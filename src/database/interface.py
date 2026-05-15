@@ -1,5 +1,6 @@
-from abc import ABC, abstractmethod
+﻿from abc import ABC, abstractmethod
 from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 class BaseDB(ABC):
     @abstractmethod
@@ -8,6 +9,11 @@ class BaseDB(ABC):
 
     @abstractmethod
     def get_config_id_by_name(self, exp_name: str) -> str:
+        pass
+
+    @abstractmethod
+    def delete_config_and_portfolios(self, config_id: str) -> bool:
+        """Delete a config and all its associated data."""
         pass
 
     @abstractmethod
@@ -31,21 +37,180 @@ class BaseDB(ABC):
         pass
 
     @abstractmethod
-    def update_portfolio(self, config_id: str, portfolio: dict, trading_date: datetime) -> bool:
+    def get_or_create_portfolio_for_date(self, config_id: str, portfolio: dict, trading_date: datetime) -> dict:
+        """
+        Get existing portfolio for the given trading date, or create a new one based on the latest portfolio.
+
+        This method prevents duplicate portfolio records for the same trading date.
+        """
         pass
 
     @abstractmethod
-    def save_decision(self, portfolio_id: str, ticker: str, prompt: str, decision: dict, trading_date: datetime) -> str:
+    def update_portfolio(self, config_id: str, portfolio: dict, trading_date: datetime) -> bool:
         pass
 
     @abstractmethod
     def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: dict) -> str:
         pass
 
+    # ========== Futures settlement interfaces ==========
+
     @abstractmethod
-    def get_recent_portfolio_ids_by_config_id(self, config_id: str, limit: int) -> list:
+    def get_previous_settlement(
+        self,
+        portfolio_id: str,
+        trading_date: datetime
+    ) -> Optional["FuturesSettlementRecord"]:
+        """Get the latest settlement record before the given trading date."""
         pass
 
     @abstractmethod
-    def get_decision_memory(self, exp_name: str, ticker: str, limit: int) -> list:
+    def save_daily_settlement(
+        self,
+        portfolio_id: str,
+        settlement: "FuturesSettlementRecord"
+    ) -> bool:
+        """Save a daily settlement record."""
         pass
+
+    # ========== Futures phase1 and phase2 interfaces ==========
+
+    def get_latest_settled_portfolio(self, config_id: str) -> Optional[Dict[str, Any]]:
+        """Get the latest settled official portfolio."""
+        raise NotImplementedError
+
+    def save_futures_recommendation(self, recommendation: Any) -> Optional[str]:
+        """Save a futures recommendation."""
+        raise NotImplementedError
+
+    def get_futures_recommendations_by_effective_date(
+        self,
+        config_id: str,
+        effective_trade_date: datetime,
+        source_type: Optional[str] = None,
+        status: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get futures recommendations by effective trading date."""
+        raise NotImplementedError
+
+    def update_futures_recommendation_status(
+        self,
+        recommendation_id: str,
+        status: str,
+        execution_price: Optional[float] = None,
+        warning_message: Optional[str] = None,
+        signal_snapshot: Optional[Dict[str, Any]] = None,
+        audit_payload: Optional[Dict[str, Any]] = None,
+        base_price: Optional[float] = None,
+        base_price_source: Optional[str] = None,
+        base_price_date: Optional[str] = None,
+        open_price: Optional[float] = None,
+        prev_close_price: Optional[float] = None,
+        slippage_model: Optional[str] = None,
+        slippage_ticks: Optional[int] = None,
+        slippage_amount: Optional[float] = None,
+    ) -> bool:
+        """Update futures recommendation execution status."""
+        raise NotImplementedError
+
+    def save_futures_intraday_decision(self, decision: Dict[str, Any]) -> Optional[str]:
+        """Save an intraday execution-gate audit decision."""
+        raise NotImplementedError
+
+    def save_futures_transaction(self, transaction: Any) -> Optional[str]:
+        """Save a futures transaction."""
+        raise NotImplementedError
+
+    def get_futures_transactions_by_date(
+        self,
+        config_id: str,
+        trading_date: datetime,
+        execution_phase: Optional[str] = None,
+        booked_in_settlement: Optional[bool] = None
+    ) -> List[Dict[str, Any]]:
+        """Get futures transactions by trading date."""
+        raise NotImplementedError
+
+    def mark_futures_transactions_booked(self, transaction_ids: List[str]) -> bool:
+        """Mark futures transactions as booked by settlement."""
+        raise NotImplementedError
+
+    def update_futures_transactions_settle_prices(
+        self,
+        settle_price_updates: List[Dict[str, Any]],
+    ) -> bool:
+        """Backfill transaction settle_price values after phase3 settlement."""
+        raise NotImplementedError
+
+    def start_trading_day_phase(
+        self,
+        config_id: str,
+        trading_date: datetime,
+        phase: str,
+        message: str = ""
+    ) -> bool:
+        """Start a trading day phase record."""
+        raise NotImplementedError
+
+    def complete_trading_day_phase(
+        self,
+        config_id: str,
+        trading_date: datetime,
+        phase: str,
+        status: str,
+        message: str = "",
+        memory_config: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Complete a trading day phase record."""
+        raise NotImplementedError
+
+    def get_trading_day_phase(
+        self,
+        config_id: str,
+        trading_date: datetime,
+        phase: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get a trading day phase record."""
+        raise NotImplementedError
+
+    def get_futures_transaction_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        limit: int
+    ) -> List[str]:
+        """Get recent futures transaction memory for prompts."""
+        raise NotImplementedError
+
+    def get_futures_conditional_trade_performance(
+        self,
+        config_id: str,
+        ticker: str,
+        side: str,
+        trading_date,
+        signal_combo: Optional[List[str]] = None,
+        lookback_trades: int = 30,
+        include_rollover: bool = False,
+    ) -> Dict[str, Any]:
+        """Get completed futures trade-pair performance for ticker + side + signal combo."""
+        raise NotImplementedError
+
+    def refresh_strategy_memory(
+        self,
+        config_id: str,
+        trading_date,
+        memory_config: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Refresh DB-backed strategy memory up to trading_date."""
+        raise NotImplementedError
+
+    def get_strategy_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        side: str,
+        trading_date=None,
+        signal_combo: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Get DB-backed strategy memory for ticker + side + optional signal combo."""
+        raise NotImplementedError

@@ -1,24 +1,636 @@
-# Deep Fund Configuration
-exp_name: "dev"
+# AgentQuant futures development configuration.
+# 本文件用于 15 个期货品类的回测、模拟盘和实盘复刻流程。
+# 调参原则：小规模回测前只整理注释和结构，不轻易改动核心交易阈值。
 
-# Trading settings
-cashflow: 100000
+# ---------------------------------------------------------------------------
+# 1. Experiment and Account
+# ---------------------------------------------------------------------------
+
+exp_name: "agentquant-futures-trading-2025"
+cashflow: 5000000
+market_type: "china_futures"
+
+# 全账户保证金和基础风险上限。
+max_total_margin_ratio: 0.75
+risk_buffer_ratio: 0.10
+
+risk_control:
+  # 按账户权益 / 初始资金划分风险状态。
+  warning_ratio: 0.70
+  danger_ratio: 0.50
+  emergency_ratio: 0.30
+  max_margin_ratio_intraday: 0.75
+  max_daily_loss_ratio: 0.10
+
+  # 风险状态下对目标仓位的缩放。
+  position_scaling:
+    safe: 1.0
+    warning: 0.6
+    danger: 0.3
+
+  # 单品种名义敞口上限，不是保证金占用上限。
+  max_single_position_ratio:
+    safe: 0.12
+    warning: 0.08
+    danger: 0.05
+
+  # 单日新增手数保护，避免极端信号一次性放大过多。
+  max_new_lots_per_day:
+    safe: 200
+    warning: 100
+    danger: 0
+
+  # 强制降风险规则。当前主流程仍以 Phase3 日结算风控为准。
+  forced_liquidation:
+    enabled: true
+    cashflow_below_ratio: 0.30
+    margin_ratio_above: 0.75
+    daily_loss_above_ratio: 0.10
+    liquidate_all_below_ratio: 0.25
+
+net_exposure_control:
+  # 限制组合多空净方向暴露。
+  max_net_exposure: 0.50
+  symmetric_scaling: true
+
+# ---------------------------------------------------------------------------
+# 2. Data Quality and Market Confirmation
+# ---------------------------------------------------------------------------
+
+fundamental_quality_control:
+  # 本地 Finoview 基本面数据覆盖率、陈旧率、缺失率较差时，
+  # 下调 fundamental 分析师权重，而不是让缺失数据形成强判断。
+  enabled: true
+  min_coverage_ratio: 0.65
+  stale_ratio_warn: 0.20
+  stale_ratio_severe: 0.35
+  missing_ratio_warn: 0.20
+  missing_ratio_severe: 0.40
+  low_coverage_multiplier: 0.70
+  stale_warn_multiplier: 0.85
+  stale_severe_multiplier: 0.65
+  missing_warn_multiplier: 0.85
+  missing_severe_multiplier: 0.65
+  min_multiplier: 0.35
+
+pandaai_extra_data:
+  # PandaAI 扩展期货数据只做盘前确认、过滤和仓位缩放，不直接生成交易信号。
+  enabled: true
+  mode: confirm_only
+  reference_lag_days: 1
+  lookback_days: 5
+  fail_policy: soft_skip
+  features:
+    # 默认启用：已实测可用，且适合做盘前确认。
+    basis: true
+    warehouse_receipt: true
+    net_flow: true
+    variety_position_rank: true
+    symbol_position_rank: true
+    ls_ratio: true
+    broker_net_margin_change: true
+    broker_variety_profit: true
+
+    # 默认关闭：接口可用但耗时更长，避免大规模回测被拖慢。
+    broker_net_margin: false
+    netposi_rank: false
+    net_cap_change: false
+    contract_daily_indicators: false
+    contract_rank: false
+
+market_confirmation:
+  # 根据 PandaAI 扩展数据，对 Phase1 目标方向做确认、缩放或阻断。
+  enabled: true
+  min_confirmations_for_new_entry: 2
+  min_confirmation_score_for_new_entry: 0.55
+  min_confirmation_score_for_weak_combo: 0.60
+  max_conflicts_for_new_entry: 4
+  quality_gate_enabled: true
+  quality_gate_cap_multiplier: 0.50
+  quality_gate_block_weak_signal: true
+  weak_signal_strength: 0.25
+  conflict_cap_multiplier: 0.50
+  block_weak_conflicting_signal: true
+  allow_conflicted_probe_with_strong_confirmation: true
+  conflicted_probe_min_confirmation_score: 0.65
+  conflicted_probe_min_confirmations: 3
+
+# ---------------------------------------------------------------------------
+# 3. Auditor, Feedback, and Legacy Trade-Frequency Rules
+# ---------------------------------------------------------------------------
+
+trade_auditor:
+  # 当前交易计划审核智能体。它不调用 LLM，不下单，不算最终手数；
+  # 它只在 portfolio_manager 资金配置前判断交易计划质量。
+  enabled: true
+  mode: deterministic
+  use_llm: false
+  learning_mode: audit_only
+  policy_version: deterministic_v1
+
+  quality_gate:
+    # 三分析师质量门槛：主要限制新开仓和加仓，不阻断必要平仓、减仓、换月和强制风控。
+    enabled: true
+    min_supporting_analysts: 2
+    block_low_tradeability_count: 2
+    conflict_block_confirmation_below: 0.50
+    no_support_block_confirmation_below: 0.70
+    medium_quality_multiplier: 0.50
+    strict_min_confirmation_score: 0.65
+    strict_min_high_quality_supporters: 2
+    strict_ticker_sides:
+      MA: [long]
+      I: [long]
+      PB: [long]
+    qualified_support_min_confidence: 0.45
+    # 基于最新回测和价格入场图的正向归因模板。
+    # 这些方向不是无条件放开；只是在 confirmation 可接受时，免被通用
+    # weak-combo/cold-start 规则硬性阻断。
+    protected_ticker_sides:
+      BU:
+        long:
+          min_confirmation_score: 0.50
+          weak_combo_multiplier: 0.50
+          cold_start_multiplier: 0.50
+          min_total_pnl_when_sampled: 0
+      J:
+        short:
+          min_confirmation_score: 0.45
+          weak_combo_multiplier: 0.50
+          cold_start_multiplier: 0.50
+          min_total_pnl_when_sampled: 0
+      RB:
+        long:
+          min_confirmation_score: 0.50
+          weak_combo_multiplier: 0.50
+          cold_start_multiplier: 0.50
+          min_total_pnl_when_sampled: 0
+      ZN:
+        short:
+          min_confirmation_score: 0.55
+          weak_combo_multiplier: 0.50
+          cold_start_multiplier: 0.50
+          min_total_pnl_when_sampled: 0
+    # 最新归因弱模板。按品种-方向细分，避免 J 空、BU/RB 多等成功模板被全局静音。
+    weak_ticker_side_rules:
+      P:
+        long:
+          min_confirmation_score: 0.65
+          block_below_confirmation_score: 0.65
+          min_qualified_supporters: 2
+          cap_multiplier: 0.25
+          block_signal_combos:
+            - [Bearish, Neutral, Bullish]
+      TA:
+        long:
+          min_confirmation_score: 0.65
+          block_below_confirmation_score: 0.65
+          min_qualified_supporters: 2
+          cap_multiplier: 0.35
+          block_signal_combos:
+            - [Bullish, Neutral, Bullish]
+      C:
+        long:
+          min_confirmation_score: 0.65
+          block_below_confirmation_score: 0.65
+          min_qualified_supporters: 2
+          cap_multiplier: 0.50
+          block_signal_combos:
+            - [Bullish, Neutral, Bearish]
+      I:
+        short:
+          min_confirmation_score: 0.70
+          block_below_confirmation_score: 0.70
+          min_qualified_supporters: 2
+          cap_multiplier: 0.50
+      HC:
+        short:
+          min_confirmation_score: 0.65
+          block_below_confirmation_score: 0.65
+          min_qualified_supporters: 2
+          cap_multiplier: 0.50
+          block_signal_combos:
+            - [Neutral, Bearish, Neutral]
+      SR:
+        short:
+          min_confirmation_score: 0.65
+          block_below_confirmation_score: 0.65
+          min_qualified_supporters: 2
+          cap_multiplier: 0.35
+          block_signal_combos:
+            - [Bearish, Neutral, Neutral]
+    news_driver_control:
+      enabled: true
+      min_news_confidence: 0.60
+      min_market_confirmation_score: 0.60
+      min_freshness_score: 0.70
+      min_relevance_score: 0.70
+      block_when_core_opposes: true
+      cap_without_fundamental_confirmation: true
+      cap_multiplier: 0.50
+
+  attribution_feedback:
+    # 基于已平仓交易的历史反馈。当前只审计和降权，不训练强化学习策略。
+    enabled: true
+    lookback_trades: 30
+    min_samples_soft: 3
+    min_samples_hard: 6
+    weak_win_rate_below: 0.40
+    severe_win_rate_below: 0.30
+    weak_total_pnl_below: -1500
+    severe_total_pnl_below: -5000
+    weak_combo_requires_confirmation_score: 0.60
+    block_severe_negative_combo: true
+
+  cold_start:
+    # 历史样本不足时不直接禁入，但限制初始仓位。
+    policy: small_cap
+    max_position_ratio_multiplier: 0.50
+    block_weak_combo_new_entries: true
+    block_conflict_confirmation_below: 0.65
+
+  audit:
+    # 输出到 recommendation.signal_snapshot.pre_open_plan.trade_auditor。
+    write_to_signal_snapshot: true
+    log_decision_reasons: true
+
+trade_frequency_control:
+  # 旧交易频率控制。trade_auditor 启用时，portfolio_manager 不直接执行旧控制；
+  # 但 side_overrides、weak_signal_combos 等仍被 auditor / capital_utilization_control
+  # 作为历史归因和保守缩放的参考参数读取，因此暂不删除。
+  enabled: true
+  lookback_trades: 20
+  min_completed_trades: 6
+  weak_win_rate_below: 0.38
+  severe_win_rate_below: 0.30
+  weak_total_pnl_below: -1500
+  severe_total_pnl_below: -5000
+  weak_cap_multiplier: 0.50
+  severe_block_new_entries: true
+
+  # 基于历史回测归因设置的弱方向静态 cap。
+  side_overrides:
+    C:
+      long_cap_multiplier: 0.50
+      short_cap_multiplier: 0.30
+    CF:
+      short_cap_multiplier: 0.20
+    M:
+      long_cap_multiplier: 0.35
+      short_cap_multiplier: 0.35
+    P:
+      long_cap_multiplier: 0.25
+    RB:
+      short_cap_multiplier: 0.50
+    SR:
+      short_cap_multiplier: 0.35
+    TA:
+      long_cap_multiplier: 0.35
+      short_cap_multiplier: 0.30
+
+  # 历史亏损较明显的三分析师信号组合。
+  weak_signal_combos:
+    - [Bearish, Bullish, Bearish]
+    - [Bullish, Bearish, Bullish]
+    - [Neutral, Bullish, Bullish]
+    - [Bullish, Bullish, Neutral]
+    - [Bullish, Neutral, Bullish]
+    - [Bearish, Neutral, Bearish]
+    - [Bearish, Bearish, Bearish]
+
+ticker_performance_control:
+  # 品种级历史表现控制：根据最近日度品种 PnL 对弱势品种降 cap。
+  enabled: true
+  lookback_days: 20
+  min_trade_days: 3
+  soft_avg_pnl_below: -300
+  soft_cap_multiplier: 0.50
+  hard_avg_pnl_below: -800
+  hard_win_rate_below: 0.35
+  hard_cap_ratio: 0.03
+  recovery_avg_pnl_above: 200
+  recovery_cap_multiplier: 1.10
+
+drawdown_control:
+  # 回撤扩大时降低新仓；硬回撤触发后进入 reduce-only。
+  enabled: true
+  soft_drawdown: 0.015
+  hard_drawdown: 0.025
+  soft_cap_multiplier: 0.70
+  hard_reduce_only: true
+
+ticker_loss_control:
+  # 防止某个品种在短窗口内连续拖累组合。
+  enabled: true
+  lookback_days: 5
+  loss_threshold: -3000
+  cap_multiplier: 0.50
+  block_new_entries_after_consecutive_losses: 2
+
+strategy_memory:
+  # 数据库驱动的实时策略记忆。Phase4 完成后基于已完成交易对刷新，
+  # 下一交易日 Phase1/auditor 读取；不自动修改本配置文件。
+  enabled: true
+  update_on_phase4: true
+  source: attribution_auto
+  lookback_trades: 30
+  expires_after_days: 30
+  min_samples_watchlist: 2
+  min_samples_weak_block: 4
+  min_samples_protected: 3
+  protected_win_rate: 0.60
+  protected_total_pnl: 1000
+  watchlist_win_rate_below: 0.45
+  watchlist_total_pnl_below: -500
+  weak_block_win_rate_below: 0.30
+  weak_block_total_pnl_below: -2500
+  audit:
+    protected_min_confirmation_score: 0.50
+    protected_multiplier: 0.50
+    watchlist_min_confirmation_score: 0.55
+    watchlist_cap_multiplier: 0.50
+    weak_block_min_confirmation_score: 0.60
+    weak_block_cap_multiplier: 0.35
+    min_qualified_supporters: 1
+
+capital_utilization_control:
+  # 只有信号被 PandaAI 确认且最近交易表现为正时，才尝试提高保证金使用率。
+  enabled: true
+  target_margin_ratio_normal: 0.06
+  target_margin_ratio_confirmed: 0.12
+  max_margin_ratio_after_scaling: 0.20
+  min_confirmation_score_for_scaling: 0.65
+  lookback_trades_for_scaling: 12
+  min_completed_trades_for_scaling: 5
+  min_recent_win_rate_for_scaling: 0.55
+  min_recent_total_pnl_for_scaling: 1000
+  scale_only_when_recent_pnl_positive: true
+  disable_scaling_for_static_capped_side: true
+  disable_scaling_when_weak_combo: true
+
+directional_override_control:
+  enabled: true
+  allow_high_quality_short: true
+  min_short_score: 0.45
+  min_short_confidence: 0.55
+  min_short_strength: 0.30
+  min_short_edge: 0.08
+  short_probe_max_ratio: 0.03
+
+# ---------------------------------------------------------------------------
+# 4. Portfolio Manager and Position Rebalancing
+# ---------------------------------------------------------------------------
+
+portfolio_manager:
+  # 投资组合经理只调用云端主模型；市场自适应能力由动态融合、质量门槛、
+  # auditor 和持仓再平衡控制共同实现。
+  llm_mode: cloud_only
+  cloud_model: "openai/gpt-5.5"
+  # cloud_model: "deepseek-v4-flash"
+  use_deepanalyze: false
+
+  holding_rebalance_control:
+    # 持仓周期与仓位再平衡控制层。
+    # 核心思想：technical 看短线时机，fundamental 做中期锚，
+    # commodity_news 只在高质量事件冲击时改变仓位。
+    enabled: true
+    min_rebalance_ratio: 0.008
+    min_new_entry_ratio: 0.004
+    max_daily_reduction_ratio: 0.40
+    reverse_min_signal_strength: 0.55
+    reverse_min_confirmation_score: 0.65
+    exit_min_signal_strength: 0.35
+    exit_min_confirmation_score: 0.45
+    min_fundamental_anchor_confidence: 0.40
+    min_signal_support_confidence: 0.35
+    fundamental_anchor_tradeability: [high, medium]
+    news_override_tradeability: high
+    news_override_min_confidence: 0.60
+    news_override_min_freshness: 0.70
+    news_override_min_relevance: 0.70
+    position_lifecycle:
+      enabled: true
+      trend_min_profit_ratio: 0.03
+      trend_min_confirmation_score: 0.60
+      trend_min_signal_strength: 0.30
+      failed_loss_ratio: -0.05
+      failed_max_confirmation_score: 0.45
+      probe_max_hold_days: 2
+      probe_min_profit_ratio: 0.01
+      probe_min_confirmation_score: 0.55
+    min_hold_days_by_sector:
+      energy: 3
+      chemical: 5
+      ferrous: 5
+      nonferrous: 4
+      agricultural: 7
+      generic: 4
+
+  adaptive_fusion:
+    enabled: true
+    sector_weight: 0.40
+
+  quality_aware_fusion:
+    enabled: true
+    tradeability_multipliers:
+      high: 1.00
+      medium: 0.65
+      low: 0.15
+      unknown: 0.75
+    confidence_caps:
+      high: 1.00
+      medium: 0.65
+      low: 0.35
+      unknown: 0.55
+    severe_risk_flag_multiplier: 0.80
+    min_quality_multiplier: 0.05
+
+  sector_weights:
+    # 不同期货大类采用不同分析侧重。
+    energy: {technical: 0.40, fundamental: 0.40, commodity_news: 0.20}
+    chemical: {technical: 0.30, fundamental: 0.50, commodity_news: 0.20}
+    ferrous: {technical: 0.30, fundamental: 0.50, commodity_news: 0.20}
+    nonferrous: {technical: 0.35, fundamental: 0.35, commodity_news: 0.30}
+    agricultural: {technical: 0.20, fundamental: 0.45, commodity_news: 0.35}
+
+dynamic_weights:
+  # 根据 basis、DeepAnalyze 市场状态和历史信号表现调整分析师权重。
+  enabled: true
+  min_weight: 0.05
+  max_weight: 0.70
+
+# ---------------------------------------------------------------------------
+# 5. Execution, Settlement, and Audit
+# ---------------------------------------------------------------------------
+
+execution:
+  # Phase2 下单价格逻辑：执行基准价 +/- 滑点。
+  price_basis: open_plus_slippage
+  slippage_model: tick
+  default_slippage_ticks: 1
+
+  intraday_confirmation:
+    # 回测和模拟盘共用的盘中执行确认逻辑。
+    # decision_frequency 是信号确认粒度；execution_frequency 是实际成交候选价粒度。
+    enabled: true
+    decision_frequency: "15m"
+    execution_frequency: "1m"
+    opening_range_minutes: 30
+    require_complete_opening_range: true
+    min_execution_volume: 1
+    max_chase_ratio: 0.015
+    finalize_after: "15:00:00"
+    loop_check_interval_seconds: 300
+    time_zone: null
+
+  slippage_ticks_by_underlying:
+    AL: 1
+    AU: 1
+    BU: 1
+    C: 1
+    CF: 2
+    CU: 1
+    EB: 2
+    HC: 1
+    I: 1
+    J: 1
+    JM: 2
+    M: 1
+    MA: 1
+    P: 1
+    PB: 1
+    RB: 1
+    SC: 2
+    SR: 1
+    TA: 2
+    ZN: 1
+
+  missing_open_price_fallback:
+    # 仅用于纸面回测或模拟；T 日开盘价缺失时可用前收盘价兜底。
+    enabled: true
+    fallback_base: prev_close
+    only_for_paper_trading: true
+    on_both_missing: skip_ticker
+
+  commission:
+    # mode=by_value 表示按成交额比例；mode=by_lot 表示按每手固定金额。
+    enabled: true
+    basis: execution_price
+    rounding: 0.01
+    require_explicit_rule_for_all_tickers: true
+    by_underlying:
+      AL: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+      AU: {mode: by_lot,   open: 10.0,    close: 10.0,    close_today: 10.0}
+      BU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      C:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      CF: {mode: by_lot,   open: 4.3,     close: 4.3,     close_today: 4.3}
+      CU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      EB: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      HC: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+      I:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      J:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      JM: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      M:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      MA: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+      P:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+      PB: {mode: by_value, open: 0.00004, close: 0.00004, close_today: 0.00004}
+      RB: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+      SC: {mode: by_lot,   open: 40.0,    close: 40.0,    close_today: 240.0}
+      SR: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+      TA: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+      ZN: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+
+rollover:
+  # 换月策略：同日策略目标与换月目标合并处理。
+  mode: reconcile_with_strategy
+  audit_execution_type: true
+
+attribution:
+  # 评估与归因工具配置。只读数据库，不参与交易。
+  show_strategy_only_pairs: true
+  show_rollover_summary: true
+
+audit:
+  # 审计日志配置，用于验证盘前决策的数据窗口和终端输出。
+  log_technical_price_window: true
+  utf8_output: true
+
+# ---------------------------------------------------------------------------
+# 6. Universe, Agents, and LLM Routing
+# ---------------------------------------------------------------------------
+
 tickers:
-  - TSLA
-  - NVDA
+  - BU
+  - C
+  - CF
+  - EB
+  - HC
+  - I
+  - J
+  - M
+  - MA
+  - P
+  - PB
+  - RB
+  - SR
+  - TA
+  - ZN
 
+planner_mode: false
+# planner_mode 是旧的 LLM 分析师选择器开关，只决定是否从 workflow_analysts 中挑选分析师。
+# 当前交易计划审核由 trade_auditor 负责，因此这里保持 false。
 
-# Analysts to run, refer to graph.constants.py
 workflow_analysts:
+  - commodity_news
   - fundamental
-  - macroeconomic
   - technical
-  - company_news
-  - insider
-  - policy
 
-# LLM model settings, refer to llm/inference.py: LLMConfig
+analyst_llm:
+  # 三分析师默认只调用云端主模型；DeepAnalyze/local LLM 作为可选增强层保留。
+  mode: cloud_only
+  cloud_model: "openai/gpt-5.5"
+  # cloud_model: "deepseek-v4-flash"
+  enable_deepanalyze_for_technical: false
+  enable_deepanalyze_for_fundamental: false
+  write_decision_reports: true
+  force_neutral_low_tradeability: true
+  cap_medium_tradeability_confidence: 0.65
+  cap_low_tradeability_confidence: 0.35
+
 llm:
-  provider: "DeepSeek" 
-  model: "deepseek-chat" # DeepSeek-V3
+  provider: "OpenRouter"
+  model: "openai/gpt-5.5"
+  structured_output_method: "json_mode"
+  failure_policy:
+    parse_error: "retry_then_default"
+    rate_limit: "retry_with_backoff"
+    auth_error: "raise"
+    invalid_request: "raise"
+    server_error: "retry_then_default"
+  openrouter:
+    app_name: "AgentQuant"
+    reasoning:
+      enabled: true
+      effort: "medium"
+      exclude: true
+  # provider: "DeepSeek"
+  # model: "deepseek-v4-flash"
+  # structured_output_method: "json_mode"
+  deepseek:
+    thinking:
+      enabled: false
+    reasoning_effort: null
 
+deepanalyze:
+  # 当前关闭；仅在 analyst_llm 对应开关打开时才会被技术/基本面分析师调用。
+  mode: "local"
+  local:
+    base_url: "http://localhost:8000"
+    model_name: "DeepAnalyze-8B"
+    timeout: 360
+    max_retries: 2
+  cloud:
+    api_url: "https://www.heywhale.com/api/model/services/691d42c36c6dda33df0bf645/app/v1/chat/completions"
+    model_name: "deepanalyze-8b"
+    timeout: 360
+    max_retries: 2

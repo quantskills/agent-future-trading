@@ -1,4 +1,4 @@
-// Database schema for DeepFund
+// Database schema for AgentQuant (based on DeepFund)
 
 Table config {
   id varchar(36) [pk]
@@ -70,3 +70,50 @@ Table signal {
 // Each config can have multiple portfolio snapshots
 // Signals are now directly linked to portfolios for faster querying
 // All text fields are NOT NULL to ensure data integrity
+
+// Table: ticker_daily_pnl (Individual futures daily P&L)
+// Stores daily profit/loss breakdown for each futures ticker
+Table ticker_daily_pnl {
+    id varchar(36) [pk]
+    portfolio_id varchar(36) [ref: > portfolio.id, not null]
+    trading_date timestamp [not null]
+    ticker varchar(10) [not null]
+    daily_pnl decimal(15,2) [not null]
+    commission decimal(15,2) [default: 0]
+    position_type varchar(10)  // LONG or SHORT
+    lots decimal(10,2) [not null]
+    entry_price decimal(15,2) [not null]
+    settle_price decimal(15,2) [not null]
+    created_at timestamp [default: `CURRENT_TIMESTAMP`]
+
+    indexes {
+        portfolio_id
+        trading_date
+        ticker
+        (portfolio_id, ticker, trading_date) [unique]
+    }
+}
+
+Table futures_intraday_decision {
+    id text [pk]
+    config_id text [ref: > config.id, not null]
+    trading_date text [not null]
+    recommendation_id text
+    ticker text [not null]
+    contract_code text
+    slot_datetime text
+    mode text
+    cutoff_datetime text
+    decision text [not null]
+    trigger_reason text
+    base_price real
+    execution_price_candidate real
+    features_json text
+    created_at text [not null]
+
+    indexes {
+        (config_id, trading_date, recommendation_id, slot_datetime) [unique]
+        (config_id, trading_date, ticker)
+        recommendation_id
+    }
+}

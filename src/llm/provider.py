@@ -4,7 +4,6 @@ from typing import Optional, Type
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
-from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 from langchain_fireworks import ChatFireworks
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -16,6 +15,7 @@ class ModelConfig:
     env_key: Optional[str] = None
     base_url: Optional[str] = None
     requires_api_key: bool = True
+    structured_output_method: str = "function_calling"
 
 class Provider(str, Enum):
     """Supported LLM providers"""
@@ -28,6 +28,7 @@ class Provider(str, Enum):
     FIREWORKS= "Fireworks"
     YIZHAN = "YiZhan"
     AIHUBMIX = "AiHubMix"
+    OPENROUTER = "OpenRouter"
 
     @property
     def config(self) -> ModelConfig:
@@ -42,8 +43,10 @@ class Provider(str, Enum):
                 env_key="ANTHROPIC_API_KEY",
             ),
             Provider.DEEPSEEK: ModelConfig(
-                model_class=ChatDeepSeek,
+                model_class=ChatOpenAI,
+                base_url="https://api.deepseek.com",
                 env_key="DEEPSEEK_API_KEY",
+                structured_output_method="json_mode",
             ),
             Provider.ALIBABA: ModelConfig(
                 model_class=ChatOpenAI,
@@ -72,6 +75,12 @@ class Provider(str, Enum):
                 model_class=ChatOpenAI,
                 env_key="AIHUBMIX_API_KEY",
                 base_url="https://api.aihubmix.com/v1",
+            ),
+            Provider.OPENROUTER: ModelConfig(
+                model_class=ChatOpenAI,
+                env_key="OPENROUTER_API_KEY",
+                base_url="https://openrouter.ai/api/v1",
+                structured_output_method="json_mode",
             ),
         }
         return PROVIDER_CONFIGS[self]

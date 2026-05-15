@@ -1,21 +1,43 @@
-# Deep Fund Configuration
-exp_name: "planner-test"
+# AgentQuant Configuration - 期货交易系统
+exp_name: "agentquant-planner-future"
 
 # Trading settings
 cashflow: 100000
+market_type: "china_futures"  # 专注期货交易
 tickers:
-  - TSLA
-  - NVDA
+  - M    # 豆粕
+  - RB   # 螺纹钢
+  - TA   # PTA
 
 # true: run planner agent, choose from workflow_analysts
 planner_mode: true
 workflow_analysts:
 - technical
-- company_news
-- insider
-- policy
+- commodity_news
+# Keep policy/macroeconomic available in codebase, but exclude them from the
+# default planner list until they are rebuilt as stable futures-only analysts.
 
 # LLM model settings, refer to llm/inference.py: LLMConfig
 llm:
-  provider: "DeepSeek" 
-  model: "deepseek-chat" # DeepSeek-V3
+  provider: "OpenRouter"
+  model: "openai/gpt-5.5"
+  structured_output_method: "json_mode"
+  failure_policy:
+    parse_error: "retry_then_default"
+    rate_limit: "retry_with_backoff"
+    auth_error: "raise"
+    invalid_request: "raise"
+    server_error: "retry_then_default"
+  openrouter:
+    app_name: "AgentQuant"
+    reasoning:
+      enabled: true
+      effort: "medium"
+      exclude: true
+  # provider: "DeepSeek"
+  # model: "deepseek-v4-flash"
+  # structured_output_method: "json_mode"
+  deepseek:
+    thinking:
+      enabled: false
+    reasoning_effort: null

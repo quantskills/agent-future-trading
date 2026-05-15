@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
-from graph.schema import Decision, AnalystSignal
+from graph.schema import AnalystSignal
 from database.interface import BaseDB
 from supabase import create_client
 from util.logger import logger
@@ -34,13 +34,24 @@ class SupabaseDB(BaseDB):
                 .select('id') \
                 .eq('exp_name', exp_name) \
                 .execute()
-            
+
             if response.data and len(response.data) > 0:
                 return response.data[0]['id']
             return None
         except Exception as e:
             logger.error(f"Config not found: {e}")
             return None
+
+    def delete_config_and_portfolios(self, config_id: str) -> bool:
+        """Delete a config and all its associated data."""
+        try:
+            # Supabase handles cascading deletes if foreign keys are set up
+            # This is a placeholder implementation
+            logger.warning("delete_config_and_portfolios not fully implemented for Supabase")
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting config: {e}")
+            return False
 
     def create_config(self, config: Dict) -> Optional[str]:
         """Create a new config entry."""
@@ -134,17 +145,67 @@ class SupabaseDB(BaseDB):
             data = {
                 'config_id': config_id,
                 'trading_date': trading_date.isoformat(),
-                'cashflow': portfolio['cashflow'],  
+                'cashflow': portfolio['cashflow'],
                 'total_assets': total_assets,
                 'positions': portfolio['positions']
             }
-            
+
             response = self.client.table('portfolio').insert(data).execute()
             if response.data and len(response.data) > 0:
                 return response.data[0]
             return None
         except Exception as e:
             logger.error(f"Error copying portfolio: {e}")
+            return None
+
+    def get_or_create_portfolio_for_date(self, config_id: str, portfolio: Dict, trading_date: datetime) -> Optional[Dict]:
+        """
+        Get existing portfolio for the given trading date, or create a new one based on the latest portfolio.
+
+        This method prevents duplicate portfolio records for the same trading date.
+        """
+        try:
+            # 首先检查是否已存在该交易日期的 portfolio 记录
+            response = self.client.table('portfolio') \
+                .select('id, cashflow, positions') \
+                .eq('config_id', config_id) \
+                .eq('trading_date', trading_date.isoformat()) \
+                .order('updated_at', desc=True) \
+                .limit(1) \
+                .execute()
+
+            if response.data and len(response.data) > 0:
+                # 已存在该日期的记录，返回它用于更新
+                existing = response.data[0]
+                logger.info(f"Found existing portfolio {existing['id'][:8]}... for trading date {trading_date.isoformat()}")
+                return {
+                    'id': existing['id'],
+                    'cashflow': float(existing['cashflow']),
+                    'positions': existing['positions'] if existing['positions'] else {}
+                }
+
+            # 不存在，则创建新的 portfolio 记录
+            total_assets = portfolio['cashflow'] + sum(position['value'] for position in portfolio['positions'].values())
+            data = {
+                'config_id': config_id,
+                'trading_date': trading_date.isoformat(),
+                'cashflow': portfolio['cashflow'],
+                'total_assets': total_assets,
+                'positions': portfolio['positions']
+            }
+
+            response = self.client.table('portfolio').insert(data).execute()
+            if response.data and len(response.data) > 0:
+                new_portfolio = response.data[0]
+                logger.info(f"Created new portfolio {new_portfolio['id'][:8]}... for trading date {trading_date.isoformat()}")
+                return {
+                    'id': new_portfolio['id'],
+                    'cashflow': float(new_portfolio['cashflow']),
+                    'positions': new_portfolio['positions'] if new_portfolio['positions'] else {}
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error in get_or_create_portfolio_for_date: {e}")
             return None
 
     def update_portfolio(self, config_id: str, portfolio: Dict, trading_date: datetime) -> bool:
@@ -167,29 +228,6 @@ class SupabaseDB(BaseDB):
             logger.error(f"Error updating portfolio: {e}")
             return False
 
-    def save_decision(self, portfolio_id: str, ticker: str, prompt: str, decision: Decision, trading_date: datetime) -> Optional[str]:
-        """Save a new decision."""
-        try:
-            data = {
-                'portfolio_id': portfolio_id,
-                'ticker': ticker,
-                'llm_prompt': prompt,
-                'action': str(decision.action),
-                'shares': decision.shares,
-                'price': decision.price,
-                'justification': decision.justification,
-                'trading_date': trading_date.isoformat(),
-            }
-            
-            response = self.client.table('decision').insert(data).execute()
-            
-            if response.data and len(response.data) > 0:
-                return response.data[0]['id']
-            return None
-        except Exception as e:
-            logger.error(f"Error saving decision: {e}")
-            return None
-
     def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: AnalystSignal) -> Optional[str]:
         """Save a new signal."""
         try:
@@ -210,59 +248,6 @@ class SupabaseDB(BaseDB):
         except Exception as e:
             logger.error(f"Error saving signal: {e}")
             return None
-
-    def get_recent_portfolio_ids_by_config_id(self, config_id: str, limit: int) -> List[str]:
-        """Get recent portfolio ids by config id."""
-        try:
-            response = self.client.table('portfolio') \
-                .select('id') \
-                .eq('config_id', config_id) \
-                .not_.is_("trading_date", None) \
-                .order('updated_at', desc=True) \
-                .limit(limit) \
-                .execute()
-            
-            return [row['id'] for row in response.data]
-        except Exception as e:
-            logger.error(f"Error getting portfolio ids: {e}")
-            return []
-
-    def get_decision_memory(self, exp_name: str, ticker: str, limit: int) -> List[Dict]:
-        """Get recent 5 decisions for a ticker."""
-        try:
-            # Step 1: Get config id by exp_name
-            config_id = self.get_config_id_by_name(exp_name)
-            if not config_id:
-                logger.error(f"Config not found for {exp_name}")
-                return []
-            
-            # Step 2: Get recent 5 portfolio transactions
-            portfolio_ids = self.get_recent_portfolio_ids_by_config_id(config_id, limit)
-            if not portfolio_ids:
-                logger.error(f"Portfolio not found for {config_id}")
-                return []
-            
-            # Step 3: Get decision memory by portfolio ids and ticker
-            response = self.client.table('decision') \
-                .select('trading_date, action, shares, price') \
-                .in_('portfolio_id', portfolio_ids) \
-                .eq('ticker', ticker) \
-                .order('updated_at', desc=True) \
-                .execute()
-            
-            decisions = []
-            for row in response.data:
-                decisions.append({
-                    'trading_date': row['trading_date'],
-                    'action': row['action'],
-                    'shares': row['shares'],
-                    'price': float(row['price']),  # Convert Decimal to float
-                })
-            
-            return decisions
-        except Exception as e:
-            logger.warning(f"No decision memory found for {ticker} in {exp_name}: {e}")
-            return []
 
 # Initialize global instance
 # db = SupabaseDB() 

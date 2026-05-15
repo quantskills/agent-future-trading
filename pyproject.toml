@@ -1,5 +1,5 @@
 [project]
-name = "deepfund"
+name = "agentquant"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -10,7 +10,6 @@ dependencies = [
   "numpy",
   "python-dotenv",
   "requests",
-  "yfinance",
   "pydantic",
   "supabase",
   "langgraph",
@@ -20,4 +19,7 @@ dependencies = [
   "langchain-deepseek",
   "langchain-ollama",
   "langchain-fireworks",
+  "uqer",
+  "panda-data==0.0.4",
+  "matplotlib",
 ]

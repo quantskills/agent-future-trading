@@ -4,13 +4,16 @@ class AgentKey:
     # analyst keys
     TECHNICAL = "technical"
     FUNDAMENTAL = "fundamental"
-    INSIDER = "insider"
-    COMPANY_NEWS = "company_news"
+    COMMODITY_NEWS = "commodity_news"
+    COMPANY_NEWS = COMMODITY_NEWS  # backward-compatible alias for older configs/scripts
     MACROECONOMIC = "macroeconomic"
     POLICY = "policy"
     # workflow keys
     PORTFOLIO = "portfolio manager"
-    PLANNER = "analyst planner" 
+    PLANNER = "analyst planner"
+    TRADER = "trader"
+    ACCOUNTANT = "accountant"
+    SETTLEMENT = ACCOUNTANT  # backward-compatible settlement node alias
 
 class Signal(str, Enum):
     """Signal type"""
@@ -20,12 +23,3 @@ class Signal(str, Enum):
 
     def __str__(self) -> str:
         return self.value
-
-class Action(str, Enum):
-    """Action type"""
-    BUY = "Buy"
-    SELL = "Sell"
-    HOLD = "Hold"
-
-    def __str__(self) -> str:
-        return self.value 

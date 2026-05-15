@@ -28,20 +28,6 @@ create table if not exists portfolio (
     positions jsonb not null
 );
 
--- Decision table
-create table if not exists decision (
-    id uuid primary key default uuid_generate_v4(),
-    portfolio_id uuid references portfolio(id),
-    updated_at timestamp with time zone default now(),
-    trading_date timestamp with time zone not null,
-    ticker varchar(10) not null,
-    llm_prompt text not null,
-    action varchar(10) not null,
-    shares integer not null,
-    price decimal(15,2) not null,
-    justification text not null
-);
-
 -- Signal table
 create table if not exists signal (
     id uuid primary key default uuid_generate_v4(),
@@ -58,9 +44,6 @@ create table if not exists signal (
 create index if not exists idx_config_exp_name on config(exp_name);
 create index if not exists idx_portfolio_updated on portfolio(updated_at);
 create index if not exists idx_portfolio_trading_date on portfolio(trading_date);
-create index if not exists idx_decision_portfolio on decision(portfolio_id);
-create index if not exists idx_decision_updated on decision(updated_at);
-create index if not exists idx_decision_trading_date on decision(trading_date);
 create index if not exists idx_signal_portfolio on signal(portfolio_id);
 create index if not exists idx_signal_updated on signal(updated_at);
 create index if not exists idx_signal_analyst on signal(analyst);

@@ -1,227 +1,199 @@
-# 💰💰  DeepFund 🔥🔥
+# AgentQuant
 
-[![arXiv](https://img.shields.io/badge/arXiv-2505.11065-b31b1b.svg?style=flat)](https://arxiv.org/abs/2505.11065)
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB.svg?style=flat)](https://www.python.org/downloads/release/python-3110/)
-[![Demo](https://img.shields.io/badge/Demo-Powered_by_Streamlit-ffa600.svg?style=flat)](https://deepfund.paradoox.ai/)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-Powered_by_Devin-6ef2cc.svg?style=flat)](https://deepwiki.com/HKUSTDial/DeepFund)
+AgentQuant is a multi-agent China futures strategy generation, backtesting, paper-trading, settlement, and audit system.
 
-## Will LLMs Be Professional At Fund Investment? 
-This project serves as an ideal solution to the above key question. We evaluate the trading capability of LLM across various financial markets given a unified environment. The LLM shall ingest external information, drive a multi-agent system, and make trading decisions. The LLM performance will be presented in a trading arena view across various dimensions. 
+The system currently targets 15 futures underlyings:
 
-
-![Arena](./image/arena_v1.png)
-> 🏁 Car-racing is for illustration only. LLM performance is subject to the real market. <br>
-> ‼️ This project is for research purposes only, it **DOES NOT TRADE**.
-
-
-
-
-## Updates
-- 2025-10: Check out the latest news about DeepFund on **QuantML**([link](https://mp.weixin.qq.com/s/51y5eIzuQ_miqeZ3oO4Jzw)) and **SyncedTech**(机器之心,[link](https://www.jiqizhixin.com/articles/2025-10-30-9)). Besides, our project won the Best Open-source Award (最佳开源项目) in **AI Agent 2025** competition ([link](https://mp.weixin.qq.com/s/U0bg0Fh9p5rYPtd0wzL2WQ)).
-- 2025-09: Our [project paper](https://arxiv.org/abs/2505.11065) is accepted by **NeurIPS 2025** as a poster.
-- 2025-08: Our [vision paper](https://arxiv.org/abs/2503.18313) is accepted by **IJCAI 2025** [FinLLM Workshop](https://finllm.github.io/workshop/#/) with Oral Paper Award.
-- 2025-06: DeepFund & Arena Leaderboard is [available](https://deepfund.paradoox.ai/) for demonstration.
-- 2025-05: Our [project paper]((https://arxiv.org/abs/2505.11065)) is released on arXiv.
-
-
-## Contact Us
-This project aims to be aligned with *TRL 1 –> 9 progression*, self-rated as 4 (What is [TRL](https://en.wikipedia.org/wiki/Technology_readiness_level)?), from exploratory research to production-ready systems, so we welcome any collaboration. If you are interested, reach out by email or scan the WeChat QR code below. 
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-<h3>General Inquiries</h3>
-<p><b>Mr. Changlun Li</b></p>  
-<p>📮 cli942[at]connect.hkust-gz.edu.cn</p>
-<p>💬 WeChat <a href="./image/tiger_wechat.jpg">QR Code</a> </p>
-
-</td>
-<td width="50%" valign="top">
-
-<h3>Research Collaborations</h3>
-<p><b>Prof. Yuyu Luo</b></p>  
-📮 yuyuluo[at]hkust-gz.edu.cn
-
-</td>
-</tr>
-</table>
-  
-
-## Setup Environment
-
-1. Choose an environment manager:
-   - If you want to use **Anaconda**: Install Conda (if not already installed): Go to [anaconda.com/download](https://www.anaconda.com/download/).
-   - If you want to use **uv**: Install uv (if not already installed): Go to [uv installation guide](https://docs.astral.sh/uv/getting-started/installation).
-
-2. Clone the repository:
-```bash
-git clone https://github.com/HKUSTDial/DeepFund.git
-cd DeepFund
+```text
+BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN
 ```
 
-3. Create a virtual env from the env configuration file:
-    - If you are using **Anaconda**:
-         ```bash
-         conda env create -f environment.yml # if using Conda
-         ```
-    - If you are using **uv**:
-         ```bash
-         uv sync # detects pyproject.toml, create an venv at project root, and install the dependencies
-         source .venv/bin/activate # or .venv\Scripts\activate for windows to activate the venv
-         ```
+## Core Capabilities
 
-4. Set up environment variables:
-```bash
-# Create .env file for your API keys (OpenAI, DeepSeek, etc.)
-cp .env.example .env
+AgentQuant has two primary runtime capabilities:
+
+1. Historical backtesting
+   The system replays trading days through a strict four-phase workflow: strategy generation, execution, settlement, and validation.
+
+2. Paper trading / live simulation
+   The same daily strategy workflow can be run against current data. Phase2 can keep running with `--loop` so intraday execution confirmation happens inside one Phase2 run instead of repeatedly restarting `order.py`.
+
+## Runtime Model
+
+AgentQuant uses a four-phase daily workflow.
+
+| Phase | Script | Responsibility |
+|-------|--------|----------------|
+| Phase 1 | `run/proposal.py` | Generate analyst signals and save pre-open futures recommendations |
+| Phase 2 | `run/order.py` | CLI runner for the `trader` agent, which translates recommendations into executable trades |
+| Phase 3 | `run/settlement.py` | CLI runner for the `accountant` agent, which runs settlement, PnL, margin, and official portfolio persistence |
+| Phase 4 | `run/validate_phase_flow.py` | Validate phase status, recommendation audit, transactions, settlement, and accounting |
+
+Phase boundaries are intentional:
+
+- Phase1 must not write real transactions.
+- Phase2 is the only normal phase that writes futures transactions.
+- Phase3 is the only phase that finalizes settlement and official portfolio state.
+- Phase4 validates the full accounting and audit trail.
+
+## Data Sources
+
+AgentQuant currently uses:
+
+- PandaAI for futures daily quotes, minute bars, main-contract quotes, settlement-related market data, and futures derivative confirmation data.
+- Local Finoview feather files for futures fundamental data.
+- Local futures news text files for news/event analysis.
+
+Key local data locations:
+
+```text
+data/Fundamental_data/Finoview_data/
+data/News_data/Future_news/
 ```
 
-## Connect to Database
-To better track the system performance, DeepFund uses a database to timely monitor the trading status. Besides, it also stores the LLM reasoning results for future analysis and traceback.
+## Analysts and Trade Auditor
 
-### Option 1: Use **Supabase**
-DeepFund connects to Supabase **by default**. 
-- Supabase is a PostgreSQL-compatible Cloud Database
-- You can create a free account on [Supabase](https://supabase.com/) website.
-- Refer to `src/database/supabase_setup.sql` to create the tables.
-- Update the `SUPABASE_URL` and `SUPABASE_KEY` in `.env` file.
+The Phase1 strategy is generated from three analyst agents:
 
-### Option 2: Use **SQLite**
-SQLite is a lightweight database that stores data locally.
-- Run the following command to **create a sqlite database** in the path
+- `technical`
+- `fundamental`
+- `commodity_news`
+
+Their signals are aggregated by the portfolio manager. The deterministic trade gate is now referred to as `trade_auditor`; the old `decision_planner` name remains backward compatible in code and historical audit payloads.
+
+`trade_auditor` does not call an LLM. It uses market confirmation, signal combinations, recent ticker-side performance, and conditional trade-pair feedback to allow, reduce, block, or hold proposed exposure.
+
+The concrete implementation lives in `src/agents/auditor.py`. `src/agents/planner.py` is kept only for the legacy LLM analyst selector controlled by `planner_mode`.
+
+## Intraday Execution Confirmation
+
+The system still generates daily-frequency strategies. Intraday data is used only to improve execution timing.
+
+The concrete Phase2 implementation now lives in `src/agents/trader.py`. The script `src/run/order.py` is kept as the stable command-line entrypoint used by manual runs and `run/backtest.py`.
+
+When `execution.intraday_confirmation.enabled` is true:
+
+- New or increasing exposure is gated by completed 15-minute bars.
+- Long entries require confirmation above VWAP and the opening range.
+- Short entries require confirmation below VWAP and the opening range.
+- The execution base price is the next valid 1-minute bar open.
+- Close/reduce/rollover actions use the first valid 1-minute execution basis more aggressively.
+- Untriggered recommendations receive explicit no-trade reasons such as `intraday_trigger_not_met`.
+
+The intraday execution audit is stored in:
+
+```text
+futures_intraday_decision
+```
+
+## Daily Settlement
+
+The concrete Phase3 implementation now lives in `src/agents/accountant.py`. The script `src/run/settlement.py` is kept as the stable command-line entrypoint used by manual runs and `run/backtest.py`.
+
+The accountant agent does not call an LLM. It uses `src/tools/agent_tools/futures_settlement.py` to replay Phase2 transactions, fetch settlement prices, persist the official portfolio, write `daily_settlement`, and mark Phase2 transactions as booked.
+
+## Quick Start
+
+Run commands from `src/`.
+
+Initialize the SQLite database:
+
 ```bash
-cd src
 python database/sqlite_setup.py
 ```
-- You may need to install VSCode Extension [SQLite Viewer](https://marketplace.cursorapi.com/items?itemName=qwtel.sqlite-viewer) to explore the database.
-- Path: `src/assets/deepfund.db`
 
+Run one full trading day:
 
-### Relation Diagram
-DeepFund system gets supported by four elementary tables: 
-- Config: store user-defined configurations
-- Portfolio: record the portfolio updates
-- Decision: record the trading decisions from managers
-- Signal: record the signals generated from analysts
-
-The ERD is generated by Supabase - DB Schema Visualizer.
-
-<p align="center">
-  <img src="./image/db_schema.gif" alt="DeepFund ERD" width="80%" />
-  <br>
-</p>
-
-
-## Running the System
-Enter the `src` directory and run the `main.py` file with configuration:
 ```bash
-cd src
-python main.py --config xxx.yaml --trading-date YYYY-MM-DD [--local-db]
+python run/proposal.py --config config/dev.yaml --trading-date 2025-01-06 --local-db
+python run/order.py --config config/dev.yaml --trading-date 2025-01-06 --local-db
+python run/settlement.py --config config/dev.yaml --trading-date 2025-01-06 --local-db
+python run/validate_phase_flow.py --config config/dev.yaml --trading-date 2025-01-06 --local-db
 ```
 
-`trading-date` coordinates the trading date for the system. It can be set to historical trading date till the last trading date. As the portfolio is updated daily, client must use it in **chronological order** to replay the trading history.
-Switch to local DB by adding `--local-db` option in the command line. 
+Run one paper-trading day with intraday execution confirmation:
 
-### Configurations
-Configs are saved in `src/config`. Below is a config template:
-```yaml
-# Deep Fund Configuration
-exp_name: "my_unique_exp_name"
-
-# Trading settings
-tickers:
-  - ticker_a
-  - ticker_b
-
-# Analysts to run, refer to graph.constants.py
-planner_mode: true/false
-workflow_analysts:
-  - analyst_a
-  - analyst_b
-  - analyst_c
-
-# LLM model settings, refer to llm/inference.py
-llm:
-  provider: "provider_name" 
-  model: "model_name"
+```bash
+python run/proposal.py --config config/dev.yaml --trading-date YYYY-MM-DD --local-db
+python run/order.py --config config/dev.yaml --trading-date YYYY-MM-DD --local-db --loop
+python run/settlement.py --config config/dev.yaml --trading-date YYYY-MM-DD --local-db
+python run/validate_phase_flow.py --config config/dev.yaml --trading-date YYYY-MM-DD --local-db
 ```
 
+Run a multi-day backtest:
 
-### Planner Mode
-We use `planner_mode` configs to switch the mode:
-- **True**: Planner agent orchestrates which analysts to run from `workflow_analysts`.
-- **False**: All workflow analysts are running in parallel without orchestration.
-
-### Remarks
-- `exp_name` is **unique identifier** for each experiment. You shall use another one for different experiments when configs are changed.
-- Specify `--local-db` flag to use SQLite. Otherwise, DeepFund connects to Supabase by default.
-
-
-## Project Structure 
-```
-deepfund/
-├── src/
-│   ├── main.py                   # Main entry point
-│   ├── agents/                   # Agent build and registry
-│   ├── apis/                     # APIs for external financial data
-│   ├── config/                   # Configuration files
-│   ├── database/                 # Database setup and helper
-│   ├── example/                  # Expected output
-│   ├── graph/                    # Workflow, prompt, and schema
-│   ├── llm/                      # LLM providers
-│   ├── util/                     # Utility functions and helpers
-├── environment.yml               # For Conda
-├── README.md                     # Project documentation
-├── ...
+```bash
+python run/backtest.py --config config/dev.yaml --start-date 2025-01-01 --end-date 2025-02-28 --local-db
 ```
 
-## 📚 Additional Resources
+Run a small smoke backtest before a larger window:
 
-**[Technical Guide](./TECHNICAL_GUIDE.md)** - Detailed information for developers including:
-  - Analyst breakdown and system architecture
-  - System dependencies and API requirements  
-  - Advanced usage: Adding new analysts and LLM providers
-
-## Acknowledgements
-The project gets inspiration from the following projects:
-- [AI Hedge Fund](https://github.com/virattt/ai-hedge-fund), An AI Hedge Fund Team
-- [LangGraph](https://langchain-ai.github.io/langgraph/tutorials/workflows), Tutorial on Workflows and Agents
-- [OpenManus](https://github.com/mannaandpoem/OpenManus), An open-source framework for building general AI agents
-- [Supabase](https://supabase.com/), The Open Source Firebase Alternative
-- [Cursor AI](https://www.cursor.com/), The AI Code Editor
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=HKUSTDial/DeepFund&type=Date)](https://www.star-history.com/#HKUSTDial/DeepFund&Date)
-
-
-## Citation
-If you find it useful, please cite it as follows:
-
-- Project Paper
-```bibtex
-@misc{li2025timetravel,
-      title={Time Travel is Cheating: Going Live with DeepFund for Real-Time Fund Investment Benchmarking}, 
-      author={Changlun Li and Yao Shi and Chen Wang and Qiqi Duan and Runke Ruan and Weijie Huang and Haonan Long and Lijun Huang and Nan Tang and Yuyu Luo},
-      year={2025},
-      eprint={2505.11065},
-      archivePrefix={arXiv},
-      primaryClass={cs.CE},
-      url={https://arxiv.org/abs/2505.11065}, 
-}
+```bash
+python run/backtest.py --config config/dev.yaml --start-date 2025-01-06 --end-date 2025-01-10 --local-db
 ```
 
-- Vision Paper
-```bibtex
-@misc{li2025deepfund,
-      title={DeepFund: Will LLM be Professional at Fund Investment? A Live Arena Perspective}, 
-      author={Changlun Li and Yao Shi and Yuyu Luo and Nan Tang},
-      year={2025},
-      eprint={2503.18313},
-      archivePrefix={arXiv},
-      primaryClass={cs.MA},
-      url={https://arxiv.org/abs/2503.18313}, 
-}
+## Database
+
+The default SQLite database is:
+
+```text
+src/assets/agentquant.db
 ```
 
+Important tables:
+
+- `config`
+- `portfolio`
+- `futures_recommendation`
+- `futures_transactions`
+- `futures_intraday_decision`
+- `daily_settlement`
+- `ticker_daily_pnl`
+- `trading_day_phase`
+
+## Logging and Outputs
+
+Main outputs are written under:
+
+```text
+src/logs/
+```
+
+Validation summaries are written under:
+
+```text
+src/logs/summaries/<run_id>/
+```
+
+## Tests
+
+The project environment may not include `pytest`, so the maintained regression path uses standard `unittest`:
+
+```bash
+python -m unittest src.tests.test_pandaai_api_adapter src.tests.test_phase_flow_regression
+```
+
+## Project Structure
+
+```text
+src/
+  agents/
+  apis/
+  config/
+  database/
+  evaluation/
+  graph/
+  run/
+  tests/
+  tools/
+  util/
+docs/
+data/
+```
+
+## Design Notes
+
+- AgentQuant is not a high-frequency trading system.
+- Strategies are generated at daily frequency.
+- Minute data is used for execution confirmation and better price selection.
+- All normal trading activity must remain auditable through the four-phase workflow.
