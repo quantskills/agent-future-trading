@@ -11,6 +11,8 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from database.sqlite_setup import DB_PATH
+from tools.agent_tools.neutral_accountability import build_neutral_accountability_summary
+from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.logger import logger
 
 
@@ -48,12 +50,27 @@ def _is_futures_position(position: Dict) -> bool:
 def calculate_returns(portfolio_values: List[float]) -> List[float]:
     """Calculate daily returns from portfolio values."""
     if len(portfolio_values) < 2:
-        return [0.0]
+        return []
 
     returns = []
     for i in range(1, len(portfolio_values)):
-        daily_return = (portfolio_values[i] - portfolio_values[i-1]) / portfolio_values[i-1]
+        previous_value = portfolio_values[i - 1]
+        if previous_value <= 0:
+            continue
+        daily_return = (portfolio_values[i] - previous_value) / previous_value
         returns.append(daily_return)
+    return returns
+
+
+def calculate_margin_returns(settlements) -> List[float]:
+    """Calculate daily PnL divided by prior margin used for futures diagnostics."""
+    returns = []
+    for i in range(1, len(settlements)):
+        margin = settlements[i - 1]['current_margin'] or 0
+        if margin <= 0:
+            continue
+        daily_pnl = settlements[i]['daily_pnl'] or 0
+        returns.append(daily_pnl / margin)
     return returns
 
 
@@ -86,9 +103,9 @@ def calculate_annualized_return(total_return: float, days: int) -> float:
 
 def calculate_volatility(returns: List[float], trading_days: int) -> float:
     """Calculate annualized volatility."""
-    if len(returns) == 0:
+    if len(returns) < 2:
         return 0.0
-    return np.std(returns) * np.sqrt(252)  # Annualize with 252 trading days per year
+    return float(np.std(returns, ddof=1) * np.sqrt(252))  # Annualize with 252 trading days per year
 
 
 def calculate_sharpe_ratio(annualized_return: float, volatility: float, risk_free_rate: float = 0.03) -> float:
@@ -96,6 +113,408 @@ def calculate_sharpe_ratio(annualized_return: float, volatility: float, risk_fre
     if volatility == 0:
         return 0.0
     return (annualized_return - risk_free_rate) / volatility
+
+
+def calculate_optimization_acceptance_metrics(
+    config_id: str,
+    db_path: str = DB_PATH,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> Dict:
+    """Metrics tied to strategy_performance_optimization.md acceptance gates."""
+    conn = None
+    metrics = {
+        "base_capacity_days_8_12": 0,
+        "strong_opportunity_days_16_20": 0,
+        "margin_utilization_target_day_ratio": 0.0,
+        "alpha_capacity_limited_days": 0,
+        "system_under_deployed_days": 0,
+        "under_deployed_days": 0,
+        "non_alpha_under_deployed_days": 0,
+        "capital_allocation_tier_counts": {},
+        "under_deployed_reason_counts": {},
+        "under_deployed_category_counts": {},
+        "capital_alpha_release_candidate_count": 0,
+        "capital_parameter_review_counts": {},
+        "capital_diagnostic_action_counts": {},
+        "trade_auditor_decision_counts": {},
+        "protected_deployable_template_net_pnl": 0.0,
+        "weak_block_template_net_pnl": 0.0,
+        "learning_overlay_effective_rows": 0,
+        "llm_causal_review_candidate_count": 0,
+        "validated_causal_rule_count": 0,
+        "causal_rule_validation_status_counts": {},
+        "learned_trade_count": 0,
+        "learned_trade_win_rate": 0.0,
+        "learned_trade_net_pnl": 0.0,
+        "unlearned_trade_count": 0,
+        "unlearned_trade_win_rate": 0.0,
+        "unlearned_trade_net_pnl": 0.0,
+        "learned_trade_reason_counts": {},
+        "neutral_signal_count": 0,
+        "neutral_signal_ratio": 0.0,
+        "neutral_accountability_complete_rate": 1.0,
+        "neutral_category_counts": {},
+        "neutral_by_analyst": {},
+        "neutral_missing_field_counts": {},
+        "neutral_review_examples": [],
+        "artifact_contract_validation_pass_rate": 1.0,
+        "free_text_control_violation_count": 0,
+    }
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        date_filters = ["p.config_id = ?"]
+        params: List = [config_id]
+        if start_date:
+            date_filters.append("substr(ds.trading_date, 1, 10) >= ?")
+            params.append(start_date)
+        if end_date:
+            date_filters.append("substr(ds.trading_date, 1, 10) <= ?")
+            params.append(end_date)
+        cursor.execute(
+            f"""
+            SELECT ds.margin_ratio
+            FROM daily_settlement ds
+            JOIN portfolio p ON ds.portfolio_id = p.id
+            WHERE {' AND '.join(date_filters)}
+            """,
+            tuple(params),
+        )
+        ratios = [float(row["margin_ratio"] or 0.0) for row in cursor.fetchall()]
+        if ratios:
+            metrics["base_capacity_days_8_12"] = sum(1 for ratio in ratios if 0.08 <= ratio <= 0.12)
+            metrics["strong_opportunity_days_16_20"] = sum(1 for ratio in ratios if 0.16 <= ratio <= 0.20)
+            metrics["margin_utilization_target_day_ratio"] = (
+                metrics["base_capacity_days_8_12"] + metrics["strong_opportunity_days_16_20"]
+            ) / len(ratios)
+
+        try:
+            deployment_filters = ["config_id = ?"]
+            deployment_params: List = [config_id]
+            if start_date:
+                deployment_filters.append("substr(trading_date, 1, 10) >= ?")
+                deployment_params.append(start_date)
+            if end_date:
+                deployment_filters.append("substr(trading_date, 1, 10) <= ?")
+                deployment_params.append(end_date)
+            cursor.execute(
+                f"""
+                SELECT capital_allocation_tier, reason_bucket, COUNT(*) AS cnt
+                FROM capital_deployment_state
+                WHERE {' AND '.join(deployment_filters)}
+                GROUP BY capital_allocation_tier, reason_bucket
+                """,
+                tuple(deployment_params),
+            )
+            tier_counts = {}
+            under_deployed_reasons = {}
+            for row in cursor.fetchall():
+                tier = str(row["capital_allocation_tier"] or "unknown")
+                reason = str(row["reason_bucket"] or "")
+                cnt = int(row["cnt"] or 0)
+                tier_counts[tier] = tier_counts.get(tier, 0) + cnt
+
+                if reason == "alpha_capacity_limited":
+                    metrics["alpha_capacity_limited_days"] += cnt
+
+                if tier == "under_deployed":
+                    metrics["under_deployed_days"] += cnt
+                    under_deployed_reasons[reason or "unknown"] = (
+                        under_deployed_reasons.get(reason or "unknown", 0) + cnt
+                    )
+                    if reason != "alpha_capacity_limited":
+                        metrics["system_under_deployed_days"] += cnt
+                        metrics["non_alpha_under_deployed_days"] += cnt
+                elif reason == "system_under_deployed":
+                    metrics["system_under_deployed_days"] += cnt
+
+            metrics["capital_allocation_tier_counts"] = tier_counts
+            metrics["under_deployed_reason_counts"] = under_deployed_reasons
+
+            cursor.execute(
+                f"""
+                SELECT capital_allocation_tier, deployment_plan_json
+                FROM capital_deployment_state
+                WHERE {' AND '.join(deployment_filters)}
+                """,
+                tuple(deployment_params),
+            )
+            category_counts = {}
+            parameter_review_counts = {}
+            action_counts = {}
+            alpha_release_candidate_count = 0
+            for row in cursor.fetchall():
+                try:
+                    deployment_plan = json.loads(row["deployment_plan_json"] or "{}")
+                except Exception:
+                    deployment_plan = {}
+                diagnostics = deployment_plan.get("diagnostics") if isinstance(deployment_plan, dict) else {}
+                if not isinstance(diagnostics, dict):
+                    continue
+                if str(row["capital_allocation_tier"] or "") == "under_deployed":
+                    for category, count in (diagnostics.get("category_counts") or {}).items():
+                        category_counts[str(category)] = category_counts.get(str(category), 0) + int(count or 0)
+                    for action, count in (diagnostics.get("action_counts") or {}).items():
+                        action_counts[str(action)] = action_counts.get(str(action), 0) + int(count or 0)
+                    for item in diagnostics.get("parameter_review") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("scope") or item.get("reason") or "unknown")
+                        parameter_review_counts[key] = parameter_review_counts.get(key, 0) + 1
+                alpha_release_candidate_count += int(diagnostics.get("alpha_release_candidate_count") or 0)
+            metrics["under_deployed_category_counts"] = category_counts
+            metrics["capital_alpha_release_candidate_count"] = alpha_release_candidate_count
+            metrics["capital_parameter_review_counts"] = parameter_review_counts
+            metrics["capital_diagnostic_action_counts"] = action_counts
+        except sqlite3.Error:
+            pass
+
+        try:
+            cursor.execute(
+                """
+                SELECT memory_state, SUM(net_pnl) AS pnl
+                FROM strategy_memory
+                WHERE config_id = ?
+                GROUP BY memory_state
+                """,
+                (config_id,),
+            )
+            for row in cursor.fetchall():
+                state = str(row["memory_state"] or "")
+                pnl = float(row["pnl"] or 0.0)
+                if state in {"protected", "deployable"}:
+                    metrics["protected_deployable_template_net_pnl"] += pnl
+                if state == "weak_block":
+                    metrics["weak_block_template_net_pnl"] += pnl
+        except sqlite3.Error:
+            pass
+
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) AS cnt FROM config_learning_overlay WHERE config_id = ? AND active = 1",
+                (config_id,),
+            )
+            metrics["learning_overlay_effective_rows"] = int(cursor.fetchone()["cnt"] or 0)
+        except sqlite3.Error:
+            pass
+
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) AS cnt FROM causal_review_candidate WHERE config_id = ?",
+                (config_id,),
+            )
+            metrics["llm_causal_review_candidate_count"] = int(cursor.fetchone()["cnt"] or 0)
+            cursor.execute(
+                """
+                SELECT rule_validation_status, COUNT(*) AS cnt
+                FROM causal_review_candidate
+                WHERE config_id = ?
+                GROUP BY rule_validation_status
+                """,
+                (config_id,),
+            )
+            metrics["causal_rule_validation_status_counts"] = {
+                str(row["rule_validation_status"] or "unknown"): int(row["cnt"] or 0)
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM adaptive_policy_state
+                WHERE config_id = ?
+                  AND policy_type = 'causal_review_rule'
+                  AND active = 1
+                """,
+                (config_id,),
+            )
+            metrics["validated_causal_rule_count"] = int(cursor.fetchone()["cnt"] or 0)
+        except sqlite3.Error:
+            pass
+
+        try:
+            recommendation_filters = ["config_id = ?"]
+            recommendation_params: List = [config_id]
+            if start_date:
+                recommendation_filters.append("substr(trading_date, 1, 10) >= ?")
+                recommendation_params.append(start_date)
+            if end_date:
+                recommendation_filters.append("substr(trading_date, 1, 10) <= ?")
+                recommendation_params.append(end_date)
+            cursor.execute(
+                f"""
+                SELECT id, underlying_code, signal_snapshot
+                FROM futures_recommendation
+                WHERE {' AND '.join(recommendation_filters)}
+                """,
+                tuple(recommendation_params),
+            )
+            recommendation_rows = [dict(row) for row in cursor.fetchall()]
+            decision_counts = {}
+            validation_total = 0
+            validation_ok = 0
+            free_text_violations = 0
+            neutral_recommendations = []
+            for row in recommendation_rows:
+                try:
+                    snapshot = json.loads(row["signal_snapshot"] or "{}")
+                except Exception:
+                    snapshot = {}
+                if not isinstance(snapshot, dict):
+                    snapshot = {}
+                neutral_recommendations.append(
+                    {
+                        "id": row.get("id"),
+                        "underlying_code": row.get("underlying_code"),
+                        "signal_snapshot": snapshot,
+                    }
+                )
+                plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+                auditor = plan.get("trade_auditor") if isinstance(plan.get("trade_auditor"), dict) else {}
+                decision = str(auditor.get("decision") or "none")
+                decision_counts[decision] = decision_counts.get(decision, 0) + 1
+                if "artifact_validation_errors" in snapshot:
+                    validation_total += 1
+                    if not snapshot.get("artifact_validation_errors"):
+                        validation_ok += 1
+                if isinstance(plan.get("strategy_controls"), str):
+                    free_text_violations += 1
+            metrics["trade_auditor_decision_counts"] = decision_counts
+            metrics["artifact_contract_validation_pass_rate"] = (
+                validation_ok / validation_total if validation_total else 1.0
+            )
+            metrics["free_text_control_violation_count"] = free_text_violations
+            neutral_summary = build_neutral_accountability_summary(neutral_recommendations, {})
+            metrics["neutral_signal_count"] = int(neutral_summary.get("neutral_count") or 0)
+            metrics["neutral_signal_ratio"] = float(neutral_summary.get("neutral_ratio") or 0.0)
+            metrics["neutral_accountability_complete_rate"] = float(
+                neutral_summary.get("accountability_complete_rate") or 0.0
+            )
+            metrics["neutral_category_counts"] = neutral_summary.get("category_counts", {})
+            metrics["neutral_by_analyst"] = neutral_summary.get("by_analyst", {})
+            metrics["neutral_missing_field_counts"] = neutral_summary.get("missing_field_counts", {})
+            metrics["neutral_review_examples"] = neutral_summary.get("examples", [])
+        except sqlite3.Error:
+            pass
+
+        try:
+            tx_filters = ["config_id = ?"]
+            tx_params: List = [config_id]
+            if end_date:
+                tx_filters.append("substr(trading_date, 1, 10) <= ?")
+                tx_params.append(end_date)
+            cursor.execute(
+                f"""
+                SELECT *
+                FROM futures_transactions
+                WHERE {' AND '.join(tx_filters)}
+                ORDER BY substr(trading_date, 1, 10), created_at, id
+                """,
+                tuple(tx_params),
+            )
+            pairs = build_completed_trade_pairs([dict(row) for row in cursor.fetchall()], include_rollover=False)
+            if start_date:
+                pairs = [pair for pair in pairs if str(pair.get("close_date") or "") >= start_date]
+            if end_date:
+                pairs = [pair for pair in pairs if str(pair.get("close_date") or "") <= end_date]
+            recommendation_ids = sorted(
+                {str(pair.get("open_recommendation_id") or "") for pair in pairs if pair.get("open_recommendation_id")}
+            )
+            recommendation_lookup = {}
+            if recommendation_ids:
+                placeholders = ", ".join(["?"] * len(recommendation_ids))
+                cursor.execute(
+                    f"SELECT id, signal_snapshot FROM futures_recommendation WHERE id IN ({placeholders})",
+                    tuple(recommendation_ids),
+                )
+                recommendation_lookup = {str(row["id"]): dict(row) for row in cursor.fetchall()}
+
+            def _snapshot(row: Dict) -> Dict:
+                try:
+                    loaded = json.loads(row.get("signal_snapshot") or "{}")
+                except Exception:
+                    loaded = {}
+                return loaded if isinstance(loaded, dict) else {}
+
+            def _collect_reasons(plan: Dict) -> List[str]:
+                reasons: List[str] = []
+                for key in ("control_reasons", "reasons"):
+                    value = plan.get(key)
+                    if isinstance(value, list):
+                        reasons.extend(str(item) for item in value if item)
+                rebalance = plan.get("rebalance_summary") if isinstance(plan.get("rebalance_summary"), dict) else {}
+                value = rebalance.get("control_reasons")
+                if isinstance(value, list):
+                    reasons.extend(str(item) for item in value if item)
+                controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
+                value = controls.get("reasons")
+                if isinstance(value, list):
+                    reasons.extend(str(item) for item in value if item)
+                auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
+                if isinstance(auditor, dict):
+                    value = auditor.get("reasons")
+                    if isinstance(value, list):
+                        reasons.extend(str(item) for item in value if item)
+                return reasons
+
+            def _learning_tags(row: Dict) -> List[str]:
+                snapshot = _snapshot(row)
+                plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+                tags: List[str] = []
+                for reason in _collect_reasons(plan):
+                    if reason.startswith("adaptive_policy_"):
+                        tags.append("adaptive_policy")
+                    elif reason.startswith("strategy_memory_"):
+                        tags.append("strategy_memory")
+                    elif reason.startswith("provisional_policy_"):
+                        tags.append("provisional_policy")
+                    elif reason in {"capital_utilization_memory_protected", "capital_utilization_same_side_add_on"}:
+                        tags.append("capital_learning")
+                controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
+                diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
+                if isinstance(diagnostics.get("capital_utilization_learning"), dict):
+                    tags.append("capital_learning")
+                auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
+                auditor_diag = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
+                if auditor_diag.get("adaptive_policy_applied"):
+                    tags.append("adaptive_policy")
+                if auditor_diag.get("provisional_policy_applied"):
+                    tags.append("provisional_policy")
+                if auditor_diag.get("strategy_memory_rule") or auditor_diag.get("strategy_memory"):
+                    tags.append("strategy_memory")
+                return sorted(set(tags))
+
+            learned_pairs = []
+            unlearned_pairs = []
+            reason_counts = {}
+            for pair in pairs:
+                recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+                tags = _learning_tags(recommendation) if recommendation else []
+                if tags:
+                    learned_pairs.append(pair)
+                    for tag in tags:
+                        reason_counts[tag] = reason_counts.get(tag, 0) + 1
+                else:
+                    unlearned_pairs.append(pair)
+            learned_summary = summarize_trade_pairs(learned_pairs)
+            unlearned_summary = summarize_trade_pairs(unlearned_pairs)
+            metrics["learned_trade_count"] = int(learned_summary.get("total_trades") or 0)
+            metrics["learned_trade_win_rate"] = float(learned_summary.get("win_rate") or 0.0)
+            metrics["learned_trade_net_pnl"] = float(learned_summary.get("total_pnl") or 0.0)
+            metrics["unlearned_trade_count"] = int(unlearned_summary.get("total_trades") or 0)
+            metrics["unlearned_trade_win_rate"] = float(unlearned_summary.get("win_rate") or 0.0)
+            metrics["unlearned_trade_net_pnl"] = float(unlearned_summary.get("total_pnl") or 0.0)
+            metrics["learned_trade_reason_counts"] = reason_counts
+        except sqlite3.Error:
+            pass
+    except Exception as exc:
+        logger.warning(f"Optimization acceptance metrics unavailable: {exc}")
+    finally:
+        if conn:
+            conn.close()
+    return metrics
 
 
 def calculate_max_drawdown(portfolio_values: List[float]) -> float:
@@ -237,19 +656,12 @@ def calculate_win_rate(winning_trades: int, total_trades: int) -> float:
     return winning_trades / total_trades
 
 
-def calculate_futures_trade_win_rate(config_id: str, db_path: str) -> Dict:
+def calculate_futures_trade_win_rate(
+    config_id: str, db_path: str,
+    start_date: str = None, end_date: str = None,
+) -> Dict:
     """
     Calculate futures win rate using daily settlement P&L.
-
-    Methodology:
-    - Use daily_settlement.daily_pnl to calculate win rate
-    - Each trading day is considered one evaluated day with its P&L
-    - This automatically includes all position changes (open, close, hold)
-
-    This approach is:
-    - More reliable than FIFO matching (doesn't depend on transaction completeness)
-    - Automatically includes forced closure (daily settlement reflects current position P&L)
-    - Simpler and more accurate
     """
     conn = None
     try:
@@ -258,14 +670,22 @@ def calculate_futures_trade_win_rate(config_id: str, db_path: str) -> Dict:
         cursor = conn.cursor()
 
         # Fetch all daily settlement records for this config
-        cursor.execute('''
+        query = '''
             SELECT ds.daily_pnl, ds.trading_date
             FROM daily_settlement ds
             JOIN portfolio p ON ds.portfolio_id = p.id
             WHERE p.config_id = ?
             AND ds.daily_pnl IS NOT NULL
-            ORDER BY ds.trading_date ASC
-        ''', (config_id,))
+        '''
+        params: list = [config_id]
+        if start_date:
+            query += ' AND ds.trading_date >= ?'
+            params.append(start_date)
+        if end_date:
+            query += ' AND ds.trading_date <= ?'
+            params.append(end_date + 'T23:59:59')
+        query += ' ORDER BY ds.trading_date ASC'
+        cursor.execute(query, params)
 
         settlements = cursor.fetchall()
 
@@ -290,14 +710,21 @@ def calculate_futures_trade_win_rate(config_id: str, db_path: str) -> Dict:
         )
         logger.info(f"Settlement days: {len(settlements)}")
         # For futures: use previous_balance + previous_margin (account equity before first trading day)
-        cursor.execute('''
+        initial_query = '''
             SELECT ds.previous_balance, ds.previous_margin
             FROM daily_settlement ds
             JOIN portfolio p ON ds.portfolio_id = p.id
             WHERE p.config_id = ?
-            ORDER BY ds.trading_date ASC
-            LIMIT 1
-        ''', (config_id,))
+        '''
+        initial_params: list = [config_id]
+        if start_date:
+            initial_query += ' AND ds.trading_date >= ?'
+            initial_params.append(start_date)
+        if end_date:
+            initial_query += ' AND ds.trading_date <= ?'
+            initial_params.append(end_date + 'T23:59:59')
+        initial_query += ' ORDER BY ds.trading_date ASC LIMIT 1'
+        cursor.execute(initial_query, initial_params)
 
         initial_row = cursor.fetchone()
         initial_capital = None
@@ -385,7 +812,10 @@ def calculate_futures_trade_win_rate(config_id: str, db_path: str) -> Dict:
             conn.close()
 
 
-def calculate_futures_transaction_win_rate(config_id: str, db_path: str) -> Dict:
+def calculate_futures_transaction_win_rate(
+    config_id: str, db_path: str,
+    start_date: str = None, end_date: str = None,
+) -> Dict:
     """
     Calculate futures win rate from completed transaction pairs.
 
@@ -418,6 +848,15 @@ def calculate_futures_transaction_win_rate(config_id: str, db_path: str) -> Dict
         transaction_columns = {row[1] for row in cursor.fetchall()}
         source_type_expr = "source_type" if "source_type" in transaction_columns else "'strategy' AS source_type"
 
+        date_filter = ''
+        params: list = [config_id]
+        if start_date:
+            date_filter += ' AND trading_date >= ?'
+            params.append(start_date)
+        if end_date:
+            date_filter += ' AND trading_date <= ?'
+            params.append(end_date + 'T23:59:59')
+
         cursor.execute(
             f'''
             SELECT
@@ -435,9 +874,10 @@ def calculate_futures_transaction_win_rate(config_id: str, db_path: str) -> Dict
             FROM futures_transactions
             WHERE config_id = ?
               AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
+              {date_filter}
             ORDER BY trading_date ASC, created_at ASC
             ''',
-            (config_id,),
+            params,
         )
         transactions = cursor.fetchall()
 
@@ -567,13 +1007,18 @@ def calculate_futures_transaction_win_rate(config_id: str, db_path: str) -> Dict
             conn.close()
 
 
-def calculate_futures_metrics(config_id: str, db_path: str) -> Dict:
+def calculate_futures_metrics(
+    config_id: str, db_path: str,
+    start_date: str = None, end_date: str = None,
+) -> Dict:
     """
     Calculate futures-specific metrics from daily_settlement and portfolio tables.
 
     Args:
         config_id: The config ID to evaluate
         db_path: Path to the SQLite database
+        start_date: Optional start date filter (ISO format)
+        end_date: Optional end date filter (ISO format)
 
     Returns:
         Dictionary containing futures-specific metrics
@@ -585,7 +1030,7 @@ def calculate_futures_metrics(config_id: str, db_path: str) -> Dict:
         cursor = conn.cursor()
 
         # Fetch all settlement records for this config
-        cursor.execute('''
+        settlement_query = '''
             SELECT
                 ds.daily_pnl,
                 ds.margin_ratio,
@@ -599,8 +1044,16 @@ def calculate_futures_metrics(config_id: str, db_path: str) -> Dict:
             FROM daily_settlement ds
             JOIN portfolio p ON ds.portfolio_id = p.id
             WHERE p.config_id = ?
-            ORDER BY ds.trading_date ASC
-        ''', (config_id,))
+        '''
+        params: list = [config_id]
+        if start_date:
+            settlement_query += ' AND ds.trading_date >= ?'
+            params.append(start_date)
+        if end_date:
+            settlement_query += ' AND ds.trading_date <= ?'
+            params.append(end_date + 'T23:59:59')
+        settlement_query += ' ORDER BY ds.trading_date ASC'
+        cursor.execute(settlement_query, params)
 
         settlements = cursor.fetchall()
 
@@ -663,12 +1116,20 @@ def calculate_futures_metrics(config_id: str, db_path: str) -> Dict:
 
             if 'leverage' in column_names:
                 # Fetch leverage data from portfolio table
-                cursor.execute('''
+                portfolio_metric_query = '''
                     SELECT p.leverage, p.total_assets, p.cashflow, p.margin_used, p.positions
                     FROM portfolio p
                     WHERE p.config_id = ? AND p.trading_date IS NOT NULL
-                    ORDER BY p.trading_date ASC
-                ''', (config_id,))
+                '''
+                portfolio_metric_params: list = [config_id]
+                if start_date:
+                    portfolio_metric_query += ' AND p.trading_date >= ?'
+                    portfolio_metric_params.append(start_date)
+                if end_date:
+                    portfolio_metric_query += ' AND p.trading_date <= ?'
+                    portfolio_metric_params.append(end_date + 'T23:59:59')
+                portfolio_metric_query += ' ORDER BY p.trading_date ASC'
+                cursor.execute(portfolio_metric_query, portfolio_metric_params)
 
                 portfolios = cursor.fetchall()
 
@@ -754,24 +1215,18 @@ def calculate_futures_metrics(config_id: str, db_path: str) -> Dict:
             conn.close()
 
 
-def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
+def calculate_futures_trade_metrics(
+    config_id: str, db_path: str,
+    start_date: str = None, end_date: str = None,
+) -> Dict:
     """
     Calculate futures trading statistics from futures_transactions table.
-
-    IMPORTANT: Statistical Definition
-    - total_futures_trades: Total number of transaction records (opens + closes)
-    - long_trades: Total lots of long positions opened
-    - short_trades: Total lots of short positions opened
-    - active_long_positions: Current net long positions (opens - closes)
-    - active_short_positions: Current net short positions (opens - closes)
-    - ticker_trade_counts: Number of transaction records per ticker
-
-    NOTE: These metrics count transaction records and opened lots, not completed round trips.
-          For win rate on completed trades, use calculate_futures_transaction_win_rate().
 
     Args:
         config_id: The config ID to evaluate
         db_path: Path to the SQLite database
+        start_date: Optional start date filter (ISO format)
+        end_date: Optional end date filter (ISO format)
 
     Returns:
         Dictionary containing futures trade metrics
@@ -783,18 +1238,27 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
         cursor = conn.cursor()
 
         # Fetch all futures transactions for this config
-        cursor.execute('''
+        tx_query = '''
             SELECT
                 ft.action,
                 ft.lots,
                 ft.execution_price AS price,
                 ft.settle_price,
                 ft.contract_multiplier,
+                ft.commission,
                 ft.ticker
             FROM futures_transactions ft
             WHERE ft.config_id = ?
-            ORDER BY ft.trading_date ASC, ft.created_at ASC
-        ''', (config_id,))
+        '''
+        params: list = [config_id]
+        if start_date:
+            tx_query += ' AND ft.trading_date >= ?'
+            params.append(start_date)
+        if end_date:
+            tx_query += ' AND ft.trading_date <= ?'
+            params.append(end_date + 'T23:59:59')
+        tx_query += ' ORDER BY ft.trading_date ASC, ft.created_at ASC'
+        cursor.execute(tx_query, params)
 
         transactions = cursor.fetchall()
 
@@ -806,6 +1270,8 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
                 'short_trades': 0,
                 'active_long_positions': 0,
                 'active_short_positions': 0,
+                'total_turnover_notional': 0.0,
+                'total_transaction_commission': 0.0,
                 'ticker_trade_counts': {}
             }
 
@@ -818,14 +1284,21 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
         # Track positions by ticker
         ticker_positions = {}  # {ticker: {'long': 0, 'short': 0}}
         ticker_trade_counts = {}  # {ticker: total_trades}
+        total_turnover_notional = 0.0
+        total_transaction_commission = 0.0
 
         for tx in transactions:
             action = tx['action']
-            lots = tx['lots']
+            lots = tx['lots'] or 0
             ticker = tx['ticker']
 
             if lots == 0:
                 continue
+
+            price = float(tx['price'] or tx['settle_price'] or 0.0)
+            multiplier = float(tx['contract_multiplier'] or 1.0)
+            total_turnover_notional += abs(float(lots) * price * multiplier)
+            total_transaction_commission += float(tx['commission'] or 0.0)
 
             # Initialize ticker tracking
             if ticker not in ticker_positions:
@@ -853,14 +1326,21 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
         active_long_positions = 0
         active_short_positions = 0
 
-        # Query the latest portfolio for actual positions
-        cursor.execute('''
+        # Query the latest portfolio within the evaluation window for actual positions.
+        latest_portfolio_query = '''
             SELECT positions
             FROM portfolio
             WHERE config_id = ?
-            ORDER BY trading_date DESC, updated_at DESC
-            LIMIT 1
-        ''', (config_id,))
+        '''
+        latest_portfolio_params: list = [config_id]
+        if start_date:
+            latest_portfolio_query += ' AND trading_date >= ?'
+            latest_portfolio_params.append(start_date)
+        if end_date:
+            latest_portfolio_query += ' AND trading_date <= ?'
+            latest_portfolio_params.append(end_date + 'T23:59:59')
+        latest_portfolio_query += ' ORDER BY trading_date DESC, updated_at DESC LIMIT 1'
+        cursor.execute(latest_portfolio_query, latest_portfolio_params)
         latest_portfolio_row = cursor.fetchone()
 
         if latest_portfolio_row and latest_portfolio_row['positions']:
@@ -885,6 +1365,8 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
             'short_trades': short_opened,
             'active_long_positions': active_long_positions,
             'active_short_positions': active_short_positions,
+            'total_turnover_notional': total_turnover_notional,
+            'total_transaction_commission': total_transaction_commission,
             'ticker_trade_counts': ticker_trade_counts
         }
 
@@ -896,6 +1378,8 @@ def calculate_futures_trade_metrics(config_id: str, db_path: str) -> Dict:
             'short_trades': 0,
             'active_long_positions': 0,
             'active_short_positions': 0,
+            'total_turnover_notional': 0.0,
+            'total_transaction_commission': 0.0,
             'ticker_trade_counts': {}
         }
     finally:
@@ -935,13 +1419,18 @@ def extract_futures_metrics_from_portfolios(portfolios: List[Dict]) -> Dict:
         'ticker_trade_counts': {}
     }
 
-def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
+def evaluate_config(
+    config_id: str, db_path: str = DB_PATH,
+    start_date: str = None, end_date: str = None,
+) -> Optional[Dict]:
     """
     Evaluate a config's performance metrics with futures support.
 
     Args:
         config_id: The config ID to evaluate
         db_path: Path to the SQLite database
+        start_date: Optional start date filter (ISO format, e.g. '2025-01-02')
+        end_date: Optional end date filter (ISO format, e.g. '2025-01-31')
 
     Returns:
         Dictionary containing all evaluation metrics, or None if evaluation fails
@@ -953,12 +1442,20 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
         cursor = conn.cursor()
 
         # Fetch all portfolios for this config, ordered by trading_date
-        cursor.execute('''
+        portfolio_query = '''
             SELECT id, trading_date, cashflow, total_assets, positions
             FROM portfolio
             WHERE config_id = ? AND trading_date IS NOT NULL
-            ORDER BY trading_date ASC
-        ''', (config_id,))
+        '''
+        portfolio_params: list = [config_id]
+        if start_date:
+            portfolio_query += ' AND trading_date >= ?'
+            portfolio_params.append(start_date)
+        if end_date:
+            portfolio_query += ' AND trading_date <= ?'
+            portfolio_params.append(end_date + 'T23:59:59')
+        portfolio_query += ' ORDER BY trading_date ASC'
+        cursor.execute(portfolio_query, portfolio_params)
 
         portfolio_rows = cursor.fetchall()
 
@@ -985,6 +1482,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
         # Extract portfolio data
         portfolios = []
         portfolio_values = []
+        account_equity_curve_values = []
         trading_dates = []
         has_futures_positions = False
         first_non_empty_positions = {}
@@ -1053,7 +1551,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
             # 4. This equity curve is used for return/volatility/drawdown calculations
 
             # Fetch settlement data for this config
-            cursor.execute('''
+            settlement_query = '''
                 SELECT
                     ds.trading_date,
                     ds.previous_balance,
@@ -1065,8 +1563,16 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
                 FROM daily_settlement ds
                 JOIN portfolio p ON ds.portfolio_id = p.id
                 WHERE p.config_id = ?
-                ORDER BY ds.trading_date ASC
-            ''', (config_id,))
+            '''
+            settlement_params: list = [config_id]
+            if start_date:
+                settlement_query += ' AND ds.trading_date >= ?'
+                settlement_params.append(start_date)
+            if end_date:
+                settlement_query += ' AND ds.trading_date <= ?'
+                settlement_params.append(end_date + 'T23:59:59')
+            settlement_query += ' ORDER BY ds.trading_date ASC'
+            cursor.execute(settlement_query, settlement_params)
 
             settlements = cursor.fetchall()
             if settlements:
@@ -1079,6 +1585,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
                     (s['current_balance'] or 0) + (s['current_margin'] or 0)
                     for s in settlements
                 ]
+                account_equity_curve_values = [initial_capital_from_settlement] + portfolio_values
                 cash_balance_values = [
                     s['current_balance'] or 0
                     for s in settlements
@@ -1107,6 +1614,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
                     portfolio_values.append(account_equity)
                     cash_balance_values.append(float(p['cashflow']))
                     trading_dates.append(p['trading_date'])
+                account_equity_curve_values = portfolio_values.copy()
                 annualization_days = len(trading_dates)
                 annualization_basis = '组合快照'
         else:
@@ -1114,11 +1622,12 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
             for p in portfolios:
                 portfolio_values.append(float(p['total_assets']))
                 trading_dates.append(p['trading_date'])
+            account_equity_curve_values = portfolio_values.copy()
 
         # Calculate time period
-        start_date = trading_dates[0]
-        end_date = trading_dates[-1]
-        calendar_days = (end_date - start_date).days if len(trading_dates) > 1 else 1
+        period_start = trading_dates[0]
+        period_end = trading_dates[-1]
+        calendar_days = (period_end - period_start).days if len(trading_dates) > 1 else 1
         if annualization_days is None:
             annualization_days = calendar_days
         effective_period_days = annualization_days
@@ -1145,13 +1654,32 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
         logger.info(f"  Last portfolio total_assets: {portfolios[-1]['total_assets']:,.2f}")
         logger.info(f"  Annualization basis: {annualization_basis} ({effective_period_days} observations)")
 
-        returns = calculate_returns(portfolio_values)
-
-        # Calculate metrics
-        annualized_return = calculate_annualized_return(total_return, effective_period_days)
-        volatility = calculate_volatility(returns, len(returns))
-        sharpe_ratio = calculate_sharpe_ratio(annualized_return, volatility)
-        account_equity_max_drawdown = calculate_max_drawdown(portfolio_values)
+        account_returns = calculate_returns(account_equity_curve_values or portfolio_values)
+        margin_returns = []
+        margin_return_volatility = 0.0
+        margin_return_annualized_return = 0.0
+        margin_return_sharpe_ratio = 0.0
+        if is_futures:
+            # Headline risk metrics use account-equity returns. Margin-normalized
+            # returns are diagnostics because small margin bases can exaggerate
+            # apparent performance.
+            margin_returns = calculate_margin_returns(settlements)
+            margin_return_volatility = calculate_volatility(margin_returns, len(margin_returns))
+            margin_return_annualized_return = calculate_annualized_return(
+                sum(margin_returns), len(margin_returns)
+            )
+            margin_return_sharpe_ratio = calculate_sharpe_ratio(
+                margin_return_annualized_return, margin_return_volatility
+            )
+            annualized_return = calculate_annualized_return(total_return, effective_period_days)
+            volatility = calculate_volatility(account_returns, len(account_returns))
+            sharpe_ratio = calculate_sharpe_ratio(annualized_return, volatility)
+        else:
+            annualized_return = calculate_annualized_return(total_return, effective_period_days)
+            volatility = calculate_volatility(account_returns, len(account_returns))
+            sharpe_ratio = calculate_sharpe_ratio(annualized_return, volatility)
+        risk_metric_status = "ok" if len(account_returns) >= 2 else "sample_insufficient"
+        account_equity_max_drawdown = calculate_max_drawdown(account_equity_curve_values or portfolio_values)
         cash_balance_max_drawdown = calculate_optional_max_drawdown(cash_balance_values)
         max_drawdown = account_equity_max_drawdown
         if is_futures and settlements:
@@ -1164,8 +1692,8 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
         warnings = []
         # Calculate futures-specific metrics
         # First, try to use the specialized tables
-        futures_metrics = calculate_futures_metrics(config_id, db_path)
-        futures_trade_metrics = calculate_futures_trade_metrics(config_id, db_path)
+        futures_metrics = calculate_futures_metrics(config_id, db_path, start_date, end_date)
+        futures_trade_metrics = calculate_futures_trade_metrics(config_id, db_path, start_date, end_date)
         forced_liquidation_metrics = calculate_forced_liquidation_metrics(config_id, db_path)
         # Debug: log the metrics from futures tables
         logger.info(f"Futures tables metrics:")
@@ -1190,13 +1718,25 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
                 'message': 'Dual-phase futures evaluation requires daily_settlement and futures_transactions. '
                            'Current metrics may be incomplete because those records are missing or zero.'
             })
-        # Calculate commission rate: total_commission / initial_capital
-        commission_rate = (futures_metrics['total_commission'] / initial_capital) if initial_capital > 0 else 0
+        # Headline commission rate is fee / traded notional. The old
+        # capital-based fee rate is retained as a separate diagnostic.
+        total_turnover_notional = float(futures_trade_metrics.get('total_turnover_notional', 0.0) or 0.0)
+        capital_commission_rate = (
+            futures_metrics['total_commission'] / initial_capital
+            if initial_capital > 0
+            else 0.0
+        )
+        commission_rate = (
+            futures_metrics['total_commission'] / total_turnover_notional
+            if total_turnover_notional > 0
+            else 0.0
+        )
 
         # Calculate futures win rates. The headline win_rate uses completed
         # transaction pairs; daily settlement win rate remains a diagnostic.
-        daily_win_rate_metrics = calculate_futures_trade_win_rate(config_id, db_path)
-        win_rate_metrics = calculate_futures_transaction_win_rate(config_id, db_path)
+        daily_win_rate_metrics = calculate_futures_trade_win_rate(config_id, db_path, start_date, end_date)
+        win_rate_metrics = calculate_futures_transaction_win_rate(config_id, db_path, start_date, end_date)
+        optimization_metrics = calculate_optimization_acceptance_metrics(config_id, db_path, start_date, end_date)
         # Generate data quality warnings
         if effective_period_days < 30:
             warnings.append({
@@ -1211,7 +1751,20 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
                 'type': 'negative_total_return',
                 'message': f'Total return is {total_return:.2%}; strategy lost money over the test period.'
             })
-        if win_rate_metrics.get('win_rate', 0) < 0.5:
+        if risk_metric_status == "sample_insufficient":
+            warnings.append({
+                'type': 'risk_sample_insufficient',
+                'message': (
+                    f'Only {len(account_returns)} account-equity return sample(s) are available; '
+                    'volatility and Sharpe ratio are not statistically meaningful.'
+                )
+            })
+        if win_rate_metrics.get('total_trades', 0) == 0:
+            warnings.append({
+                'type': 'no_completed_round_trips',
+                'message': 'No completed open-close futures trades; transaction win rate is not available yet.'
+            })
+        elif win_rate_metrics.get('win_rate', 0) < 0.5:
             wr = win_rate_metrics.get('win_rate', 0)
             warnings.append({
                 'type': 'low_win_rate',
@@ -1221,8 +1774,8 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
         # Compile results (merge all metrics)
         metrics = {
             # Original metrics
-            'trading_date_start': start_date.isoformat(),
-            'trading_date_end': end_date.isoformat(),
+            'trading_date_start': period_start.isoformat(),
+            'trading_date_end': period_end.isoformat(),
             'is_futures': is_futures,
             'total_return': total_return,
             'annualized_return': annualized_return,
@@ -1232,6 +1785,12 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
             'cash_balance_max_drawdown': cash_balance_max_drawdown,
             'intraday_max_drawdown': intraday_max_drawdown,
             'volatility': volatility,
+            'risk_metric_status': risk_metric_status,
+            'account_equity_return_sample_count': len(account_returns),
+            'margin_return_sample_count': len(margin_returns),
+            'margin_return_volatility': margin_return_volatility,
+            'margin_return_annualized_return': margin_return_annualized_return,
+            'margin_return_sharpe_ratio': margin_return_sharpe_ratio,
             'initial_capital': initial_capital,
             'final_capital': final_capital,
             'annualization_days': effective_period_days,
@@ -1254,6 +1813,8 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
             'short_trades': futures_trade_metrics['short_trades'],
             'active_long_positions': futures_trade_metrics['active_long_positions'],
             'active_short_positions': futures_trade_metrics['active_short_positions'],
+            'total_turnover_notional': total_turnover_notional,
+            'total_transaction_commission': futures_trade_metrics.get('total_transaction_commission', 0.0),
             'ticker_trade_counts': futures_trade_metrics['ticker_trade_counts'],
 
             # Forced liquidation metrics (kept separate from liquidation_events count)
@@ -1265,6 +1826,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
 
             # Commission rate
             'commission_rate': commission_rate,
+            'capital_commission_rate': capital_commission_rate,
 
             # Futures trade win rate metrics
             'winning_trades': win_rate_metrics['winning_trades'],
@@ -1274,6 +1836,7 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
             'losing_days': daily_win_rate_metrics['losing_days'],
             'flat_days': daily_win_rate_metrics['flat_days'],
             'win_rate': win_rate_metrics['win_rate'],
+            'win_rate_available': win_rate_metrics['total_trades'] > 0,
             'daily_win_rate': daily_win_rate_metrics['win_rate'],
             'avg_return_per_trade': win_rate_metrics['avg_return_per_trade'],
             'avg_return_per_day': daily_win_rate_metrics['avg_return_per_day'],
@@ -1284,6 +1847,9 @@ def evaluate_config(config_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
 
             # Margin call count (default to 0, could be calculated from forced_liquidation_metrics)
             'margin_call_count': forced_liquidation_metrics['forced_liquidation_count'],
+
+            # Optimization-plan acceptance metrics
+            **optimization_metrics,
 
             # Data quality warnings
             'warnings': warnings

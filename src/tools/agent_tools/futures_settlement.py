@@ -25,10 +25,11 @@ from util.trading_calendar import get_next_trading_day
 class FuturesDailySettlement:
     """Futures daily settlement engine for the post-order settlement phase."""
 
-    def __init__(self, market_type: str = "china_futures"):
+    def __init__(self, market_type: str = "china_futures", config: Optional[Dict[str, Any]] = None):
         self.market_type = market_type
+        self.config = config or {}
         self.db = get_db()
-        self.router = Router(APISource.PANDAAI, market_type=market_type)
+        self.router = Router(APISource.PANDAAI, market_type=market_type, config=self.config)
 
     def daily_settlement(self, portfolio: Portfolio, trading_date: datetime, use_main_contract: bool = False):
         raise RuntimeError("Legacy futures settlement flow is disabled. Use run_phase3(config_id, trading_date).")
@@ -300,13 +301,20 @@ class FuturesDailySettlement:
                 continue
 
             quote = self.router.get_futures_contract_quote_on_date(contract_code, trading_date)
-            if quote is None or quote.settle_price is None:
+            if quote is None or quote.settle_price is None or float(quote.settle_price) <= 0:
                 raise RuntimeError(
-                    f"Missing settlePrice for contract {contract_code} on {trading_date.strftime('%Y-%m-%d')}"
+                    "Missing official same-day settlePrice for contract "
+                    f"{contract_code} on {trading_date.strftime('%Y-%m-%d')}"
                 )
             settle_prices[contract_code] = float(quote.settle_price)
 
         return settle_prices
+
+    def _short_error(self, exc: Exception, limit: int = 280) -> str:
+        text = str(exc).replace("\r", " ").replace("\n", " ")
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
 
     def _finalize_ledgers(
         self,
@@ -520,11 +528,18 @@ class FuturesDailySettlement:
             if position.shares == 0 or not position.contract_code:
                 continue
 
-            next_trading_date = get_next_trading_day(
-                router=self.router,
-                trading_date=trading_date,
-                underlying_code=ticker,
-            ).strftime("%Y-%m-%d")
+            try:
+                next_trading_date = get_next_trading_day(
+                    router=self.router,
+                    trading_date=trading_date,
+                    underlying_code=ticker,
+                ).strftime("%Y-%m-%d")
+            except Exception as exc:
+                logger.warning(
+                    f"Rollover detection skipped for {ticker} on {trading_date.strftime('%Y-%m-%d')}: "
+                    f"next trading day provider unavailable: {self._short_error(exc)}"
+                )
+                continue
             if next_trading_date not in existing_rollovers_cache:
                 existing_rollovers = self.db.get_futures_recommendations_by_effective_date(
                     config_id=config_id,
@@ -541,7 +556,14 @@ class FuturesDailySettlement:
                     for item in existing_rollovers
                 }
 
-            main_quote = self.router.get_futures_main_contract_quote_on_date(ticker, trading_date)
+            try:
+                main_quote = self.router.get_futures_main_contract_quote_on_date(ticker, trading_date)
+            except Exception as exc:
+                logger.warning(
+                    f"Rollover detection skipped for {ticker} on {trading_date.strftime('%Y-%m-%d')}: "
+                    f"main-contract provider unavailable: {self._short_error(exc)}"
+                )
+                continue
             if main_quote is None or not main_quote.ticker:
                 continue
             if main_quote.ticker == position.contract_code:

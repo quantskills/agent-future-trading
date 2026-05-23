@@ -11,6 +11,11 @@ held. It does not select analyst agents, calculate lots, or place orders.
 from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field
+from tools.agent_tools.audit_decision_types import hard_block_or_reduce_only, normalize_audit_decision
+from tools.agent_tools.audit_explainer import build_audit_payload, build_audit_state_key
+from tools.agent_tools.hard_risk_rules import has_hard_block_reason
+from tools.agent_tools.memory_policy_rules import strategy_memory_record as _memory_strategy_record
+from tools.agent_tools.soft_risk_rules import fallback_business_quality_score
 
 
 class TradeAuditorInput(BaseModel):
@@ -29,12 +34,12 @@ class TradeAuditorInput(BaseModel):
     signal_strength: float = 0.0
     market_confirmation: Dict[str, Any] = Field(default_factory=dict)
     fundamental_quality: Dict[str, Any] = Field(default_factory=dict)
-    deepanalyze_market_state: Optional[Dict[str, Any]] = None
-    deepanalyze_fundamental_trends: Optional[Dict[str, Any]] = None
     account_drawdown_state: Dict[str, Any] = Field(default_factory=dict)
     recent_ticker_side_performance: Dict[str, Any] = Field(default_factory=dict)
     recent_conditional_performance: Dict[str, Any] = Field(default_factory=dict)
     strategy_memory: Dict[str, Any] = Field(default_factory=dict)
+    adaptive_policy_state: List[Dict[str, Any]] = Field(default_factory=list)
+    provisional_policy_state: List[Dict[str, Any]] = Field(default_factory=list)
     risk_level: str = ""
     full_config: Dict[str, Any] = Field(default_factory=dict)
 
@@ -42,7 +47,7 @@ class TradeAuditorInput(BaseModel):
 class TradeAuditorOutput(BaseModel):
     """Auditor verdict consumed by portfolio_manager."""
 
-    decision: str = Field(default="allow", description="allow / reduce / block / hold")
+    decision: str = Field(default="allow", description="allow / scale_down / probe_only / reduce_only / block")
     target_side: str = Field(default="flat", description="long / short / flat")
     position_ratio_multiplier: float = Field(default=1.0)
     confidence_multiplier: float = Field(default=1.0)
@@ -147,6 +152,11 @@ def _signal_metadata(signal_payload: Dict[str, Any]) -> Dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _fallback_business_quality_score(tradeability: str, confidence: float) -> float:
+    """Estimate score for legacy analyst payloads that predate structured BQ."""
+    return fallback_business_quality_score(tradeability, confidence)
+
+
 def _side_rule(config: Dict[str, Any], ticker: Any, side: str) -> Dict[str, Any]:
     """Return ticker-side rule config while accepting compact YAML shapes."""
     if not isinstance(config, dict):
@@ -164,17 +174,7 @@ def _side_rule(config: Dict[str, Any], ticker: Any, side: str) -> Dict[str, Any]
 
 
 def _strategy_memory_record(strategy_memory: Dict[str, Any], states: Sequence[str]) -> Dict[str, Any]:
-    if not isinstance(strategy_memory, dict):
-        return {}
-    wanted = {str(state) for state in states}
-    for key in ("combo", "side_memory"):
-        row = strategy_memory.get(key)
-        if isinstance(row, dict) and str(row.get("memory_state") or "") in wanted:
-            return row
-    for row in strategy_memory.get("records") or []:
-        if isinstance(row, dict) and str(row.get("memory_state") or "") in wanted:
-            return row
-    return {}
+    return _memory_strategy_record(strategy_memory, states)
 
 
 def _context_from_metadata(metadata: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
@@ -295,7 +295,7 @@ class AttributionFeedbackCalibrator:
     def _protected_side_rule(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
         if target_side not in {"long", "short"}:
             return {}
-        memory_row = _strategy_memory_record(payload.strategy_memory or {}, ["protected"])
+        memory_row = _strategy_memory_record(payload.strategy_memory or {}, ["protected", "deployable"])
         if memory_row:
             audit_config = (self.memory_config.get("audit") or {})
             return {
@@ -583,6 +583,8 @@ class TradeAuditor:
             "signal_strength": float(payload.signal_strength or 0.0),
             "signal_combo": list(_signal_combo_tuple(payload.signal_combo)),
             "strategy_memory": payload.strategy_memory or {},
+            "adaptive_policy_state": payload.adaptive_policy_state or [],
+            "provisional_policy_state": payload.provisional_policy_state or [],
         }
 
         if not self.enabled:
@@ -627,27 +629,58 @@ class TradeAuditor:
         quality_result = self._evaluate_analyst_signal_quality(payload)
         market_result = self._evaluate_market_confirmation(payload)
         attribution_result = self.calibrator.calibrate(payload)
+        adaptive_policy_result = self._evaluate_adaptive_policy(payload, target_side)
+        provisional_policy_result = self._evaluate_provisional_policy(payload, target_side)
 
         reasons.extend(quality_result["reasons"])
         reasons.extend(market_result["reasons"])
         reasons.extend(attribution_result["reasons"])
+        reasons.extend(adaptive_policy_result["reasons"])
+        reasons.extend(provisional_policy_result["reasons"])
         notes.extend(quality_result["notes"])
         notes.extend(market_result["notes"])
         notes.extend(attribution_result["notes"])
+        notes.extend(adaptive_policy_result["notes"])
+        notes.extend(provisional_policy_result["notes"])
         diagnostics.update(quality_result["diagnostics"])
         diagnostics.update(market_result["diagnostics"])
         diagnostics.update(attribution_result["diagnostics"])
+        diagnostics.update(adaptive_policy_result["diagnostics"])
+        diagnostics.update(provisional_policy_result["diagnostics"])
 
-        if quality_result["block"] or market_result["block"] or attribution_result["block"]:
-            multiplier = 0.0
-            decision = "block"
+        if (
+            quality_result["block"]
+            or market_result["block"]
+            or attribution_result["block"]
+            or adaptive_policy_result["block"]
+            or provisional_policy_result["block"]
+        ):
+            hard_block = has_hard_block_reason(reasons)
+            if hard_block:
+                multiplier = 0.0
+                decision = hard_block_or_reduce_only(
+                    target_ratio=payload.raw_position_ratio,
+                    current_ratio=payload.current_position_ratio,
+                )
+            else:
+                multiplier = min(
+                    max(0.0, _safe_float((self.full_config.get("analyst_business_quality") or {}).get("probe_multiplier"), 0.25)),
+                    max(0.0, _safe_float((self.auditor_config.get("cold_start") or {}).get("max_position_ratio_multiplier"), 0.50)),
+                )
+                decision = "probe_only"
+                reasons.append("soft_block_converted_to_probe_only")
         else:
             multiplier = min(
                 quality_result["multiplier"],
                 market_result["multiplier"],
                 attribution_result["multiplier"],
+                adaptive_policy_result["multiplier"],
+                provisional_policy_result["multiplier"],
             )
-            decision = "reduce" if multiplier < 0.999999 else "allow"
+            if multiplier < 0.999999:
+                decision = "probe_only" if multiplier <= 0.35 or "business_quality_probe_only" in reasons else "scale_down"
+            else:
+                decision = "allow"
 
         return self._output(
             decision=decision,
@@ -660,6 +693,84 @@ class TradeAuditor:
             policy_version=policy_version,
             learning_mode=learning_mode,
         )
+
+    def _evaluate_adaptive_policy(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
+        rows = payload.adaptive_policy_state or []
+        if not rows:
+            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
+
+        cfg = (payload.full_config.get("learning", {}) or {}).get("adaptive_policy", {}) or {}
+        min_confidence = _safe_float(cfg.get("min_policy_confidence"), 0.35)
+        block = False
+        multiplier = 1.0
+        reasons: List[str] = []
+        notes: List[str] = []
+        applied: List[Dict[str, Any]] = []
+        for row in rows:
+            action = str(row.get("policy_action") or "").lower()
+            confidence = _safe_float(row.get("confidence_score"), 0.0)
+            if confidence < min_confidence:
+                continue
+            row_multiplier = max(0.0, _safe_float(row.get("multiplier"), 1.0))
+            if action == "block":
+                block = True
+                multiplier = 0.0
+                reasons.append("adaptive_policy_block")
+            elif action in {"cap", "reduce"}:
+                multiplier = min(multiplier, row_multiplier)
+                reasons.append("adaptive_policy_cap")
+            elif action in {"protect", "allow"}:
+                reasons.append("adaptive_policy_protect")
+            else:
+                continue
+            applied.append(row)
+            notes.append(
+                f"adaptive policy {action} for {payload.ticker} {target_side}: "
+                f"multiplier={row_multiplier:.2f}, confidence={confidence:.2f}, "
+                f"reason={row.get('reason') or 'reviewer learning'}"
+            )
+
+        return {
+            "block": block,
+            "multiplier": multiplier,
+            "reasons": _dedupe(reasons),
+            "notes": notes,
+            "diagnostics": {"adaptive_policy_applied": applied},
+        }
+
+    def _evaluate_provisional_policy(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
+        rows = payload.provisional_policy_state or []
+        if not rows:
+            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
+        block = False
+        multiplier = 1.0
+        reasons: List[str] = []
+        notes: List[str] = []
+        applied: List[Dict[str, Any]] = []
+        for row in rows:
+            action = str(row.get("policy_action") or "").lower()
+            row_multiplier = max(0.0, _safe_float(row.get("multiplier"), 1.0))
+            if action in {"block", "weak_block"}:
+                block = True
+                multiplier = 0.0
+                reasons.append("provisional_policy_block")
+            elif action in {"probe_only", "cap", "reduce"}:
+                multiplier = min(multiplier, row_multiplier)
+                reasons.append("provisional_policy_probe_only" if action == "probe_only" else "provisional_policy_cap")
+            else:
+                continue
+            applied.append(row)
+            notes.append(
+                f"provisional policy {action} for {payload.ticker} {target_side}: "
+                f"multiplier={row_multiplier:.2f}, reason={row.get('reason') or 'early risk sentinel'}"
+            )
+        return {
+            "block": block,
+            "multiplier": 0.0 if block else multiplier,
+            "reasons": _dedupe(reasons),
+            "notes": notes,
+            "diagnostics": {"provisional_policy_applied": applied},
+        }
 
     def _evaluate_analyst_signal_quality(self, payload: TradeAuditorInput) -> Dict[str, Any]:
         reasons: List[str] = []
@@ -705,11 +816,24 @@ class TradeAuditor:
             risk_flags = metadata.get("risk_flags") or context.get("risk_flags") or []
             risk_flags = [str(flag) for flag in risk_flags] if isinstance(risk_flags, list) else []
             confidence = _safe_float(item.get("confidence"), 0.0)
+            raw_business_quality = (
+                item.get("business_quality_score")
+                or (metadata.get("business_quality") or {}).get("score")
+                or metadata.get("business_quality_score")
+            )
+            business_quality = (
+                _safe_float(raw_business_quality, 0.0)
+                if raw_business_quality is not None
+                else _fallback_business_quality_score(tradeability, confidence)
+            )
             analyst_quality[agent_name] = {
                 "signal": signal,
                 "tradeability": tradeability,
                 "risk_flags": risk_flags,
                 "confidence": confidence,
+                "business_quality_score": business_quality,
+                "template_name": item.get("template_name") or metadata.get("template_name") or "unknown",
+                "primary_business_driver": item.get("primary_business_driver") or (metadata.get("business_quality") or {}).get("primary_business_driver"),
                 "freshness_score": _safe_float(metadata.get("freshness_score") or context.get("freshness_score"), 0.0),
                 "relevance_score": _safe_float(metadata.get("relevance_score") or context.get("relevance_score"), 0.0),
             }
@@ -720,7 +844,11 @@ class TradeAuditor:
                 supporters.append(agent_name)
                 if tradeability == "high":
                     high_quality_supporters.append(agent_name)
-                if tradeability in {"high", "medium"} and confidence >= min_qualified_confidence:
+                if (
+                    tradeability in {"high", "medium"}
+                    and confidence >= min_qualified_confidence
+                    and business_quality >= _safe_float(self.full_config.get("analyst_business_quality", {}).get("min_score_for_probe"), 0.45)
+                ):
                     qualified_supporters.append(agent_name)
                 if tradeability == "low":
                     low_quality_supporters.append(agent_name)
@@ -745,12 +873,40 @@ class TradeAuditor:
         block_low_count = _safe_int(self.quality_config.get("block_low_tradeability_count"), 2)
         conflict_score = _safe_float(self.quality_config.get("conflict_block_confirmation_below"), 0.65)
         medium_multiplier = max(0.0, _safe_float(self.quality_config.get("medium_quality_multiplier"), 0.50))
+        business_cfg = self.full_config.get("analyst_business_quality", {}) or {}
+        business_gate_enabled = bool(business_cfg.get("enabled", False))
+        min_business_probe = _safe_float(business_cfg.get("min_score_for_probe"), 0.45)
+        min_business_deploy = _safe_float(business_cfg.get("min_score_for_deployable"), 0.60)
+        probe_multiplier = max(0.0, _safe_float(business_cfg.get("probe_multiplier"), 0.25))
+        best_business_support = max(
+            (
+                _safe_float(analyst_quality.get(agent, {}).get("business_quality_score"), 0.0)
+                for agent in supporters
+            ),
+            default=0.0,
+        )
+        diagnostics["target_support"]["best_business_quality_score"] = best_business_support
 
         if low_tradeability_count >= block_low_count:
             block = True
             reasons.append("analyst_quality_low_tradeability")
             notes.append(
                 f"blocked {target_side}: {low_tradeability_count} analyst signals have low tradeability"
+            )
+
+        if business_gate_enabled and supporters and best_business_support < min_business_probe:
+            block = True
+            reasons.append("business_quality_below_probe")
+            notes.append(
+                f"blocked {target_side}: best business_quality_score={best_business_support:.2f} "
+                f"is below probe threshold {min_business_probe:.2f}"
+            )
+        elif business_gate_enabled and supporters and best_business_support < min_business_deploy:
+            multiplier = min(multiplier, probe_multiplier)
+            reasons.append("business_quality_probe_only")
+            notes.append(
+                f"probe-only {target_side}: best business_quality_score={best_business_support:.2f} "
+                f"is below deployable threshold {min_business_deploy:.2f}"
             )
 
         if not supporters:
@@ -1224,35 +1380,27 @@ class TradeAuditor:
         learning_mode: str,
     ) -> TradeAuditorOutput:
         multiplier = max(0.0, float(multiplier or 0.0))
-        if decision == "reduce" and multiplier <= 1e-12:
-            decision = "block"
+        decision = normalize_audit_decision(decision, multiplier)
 
-        state_key = "|".join(
-            [
-                str(payload.ticker).upper(),
-                target_side,
-                "/".join(_signal_combo_tuple(payload.signal_combo)),
-                _state_bucket(payload.deepanalyze_market_state),
-                _confirmation_bucket(payload.market_confirmation or {}),
-            ]
+        state_key = build_audit_state_key(
+            ticker=payload.ticker,
+            target_side=target_side,
+            signal_combo=payload.signal_combo,
+            market_state=None,
+            market_confirmation=payload.market_confirmation or {},
         )
-        audit_payload = {
-            "policy_version": policy_version,
-            "learning_mode": learning_mode,
-            "pre_open_only": True,
-            "info_cutoff": "pre_open",
-            "state_key": state_key,
-            "action": decision,
-            "reward_status": "pending",
-            "reward_source": "completed_trade_pair_after_close",
-            "target_support": diagnostics.get("target_support", {}),
-            "analyst_quality": diagnostics.get("analyst_quality", {}),
-            "memory_reads": {
+        audit_payload = build_audit_payload(
+            policy_version=policy_version,
+            learning_mode=learning_mode,
+            state_key=state_key,
+            decision=decision,
+            diagnostics=diagnostics,
+            memory_reads={
                 "ticker_side_performance": payload.recent_ticker_side_performance or {},
                 "conditional_performance": payload.recent_conditional_performance or {},
                 "strategy_memory": payload.strategy_memory or {},
             },
-        }
+        )
         return TradeAuditorOutput(
             decision=decision,
             target_side=target_side,

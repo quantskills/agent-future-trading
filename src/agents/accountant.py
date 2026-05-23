@@ -17,8 +17,8 @@ if str(SRC_ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 from graph.schema import TradingPhase
-from run.proposal import ensure_seed_settled_portfolio, load_portfolio_config
 from tools.agent_tools.futures_settlement import FuturesDailySettlement
+from tools.agent_tools.runtime_setup import ensure_seed_settled_portfolio, load_portfolio_config
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.logger import logger
@@ -60,7 +60,7 @@ def accountant_agent(argv: Optional[List[str]] = None) -> None:
     db.start_trading_day_phase(config_id, trading_date_value, TradingPhase.PHASE3)
 
     try:
-        engine = FuturesDailySettlement("china_futures")
+        engine = FuturesDailySettlement("china_futures", config=cfg)
         settlement_record = engine.run_phase3(config_id=config_id, trading_date=cfg["trading_date"])
         logger.log_settlement(trading_date_value, settlement_record)
         db.complete_trading_day_phase(

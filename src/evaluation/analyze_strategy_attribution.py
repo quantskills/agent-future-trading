@@ -4,6 +4,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections.abc import Iterable as IterableABC
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,19 @@ def _deserialize_json(value: Any) -> Any:
         return json.loads(value)
     except Exception:
         return value
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _fundamental_context_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    analyst_payload = _as_dict(snapshot.get("fundamental"))
+    metadata = _as_dict(analyst_payload.get("metadata"))
+    context = analyst_payload.get("fundamental_context")
+    if not isinstance(context, dict):
+        context = metadata.get("fundamental_context")
+    return context if isinstance(context, dict) else {}
 
 
 def _source_type(value: Any) -> str:
@@ -177,19 +191,55 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
     rebalance_control_reason_counts: Counter = Counter()
     rebalance_holding_days: List[float] = []
     rebalance_turnover_notional: List[float] = []
+    finoview_group_counts: Counter = Counter()
+    finoview_attribution_count = 0
+    finoview_missing_attribution_count = 0
+    finoview_invalid_attribution_count = 0
+    finoview_empty_group_count = 0
+    artifact_validation_total = 0
+    artifact_validation_pass = 0
+    free_text_control_violation_count = 0
+    strategy_recommendation_count = 0
 
     for recommendation in recommendations:
         if _source_type(recommendation.get("source_type")) != "strategy":
             continue
+        strategy_recommendation_count += 1
 
         snapshot = _deserialize_json(recommendation.get("signal_snapshot")) or {}
         if not isinstance(snapshot, dict):
             continue
 
+        if "artifact_validation_errors" in snapshot:
+            artifact_validation_total += 1
+            if not snapshot.get("artifact_validation_errors"):
+                artifact_validation_pass += 1
+
         plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
         controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
+        if isinstance(plan.get("strategy_controls"), str):
+            free_text_control_violation_count += 1
         for reason in controls.get("reasons") or []:
             control_reason_counts[str(reason)] += 1
+
+        context = _fundamental_context_from_snapshot(snapshot)
+        attribution = context.get("finoview_factor_attribution") if context else None
+        if not isinstance(attribution, dict) or not attribution:
+            finoview_missing_attribution_count += 1
+            if attribution is not None and not isinstance(attribution, dict):
+                finoview_invalid_attribution_count += 1
+        else:
+            finoview_attribution_count += 1
+            groups = attribution.get("covered_required_groups") or []
+            if isinstance(groups, (str, bytes)):
+                groups = [groups]
+            elif not isinstance(groups, IterableABC):
+                groups = [groups]
+            group_values = [group for group in groups if group]
+            if not group_values:
+                finoview_empty_group_count += 1
+            for group in group_values:
+                finoview_group_counts[str(group)] += 1
 
         rebalance_summary = _rebalance_summary_from_snapshot(snapshot)
         if rebalance_summary:
@@ -227,9 +277,7 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
 
     avg_score = sum(market_scores) / len(market_scores) if market_scores else 0.0
     return {
-        "strategy_recommendations": sum(
-            1 for row in recommendations if _source_type(row.get("source_type")) == "strategy"
-        ),
+        "strategy_recommendations": strategy_recommendation_count,
         "market_confirmation_count": market_confirmation_count,
         "avg_confirmation_score": avg_score,
         "control_reason_counts": dict(control_reason_counts.most_common()),
@@ -242,6 +290,19 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
         "rebalance_action_counts": dict(rebalance_action_counts.most_common()),
         "rebalance_reason_counts": dict(rebalance_reason_counts.most_common()),
         "rebalance_control_reason_counts": dict(rebalance_control_reason_counts.most_common()),
+        "finoview_factor_group_counts": dict(finoview_group_counts.most_common()),
+        "finoview_factor_attribution_count": finoview_attribution_count,
+        "finoview_factor_missing_attribution_count": finoview_missing_attribution_count,
+        "finoview_factor_invalid_attribution_count": finoview_invalid_attribution_count,
+        "finoview_factor_empty_group_count": finoview_empty_group_count,
+        "finoview_factor_attribution_coverage_rate": (
+            finoview_attribution_count / strategy_recommendation_count
+            if strategy_recommendation_count else 1.0
+        ),
+        "artifact_contract_validation_pass_rate": (
+            artifact_validation_pass / artifact_validation_total if artifact_validation_total else 1.0
+        ),
+        "free_text_control_violation_count": free_text_control_violation_count,
         "avg_holding_days": (
             sum(rebalance_holding_days) / len(rebalance_holding_days)
             if rebalance_holding_days else 0.0
@@ -471,6 +532,20 @@ def _write_markdown_legacy(path: Path, payload: Dict[str, Any]) -> None:
         "### Trade auditor 原因分布",
         "",
         _format_table(["原因", "次数"], _top_counter_rows(diagnostics.get("trade_auditor_reason_counts", {}))),
+        "",
+        "### Finoview 因子归因覆盖",
+        "",
+        _format_table(["因子组", "出现次数"], _top_counter_rows(diagnostics.get("finoview_factor_group_counts", {}))),
+        "",
+        "### Artifact 契约与自由文本控制",
+        "",
+        _format_table(
+            ["项目", "数值"],
+            [
+                ["Artifact contract pass rate", f"{diagnostics.get('artifact_contract_validation_pass_rate', 1.0):.2%}"],
+                ["Free-text control violations", diagnostics.get("free_text_control_violation_count", 0)],
+            ],
+        ),
         "",
         "## Trade auditor 后交易表现",
         "",
@@ -813,6 +888,21 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
                 ["Strategy recommendations", diagnostics.get("strategy_recommendations", 0)],
                 ["PandaAI market confirmations", diagnostics.get("market_confirmation_count", 0)],
                 ["Average PandaAI confirmation score", f"{_safe_float(diagnostics.get('avg_confirmation_score')):.4f}"],
+                [
+                    "Finoview attribution coverage",
+                    f"{_safe_float(diagnostics.get('finoview_factor_attribution_coverage_rate')):.2%}",
+                ],
+                [
+                    "Finoview attribution missing/invalid",
+                    (
+                        f"{diagnostics.get('finoview_factor_missing_attribution_count', 0)}"
+                        f"/{diagnostics.get('finoview_factor_invalid_attribution_count', 0)}"
+                    ),
+                ],
+                [
+                    "Finoview attribution with no covered groups",
+                    diagnostics.get("finoview_factor_empty_group_count", 0),
+                ],
             ],
         ),
         "",
@@ -827,6 +917,10 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "### PandaAI Feature Usage",
         "",
         _format_table(["Feature", "Count"], _top_counter_rows(diagnostics.get("market_feature_counts", {}))),
+        "",
+        "### Finoview Factor Coverage",
+        "",
+        _format_table(["Factor Group", "Count"], _top_counter_rows(diagnostics.get("finoview_factor_group_counts", {}))),
         "",
         "### Trade Auditor",
         "",

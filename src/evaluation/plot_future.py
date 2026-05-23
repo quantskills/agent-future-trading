@@ -15,6 +15,7 @@ Output:
 """
 
 import argparse
+import math
 import re
 import sys
 import sqlite3
@@ -354,45 +355,149 @@ class SingleFutureCurvePlotter:
             if conn:
                 conn.close()
 
+    @staticmethod
+    def _positive_float(value) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric_value) or numeric_value <= 0:
+            return None
+        return numeric_value
+
+    def _build_price_frame(self, records: List[Dict]) -> Optional[pd.DataFrame]:
+        clean_records: List[Dict] = []
+        for record in records:
+            price = self._positive_float(record.get('price'))
+            if price is None:
+                continue
+            trading_date = pd.to_datetime(record.get('trading_date'), errors='coerce')
+            if pd.isna(trading_date):
+                continue
+
+            clean_records.append({
+                'trading_date': trading_date,
+                'price': price,
+                'close': self._positive_float(record.get('close')),
+                'settle_price': self._positive_float(record.get('settle_price')),
+                'source': record.get('source') or '价格',
+                '_source_rank': int(record.get('_source_rank', 0) or 0),
+            })
+
+        if not clean_records:
+            return None
+
+        df = pd.DataFrame(clean_records)
+        df = df.sort_values(['trading_date', '_source_rank'])
+        df = df.drop_duplicates('trading_date', keep='first')
+        df = df.drop(columns=['_source_rank'])
+        return df.reset_index(drop=True)
+
     def _load_price_data_from_router(self) -> Optional[pd.DataFrame]:
         if self.ticker_pnl_data is None or self.ticker_pnl_data.empty:
             return None
 
         start_date = self.ticker_pnl_data['trading_date'].min()
         end_date = self.ticker_pnl_data['trading_date'].max()
+        query_end_date = pd.to_datetime(end_date) + pd.Timedelta(days=1)
         market_type = (self.config or {}).get('market_type', 'china_futures')
 
         router = Router(APISource.PANDAAI, market_type=market_type)
         quotes = router.get_china_futures_continuous_candles(
             self.ticker,
             start_date=start_date,
-            end_date=end_date,
+            end_date=query_end_date,
         )
         if not quotes:
             return None
 
         records: List[Dict] = []
         for quote in quotes:
-            price = quote.settle_price if quote.settle_price is not None else quote.close
+            settle_price = self._positive_float(quote.settle_price)
+            close_price = self._positive_float(quote.close)
+            price = settle_price if settle_price is not None else close_price
             if price is None:
                 continue
             records.append({
                 'trading_date': pd.to_datetime(quote.trade_date),
-                'price': float(price),
-                'close': float(quote.close) if quote.close is not None else None,
-                'settle_price': float(quote.settle_price) if quote.settle_price is not None else None,
+                'price': price,
+                'close': close_price,
+                'settle_price': settle_price,
                 'source': 'PandaAI主力连续',
             })
 
-        if not records:
+        return self._build_price_frame(records)
+
+    def _load_price_data_from_local_fundamentals(self) -> Optional[pd.DataFrame]:
+        """Fallback to local active-contract futures close prices when available."""
+        if self.ticker_pnl_data is None or self.ticker_pnl_data.empty:
             return None
 
-        df = pd.DataFrame(records).dropna(subset=['price'])
-        df = df.sort_values('trading_date').drop_duplicates('trading_date', keep='last')
-        return df
+        data_dir = self.project_root / "data" / "Fundamental_data" / "Finoview_data"
+        candidate_stems = [
+            f"{self.ticker.lower()}_future_close_price",
+            f"{self.ticker.lower()}_futures_close_price",
+            f"{self.ticker.lower()}_future_settle_price",
+            f"{self.ticker.lower()}_futures_settle_price",
+        ]
+        start_date = pd.to_datetime(self.ticker_pnl_data['trading_date'].min()).normalize()
+        end_date = pd.to_datetime(self.ticker_pnl_data['trading_date'].max()).normalize()
+
+        for stem in candidate_stems:
+            file_path = data_dir / f"{stem}.feather"
+            if not file_path.exists():
+                continue
+
+            df = pd.read_feather(file_path)
+            if df.empty:
+                continue
+
+            date_col = next(
+                (col for col in ['tradeDate', 'date', 'trading_date', 'trade_date', 'datetime'] if col in df.columns),
+                None,
+            )
+            value_col = stem if stem in df.columns else None
+            if value_col is None:
+                value_col = next(
+                    (col for col in ['value', 'close', 'price', 'settle_price'] if col in df.columns),
+                    None,
+                )
+            if date_col is None or value_col is None:
+                continue
+
+            local_df = df[[date_col, value_col]].copy()
+            local_df[date_col] = pd.to_datetime(local_df[date_col], errors='coerce')
+            local_df[value_col] = pd.to_numeric(local_df[value_col], errors='coerce')
+            local_df = local_df[
+                (local_df[date_col] >= start_date)
+                & (local_df[date_col] <= end_date)
+            ]
+
+            records = [
+                {
+                    'trading_date': row[date_col],
+                    'price': row[value_col],
+                    'close': row[value_col],
+                    'settle_price': None,
+                    'source': 'Finoview活跃合约收盘价',
+                }
+                for _, row in local_df.iterrows()
+            ]
+            price_frame = self._build_price_frame(records)
+            if price_frame is not None and not price_frame.empty:
+                return price_frame
+
+        return None
 
     def _load_price_data_from_ticker_pnl(self) -> Optional[pd.DataFrame]:
-        """Fallback price points from settlement records; only active-position days exist."""
+        """Fallback price points from settlement and transaction records."""
         conn = None
         try:
             config_id = self.config_id or self.get_config_id()
@@ -410,21 +515,46 @@ class SingleFutureCurvePlotter:
                   AND tdp.settle_price IS NOT NULL
                 ORDER BY tdp.trading_date ASC
             ''', (config_id, self.ticker))
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-
-            records = [
-                {
+            records: List[Dict] = []
+            for row in cursor.fetchall():
+                records.append({
                     'trading_date': datetime.fromisoformat(row['trading_date']),
-                    'price': float(row['settle_price']),
+                    'price': row['settle_price'],
                     'close': None,
-                    'settle_price': float(row['settle_price']),
-                    'source': '结算价快照',
-                }
-                for row in rows
-            ]
-            return pd.DataFrame(records)
+                    'settle_price': row['settle_price'],
+                    'source': '结算价/成交价快照',
+                    '_source_rank': 0,
+                })
+
+            cursor.execute('''
+                SELECT
+                    ft.trading_date,
+                    ft.settle_price,
+                    ft.execution_price,
+                    ft.price,
+                    ft.created_at
+                FROM futures_transactions ft
+                LEFT JOIN portfolio p ON ft.portfolio_id = p.id
+                WHERE COALESCE(ft.config_id, p.config_id) = ?
+                  AND UPPER(ft.ticker) = ?
+                  AND ft.action IN ('open_long', 'open_short', 'close_long', 'close_short')
+                ORDER BY ft.trading_date ASC, ft.created_at ASC
+            ''', (config_id, self.ticker))
+            for row in cursor.fetchall():
+                settle_price = self._positive_float(row['settle_price'])
+                execution_price = self._positive_float(row['execution_price'])
+                raw_price = self._positive_float(row['price'])
+                price = settle_price if settle_price is not None else execution_price or raw_price
+                records.append({
+                    'trading_date': datetime.fromisoformat(row['trading_date']),
+                    'price': price,
+                    'close': None,
+                    'settle_price': settle_price,
+                    'source': '结算价/成交价快照',
+                    '_source_rank': 1,
+                })
+
+            return self._build_price_frame(records)
         except Exception as e:
             print(f"Error loading fallback price data: {e}")
             return None
@@ -450,11 +580,23 @@ class SingleFutureCurvePlotter:
         except Exception as e:
             print(f"Warning: Could not load full price curve from PandaAI: {e}")
 
+        try:
+            local_price = self._load_price_data_from_local_fundamentals()
+            if local_price is not None and not local_price.empty:
+                self.price_data = local_price
+                print(
+                    f"Loaded {len(self.price_data)} local futures price points for {self.ticker} "
+                    f"from {self.price_data['source'].iloc[0]}"
+                )
+                return True
+        except Exception as e:
+            print(f"Warning: Could not load local futures price curve: {e}")
+
         fallback = self._load_price_data_from_ticker_pnl()
         if fallback is not None and not fallback.empty:
             self.price_data = fallback
             print(
-                f"Loaded {len(self.price_data)} fallback settlement price points for {self.ticker}; "
+                f"Loaded {len(self.price_data)} fallback settlement/transaction price points for {self.ticker}; "
                 "full inactive-day price curve is unavailable."
             )
         else:

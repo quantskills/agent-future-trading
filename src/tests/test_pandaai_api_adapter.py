@@ -149,6 +149,21 @@ class PandaAIAdapterTest(unittest.TestCase):
             fake.calls.append({"func": "get_future_ls_ratio", **kwargs})
             return [{"symbol": "M2505.DCE", "date": "2025-01-03", "ls_ratio": 1.2}]
 
+        def get_future_contract_rank(**kwargs):
+            fake.calls.append({"func": "get_future_contract_rank", **kwargs})
+            if not kwargs.get("rank_type"):
+                raise RuntimeError("rank_type参数不能为空")
+            return [
+                {
+                    "symbol": "M2505.DCE",
+                    "underlying_symbol": "M",
+                    "date": "2025-01-03",
+                    "position_type": "long",
+                    "rank": 1,
+                    "ratio": 1.2,
+                }
+            ]
+
         fake.init_token = init_token
         fake.get_future_detail = get_future_detail
         fake.get_market_data = get_market_data
@@ -156,6 +171,7 @@ class PandaAIAdapterTest(unittest.TestCase):
         fake.get_future_basis = get_future_basis
         fake.get_future_wr = get_future_wr
         fake.get_future_ls_ratio = get_future_ls_ratio
+        fake.get_future_contract_rank = get_future_contract_rank
 
         env = {"PANDAAI_USERNAME": "user", "PANDAAI_PASSWORD": "pass"}
         modules = {"panda_data": fake}
@@ -252,6 +268,28 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(snapshot["record_counts"]["ls_ratio"], 1)
         basis_call = next(call for call in fake.calls if call["func"] == "get_future_basis")
         self.assertEqual(basis_call["end_date"], "20250103")
+
+    def test_contract_rank_extra_snapshot_supplies_required_rank_type(self):
+        fake, env_patch, module_patch = self._build_api()
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            snapshot = api.get_futures_extra_snapshot(
+                underlying_code="M",
+                reference_date=datetime(2025, 1, 3),
+                lookback_days=5,
+                contract_id="m2505",
+                features={"contract_rank": True},
+            )
+
+        rank_call = next(call for call in fake.calls if call["func"] == "get_future_contract_rank")
+        self.assertEqual(rank_call["rank_type"], "ratio")
+        self.assertEqual(rank_call["type"], "")
+        self.assertEqual(rank_call["max_rank"], 10)
+        self.assertEqual(rank_call["symbol"], "")
+        self.assertEqual(rank_call["underlying_symbol"], ["M"])
+        self.assertEqual(snapshot["record_counts"]["contract_rank"], 1)
+        self.assertEqual(snapshot["feature_status"]["contract_rank"], "ok")
+        self.assertEqual(snapshot["feature_diagnostics"]["contract_rank"]["status"], "ok")
 
     def test_minute_bars_use_pandaai_minute_api_and_sort_by_datetime(self):
         fake, env_patch, module_patch = self._build_api()

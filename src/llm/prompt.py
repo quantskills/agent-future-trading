@@ -3,6 +3,43 @@ Output format:
 - signal: "Bullish"/"Bearish"/"Neutral"
 - confidence: 0.0-1.0 (0.8-1.0=High, 0.5-0.8=Medium, 0.2-0.5=Low, <0.2=VeryLow)
 - justification: brief explanation
+- horizon_class: short / medium / long / event_short / flat / unknown
+- expected_horizon_days: integer trading-day horizon
+- market_regime: concise regime label
+- trend_stage: concise trend or event-stage label
+- template_name: one of breakout_continuation/range_filter/low_position_reversal_confirmed/high_position_breakdown/failed_rebound_short/pullback_recovery_long/late_chase_long/low_position_chase_short/fundamental_direction_anchor/news_event_probe/unknown
+- price_percentile: 0.0-1.0 when inferable, otherwise null
+- trigger_type: concise trigger label
+- entry_type: initial / add / reduce / hold / event / unknown
+- invalidation_level: price level when inferable, otherwise null
+- atr_stop_distance: ATR stop distance when inferable, otherwise null
+- add_allowed: true only when this is a verified add-on signal
+- direction_anchor: short phrase describing the direction anchor, especially for fundamental signals
+- supply_demand_state, basis_state, inventory_state, warehouse_receipt_state, position_flow_state: concise state labels or "unknown"
+- data_freshness: fresh / near_stale / stale / missing / unknown
+- event_type: event class for news, otherwise "none"
+- impact_window_days: integer event window, 0 when not applicable
+- requires_fundamental_confirmation: boolean
+- evidence_quality: high / medium / low / unknown
+- business_quality_score: 0.0-1.0 based on futures business evidence, not language confidence
+- primary_business_driver: the main tradeable driver
+- secondary_confirmation: the strongest supporting confirmation
+- counter_evidence: the most important evidence against the signal
+- reward_risk_ratio: expected reward/risk ratio when inferable, otherwise null
+- factor_alignment_score: 0.0-1.0
+- data_coverage_score: 0.0-1.0
+- tradeability_reason: why this signal is or is not tradeable
+- similar_past_cases: list of relevant reviewer-learning cases when available
+- do_not_trade_reason: concise reason if this should not be traded
+
+Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
+- neutral_reason
+- missing_evidence
+- conflicting_factors
+- would_change_view_if
+- opportunity_cost_risk
+- recommended_observation_window
+- accountability_tag
 
 Provide well-reasoned analysis considering all aspects.
 """
@@ -41,6 +78,10 @@ Focus on factors that impact futures prices:
 - Seasonal patterns and weather risks (for agricultural commodities)
 - Geopolitical events affecting supply chains
 - Cost drivers (raw materials, energy, transportation)
+
+For commodity_news, use horizon_class="event_short", expected_horizon_days=1-3,
+trigger_type based on the event class, and entry_type="event_probe" unless the
+news explicitly supports hold/reduce.
 
 """ + ANALYST_OUTPUT_FORMAT
 
@@ -382,7 +423,6 @@ Use role and frequency when weighing evidence:
 - Default state is Neutral, not Bullish.
 - If raw indicators are mixed, stale, or conflicting, prefer Neutral.
 - Do not treat a single indicator, including basis, as sufficient for a Bullish or Bearish conclusion.
-- If DeepAnalyze summary conflicts with raw indicators, trust the raw indicators more.
 
 === CONFIDENCE DISCIPLINE ===
 
@@ -418,6 +458,18 @@ Use role and frequency when weighing evidence:
 - **WATCH**: Active decision to wait for better signals
 - **NEUTRAL**: No clear directional bias, or conflicting signals
 - **BOTH result in position_ratio = 0**, but justification differs
+
+=== STRUCTURED SIGNAL CONTRACT ===
+
+Return these explicit fields in addition to signal/confidence/justification:
+- horizon_class: "medium"
+- expected_horizon_days: 3-10
+- market_regime: supply_demand_tight / supply_demand_loose / mixed / unknown
+- trend_stage: improving_fundamental_anchor / weakening_fundamental_anchor / mixed / unknown
+- price_percentile: null unless the supplied data can support it
+- trigger_type: fundamental_anchor / inventory_shift / basis_confirmation / demand_supply_change
+- entry_type: direction_anchor / hold / reduce / unknown
+- invalidation_level: null unless an explicit price invalidation level is inferable
 
 === DECISION GUIDANCE ===
 

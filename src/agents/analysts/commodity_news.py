@@ -14,6 +14,8 @@ from tools.agent_tools.quality import (
     summarize_news_events,
     write_analyst_report,
 )
+from tools.agent_tools.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.learning_context import build_learning_context, resolve_config_id
 
 # thresholds
 thresholds = {
@@ -62,7 +64,7 @@ def commodity_news_agent(state: FundState):
     db = get_db()
     logger.log_agent_status(agent_name, ticker, "Fetching commodity news")
 
-    router = Router(APISource.PANDAAI, market_type=market_type)
+    router = Router(APISource.PANDAAI, market_type=market_type, config=full_config)
     try:
         commodity_news = router.get_china_futures_news(
             ticker=ticker,
@@ -76,7 +78,7 @@ def commodity_news_agent(state: FundState):
 
     news_dict = [item.model_dump_json() for item in commodity_news]
     news_context = summarize_news_events(commodity_news, ticker)
-    llm_path = llm_path_label(full_config, "commodity_news", False)
+    llm_path = llm_path_label(full_config, "commodity_news")
     analyst_llm_config = get_analyst_llm_config(full_config, "commodity_news")
     instrument_context = FUTURES_INSTRUMENT_CONTEXT.get(
         ticker,
@@ -93,6 +95,17 @@ def commodity_news_agent(state: FundState):
         "Return metadata with event_types, event_strength, tradeability, risk_flags, and llm_path. "
         "Do not force a directional signal when tradeability is low.\n"
     )
+    learning_context = build_learning_context(
+        db=db,
+        full_config=full_config,
+        config_id=resolve_config_id(db, full_config, state.get("config_id")),
+        trading_date=trading_date,
+        analyst="commodity_news",
+        ticker=ticker,
+        context=news_context,
+        horizon_class="event_short",
+    )
+    prompt += learning_context.get("text", "")
 
     signal = agent_call(
         prompt=prompt,
@@ -101,18 +114,30 @@ def commodity_news_agent(state: FundState):
     )
 
     signal.agent_name = agent_name
+    signal.horizon_class = signal.horizon_class if signal.horizon_class != "unknown" else "event_short"
+    signal.expected_horizon_days = signal.expected_horizon_days or 2
+    signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(news_context.get("event_regime") or "event_driven")
+    signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(news_context.get("tradeability") or "event_window")
+    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "news_event_trigger"
+    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "event_probe"
     signal.metadata = {
         **(getattr(signal, "metadata", {}) or {}),
         "llm_path": llm_path,
         "news_context": news_context,
         "cloud_model": analyst_llm_config.get("cloud_model"),
+        "reviewer_learning_context": {
+            "selected_ids": learning_context.get("selected_ids", []),
+            "horizon_class": learning_context.get("horizon_class", "event_short"),
+        },
     }
     signal = apply_signal_quality_gate(signal, news_context, full_config, "commodity_news")
+    signal = apply_business_quality_enrichment(signal, news_context, full_config, "commodity_news")
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
         f"news_cutoff={'<' if pre_open_only else '<='}{trading_date_value}; "
-        f"llm_path={llm_path}; tradeability={news_context.get('tradeability')}]"
+        f"llm_path={llm_path}; tradeability={news_context.get('tradeability')}; "
+        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
     )
     signal.justification = sanitize_visible_text(signal.justification)
 

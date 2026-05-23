@@ -21,7 +21,28 @@ from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.dynamic_weights import DynamicWeightCalculator, calibrate_weights_by_signal_history
+from tools.agent_tools.learning_context import apply_config_learning_overlay
 from tools.agent_tools.market_confirmation import MarketConfirmationEngine
+from tools.agent_tools.business_quality import summarize_business_quality
+from tools.agent_tools.contracts import attach_snapshot_contract
+from tools.agent_tools.capital_allocator import (
+    has_adaptive_policy_action as _capital_has_adaptive_policy_action,
+    high_quality_learning_context,
+    strategy_memory_record as _capital_strategy_memory_record,
+)
+from tools.agent_tools.position_lifecycle import (
+    apply_trade_plan_multiplier as _position_apply_trade_plan_multiplier,
+    is_new_or_increasing_exposure as _position_is_new_or_increasing_exposure,
+    same_sign as _position_same_sign,
+    scale_signed_ratio as _position_scale_signed_ratio,
+    target_side_from_ratio as _position_target_side_from_ratio,
+)
+from tools.agent_tools.risk_controls import business_quality_position_gate
+from tools.agent_tools.signal_fusion import (
+    analyst_signal_combo as _fusion_analyst_signal_combo,
+    build_horizon_scope,
+    resolve_decision_horizon as _fusion_resolve_decision_horizon,
+)
 
 class RiskLevel(Enum):
     """Risk level classification for futures portfolio control."""
@@ -301,6 +322,16 @@ def _quality_multiplier(signal, agent_name: str, full_config: dict) -> tuple[flo
     if severe_flags.intersection(risk_flags):
         multiplier *= float(quality_config.get("severe_risk_flag_multiplier", 0.80))
 
+    business_cfg = full_config.get("analyst_business_quality", {}) or {}
+    if business_cfg.get("enabled", True):
+        business_score = _safe_float(getattr(signal, "business_quality_score", 0.0), 0.0)
+        min_probe = _safe_float(business_cfg.get("min_score_for_probe"), 0.45)
+        min_deploy = _safe_float(business_cfg.get("min_score_for_deployable"), 0.60)
+        if business_score < min_probe:
+            multiplier *= 0.10
+        elif business_score < min_deploy:
+            multiplier *= 0.55
+
     min_multiplier = float(quality_config.get("min_quality_multiplier", 0.05))
     return max(min_multiplier, multiplier), tradeability, risk_flags
 
@@ -346,6 +377,37 @@ def _quality_aware_fusion_context(
             if agent_name in ANALYST_ORDER:
                 signals_by_agent[agent_name] = signal
 
+    applicability_profile = full_config.get("analyst_applicability_profile", {}) or {}
+    applicability_adjustments = {}
+    if applicability_profile.get("enabled", False):
+        sector = _sector_for_ticker(ticker)
+        for agent_name in ANALYST_ORDER:
+            signal = signals_by_agent.get(agent_name)
+            profile = (applicability_profile.get(agent_name) or {})
+            multiplier = 1.0
+            horizon = str(getattr(signal, "horizon_class", "") or profile.get("default_horizon") or "unknown")
+            market_regime = str(getattr(signal, "market_regime", "") or "unknown")
+            multiplier *= float((profile.get("horizon_multipliers") or {}).get(horizon, 1.0))
+            multiplier *= float((profile.get("sector_multipliers") or {}).get(sector, 1.0))
+            multiplier *= float((profile.get("market_regime_multipliers") or {}).get(market_regime, 1.0))
+            if agent_name == "commodity_news":
+                event_window_days = int(profile.get("event_window_days", 3) or 3)
+                expected_days = int(getattr(signal, "expected_horizon_days", 0) or 0) if signal else 0
+                if expected_days and expected_days > event_window_days:
+                    multiplier *= float(profile.get("outside_event_window_multiplier", 0.60))
+            if abs(multiplier - 1.0) > 1e-9:
+                before = blended.get(agent_name, 0.0)
+                blended[agent_name] = before * multiplier
+                applicability_adjustments[agent_name] = {
+                    "horizon_class": horizon,
+                    "market_regime": market_regime,
+                    "sector": sector,
+                    "multiplier": multiplier,
+                    "weight_before": before,
+                    "weight_after": blended[agent_name],
+                }
+        blended = _normalize_weights(blended)
+
     quality_summary = {}
     adjusted = {}
     for agent_name in ANALYST_ORDER:
@@ -375,6 +437,9 @@ def _quality_aware_fusion_context(
             "raw_confidence": float(getattr(signal, "confidence", 0.0) or 0.0),
             "effective_confidence": effective_confidence,
             "tradeability": tradeability,
+            "business_quality_score": _safe_float(getattr(signal, "business_quality_score", 0.0), 0.0),
+            "template_name": getattr(signal, "template_name", "unknown"),
+            "horizon_class": getattr(signal, "horizon_class", "unknown"),
             "risk_flags": risk_flags,
             "quality_multiplier": quality_multiplier,
         }
@@ -386,6 +451,7 @@ def _quality_aware_fusion_context(
         "dynamic_weights": dynamic_weights,
         "quality_adjusted_weights": adjusted,
         "analyst_quality": quality_summary,
+        "analyst_applicability_profile": applicability_adjustments,
         "llm_path": {
             "portfolio_manager": "cloud_only",
             "model": (full_config.get("llm") or {}).get("model"),
@@ -458,19 +524,36 @@ def _build_phase1_recommendation(
     market_confirmation=None,
 ):
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
+    analyst_signals = list(analyst_signals or [])
     signal_snapshot = {}
+    source_artifacts = []
     for idx, signal in enumerate(analyst_signals):
         key = getattr(signal, "agent_name", None) or f"signal_{idx}"
         signal_snapshot[key] = signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
+        source_artifacts.append(f"AnalystSignalArtifact:{key}")
     if plan_snapshot:
         signal_snapshot["pre_open_plan"] = plan_snapshot
     if market_confirmation:
         signal_snapshot["market_confirmation"] = market_confirmation
+    signal_snapshot["horizon_scope"] = build_horizon_scope(
+        analyst_signals,
+        decision_horizon=(plan_snapshot or {}).get("decision_horizon", "unknown") if plan_snapshot else "unknown",
+        execution_horizon="short",
+        validation_horizon=(plan_snapshot or {}).get("validation_horizon", "unknown") if plan_snapshot else "unknown",
+    )
+    signal_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
     signal_snapshot["audit"] = {
         "pre_open_only": True,
         "info_cutoff": "pre_open",
         "phase1_generates_recommendation_only": True,
     }
+    signal_snapshot = attach_snapshot_contract(
+        signal_snapshot,
+        trading_date=trading_date_value,
+        ticker=ticker,
+        config_id=config_id,
+        source_artifacts=source_artifacts,
+    )
 
     return FuturesRecommendation(
         config_id=config_id,
@@ -511,6 +594,10 @@ def _resolve_pre_open_signal_confidence(direction: str, long_scores: dict, short
         return float(short_scores.get("confidence", 0.0) or 0.0)
     return 0.0
 
+
+def _resolve_decision_horizon(analyst_signals: list, target_lots: int) -> str:
+    return _fusion_resolve_decision_horizon(analyst_signals, target_lots)
+
 def _build_pre_open_plan_snapshot(
     target_lots: int,
     current_price: float,
@@ -531,45 +618,31 @@ def _build_pre_open_plan_snapshot(
 
 
 def _analyst_signal_combo(analyst_signals: list) -> tuple[str, str, str]:
-    signals = {
-        "technical": "Neutral",
-        "fundamental": "Neutral",
-        "commodity_news": "Neutral",
-    }
-    for signal in analyst_signals:
-        agent_name = getattr(signal, "agent_name", None)
-        if agent_name == "company_news":
-            agent_name = "commodity_news"
-        if agent_name in signals:
-            value = getattr(signal, "signal", "Neutral")
-            signals[agent_name] = getattr(value, "value", value)
-    return (signals["technical"], signals["fundamental"], signals["commodity_news"])
+    return _fusion_analyst_signal_combo(analyst_signals)
 
 
 def _target_side_from_ratio(position_ratio: float) -> str:
-    if position_ratio > 0:
-        return "long"
-    if position_ratio < 0:
-        return "short"
-    return "flat"
+    return _position_target_side_from_ratio(position_ratio)
 
 
 def _same_sign(lhs: float, rhs: float) -> bool:
-    return (lhs > 0 and rhs > 0) or (lhs < 0 and rhs < 0)
+    return _position_same_sign(lhs, rhs)
 
 
 def _is_new_or_increasing_exposure(target_ratio: float, current_ratio: float) -> bool:
-    if abs(target_ratio) <= 1e-12:
-        return False
-    if abs(current_ratio) <= 1e-12:
-        return True
-    if not _same_sign(target_ratio, current_ratio):
-        return True
-    return abs(target_ratio) > abs(current_ratio)
+    return _position_is_new_or_increasing_exposure(target_ratio, current_ratio)
 
 
 def _scale_signed_ratio(position_ratio: float, multiplier: float) -> float:
-    return (1.0 if position_ratio >= 0 else -1.0) * abs(position_ratio) * max(0.0, multiplier)
+    return _position_scale_signed_ratio(position_ratio, multiplier)
+
+
+def _strategy_memory_record(strategy_memory: dict, states: set[str]) -> dict:
+    return _capital_strategy_memory_record(strategy_memory, states)
+
+
+def _has_adaptive_policy_action(rows: list, actions: set[str]) -> bool:
+    return _capital_has_adaptive_policy_action(rows, actions)
 
 
 def _apply_trade_plan_multiplier(
@@ -579,10 +652,11 @@ def _apply_trade_plan_multiplier(
     multiplier: float,
 ) -> float:
     """Scale new risk without forcing an existing same-side position to shrink."""
-    scaled_ratio = _scale_signed_ratio(target_ratio, multiplier)
-    if _same_sign(target_ratio, current_ratio) and abs(current_ratio) > abs(scaled_ratio):
-        return current_ratio
-    return scaled_ratio
+    return _position_apply_trade_plan_multiplier(
+        target_ratio=target_ratio,
+        current_ratio=current_ratio,
+        multiplier=multiplier,
+    )
 
 
 def _apply_market_confirmation_control(
@@ -884,6 +958,8 @@ def _apply_capital_utilization_control(
     market_confirmation: dict,
     full_config: dict,
     signal_combo: tuple[str, str, str],
+    strategy_memory: dict | None = None,
+    adaptive_policy_state: list | None = None,
 ) -> tuple[float, list[str], list[str], dict]:
     reasons: list[str] = []
     notes: list[str] = []
@@ -891,31 +967,82 @@ def _apply_capital_utilization_control(
     control = full_config.get("capital_utilization_control", {}) or {}
     if not control.get("enabled", False):
         return position_ratio, reasons, notes, diagnostics
-    if not _is_new_or_increasing_exposure(position_ratio, current_ratio):
-        return position_ratio, reasons, notes, diagnostics
     if margin_rate <= 0 or abs(position_ratio) <= 0:
         return position_ratio, reasons, notes, diagnostics
 
     side = _target_side_from_ratio(position_ratio)
+    allow_protected_scaling = bool(control.get("allow_memory_protected_scaling", True))
+    allow_recovering_scaling = bool(control.get("allow_recovering_template_scaling", False))
+    high_quality_memory, learning_diagnostics = high_quality_learning_context(
+        strategy_memory=strategy_memory or {},
+        adaptive_policy_state=adaptive_policy_state or [],
+        allow_memory_protected_scaling=allow_protected_scaling,
+        allow_recovering_template_scaling=allow_recovering_scaling,
+    )
+    if high_quality_memory:
+        diagnostics["capital_utilization_learning"] = learning_diagnostics
+
+    is_new_or_increasing = _is_new_or_increasing_exposure(position_ratio, current_ratio)
+    add_on_tolerance = float(control.get("same_side_add_on_match_tolerance", 0.0005) or 0.0005)
+    same_side_matched_add_on = (
+        bool(control.get("allow_confirmed_same_side_add_on", True))
+        and high_quality_memory
+        and not is_new_or_increasing
+        and _same_sign(position_ratio, current_ratio)
+        and abs(position_ratio) >= abs(current_ratio) - max(1e-12, add_on_tolerance)
+    )
+    if same_side_matched_add_on:
+        diagnostics["capital_utilization_same_side_add_on"] = {
+            "current_ratio": float(current_ratio),
+            "matched_target_ratio": float(position_ratio),
+            "requires_high_quality_memory": True,
+        }
+    elif not is_new_or_increasing:
+        return position_ratio, reasons, notes, diagnostics
+
     trade_control = full_config.get("trade_frequency_control", {}) or {}
     weak_combos = [tuple(item) for item in (trade_control.get("weak_signal_combos") or [])]
-    if bool(control.get("disable_scaling_when_weak_combo", True)) and signal_combo in weak_combos:
+    if (
+        bool(control.get("disable_scaling_when_weak_combo", True))
+        and signal_combo in weak_combos
+        and not high_quality_memory
+    ):
         diagnostics["capital_utilization_skip"] = "weak_signal_combo"
         return position_ratio, reasons, notes, diagnostics
 
     side_override = ((trade_control.get("side_overrides") or {}).get(ticker) or {})
     override_key = f"{side}_cap_multiplier"
-    if bool(control.get("disable_scaling_for_static_capped_side", True)) and override_key in side_override:
+    if (
+        bool(control.get("disable_scaling_for_static_capped_side", True))
+        and override_key in side_override
+        and not high_quality_memory
+    ):
         diagnostics["capital_utilization_skip"] = "static_side_cap"
         return position_ratio, reasons, notes, diagnostics
 
     confirmation_score = float(market_confirmation.get("confirmation_score", 0.0) or 0.0)
     min_score = float(control.get("min_confirmation_score_for_scaling", 0.60))
+    if high_quality_memory:
+        protected_min_score = float(
+            control.get(
+                "memory_protected_min_confirmation_score",
+                (full_config.get("strategy_memory", {}) or {}).get("audit", {}).get(
+                    "protected_min_confirmation_score",
+                    min_score,
+                ),
+            )
+        )
+        min_score = min(min_score, protected_min_score)
     if confirmation_score < min_score:
         diagnostics["capital_utilization_skip"] = "confirmation_score_below_threshold"
         return position_ratio, reasons, notes, diagnostics
 
-    if bool(control.get("scale_only_when_recent_pnl_positive", True)) and db and config_id:
+    if (
+        bool(control.get("scale_only_when_recent_pnl_positive", True))
+        and db
+        and config_id
+        and not high_quality_memory
+    ):
         side_perf = db.get_futures_trade_pair_performance(
             config_id=config_id,
             ticker=ticker,
@@ -943,14 +1070,35 @@ def _apply_capital_utilization_control(
             diagnostics["capital_utilization_skip"] = "recent_side_pnl_not_positive"
             return position_ratio, reasons, notes, diagnostics
 
-    target_total_margin_ratio = float(control.get("target_margin_ratio_confirmed", 0.12))
-    max_after_scaling = float(control.get("max_margin_ratio_after_scaling", 0.20))
+    target_min = float(control.get("target_margin_ratio_min", 0.16))
+    target_max = float(control.get("target_margin_ratio_max", control.get("max_margin_ratio_after_scaling", 0.20)))
+    target_total_margin_ratio = float(control.get("target_margin_ratio_confirmed", target_min))
+    target_total_margin_ratio = min(max(target_total_margin_ratio, target_min), target_max)
+    max_after_scaling = float(control.get("max_margin_ratio_after_scaling", target_max))
+    max_after_scaling = min(max_after_scaling, target_max)
+    diagnostics["capital_utilization_target"] = {
+        "current_margin_ratio": current_margin_ratio,
+        "target_margin_ratio_min": target_min,
+        "target_margin_ratio_max": target_max,
+        "target_margin_ratio_confirmed": target_total_margin_ratio,
+        "underutilization_breach": current_margin_ratio < target_min,
+        "capital_allocation_tier": (
+            "under_deployed"
+            if current_margin_ratio < target_min
+            else ("over_deployed" if current_margin_ratio > target_max else "target_band")
+        ),
+        "margin_ratio_gap_to_min": max(0.0, target_min - current_margin_ratio),
+    }
     allowed_increment_margin_ratio = max(0.0, min(
         target_total_margin_ratio - current_margin_ratio,
         max_after_scaling - current_margin_ratio,
     ))
     if allowed_increment_margin_ratio <= 0:
-        diagnostics["capital_utilization_skip"] = "target_margin_already_reached"
+        diagnostics["capital_utilization_skip"] = (
+            "target_margin_already_reached"
+            if current_margin_ratio >= target_min
+            else "no_margin_capacity_under_target_guard"
+        )
         return position_ratio, reasons, notes, diagnostics
 
     proposed_abs_ratio = min(max_position_ratio, allowed_increment_margin_ratio / margin_rate)
@@ -958,10 +1106,18 @@ def _apply_capital_utilization_control(
         before = position_ratio
         position_ratio = (1.0 if position_ratio > 0 else -1.0) * proposed_abs_ratio
         reasons.append("capital_utilization_guard")
+        if high_quality_memory:
+            reasons.append("capital_utilization_memory_protected")
+        if same_side_matched_add_on:
+            reasons.append("capital_utilization_same_side_add_on")
         notes.append(
             f"capital utilization scaled ratio {before:.2%}->{position_ratio:.2%}; "
-            f"confirmation_score={confirmation_score:.2f}"
+            f"confirmation_score={confirmation_score:.2f}; "
+            f"margin_target={target_min:.0%}-{target_max:.0%}; "
+            f"learning_protected={high_quality_memory}"
         )
+    elif current_margin_ratio < target_min:
+        diagnostics["capital_utilization_skip"] = "candidate_ratio_not_improved"
 
     return position_ratio, reasons, notes, diagnostics
 
@@ -990,6 +1146,7 @@ def _analyst_signal_payloads(analyst_signals: list, fusion_context=None) -> dict
 
         metadata = _signal_metadata(signal)
         context = _nested_context(metadata, agent_name)
+        business = metadata.get("business_quality") if isinstance(metadata.get("business_quality"), dict) else {}
         quality = quality_summary.get(agent_name, {})
         effective_confidence = _safe_float(
             quality.get("effective_confidence"),
@@ -1006,6 +1163,15 @@ def _analyst_signal_payloads(analyst_signals: list, fusion_context=None) -> dict
                 or context.get("tradeability")
                 or "unknown"
             ).lower(),
+            "business_quality_score": _safe_float(
+                getattr(signal, "business_quality_score", business.get("score", 0.0)),
+                0.0,
+            ),
+            "template_name": str(getattr(signal, "template_name", metadata.get("template_name", "unknown")) or "unknown"),
+            "horizon_class": str(getattr(signal, "horizon_class", "unknown") or "unknown"),
+            "analyst_horizon": str(getattr(signal, "analyst_horizon", getattr(signal, "horizon_class", "unknown")) or "unknown"),
+            "primary_business_driver": getattr(signal, "primary_business_driver", business.get("primary_business_driver", "")),
+            "counter_evidence": getattr(signal, "counter_evidence", business.get("counter_evidence", "")),
             "risk_flags": quality.get("risk_flags") or metadata.get("risk_flags") or context.get("risk_flags") or [],
             "metadata": metadata,
             "context": context,
@@ -1030,9 +1196,11 @@ def _fundamental_anchor_supports(payload, side: str, control: dict) -> bool:
         for item in (control.get("fundamental_anchor_tradeability") or ["high", "medium"])
     }
     min_confidence = float(control.get("min_fundamental_anchor_confidence", 0.40))
+    min_business_quality = float(control.get("min_fundamental_anchor_business_quality", 0.55))
     return (
         _payload_supports_side(payload, side, min_confidence)
         and str(payload.get("tradeability", "unknown")).lower() in allowed_tradeability
+        and _safe_float(payload.get("business_quality_score"), 0.0) >= min_business_quality
     )
 
 
@@ -1059,6 +1227,21 @@ def _news_high_quality_override(payload, side: str, control: dict) -> bool:
 def _side_signal_strength(side: str, long_scores: dict, short_scores: dict) -> float:
     scores = long_scores if side == "long" else short_scores if side == "short" else {}
     return _safe_float(scores.get("score"), 0.0) * _safe_float(scores.get("confidence"), 0.0)
+
+
+def _apply_business_quality_position_gate(
+    *,
+    position_ratio: float,
+    current_ratio: float,
+    analyst_signals: list,
+    full_config: dict,
+) -> tuple[float, list[str], list[str], dict]:
+    return business_quality_position_gate(
+        position_ratio=position_ratio,
+        current_ratio=current_ratio,
+        analyst_signals=analyst_signals,
+        config=full_config,
+    )
 
 
 def _signed_abs(side: str, abs_ratio: float) -> float:
@@ -1460,10 +1643,17 @@ def portfolio_agent_futures(state: FundState):
     db = get_db()
     router = state.get("router")
 
-    max_total_margin_ratio = cfg.get("max_total_margin_ratio", 0.40)
-    risk_buffer_ratio = cfg.get("risk_buffer_ratio", 0.10)
-
     full_config = state.get("full_config", cfg)
+    full_config = apply_config_learning_overlay(
+        full_config,
+        db=db,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
+    state["full_config"] = full_config
+
+    max_total_margin_ratio = full_config.get("max_total_margin_ratio", cfg.get("max_total_margin_ratio", 0.40))
+    risk_buffer_ratio = full_config.get("risk_buffer_ratio", cfg.get("risk_buffer_ratio", 0.10))
     risk_level, cashflow_ratio = check_risk_level(portfolio, full_config)
 
     # First apply the risk-level scaling, then decide LONG, SHORT, or NEUTRAL.
@@ -1767,10 +1957,6 @@ def portfolio_agent_futures(state: FundState):
     weights = {}
     fusion_context = {}
     if analyst_count > 1:
-        # Pull optional DeepAnalyze summaries when multiple analysts are enabled.
-        market_state_analysis = state.get("deepanalyze_market_state")
-        fundamental_trends_analysis = state.get("deepanalyze_fundamental_trends")
-
         # Extract the basis percentage from the fundamental analyst output.
         fundamental_signal = signals_by_agent.get('fundamental')
         basis_pct = 0.0
@@ -1779,13 +1965,11 @@ def portfolio_agent_futures(state: FundState):
             basis_pct = DynamicWeightCalculator.extract_basis_from_signal(fundamental_signal)
             fundamental_quality = DynamicWeightCalculator.extract_quality_from_signal(fundamental_signal)
 
-        # Build dynamic weights from the current basis and DeepAnalyze context.
+        # Build dynamic weights from the current basis and structured quality context.
         calculator = DynamicWeightCalculator(full_config)
         weights = calculator.calculate(
             basis_pct,
-            market_state_analysis,
-            fundamental_trends_analysis,
-            fundamental_quality,
+            fundamental_quality=fundamental_quality,
         )
         weights = calibrate_weights_by_signal_history(
             db=db,
@@ -1814,8 +1998,8 @@ def portfolio_agent_futures(state: FundState):
             weights=weights,
             max_position_ratio=max_position_ratio,
             basis_pct=basis_pct,
-            market_state=market_state_analysis,
-            fundamental_trends=fundamental_trends_analysis,
+            market_state=None,
+            fundamental_trends=None,
             fusion_context=fusion_context,
         )
     for signal in analyst_signals:
@@ -1849,6 +2033,9 @@ def portfolio_agent_futures(state: FundState):
         quality_suffix = (
             f"Tradeability={quality.get('tradeability', 'unknown')}, "
             f"EffectiveConfidence={quality.get('effective_confidence', signal.confidence):.2f}, "
+            f"BusinessQuality={getattr(signal, 'business_quality_score', 0.0):.2f}, "
+            f"Template={getattr(signal, 'template_name', 'unknown')}, "
+            f"Horizon={getattr(signal, 'horizon_class', 'unknown')}, "
             f"RiskFlags={quality.get('risk_flags', [])}"
         )
 
@@ -1916,10 +2103,6 @@ def portfolio_agent_futures(state: FundState):
             if fundamental_basis:
                 logger.info(f"Using structured basis percentage for {ticker}: {fundamental_basis:.2f}%")
             break
-    # Pull optional DeepAnalyze context for dynamic weighting and prompt shaping.
-    market_state_analysis = state.get("deepanalyze_market_state")
-    fundamental_trends_analysis = state.get("deepanalyze_fundamental_trends")
-
     # Reuse the same quality-aware adaptive weights shown to the portfolio LLM.
     dynamic_weights = weights if weights else None
     if not fusion_context:
@@ -1927,9 +2110,7 @@ def portfolio_agent_futures(state: FundState):
         if calculator.enabled:
             dynamic_weights = calculator.calculate(
                 fundamental_basis,
-                market_state_analysis,
-                fundamental_trends_analysis,
-                fundamental_quality,
+                fundamental_quality=fundamental_quality,
             )
         fusion_context = _quality_aware_fusion_context(
             ticker=ticker,
@@ -2014,6 +2195,21 @@ def portfolio_agent_futures(state: FundState):
     current_ticker_exposure = _signed_position_ratio(current_position, account_equity)
     current_lots_for_control = int(getattr(current_position, "shares", 0) or 0)
 
+    bq_ratio, bq_reasons, bq_notes, bq_diagnostics = _apply_business_quality_position_gate(
+        position_ratio=position_risk.optimal_position_ratio,
+        current_ratio=current_ticker_exposure,
+        analyst_signals=analyst_signals,
+        full_config=full_config,
+    )
+    if bq_reasons or bq_notes:
+        before_ratio = position_risk.optimal_position_ratio
+        position_risk.optimal_position_ratio = bq_ratio
+        position_risk.justification += (
+            f"\n[Business quality gate: {before_ratio:.2%}->{bq_ratio:.2%}; "
+            f"reasons={bq_reasons}]"
+        )
+        logger.info(f"{ticker}: Business quality gate applied: {bq_notes or bq_reasons}")
+
     signal_strength = max(
         float(long_scores.get("score", 0.0) or 0.0) * float(long_scores.get("confidence", 0.0) or 0.0),
         float(short_scores.get("score", 0.0) or 0.0) * float(short_scores.get("confidence", 0.0) or 0.0),
@@ -2047,10 +2243,16 @@ def portfolio_agent_futures(state: FundState):
     control_reasons.extend(directional_reasons)
     control_notes.extend(directional_notes)
     control_diagnostics.update(directional_diagnostics)
+    control_reasons.extend(bq_reasons)
+    control_notes.extend(bq_notes)
+    control_diagnostics.update(bq_diagnostics)
     control_block_reason = None
     pre_control_ratio = position_risk.optimal_position_ratio
     signal_combo = _analyst_signal_combo(analyst_signals)
     auditor_output = None
+    strategy_memory = {}
+    adaptive_policy_state = []
+    provisional_policy_state = []
     trade_auditor = TradeAuditor(full_config)
 
     if trade_auditor.enabled:
@@ -2066,7 +2268,6 @@ def portfolio_agent_futures(state: FundState):
         auditor_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
         recent_side_performance = {}
         recent_conditional_performance = {}
-        strategy_memory = {}
         if db and config_id and auditor_side in {"long", "short"}:
             recent_side_performance = db.get_futures_trade_pair_performance(
                 config_id=config_id,
@@ -2093,6 +2294,24 @@ def portfolio_agent_futures(state: FundState):
                     trading_date=trading_date,
                     signal_combo=list(signal_combo),
                 )
+            if hasattr(db, "get_adaptive_policy_state"):
+                signal_template_key = f"{auditor_side}_{'_'.join(str(item).lower() for item in signal_combo)}"
+                adaptive_policy_state = db.get_adaptive_policy_state(
+                    config_id=config_id,
+                    ticker=ticker,
+                    side=auditor_side,
+                    signal_template=signal_template_key,
+                    trading_date=trading_date,
+                )
+            if hasattr(db, "get_provisional_policy_state"):
+                signal_template_key = f"{auditor_side}_{'_'.join(str(item).lower() for item in signal_combo)}"
+                provisional_policy_state = db.get_provisional_policy_state(
+                    config_id=config_id,
+                    ticker=ticker,
+                    side=auditor_side,
+                    signal_template=signal_template_key,
+                    trading_date=trading_date,
+                )
 
         analyst_payload = [
             signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
@@ -2112,11 +2331,11 @@ def portfolio_agent_futures(state: FundState):
             signal_strength=signal_strength,
             market_confirmation=market_confirmation,
             fundamental_quality=fundamental_quality,
-            deepanalyze_market_state=market_state_analysis,
-            deepanalyze_fundamental_trends=fundamental_trends_analysis,
             recent_ticker_side_performance=recent_side_performance,
             recent_conditional_performance=recent_conditional_performance,
             strategy_memory=strategy_memory,
+            adaptive_policy_state=adaptive_policy_state,
+            provisional_policy_state=provisional_policy_state,
             risk_level=risk_level.value,
             full_config=full_config,
         )
@@ -2134,7 +2353,22 @@ def portfolio_agent_futures(state: FundState):
                 f"trade auditor blocked new {auditor_output.target_side} exposure: "
                 f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
             )
-        elif auditor_output.decision == "reduce":
+        elif auditor_output.decision == "reduce_only":
+            if abs(current_ticker_exposure) > 1e-12 and _same_sign(before_ratio, current_ticker_exposure):
+                position_risk.optimal_position_ratio = min(
+                    abs(before_ratio),
+                    abs(current_ticker_exposure),
+                ) * (1.0 if current_ticker_exposure > 0 else -1.0)
+            else:
+                position_risk.optimal_position_ratio = 0.0
+            control_reasons.extend(auditor_output.reasons)
+            control_reasons.append("trade_auditor_reduce_only")
+            control_notes.extend(auditor_output.notes)
+            control_notes.append(
+                f"trade auditor reduce-only {auditor_output.target_side}: "
+                f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
+            )
+        elif auditor_output.decision in {"reduce", "scale_down", "probe_only"}:
             position_risk.optimal_position_ratio = _apply_trade_plan_multiplier(
                 target_ratio=position_risk.optimal_position_ratio,
                 current_ratio=current_ticker_exposure,
@@ -2142,10 +2376,10 @@ def portfolio_agent_futures(state: FundState):
             )
             control_reasons.extend(auditor_output.reasons)
             if abs(position_risk.optimal_position_ratio) <= 1e-12 and abs(before_ratio) > 1e-12:
-                control_reasons.append("trade_auditor_reduce_to_zero")
+                control_reasons.append("trade_auditor_scale_to_zero")
             control_notes.extend(auditor_output.notes)
             control_notes.append(
-                f"trade auditor reduced {auditor_output.target_side} ratio "
+                f"trade auditor {auditor_output.decision} {auditor_output.target_side} ratio "
                 f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
             )
         else:
@@ -2213,6 +2447,8 @@ def portfolio_agent_futures(state: FundState):
         market_confirmation=market_confirmation,
         full_config=full_config,
         signal_combo=signal_combo,
+        strategy_memory=strategy_memory,
+        adaptive_policy_state=adaptive_policy_state,
     )
     control_reasons.extend(reasons)
     control_notes.extend(notes)
@@ -2468,6 +2704,10 @@ def portfolio_agent_futures(state: FundState):
     plan_snapshot["max_position_ratio_after_performance"] = float(max_position_ratio)
     plan_snapshot["analyst_signal_combo"] = list(signal_combo)
     plan_snapshot["adaptive_fusion"] = fusion_context
+    plan_snapshot["decision_horizon"] = _resolve_decision_horizon(analyst_signals, target_lots)
+    plan_snapshot["execution_horizon"] = "short"
+    plan_snapshot["validation_horizon"] = plan_snapshot["decision_horizon"]
+    plan_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
     if current_lots == target_lots:
         rebalance_action_type = "keep"
     elif current_lots == 0 and target_lots != 0:
@@ -2500,7 +2740,6 @@ def portfolio_agent_futures(state: FundState):
         "mode": "cloud_only",
         "provider": portfolio_llm_config.get("provider"),
         "model": portfolio_llm_config.get("model"),
-        "use_deepanalyze": False,
     }
     if auditor_output:
         auditor_payload = (

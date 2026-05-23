@@ -73,28 +73,43 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     print(f"  累计结算盈亏:       {metrics.get('total_settlement_pnl', 0):>15,.2f}")
     print(f"  日均盈亏:           {metrics.get('avg_daily_pnl', 0):>15,.2f}")
     if annualization_days and annualization_basis:
+        annualized_label = f"(基于{annualization_days}个{annualization_basis}样本年化)"
+    else:
+        annualized_label = "(252个交易日复利)"
+    print(
+        f"  年化收益率:         {metrics.get('annualized_return', 0):.2%} {annualized_label}"
+    )
+    if is_futures:
+        print(f"  夏普比率(账户权益日收益): {metrics.get('sharpe_ratio', 0):.4f}")
         print(
-            f"  年化收益率:         {metrics.get('annualized_return', 0):.2%} "
-            f"(基于{annualization_days}个{annualization_basis}样本年化)"
+            f"  风险样本状态:       {metrics.get('risk_metric_status', 'unknown')} "
+            f"({metrics.get('account_equity_return_sample_count', 0)}个收益样本)"
         )
     else:
-        print(f"  年化收益率:         {metrics.get('annualized_return', 0):.2%} (252个交易日复利)")
-    print(f"  夏普比率:           {metrics.get('sharpe_ratio', 0):.4f}")
+        print(f"  夏普比率:           {metrics.get('sharpe_ratio', 0):.4f}")
     if is_futures:
         print(
-            f"  最大回撤(账户权益): {metrics.get('account_equity_max_drawdown', metrics.get('max_drawdown', 0)):.2%}"
+            f"  最大回撤(账户权益): {metrics.get('account_equity_max_drawdown', metrics.get('max_drawdown', 0)):.4%}"
         )
         cash_balance_max_drawdown = metrics.get('cash_balance_max_drawdown')
         if cash_balance_max_drawdown is None:
             print("  最大回撤(现金余额): 暂无可用现金余额序列")
         else:
-            print(f"  最大回撤(现金余额): {cash_balance_max_drawdown:.2%}")
+            print(f"  最大回撤(现金余额/保证金占用影响): {cash_balance_max_drawdown:.4%}")
         intraday_max_drawdown = metrics.get('intraday_max_drawdown')
         if intraday_max_drawdown is not None:
             print(f"  最大回撤(日内权益): {intraday_max_drawdown:.2%}")
     else:
         print(f"  最大回撤:           {metrics.get('max_drawdown', 0):.2%}")
-    print(f"  波动率:             {metrics.get('volatility', 0):.2%} (年化)")
+    if is_futures:
+        print(f"  波动率(账户权益):   {metrics.get('volatility', 0):.2%} (年化)")
+        print(
+            f"  保证金收益率诊断:   夏普={metrics.get('margin_return_sharpe_ratio', 0):.4f}, "
+            f"波动率={metrics.get('margin_return_volatility', 0):.2%}, "
+            f"样本={metrics.get('margin_return_sample_count', 0)}"
+        )
+    else:
+        print(f"  波动率:             {metrics.get('volatility', 0):.2%} (年化)")
     print("-" * 80)
 
     print("【交易统计】")
@@ -109,7 +124,10 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
         print(f"  盈利交易:           {metrics.get('winning_trades', 0)} 笔")
         print(f"  亏损交易:           {metrics.get('losing_trades', 0)} 笔")
         print(f"  持平交易:           {metrics.get('flat_trades', 0)} 笔")
-        print(f"  交易笔数胜率:       {metrics.get('win_rate', 0):.2%} (按已平仓交易)")
+        if metrics.get('win_rate_available', True):
+            print(f"  交易笔数胜率:       {metrics.get('win_rate', 0):.2%} (按已平仓交易)")
+        else:
+            print("  交易笔数胜率:       N/A (暂无完整开平仓交易)")
         print(f"  平均每笔收益率:     {metrics.get('avg_return_per_trade', 0):.2%}")
         print(f"  平均单日收益率:     {metrics.get('avg_return_per_day', 0):.2%}")
     else:
@@ -129,6 +147,20 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     print("【保证金风险】")
     print(f"  峰值保证金比例:     {metrics.get('peak_margin_ratio', 0):.2%}")
     print(f"  平均保证金比例:     {metrics.get('avg_margin_ratio', 0):.2%}")
+    print(f"  8%-12%容量达标天数: {metrics.get('base_capacity_days_8_12', 0)} 天")
+    print(f"  16%-20%强机会天数:  {metrics.get('strong_opportunity_days_16_20', 0)} 天")
+    print(f"  容量达标日占比:     {metrics.get('margin_utilization_target_day_ratio', 0):.2%}")
+    print(f"  Alpha容量不足天数:  {metrics.get('alpha_capacity_limited_days', 0)} 天")
+    print(f"  系统保守不足天数:   {metrics.get('system_under_deployed_days', 0)} 天")
+    print(f"  未充分部署天数:     {metrics.get('under_deployed_days', 0)} 天")
+    if metrics.get('under_deployed_reason_counts'):
+        print(f"  未充分部署原因:     {metrics.get('under_deployed_reason_counts', {})}")
+    if metrics.get('under_deployed_category_counts'):
+        print(f"  资金利用专项分类:   {metrics.get('under_deployed_category_counts', {})}")
+    if metrics.get('capital_alpha_release_candidate_count', 0):
+        print(f"  可合理扩仓候选数:   {metrics.get('capital_alpha_release_candidate_count', 0)}")
+    if metrics.get('capital_parameter_review_counts'):
+        print(f"  需复盘参数范围:     {metrics.get('capital_parameter_review_counts', {})}")
     print(f"  预警天数:           {metrics.get('warning_days', 0)} 天")
     print(f"  强平事件:           {metrics.get('liquidation_events', 0)} 次", end="")
     if metrics.get('liquidation_events', 0) > 0:
@@ -146,7 +178,49 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
 
     print("【成本分析】")
     print(f"  累计手续费:         {metrics.get('total_commission', 0):>15,.2f}")
-    print(f"  手续费率:           {metrics.get('commission_rate', 0):.2%}")
+    print(f"  成交名义额:         {metrics.get('total_turnover_notional', 0):>15,.2f}")
+    print(f"  手续费/成交名义额:  {metrics.get('commission_rate', 0):.4%}")
+    print(f"  手续费/初始权益:    {metrics.get('capital_commission_rate', 0):.4%}")
+    print("-" * 80)
+
+    print("【学习与审计验收】")
+    print(f"  Trade auditor决策分布: {metrics.get('trade_auditor_decision_counts', {})}")
+    print(f"  Protected/Deployable净PnL: {metrics.get('protected_deployable_template_net_pnl', 0):>15,.2f}")
+    print(f"  Weak-block模板净PnL:       {metrics.get('weak_block_template_net_pnl', 0):>15,.2f}")
+    print(f"  生效overlay行数:           {metrics.get('learning_overlay_effective_rows', 0)}")
+    print(f"  LLM因果候选数:             {metrics.get('llm_causal_review_candidate_count', 0)}")
+    print(f"  可验证因果规则数:          {metrics.get('validated_causal_rule_count', 0)}")
+    if metrics.get('causal_rule_validation_status_counts'):
+        print(f"  因果候选验证状态:          {metrics.get('causal_rule_validation_status_counts', {})}")
+    print(
+        f"  Learned交易表现:           {metrics.get('learned_trade_count', 0)}笔, "
+        f"胜率={metrics.get('learned_trade_win_rate', 0):.2%}, "
+        f"净PnL={metrics.get('learned_trade_net_pnl', 0):>12,.2f}"
+    )
+    print(
+        f"  Unlearned交易表现:         {metrics.get('unlearned_trade_count', 0)}笔, "
+        f"胜率={metrics.get('unlearned_trade_win_rate', 0):.2%}, "
+        f"净PnL={metrics.get('unlearned_trade_net_pnl', 0):>12,.2f}"
+    )
+    if metrics.get('learned_trade_reason_counts'):
+        print(f"  Learned交易来源:           {metrics.get('learned_trade_reason_counts', {})}")
+    print(f"  Neutral信号比例:           {metrics.get('neutral_signal_ratio', 0):.2%} ({metrics.get('neutral_signal_count', 0)}个)")
+    print(f"  Neutral责任完整率:         {metrics.get('neutral_accountability_complete_rate', 1):.2%}")
+    if metrics.get('neutral_category_counts'):
+        print(f"  Neutral责任分类:           {metrics.get('neutral_category_counts', {})}")
+    if metrics.get('neutral_missing_field_counts'):
+        print(f"  Neutral缺失字段:           {metrics.get('neutral_missing_field_counts', {})}")
+    if metrics.get('neutral_by_analyst'):
+        concise = {
+            analyst: {
+                'neutral_ratio': payload.get('neutral_ratio', 0),
+                'category_counts': payload.get('category_counts', {}),
+            }
+            for analyst, payload in metrics.get('neutral_by_analyst', {}).items()
+        }
+        print(f"  Neutral分析师分布:         {concise}")
+    print(f"  Artifact契约通过率:        {metrics.get('artifact_contract_validation_pass_rate', 1):.2%}")
+    print(f"  自由文本控制违规数:        {metrics.get('free_text_control_violation_count', 0)}")
     print("-" * 80)
 
     print("【账户权益变动】")
@@ -167,6 +241,8 @@ def main():
     parser.add_argument("--local-db", action="store_true", help="Use local SQLite database")
     parser.add_argument("--update", action="store_true", help="Update existing evaluation instead of creating new record")
     parser.add_argument("--init-db", action="store_true", help="Initialize evaluation database tables")
+    parser.add_argument("--start-date", type=str, default=None, help="Start date filter (YYYY-MM-DD)")
+    parser.add_argument("--end-date", type=str, default=None, help="End date filter (YYYY-MM-DD)")
     args = parser.parse_args()
     args.config = resolve_config_path(args.config)
 
@@ -196,7 +272,9 @@ def main():
 
     # Run evaluation
     logger.info("Calculating performance metrics...")
-    metrics = evaluate_config(config_id)
+    if args.start_date or args.end_date:
+        logger.info(f"Date filter: {args.start_date or 'beginning'} to {args.end_date or 'end'}")
+    metrics = evaluate_config(config_id, start_date=args.start_date, end_date=args.end_date)
 
     if metrics is None:
         logger.error("Failed to calculate metrics. Check if portfolio data exists.")

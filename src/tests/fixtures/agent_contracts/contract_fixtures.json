@@ -1,0 +1,250 @@
+[
+  {
+    "artifact_type": "AnalystSignalArtifact",
+    "header": {
+      "contract_version": "agentquant.signal.v2",
+      "agent_name": "technical",
+      "trading_date": "2025-01-02",
+      "ticker": "BU",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": null,
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "llm_with_deterministic_controls",
+      "llm_provider": "fixture",
+      "llm_model": "fixture-model",
+      "source_artifacts": ["pandaai_daily:BU:2025-01-01"],
+      "validation_errors": []
+    },
+    "payload": {
+      "signal": "Bullish",
+      "horizon_class": "short",
+      "template_name": "breakout_continuation",
+      "business_quality_score": 0.72
+    }
+  },
+  {
+    "artifact_type": "AnalystSignalArtifact",
+    "header": {
+      "contract_version": "agentquant.signal.v2",
+      "agent_name": "fundamental",
+      "trading_date": "2025-01-02",
+      "ticker": "I",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": null,
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "llm_with_deterministic_controls",
+      "llm_provider": "fixture",
+      "llm_model": "fixture-model",
+      "source_artifacts": ["finoview_snapshot:I:2025-01-01"],
+      "validation_errors": []
+    },
+    "payload": {
+      "signal": "Bullish",
+      "analyst_horizon": "medium",
+      "direction_anchor": "bullish",
+      "supply_demand_state": "tight"
+    }
+  },
+  {
+    "artifact_type": "AnalystSignalArtifact",
+    "header": {
+      "contract_version": "agentquant.signal.v2",
+      "agent_name": "commodity_news",
+      "trading_date": "2025-01-02",
+      "ticker": "SR",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": null,
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "llm_with_deterministic_controls",
+      "llm_provider": "fixture",
+      "llm_model": "fixture-model",
+      "source_artifacts": ["future_news:SR:2025-01-01"],
+      "validation_errors": []
+    },
+    "payload": {
+      "signal": "Neutral",
+      "analyst_horizon": "event_short",
+      "neutral_reason": "event impact conflicts with price confirmation",
+      "would_change_view_if": "fresh export shock aligns with price breakout"
+    }
+  },
+  {
+    "artifact_type": "PMDecisionArtifact",
+    "header": {
+      "contract_version": "agentquant.snapshot.v2",
+      "agent_name": "portfolio_manager",
+      "trading_date": "2025-01-02",
+      "ticker": "I",
+      "config_id": "fixture",
+      "recommendation_id": "rec-fixture",
+      "evidence_pack_id": null,
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "llm_with_deterministic_controls",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["technical:I:2025-01-02", "fundamental:I:2025-01-02"],
+      "validation_errors": []
+    },
+    "payload": {
+      "pre_open_plan": {
+        "target_position_ratio": 0.08,
+        "decision_horizon": "medium"
+      },
+      "horizon_scope": {
+        "decision_horizon": "medium"
+      }
+    }
+  },
+  {
+    "artifact_type": "AuditVerdictArtifact",
+    "header": {
+      "contract_version": "agentquant.audit.v1",
+      "agent_name": "auditor",
+      "trading_date": "2025-01-02",
+      "ticker": "P",
+      "config_id": "fixture",
+      "recommendation_id": "rec-fixture",
+      "evidence_pack_id": null,
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["pm_decision:P:2025-01-02"],
+      "validation_errors": []
+    },
+    "payload": {
+      "decision": "probe_only",
+      "reasons": ["business_quality_probe_only"]
+    }
+  },
+  {
+    "artifact_type": "ExecutionArtifact",
+    "header": {
+      "contract_version": "agentquant.execution.v1",
+      "agent_name": "trader",
+      "trading_date": "2025-01-02",
+      "ticker": "BU",
+      "config_id": "fixture",
+      "recommendation_id": "rec-fixture",
+      "evidence_pack_id": null,
+      "data_cutoff": "open_window",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["audit_verdict:BU:2025-01-02"],
+      "validation_errors": []
+    },
+    "payload": {
+      "entry_timing": {"entry_action_family": "open_long"},
+      "exit_policy": {"exit_required": false}
+    }
+  },
+  {
+    "artifact_type": "SettlementArtifact",
+    "header": {
+      "contract_version": "agentquant.settlement.v1",
+      "agent_name": "accountant",
+      "trading_date": "2025-01-02",
+      "ticker": "*",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": "settlement-fixture",
+      "data_cutoff": "settlement",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["transactions:2025-01-02"],
+      "validation_errors": []
+    },
+    "payload": {
+      "daily_pnl": 0,
+      "current_margin": 0
+    }
+  },
+  {
+    "artifact_type": "ReviewerAttributionArtifact",
+    "header": {
+      "contract_version": "agentquant.reviewer.v1",
+      "agent_name": "reviewer",
+      "trading_date": "2025-01-02",
+      "ticker": "BU",
+      "config_id": "fixture",
+      "recommendation_id": "rec-fixture",
+      "evidence_pack_id": "review-fixture",
+      "data_cutoff": "post_settlement",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["ExecutionArtifact:BU", "SettlementArtifact:*"],
+      "validation_errors": []
+    },
+    "payload": {
+      "ticker": "BU",
+      "side": "long",
+      "signal_template": "breakout_continuation",
+      "realized_pnl": 1200,
+      "attribution_status": "complete"
+    }
+  },
+  {
+    "artifact_type": "ReviewerLearningArtifact",
+    "header": {
+      "contract_version": "agentquant.reviewer.v1",
+      "agent_name": "reviewer",
+      "trading_date": "2025-01-02",
+      "ticker": "*",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": "review-fixture",
+      "data_cutoff": "post_settlement",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic_with_llm_candidate_notes",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["settlement-fixture"],
+      "validation_errors": []
+    },
+    "payload": {
+      "template_state": "protected",
+      "sample_count": 4,
+      "valid_until": "2025-02-01"
+    }
+  },
+  {
+    "artifact_type": "CausalReviewCandidateArtifact",
+    "header": {
+      "contract_version": "agentquant.reviewer.v1",
+      "agent_name": "reviewer",
+      "trading_date": "2025-01-02",
+      "ticker": "BU",
+      "config_id": "fixture",
+      "recommendation_id": "rec-fixture",
+      "evidence_pack_id": "causal-review-fixture",
+      "data_cutoff": "post_settlement",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic_with_llm_candidate_notes",
+      "llm_provider": "fixture",
+      "llm_model": "fixture-model",
+      "source_artifacts": ["AnalystSignalArtifact:BU", "PMDecisionArtifact:BU", "SettlementArtifact:*"],
+      "validation_errors": []
+    },
+    "payload": {
+      "candidate_type": "post_trade_causal_review",
+      "direction_error_weight": 0.0,
+      "entry_error_weight": 0.2,
+      "exit_error_weight": 0.1,
+      "rule_engine_status": "notes_only"
+    }
+  }
+]

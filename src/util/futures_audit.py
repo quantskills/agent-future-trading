@@ -30,6 +30,7 @@ EXPECTED_NO_TRADE_REASONS = {
     "drawdown_control",
     "ticker_loss_control",
     "capital_utilization_guard",
+    "capital_utilization_memory_protected",
     "market_confirmation_quality_gate",
     "minimum_new_entry_threshold",
     "minimum_rebalance_threshold",
@@ -40,6 +41,11 @@ EXPECTED_NO_TRADE_REASONS = {
     "decision_planner_reduce_to_zero",
     "trade_auditor_block",
     "trade_auditor_reduce_to_zero",
+    "trade_auditor_scale_to_zero",
+    "trade_auditor_reduce_only",
+    "business_quality_observe_or_block",
+    "business_quality_probe_only",
+    "business_quality_below_probe",
     "conditional_performance_block",
     "weak_conditional_combo",
     "weak_ticker_side_quality_gate",
@@ -56,11 +62,19 @@ EXPECTED_NO_TRADE_REASONS = {
     "intraday_no_valid_bar",
     "after_last_entry_time",
     "duplicate_execution_prevented",
+    "signal_invalidation_level",
+    "invalidation_level_long",
+    "invalidation_level_short",
+    "atr_trailing_stop_long",
+    "atr_trailing_stop_short",
+    "time_stop",
+    "signal_horizon_audit",
 }
 
 LEGACY_NO_TRADE_REASON_ALIASES = {
     "decision_planner_block": "trade_auditor_block",
     "decision_planner_reduce_to_zero": "trade_auditor_reduce_to_zero",
+    "trade_auditor_reduce_to_zero": "trade_auditor_scale_to_zero",
 }
 
 _EMPTY_NO_TRADE_REASONS = {
@@ -138,6 +152,87 @@ def append_translated_order(
             "price": price,
         }
     )
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value in (None, "", "unknown", "UNKNOWN"):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value in (None, "", "unknown", "UNKNOWN"):
+        return None
+    try:
+        return max(0, int(value))
+    except Exception:
+        return None
+
+
+def _first_signal_value(snapshot: Dict[str, Any], field_names: List[str]) -> Any:
+    analyst_keys = ("technical", "fundamental", "commodity_news")
+    for analyst in analyst_keys:
+        item = snapshot.get(analyst)
+        if not isinstance(item, dict):
+            continue
+        for field_name in field_names:
+            value = item.get(field_name)
+            if value not in (None, "", "unknown"):
+                return value
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        for context_name in ("technical_context", "market_context", "signal_context"):
+            context = metadata.get(context_name) if isinstance(metadata.get(context_name), dict) else {}
+            for field_name in field_names:
+                value = context.get(field_name)
+                if value not in (None, "", "unknown"):
+                    return value
+    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+    for field_name in field_names:
+        value = plan.get(field_name)
+        if value not in (None, "", "unknown"):
+            return value
+    return None
+
+
+def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return execution-relevant lifecycle fields emitted by analysts or Phase1 planning."""
+    if not isinstance(snapshot, dict):
+        return {}
+    expected_days = _optional_int(_first_signal_value(snapshot, ["expected_horizon_days", "horizon_days"]))
+    horizon_class = _first_signal_value(snapshot, ["horizon_class"])
+    if not horizon_class and expected_days is not None:
+        if expected_days <= 0:
+            horizon_class = "flat"
+        elif expected_days <= 2:
+            horizon_class = "short"
+        elif expected_days <= 5:
+            horizon_class = "medium"
+        else:
+            horizon_class = "long"
+    lifecycle = {
+        "horizon_class": str(horizon_class) if horizon_class else None,
+        "expected_horizon_days": expected_days,
+        "price_percentile": _optional_float(
+            _first_signal_value(snapshot, ["price_percentile", "price_percentile_lookback", "current_price_percentile"])
+        ),
+        "trigger_type": _first_signal_value(snapshot, ["trigger_type"]),
+        "entry_type": _first_signal_value(snapshot, ["entry_type"]),
+        "invalidation_level": _optional_float(
+            _first_signal_value(snapshot, ["invalidation_level", "stop_level", "stop_loss_level", "invalid_price"])
+        ),
+        "target_return": _optional_float(
+            _first_signal_value(snapshot, ["target_return", "expected_return", "target_return_ratio", "expected_return_ratio"])
+        ),
+        "atr_stop_distance": _optional_float(
+            _first_signal_value(snapshot, ["atr_stop_distance", "atr_stop", "atr_distance"])
+        ),
+        "template_name": _first_signal_value(snapshot, ["template_name"]),
+        "business_quality_score": _optional_float(_first_signal_value(snapshot, ["business_quality_score"])),
+    }
+    return {key: value for key, value in lifecycle.items() if value is not None}
 
 
 def infer_target_lots(recommendation: Dict[str, Any]) -> int:

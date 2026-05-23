@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from graph.schema import AnalystSignal
 from database.interface import BaseDB
-from database.sqlite_setup import DB_PATH
+from database.sqlite_setup import DB_PATH, _ensure_columns, _ensure_reviewer_learning_schema
 from util.logger import logger
 
 class SQLiteDB(BaseDB):
@@ -23,6 +23,17 @@ class SQLiteDB(BaseDB):
                 # Patch them lazily on first connect so new controls actually participate.
                 cursor = conn.cursor()
                 self._ensure_strategy_memory_schema(cursor)
+                self._ensure_reviewer_learning_schema(cursor)
+                _ensure_columns(
+                    cursor,
+                    "signal",
+                    {
+                        "artifact_json": "TEXT",
+                        "business_quality_score": "REAL DEFAULT 0",
+                        "horizon_class": "TEXT DEFAULT 'unknown'",
+                        "template_name": "TEXT DEFAULT 'unknown'",
+                    },
+                )
                 conn.commit()
                 self._runtime_schema_ready = True
             except Exception as exc:
@@ -138,6 +149,9 @@ class SQLiteDB(BaseDB):
             "CREATE INDEX IF NOT EXISTS idx_strategy_memory_state "
             "ON strategy_memory(config_id, memory_state)"
         )
+
+    def _ensure_reviewer_learning_schema(self, cursor: sqlite3.Cursor) -> None:
+        _ensure_reviewer_learning_schema(cursor)
 
     def _strategy_memory_signal_combo_key(self, signal_combo: Optional[List[str]]) -> str:
         normalized = self._normalize_signal_combo(signal_combo)
@@ -415,6 +429,26 @@ class SQLiteDB(BaseDB):
                 cursor.execute('DELETE FROM strategy_memory WHERE config_id = ?', (config_id,))
             except Exception:
                 pass
+
+            for table_name in (
+                "strategy_memory_history",
+                "signal_context_history",
+                "signal_template_performance",
+                "analyst_performance",
+                "adaptive_policy_state",
+                "capital_deployment_state",
+                "config_learning_overlay",
+                "reviewer_llm_notes",
+                "causal_review_candidate",
+                "provisional_policy_state",
+                "analyst_learning_digest",
+                "learning_event_log",
+                "learning_context_budget",
+            ):
+                try:
+                    cursor.execute(f"DELETE FROM {table_name} WHERE config_id = ?", (config_id,))
+                except Exception:
+                    pass
 
             # Delete in correct order (respect foreign key dependencies)
             for portfolio_id in portfolio_ids:
@@ -792,8 +826,9 @@ class SQLiteDB(BaseDB):
             signal_id = str(uuid.uuid4())
             cursor.execute('''
                 INSERT INTO signal (id, portfolio_id, updated_at, ticker, llm_prompt,
-                                  analyst, signal, justification)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                  analyst, signal, justification, artifact_json,
+                                  business_quality_score, horizon_class, template_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id,
                 portfolio_id,
@@ -802,7 +837,11 @@ class SQLiteDB(BaseDB):
                 prompt,
                 analyst,
                 str(signal.signal),
-                signal.justification
+                signal.justification,
+                self._serialize_json(signal.model_dump() if hasattr(signal, "model_dump") else signal),
+                float(getattr(signal, "business_quality_score", 0.0) or 0.0),
+                str(getattr(signal, "horizon_class", "unknown") or "unknown"),
+                str(getattr(signal, "template_name", "unknown") or "unknown"),
             ))
             
             conn.commit()
@@ -1775,6 +1814,388 @@ class SQLiteDB(BaseDB):
                 "records": [],
                 "error": str(e),
             }
+        finally:
+            if conn:
+                conn.close()
+
+    def get_config_learning_overlay(
+        self,
+        config_id: str,
+        trading_date=None,
+        param_prefix: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return active reviewer-learned config overlays that are valid today."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            params: List[Any] = [config_id]
+            where = [
+                "config_id = ?",
+                "active = 1",
+            ]
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            if param_prefix:
+                where.append("param_key LIKE ?")
+                params.append(f"{param_prefix}%")
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM config_learning_overlay
+                WHERE {' AND '.join(where)}
+                ORDER BY confidence_score DESC, created_at DESC
+                ''',
+                tuple(params),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["learned_value"] = self._deserialize_json(item.get("learned_value_json"))
+                item["previous_value"] = self._deserialize_json(item.get("previous_value_json"))
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Config learning overlay unavailable: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_signal_template_performance(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        trading_date=None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Read matured signal-template performance for one ticker."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            params: List[Any] = [config_id, ticker.upper()]
+            where = ["config_id = ?", "ticker IN (?, '*')"]
+            if side:
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM signal_template_performance
+                WHERE {' AND '.join(where)}
+                ORDER BY confidence_score DESC, sample_count DESC, last_updated DESC
+                LIMIT ?
+                ''',
+                tuple(params + [int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Signal-template performance unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_adaptive_policy_state(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        signal_template: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+    ) -> List[Dict[str, Any]]:
+        """Read reviewer-learned soft policy state for auditor and PM controls."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            params: List[Any] = [config_id, ticker.upper()]
+            where = [
+                "config_id = ?",
+                "active = 1",
+                "ticker IN (?, '*')",
+            ]
+            if side:
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if signal_template:
+                where.append("signal_template IN (?, '*')")
+                params.append(str(signal_template))
+            if horizon_class:
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime:
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM adaptive_policy_state
+                WHERE {' AND '.join(where)}
+                ORDER BY confidence_score DESC, sample_count DESC, created_at DESC
+                ''',
+                tuple(params),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Adaptive policy state unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_provisional_policy_state(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        signal_template: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        trading_date=None,
+    ) -> List[Dict[str, Any]]:
+        """Read short-lived reviewer risk sentinels."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            params: List[Any] = [config_id, ticker.upper()]
+            where = [
+                "config_id = ?",
+                "active = 1",
+                "ticker IN (?, '*')",
+            ]
+            if side:
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if signal_template:
+                where.append("signal_template IN (?, '*')")
+                params.append(str(signal_template))
+            if horizon_class:
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM provisional_policy_state
+                WHERE {' AND '.join(where)}
+                ORDER BY confidence_score DESC, created_at DESC
+                ''',
+                tuple(params),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                item["rollback_value"] = self._deserialize_json(item.get("rollback_value_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Provisional policy state unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_analyst_learning_digest(
+        self,
+        config_id: str,
+        analyst: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        max_items: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve compact, mature reviewer digests for one analyst prompt."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            ticker_value = str(ticker or "*").upper()
+            sector_value = str(sector or "*")
+            horizon_value = str(horizon_class or "*")
+            regime_value = str(market_regime or "*")
+            params: List[Any] = [config_id, str(analyst)]
+            where = ["config_id = ?", "analyst = ?", "accepted = 1"]
+            if ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if sector_value != "*":
+                where.append("sector IN (?, '*')")
+                params.append(sector_value)
+            if horizon_value != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(horizon_value)
+            if regime_value != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(regime_value)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM analyst_learning_digest
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN horizon_class = ? THEN 0 WHEN horizon_class = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN market_regime = ? THEN 0 WHEN market_regime = '*' THEN 1 ELSE 2 END,
+                    confidence_score DESC,
+                    sample_count DESC,
+                    created_at DESC
+                LIMIT ?
+                ''',
+                tuple(
+                    params
+                    + [
+                        ticker_value,
+                        sector_value,
+                        horizon_value,
+                        regime_value,
+                        int(max_items),
+                    ]
+                ),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Analyst learning digest unavailable for {ticker}/{analyst}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_analyst_performance(
+        self,
+        config_id: str,
+        ticker: str,
+        trading_date=None,
+        horizon_class: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Read reviewer-attributed analyst performance for dynamic weighting."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            params: List[Any] = [config_id, ticker.upper()]
+            where = ["config_id = ?", "ticker IN (?, '*')"]
+            if horizon_class:
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM analyst_performance
+                WHERE {' AND '.join(where)}
+                ORDER BY confidence_score DESC, sample_count DESC, last_updated DESC
+                LIMIT ?
+                ''',
+                tuple(params + [int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Analyst performance unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def save_learning_context_budget(
+        self,
+        *,
+        config_id: str,
+        trading_date,
+        analyst: str,
+        ticker: str,
+        selected_digest_ids: List[str],
+        selected_chars: int,
+        dropped_count: int,
+        max_items: int,
+        max_chars: int,
+    ) -> bool:
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            cursor.execute(
+                '''
+                INSERT INTO learning_context_budget (
+                    id, config_id, trading_date, analyst, ticker, selected_digest_ids,
+                    selected_chars, dropped_count, max_items, max_chars, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    config_id,
+                    self._normalize_trading_day_value(trading_date),
+                    str(analyst),
+                    ticker.upper(),
+                    json.dumps(selected_digest_ids or [], ensure_ascii=False),
+                    int(selected_chars),
+                    int(dropped_count),
+                    int(max_items),
+                    int(max_chars),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"Learning context budget was not persisted: {e}")
+            return False
         finally:
             if conn:
                 conn.close()

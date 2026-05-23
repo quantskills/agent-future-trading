@@ -35,12 +35,21 @@ from graph.schema import (
     RecommendationStatus,
     TradingPhase,
 )
-from run.proposal import ensure_seed_settled_portfolio, load_portfolio_config, resolve_net_exposure_config
 from tools.agent_tools.futures_execution import FuturesExecutionEngine
 from tools.agent_tools.intraday_execution import (
     intraday_confirmation_enabled,
     resolve_intraday_execution_basis,
 )
+from tools.agent_tools.entry_timing import phase2_entry_audit
+from tools.agent_tools.execution_simulator import execution_price_basis
+from tools.agent_tools.order_sizing import cap_target_lots_by_phase1_plan, lots_from_target_ratio
+from tools.agent_tools.position_lifecycle import cap_signed_lots_by_abs_limit
+from tools.agent_tools.runtime_setup import (
+    ensure_seed_settled_portfolio,
+    load_portfolio_config,
+    resolve_net_exposure_config,
+)
+from tools.agent_tools.trader_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.futures_audit import (
@@ -49,6 +58,7 @@ from util.futures_audit import (
     build_audit_payload,
     ensure_execution_translation,
     ensure_signal_snapshot,
+    extract_signal_lifecycle,
     infer_no_trade_reason,
     normalize_no_trade_reason,
     set_execution_result,
@@ -106,6 +116,39 @@ def _current_net_exposure(portfolio: Portfolio, total_portfolio_value: float) ->
     return net_exposure
 
 
+def _signal_invalidation_breached(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> bool:
+    if current_price is None or target_lots == 0:
+        return False
+    invalidation_level = lifecycle.get("invalidation_level")
+    if invalidation_level is None:
+        return False
+    try:
+        price = float(current_price)
+        level = float(invalidation_level)
+    except Exception:
+        return False
+    if target_lots > 0:
+        return price <= level
+    if target_lots < 0:
+        return price >= level
+    return False
+
+
+def _target_return_price(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> Optional[float]:
+    if current_price is None or target_lots == 0 or lifecycle.get("target_return") is None:
+        return None
+    try:
+        price = float(current_price)
+        target_return = abs(float(lifecycle["target_return"]))
+    except Exception:
+        return None
+    if target_lots > 0:
+        return round(price * (1.0 + target_return), 6)
+    if target_lots < 0:
+        return round(price * (1.0 - target_return), 6)
+    return None
+
+
 def _build_executable_recommendation(
     recommendation: Dict[str, Any],
     decision: FuturesDecision,
@@ -140,6 +183,9 @@ def _record_execution_translation_context(
     translation["open_price"] = morning_price_context.open_price
     translation["prev_close_price"] = morning_price_context.prev_close_price
     translation["warning_message"] = morning_price_context.warning_message
+    lifecycle = extract_signal_lifecycle(snapshot)
+    if lifecycle:
+        translation["signal_lifecycle"] = lifecycle
     if getattr(morning_price_context, "intraday_audit", None):
         translation["intraday_execution"] = morning_price_context.intraday_audit
 
@@ -215,6 +261,12 @@ def _record_phase2_order_plan(
     decision: FuturesDecision,
 ) -> None:
     translation = ensure_execution_translation(snapshot)
+    lifecycle = extract_signal_lifecycle(snapshot)
+    if lifecycle and target_lots != 0:
+        target_price = _target_return_price(current_price, target_lots, lifecycle)
+        if target_price is not None:
+            lifecycle = dict(lifecycle)
+            lifecycle["target_price"] = target_price
     translation["phase2_order_plan"] = {
         "current_lots": int(current_lots or 0),
         "target_lots": int(target_lots or 0),
@@ -230,6 +282,7 @@ def _record_phase2_order_plan(
         "max_total_margin_ratio": round(float(max_total_margin_ratio or 0.0), 6),
         "max_single_margin_ratio": round(float(max_single_margin_ratio or 0.0), 6),
         "remaining_margin": round(float(remaining_margin or 0.0), 2),
+        "signal_lifecycle": lifecycle,
     }
 
 
@@ -496,29 +549,12 @@ def _needs_two_step_reversal(current_lots: int, decision: FuturesDecision) -> bo
 
 def _cap_target_lots_by_abs_limit(target_lots: int, abs_limit: int) -> int:
     """Clamp signed target lots without changing direction."""
-    if abs_limit < 0:
-        abs_limit = abs(abs_limit)
-    if target_lots > abs_limit:
-        return abs_limit
-    if target_lots < -abs_limit:
-        return -abs_limit
-    return target_lots
+    return cap_signed_lots_by_abs_limit(target_lots, abs_limit)
 
 
 def _cap_target_lots_by_phase1_plan(target_lots: int, pre_open_plan: Dict[str, Any]) -> int:
     """Do not let phase2 price translation enlarge the phase1 target lot estimate."""
-    if not isinstance(pre_open_plan, dict):
-        return target_lots
-    planned_target = pre_open_plan.get("target_lots_estimate")
-    if planned_target is None:
-        return target_lots
-
-    planned_target_lots = int(planned_target or 0)
-    if planned_target_lots == 0:
-        return 0 if target_lots != 0 else target_lots
-    if target_lots == 0 or (target_lots > 0) != (planned_target_lots > 0):
-        return target_lots
-    return _cap_target_lots_by_abs_limit(target_lots, abs(planned_target_lots))
+    return cap_target_lots_by_phase1_plan(target_lots, pre_open_plan)
 
 
 def _translate_pre_open_recommendation_to_order(
@@ -531,6 +567,9 @@ def _translate_pre_open_recommendation_to_order(
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
     pre_open_plan = signal_snapshot.get("pre_open_plan") if isinstance(signal_snapshot, dict) else None
+    signal_lifecycle = extract_signal_lifecycle(snapshot)
+    if not signal_lifecycle and isinstance(signal_snapshot, dict):
+        signal_lifecycle = extract_signal_lifecycle(signal_snapshot)
 
     contract_info = FuturesContractInfoCache.get_contract_info(ticker)
     if not contract_info:
@@ -604,8 +643,12 @@ def _translate_pre_open_recommendation_to_order(
                 else:
                     target_position_ratio = max(target_position_ratio, min(0.0, allowed_ratio))
 
-            target_value = account_equity * target_position_ratio
-            target_lots = int(target_value / (current_price * multiplier)) if current_price > 0 else 0
+            target_lots = lots_from_target_ratio(
+                account_equity=account_equity,
+                target_position_ratio=target_position_ratio,
+                current_price=current_price,
+                multiplier=multiplier,
+            )
             capped_target_lots = _cap_target_lots_by_phase1_plan(target_lots, pre_open_plan)
             if capped_target_lots != target_lots:
                 target_lots = capped_target_lots
@@ -623,6 +666,33 @@ def _translate_pre_open_recommendation_to_order(
             target_lots = min(0, current_lots + direct_lots)
         else:
             target_lots = current_lots
+
+    if _signal_invalidation_breached(current_price, target_lots, signal_lifecycle):
+        target_lots = 0
+        add_rewrite_reason(snapshot, "signal_invalidation_level")
+
+    exit_policy_result = evaluate_exit_policy(
+        ticker=ticker,
+        current_price=float(current_price),
+        current_lots=current_lots,
+        target_lots=target_lots,
+        lifecycle=signal_lifecycle,
+        current_position=current_position,
+        trading_date=recommendation.get("effective_trade_date") or recommendation.get("trading_date"),
+        config=config,
+    )
+    if exit_policy_result.get("exit_required"):
+        target_lots = int(exit_policy_result.get("target_lots") or 0)
+        add_rewrite_reason(snapshot, str(exit_policy_result.get("reason") or "exit_policy"))
+    phase2_execution = _ensure_phase2_execution(snapshot)
+    phase2_execution["exit_policy"] = exit_policy_result
+    phase2_execution["entry_timing"] = phase2_entry_audit(
+        target_lots=target_lots,
+        current_lots=current_lots,
+        price_context=morning_price_context,
+        pre_open_plan=pre_open_plan,
+    )
+    phase2_execution["execution_simulation"] = execution_price_basis(morning_price_context)
 
     max_target_notional = account_equity * max_single_margin_ratio
     if current_price > 0 and multiplier > 0 and max_target_notional > 0:

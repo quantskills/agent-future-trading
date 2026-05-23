@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,12 +13,27 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from evaluation import calculate_futures_metrics, calculate_futures_transaction_win_rate
+from evaluation import (
+    calculate_futures_metrics,
+    calculate_futures_transaction_win_rate,
+    evaluate_config,
+)
+from evaluation.evaluation import calculate_optimization_acceptance_metrics
 from agents.auditor import TradeAuditor, TradeAuditorInput
+from apis.router import Router
 from database.sqlite_helper import SQLiteDB
-from graph.schema import FuturesAction, Portfolio
+from graph.constants import Signal
+from graph.schema import AnalystSignal, FuturesAction, FuturesDecision, Portfolio
+from agents.portfolio_manager import _build_phase1_recommendation
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
+from tools.agent_tools.futures_settlement import FuturesDailySettlement
 from tools.agent_tools.intraday_execution import select_intraday_execution
+from tools.agent_tools.reviewer_tools import (
+    _apply_net_exposure_review,
+    _build_capital_deployment_diagnostics,
+    _collect_recommendation_quality_warnings,
+    _validate_recommendation_execution_audit,
+)
 from util.futures_audit import (
     calculate_margin_audit,
     classify_zero_transaction_day,
@@ -55,6 +71,90 @@ class TradingCalendarRegressionTest(unittest.TestCase):
             max_lookback_days=20,
         )
         self.assertEqual(previous.strftime("%Y-%m-%d"), "2025-01-27")
+
+
+class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
+    def test_phase1_recommendation_uses_actual_analyst_signal_artifacts(self):
+        portfolio = Portfolio(id="portfolio-1", cashflow=1_000_000, positions={})
+        decision = FuturesDecision(ticker="BU", action=FuturesAction.HOLD, lots=0, justification="hold")
+        signals = [
+            AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.5),
+            AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.6),
+        ]
+
+        recommendation = _build_phase1_recommendation(
+            config_id="cfg",
+            portfolio=portfolio,
+            ticker="BU",
+            trading_date="2025-01-02",
+            contract_code="BU2506.SHF",
+            decision=decision,
+            morning_price_context=None,
+            analyst_signals=signals,
+            plan_snapshot={"decision_horizon": "medium", "validation_horizon": "medium"},
+        )
+
+        header = recommendation.signal_snapshot["artifact_contract"]
+        self.assertEqual(
+            header["source_artifacts"],
+            ["AnalystSignalArtifact:technical", "AnalystSignalArtifact:fundamental"],
+        )
+        self.assertEqual(
+            sorted(recommendation.signal_snapshot["horizon_scope"]["analyst_horizons"]),
+            ["fundamental", "technical"],
+        )
+
+
+class _FailingPreviousCloseAPI:
+    def get_futures_daily_candles_optimized(self, underlying_code, is_main, start_date, end_date):
+        return [SimpleNamespace(trade_date="2025-03-07")]
+
+    def get_main_contract_quote_on_date(self, underlying_code, trading_date):
+        raise RuntimeError("Network error: refused")
+
+
+class RouterProviderFailureRegressionTest(unittest.TestCase):
+    def test_pre_open_reference_price_soft_skips_when_provider_refuses_connection(self):
+        router = Router.__new__(Router)
+        router.api = _FailingPreviousCloseAPI()
+        router.market_type = "china_futures"
+        router.config = {}
+
+        basis = router.resolve_pre_open_reference_price("RB", "2025-03-10")
+
+        self.assertIsNone(basis.base_price)
+        self.assertIsNone(basis.base_price_source)
+        self.assertIn("provider unavailable", basis.warning_message)
+        self.assertIn("has no previous close available", basis.warning_message)
+
+
+class _FailingSettlementRouter:
+    def get_futures_contract_quote_on_date(self, contract_code, trading_date):
+        raise RuntimeError("HTTP 403 provider blocked")
+
+
+class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
+    def test_settlement_price_provider_failure_does_not_fallback(self):
+        engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
+        engine.router = _FailingSettlementRouter()
+
+        ledgers = {
+            "BU": {
+                "batches": [
+                    {
+                        "contract_code": "BU2506.SHF",
+                        "daily_reference_price": 4400.0,
+                    }
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403 provider blocked"):
+            engine._fetch_contract_settle_prices(
+                ledgers=ledgers,
+                transactions=[],
+                trading_date=datetime(2025, 1, 6),
+            )
 
 
 class FuturesAuditRegressionTest(unittest.TestCase):
@@ -204,7 +304,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(output.decision, "reduce")
+        self.assertEqual(output.decision, "scale_down")
         self.assertIn("cold_start_small_cap", output.reasons)
         self.assertAlmostEqual(output.position_ratio_multiplier, 0.50)
 
@@ -287,7 +387,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(output.decision, "reduce")
+        self.assertEqual(output.decision, "scale_down")
         self.assertIn("market_confirmation_conflict", output.reasons)
         self.assertIn("cold_start_small_cap", output.reasons)
 
@@ -314,7 +414,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(output.decision, "reduce")
+        self.assertEqual(output.decision, "scale_down")
         self.assertIn("protected_ticker_side_cold_start", output.reasons)
         self.assertNotEqual(output.position_ratio_multiplier, 0.0)
 
@@ -441,6 +541,226 @@ class ValidationRegressionTest(unittest.TestCase):
         result = classify_zero_transaction_day(recommendations)
         self.assertEqual(result["classification"], "expected")
         self.assertEqual(sorted(result["reasons"]), ["llm_neutral", "position_matched"])
+
+    def test_net_exposure_review_allows_small_phase4_drift_with_warning(self):
+        warnings = []
+        errors = []
+
+        _apply_net_exposure_review(
+            trading_date="2025-01-14",
+            cfg={"net_exposure_control": {"max_net_exposure": 0.50, "phase4_drift_tolerance": 0.01}},
+            net_exposure=0.5085,
+            warnings=warnings,
+            errors=errors,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("stayed within tolerance", warnings[0])
+
+    def test_net_exposure_review_rejects_material_phase4_breach(self):
+        warnings = []
+        errors = []
+
+        _apply_net_exposure_review(
+            trading_date="2025-01-14",
+            cfg={"net_exposure_control": {"max_net_exposure": 0.50, "phase4_drift_tolerance": 0.01}},
+            net_exposure=0.525,
+            warnings=warnings,
+            errors=errors,
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("net exposure exceeds cap", errors[0])
+
+    def test_market_confirmation_quality_warnings_are_aggregated_by_status(self):
+        recommendations = [
+            {
+                "underlying_code": "BU",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "market_confirmation": {
+                            "data_missing": ["contract_rank"],
+                            "feature_status": {"contract_rank": "parameter_error"},
+                            "parameter_errors": ["contract_rank"],
+                            "data_status_groups": {"parameter_error": ["contract_rank"]},
+                        }
+                    }
+                },
+            },
+            {
+                "underlying_code": "RB",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "market_confirmation": {
+                            "data_missing": ["warehouse_receipt"],
+                            "feature_status": {"warehouse_receipt": "no_data"},
+                            "no_data": ["warehouse_receipt"],
+                            "data_status_groups": {"no_data": ["warehouse_receipt"]},
+                        }
+                    }
+                },
+            },
+            {
+                "underlying_code": "M",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "market_confirmation": {
+                            "data_missing": [],
+                            "fallback_covered_missing": ["net_flow_long", "net_flow_short"],
+                            "feature_status": {
+                                "net_flow_long": "fallback_covered",
+                                "net_flow_short": "fallback_covered",
+                            },
+                            "data_status_groups": {
+                                "fallback_covered": ["net_flow_long", "net_flow_short"]
+                            },
+                        }
+                    }
+                },
+            },
+        ]
+
+        warnings, summary = _collect_recommendation_quality_warnings(recommendations)
+
+        self.assertTrue(any("market confirmation parameter errors" in item for item in warnings))
+        self.assertTrue(any("market confirmation no data" in item for item in warnings))
+        self.assertTrue(any("market confirmation fallback covered missing" in item for item in warnings))
+        self.assertFalse(any(": market confirmation data missing:" in item for item in warnings))
+        self.assertEqual(summary["missing_by_status"]["parameter_error"], ["BU"])
+        self.assertEqual(summary["missing_by_status_feature"]["no_data"]["warehouse_receipt"], ["RB"])
+        self.assertEqual(summary["fallback_covered_by_feature"]["net_flow_long"], ["M"])
+
+    def test_reviewer_execution_audit_accepts_hold_recommendation_without_transactions(self):
+        errors = []
+        counter = _validate_recommendation_execution_audit(
+            recommendations=[
+                {
+                    "id": "rec-hold",
+                    "action": "hold",
+                    "lots": 0,
+                    "status": "executed",
+                    "signal_snapshot": json.dumps(
+                        {
+                            "execution_result": {
+                                "transaction_count": 0,
+                                "actual_transactions": [],
+                                "no_trade_reason": "position_matched",
+                            }
+                        }
+                    ),
+                }
+            ],
+            transactions_by_recommendation={},
+            errors=errors,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(counter["position_matched"], 1)
+
+    def test_capital_deployment_diagnostics_separates_reasons_and_alpha_candidates(self):
+        recommendations = [
+            {
+                "underlying_code": "BU",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "target_position_ratio": 0.05,
+                        "current_ticker_exposure": 0.02,
+                        "target_lots_estimate": 5,
+                        "current_lots_before_open": 2,
+                        "tradable_lots_if_executed_now": 3,
+                        "tradable_lots_reason": "position_matched",
+                        "signal_confidence": 0.70,
+                        "rebalance_summary": {
+                            "action_type": "increase",
+                            "control_reasons": ["capital_utilization_guard"],
+                        },
+                        "market_confirmation": {"confirmation_score": 0.72},
+                        "strategy_controls": {
+                            "diagnostics": {
+                                "capital_utilization_learning": {
+                                    "protected_memory": {"memory_state": "protected"}
+                                }
+                            }
+                        },
+                        "trade_auditor": {"decision": "allow", "reasons": ["trade_auditor_allow"]},
+                    },
+                    "execution_result": {"no_trade_reason": "position_matched"},
+                },
+            },
+            {
+                "underlying_code": "RB",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "target_position_ratio": 0.04,
+                        "target_lots_estimate": 4,
+                        "tradable_lots_reason": "intraday_trigger_not_met",
+                        "market_confirmation": {"confirmation_score": 0.66},
+                    },
+                    "execution_result": {"no_trade_reason": "intraday_trigger_not_met"},
+                },
+            },
+            {
+                "underlying_code": "M",
+                "signal_snapshot": {
+                    "pre_open_plan": {
+                        "target_position_ratio": -0.03,
+                        "target_lots_estimate": -3,
+                        "tradable_lots_reason": "trade_auditor_block",
+                        "market_confirmation": {"confirmation_score": 0.40},
+                        "trade_auditor": {
+                            "decision": "block",
+                            "reasons": ["analyst_quality_low_tradeability"],
+                        },
+                    },
+                    "execution_result": {"no_trade_reason": "trade_auditor_block"},
+                },
+            },
+        ]
+
+        diagnostics = _build_capital_deployment_diagnostics(
+            cfg={
+                "capital_utilization_control": {
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "memory_protected_min_confirmation_score": 0.45,
+                },
+                "execution": {
+                    "intraday_confirmation": {
+                        "opening_range_minutes": 30,
+                        "require_complete_opening_range": True,
+                        "max_chase_ratio": 0.015,
+                    }
+                },
+            },
+            allocation_tier="under_deployed",
+            reason_bucket="intraday_trigger_not_met",
+            current_ratio=0.04,
+            target_min=0.16,
+            target_max=0.20,
+            margin_gap_to_min=600000.0,
+            strategy_recommendations=recommendations,
+            no_trade_reason_counter=Counter(
+                {
+                    "position_matched": 1,
+                    "intraday_trigger_not_met": 1,
+                    "trade_auditor_block": 1,
+                }
+            ),
+        )
+
+        self.assertEqual(diagnostics["primary_category"], "execution_timing_gate")
+        self.assertEqual(diagnostics["category_counts"]["position_already_matched"], 1)
+        self.assertEqual(diagnostics["category_counts"]["execution_timing_gate"], 1)
+        self.assertEqual(diagnostics["category_counts"]["auditor_suppression"], 1)
+        self.assertEqual(diagnostics["alpha_release_candidate_count"], 1)
+        self.assertEqual(diagnostics["alpha_release_candidates"][0]["ticker"], "BU")
+        self.assertEqual(diagnostics["execution_gate_candidates"][0]["ticker"], "RB")
+        self.assertEqual(diagnostics["auditor_suppression_cases"][0]["ticker"], "M")
+        self.assertEqual(
+            diagnostics["parameter_review"][0]["scope"],
+            "execution.intraday_confirmation",
+        )
 
 
 class IntradayExecutionRegressionTest(unittest.TestCase):
@@ -974,6 +1294,57 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             snapshot.get("execution_translation", {}).get("rewrite_reasons", []),
         )
 
+    def test_phase2_blocks_open_when_signal_invalidation_level_is_breached(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5162600.45,
+            margin_used=0.0,
+            positions={},
+        )
+        signal_snapshot = {
+            "technical": {
+                "signal": "Bearish",
+                "horizon_class": "short",
+                "expected_horizon_days": 2,
+                "invalidation_level": 4400.0,
+                "target_return": 0.03,
+            },
+            "pre_open_plan": {
+                "target_position_ratio": -0.12,
+                "target_lots_estimate": -26,
+            },
+        }
+        recommendation = {
+            "underlying_code": "TA",
+            "contract_code": "ta601",
+            "signal_snapshot": signal_snapshot,
+        }
+        config = {
+            "cashflow": 5000000,
+            "max_total_margin_ratio": 0.75,
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+        snapshot = dict(signal_snapshot)
+
+        decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=4566.0),
+            snapshot=snapshot,
+        )
+
+        translation = snapshot.get("execution_translation", {})
+        self.assertEqual(decision.action, FuturesAction.HOLD)
+        self.assertEqual(decision.lots, 0)
+        self.assertIn("signal_invalidation_level", translation.get("rewrite_reasons", []))
+        self.assertEqual(translation["phase2_order_plan"]["signal_lifecycle"]["invalidation_level"], 4400.0)
+
     def test_rollover_reconciliation_records_close_only_execution_type(self):
         rollover = {
             "underlying_code": "C",
@@ -999,6 +1370,101 @@ class OrderTranslationRegressionTest(unittest.TestCase):
 
 
 class EvaluationRegressionTest(unittest.TestCase):
+    def _create_minimal_futures_evaluation_db(self, db_path: str):
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE portfolio (
+                id TEXT,
+                config_id TEXT,
+                updated_at TEXT,
+                trading_date TEXT,
+                cashflow REAL,
+                total_assets REAL,
+                positions TEXT,
+                margin_used REAL,
+                leverage REAL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE daily_settlement (
+                portfolio_id TEXT,
+                trading_date TEXT,
+                previous_balance REAL,
+                current_balance REAL,
+                previous_margin REAL,
+                current_margin REAL,
+                daily_pnl REAL,
+                commission REAL,
+                margin_ratio REAL,
+                is_warning INTEGER,
+                is_liquidation INTEGER
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE futures_transactions (
+                config_id TEXT,
+                trading_date TEXT,
+                created_at TEXT,
+                ticker TEXT,
+                contract_code TEXT,
+                action TEXT,
+                lots INTEGER,
+                execution_price REAL,
+                price REAL,
+                contract_multiplier REAL,
+                commission REAL,
+                settle_price REAL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE capital_deployment_state (
+                config_id TEXT,
+                trading_date TEXT,
+                capital_allocation_tier TEXT,
+                reason_bucket TEXT
+            )
+            """
+        )
+        cur.execute(
+            "CREATE TABLE strategy_memory (config_id TEXT, memory_state TEXT, net_pnl REAL)"
+        )
+        cur.execute(
+            "CREATE TABLE config_learning_overlay (config_id TEXT, active INTEGER)"
+        )
+        cur.execute(
+            "CREATE TABLE causal_review_candidate (config_id TEXT)"
+        )
+        cur.execute(
+            "CREATE TABLE futures_recommendation (config_id TEXT, signal_snapshot TEXT)"
+        )
+
+        positions = {"M": {"shares": 1, "value": 100000.0, "contract_code": "m2601"}}
+        portfolios = [
+            ("p1", "cfg", "2025-01-02T15:30:00", "2025-01-02", 4999900.0, 5009900.0, json.dumps(positions), 10000.0, 1.0),
+            ("p2", "cfg", "2025-01-03T15:30:00", "2025-01-03", 5006500.0, 5016500.0, json.dumps(positions), 10000.0, 1.0),
+        ]
+        cur.executemany("INSERT INTO portfolio VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", portfolios)
+        settlements = [
+            ("p1", "2025-01-02", 5000000.0, 4996625.68, 0.0, 3311.0, -50.0, 13.32, 0.0007, 0, 0),
+            ("p2", "2025-01-03", 4996625.68, 4993229.93, 3311.0, 13301.0, 6660.0, 66.75, 0.0027, 0, 0),
+        ]
+        cur.executemany("INSERT INTO daily_settlement VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", settlements)
+        transactions = [
+            ("cfg", "2025-01-02", "2025-01-02T09:00:00", "M", "m2601", "open_long", 1, 100.0, 100.0, 10.0, 2.0, 100.0),
+            ("cfg", "2025-01-03", "2025-01-03T09:00:00", "RB", "rb2601", "open_short", 2, 200.0, 200.0, 10.0, 4.0, 200.0),
+        ]
+        cur.executemany("INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", transactions)
+        conn.commit()
+        return conn
+
     def test_futures_transaction_win_rate_uses_completed_round_trips(self):
         fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
@@ -1109,6 +1575,83 @@ class EvaluationRegressionTest(unittest.TestCase):
 
             metrics = calculate_futures_metrics("cfg", db_path)
             self.assertAlmostEqual(metrics["avg_leverage"], 800.0 / 1200.0)
+        finally:
+            os.remove(db_path)
+
+    def test_futures_evaluation_uses_account_equity_for_risk_metrics(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = self._create_minimal_futures_evaluation_db(db_path)
+            conn.close()
+
+            metrics = evaluate_config("cfg", db_path)
+            self.assertIsNotNone(metrics)
+            self.assertEqual(metrics["risk_metric_status"], "ok")
+            self.assertEqual(metrics["account_equity_return_sample_count"], 2)
+            self.assertGreater(metrics["volatility"], 0.0)
+            self.assertNotEqual(metrics["sharpe_ratio"], 0.0)
+            self.assertGreater(metrics["account_equity_max_drawdown"], 0.0)
+            self.assertEqual(metrics["margin_return_sample_count"], 1)
+            self.assertEqual(metrics["margin_return_volatility"], 0.0)
+        finally:
+            os.remove(db_path)
+
+    def test_no_completed_round_trips_warns_without_low_win_rate(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = self._create_minimal_futures_evaluation_db(db_path)
+            conn.close()
+
+            metrics = evaluate_config("cfg", db_path)
+            warning_types = {warning["type"] for warning in metrics["warnings"]}
+            self.assertFalse(metrics["win_rate_available"])
+            self.assertIn("no_completed_round_trips", warning_types)
+            self.assertNotIn("low_win_rate", warning_types)
+        finally:
+            os.remove(db_path)
+
+    def test_commission_rate_uses_turnover_not_initial_capital(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = self._create_minimal_futures_evaluation_db(db_path)
+            conn.close()
+
+            metrics = evaluate_config("cfg", db_path)
+            self.assertAlmostEqual(metrics["total_turnover_notional"], 5000.0)
+            self.assertAlmostEqual(metrics["commission_rate"], 80.07 / 5000.0)
+            self.assertAlmostEqual(metrics["capital_commission_rate"], 80.07 / 5000000.0)
+        finally:
+            os.remove(db_path)
+
+    def test_capital_deployment_under_deployed_counts_by_tier(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = self._create_minimal_futures_evaluation_db(db_path)
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT INTO capital_deployment_state VALUES (?, ?, ?, ?)",
+                [
+                    ("cfg", "2025-01-02", "under_deployed", "llm_neutral"),
+                    ("cfg", "2025-01-03", "under_deployed", "intraday_trigger_not_met"),
+                    ("cfg", "2025-01-04", "normal", "alpha_capacity_limited"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            metrics = calculate_optimization_acceptance_metrics(
+                "cfg", db_path, start_date="2025-01-02", end_date="2025-01-03"
+            )
+            self.assertEqual(metrics["under_deployed_days"], 2)
+            self.assertEqual(metrics["system_under_deployed_days"], 2)
+            self.assertEqual(metrics["non_alpha_under_deployed_days"], 2)
+            self.assertEqual(metrics["under_deployed_reason_counts"]["llm_neutral"], 1)
+            self.assertEqual(metrics["under_deployed_reason_counts"]["intraday_trigger_not_met"], 1)
+            self.assertEqual(metrics["alpha_capacity_limited_days"], 0)
         finally:
             os.remove(db_path)
 

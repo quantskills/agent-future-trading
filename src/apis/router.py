@@ -2,6 +2,9 @@
 
 import math
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from util.trading_calendar import get_previous_trading_day
@@ -21,15 +24,17 @@ class APISource:
 class Router():
     """Router for APIs"""
 
-    def __init__(self, source: APISource, market_type: str = "china_futures"):
+    def __init__(self, source: APISource, market_type: str = "china_futures", config: Optional[Dict[str, Any]] = None):
         """
         Initialize Router with API source and market type.
 
         Args:
             source: API source (ALPHA_VANTAGE, DATAYES, or PANDAAI)
             market_type: Current runtime market type. AgentQuant now runs in china_futures mode.
+            config: Optional runtime config; used to resolve local Finoview/news paths.
         """
         self.market_type = market_type
+        self.config = config or {}
         if source == APISource.ALPHA_VANTAGE:
             from apis.alphavantage import AlphaVantageAPI
             self.api = AlphaVantageAPI()
@@ -42,6 +47,15 @@ class Router():
         else:
             raise ValueError(f"Invalid API source: {source}")
         self.last_fundamentals_metadata = None
+
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _resolve_project_path(self, path_text: Optional[str], default_relative: str) -> Path:
+        raw = Path(path_text or default_relative)
+        if raw.is_absolute():
+            return raw
+        return self._project_root() / raw
 
     def _require_pandas(self, feature_name: str) -> None:
         if pd is not None:
@@ -190,10 +204,19 @@ class Router():
         warning_messages = []
 
         today_quote = None
-        if contract_code:
-            today_quote = self.get_futures_contract_quote_on_date(contract_code, normalized_date)
-        if today_quote is None:
-            today_quote = self.get_futures_main_contract_quote_on_date(underlying_code, normalized_date)
+        try:
+            if contract_code:
+                today_quote = self.get_futures_contract_quote_on_date(contract_code, normalized_date)
+            if today_quote is None:
+                today_quote = self.get_futures_main_contract_quote_on_date(underlying_code, normalized_date)
+        except Exception as exc:
+            self._append_provider_warning(
+                underlying_code=underlying_code,
+                trading_date=normalized_date,
+                operation="T-day open quote",
+                exc=exc,
+                warning_messages=warning_messages,
+            )
 
         open_price = today_quote.open_price if today_quote is not None else None
         if open_price is not None and open_price > 0:
@@ -214,6 +237,7 @@ class Router():
             underlying_code=underlying_code,
             trading_date=normalized_date,
             contract_code=contract_code,
+            warning_messages=warning_messages,
         )
         if prev_quote is None or prev_quote.close_price is None or prev_quote.close_price <= 0:
             return self._build_missing_previous_close_basis(
@@ -252,6 +276,7 @@ class Router():
             underlying_code=underlying_code,
             trading_date=normalized_date,
             contract_code=contract_code,
+            warning_messages=warning_messages,
         )
         if prev_quote is not None and prev_quote.close_price is not None and prev_quote.close_price > 0:
             return MorningExecutionBasis(
@@ -270,25 +295,56 @@ class Router():
             warning_messages=warning_messages,
         )
 
-    def _resolve_previous_close_quote(self, underlying_code, trading_date, contract_code=None):
+    def _resolve_previous_close_quote(self, underlying_code, trading_date, contract_code=None, warning_messages=None):
         try:
             previous_trading_day = get_previous_trading_day(
                 router=self,
                 trading_date=trading_date,
                 underlying_code=underlying_code,
             )
-        except RuntimeError:
+        except Exception as exc:
+            self._append_provider_warning(
+                underlying_code=underlying_code,
+                trading_date=trading_date,
+                operation="previous trading day lookup",
+                exc=exc,
+                warning_messages=warning_messages,
+            )
             return None, None
 
-        if contract_code:
+        try:
+            if contract_code:
+                return (
+                    self.get_futures_contract_quote_on_date(contract_code, previous_trading_day),
+                    previous_trading_day,
+                )
             return (
-                self.get_futures_contract_quote_on_date(contract_code, previous_trading_day),
+                self.get_futures_main_contract_quote_on_date(underlying_code, previous_trading_day),
                 previous_trading_day,
             )
-        return (
-            self.get_futures_main_contract_quote_on_date(underlying_code, previous_trading_day),
-            previous_trading_day,
+        except Exception as exc:
+            self._append_provider_warning(
+                underlying_code=underlying_code,
+                trading_date=previous_trading_day,
+                operation="previous close quote",
+                exc=exc,
+                warning_messages=warning_messages,
+            )
+            return None, previous_trading_day
+
+    def _append_provider_warning(self, underlying_code, trading_date, operation, exc, warning_messages=None):
+        normalized_date = self._normalize_trading_date(trading_date) if trading_date is not None else None
+        date_text = normalized_date.strftime("%Y-%m-%d") if normalized_date is not None else "unknown"
+        detail = sanitize_visible_text(str(exc))
+        if len(detail) > 280:
+            detail = detail[:280] + "..."
+        message = (
+            f"{underlying_code} {operation} provider unavailable on {date_text}: "
+            f"{type(exc).__name__}: {detail}"
         )
+        logger.warning(message)
+        if warning_messages is not None:
+            warning_messages.append(message)
 
     def _build_missing_previous_close_basis(self, underlying_code, normalized_date, open_price, warning_messages):
         from graph.schema import MorningExecutionBasis
@@ -363,13 +419,19 @@ class Router():
         """
         self._require_pandas("Local futures fundamental loading")
 
-        from pathlib import Path
         import os
 
         # Fundamental inputs are read from local Finoview feather files.
-        current_file = Path(__file__).resolve()
-        project_root = current_file.parent.parent.parent
-        data_dir = project_root / "data" / "Fundamental_data" / "Finoview_data"
+        factor_cfg = (self.config.get("factor_data") or {}) if isinstance(self.config, dict) else {}
+        data_dir = self._resolve_project_path(
+            factor_cfg.get("data_dir"),
+            "data/Fundamental_data/Finoview_data",
+        )
+        catalog_path = self._resolve_project_path(
+            factor_cfg.get("catalog_path"),
+            "src/config/finoview_factor_catalog.yaml",
+        )
+        finoview_enabled = bool(factor_cfg.get("finoview_enabled", True))
 
         # Current 15-symbol fundamental coverage backed by Finoview feather files.
         indicator_map = {
@@ -404,7 +466,7 @@ class Router():
                 "sorghum_spot_price": "c_sorghum_spot_price",
                 "barley_spot_price": "c_barley_spot_price",
                 "import_volume": "c_jk_volume",
-                "us_net_sales": "c_us_trade_volume",
+                "us_net_sales": "c_trade_volume_usa",
                 "starch_spot_price": "cs_spot_price",
                 "starch_profit_heilongjiang": "cs_profit_heilongjiang",
                 "starch_profit_shandong": "cs_profit_shandong",
@@ -421,15 +483,14 @@ class Router():
                 "basis_spread": "cf_spread",
                 "commercial_inventory": "cf_b_stock",
                 "industrial_inventory": "cf_i_stock",
-                "industrial_commercial_inventory_ratio": "cf_is_ratio",
                 "port_inventory": "cf_port_stock",
                 "textile_raw_material_inventory": "cf_textile_ms_stock",
                 "textile_finished_goods_inventory": "cf_textile_stock",
                 "trade_volume": "cf_trade_volume",
                 "market_trade_volume": "cf_market_trade_volume",
                 "freight_fee": "cf_freight_fee",
-                "railway_departures": "cf_departures",
-                "warehouse_receipts": "cf_ck_volume",
+                "us_weekly_exports": "cf_ck_volume_usa",
+                "us_weekly_exports_to_china": "cf_ck_volume_usa_to_china",
                 "polyester_bottle_chip_operating_rate": "cf_pb_operate_rate",
                 "cotton_yarn_inventory_index": "cf_sx_stock_index",
                 "cotton_yarn_spot_price_index": "cf_sx_spot_price_index",
@@ -535,7 +596,7 @@ class Router():
                 "trade_volume": "m_trade_volume",
                 "spot_trade_volume": "m_spot_trade_volume",
                 "contract_volume": "m_contract_volume",
-                "usa_trade_volume": "m_usa_trade_volume",
+                "usa_trade_volume": "m_trade_volume_usa",
                 "shipment": "m_shipment",
                 "yield": "m_yield",
                 "feed_output": "m_feed_yield",
@@ -599,15 +660,15 @@ class Router():
             "PB": {
                 "spot_price": "pb_spot_price",
                 "lead_ingot_spot_price": "pb_ingot_spot_price",
-                "scrap_battery_spot_price": "pb_scrap_battery_spot_price",
+                "bike_scrap_battery_spot_price": "pb_bike_scrap_battery_spot_price",
+                "car_scrap_battery_spot_price": "pb_car_scrap_battery_spot_price",
                 "reflective_furnace_profit": "pb_profit_reflective_furnace",
                 "processing_fee": "pb_processing_fee",
-                "processing_fee_tc": "pb_processing_fee_tc",
                 "social_inventory": "pb_social_stock",
                 "lead_ingot_inventory": "pb_ingot_stock",
                 "shfe_inventory": "pb_shfe_stock",
                 "lme_inventory": "pb_lme_stock",
-                "domestic_yield": "pb_yield",
+                "global_refined_yield": "pb_refine_yield",
                 "electric_lead_yield": "pb_electric_yield",
                 "recycled_lead_yield": "pb_recycle_yield",
                 "primary_operating_rate": "pb_primary_operate_rate",
@@ -650,9 +711,10 @@ class Router():
                 "national_spot_context": "sr_spot_price",
                 "spot_price_liuzhou": "sr_spot_price_liuzhou",
                 "spot_price_kunming": "sr_spot_price_kunming",
-                "import_profit": "sr_jk_profit",
-                "import_profit_quota": "sr_jk_profit_quota",
-                "seasonal_yield": "sr_season_yield",
+                "brazil_import_profit_non_quota": "sr_jk_profit_non_quota_brazil",
+                "brazil_import_profit_quota": "sr_jk_profit_quota_brazil",
+                "thailand_import_profit_non_quota": "sr_jk_profit_non_quota_thailand",
+                "thailand_import_profit_quota": "sr_jk_profit_quota_thailand",
                 "cane_sugar_yield_guangxi_cumulative": "sr_yield",
                 "brazil_warehouse_receipts": "sr_ck_volume_brazil",
                 "cane_sugar_sales_guangxi_cumulative": "sr_trade_volume",
@@ -1028,7 +1090,50 @@ class Router():
             logger.error(traceback.format_exc())
 
         self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
+        try:
+            from tools.agent_tools.finoview_factors import (
+                build_factor_attribution_payload,
+                build_factor_catalog,
+                build_factor_snapshot,
+                map_factor_snapshot_to_judgment,
+            )
+
+            if finoview_enabled:
+                factor_snapshot = build_factor_snapshot(
+                    ticker,
+                    trading_date,
+                    data_dir=data_dir,
+                    catalog=build_factor_catalog(
+                        data_dir=data_dir,
+                        limit_to_tickers=[ticker],
+                        catalog_config_path=catalog_path,
+                    ),
+                )
+                factor_judgment = map_factor_snapshot_to_judgment(factor_snapshot)
+                factor_attribution = build_factor_attribution_payload(
+                    ticker=ticker,
+                    trade_date=trading_date,
+                    snapshot=factor_snapshot,
+                    judgment=factor_judgment,
+                )
+                self.last_fundamentals_metadata["finoview_factor_snapshot"] = factor_snapshot
+                self.last_fundamentals_metadata["finoview_factor_judgment"] = factor_judgment
+                self.last_fundamentals_metadata["finoview_factor_attribution"] = factor_attribution
+                self.last_fundamentals_metadata["factor_coverage_score"] = factor_judgment.get("coverage_score", 0.0)
+                self.last_fundamentals_metadata["factor_freshness_score"] = factor_judgment.get("freshness_score", 0.0)
+                self.last_fundamentals_metadata["no_lookahead_status"] = factor_judgment.get("no_lookahead_status", "unchecked")
+        except Exception as exc:
+            logger.warning(f"{ticker}: Finoview factor snapshot build skipped: {exc}")
+
         result = f"=== Fundamental Analysis for {ticker} ===\n\n"
+        factor_judgment = self.last_fundamentals_metadata.get("finoview_factor_judgment") or {}
+        if factor_judgment:
+            result += "=== Finoview No-Lookahead Factor Snapshot ===\n"
+            result += f"No-lookahead status: {factor_judgment.get('no_lookahead_status')}\n"
+            result += f"Coverage score: {float(factor_judgment.get('coverage_score') or 0.0):.2f}\n"
+            result += f"Freshness score: {float(factor_judgment.get('freshness_score') or 0.0):.2f}\n"
+            result += f"Covered groups: {', '.join(factor_judgment.get('covered_required_groups') or []) or 'none'}\n"
+            result += f"Tradable coverage: {factor_judgment.get('tradable_coverage')}\n\n"
         for name_cn, data in fundamental_data.items():
             if name_cn == 'basis':
                 result += "\n=== Basis Analysis ===\n"
@@ -1061,7 +1166,6 @@ class Router():
         """
         Load futures news from the local Future_news directory.
         """
-        from pathlib import Path
         from datetime import datetime
         from pydantic import BaseModel
         from typing import Optional
@@ -1074,9 +1178,12 @@ class Router():
             content: Optional[str] = None
             url: Optional[str] = None
 
-        current_file = Path(__file__).resolve()
-        project_root = current_file.parent.parent.parent
-        news_dir = project_root / 'data' / 'News_data' / 'Future_news'
+        factor_cfg = (self.config.get("factor_data") or {}) if isinstance(self.config, dict) else {}
+        news_cfg = factor_cfg.get("news") or {}
+        news_dir = self._resolve_project_path(
+            news_cfg.get("data_dir"),
+            "data/News_data/Future_news",
+        )
         news_file = news_dir / f"{ticker}.txt"
 
         if not news_file.exists():

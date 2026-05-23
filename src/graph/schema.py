@@ -12,10 +12,71 @@ from graph.constants import Signal
 class AnalystSignal(BaseModel):
     """Signal produced by an analyst agent."""
 
+    contract_version: str = Field(default="agentquant.signal.v2", description="Agent artifact contract version")
     agent_name: str = Field(default="", description="Analyst agent name")
     signal: Signal = Field(default=Signal.NEUTRAL, description="Bullish / bearish / neutral signal")
     confidence: float = Field(default=0.5, description="Signal confidence from 0.0 to 1.0")
     justification: str = Field(default="No justification provided due to error", description="Signal rationale")
+    data_cutoff: str = Field(default="pre_open", description="Data cutoff used by this signal")
+    no_lookahead_status: str = Field(default="unchecked", description="ok / warning / violation / unchecked")
+    determinism_mode: str = Field(default="llm_with_deterministic_controls", description="How this artifact was produced")
+    llm_provider: str = Field(default="", description="LLM provider used by the analyst when available")
+    llm_model: str = Field(default="", description="LLM model used by the analyst when available")
+    source_artifacts: List[str] = Field(default_factory=list, description="Upstream artifact ids or descriptors")
+    validation_errors: List[str] = Field(default_factory=list, description="Schema or contract validation warnings")
+    horizon_class: str = Field(
+        default="unknown",
+        description="Effective horizon: short / medium / long / event_short / flat / unknown",
+    )
+    analyst_horizon: str = Field(default="unknown", description="Natural analyst horizon before PM fusion")
+    decision_horizon: str = Field(default="unknown", description="PM decision horizon after fusion")
+    execution_horizon: str = Field(default="unknown", description="Trader execution horizon")
+    validation_horizon: str = Field(default="unknown", description="Reviewer validation horizon")
+    expected_horizon_days: int = Field(default=0, description="Expected signal horizon in trading days")
+    horizon_days: int = Field(default=0, description="Alias for expected_horizon_days used by business gates")
+    market_regime: str = Field(default="unknown", description="Market regime used by the analyst")
+    trend_stage: str = Field(default="unknown", description="Trend or price-stage classification")
+    template_name: str = Field(default="unknown", description="Trading template classification")
+    price_percentile: Optional[float] = Field(
+        default=None,
+        description="Current price percentile in the analyst lookback window, 0.0 to 1.0 when available",
+    )
+    trigger_type: str = Field(default="unknown", description="Signal trigger type")
+    entry_type: str = Field(default="unknown", description="initial / add / reduce / hold / event / unknown")
+    invalidation_level: Optional[float] = Field(default=None, description="Price level invalidating the signal")
+    atr_stop_distance: Optional[float] = Field(default=None, description="ATR-based stop distance when available")
+    add_allowed: bool = Field(default=False, description="Whether this signal permits adding to an existing position")
+    direction_anchor: str = Field(default="unknown", description="Medium-horizon directional anchor")
+    supply_demand_state: str = Field(default="unknown", description="Supply-demand state")
+    basis_state: str = Field(default="unknown", description="Basis or spot-futures state")
+    inventory_state: str = Field(default="unknown", description="Inventory state")
+    warehouse_receipt_state: str = Field(default="unknown", description="Warehouse receipt state")
+    position_flow_state: str = Field(default="unknown", description="Position or capital-flow state")
+    data_freshness: str = Field(default="unknown", description="fresh / near_stale / stale / missing / unknown")
+    event_type: str = Field(default="none", description="News event type")
+    impact_window_days: int = Field(default=0, description="Expected event impact window in trading days")
+    requires_fundamental_confirmation: bool = Field(
+        default=False,
+        description="Whether this signal must be confirmed by fundamental evidence before scaling",
+    )
+    evidence_quality: str = Field(default="unknown", description="high / medium / low / unknown")
+    business_quality_score: float = Field(default=0.0, description="Business-quality score from 0.0 to 1.0")
+    primary_business_driver: str = Field(default="", description="Primary business driver behind the signal")
+    secondary_confirmation: str = Field(default="", description="Secondary confirmation chain")
+    counter_evidence: str = Field(default="", description="Main evidence that could invalidate the signal")
+    reward_risk_ratio: Optional[float] = Field(default=None, description="Expected reward/risk ratio")
+    factor_alignment_score: float = Field(default=0.0, description="How well factors align with the signal")
+    data_coverage_score: float = Field(default=0.0, description="Data coverage score from 0.0 to 1.0")
+    tradeability_reason: str = Field(default="", description="Why this signal is or is not tradeable")
+    neutral_reason: str = Field(default="", description="Required reason when signal is Neutral")
+    missing_evidence: List[str] = Field(default_factory=list, description="Evidence missing for a directional call")
+    conflicting_factors: List[str] = Field(default_factory=list, description="Factors that conflict with the signal")
+    would_change_view_if: str = Field(default="", description="Condition that would change Neutral or directional view")
+    opportunity_cost_risk: str = Field(default="", description="Risk of missing a trade by staying Neutral")
+    recommended_observation_window: str = Field(default="", description="Suggested observation window for Neutral")
+    accountability_tag: str = Field(default="", description="Post-trade accountability label")
+    similar_past_cases: List[str] = Field(default_factory=list, description="Reviewer-provided similar past cases")
+    do_not_trade_reason: str = Field(default="", description="Reviewer/business reason to avoid trading")
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Structured audit metadata, e.g. basis and data-quality diagnostics",
@@ -26,6 +87,113 @@ class AnalystSignal(BaseModel):
     def normalize_metadata(cls, value):
         """Treat model-emitted null metadata as an empty audit dictionary."""
         return {} if value is None else value
+
+    @field_validator(
+        "source_artifacts",
+        "validation_errors",
+        "missing_evidence",
+        "conflicting_factors",
+        "similar_past_cases",
+        mode="before",
+    )
+    @classmethod
+    def normalize_list_fields(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        try:
+            return list(value)
+        except Exception:
+            return [str(value)]
+
+    @field_validator(
+        "contract_version",
+        "data_cutoff",
+        "no_lookahead_status",
+        "determinism_mode",
+        "llm_provider",
+        "llm_model",
+        "horizon_class",
+        "analyst_horizon",
+        "decision_horizon",
+        "execution_horizon",
+        "validation_horizon",
+        "market_regime",
+        "trend_stage",
+        "template_name",
+        "trigger_type",
+        "entry_type",
+        "direction_anchor",
+        "supply_demand_state",
+        "basis_state",
+        "inventory_state",
+        "warehouse_receipt_state",
+        "position_flow_state",
+        "data_freshness",
+        "event_type",
+        "evidence_quality",
+        "primary_business_driver",
+        "secondary_confirmation",
+        "counter_evidence",
+        "tradeability_reason",
+        "neutral_reason",
+        "would_change_view_if",
+        "opportunity_cost_risk",
+        "recommended_observation_window",
+        "accountability_tag",
+        "do_not_trade_reason",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text_fields(cls, value):
+        return "unknown" if value is None or str(value).strip() == "" else str(value)
+
+    @field_validator("expected_horizon_days", "horizon_days", "impact_window_days", mode="before")
+    @classmethod
+    def normalize_horizon_days(cls, value):
+        try:
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    @field_validator("confidence", "business_quality_score", "factor_alignment_score", "data_coverage_score", mode="before")
+    @classmethod
+    def normalize_score_fields(cls, value):
+        try:
+            score = float(value if value is not None else 0.0)
+        except Exception:
+            score = 0.0
+        return max(0.0, min(1.0, score))
+
+
+class ArtifactHeader(BaseModel):
+    """Shared audit header for local A2A-inspired agent artifacts."""
+
+    contract_version: str = Field(default="agentquant.artifact.v1")
+    agent_name: str = Field(default="")
+    trading_date: str = Field(default="")
+    ticker: str = Field(default="")
+    config_id: str = Field(default="")
+    recommendation_id: Optional[str] = Field(default=None)
+    evidence_pack_id: Optional[str] = Field(default=None)
+    data_cutoff: str = Field(default="pre_open")
+    no_lookahead_status: str = Field(default="unchecked")
+    determinism_mode: str = Field(default="deterministic")
+    llm_provider: str = Field(default="")
+    llm_model: str = Field(default="")
+    source_artifacts: List[str] = Field(default_factory=list)
+    validation_errors: List[str] = Field(default_factory=list)
+
+
+class AgentArtifact(BaseModel):
+    """Minimal structured artifact wrapper used by contract tests and snapshots."""
+
+    artifact_type: str = Field(default="generic")
+    header: ArtifactHeader = Field(default_factory=ArtifactHeader)
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FuturesAction(str, Enum):
@@ -238,5 +406,3 @@ class FundState(TypedDict):
     analyst_signals: Annotated[List[AnalystSignal], operator.add]
     decision: FuturesDecision
     recommendation: Optional[FuturesRecommendation]
-    deepanalyze_market_state: Optional[Dict[str, Any]]
-    deepanalyze_fundamental_trends: Optional[Dict[str, Any]]

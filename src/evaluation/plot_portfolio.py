@@ -282,35 +282,98 @@ class PortfolioCurvePlotter:
         drawdown = (net_value - cumulative_max) / cumulative_max
         max_drawdown = drawdown.min() * 100
 
-        # Calculate settlement win rate, excluding zero P&L days.
-        winning_days = (daily_pnl > 0).sum()
-        losing_days = (daily_pnl < 0).sum()
-        pnl_days = winning_days + losing_days
-        win_rate = (winning_days / pnl_days * 100) if pnl_days > 0 else 0
+        # Calculate trade win rate from transaction pairs
+        config_id = self.get_config_id()
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(futures_transactions)")
+        tx_columns = {row[1] for row in cursor.fetchall()}
+        source_expr = "source_type" if "source_type" in tx_columns else "'strategy' AS source_type"
+        cursor.execute(
+            f'''
+            SELECT ticker, action, lots, execution_price, price, contract_multiplier, commission, {source_expr}
+            FROM futures_transactions
+            WHERE config_id = ? AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
+            ORDER BY trading_date ASC, created_at ASC
+            ''',
+            (config_id,),
+        )
+        transactions = cursor.fetchall()
+        open_positions = {}
+        winning_trades = 0
+        losing_trades = 0
+        total_trades = 0
+        for tx in transactions:
+            action = tx['action']
+            lots = int(tx['lots'] or 0)
+            if lots == 0:
+                continue
+            ticker = tx['ticker'] if 'ticker' in tx.keys() else ''
+            key = (ticker, 'long' if 'long' in action else 'short')
+            if action in ('open_long', 'open_short'):
+                if key not in open_positions:
+                    open_positions[key] = []
+                open_positions[key].append({
+                    'lots': lots,
+                    'price': float(tx['execution_price'] or tx['price'] or 0),
+                    'multiplier': float(tx['contract_multiplier'] or 1),
+                    'commission': float(tx['commission'] or 0) / lots,
+                })
+            elif action in ('close_long', 'close_short') and key in open_positions:
+                close_price = float(tx['execution_price'] or tx['price'] or 0)
+                multiplier = float(tx['contract_multiplier'] or 1)
+                close_comm = float(tx['commission'] or 0) / lots
+                remaining = lots
+                while remaining > 0 and open_positions[key]:
+                    entry = open_positions[key][0]
+                    matched = min(remaining, entry['lots'])
+                    direction = 1 if 'long' in action else -1
+                    pnl = direction * (close_price - entry['price']) * multiplier * matched
+                    comm = (entry['commission'] + close_comm) * matched
+                    net = pnl - comm
+                    total_trades += 1
+                    if net > 0:
+                        winning_trades += 1
+                    elif net < 0:
+                        losing_trades += 1
+                    entry['lots'] -= matched
+                    remaining -= matched
+                    if entry['lots'] <= 0:
+                        open_positions[key].pop(0)
+        trade_win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
 
-        # Calculate Sharpe ratio using the same settlement-day annualization
-        # basis as evaluation.evaluate_config for futures.
+        # Calculate Sharpe ratio using margin-based returns (same as evaluation.py)
         if len(account_equity) > 1:
             import numpy as np
-            returns = []
-            for i in range(1, len(account_equity)):
-                daily_return = (account_equity.iloc[i] - account_equity.iloc[i-1]) / account_equity.iloc[i-1]
-                returns.append(daily_return)
 
-            annualization_days = len(dates)
-            total_return_decimal = final_net_value - 1
-            annualized_return = (
-                (1 + total_return_decimal) ** (252.0 / annualization_days) - 1
-                if annualization_days > 0 and total_return_decimal > -1
+            # Use margin-based returns for futures volatility
+            margin_returns = []
+            for i in range(1, len(self.settlement_data)):
+                margin = self.settlement_data['current_margin'].iloc[i - 1]
+                if margin and margin > 0:
+                    pnl = self.settlement_data['daily_pnl'].iloc[i] or 0
+                    margin_returns.append(pnl / margin)
+
+            volatility = np.std(margin_returns) * np.sqrt(252) if margin_returns else 0
+            total_margin_return = sum(margin_returns)
+            annualization_days = len(margin_returns) if margin_returns else len(dates)
+            margin_annualized_return = (
+                (1 + total_margin_return) ** (252.0 / annualization_days) - 1
+                if annualization_days > 0 and total_margin_return > -1
                 else 0
             )
-            volatility = np.std(returns) * np.sqrt(252) if returns else 0
+            # Display annualized return stays account equity based
+            display_annualized_return = (
+                (1 + (final_net_value - 1)) ** (252.0 / len(dates)) - 1
+                if len(dates) > 0 and (final_net_value - 1) > -1
+                else 0
+            )
 
             risk_free_rate = 0.03
-            sharpe_ratio = (annualized_return - risk_free_rate) / volatility if volatility > 0 else 0
+            sharpe_ratio = (margin_annualized_return - risk_free_rate) / volatility if volatility > 0 else 0
         else:
             annualization_days = len(dates)
-            annualized_return = 0
+            display_annualized_return = 0
             volatility = 0
             sharpe_ratio = 0
 
@@ -350,11 +413,11 @@ class PortfolioCurvePlotter:
         # Add performance metrics text box
         metrics_text = (
             f"总收益: {total_return:+.2f}%\n"
-            f"年化收益: {annualized_return * 100:.2f}%\n"
+            f"年化收益: {display_annualized_return * 100:.2f}%\n"
             f"最大回撤: {max_drawdown:.2f}%\n"
-            f"夏普比率: {sharpe_ratio:.2f}\n"
-            f"波动率: {volatility * 100:.2f}%\n"
-            f"日结算胜率: {win_rate:.1f}% ({winning_days}/{pnl_days})\n"
+            f"夏普比率(保证金基准): {sharpe_ratio:.2f}\n"
+            f"波动率(保证金基准): {volatility * 100:.2f}%\n"
+            f"交易胜率: {trade_win_rate:.1f}% ({winning_trades}/{total_trades})\n"
             f"结算交易日: {len(dates)}"
         )
         props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)

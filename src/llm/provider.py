@@ -20,6 +20,7 @@ class ModelConfig:
 class Provider(str, Enum):
     """Supported LLM providers"""
     OPENAI = "OpenAI"
+    CODEX_OPENAI = "CodexOpenAI"
     ANTHROPIC = "Anthropic"
     DEEPSEEK = "DeepSeek"
     ALIBABA = "Alibaba"
@@ -37,6 +38,12 @@ class Provider(str, Enum):
             Provider.OPENAI: ModelConfig(
                 model_class=ChatOpenAI,
                 env_key="OPENAI_API_KEY",
+            ),
+            Provider.CODEX_OPENAI: ModelConfig(
+                model_class=ChatOpenAI,
+                base_url="http://47.245.121.52/v1",
+                env_key="CODEX_OPENAI_API_KEY",
+                structured_output_method="json_mode",
             ),
             Provider.ANTHROPIC: ModelConfig(
                 model_class=ChatAnthropic,

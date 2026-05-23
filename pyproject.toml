@@ -20,6 +20,6 @@ dependencies = [
   "langchain-ollama",
   "langchain-fireworks",
   "uqer",
-  "panda-data==0.0.4",
+  "panda-data==0.0.7",
   "matplotlib",
 ]

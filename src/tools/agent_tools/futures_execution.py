@@ -28,6 +28,7 @@ from util.futures_audit import (
     calculate_margin_audit,
     ensure_execution_translation,
     ensure_signal_snapshot,
+    extract_signal_lifecycle,
     infer_no_trade_reason,
     set_execution_result,
 )
@@ -40,7 +41,7 @@ class FuturesExecutionEngine:
     def __init__(self, config: Dict[str, Any], db):
         self.config = config
         self.db = db
-        self.router = Router(APISource.PANDAAI, market_type="china_futures")
+        self.router = Router(APISource.PANDAAI, market_type="china_futures", config=config)
         self.execution_config = config.get("execution", {})
 
     def execute_pending_rollovers(self, config_id: str, trading_date, portfolio, execution_phase: TradingPhase):
@@ -80,6 +81,9 @@ class FuturesExecutionEngine:
         recommendation_dict = self._to_dict(recommendation)
         recommendation_dict["id"] = recommendation_id
         snapshot = ensure_signal_snapshot(recommendation_dict.get("signal_snapshot"))
+        signal_lifecycle = extract_signal_lifecycle(snapshot)
+        if signal_lifecycle:
+            ensure_execution_translation(snapshot)["signal_lifecycle"] = signal_lifecycle
         action_value = self._enum_value(recommendation_dict.get("action"))
         warning_message = recommendation_dict.get("warning_message")
 
@@ -256,6 +260,9 @@ class FuturesExecutionEngine:
             "slippage_model": transaction.get("slippage_model") or self.execution_config.get("slippage_model", "tick"),
             "slippage_ticks": transaction.get("slippage_ticks"),
             "slippage_amount": transaction.get("slippage_amount"),
+            "signal_lifecycle": extract_signal_lifecycle(
+                recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
+            ),
         }
 
     def _expand_rollover_recommendation(

@@ -78,6 +78,7 @@ class PandaAIAPI:
         self._quote_cache: dict[tuple, list[dict[str, Any]]] = {}
         self._minute_cache: dict[tuple, list[dict[str, Any]]] = {}
         self._extra_cache: dict[tuple, list[dict[str, Any]]] = {}
+        self._extra_diagnostics_cache: dict[tuple, dict[str, Any]] = {}
         self._exchange_suffix_cache: dict[str, str] = {}
         self._min_request_interval_seconds = self._env_float("PANDAAI_MIN_REQUEST_INTERVAL_SECONDS", 1.1)
         self._retry_attempts = self._env_int("PANDAAI_RETRY_ATTEMPTS", 5)
@@ -243,6 +244,10 @@ class PandaAIAPI:
         return list(exact_rows)
 
     def _query_extra_data(self, method_name: str, **kwargs) -> list[dict[str, Any]]:
+        result = self._query_extra_data_with_diagnostic(method_name, **kwargs)
+        return list(result["records"])
+
+    def _query_extra_data_with_diagnostic(self, method_name: str, **kwargs) -> dict[str, Any]:
         normalized_kwargs = tuple(
             sorted(
                 (key, tuple(value) if isinstance(value, list) else value)
@@ -251,31 +256,83 @@ class PandaAIAPI:
         )
         cache_key = (method_name, normalized_kwargs)
         if cache_key in self._extra_cache:
-            return list(self._extra_cache[cache_key])
+            diagnostic = dict(self._extra_diagnostics_cache.get(cache_key, {}))
+            diagnostic["records"] = list(self._extra_cache[cache_key])
+            return diagnostic
 
         self._ensure_token()
         method = getattr(self._panda_data, method_name, None)
         if method is None:
             logger.warning(f"PandaAI extra data method is unavailable: {method_name}")
             self._extra_cache[cache_key] = []
-            return []
+            diagnostic = {
+                "records": [],
+                "status": "unsupported_feature",
+                "reason": "sdk_method_unavailable",
+                "error": f"PandaAI SDK method is unavailable: {method_name}",
+                "method": method_name,
+                "params": dict(kwargs),
+            }
+            self._extra_diagnostics_cache[cache_key] = diagnostic
+            return dict(diagnostic)
 
         try:
             response = self._call_pandaai(method_name, **kwargs)
             records = self._records_from_response(response)
+            status = "ok" if records else "no_data"
+            reason = None if records else "empty_response"
             logger.info(
                 "PandaAI futures extra data loaded | "
                 f"provider=PandaAI | method={method_name} | rows={len(records)} | params={kwargs}"
             )
             self._extra_cache[cache_key] = records
-            return list(records)
+            diagnostic = {
+                "records": list(records),
+                "status": status,
+                "reason": reason,
+                "error": None,
+                "method": method_name,
+                "params": dict(kwargs),
+                "row_count": len(records),
+            }
+            self._extra_diagnostics_cache[cache_key] = diagnostic
+            return dict(diagnostic)
         except Exception as exc:
+            status, reason = self._classify_extra_data_error(exc)
             logger.warning(
                 "PandaAI futures extra data skipped | "
-                f"provider=PandaAI | method={method_name} | params={kwargs} | error={exc}"
+                f"provider=PandaAI | method={method_name} | status={status} | "
+                f"reason={reason} | params={kwargs} | error={exc}"
             )
             self._extra_cache[cache_key] = []
-            return []
+            diagnostic = {
+                "records": [],
+                "status": status,
+                "reason": reason,
+                "error": str(exc),
+                "method": method_name,
+                "params": dict(kwargs),
+                "row_count": 0,
+            }
+            self._extra_diagnostics_cache[cache_key] = diagnostic
+            return dict(diagnostic)
+
+    def _classify_extra_data_error(self, exc: Exception) -> tuple[str, str]:
+        message = str(exc)
+        lowered = message.lower()
+        if "参数不能为空" in message or "required" in lowered or "missing" in lowered:
+            return "parameter_error", "required_parameter_missing"
+        if "unsupported" in lowered or "not support" in lowered or "不支持" in message:
+            return "unsupported_feature", "provider_or_symbol_not_supported"
+        if "permission" in lowered or "unauthorized" in lowered or "无权限" in message:
+            return "permission_error", "account_permission_denied"
+        if "403" in message or "forbidden" in lowered:
+            return "permission_error", "http_403_or_icp_block"
+        if "network" in lowered or "timed out" in lowered or "timeout" in lowered:
+            return "provider_error", "network_or_timeout"
+        if self._is_rate_limit_error(exc):
+            return "provider_error", "rate_limited"
+        return "provider_error", "provider_exception"
 
     def _coerce_record(self, row: Any) -> dict[str, Any]:
         if row is None:
@@ -587,8 +644,13 @@ class PandaAIAPI:
             snapshot["errors"].append(f"contract_symbol: {exc}")
 
         def store(feature_key: str, method_name: str, **kwargs) -> None:
-            rows = self._query_extra_data(method_name, **kwargs)
+            diagnostic = self._query_extra_data_with_diagnostic(method_name, **kwargs)
+            rows = diagnostic.pop("records", [])
             snapshot["records"][feature_key] = rows
+            snapshot.setdefault("feature_status", {})[feature_key] = diagnostic.get("status", "unknown")
+            snapshot.setdefault("feature_diagnostics", {})[feature_key] = diagnostic
+            if diagnostic.get("error"):
+                snapshot["errors"].append(f"{feature_key}: {diagnostic.get('error')}")
 
         if features.get("basis", False):
             store(
@@ -728,15 +790,32 @@ class PandaAIAPI:
             store(
                 "contract_rank",
                 "get_future_contract_rank",
-                symbol=[contract_symbol],
+                symbol="",
+                underlying_symbol=[underlying],
                 start_date=start_key,
                 end_date=end_key,
+                max_rank=10,
+                type="",
+                rank_type="ratio",
             )
 
         snapshot["contract_symbol"] = contract_symbol
         snapshot["record_counts"] = {
             key: len(value) for key, value in snapshot["records"].items()
         }
+        status = snapshot.setdefault("feature_status", {})
+        diagnostics = snapshot.setdefault("feature_diagnostics", {})
+        for key, count in snapshot["record_counts"].items():
+            if key not in status:
+                status[key] = "ok" if count > 0 else "no_data"
+            diagnostics.setdefault(
+                key,
+                {
+                    "status": status[key],
+                    "reason": None if count > 0 else "empty_response",
+                    "row_count": count,
+                },
+            )
         return snapshot
 
     def _prepare_historical_records(

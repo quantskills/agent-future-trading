@@ -237,7 +237,11 @@ class SupabaseDB(BaseDB):
                 'llm_prompt': prompt,
                 'analyst': analyst,
                 'signal': str(signal.signal),
-                'justification': signal.justification
+                'justification': signal.justification,
+                'artifact_json': signal.model_dump() if hasattr(signal, "model_dump") else {},
+                'business_quality_score': float(getattr(signal, "business_quality_score", 0.0) or 0.0),
+                'horizon_class': str(getattr(signal, "horizon_class", "unknown") or "unknown"),
+                'template_name': str(getattr(signal, "template_name", "unknown") or "unknown"),
             }
             
             response = self.client.table('signal').insert(data).execute()

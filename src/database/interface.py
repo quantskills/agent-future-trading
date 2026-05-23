@@ -214,3 +214,15 @@ class BaseDB(ABC):
     ) -> Dict[str, Any]:
         """Get DB-backed strategy memory for ticker + side + optional signal combo."""
         raise NotImplementedError
+
+    def get_provisional_policy_state(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        signal_template: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        trading_date=None,
+    ) -> List[Dict[str, Any]]:
+        """Get short-lived reviewer risk sentinels."""
+        raise NotImplementedError

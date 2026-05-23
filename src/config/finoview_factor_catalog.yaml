@@ -1,0 +1,515 @@
+version: 1
+description: >
+  本文件是本地 Finoview feather 字段的业务含义映射表。运行时仍会自动扫描
+  feather schema，但关键字段的 ticker、factor_group、频率和滞后天数由这里显式固定，
+  避免让 LLM 或文件名猜测交易含义。
+
+# 第一优先级先覆盖上轮回测中已有正贡献或强模板的品种。
+priority_tickers:
+  trading_universe: [BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN]
+  phase1_alpha_core: [I, BU, EB, J, SR]
+  phase2_weak_or_disputed: [P, ZN, PB, M, C, RB, MA]
+
+# 可交易基本面快照至少要尽量覆盖这些因子组。
+required_groups:
+  - price_basis
+  - inventory
+  - supply
+  - demand
+  - cost_profit
+  - import_export
+
+# 辅助产业链字段 -> 交易品种。比如 cs 是玉米淀粉、jm 是焦煤、bz 是纯苯，
+# 它们不是本轮直接交易品种，但会作为对应主力合约的上下游因子进入分析。
+ticker_overrides:
+  a_arrivals: M
+  a_port_stock: M
+  a_spot_price_tianjin: M
+  a_squeeze_profit: M
+  a_squeeze_volume: M
+  cs_factory_stock: C
+  cs_operate_rate: C
+  cs_processing_volume: C
+  cs_profit_heilongjiang: C
+  cs_profit_shandong: C
+  cs_shipment: C
+  cs_spot_price: C
+  bz_capacity_utilization_rate: EB
+  bz_eb_demand: EB
+  bz_port_stock: EB
+  bz_profit: EB
+  abs_operate_rate: EB
+  abs_profit: EB
+  abs_stock: EB
+  abs_yield: EB
+  eps_factory_stock: EB
+  eps_operate_rate: EB
+  eps_profit: EB
+  eps_yield: EB
+  pe_operate_rate: EB
+  ps_factory_stock: EB
+  ps_operate_rate: EB
+  ps_profit: EB
+  ps_yield: EB
+  iron_factory_operate_rate: I
+  iron_factory_profit_rate: I
+  iron_operate_rate: I
+  iron_yield: I
+  jm_factory_stock: J
+  jm_futures_close_price: J
+  jm_independent_factory_stock: J
+  jm_jk_volume: J
+  jm_operate_rate_shanxi: J
+  jm_operate_rate_washing_plant: J
+  jm_port_spot_price_hebei: J
+  jm_port_stock_zhanjiang: J
+  jm_spot_price: J
+  jm_spot_price_canada: J
+  jm_spot_price_meng: J
+  jm_steel_factory_stock: J
+  jm_steel_factory_stock_days: J
+  jm_yield: J
+  oi_factory_stock: M
+  oi_spot_price: M
+  oi_stock: M
+  oi_yield: M
+  rm_factory_stock: M
+  rm_spot_price: M
+  rm_spot_price_zhengzhou: M
+  y_factory_stock: M
+  y_is_ratio: M
+  y_spot_price: M
+  y_trade_volume: M
+  y_usa_stock_end: M
+  y_yield: M
+  land_trade_volume: RB
+  house_trade_volume: RB
+  px_operate_rate: TA
+  px_yield: TA
+  weather_indianocean_index: P
+  "weather_ON 3.4": P
+
+# 字段名 -> 业务因子组。无法确定含义的字段不要写入这里，
+# 运行时会保留为 unknown_factor，不能参与 protected 升级和大仓位方向锚。
+factor_group_overrides:
+  i_arrivals: import_export
+  i_arrivals_port: import_export
+  i_expected_arrivals_7d: import_export
+  i_expected_arrivals_14d: import_export
+  i_departures: import_export
+  i_departures_australia: import_export
+  i_departures_brazil: import_export
+  i_departures_rio_tinto_to_china: import_export
+  i_non_arrivals: import_export
+  i_outturn_volume: import_export
+  i_port_stock: inventory
+  i_jk_factory_stock: inventory
+  i_gc_factory_stock: inventory
+  i_spot_price: price_basis
+  i_port_spot_price: price_basis
+  i_future_close_price: price_basis
+  i_pb_discounted_warehouse_price: price_basis
+  i_trade_volume: demand
+  i_jk_demand: demand
+  i_gc_demand: demand
+  i_jk_total_demand: demand
+  i_capacity_utilization_rate: supply
+  i_yield: supply
+  i_jk_volume: import_export
+  i_jk_volume_days: import_export
+  i_jk_is_ratio: import_export
+
+  bu_demand: demand
+  bu_shipment: demand
+  bu_factory_stock: inventory
+  bu_refinery_stock: inventory
+  bu_social_stock: inventory
+  bu_social_stock_company: inventory
+  bu_spot_price: price_basis
+  bu_spot_price_shandong: price_basis
+  bu_future_close_price: price_basis
+  bu_future_stock: inventory
+  bu_operate_rate_shandong: supply
+  bu_yield: supply
+  bu_profit_shandong: cost_profit
+
+  eb_factory_stock: inventory
+  eb_port_stock: inventory
+  eb_port_stock_hn: inventory
+  eb_spot_price: price_basis
+  eb_spot_price_hb: price_basis
+  eb_spot_price_hd: price_basis
+  eb_future_close_price: price_basis
+  eb_capacity_utilization_rate: supply
+  eb_operate_rate: supply
+  eb_yield: supply
+  eb_weekly_yield: supply
+  eb_downstream_operate_rate: demand
+  eb_jk_volume: import_export
+  eb_equipment_profit_unit: cost_profit
+  eb_equipment_profit_nonunit: cost_profit
+  eb_bz_spread: cost_profit
+
+  j_factory_stock: inventory
+  j_port_stock: inventory
+  j_steel_factory_stock: inventory
+  j_steel_factory_stock_days: inventory
+  j_spot_price_rizhao: price_basis
+  j_spot_price_tianjin: price_basis
+  j_capacity_utilization_rate: supply
+  j_yield: supply
+  j_profit: cost_profit
+  j_jm_freight_fee: cost_profit
+
+  sr_spot_price: price_basis
+  sr_spot_price_kunming: price_basis
+  sr_spot_price_liuzhou: price_basis
+  sr_spot_price_nanning: price_basis
+  sr_future_close_price: price_basis
+  sr_trade_volume: demand
+  sr_domestic_sales_rate: demand
+  sr_yield: supply
+  sr_jk_volume_brazil: import_export
+  sr_jk_volume_total: import_export
+  sr_jk_profit_quota_brazil: cost_profit
+  sr_jk_profit_non_quota_brazil: cost_profit
+  sr_jk_profit_quota_thailand: cost_profit
+  sr_jk_profit_non_quota_thailand: cost_profit
+  sr_profit_brazil: cost_profit
+  sr_profit_thailand: cost_profit
+  sr_freight_fee_brazil: import_export
+  sr_freight_fee_thailand: import_export
+
+  # C 玉米及玉米淀粉辅助因子
+  c_spot_price: price_basis
+  c_future_close_price: price_basis
+  c_barley_spot_price: price_basis
+  c_sorghum_spot_price: price_basis
+  c_trade_profit: cost_profit
+  c_jk_profit: cost_profit
+  c_jk_profit_quota: cost_profit
+  c_alcohol_profit: cost_profit
+  c_sales_progress: demand
+  c_processing_demand: demand
+  c_feed_yield: demand
+  c_port_stock: inventory
+  c_processing_stock: inventory
+  c_feed_stock_days: inventory
+  c_alcohol_operate_rate: supply
+  c_sow_operate_rate_usa: supply
+  c_sow_process_brazil: supply
+  c_yield_rate_usa: supply
+  c_good_yield_rate_usa: supply
+  c_drought_rate_usa: macro_policy
+  c_jk_volume: import_export
+  c_ck_volume_usa: import_export
+  c_trade_volume_usa: import_export
+  c_undelivered_volume_usa: import_export
+  cs_spot_price: price_basis
+  cs_factory_stock: inventory
+  cs_processing_volume: demand
+  cs_shipment: demand
+  cs_operate_rate: supply
+  cs_profit_heilongjiang: cost_profit
+  cs_profit_shandong: cost_profit
+
+  # CF 棉花及纺织链因子
+  cf_spot_price: price_basis
+  cf_spot_price_index: price_basis
+  cf_jk_price_index: price_basis
+  cf_sx_spot_price_index: price_basis
+  cf_spread: cost_profit
+  cf_profit: cost_profit
+  cf_processing_profit: cost_profit
+  cf_freight_fee: cost_profit
+  cf_b_stock: inventory
+  cf_i_stock: inventory
+  cf_is_ratio: inventory
+  cf_port_stock: inventory
+  cf_textile_ms_stock: inventory
+  cf_textile_stock: inventory
+  cf_sx_stock_index: inventory
+  cf_trade_volume: demand
+  cf_market_trade_volume: demand
+  cf_textile_operate_rate: demand
+  cf_textile_order_days: demand
+  cf_pb_operate_rate: demand
+  cf_sx_operate_rate: demand
+  cf_india_operate_rate: demand
+  cf_processing_rate: supply
+  cf_sales_rate: demand
+  cf_sow_process: supply
+  cf_yield_rate: supply
+  cf_good_yield_rate_usa: supply
+  cf_bad_yield_rate_usa: supply
+  cf_inspect_volume: supply
+  cf_departures: import_export
+  cf_ck_volume_usa: import_export
+  cf_ck_volume_usa_to_china: import_export
+  cf_undelivered_volume_usa: import_export
+  cf_jk_volume: import_export
+  cf_textile_PMI: macro_policy
+
+  # EB 苯乙烯及上游纯苯、下游 ABS/EPS/PS 链条
+  eb_ck_volume: import_export
+  bz_capacity_utilization_rate: supply
+  bz_port_stock: inventory
+  bz_profit: cost_profit
+  bz_eb_demand: demand
+  abs_operate_rate: supply
+  abs_stock: inventory
+  abs_yield: supply
+  abs_profit: cost_profit
+  eps_factory_stock: inventory
+  eps_operate_rate: supply
+  eps_yield: supply
+  eps_profit: cost_profit
+  pe_operate_rate: supply
+  ps_factory_stock: inventory
+  ps_operate_rate: supply
+  ps_yield: supply
+  ps_profit: cost_profit
+
+  # HC 热卷
+  hc_spot_price: price_basis
+  hc_social_stock: inventory
+  hc_factory_stock: inventory
+  hc_trade_volume: demand
+  hc_capacity_utilization_rate: supply
+  hc_operate_rate: supply
+  hc_yield: supply
+  hc_profit: cost_profit
+
+  # J 焦炭及焦煤辅助因子
+  jm_spot_price: price_basis
+  jm_futures_close_price: price_basis
+  jm_port_spot_price_hebei: price_basis
+  jm_spot_price_canada: price_basis
+  jm_spot_price_meng: price_basis
+  jm_factory_stock: inventory
+  jm_independent_factory_stock: inventory
+  jm_port_stock_zhanjiang: inventory
+  jm_steel_factory_stock: inventory
+  jm_steel_factory_stock_days: inventory
+  jm_operate_rate_shanxi: supply
+  jm_operate_rate_washing_plant: supply
+  jm_yield: supply
+  jm_jk_volume: import_export
+  iron_factory_operate_rate: supply
+  iron_operate_rate: supply
+  iron_yield: supply
+  iron_factory_profit_rate: cost_profit
+
+  # M 豆粕及大豆、豆油、菜粕辅助因子
+  m_spot_price: price_basis
+  m_spread: cost_profit
+  m_factory_stock: inventory
+  m_factory_stock_days: inventory
+  m_contract_volume: demand
+  m_spot_trade_volume: demand
+  m_trade_volume: demand
+  m_feed_yield: demand
+  m_shipment: demand
+  m_yield: supply
+  m_yield_usa: supply
+  m_yield_brazil: supply
+  m_yield_argentina: supply
+  m_stock_end_usa: inventory
+  m_ck_volume_usa: import_export
+  m_ck_volume_argentina: import_export
+  m_trade_volume_usa: import_export
+  m_undelivered_volume_usa: import_export
+  a_spot_price_tianjin: price_basis
+  a_arrivals: import_export
+  a_port_stock: inventory
+  a_squeeze_volume: demand
+  a_squeeze_profit: cost_profit
+  y_spot_price: price_basis
+  y_factory_stock: inventory
+  y_is_ratio: inventory
+  y_trade_volume: demand
+  y_usa_stock_end: inventory
+  y_yield: supply
+  oi_spot_price: price_basis
+  oi_factory_stock: inventory
+  oi_stock: inventory
+  oi_yield: supply
+  rm_spot_price: price_basis
+  rm_spot_price_zhengzhou: price_basis
+  rm_factory_stock: inventory
+
+  # MA 甲醇及下游链条
+  ma_spot_price: price_basis
+  ma_spot_price_paper: price_basis
+  ma_ps_ratio: price_basis
+  ma_factory_stock: inventory
+  ma_factory_stock_days: inventory
+  ma_port_stock: inventory
+  ma_social_stock: inventory
+  ma_warehouse: inventory
+  ma_downstream_operate_rate: demand
+  ma_aacid_downstream_operate_rate: demand
+  ma_dme_downstream_operate_rate: demand
+  ma_olefin_downstream_operate_rate: demand
+  ma_olefin_purchase_volume: demand
+  ma__mtbe_downstream_operate_rate: demand
+  ma_operate_rate: supply
+  ma_olefin_operate_rate: supply
+  ma_yield: supply
+  ma_arrivals: import_export
+  ma_jk_volume_hd: import_export
+  ma_profit: cost_profit
+  ma_profit_hebei: cost_profit
+  ma_c_cost_shandong: cost_profit
+  ma_c_profit_shandong: cost_profit
+  ma_aacid_downstream_profit: cost_profit
+  ma_mtbe_downstream_profit: cost_profit
+  ma_olefin_downstream_profit: cost_profit
+  ma_pp_downstream_profit: cost_profit
+  ma_py_downstream_profit: cost_profit
+
+  # P 棕榈油及马来/印尼高频出口库存链条
+  p_spot_price: price_basis
+  p_port_spot_price: price_basis
+  p_spot_price_fob: price_basis
+  p_future_close_price: price_basis
+  p_b_stock: inventory
+  p_stock_malaysia: inventory
+  p_stock_indonesia: inventory
+  p_arrivals: import_export
+  p_jk_volume: import_export
+  p_ck_volume_malaysia: import_export
+  p_ck_volume_indonesia: import_export
+  p_hf_ck_volume_malaysia_its: import_export
+  p_hf_ck_volume_malaysia_sgs: import_export
+  p_ship_trade_volume: import_export
+  p_trade_volume: demand
+  p_yield_malaysia: supply
+  p_yield_indonesia: supply
+  p_oer_malaysia: cost_profit
+  p_jk_profit: cost_profit
+  p_jk_cost: cost_profit
+  weather_indianocean_index: macro_policy
+  "weather_ON 3.4": macro_policy
+
+  # PB 铅及再生铅链条
+  pb_spot_price: price_basis
+  pb_ingot_spot_price: price_basis
+  pb_ingot_stock: inventory
+  pb_lme_stock: inventory
+  pb_shfe_stock: inventory
+  pb_social_stock: inventory
+  pb_SMM_stock: inventory
+  pb_recycle_stock: inventory
+  pb_SMM_recycle_stock_days: inventory
+  pb_primary_operate_rate: supply
+  pb_recycle_operate_rate: supply
+  pb_smm_recycle_operate_rate: supply
+  pb_smm_battery_operate_rate: demand
+  pb_smm_battery_operate_rate_starting_type: demand
+  pb_battery_operate_rate: demand
+  pb_yield: supply
+  pb_electric_yield: supply
+  pb_refine_yield: supply
+  pb_recycle_yield: supply
+  pb_processing_fee: cost_profit
+  pb_processing_fee_tc: cost_profit
+  pb_profit_reflective_furnace: cost_profit
+  pb_bike_scrap_battery_spot_price: cost_profit
+  pb_car_scrap_battery_spot_price: cost_profit
+
+  # RB 螺纹钢及地产成交辅助因子
+  rb_spot_price: price_basis
+  rb_20mm_spot_price: price_basis
+  rb_billet_spot_price: price_basis
+  rb_scrap_spot_price: cost_profit
+  rb_social_stock: inventory
+  rb_factory_stock: inventory
+  rb_long_processing_factory_stock: inventory
+  rb_short_processing_factory_stock: inventory
+  rb_demand: demand
+  rb_trade_volume: demand
+  land_trade_volume: demand
+  house_trade_volume: demand
+  rb_operate_rate: supply
+  rb_long_processing_operate_rate: supply
+  rb_short_processing_operate_rate: supply
+  rb_long_processing_capacity_utilization_rate: supply
+  rb_short_processing_capacity_utilization_rate: supply
+  rb_yield: supply
+  rb_long_processing_yield: supply
+  rb_short_processing_yield: supply
+  rb_profit: cost_profit
+  rb_profit_dangshan: cost_profit
+
+  # SR 白糖补充字段
+  sr_balance_demand: demand
+  sr_ck_volume_brazil: import_export
+  sr_jk_volume: import_export
+  sr_season_yield: supply
+
+  # TA PTA、PX、聚酯和纺织链条
+  ta_spot_price: price_basis
+  ta_spot_price_hd: price_basis
+  ta_spot_goods_processing_fee: cost_profit
+  ta_processing_fee: cost_profit
+  ta_PXN: cost_profit
+  ta_naphtha_spot_price: cost_profit
+  ta_px_spot_price: cost_profit
+  ta_cs_spot_price: price_basis
+  ta_social_stock: inventory
+  ta_factory_stock: inventory
+  ta_warehouse: inventory
+  ta_cs_downstream_stock: inventory
+  ta_dx_downstream_stock: inventory
+  ta_jzxwdx_downstream_stock: inventory
+  ta_pet_downstream_stock: inventory
+  ta_textile_raw_stock_days: inventory
+  ta_textile_stock_days: inventory
+  ta_operate_rate: supply
+  ta_weekly_operate_rate: supply
+  ta_yield: supply
+  ta_monthly_yield: supply
+  px_operate_rate: supply
+  px_yield: supply
+  ta_textile_operate_rate: demand
+  ta_textile_machine_operate_rate: demand
+  ta_cs_downstream_ps_ratio: demand
+  ta_dx_downstream_ps_ratio: demand
+  ta_downstream_profit: cost_profit
+  ta_dty_downstream_profit: cost_profit
+  ta_dx_downstream_profit: cost_profit
+  ta_fdy_downstream_profit: cost_profit
+  ta_poy_downstream_profit: cost_profit
+
+  # ZN 锌矿、冶炼、加工和库存链条
+  zn_spot_price: price_basis
+  zn_spot_price_shanghai: price_basis
+  zn_cif_spread: cost_profit
+  zn_processing_fee: cost_profit
+  zn_processing_fee_shanghai: cost_profit
+  zn_ingot_stock: inventory
+  zn_social_stock: inventory
+  zn_lme_social_stock: inventory
+  zn_mine_port_stock: inventory
+  zn_oxide_stock: inventory
+  zn_galvanize_operate_rate: demand
+  zn_alloy_operate_rate: demand
+  zn_oxide_operate_rate: demand
+  zn_trade_volume: demand
+  zn_operate_rate: supply
+  zn_monthly_yield: supply
+  zn_yield: supply
+  zn_refine_yield: supply
+  zn_alloy_yield: supply
+  zn_jk_volume: import_export
+
+# 默认按 T+1 可见，防止当天发布数据在盘前被提前使用。
+release_lag_days:
+  default: 1
+
+# 不同频率数据的新鲜度阈值。超过阈值后只能作为背景，不能增强方向锚。
+freshness_threshold_days:
+  default_daily: 7
+  default_weekly: 14
+  default_monthly: 45

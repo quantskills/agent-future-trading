@@ -35,7 +35,7 @@ class AgentWorkflow:
         self.db = get_db()
         if self.market_type != "china_futures":
             raise RuntimeError("AgentWorkflow now supports china_futures only.")
-        self.router = Router(APISource.PANDAAI, market_type="china_futures")
+        self.router = Router(APISource.PANDAAI, market_type="china_futures", config=self.config)
         self.execution_engine = FuturesExecutionEngine(config, self.db)
 
         portfolio = self.db.get_latest_settled_portfolio(config_id)
@@ -177,7 +177,6 @@ class AgentWorkflow:
             config={
                 'max_total_margin_ratio': self.config.get('max_total_margin_ratio', 0.40),
                 'max_single_margin_ratio': self.config.get('max_single_margin_ratio', 0.15),
-                'risk_buffer_ratio': self.config.get('risk_buffer_ratio', 0.10),
             },
             full_config=self.config,
             router=self.router,
@@ -296,6 +295,23 @@ class AgentWorkflow:
                 underlying_code=ticker,
                 trading_date=self.trading_date,
             )
+            if morning_price_context is None or morning_price_context.base_price is None:
+                recommendation = self._coerce_phase1_recommendation(
+                    ticker=ticker,
+                    portfolio=portfolio,
+                    decision=None,
+                    morning_price_context=morning_price_context,
+                    final_state={},
+                )
+                recommendation_id = self.db.save_futures_recommendation(recommendation)
+                if not recommendation_id:
+                    raise RuntimeError(f"Failed to save futures recommendation for {ticker}")
+                logger.warning(f"{ticker} phase1 skipped: {recommendation.warning_message}")
+                logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
+                if self.planner_mode:
+                    self.current_analysts = None
+                continue
+
             state = self._build_futures_phase1_state(ticker, portfolio, morning_price_context)
 
             workflow = self.build()

@@ -1,361 +1,383 @@
-# AgentQuant 策略绩效优化记录
+# AgentQuant 策略绩效优化方案与回测前验收结论
 
-更新日期：2026-05-13
+更新日期：2026-05-22
 
-本文档用于持续提醒系统设计目标、当前架构边界、已经完成的优化，以及下一轮小规模回测前后的判断重点。AgentQuant 的优化不追求堆叠复杂模块，而是围绕“能产生更高质量期货交易策略，并且这些策略能在回测、模拟盘和实盘中一致复刻”这一核心目标逐步推进。
+本文档是本轮优化工作的回测前验收版。它不再只是优化设想，而是记录：
 
-## 一、系统的两大核心功能
+1. 该系统的两大基础功能与六大优化目的。
+2. 本轮九次代码验收得到的结论。
+3. 下一轮至少 6 个月正式回测期间，必须验收哪些优化成果。
 
-1. **期货交易策略生成与回测**
+本轮优化的底线是：代码层面该改的都必须在正式回测前完成，正式回测只用于验证策略效果、资金利用率、收益质量、学习效果和实盘可复刻性，不能再用短窗口结果反复小修小改。
 
-   系统在 Phase1 生成交易建议，在 Phase2 由 trader 执行交易，在 Phase3 由 accountant 完成日盯盘结算，在 Phase4 校验 recommendation、transaction、settlement、portfolio 与 phase status 的一致性。回测不是单独的研究脚本，而是尽量复用模拟盘/实盘同一套阶段化交易流程。
+## 一、系统的两大基础功能
 
-2. **模拟盘与实盘可复刻运行**
+### 1. 期货策略回测
 
-   系统保留日频策略生成逻辑，同时在 Phase2 支持盘中盯盘式执行。Phase1 只生成目标方向与目标仓位，Phase2 根据盘中价格、滑点、成交量和执行窗口确认是否成交，使回测中的交易逻辑可以被模拟盘和实盘尽量复刻。
+系统以 15 个期货主力合约为交易对象：
 
-## 二、六大核心优化目的
+`BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN`
 
-1. **提高策略 alpha**
+回测必须复用系统真实四阶段流程：
 
-   让 technical、fundamental、commodity_news 输出更高质量、更可解释、更可比对的交易信号，并减少低质量信号对最终交易的干扰。
+1. Phase1：盘前生成交易建议，只能使用 T-1 及以前的可见信息。
+2. Phase2：交易员按盘前建议和盘中择时规则执行交易。
+3. Phase3：会计师在收盘后按交易所结算价完成日终结算。
+4. Phase4：复盘者校验交易、账务和归因，并写入学习结果。
 
-2. **降低无效交易与错误反手**
+回测不是单独的研究脚本，而是模拟盘和未来实盘流程的历史回放。
 
-   避免因为每日信号轻微波动而频繁开平仓；新开仓门槛低于反手门槛，反手必须有更强证据。
+### 2. 模拟盘与实盘可复刻运行
 
-3. **增强账务、风控与阶段流一致性**
+系统的另一项基础功能是模拟盘运行，并为未来实盘保留一致路径。
 
-   确保 recommendation、transaction、settlement、position、PnL、margin 与 phase status 在四阶段运行中可追踪、可校验。
+盘前建议、盘中择时、成交基准、滑点、手续费、保证金、日终结算、复盘学习，都必须使用确定性代码和统一 artifact 口径。LLM 可以用于分析师信号和复盘解释，但不能直接决定成交价、成交手数、账务结算、硬风控或模板权限。
 
-4. **支持 15 个期货品类差异化交易**
+## 二、六大优化目的
 
-   覆盖 BU、C、CF、EB、HC、I、J、M、MA、P、PB、RB、SR、TA、ZN，并按能源、化工、黑色、有色、农产品设置不同分析侧重。
+### 1. 扩大策略 alpha 收益
 
-5. **提高系统自适应能力与可学习性**
+通过结构化基本面因子、新闻事件质量判断、技术形态模板、horizon 分层、模板治理和历史学习，提高交易信号的真实正期望，而不是只靠加杠杆放大噪音。
 
-   通过动态权重、交易记忆、auditor 审核结果和回测归因，为后续 contextual bandit 或更轻量的学习机制保留数据基础。
+### 2. 提高资金利用率
 
-6. **提高实战部署性**
+将平均保证金占用从约 2% 提升到 capacity-aware 的真实可用区间：基础目标 8%-12%，强机会目标 16%-20%。资金释放只能给 protected、deployable 或确认充分的 recovering 模板，不能用 watchlist、weak_block 或低质量信号硬凑仓位。
 
-   所有回测策略都应尽量能在模拟盘和实盘中复刻；策略生成、盘中执行、日终结算和归因报告必须保持同一套口径。
+### 3. 实现正收益并改善收益质量
 
-## 三、当前已经完成的主要优化
+目标不是单日或短窗口偶然转正，而是在至少 6 个月正式回测中实现账户权益收益转正，并力争达到 +1% 至 +3% 的稳定正收益，同时提高 profit factor、胜率、平均盈亏比，降低尾部亏损和手续费侵蚀。
 
-1. **交易品类扩展至 15 个**
+### 4. 解决智能体“学得太浅”的问题
 
-   系统配置、新闻数据、Finoview 基本面数据、PandaAI 行情与衍生数据调用逻辑已经围绕 15 个主力合约品类展开。
+学习结果必须从日志和 prompt 附件升级为交易权限、模板状态、PM 仓位释放、auditor 风险分层、trader 执行注意事项和分析师下一日输入。系统要能积累知识，而不是只记住当天复盘摘要。
 
-2. **三分析师信号质量优化**
+### 5. 从业务层提高分析师信号质量
 
-   technical、fundamental、commodity_news 采用“结构化预处理 + 云端主模型信号生成”的默认流程；保留 local LLM / DeepAnalyze 调用开关。technical 偏短线时机，fundamental 偏中期方向锚，commodity_news 只在高相关、高新鲜度、高强度事件下显著影响决策。
+三个分析师不能只输出 Bullish、Bearish、Neutral 和泛泛理由。它们必须输出可验证的业务字段，包括趋势阶段、方向锚、供需状态、库存/仓单/资金流、事件类型、影响窗口、无效位、ATR 止损距离、业务质量分、反证和 Neutral 责任说明。
 
-3. **组合经理的自适应融合优化**
+### 6. 保持无未来函数、账务正确和实盘可执行
 
-   portfolio_manager 默认只调用云端主模型，并继续承担市场自适应动态融合能力。系统按期货大类设置技术面、基本面、新闻面的基础权重，再结合信号质量、置信度、历史表现、PandaAI 确认层和 auditor 输出动态调整最终仓位。
+盘前策略只能基于 T-1 及以前信息；盘中交易员只能使用当时已经发生的分钟线；会计师只能在收盘后使用 T 日结算价；复盘者只能在 Phase3 完成后使用当日及以前结果。回测、模拟盘、未来实盘必须共享同一套交易员、会计师和复盘者逻辑。
 
-4. **auditor 非 LLM 审核层**
+## 三、九次代码验收结论
 
-   auditor 独立为确定性审核智能体，不调用 LLM。它负责质量门槛、弱组合限制、历史亏损组合限制、PandaAI 确认不足时的 reduce/block 决策，并把审核原因写入 recommendation snapshot。
+### 验收 1：三个分析师
 
-5. **trader 与 accountant 智能体化**
+结论：已通过。
 
-   Phase2 的 order 逻辑已抽象为 trader，`run/order.py` 保留为运行脚本；Phase3 的 settlement 逻辑已抽象为 accountant，`run/settlement.py` 保留为运行脚本。执行工具放在 `src/tools/agent_tools/`，方便后续开发和审计。
+三个启用分析师为 `commodity_news`、`fundamental`、`technical`，宏观经济与政策分析师只保留接口，本轮回测不启用。
 
-6. **proposal 命名与阶段流语义优化**
+已验收内容：
 
-   原主运行脚本 main 已改为 proposal，更清楚地表达 Phase1 的职责：生成交易建议，而不是直接交易。
+1. `AnalystSignal` 已升级为结构化 schema，支持 horizon、template、entry_type、invalidation_level、atr_stop_distance、direction_anchor、supply_demand_state、business_quality_score、neutral_reason 等字段。
+2. 三个分析师均调用 LLM 输出结构化 `AnalystSignal`，但下游 PM、auditor、trader 不再从自由文本中解析交易权限。
+3. Neutral 信号允许存在，但必须给出责任化解释，包括缺失证据、冲突因素、什么条件会改变观点。
+4. 分析师输入已接入学习摘要、业务质量门槛和数据质量检查。
 
-7. **盘中执行与模拟盘复刻优化**
+回测关注点：分析师是否减少无理由 Neutral，是否提高方向信号质量，是否在强模板场景中给出更明确的结构化交易字段。
 
-   Phase2 支持 15 分钟触发判断、1 分钟执行价格、开盘区间过滤、滑点模型、成交量检查和 loop 模式。回测、模拟盘和实盘尽量共用同一套 trader 逻辑。
+### 验收 2：审计员 Auditor
 
-8. **持仓周期与仓位再平衡控制层**
+结论：已通过。
 
-   portfolio_manager 新增 holding/rebalance 控制层：
+审计员仍是确定性风险分层器，不调用 LLM。它的职责不是“放大赚钱交易”，而是放过真正应该放过的交易、拦住硬风险和成熟弱模板，让 PM 负责资金释放。
 
-   - technical 主要作为短线入场/出场滤波，不轻易推翻 fundamental 的中期方向。
-   - fundamental 是中期仓位锚；当基本面仍支持当前持仓时，优先持有或小幅调仓。
-   - commodity_news 仅在高质量事件冲击时改变仓位。
-   - 已有持仓时，除非出现强反向信号、止损、风控或换月，否则优先保持或小幅增减仓。
-   - 新开仓有最小仓位门槛，反手有更高证据门槛。
-   - 目标仓位变化小于最小调仓阈值时不交易。
-   - 农产品、黑色、化工、有色、能源设置不同最小持仓天数。
-   - recommendation snapshot 新增 `rebalance_summary`，记录持仓天数、目标手数变化、估算换手额、调仓类型与调仓原因。
+已验收内容：
 
-9. **PandaAI 数据质量处理**
+1. auditor 输出已扩展为五档：`allow`、`scale_down`、`probe_only`、`reduce_only`、`block`。
+2. 硬风险仍可 block，包括保证金、账务、强平、严重数据缺失、合约不可交易、成熟 weak_block 等。
+3. 软风险主要降仓或试探，不再一刀切拦截。
+4. protected/deployable 模板可绕过普通保守规则，不会被冷启动、小样本或轻微信号冲突误杀。
+5. `audit_decision_types`、`hard_risk_rules`、`soft_risk_rules`、`memory_policy_rules`、`audit_explainer` 已放在 `src/tools/agent_tools/` 下，与 `src/agents/auditor.py` 解耦。
 
-   PandaAI `net_flow` 只有在多头与空头资金流两侧都有数据时才参与确认层打分；单侧缺失时不再制造虚假的确认或冲突。缺失数据仍记录为 data quality warning，但只作为“未知/降权”处理。
+回测关注点：auditor 的 block 是否明显减少且主要对应硬风险；protected/deployable 的交易是否不再被普通保守规则压死。
 
-10. **日志与归因可读性增强**
+### 验收 3：投资组合经理 PM
 
-   三分析师的技术指标、基本面因子、新闻证据、信号理由、tradeability、risk_flags、组合经理融合权重、auditor 决策、Phase2 执行计划和持仓再平衡原因都会进入日志或 recommendation snapshot，便于后续归因。
+结论：已通过。
 
-## 四、当前推荐的验证顺序
+PM 已从简单融合信号升级为质量感知的组合资金分配器。
 
-1. 重新建表或清理回测记录。
-2. 先手动跑 1 个交易日完整四阶段，确认 proposal、order/trader、settlement/accountant、validate_phase_flow 全部通过。
-3. 再跑 20 个交易日小规模自动回测，不建议立刻大规模回测。
-4. 回测后重点检查：
+已验收内容：
 
-   - 是否减少无意义开平仓与反手。
-   - `rebalance_summary` 是否清楚记录持仓天数、调仓原因、换手额。
-   - technical 是否主要影响执行时机，fundamental 是否真正承担中期方向锚。
-   - PandaAI 缺失数据是否只降权，不再制造假冲突。
-   - 亏损品种 P、RB、EB、J、ZN 是否因错误反手和过度交易减少而改善。
-   - BU、I 等此前表现较好的品种是否没有被过度限制。
-
-## 五、后续可能优化但暂不优先
-
-1. attribution 报告进一步按“持仓天数、调仓原因、换手成本、平仓原因”聚合统计。
-2. auditor 基于 20 个交易日小样本继续校准 reduce/block 阈值。
-3. 若小规模回测证明交易记忆有稳定贡献，再考虑 contextual bandit，而不是立即引入复杂强化学习。
-4. 继续修复历史日志中的终端乱码显示问题，但不影响数据库中的结构化字段与新日志口径。
-# 2026-05-14 Execution Update: Post-Backtest Optimization Implemented
-
-This section records the optimization changes executed after reviewing the latest backtest logs under `src/logs` and the SQLite database `src/assets/agentquant.db`.
-
-## Backtest Diagnosis
-
-- The four-phase workflow, execution, settlement, and validation path completed successfully for the latest window.
-- The negative return was caused by strategy quality rather than accounting or execution errors.
-- `new_entry` attribution was weak: 9 new-entry trade pairs had a 22.22% win rate.
-- Main loss sources were `MA long`, `I long`, and `PB long`; `BU long` was the successful trend-holding case.
-- The system was effectively long-only in realized trades, so high-confidence bearish setups were mostly defensive holds instead of small short probes.
-
-## Executed Optimizations
-
-1. Entry gating was tightened.
-   - Added `MA long`, `I long`, and `PB long` to the strict ticker-side auditor watchlist.
-   - Raised the base PandaAI confirmation threshold for new entries from `0.45` to `0.55`.
-   - Added weak analyst combinations `[Bullish, Bearish, Bullish]` and `[Neutral, Bullish, Bullish]`.
-   - Cold-start weak-combo entries are now blocked when confirmation is below `0.65`.
-
-2. Loss feedback was accelerated.
-   - `ticker_loss_control.loss_threshold` was tightened from `-8000` to `-3000`.
-   - Consecutive-loss blocking was tightened from 3 days to 2 days.
-   - `ticker_performance_control.min_trade_days` was reduced from 5 to 3.
-   - Auditor attribution soft/hard sample thresholds were reduced from 5/10 to 3/6.
-
-3. Position lifecycle control was added.
-   - Positions are classified as `trend_position`, `probe_position`, `failed_position`, or `normal`.
-   - Profitable, confirmed trend positions are protected from premature exits.
-   - Failed positions can exit before the sector minimum holding period.
-   - Unvalidated probe positions can be exited after 2 days when PnL and confirmation do not validate the entry.
-
-4. High-quality bearish handling was added.
-   - Added `directional_override_control`.
-   - A strong blended bearish signal can override a non-short LLM target into a small `open_short` probe.
-   - The short probe remains capped by `short_probe_max_ratio: 0.03` and still must pass auditor/PandaAI controls.
-
-5. Technical quality filtering was strengthened.
-   - `MA`, `I`, and `PB` bullish technical setups now require stronger trend, cleaner indicator alignment, and better volume confirmation.
-   - Weak bullish watchlist setups are downgraded before they reach portfolio fusion.
-
-6. Attribution reporting was made more readable.
-   - New attribution Markdown output uses readable English section headers and table labels.
-   - Weak-side suggestions now include low-sample but material weak directions and weak signal combinations.
-
-7. LLM switching was implemented.
-   - `OpenRouter` now uses `json_mode` structured output for compatibility with flexible metadata fields in analyst schemas.
-   - `llm.inference` supports `openrouter.reasoning` config and loads env files from `AgentQuant/.env`, `AgentQuant.env`, or `AGENTQUANT_ENV_FILE`.
-   - `dev.yaml` and the backup `planner.yaml` are switched to `OpenRouter` / `openai/gpt-5.5`.
-   - DeepSeek `deepseek-v4-flash` access remains in the config as commented switch-back lines and the existing `deepseek` block remains supported.
-   - Provider authentication and invalid-request errors are configured to raise immediately, so a broken LLM call will stop the backtest instead of silently producing all-neutral recommendations.
-
-8. Follow-up gating correction was applied after the first GPT-5.5 rerun on 2025-01-06 produced zero trades.
-   - The latest rerun confirmed that LLM calls were succeeding, so the no-trade result was no longer a model-availability problem.
-   - The strict ticker-side watchlist was narrowed back to the intended scope: `MA long`, `I long`, and `PB long`.
-   - Legacy strict entries on other tickers were removed because they were over-blocking beyond the original optimization target.
-   - The single-supporter conflict block threshold was relaxed from `0.65` to `0.50`, so medium-confirmation probe ideas can be reduced instead of always being hard-blocked.
-   - This keeps the weak-side protection on the main loss sources while allowing non-watchlist names to express small cold-start positions when confirmation is not outright poor.
-
-9. BU-style conflicted-but-confirmed probe handling was corrected.
-   - A new-entry signal with weak raw strength but strong PandaAI confirmation can now be reduced instead of being hard-blocked when the conflict is only partial.
-   - This specifically protects cases like `BU` on 2025-01-07, where two analysts supported the long side and PandaAI confirmation score was high enough, but two conflicting sub-features previously forced the target to zero.
-   - The relaxed path still requires strong confirmation and only produces a capped probe through the existing conflict multiplier and cold-start multiplier.
-   - Weak watchlist names such as `MA/I/PB long` remain under the stricter quality gate and are not loosened by this change.
-
-10. Opening-range timing was aligned between backtest and paper trading.
-   - `require_complete_opening_range: true` was added to intraday confirmation.
-   - Opening-range breakout/down triggers are now disabled until the configured opening range has fully formed.
-   - Backtests skip signal bars earlier than the completed opening range instead of using full-day data to evaluate them.
-   - Paper trading reports `intraday_opening_range_incomplete` before the opening range is complete, then uses the same trigger logic as backtest after completion.
-
-## Next Validation Criteria
-
-- `MA long`, `I long`, and `PB long` should no longer repeatedly pass as low-quality new entries.
-- `BU long` should remain holdable when it becomes a confirmed trend position.
-- `new_entry` win rate should improve materially from 22.22%.
-- Total trades should not expand sharply.
-- Phase4 validation and settlement reconciliation must remain clean.
-- The next A/B backtest should compare the previous DeepSeek run against the new OpenRouter GPT-5.5 configuration.
-
-# 2026-05-15 Execution Update: Attribution-Driven Template Calibration
-
-This section records the targeted optimization executed after reviewing the latest
-backtest, attribution report, and ticker contribution/price-entry charts. The
-core objective remains unchanged: generate higher-quality futures strategies
-that can be reproduced consistently across backtest, paper trading, and live
-trading. Therefore this update does not change accounting, settlement, Phase4
-validation, intraday execution, or LLM routing.
-
-## Latest Diagnosis
-
-- Strong captured templates: `BU long`, `J short`, `RB long`, and `ZN short`.
-- Main weak templates: `P long`, `TA long`, `C long`, `I short`, `HC short`,
-  and `SR short`.
-- The system already supports short exposure; the issue is not "no shorting",
-  but uneven ticker-side short quality.
-- Several losing setups were driven or reinforced by commodity news without a
-  reliable fundamental anchor.
-- Attribution learning must not punish a strong ticker-side template because of
-  one small losing sub-combo.
-
-## Executed Optimizations
-
-1. Strong ticker-side template protection was added.
-   - Added `protected_ticker_sides` for `BU long`, `J short`, `RB long`, and
-     `ZN short`.
-   - These templates are not unconditional approvals. They can still be blocked
-     by market confirmation, severe performance decay, or risk controls.
-   - The protection only prevents generic weak-combo/cold-start rules from
-     hard-blocking a historically strong side when confirmation is acceptable.
-
-2. Weak ticker-side template rules were added.
-   - Added `weak_ticker_side_rules` for `P long`, `TA long`, `C long`,
-     `I short`, `HC short`, and `SR short`.
-   - `P long / Bearish|Neutral|Bullish`, `TA long / Bullish|Neutral|Bullish`,
-     `C long / Bullish|Neutral|Bearish`, `HC short / Neutral|Bearish|Neutral`,
-     and `SR short / Bearish|Neutral|Neutral` now require stronger confirmation
-     and qualified analyst support.
-   - `I short` is tightened instead of globally disabled, so successful bearish
-     templates such as `J short` are not harmed.
-
-3. Commodity-news-only directional trades were tightened.
-   - Added `news_driver_control`.
-   - If commodity news is the only directional supporter, the auditor now
-     requires high tradeability, sufficient news confidence, freshness,
-     relevance, and PandaAI confirmation.
-   - If news supports the target but fundamental does not anchor it, the target
-     is capped rather than freely expanded.
-
-4. Static attribution caps were aligned with the new attribution readout.
-   - Added static caps for `P long`, `TA long`, and `SR short`.
-   - Kept `C long` capped.
-   - Removed the old `RB long` static cap so the current profitable `RB long`
-     template is not unnecessarily muted.
-
-5. Phase4 no-trade classification was updated.
-   - Added the new auditor reasons to expected no-trade classifications:
-     `weak_ticker_side_quality_gate`, `weak_ticker_side_cap`,
-     `news_only_directional_trade`, `news_without_fundamental_anchor`,
-     `protected_ticker_side_weak_combo`, and
-     `protected_ticker_side_cold_start`.
-
-## Validation
-
-- `dev.yaml` parses successfully with the new config.
-- `tests.test_phase_flow_regression` passes: 25 tests OK.
-
-## Next Backtest Checks
-
-- Confirm `BU long`, `J short`, `RB long`, and `ZN short` are not over-blocked.
-- Confirm `P long`, `TA long`, `C long`, `I short`, `HC short`, and `SR short`
-  either trade less or require visibly stronger confirmation.
-- Confirm commodity-news-only signals no longer push weak new entries.
-- Confirm Phase4 validation and cash-plus-margin reconciliation remain clean.
-
-# 2026-05-15 Execution Update: DB-Backed Real-Time Strategy Memory
-
-This section records the follow-up memory optimization. The purpose is to make
-the system adjust future trade audits from its own validated trading history,
-without hard-coding every profitable or weak template into `dev.yaml`.
-
-## Why This Was Added
-
-- Static attribution rules help immediately, but they do not learn as the
-  backtest progresses.
-- Strong templates such as `BU long`, `J short`, `RB long`, and `ZN short`
-  should gain protection from repeated validated wins.
-- Weak templates should be tightened only after completed round-trip evidence,
-  so the system avoids overreacting to a single open position or incomplete day.
-- The memory layer must not change settlement/accounting logic or introduce
-  look-ahead bias.
-
-## Executed Optimizations
-
-1. Added a local strategy memory table.
-   - Added `strategy_memory` to SQLite initialization.
-   - Memory rows are keyed by `config_id`, `ticker`, `side`, `signal_combo`,
-     and `source`.
-   - Stored fields include `memory_state`, `sample_count`, `win_rate`,
-     `net_pnl`, `avg_pnl`, `confidence_score`, `valid_until`, and a JSON
-     payload with the attribution summary.
-
-2. Added automatic Phase4 memory refresh.
-   - After `phase4` is marked completed, the database refreshes
-     `strategy_memory` from completed futures round-trip trade pairs.
-   - The Phase4 validator passes the active `strategy_memory` config into the
-     refresh step, so sample thresholds, PnL thresholds, and expiry days remain
-     weak-parameter tunable from `dev.yaml`.
-   - Rollover transactions are excluded from strategy memory, because this
-     memory should learn signal quality, not mechanical contract replacement.
-   - Memory only uses trade pairs whose close date is on or before the
-     completed trading day.
-
-3. Added memory states for real-time audit use.
-   - `protected`: repeated positive attribution; generic weak/cold-start rules
-     should avoid hard-blocking unless confirmation or risk controls fail.
-   - `watchlist`: early weak attribution; new exposure is capped unless current
-     confirmation is strong enough.
-   - `weak_block`: repeated weak attribution; new exposure requires stronger
-     confirmation and qualified analyst support.
-   - `recovering`: positive but not yet strong enough for protected treatment.
-
-4. Connected memory to the trade auditor.
-   - Portfolio manager reads `get_strategy_memory()` before audit when
-     `strategy_memory.enabled` is true.
-   - Trade auditor now records the memory payload in diagnostics and audit
-     metadata.
-   - Protected memory can strengthen a ticker-side template.
-   - Watchlist/weak-block memory can cap or block new exposure before the
-     older static weak-template rules are applied.
-
-5. Added config-level switches.
-   - Added `strategy_memory.enabled`.
-   - Added sample, win-rate, PnL, expiry, and audit threshold settings.
-   - These settings keep memory behavior configurable while preserving the
-     existing DeepSeek/OpenRouter model switch.
-
-6. Updated validation classification.
-   - Added `strategy_memory_weak_block` and
-     `strategy_memory_watchlist_cap` as expected Phase4 no-trade reasons.
-   - This prevents a correctly memory-blocked day from being treated as an
-     unknown workflow failure.
-
-## Guardrails
-
-- Memory is refreshed from completed trade pairs only.
-- Memory does not write new static ticker rules into `dev.yaml`.
-- Memory is not an unconditional permission to trade; market confirmation,
-  severe performance controls, margin controls, and settlement validation still
-  dominate.
-- Memory is local-DB backed and designed for `--local-db` backtests first.
-
-## Validation
-
-- Added regression coverage for:
-  - memory-based auditor blocking via `strategy_memory_weak_block`;
-  - SQLite refresh from completed trade pairs;
-  - next-day memory lookup for protected and watchlist templates.
-
-## Next Backtest Checks
-
-- Confirm strong templates gain protection only after validated completed wins.
-- Confirm weak templates become capped/blocked only after enough completed
-  evidence.
-- Confirm no look-ahead behavior: a same-day open position should not affect
-  memory until Phase4 validates completed round trips.
-- Confirm Phase4 validation remains clean on zero-transaction days generated by
-  strategy memory.
+1. PM 读取结构化分析师信号、horizon、业务质量、市场确认、strategy memory、adaptive policy、provisional policy。
+2. PM 能区分 technical 短线执行信号、fundamental 中期方向锚、commodity_news 事件窗口。
+3. 资金利用率目标改为 capacity-aware：基础目标 8%-12%，强机会目标 16%-20%。
+4. protected/deployable/recovering/watchlist/weak_block 模板状态会影响仓位权限。
+5. `signal_fusion`、`risk_controls`、`capital_allocator`、`position_lifecycle` 等模块已形成可测试拆分。
+
+回测关注点：资金占用是否从约 2% 提升到 8%-12%；强机会日是否接近 16%；未达目标时是否能区分 `system_under_deployed` 与 `alpha_capacity_limited`。
+
+### 验收 4：交易员 Trader
+
+结论：已通过。
+
+交易员已改为确定性盘中择时执行器，回测和模拟盘路径可复刻。
+
+已验收内容：
+
+1. Phase2 才允许使用 T 日开盘和盘中分钟线。
+2. 入场使用 15 分钟确认和下一根 1 分钟开盘价成交基准。
+3. 模拟盘循环使用 `cutoff_datetime`，只能看到当前时刻以前的分钟线。
+4. 未触发条件时，模拟盘保持 wait，回测日终才 finalize 为 skip。
+5. 已接入 invalidation level、ATR、time stop、trend break 等退出策略。
+6. `intraday_execution`、`entry_timing`、`trader_exit_policy`、`order_sizing`、`execution_simulator` 等确定性模块已拆分。
+
+回测关注点：入场是否减少高位追多和低位追空；MFE/MAE 是否改善；止损是否截断尾部亏损且不误伤 protected 趋势模板。
+
+### 验收 5：复盘者 Reviewer
+
+结论：已通过。
+
+Reviewer 已从日终日志生成器升级为学习闭环核心。
+
+已验收内容：
+
+1. Reviewer 在 Phase4 校验 Phase1/2/3、recommendation、transaction、settlement、portfolio 后才写学习。
+2. 已写入或支持 `signal_context_history`、`signal_template_performance`、`analyst_performance`、`analyst_learning_digest`、`strategy_memory_history`、`adaptive_policy_state`、`provisional_policy_state`、`config_learning_overlay`、`capital_deployment_state`、`template_prior.json`、`reviewer_llm_notes`、`causal_review_candidate`、`learning_event_log`。
+3. Reviewer 可以调用 LLM 做 post-trade causal review，但 LLM 只生成候选因果解释，正式学习和交易权限仍由规则引擎确认。
+4. 学习结果能在下一交易日进入分析师、PM、auditor 和 trader 输入。
+
+回测关注点：学习生效后的交易是否优于未生效交易；LLM 因果候选有多少被采纳；被拒绝原因是否合理；template_prior 是否减少冷启动亏损。
+
+### 验收 6：数据调用层
+
+结论：已通过。
+
+系统可调用并理解当前可用数据源。
+
+已验收内容：
+
+1. 行情数据来自 PandaAI 文档支持的日线、分钟线、主力合约、成交量、持仓量等接口。
+2. PandaAI 扩展期货数据已接入，包括基差、仓单、净资金流、多空比、席位持仓、合约排名、净资金变化等。
+3. Finoview 本地基本面数据共 422 个 feather 文件，已通过 `finoview_factor_catalog.yaml` 映射到 15 个目标合约。
+4. 新闻数据来自 `data/News_data/Future_news/*.txt`，15 个目标合约均有对应新闻文件。
+5. Fundamental 分析师已读取 Finoview snapshot 和 PandaAI extra factor context。
+6. 新闻分析师按 `pre_open_only` 过滤新闻，盘前不读取 T 日新闻。
+
+回测关注点：Finoview/PandaAI 因子是否真正改善 fundamental 方向锚；新闻是否只在高质量事件和同向确认时推动交易。
+
+### 验收 7：分析决策执行层耦合
+
+结论：已通过。
+
+智能体之间已通过结构化 artifact 协作，而不是靠自由文本互相猜。
+
+已验收内容：
+
+1. 三个分析师输出 `AnalystSignal`。
+2. PM 读取结构化字段并生成 recommendation。
+3. Auditor 读取 PM 推荐、模板状态、市场确认和学习状态，输出五档审计结论。
+4. Trader 只按结构化推荐和确定性盘中规则执行。
+5. Accountant 只在 Phase3 读取成交与结算价记账。
+6. Reviewer 只在 Phase4 校验并学习。
+7. 宏观经济与政策分析师接口保留，但本轮回测不启用。
+
+回测关注点：artifact 链条是否完整；是否存在某个 agent 输出字段但下游未消费；是否存在自由文本直接控制交易动作。
+
+### 验收 8：记忆与学习层
+
+结论：已通过。
+
+系统已经具备可积累的数据库记忆与学习功能，不是只记住当天总结。
+
+已验收内容：
+
+1. 学习结果写入数据库表和 `template_prior.json`，可跨交易日读取。
+2. `strategy_memory`、`adaptive_policy_state`、`provisional_policy_state`、`analyst_learning_digest`、`config_learning_overlay` 已进入下游决策。
+3. 学习有过期、样本数、置信度、rollback、防过拟合约束。
+4. 学习不是训练 LLM 权重，也不是自动切换模型，而是用确定性数据库记忆改变交易权限和分析上下文。
+
+回测关注点：学习曲线是否随时间改善；弱模板是否更早被 cap/probe/block；强模板是否获得更高仓位权限。
+
+### 验收 9：无未来函数与四阶段实盘逻辑
+
+结论：已通过，并补了一处盘前可见性边界。
+
+已验收内容：
+
+1. Phase1 技术日线排除 T 日收盘/结算，只使用 T-1 及以前历史窗口。
+2. Phase1 盘前参考价只取前一交易日收盘。
+3. Finoview factor snapshot 现在按“数据日期 + 滞后天数 <= 交易日”判断可见，且盘前至少滞后 1 天，避免误读 T 日数据。
+4. PandaAI extra factor 使用 T-1 或更早参考日期。
+5. 新闻在 `pre_open_only=True` 时排除 T 日及未来新闻。
+6. Phase2 交易员可以使用 T 日开盘和已发生分钟线，但模拟盘用 `cutoff_datetime` 防止看未来分钟线。
+7. Phase3 会计师收盘后才使用 T 日结算价。
+8. Phase4 复盘者在结算完成后才使用当日结果学习。
+
+回测关注点：正式回测必须使用新的 `config_id` 或 `--reset-config`，避免旧数据库中未来日期学习结果污染历史窗口。
+
+## 四、回测前总验收状态
+
+截至 2026-05-22，代码层面已完成以下回测前验收：
+
+1. `dev.yaml` 启用 15 个目标合约。
+2. 启用分析师为 `commodity_news`、`fundamental`、`technical`。
+3. `planner.yaml` 已同步为 15 个合约和三分析师，避免误跑旧的三品种配置。
+4. 本地 Finoview feather 文件共 422 个。
+5. 15 个目标合约均有本地新闻 txt。
+6. Finoview catalog 对 15 个目标合约覆盖 `all_ready=True`。
+7. `compileall` 通过。
+8. 完整单元测试通过：`Ran 60 tests ... OK`。
+
+因此，除正式回测才能验证的绩效结果外，当前没有发现必须在回测前继续修改的阻塞项。
+
+## 五、下一轮至少 6 个月回测的验收清单
+
+下一轮正式回测至少覆盖 6 个月。3 个月窗口只能做冒烟回放，不能作为最终绩效验收。若 6 个月结果达标，再用 12 个月窗口做稳健性检验。
+
+### 1. 总体绩效
+
+必须验收：
+
+1. 账户权益收益率是否转正。
+2. 是否力争达到 +1% 至 +3% 的稳定正收益。
+3. 最大回撤是否下降。
+4. Profit factor 是否改善。
+5. 胜率与平均盈亏比是否改善。
+6. 手续费侵蚀率是否下降。
+7. 收益是否来自高质量模板，而不是少数偶然大单。
+
+### 2. Alpha 来源
+
+必须验收：
+
+1. protected/deployable 模板贡献的 PnL。
+2. weak_block/watchlist 模板的新开仓是否明显减少。
+3. I long、BU 强趋势 long、EB short、J short、SR short 等历史强方向是否延续有效。
+4. P long、ZN short、RB short、PB long、M long、C long 等历史弱方向是否被更早限制。
+5. Finoview 与 PandaAI 基本面因子是否改善 fundamental direction_anchor。
+6. 新闻信号是否只在高质量事件和同向确认时贡献正收益。
+
+### 3. 资金利用率
+
+必须验收：
+
+1. 平均保证金占用是否从约 2% 提升到 8%-12%。
+2. 强机会交易日是否接近或进入 16%。
+3. 16%-20% 未达成时，原因是否被明确记录。
+4. 是否区分 `system_under_deployed` 与 `alpha_capacity_limited`。
+5. PM 主动资金补足是否只发生在 protected/deployable/recovering 机会中。
+6. 是否仍存在高质量机会被 PM 或 auditor 压死。
+
+### 4. 分析师信号质量
+
+必须验收：
+
+1. 三个分析师结构化字段合法率。
+2. Neutral 责任化完整率。
+3. 无理由 Neutral 是否下降。
+4. 方向信号准确率是否提升。
+5. `business_quality_score` 高的交易是否明显优于低分交易。
+6. technical 的 trend_stage/template 是否能解释入场质量。
+7. fundamental 的 direction_anchor 是否能改善持仓方向。
+8. commodity_news 的 event window 是否能解释事件驱动收益。
+
+### 5. Horizon 分层
+
+必须验收：
+
+1. `signal_context_history` 不再把绝大多数画像压成 short。
+2. technical short、fundamental medium、commodity_news event_short 是否分别保留。
+3. PM 是否把 fundamental 当作方向锚，而不是短线追涨杀跌信号。
+4. Reviewer 归因是否按 horizon_scope 评价模板，不再把中期基本面锚放到短线框架里误杀。
+
+### 6. Auditor 风险分层
+
+必须验收：
+
+1. block 主要来自硬风险和成熟弱模板。
+2. 普通分歧、小样本、轻微确认不足是否更多进入 scale_down/probe_only。
+3. protected 模板是否能绕过普通保守规则。
+4. auditor 正确拦截带来的避免亏损金额。
+5. auditor 误杀高质量交易的次数和机会成本。
+
+### 7. Trader 择时与出场
+
+必须验收：
+
+1. 15m 确认 + 下一根 1m 开盘成交是否减少追价。
+2. 未触发交易是否正确 wait/skip。
+3. 入场后 MFE/MAE 是否改善。
+4. ATR 止损、无效位、时间止损、趋势破坏是否降低尾部亏损。
+5. protected 趋势模板是否没有被过紧止损洗掉。
+6. probe/recovering 模板的探索亏损是否被控制。
+7. 回测成交逻辑是否能被模拟盘一比一复刻。
+
+### 8. Reviewer 学习闭环
+
+必须验收：
+
+1. 每日 Phase4 是否稳定写入学习结果。
+2. `template_prior.json` 是否在新一轮 Day 1 生效。
+3. `provisional_policy_state` 是否能在 1-2 笔异常亏损后临时 cap/probe。
+4. `adaptive_policy_state` 是否在样本成熟后形成稳定策略。
+5. LLM causal review 生成的候选知识有多少被规则引擎采纳。
+6. 被采纳学习后的交易表现是否优于未采纳交易。
+7. 学习是否遵守样本数、过期、rollback 和防过拟合约束。
+
+### 9. 数据与无未来函数
+
+必须验收：
+
+1. Phase1 所有数据快照是否只含 T-1 及以前可见数据。
+2. Finoview factor snapshot 是否记录 data_date、lag_days、freshness_status。
+3. 新闻是否不读取 T 日及未来新闻。
+4. PandaAI extra factor 是否使用 T-1 或更早参考日。
+5. Phase2 是否只使用已发生分钟线。
+6. Phase3 是否只在收盘后使用结算价。
+7. Phase4 是否只在结算完成后复盘学习。
+8. 正式回测是否使用新 `config_id` 或 `--reset-config`，避免数据库历史学习泄漏。
+
+### 10. 账务与阶段一致性
+
+必须验收：
+
+1. Phase1 不写真实交易。
+2. Phase2 交易记录与 recommendation 对齐。
+3. Phase3 settlement、portfolio、ticker PnL、commission、margin 全部一致。
+4. Phase4 校验通过后才写学习。
+5. 账户权益收益口径、保证金收益口径、手续费、滑点、保证金占用口径一致。
+
+### 11. 归因与报告
+
+必须验收：
+
+1. 每笔交易能归因到分析师、模板、horizon、ticker-side、PM 动作、auditor 决策、trader 入场/出场。
+2. 每个未交易建议能说明是硬风险、软风险、资金容量不足、信号质量不足、还是盘中未触发。
+3. `alpha_capacity_limited` 与 `system_under_deployed` 能在报告中分开统计。
+4. 评估报告能回答：亏损来自信号错、PM 错、auditor 误拦、trader 入场差、出场慢、还是账务/成本侵蚀。
+5. 图像输出保留组合净值曲线和品种价格曲线 + 开平仓点。
+
+## 六、正式回测通过标准
+
+6 个月正式回测通过，至少应同时满足：
+
+1. 账户权益收益转正，且收益来源可归因。
+2. 平均保证金占用进入 8%-12% 区间，强机会日能接近 16%。
+3. protected/deployable 模板收益为正，且仓位明显高于普通模板。
+4. weak_block/watchlist 新开仓显著减少。
+5. auditor block 不再是最大资金空转原因。
+6. 学习生效交易表现优于未学习交易。
+7. trader 入场和出场质量指标改善。
+8. 无未来函数、账务、阶段校验全部通过。
+9. 归因报告能解释收益、亏损、空仓和资金未部署原因。
+
+若 6 个月未达标，不允许直接调参重跑。必须先用 attribution 报告判断失败原因属于：
+
+1. alpha 容量不足。
+2. 分析师信号质量仍不足。
+3. PM 仍过度保守。
+4. auditor 误杀高质量交易。
+5. trader 入场或出场仍有问题。
+6. 学习闭环未真正生效。
+7. 数据覆盖或 no-look-ahead 存在问题。
+8. 市场窗口本身不支持当前 15 品种策略容量。
+
+只有定位到结构性原因后，才允许进入下一轮有边界的优化。
+
+## 七、当前结论
+
+基于本轮九次代码验收，AgentQuant 已经具备再次正式回测的代码条件。现在可以进行至少 6 个月的新一轮回测。
+
+执行正式回测时，必须使用 `src/config/dev.yaml`，并使用新的实验状态或 `--reset-config`，避免旧数据库中未来日期学习结果污染历史窗口。

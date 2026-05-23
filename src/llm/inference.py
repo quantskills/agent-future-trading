@@ -14,10 +14,11 @@ class LLMConfig:
     """Configuration for LLM inference"""
     provider: str
     model: str
-    temperature: float = 0.5
+    temperature: Optional[float] = 0.5
     max_retries: int = 3
     structured_output_method: Optional[str] = None
     failure_policy: Dict[str, str] = field(default_factory=dict)
+    codex_openai: Dict[str, Any] = field(default_factory=dict)
     deepseek: Dict[str, Any] = field(default_factory=dict)
     openrouter: Dict[str, Any] = field(default_factory=dict)
 
@@ -64,6 +65,9 @@ def _load_llm_env_files() -> None:
         [
             project_root / ".env",
             project_root.parent / f"{project_root.name}.env",
+            project_root.parent / "Codex.env",
+            project_root.parent / "Codex" / f"{project_root.name}.env",
+            project_root.parent / "Codex" / "Codex.env",
             Path.cwd() / ".env",
         ]
     )
@@ -78,6 +82,20 @@ def _load_llm_env_files() -> None:
             continue
         seen.add(resolved)
         load_dotenv(dotenv_path=resolved, override=False)
+
+
+def _normalize_openai_compatible_root(base_url: str) -> str:
+    base_url = str(base_url).strip().rstrip("/")
+    return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+
+def _resolve_provider_base_url(provider: Provider, model_config, config: LLMConfig) -> Optional[str]:
+    """Resolve provider base URLs, including env/config overrides for local gateways."""
+    if provider == Provider.CODEX_OPENAI:
+        codex_config = config.codex_openai or {}
+        base_url = codex_config.get("base_url") or os.getenv("CODEX_OPENAI_BASE_URL") or model_config.base_url
+        return _normalize_openai_compatible_root(base_url) if base_url else None
+    return model_config.base_url
 
 
 def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, Any]:
@@ -134,6 +152,7 @@ def get_model(config: LLMConfig):
     _load_llm_env_files()
     provider = Provider(config.provider)
     model_config = provider.config
+    base_url = _resolve_provider_base_url(provider, model_config, config)
 
     if model_config.requires_api_key:
         api_key = os.getenv(model_config.env_key)
@@ -144,7 +163,7 @@ def get_model(config: LLMConfig):
     kwargs = {
         "model": config.model,
         **({"api_key": api_key} if model_config.requires_api_key else {}),
-        **({"base_url": model_config.base_url} if model_config.base_url else {}),
+        **({"base_url": base_url} if base_url else {}),
         **({"temperature": config.temperature} if config.temperature is not None else {}),
         **_build_provider_kwargs(provider, config),
     }

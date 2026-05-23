@@ -12,11 +12,14 @@ from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.quality import (
     apply_signal_quality_gate,
     format_fundamental_summary_for_prompt,
-    get_analyst_llm_config,
     llm_path_label,
     parse_fundamental_factors,
+    summarize_pandaai_extra_factors,
     write_analyst_report,
 )
+from tools.agent_tools.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.learning_context import build_learning_context, resolve_config_id
+from util.trading_calendar import get_previous_trading_day
 
 
 def _build_fundamental_audit_note(
@@ -84,6 +87,17 @@ def _build_fundamental_signal_metadata(metadata: Optional[Dict[str, Any]]) -> Di
     if metadata.get("basis"):
         result["basis"] = metadata["basis"]
     return result
+
+
+def _resolve_pandaai_extra_reference_date(router: Router, ticker: str, trading_date, lag_days: int):
+    reference_date = trading_date
+    for _ in range(max(1, int(lag_days or 1))):
+        reference_date = get_previous_trading_day(
+            router=router,
+            trading_date=reference_date,
+            underlying_code=ticker,
+        )
+    return reference_date
 
 
 def apply_confidence_discount(
@@ -309,10 +323,8 @@ def fundamental_agent(state: FundState):
     db = get_db()
     logger.log_agent_status(agent_name, ticker, "Analyzing fundamental data")
 
-    deep_fundamental_analysis = None
-
     try:
-        router = Router(APISource.PANDAAI, market_type=market_type)
+        router = Router(APISource.PANDAAI, market_type=market_type, config=full_config)
         fundamentals = router.get_china_futures_fundamentals(
             ticker=ticker,
             trading_date=trading_date,
@@ -325,59 +337,67 @@ def fundamental_agent(state: FundState):
 
         logger.info(f"{ticker}: Got fundamental data from router:\n{fundamentals}")
         fundamental_context = parse_fundamental_factors(fundamentals, fundamentals_metadata, ticker)
-        fundamentals_for_prompt = fundamentals + format_fundamental_summary_for_prompt(fundamental_context)
-
-        analyst_llm_config = get_analyst_llm_config(full_config, "fundamental")
-        if analyst_llm_config.get("enable_deepanalyze", False):
+        pandaai_extra_context = {}
+        extra_config = full_config.get("pandaai_extra_data", {}) or {}
+        if extra_config.get("enabled", False) and extra_config.get("use_in_fundamental_analyst", True):
             try:
-                from llm.deepanalyze_client import DeepAnalyzeClient
-
-                da_client = DeepAnalyzeClient()
-                deep_fundamental_analysis = da_client.analyze_fundamental_trends(
-                    fundamentals_text=fundamentals,
-                    ticker=ticker,
+                reference_date = _resolve_pandaai_extra_reference_date(
+                    router,
+                    ticker,
+                    trading_date,
+                    int(extra_config.get("reference_lag_days", 1)),
+                )
+                extra_features = (
+                    extra_config.get("fundamental_features")
+                    or extra_config.get("features")
+                    or {}
+                )
+                pandaai_extra_snapshot = router.get_pandaai_futures_extra_snapshot(
+                    underlying_code=ticker,
+                    reference_date=reference_date,
+                    lookback_days=int(extra_config.get("lookback_days", 5)),
+                    contract_id=state.get("contract_code") or state.get("target_contract_code"),
+                    features=extra_features,
+                )
+                pandaai_extra_context = summarize_pandaai_extra_factors(pandaai_extra_snapshot)
+                fundamental_context["pandaai_extra_factors"] = pandaai_extra_context
+                logger.info(
+                    f"{ticker}: PandaAI extra fundamental factors | "
+                    f"direction={pandaai_extra_context.get('direction_hint')} | "
+                    f"tradeability={pandaai_extra_context.get('tradeability')} | "
+                    f"features={len(pandaai_extra_context.get('features') or [])}"
                 )
             except Exception as exc:
-                logger.warning(f"{ticker}: DeepAnalyze fundamental analysis failed: {exc}")
-                deep_fundamental_analysis = None
-        else:
-            logger.info(f"{ticker}: Fundamental DeepAnalyze disabled by analyst_llm config")
+                pandaai_extra_context = {
+                    "enabled": True,
+                    "tradeability": "low",
+                    "direction_hint": "neutral",
+                    "features": [],
+                    "errors": [str(exc)],
+                }
+                fundamental_context["pandaai_extra_factors"] = pandaai_extra_context
+                logger.warning(f"{ticker}: PandaAI extra fundamental factor context skipped: {exc}")
 
-        if deep_fundamental_analysis:
-            fundamentals_for_prompt += "\n\n=== DeepAnalyze Fundamental Summary ===\n"
-            fundamentals_for_prompt += (
-                f"Inventory trend: {deep_fundamental_analysis.get('inventory_trend')}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Inventory outlook: {deep_fundamental_analysis.get('inventory_outlook')}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Profit status: {deep_fundamental_analysis.get('profit_margin_status')}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Profit trend: {deep_fundamental_analysis.get('profit_margin_trend')}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Supply-demand balance: {deep_fundamental_analysis.get('supply_demand_balance')}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Key drivers: {', '.join(deep_fundamental_analysis.get('key_drivers', []))}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Confidence: {deep_fundamental_analysis.get('confidence', 0.30):.2f}\n"
-            )
-            fundamentals_for_prompt += (
-                f"Reasoning: {deep_fundamental_analysis.get('reasoning', '')}\n"
-            )
-            logger.info(f"{ticker}: DeepAnalyze fundamental analysis completed")
+        fundamentals_for_prompt = fundamentals + format_fundamental_summary_for_prompt(fundamental_context)
 
-        llm_path = llm_path_label(full_config, "fundamental", deep_fundamental_analysis is not None)
+        llm_path = llm_path_label(full_config, "fundamental")
         fundamentals_for_prompt += f"\n\n=== LLM Path ===\n{llm_path}\n"
 
         prompt = FUTURES_FUNDAMENTAL_PROMPT.format(
             ticker=ticker,
             fundamentals=fundamentals_for_prompt,
         )
+        learning_context = build_learning_context(
+            db=db,
+            full_config=full_config,
+            config_id=resolve_config_id(db, full_config, state.get("config_id")),
+            trading_date=trading_date,
+            analyst="fundamental",
+            ticker=ticker,
+            context=fundamental_context,
+            horizon_class="medium",
+        )
+        prompt += learning_context.get("text", "")
         logger.info(f"{ticker}: Fundamental prompt created, length={len(prompt)}")
     except Exception as exc:
         logger.error(f"{ticker}: Failed to fetch futures fundamentals: {exc}")
@@ -393,6 +413,12 @@ def fundamental_agent(state: FundState):
     )
 
     signal.agent_name = agent_name
+    signal.horizon_class = signal.horizon_class if signal.horizon_class != "unknown" else "medium"
+    signal.expected_horizon_days = signal.expected_horizon_days or 5
+    signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
+    signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
+    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "fundamental_anchor"
+    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "direction_anchor"
 
     signal = apply_confidence_discount(signal, fundamentals_for_prompt, ticker, metadata=fundamentals_metadata)
     signal.metadata = {
@@ -400,8 +426,13 @@ def fundamental_agent(state: FundState):
         **_build_fundamental_signal_metadata(fundamentals_metadata),
         "llm_path": llm_path,
         "fundamental_context": fundamental_context,
+        "reviewer_learning_context": {
+            "selected_ids": learning_context.get("selected_ids", []),
+            "horizon_class": learning_context.get("horizon_class", "medium"),
+        },
     }
     signal = apply_signal_quality_gate(signal, fundamental_context, full_config, "fundamental")
+    signal = apply_business_quality_enrichment(signal, fundamental_context, full_config, "fundamental")
     signal.justification += "\n" + _build_fundamental_audit_note(
         trading_date=trading_date,
         pre_open_only=pre_open_only,
@@ -410,7 +441,8 @@ def fundamental_agent(state: FundState):
     )
     signal.justification += (
         f"\n[Fundamental context: sector={fundamental_context.get('sector')}; "
-        f"tradeability={fundamental_context.get('tradeability')}; llm_path={llm_path}]"
+        f"tradeability={fundamental_context.get('tradeability')}; llm_path={llm_path}; "
+        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
     )
 
     signal.justification = sanitize_visible_text(signal.justification)
@@ -430,8 +462,8 @@ def fundamental_agent(state: FundState):
             "Factor Group Counts": fundamental_context.get("factor_group_counts"),
             "Data Quality": fundamental_context.get("data_quality"),
             "Basis": fundamental_context.get("basis") or "unavailable",
+            "PandaAI Extra Factors": fundamental_context.get("pandaai_extra_factors") or "disabled_or_unavailable",
             "Risk Flags": fundamental_context.get("risk_flags"),
-            "DeepAnalyze Context": deep_fundamental_analysis or "disabled_or_unavailable",
         },
     )
     if report_path:
@@ -442,5 +474,4 @@ def fundamental_agent(state: FundState):
 
     return {
         "analyst_signals": [signal],
-        "deepanalyze_fundamental_trends": deep_fundamental_analysis,
     }

@@ -21,11 +21,12 @@ from tools.agent_tools.quality import (
     apply_signal_quality_gate,
     build_technical_context,
     format_technical_summary_for_prompt,
-    get_analyst_llm_config,
     llm_path_label,
     signal_value,
     write_analyst_report,
 )
+from tools.agent_tools.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.learning_context import build_learning_context, resolve_config_id
 
 def format_signal_compact(signal: Signal) -> str:
     """
@@ -219,47 +220,27 @@ def technical_agent(state: FundState):
 
     technical_context = build_technical_context(ticker, signal_results, features)
 
-    # Optionally enrich the signal set with DeepAnalyze market-state context.
-    analyst_llm_config = get_analyst_llm_config(full_config, "technical")
-    deep_analysis_structured: Optional[Dict[str, Any]] = None
-    deep_analysis_text: Optional[str] = None
-    if analyst_llm_config.get("enable_deepanalyze", False):
-        try:
-            from llm.deepanalyze_client import DeepAnalyzeClient
-
-            da_client = DeepAnalyzeClient()
-
-            # 1. Request the textual DeepAnalyze market-state report.
-            deep_analysis_text = da_client.analyze_market_state(
-                price_df=prices_df,
-                ticker=ticker,
-                technical_indicators=signal_results
-            )
-
-            # 2. Extract structured fields for downstream weighting and auditing.
-            if deep_analysis_text:
-                deep_analysis_structured = da_client.extract_market_state_from_text(
-                    deep_analysis_text, ticker
-                )
-                logger.info(f"{ticker}: DeepAnalyze market-state extraction completed")
-
-        except Exception as e:
-            logger.warning(f"{ticker}: DeepAnalyze market-state analysis failed: {e}")
-            deep_analysis_structured = None
-    else:
-        logger.info(f"{ticker}: Technical DeepAnalyze disabled by analyst_llm config")
-
-    llm_path = llm_path_label(full_config, "technical", deep_analysis_text is not None)
+    llm_path = llm_path_label(full_config, "technical")
 
     # Build the futures-only technical-analysis prompt.
     prompt = build_futures_technical_prompt_enhanced_v2(
         ticker=ticker,
         signal_results=signal_results,
-        deep_analysis_text=deep_analysis_text,
         features=features,
         technical_context=technical_context,
         llm_path=llm_path,
     )
+    learning_context = build_learning_context(
+        db=db,
+        full_config=full_config,
+        config_id=resolve_config_id(db, full_config, state.get("config_id")),
+        trading_date=trading_date,
+        analyst="technical",
+        ticker=ticker,
+        context=technical_context,
+        horizon_class="short",
+    )
+    prompt += learning_context.get("text", "")
 
     # Get LLM signal
     signal = agent_call(
@@ -270,17 +251,40 @@ def technical_agent(state: FundState):
 
     # Preserve agent identity explicitly for downstream ordering and auditing.
     signal.agent_name = agent_name
+    try:
+        close = prices_df["close"].dropna()
+        latest_close = float(close.iloc[-1]) if not close.empty else None
+        price_percentile = (
+            float((close <= latest_close).sum()) / float(len(close))
+            if latest_close is not None and len(close) > 0
+            else None
+        )
+    except Exception:
+        price_percentile = None
+    signal.horizon_class = signal.horizon_class if signal.horizon_class != "unknown" else "short"
+    signal.expected_horizon_days = signal.expected_horizon_days or 2
+    signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(technical_context.get("market_regime") or "unknown")
+    signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(technical_context.get("market_regime") or technical_context.get("tradeability") or "unknown")
+    signal.price_percentile = signal.price_percentile if signal.price_percentile is not None else price_percentile
+    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "technical_price_trigger"
+    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "initial_or_rebalance"
     signal.metadata = {
         **(getattr(signal, "metadata", {}) or {}),
         "llm_path": llm_path,
         "technical_context": technical_context,
         "indicators_used": list(signal_results.keys()),
+        "reviewer_learning_context": {
+            "selected_ids": learning_context.get("selected_ids", []),
+            "horizon_class": learning_context.get("horizon_class", "short"),
+        },
     }
     signal = apply_signal_quality_gate(signal, technical_context, full_config, "technical")
+    signal = apply_business_quality_enrichment(signal, technical_context, full_config, "technical")
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
         f"gap_analysis={'disabled_pre_open' if pre_open_only else 'standard'}; "
-        f"llm_path={llm_path}; tradeability={technical_context.get('tradeability')}]"
+        f"llm_path={llm_path}; tradeability={technical_context.get('tradeability')}; "
+        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
     )
     signal.justification = sanitize_visible_text(signal.justification)
 
@@ -300,7 +304,6 @@ def technical_agent(state: FundState):
                 for name, value in signal_results.items()
             },
             "Structured Technical Context": technical_context,
-            "DeepAnalyze Context": deep_analysis_structured or "disabled_or_unavailable",
         },
     )
     if report_path:
@@ -312,7 +315,6 @@ def technical_agent(state: FundState):
 
     return {
         "analyst_signals": [signal],
-        "deepanalyze_market_state": deep_analysis_structured
     }
 
 def calculate_market_features(prices_df: pd.DataFrame) -> dict:
@@ -945,8 +947,7 @@ def get_futures_volatility(prices_df, params):
 
 # ==================== Legacy enhanced prompt wrapper ====================
 
-def build_futures_technical_prompt_enhanced(ticker: str, signal_results: dict,
-                                           deep_analysis: Optional[dict] = None) -> str:
+def build_futures_technical_prompt_enhanced(ticker: str, signal_results: dict) -> str:
     """Backward-compatible enhanced futures technical prompt builder."""
     signal_results_compact = {k: format_signal_compact(v) for k, v in signal_results.items() if isinstance(v, Signal)}
 
@@ -957,19 +958,6 @@ Indicator snapshot (UP / DOWN / FLAT):
 [Context] VOL:{signal_results_compact.get('futures_volatility', '?')} TV:{signal_results_compact.get('turnover_value', '?')} PL:{signal_results_compact.get('price_levels', '?')}
 [Filters] MR:{signal_results_compact.get('mean_reversion', '?')} RSI:{signal_results_compact.get('rsi', '?')}
 """
-
-    if deep_analysis:
-        base_prompt += f"""
-
-=== DeepAnalyze market context ===
-- Market state: {deep_analysis.get('market_state', 'unknown')}
-- Trend direction: {deep_analysis.get('trend_direction', 'unknown')}
-- Volatility level: {deep_analysis.get('volatility_level', 'unknown')}
-- Confidence: {deep_analysis.get('confidence', 0):.2f}
-- Reasoning: {deep_analysis.get('reasoning', '')}
-"""
-    else:
-        base_prompt += "\n=== DeepAnalyze market context unavailable; rely on the technical indicators directly. ===\n"
 
     base_prompt += """
 Signal priority: market regime fit > primary signals > filter signals
@@ -985,7 +973,6 @@ Provide a concise, well-reasoned futures technical view.
     return base_prompt
 
 def build_futures_technical_prompt_enhanced_v2(ticker: str, signal_results: dict,
-                                                 deep_analysis_text: Optional[str] = None,
                                                  features: dict = None,
                                                  technical_context: Optional[Dict[str, Any]] = None,
                                                  llm_path: str = "cloud_only") -> str:
@@ -1007,21 +994,14 @@ GAP_DETAIL: {signal_results.get('gap_analysis', 'N/A')}
     if technical_context:
         base_prompt += "\n" + format_technical_summary_for_prompt(technical_context)
 
-    if deep_analysis_text:
+    if features:
         analysis_section = f"""
-
-=== DeepAnalyze market report ===
-{deep_analysis_text}
-
 === Market features ===
-"""
-        if features:
-            analysis_section += f"- Volatility: {features['volatility']:.2%}\n"
-            analysis_section += f"- Trend strength (ADX): {features['trend_strength']:.2f}\n"
-            analysis_section += f"- Price range: {features['price_range']:.2%}\n"
-            analysis_section += f"- Volume ratio: {features['volume_ratio']:.2f}\n"
+- Volatility: {features['volatility']:.2%}
+- Trend strength (ADX): {features['trend_strength']:.2f}
+- Price range: {features['price_range']:.2%}
+- Volume ratio: {features['volume_ratio']:.2f}
 
-        analysis_section += """
 === Decision guidance ===
 - In trending markets, emphasize trend, MACD, and ADX signals.
 - In ranging markets, emphasize mean-reversion, RSI, and stochastic signals.
@@ -1032,8 +1012,6 @@ GAP_DETAIL: {signal_results.get('gap_analysis', 'N/A')}
 - If volume ratio is elevated, treat aligned signals as more reliable.
 """
         base_prompt += analysis_section
-    else:
-        base_prompt += "\n=== DeepAnalyze market report unavailable; use the indicator snapshot directly. ===\n"
 
     base_prompt += """
 Signal priority: market regime context > primary trend signals > filter signals
@@ -1047,6 +1025,14 @@ Quality discipline:
 Output format:
 - signal: "Bullish" / "Bearish" / "Neutral"
 - confidence: 0.0-1.0
+- horizon_class: "short"
+- expected_horizon_days: 1-2
+- market_regime: current technical regime
+- trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
+- price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
+- trigger_type: breakout_continuation / reversal_confirmed / pullback_repair / range_filter / technical_price_trigger
+- entry_type: initial / add / reduce / hold / initial_or_rebalance
+- invalidation_level: nearest invalidation price if inferable, otherwise null
 - justification: explain the market regime, the bullish evidence, the bearish evidence, conflicts, and why the setup is or is not tradable
 - metadata: include tradeability, market_regime, indicator_votes, risk_flags, and llm_path
 

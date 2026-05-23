@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from tools.agent_tools.market_confirmation import score_pandaai_extra_records
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 
@@ -75,12 +76,10 @@ def get_sector_guidance(ticker: str, analyst: str) -> str:
 def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[str, Any]:
     cfg = full_config.get("analyst_llm", {}) or {}
     llm_cfg = full_config.get("llm", {}) or {}
-    analyst_key = str(analyst).lower()
-    deep_key = f"enable_deepanalyze_for_{analyst_key}"
+    del analyst
     return {
-        "mode": cfg.get("mode", "cloud_only"),
+        "mode": "cloud_only",
         "cloud_model": cfg.get("cloud_model") or llm_cfg.get("model"),
-        "enable_deepanalyze": bool(cfg.get(deep_key, False)),
         "write_decision_reports": bool(cfg.get("write_decision_reports", True)),
         "force_neutral_low_tradeability": bool(cfg.get("force_neutral_low_tradeability", True)),
         "cap_medium_tradeability_confidence": float(cfg.get("cap_medium_tradeability_confidence", 0.65)),
@@ -88,10 +87,8 @@ def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[st
     }
 
 
-def llm_path_label(full_config: Dict[str, Any], analyst: str, deepanalyze_used: bool) -> str:
+def llm_path_label(full_config: Dict[str, Any], analyst: str) -> str:
     base = get_analyst_llm_config(full_config, analyst)
-    if deepanalyze_used:
-        return "cloud_plus_deepanalyze"
     return str(base.get("mode") or "cloud_only")
 
 
@@ -246,6 +243,9 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         )
 
     quality = metadata or {}
+    factor_judgment = quality.get("finoview_factor_judgment") or {}
+    factor_snapshot = quality.get("finoview_factor_snapshot") or {}
+    factor_attribution = quality.get("finoview_factor_attribution") or {}
     configured = int(quality.get("configured_indicator_count") or 0)
     loaded = int(quality.get("loaded_indicator_count") or 0)
     missing_like = int(quality.get("missing_like_count") or 0)
@@ -287,8 +287,11 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         if counts.get("up", 0) and counts.get("down", 0):
             conflicting_groups += 1
 
+    factor_tradable = bool(factor_judgment.get("tradable_coverage"))
     if risk_flags and ("low_coverage" in risk_flags or "stale_fundamental_inputs" in risk_flags):
         tradeability = "low"
+    elif factor_tradable and directional_groups >= 2 and conflicting_groups <= 1:
+        tradeability = "high"
     elif directional_groups >= 3 and conflicting_groups <= 1:
         tradeability = "high"
     elif directional_groups >= 2 and conflicting_groups <= 2:
@@ -301,6 +304,9 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         "sector_guidance": get_sector_guidance(ticker, "fundamental"),
         "factor_groups": {group: items[:8] for group, items in groups.items()},
         "factor_group_counts": {group: dict(counts) for group, counts in group_counts.items()},
+        "finoview_factor_snapshot": factor_snapshot,
+        "finoview_factor_judgment": factor_judgment,
+        "finoview_factor_attribution": factor_attribution,
         "data_quality": {
             "configured": configured,
             "loaded": loaded,
@@ -309,10 +315,119 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
             "stale_ratio": stale_ratio,
             "near_stale_ratio": near_stale_ratio,
             "low_confidence_count": low_confidence,
+            "factor_coverage_score": float(factor_judgment.get("coverage_score") or 0.0),
+            "factor_freshness_score": float(factor_judgment.get("freshness_score") or 0.0),
+            "no_lookahead_status": factor_judgment.get("no_lookahead_status", "unchecked"),
         },
         "basis": quality.get("basis"),
         "tradeability": tradeability,
         "risk_flags": risk_flags,
+    }
+
+
+_PANDAAI_FACTOR_GROUPS = {
+    "basis": "price_basis",
+    "warehouse_receipt": "inventory",
+    "net_flow": "capital_flow",
+    "variety_position_rank": "positioning",
+    "symbol_position_rank": "positioning",
+    "ls_ratio": "sentiment_positioning",
+    "broker_net_margin_change": "capital_flow",
+    "broker_net_margin": "capital_flow",
+    "netposi_rank": "positioning",
+    "net_cap_change": "capital_flow",
+    "contract_daily_indicators": "sentiment_positioning",
+    "contract_rank": "sentiment_positioning",
+    "broker_variety_profit": "broker_profit",
+}
+
+
+def summarize_pandaai_extra_factors(snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize PandaAI futures non-market data as business factor evidence."""
+    if not isinstance(snapshot, dict):
+        return {
+            "enabled": False,
+            "tradeability": "low",
+            "direction_hint": "neutral",
+            "features": [],
+            "factor_group_counts": {},
+            "record_counts": {},
+            "data_missing": [],
+            "feature_status": {},
+            "feature_diagnostics": {},
+            "data_status_groups": {},
+            "errors": [],
+        }
+
+    records = snapshot.get("records") or {}
+    record_counts = snapshot.get("record_counts") or {}
+    feature_status = dict(snapshot.get("feature_status") or {})
+    features = score_pandaai_extra_records(records)
+    directional = [item for item in features if item.get("direction") in {"long", "short"}]
+    long_features = [item["feature"] for item in directional if item.get("direction") == "long"]
+    short_features = [item["feature"] for item in directional if item.get("direction") == "short"]
+    avg_score = (
+        sum(float(item.get("score") or 0.0) for item in directional) / len(directional)
+        if directional
+        else 0.0
+    )
+    if avg_score > 0.10:
+        direction_hint = "long"
+    elif avg_score < -0.10:
+        direction_hint = "short"
+    else:
+        direction_hint = "neutral"
+
+    group_counts: Dict[str, int] = {}
+    for item in features:
+        group = _PANDAAI_FACTOR_GROUPS.get(str(item.get("feature")), "context")
+        group_counts[group] = group_counts.get(group, 0) + 1
+
+    normalized_status: Dict[str, str] = {}
+    for key, value in (record_counts or {}).items():
+        try:
+            count = int(value or 0)
+        except Exception:
+            count = 0
+        normalized_status[key] = "ok" if count > 0 else str(feature_status.get(key) or "no_data")
+    for key, value in feature_status.items():
+        normalized_status.setdefault(str(key), str(value or "unknown"))
+    data_missing = [key for key, status in normalized_status.items() if status not in {"ok", "unsupported_feature"}]
+    data_status_groups: Dict[str, List[str]] = {}
+    for key, status in sorted(normalized_status.items()):
+        data_status_groups.setdefault(status, []).append(key)
+    errors = snapshot.get("errors") or []
+    if len(directional) >= 3 and len(group_counts) >= 3 and len(errors) == 0:
+        tradeability = "high"
+    elif len(directional) >= 1 and len(errors) <= 2:
+        tradeability = "medium"
+    else:
+        tradeability = "low"
+
+    return {
+        "enabled": True,
+        "source": "PandaAI",
+        "info_cutoff": "T-1_or_earlier",
+        "underlying_code": snapshot.get("underlying_code"),
+        "contract_symbol": snapshot.get("contract_symbol"),
+        "reference_date": snapshot.get("reference_date"),
+        "lookback_days": snapshot.get("lookback_days"),
+        "tradeability": tradeability,
+        "direction_hint": direction_hint,
+        "avg_score": avg_score,
+        "long_features": long_features,
+        "short_features": short_features,
+        "features": features,
+        "factor_group_counts": group_counts,
+        "record_counts": record_counts,
+        "data_missing": data_missing,
+        "feature_status": normalized_status,
+        "feature_diagnostics": snapshot.get("feature_diagnostics") or {},
+        "data_status_groups": data_status_groups,
+        "parameter_errors": data_status_groups.get("parameter_error", []),
+        "no_data": data_status_groups.get("no_data", []),
+        "unsupported_features": data_status_groups.get("unsupported_feature", []),
+        "errors": errors,
     }
 
 
@@ -531,6 +646,7 @@ def format_fundamental_summary_for_prompt(context: Dict[str, Any]) -> str:
         f"Data quality: {_format_json_block(context.get('data_quality'))}\n"
         f"Factor group counts: {_format_json_block(context.get('factor_group_counts'))}\n"
         f"Basis: {_format_json_block(context.get('basis'))}\n"
+        f"PandaAI extra factor context: {_format_json_block(context.get('pandaai_extra_factors'))}\n"
         f"Risk flags: {', '.join(context.get('risk_flags') or []) or 'none'}\n"
         "Directional discipline: require at least two independent factor groups supporting a direction. "
         "If factors or data quality are weak, prefer Neutral.\n"
