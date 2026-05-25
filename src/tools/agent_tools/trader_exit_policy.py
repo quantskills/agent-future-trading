@@ -121,7 +121,16 @@ def evaluate_exit_policy(
         template_state = str((lifecycle.get("template_state") or lifecycle.get("memory_state") or "")).lower()
         is_probe = template_state in {"probe_only", "recovering", "watchlist"} or "probe" in template_name
         max_days = int(policy.get("probe_time_stop_days" if is_probe else "trend_time_stop_days") or 0)
-        if max_days > 0 and days >= max_days and abs(target_lots) >= abs(current_lots):
+        same_direction_supported = (
+            target_lots != 0
+            and current_lots != 0
+            and ((target_lots > 0) == (current_lots > 0))
+            and abs(target_lots) >= abs(current_lots)
+        )
+        result["same_direction_supported"] = same_direction_supported
+        result["days_held"] = days
+        result["is_probe"] = is_probe
+        if max_days > 0 and days >= max_days and not same_direction_supported and abs(target_lots) >= abs(current_lots):
             result.update({"exit_required": True, "target_lots": 0, "reason": "time_stop"})
             return result
     return result

@@ -29,7 +29,6 @@ class Provider(str, Enum):
     FIREWORKS= "Fireworks"
     YIZHAN = "YiZhan"
     AIHUBMIX = "AiHubMix"
-    OPENROUTER = "OpenRouter"
 
     @property
     def config(self) -> ModelConfig:
@@ -82,12 +81,6 @@ class Provider(str, Enum):
                 model_class=ChatOpenAI,
                 env_key="AIHUBMIX_API_KEY",
                 base_url="https://api.aihubmix.com/v1",
-            ),
-            Provider.OPENROUTER: ModelConfig(
-                model_class=ChatOpenAI,
-                env_key="OPENROUTER_API_KEY",
-                base_url="https://openrouter.ai/api/v1",
-                structured_output_method="json_mode",
             ),
         }
         return PROVIDER_CONFIGS[self]

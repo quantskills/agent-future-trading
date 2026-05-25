@@ -42,13 +42,9 @@ llm:
     auth_error: "raise"
     invalid_request: "raise"
     server_error: "retry_then_default"
-  openrouter:
-    app_name: "AgentQuant"
-    reasoning:
-      enabled: true
-      effort: "medium"
-      exclude: true
   deepseek:
     thinking:
       enabled: false
     reasoning_effort: null
+  codex_openai:
+    reasoning_effort: "medium"

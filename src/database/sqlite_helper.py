@@ -5,7 +5,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from graph.schema import AnalystSignal
 from database.interface import BaseDB
-from database.sqlite_setup import DB_PATH, _ensure_columns, _ensure_reviewer_learning_schema
+from database.artifact_store import (
+    externalize_json_for_db,
+    externalize_text_for_db,
+    load_externalized_json,
+)
+from database.sqlite_setup import (
+    DB_PATH,
+    _ensure_columns,
+    _ensure_reviewer_learning_schema,
+    _json_artifact_columns,
+    _text_artifact_columns,
+)
 from util.logger import logger
 
 class SQLiteDB(BaseDB):
@@ -24,21 +35,89 @@ class SQLiteDB(BaseDB):
                 cursor = conn.cursor()
                 self._ensure_strategy_memory_schema(cursor)
                 self._ensure_reviewer_learning_schema(cursor)
-                _ensure_columns(
-                    cursor,
-                    "signal",
-                    {
-                        "artifact_json": "TEXT",
-                        "business_quality_score": "REAL DEFAULT 0",
-                        "horizon_class": "TEXT DEFAULT 'unknown'",
-                        "template_name": "TEXT DEFAULT 'unknown'",
-                    },
-                )
+                if self._table_exists(cursor, "signal"):
+                    _ensure_columns(
+                        cursor,
+                        "signal",
+                        {
+                            "artifact_json": "TEXT",
+                            "business_quality_score": "REAL DEFAULT 0",
+                            "horizon_class": "TEXT DEFAULT 'unknown'",
+                            "template_name": "TEXT DEFAULT 'unknown'",
+                        },
+                    )
+                self._ensure_artifact_runtime_schema(cursor)
                 conn.commit()
                 self._runtime_schema_ready = True
             except Exception as exc:
                 logger.warning(f"Runtime schema bootstrap skipped: {exc}")
         return conn
+
+    def _table_exists(self, cursor: sqlite3.Cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
+
+    def _ensure_artifact_runtime_schema(self, cursor: sqlite3.Cursor) -> None:
+        if self._table_exists(cursor, "ticker_daily_pnl"):
+            _ensure_columns(
+                cursor,
+                "ticker_daily_pnl",
+                {
+                    "holding_pnl": "REAL DEFAULT 0",
+                    "new_position_pnl": "REAL DEFAULT 0",
+                    "close_pnl": "REAL DEFAULT 0",
+                },
+            )
+        if self._table_exists(cursor, "signal"):
+            _ensure_columns(
+                cursor,
+                "signal",
+                {
+                    **_text_artifact_columns("llm_prompt"),
+                    **_json_artifact_columns("artifact_json"),
+                },
+            )
+        if self._table_exists(cursor, "futures_recommendation"):
+            _ensure_columns(
+                cursor,
+                "futures_recommendation",
+                {
+                    **_json_artifact_columns("signal_snapshot"),
+                    **_json_artifact_columns("audit_payload"),
+                },
+            )
+        if self._table_exists(cursor, "futures_transactions"):
+            _ensure_columns(
+                cursor,
+                "futures_transactions",
+                {
+                    **_json_artifact_columns("audit_payload"),
+                    **_text_artifact_columns("llm_prompt"),
+                },
+            )
+        if self._table_exists(cursor, "signal_context_history"):
+            _ensure_columns(
+                cursor,
+                "signal_context_history",
+                {
+                    **_json_artifact_columns("analyst_signals"),
+                    **_json_artifact_columns("market_confirmation"),
+                    **_json_artifact_columns("pre_open_plan"),
+                },
+            )
+        if self._table_exists(cursor, "reviewer_llm_notes"):
+            _ensure_columns(
+                cursor,
+                "reviewer_llm_notes",
+                {
+                    **_text_artifact_columns("raw_prompt"),
+                    **_text_artifact_columns("raw_response"),
+                    **_json_artifact_columns("payload"),
+                },
+            )
 
     def _model_to_dict(self, obj: Any) -> Dict[str, Any]:
         """Convert pydantic models / sqlite rows / dict-like objects into plain dicts."""
@@ -63,14 +142,15 @@ class SQLiteDB(BaseDB):
         return json.dumps(value, ensure_ascii=False)
 
     def _deserialize_json(self, value: Any) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, (dict, list)):
-            return value
-        try:
-            return json.loads(value)
-        except Exception:
-            return value
+        return load_externalized_json(value)
+
+    def _deserialize_external_json(self, record: Dict[str, Any], field_name: str, prefix: Optional[str] = None) -> Any:
+        prefix = prefix or field_name
+        return load_externalized_json(
+            record.get(field_name),
+            record.get(f"{prefix}_artifact_path"),
+            record.get(f"{prefix}_sha256"),
+        )
 
     def _normalize_db_value(self, value: Any) -> Optional[str]:
         if value is None:
@@ -264,7 +344,7 @@ class SQLiteDB(BaseDB):
             placeholders = ", ".join(["?"] * len(set(recommendation_ids)))
             cursor.execute(
                 f'''
-                SELECT id, signal_snapshot
+                SELECT *
                 FROM futures_recommendation
                 WHERE id IN ({placeholders})
                 ''',
@@ -281,7 +361,7 @@ class SQLiteDB(BaseDB):
             recommendation = recommendations_by_id.get(str(pair.get("open_recommendation_id") or ""))
             snapshot = {}
             if recommendation:
-                snapshot = self._deserialize_json(recommendation.get("signal_snapshot")) or {}
+                snapshot = self._deserialize_external_json(recommendation, "signal_snapshot") or {}
                 if not isinstance(snapshot, dict):
                     snapshot = {}
             combo = list(self._signal_combo_from_snapshot(snapshot))
@@ -824,24 +904,61 @@ class SQLiteDB(BaseDB):
             cursor = conn.cursor()
             
             signal_id = str(uuid.uuid4())
+            cursor.execute("SELECT config_id, trading_date FROM portfolio WHERE id = ?", (portfolio_id,))
+            portfolio_row = cursor.fetchone()
+            config_id = portfolio_row["config_id"] if portfolio_row and "config_id" in portfolio_row.keys() else None
+            trading_date = (
+                self._normalize_trading_day_value(portfolio_row["trading_date"])
+                if portfolio_row and "trading_date" in portfolio_row.keys()
+                else None
+            )
+            prompt_ext = externalize_text_for_db(
+                prompt,
+                category="signal",
+                record_id=signal_id,
+                field_name="llm_prompt",
+                config_id=config_id,
+                trading_date=trading_date,
+            )
+            artifact_payload = signal.model_dump() if hasattr(signal, "model_dump") else signal
+            artifact_ext = externalize_json_for_db(
+                artifact_payload,
+                category="signal",
+                record_id=signal_id,
+                field_name="artifact_json",
+                config_id=config_id,
+                trading_date=trading_date,
+            )
             cursor.execute('''
                 INSERT INTO signal (id, portfolio_id, updated_at, ticker, llm_prompt,
                                   analyst, signal, justification, artifact_json,
-                                  business_quality_score, horizon_class, template_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  business_quality_score, horizon_class, template_name,
+                                  llm_prompt_artifact_path, llm_prompt_sha256,
+                                  llm_prompt_size, llm_prompt_summary_json,
+                                  artifact_json_artifact_path, artifact_json_sha256,
+                                  artifact_json_size, artifact_json_summary_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id,
                 portfolio_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time 
                 ticker,
-                prompt,
+                prompt_ext.inline_value,
                 analyst,
                 str(signal.signal),
                 signal.justification,
-                self._serialize_json(signal.model_dump() if hasattr(signal, "model_dump") else signal),
+                artifact_ext.inline_value,
                 float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 str(getattr(signal, "horizon_class", "unknown") or "unknown"),
                 str(getattr(signal, "template_name", "unknown") or "unknown"),
+                prompt_ext.artifact_path,
+                prompt_ext.sha256,
+                prompt_ext.size_bytes,
+                prompt_ext.summary_json,
+                artifact_ext.artifact_path,
+                artifact_ext.sha256,
+                artifact_ext.size_bytes,
+                artifact_ext.summary_json,
             ))
             
             conn.commit()
@@ -862,6 +979,26 @@ class SQLiteDB(BaseDB):
             recommendation_dict = self._model_to_dict(recommendation)
             recommendation_id = recommendation_dict.get("id") or str(uuid.uuid4())
             created_at = recommendation_dict.get("created_at") or datetime.now(timezone.utc).isoformat()
+            config_id = recommendation_dict.get("config_id")
+            trading_date = self._normalize_trading_day_value(recommendation_dict.get("trading_date"))
+            effective_trade_date = self._normalize_trading_day_value(recommendation_dict.get("effective_trade_date"))
+            artifact_date = effective_trade_date or trading_date
+            snapshot_ext = externalize_json_for_db(
+                recommendation_dict.get("signal_snapshot"),
+                category="recommendation",
+                record_id=recommendation_id,
+                field_name="signal_snapshot",
+                config_id=config_id,
+                trading_date=artifact_date,
+            )
+            audit_ext = externalize_json_for_db(
+                recommendation_dict.get("audit_payload"),
+                category="recommendation",
+                record_id=recommendation_id,
+                field_name="audit_payload",
+                config_id=config_id,
+                trading_date=artifact_date,
+            )
 
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -873,15 +1010,19 @@ class SQLiteDB(BaseDB):
                     action, lots, base_price, base_price_source, base_price_date,
                     open_price, prev_close_price, slippage_model, slippage_ticks,
                     slippage_amount, execution_price, justification, signal_snapshot,
-                    audit_payload, warning_message, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    audit_payload, warning_message, status, created_at,
+                    signal_snapshot_artifact_path, signal_snapshot_sha256,
+                    signal_snapshot_size, signal_snapshot_summary_json,
+                    audit_payload_artifact_path, audit_payload_sha256,
+                    audit_payload_size, audit_payload_summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     recommendation_id,
-                    recommendation_dict.get("config_id"),
+                    config_id,
                     recommendation_dict.get("reference_portfolio_id"),
-                    self._normalize_trading_day_value(recommendation_dict.get("trading_date")),
-                    self._normalize_trading_day_value(recommendation_dict.get("effective_trade_date")),
+                    trading_date,
+                    effective_trade_date,
                     self._enum_value(recommendation_dict.get("source_type")),
                     recommendation_dict.get("underlying_code"),
                     recommendation_dict.get("from_contract"),
@@ -899,11 +1040,19 @@ class SQLiteDB(BaseDB):
                     recommendation_dict.get("slippage_amount", 0),
                     recommendation_dict.get("execution_price"),
                     recommendation_dict.get("justification"),
-                    self._serialize_json(recommendation_dict.get("signal_snapshot")),
-                    self._serialize_json(recommendation_dict.get("audit_payload")),
+                    snapshot_ext.inline_value,
+                    audit_ext.inline_value,
                     recommendation_dict.get("warning_message"),
                     self._enum_value(recommendation_dict.get("status")),
                     created_at,
+                    snapshot_ext.artifact_path,
+                    snapshot_ext.sha256,
+                    snapshot_ext.size_bytes,
+                    snapshot_ext.summary_json,
+                    audit_ext.artifact_path,
+                    audit_ext.sha256,
+                    audit_ext.size_bytes,
+                    audit_ext.summary_json,
                 ),
             )
             conn.commit()
@@ -948,8 +1097,8 @@ class SQLiteDB(BaseDB):
             recommendations: List[Dict[str, Any]] = []
             for row in cursor.fetchall():
                 record = dict(row)
-                record["signal_snapshot"] = self._deserialize_json(record.get("signal_snapshot"))
-                record["audit_payload"] = self._deserialize_json(record.get("audit_payload"))
+                record["signal_snapshot"] = self._deserialize_external_json(record, "signal_snapshot")
+                record["audit_payload"] = self._deserialize_external_json(record, "audit_payload")
                 recommendations.append(record)
             return recommendations
         except Exception as e:
@@ -981,6 +1130,21 @@ class SQLiteDB(BaseDB):
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT config_id, trading_date, effective_trade_date FROM futures_recommendation WHERE id = ?",
+                (recommendation_id,),
+            )
+            recommendation_row = cursor.fetchone()
+            config_id = recommendation_row["config_id"] if recommendation_row and "config_id" in recommendation_row.keys() else None
+            artifact_date = (
+                self._normalize_trading_day_value(recommendation_row["effective_trade_date"])
+                if recommendation_row and "effective_trade_date" in recommendation_row.keys()
+                else None
+            ) or (
+                self._normalize_trading_day_value(recommendation_row["trading_date"])
+                if recommendation_row and "trading_date" in recommendation_row.keys()
+                else None
+            )
 
             fields = ['status = ?']
             params: List[Any] = [self._enum_value(status)]
@@ -994,12 +1158,52 @@ class SQLiteDB(BaseDB):
                 params.append(warning_message)
 
             if signal_snapshot is not None:
-                fields.append('signal_snapshot = ?')
-                params.append(self._serialize_json(signal_snapshot))
+                snapshot_ext = externalize_json_for_db(
+                    signal_snapshot,
+                    category="recommendation",
+                    record_id=recommendation_id,
+                    field_name="signal_snapshot",
+                    config_id=config_id,
+                    trading_date=artifact_date,
+                )
+                fields.extend([
+                    'signal_snapshot = ?',
+                    'signal_snapshot_artifact_path = ?',
+                    'signal_snapshot_sha256 = ?',
+                    'signal_snapshot_size = ?',
+                    'signal_snapshot_summary_json = ?',
+                ])
+                params.extend([
+                    snapshot_ext.inline_value,
+                    snapshot_ext.artifact_path,
+                    snapshot_ext.sha256,
+                    snapshot_ext.size_bytes,
+                    snapshot_ext.summary_json,
+                ])
 
             if audit_payload is not None:
-                fields.append('audit_payload = ?')
-                params.append(self._serialize_json(audit_payload))
+                audit_ext = externalize_json_for_db(
+                    audit_payload,
+                    category="recommendation",
+                    record_id=recommendation_id,
+                    field_name="audit_payload",
+                    config_id=config_id,
+                    trading_date=artifact_date,
+                )
+                fields.extend([
+                    'audit_payload = ?',
+                    'audit_payload_artifact_path = ?',
+                    'audit_payload_sha256 = ?',
+                    'audit_payload_size = ?',
+                    'audit_payload_summary_json = ?',
+                ])
+                params.extend([
+                    audit_ext.inline_value,
+                    audit_ext.artifact_path,
+                    audit_ext.sha256,
+                    audit_ext.size_bytes,
+                    audit_ext.summary_json,
+                ])
 
             if base_price is not None:
                 fields.append('base_price = ?')
@@ -1125,6 +1329,23 @@ class SQLiteDB(BaseDB):
                 cursor.execute('SELECT config_id FROM portfolio WHERE id = ?', (transaction_dict["portfolio_id"],))
                 config_row = cursor.fetchone()
                 config_id = config_row["config_id"] if config_row else None
+            trading_date = self._normalize_trading_day_value(transaction_dict.get("trading_date"))
+            audit_ext = externalize_json_for_db(
+                transaction_dict.get("audit_payload"),
+                category="transaction",
+                record_id=transaction_id,
+                field_name="audit_payload",
+                config_id=config_id,
+                trading_date=trading_date,
+            )
+            prompt_ext = externalize_text_for_db(
+                transaction_dict.get("llm_prompt"),
+                category="transaction",
+                record_id=transaction_id,
+                field_name="llm_prompt",
+                config_id=config_id,
+                trading_date=trading_date,
+            )
 
             cursor.execute(
                 '''
@@ -1135,8 +1356,13 @@ class SQLiteDB(BaseDB):
                     execution_price_basis, base_price, base_price_source, base_price_date,
                     open_price, prev_close_price, slippage_model, slippage_ticks, slippage_amount,
                     released_margin, margin_delta, post_trade_margin_used, audit_payload,
-                    warning_message, justification, llm_prompt, booked_in_settlement, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    audit_payload_artifact_path, audit_payload_sha256,
+                    audit_payload_size, audit_payload_summary_json,
+                    warning_message, justification, llm_prompt,
+                    llm_prompt_artifact_path, llm_prompt_sha256,
+                    llm_prompt_size, llm_prompt_summary_json,
+                    booked_in_settlement, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     transaction_id,
@@ -1170,10 +1396,18 @@ class SQLiteDB(BaseDB):
                     transaction_dict.get("released_margin"),
                     transaction_dict.get("margin_delta"),
                     transaction_dict.get("post_trade_margin_used"),
-                    self._serialize_json(transaction_dict.get("audit_payload")),
+                    audit_ext.inline_value,
+                    audit_ext.artifact_path,
+                    audit_ext.sha256,
+                    audit_ext.size_bytes,
+                    audit_ext.summary_json,
                     transaction_dict.get("warning_message"),
                     transaction_dict.get("justification"),
-                    transaction_dict.get("llm_prompt"),
+                    prompt_ext.inline_value,
+                    prompt_ext.artifact_path,
+                    prompt_ext.sha256,
+                    prompt_ext.size_bytes,
+                    prompt_ext.summary_json,
                     1 if transaction_dict.get("booked_in_settlement", False) else 0,
                     created_at,
                 ),
@@ -1221,7 +1455,7 @@ class SQLiteDB(BaseDB):
             transactions: List[Dict[str, Any]] = []
             for row in cursor.fetchall():
                 record = dict(row)
-                record["audit_payload"] = self._deserialize_json(record.get("audit_payload"))
+                record["audit_payload"] = self._deserialize_external_json(record, "audit_payload")
                 transactions.append(record)
             return transactions
         except Exception as e:
@@ -1654,7 +1888,7 @@ class SQLiteDB(BaseDB):
                 placeholders = ", ".join(["?"] * len(set(recommendation_ids)))
                 cursor.execute(
                     f'''
-                    SELECT id, signal_snapshot
+                    SELECT *
                     FROM futures_recommendation
                     WHERE id IN ({placeholders})
                     ''',
@@ -1671,7 +1905,7 @@ class SQLiteDB(BaseDB):
                 recommendation = recommendations_by_id.get(str(item.get("open_recommendation_id") or ""))
                 snapshot = {}
                 if recommendation:
-                    snapshot = self._deserialize_json(recommendation.get("signal_snapshot")) or {}
+                    snapshot = self._deserialize_external_json(recommendation, "signal_snapshot") or {}
                     if not isinstance(snapshot, dict):
                         snapshot = {}
                 item_combo = self._signal_combo_from_snapshot(snapshot)
@@ -2630,6 +2864,9 @@ class SQLiteDB(BaseDB):
                         ticker TEXT NOT NULL,
                         daily_pnl REAL NOT NULL,
                         commission REAL DEFAULT 0,
+                        holding_pnl REAL DEFAULT 0,
+                        new_position_pnl REAL DEFAULT 0,
+                        close_pnl REAL DEFAULT 0,
                         position_type TEXT,
                         lots REAL NOT NULL,
                         entry_price REAL NOT NULL,
@@ -2649,6 +2886,17 @@ class SQLiteDB(BaseDB):
                 cursor.execute('''
                     CREATE INDEX idx_ticker_daily_pnl_ticker ON ticker_daily_pnl(ticker)
                 ''')
+                conn.commit()
+            else:
+                _ensure_columns(
+                    cursor,
+                    "ticker_daily_pnl",
+                    {
+                        "holding_pnl": "REAL DEFAULT 0",
+                        "new_position_pnl": "REAL DEFAULT 0",
+                        "close_pnl": "REAL DEFAULT 0",
+                    },
+                )
 
             # 妫€鏌ユ槸鍚﹀凡瀛樺湪鐩稿悓 portfolio_id, ticker 鍜?trading_date 鐨勮褰?
             cursor.execute('''
@@ -2669,6 +2917,9 @@ class SQLiteDB(BaseDB):
                     UPDATE ticker_daily_pnl
                     SET daily_pnl = ?,
                         commission = ?,
+                        holding_pnl = ?,
+                        new_position_pnl = ?,
+                        close_pnl = ?,
                         position_type = ?,
                         lots = ?,
                         entry_price = ?,
@@ -2678,6 +2929,9 @@ class SQLiteDB(BaseDB):
                 ''', (
                     settlement_record['daily_pnl'],
                     settlement_record['commission'],
+                    settlement_record.get('holding_pnl', 0.0),
+                    settlement_record.get('new_position_pnl', 0.0),
+                    settlement_record.get('close_pnl', 0.0),
                     settlement_record['position_type'],
                     settlement_record['lots'],
                     settlement_record['entry_price'],
@@ -2691,8 +2945,9 @@ class SQLiteDB(BaseDB):
                 cursor.execute('''
                     INSERT INTO ticker_daily_pnl
                     (id, portfolio_id, trading_date, ticker, daily_pnl,
-                     commission, position_type, lots, entry_price, settle_price, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     commission, holding_pnl, new_position_pnl, close_pnl,
+                     position_type, lots, entry_price, settle_price, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     record_id,
                     settlement_record['portfolio_id'],
@@ -2700,6 +2955,9 @@ class SQLiteDB(BaseDB):
                     settlement_record['ticker'],
                     settlement_record['daily_pnl'],
                     settlement_record['commission'],
+                    settlement_record.get('holding_pnl', 0.0),
+                    settlement_record.get('new_position_pnl', 0.0),
+                    settlement_record.get('close_pnl', 0.0),
                     settlement_record['position_type'],
                     settlement_record['lots'],
                     settlement_record['entry_price'],

@@ -17,6 +17,64 @@ def _project_path(path_text: str) -> Path:
     return SRC_ROOT.parent / path
 
 
+def _memory_thresholds(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    memory_cfg = (cfg.get("strategy_memory") or {}) if isinstance(cfg, dict) else {}
+    return {
+        "min_samples_watchlist": int(memory_cfg.get("min_samples_watchlist", 2) or 2),
+        "min_samples_weak_block": int(memory_cfg.get("min_samples_weak_block", 4) or 4),
+        "min_samples_protected": int(memory_cfg.get("min_samples_protected", 3) or 3),
+        "protected_win_rate": float(memory_cfg.get("protected_win_rate", 0.60) or 0.60),
+        "protected_total_pnl": float(memory_cfg.get("protected_total_pnl", 1000) or 1000),
+        "watchlist_win_rate_below": float(memory_cfg.get("watchlist_win_rate_below", 0.45) or 0.45),
+        "watchlist_total_pnl_below": float(memory_cfg.get("watchlist_total_pnl_below", -500) or -500),
+        "weak_block_win_rate_below": float(memory_cfg.get("weak_block_win_rate_below", 0.30) or 0.30),
+        "weak_block_total_pnl_below": float(memory_cfg.get("weak_block_total_pnl_below", -2500) or -2500),
+    }
+
+
+def classify_template_prior_item(item: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+    """Classify exported template evidence with the current strategy-memory thresholds."""
+    thresholds = _memory_thresholds(cfg)
+    sample_count = int(item.get("sample_count") or 0)
+    win_rate = float(item.get("win_rate") or 0.0)
+    net_pnl = float(item.get("net_pnl") or 0.0)
+    fallback_state = str(item.get("prior_state") or item.get("memory_state") or "recovering").lower()
+
+    if sample_count >= thresholds["min_samples_weak_block"] and (
+        win_rate <= thresholds["weak_block_win_rate_below"]
+        or net_pnl <= thresholds["weak_block_total_pnl_below"]
+    ):
+        return "weak_block"
+    if sample_count >= thresholds["min_samples_watchlist"] and (
+        win_rate <= thresholds["watchlist_win_rate_below"]
+        or net_pnl <= thresholds["watchlist_total_pnl_below"]
+    ):
+        return "watchlist"
+    if sample_count >= thresholds["min_samples_protected"] and (
+        win_rate >= thresholds["protected_win_rate"]
+        and net_pnl >= thresholds["protected_total_pnl"]
+    ):
+        return "protected"
+    if sample_count >= 2 and win_rate >= 0.50 and net_pnl > 0:
+        return "recovering"
+    return fallback_state
+
+
+def _template_prior_marker(payload: Dict[str, Any]) -> str:
+    marker = payload.get("exported_at_trading_date") or payload.get("exported_at")
+    return str(marker or "unversioned")
+
+
+def _loaded_template_prior_marker(payload_json: Any) -> str:
+    try:
+        payload = json.loads(payload_json or "{}")
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("source_exported_at_trading_date") or payload.get("exported_at_trading_date") or "")
+
+
 def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> int:
     """Load reviewer-exported template prior into strategy_memory at run start.
 
@@ -50,6 +108,8 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
     if not isinstance(templates, list) or not templates:
         logger.info(f"Template prior has no templates, skipped: {prior_path}")
         return 0
+    source_marker = _template_prior_marker(payload)
+    reclassify_on_load = bool(prior_cfg.get("reclassify_on_load", True))
 
     trading_day_value = (
         cfg["trading_date"].strftime("%Y-%m-%d")
@@ -68,19 +128,34 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
         cursor = conn.cursor()
         db._ensure_strategy_memory_schema(cursor)
         cursor.execute(
-            "SELECT COUNT(*) AS cnt FROM strategy_memory WHERE config_id = ? AND source = 'template_prior'",
+            '''
+            SELECT payload_json
+            FROM strategy_memory
+            WHERE config_id = ? AND source = 'template_prior'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            ''',
             (config_id,),
         )
-        existing_count = int((cursor.fetchone() or {"cnt": 0})["cnt"] or 0)
-        if existing_count > 0:
-            logger.info(f"Template prior already loaded for config {config_id[:8]}..., skipped")
+        existing_row = cursor.fetchone()
+        loaded_marker = _loaded_template_prior_marker(existing_row["payload_json"] if existing_row else None)
+        if loaded_marker == source_marker:
+            logger.info(
+                f"Template prior already loaded for config {config_id[:8]}... "
+                f"marker={source_marker}, skipped"
+            )
             return 0
+        cursor.execute(
+            "DELETE FROM strategy_memory WHERE config_id = ? AND source = 'template_prior'",
+            (config_id,),
+        )
         for item in templates:
             if not isinstance(item, dict):
                 continue
             ticker = str(item.get("ticker") or "").upper()
             side = str(item.get("side") or "").lower()
-            state = str(item.get("prior_state") or item.get("memory_state") or "").lower()
+            original_state = str(item.get("prior_state") or item.get("memory_state") or "").lower()
+            state = classify_template_prior_item(item, cfg) if reclassify_on_load else original_state
             if not ticker or side not in {"long", "short"} or state not in allowed_states:
                 continue
             sample_count = int(item.get("sample_count") or 0)
@@ -98,9 +173,13 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
                 "signal_template": template_name,
                 "horizon_class": horizon_class,
                 "prior_state": state,
+                "original_prior_state": original_state,
                 "sample_count": sample_count,
                 "win_rate": win_rate,
                 "net_pnl": net_pnl,
+                "source_config_id": payload.get("config_id"),
+                "source_exported_at_trading_date": source_marker,
+                "loader_reclassified": reclassify_on_load and state != original_state,
                 "payload": item.get("payload") or {},
             }
             cursor.execute(

@@ -3,7 +3,7 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from llm.provider import Provider
@@ -20,7 +20,6 @@ class LLMConfig:
     failure_policy: Dict[str, str] = field(default_factory=dict)
     codex_openai: Dict[str, Any] = field(default_factory=dict)
     deepseek: Dict[str, Any] = field(default_factory=dict)
-    openrouter: Dict[str, Any] = field(default_factory=dict)
 
 
 DEFAULT_FAILURE_POLICY = {
@@ -100,34 +99,11 @@ def _resolve_provider_base_url(provider: Provider, model_config, config: LLMConf
 
 def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, Any]:
     """Build provider-specific kwargs without hard-coding a model choice."""
-    if provider == Provider.OPENROUTER:
-        openrouter_config = config.openrouter or {}
-        reasoning_config = openrouter_config.get("reasoning") or {}
-        extra_body: Dict[str, Any] = {}
-
-        if reasoning_config.get("enabled", False):
-            reasoning: Dict[str, Any] = {"enabled": True}
-            if reasoning_config.get("effort"):
-                reasoning["effort"] = reasoning_config["effort"]
-            if reasoning_config.get("max_tokens") is not None:
-                reasoning["max_tokens"] = reasoning_config["max_tokens"]
-            if reasoning_config.get("exclude") is not None:
-                reasoning["exclude"] = bool(reasoning_config["exclude"])
-            extra_body["reasoning"] = reasoning
-
-        kwargs: Dict[str, Any] = {}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-
-        headers: Dict[str, str] = {}
-        if openrouter_config.get("site_url"):
-            headers["HTTP-Referer"] = str(openrouter_config["site_url"])
-        if openrouter_config.get("app_name"):
-            headers["X-Title"] = str(openrouter_config["app_name"])
-        if headers:
-            kwargs["default_headers"] = headers
-
-        return kwargs
+    if provider == Provider.CODEX_OPENAI:
+        codex_config = config.codex_openai or {}
+        reasoning_config = codex_config.get("reasoning") or {}
+        effort = codex_config.get("reasoning_effort") or reasoning_config.get("effort")
+        return {"extra_body": {"reasoning_effort": effort}} if effort else {}
 
     if provider != Provider.DEEPSEEK:
         return {}
@@ -144,6 +120,12 @@ def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, A
     if reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
     return kwargs
+
+
+def _normalize_llm_config(raw_config: Dict[str, Any]) -> LLMConfig:
+    """Ignore removed/legacy provider keys while keeping current config strict."""
+    allowed = {item.name for item in fields(LLMConfig)}
+    return LLMConfig(**{key: value for key, value in raw_config.items() if key in allowed})
 
 
 def get_model(config: LLMConfig):
@@ -185,7 +167,7 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
     Returns:
         An instance of output_model (with defaults if error occurs)
     """
-    llm_cfg = LLMConfig(**llm_config)
+    llm_cfg = _normalize_llm_config(llm_config)
     llm = get_model(llm_cfg)
     provider = Provider(llm_cfg.provider)
     model_config = provider.config

@@ -204,6 +204,14 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     )
     if metrics.get('learned_trade_reason_counts'):
         print(f"  Learned交易来源:           {metrics.get('learned_trade_reason_counts', {})}")
+    if metrics.get('learned_trade_effect_counts'):
+        print(f"  Learned干预类型:           {metrics.get('learned_trade_effect_counts', {})}")
+        for effect, payload in metrics.get('learned_trade_effect_summary', {}).items():
+            print(
+                f"    - {effect}: {payload.get('total_trades', 0)}笔, "
+                f"胜率={payload.get('win_rate', 0):.2%}, "
+                f"净PnL={payload.get('net_pnl', 0):>12,.2f}"
+            )
     print(f"  Neutral信号比例:           {metrics.get('neutral_signal_ratio', 0):.2%} ({metrics.get('neutral_signal_count', 0)}个)")
     print(f"  Neutral责任完整率:         {metrics.get('neutral_accountability_complete_rate', 1):.2%}")
     if metrics.get('neutral_category_counts'):

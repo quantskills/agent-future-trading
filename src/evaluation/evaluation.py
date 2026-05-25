@@ -10,8 +10,15 @@ if str(SRC_ROOT) not in sys.path:
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from database.artifact_store import load_externalized_json
 from database.sqlite_setup import DB_PATH
 from tools.agent_tools.neutral_accountability import build_neutral_accountability_summary
+from util.learning_attribution import (
+    learning_effect_counts,
+    learning_effects_from_context,
+    learning_tags_from_context,
+    summarize_pairs_by_learning_effect,
+)
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.logger import logger
 
@@ -151,6 +158,8 @@ def calculate_optimization_acceptance_metrics(
         "unlearned_trade_win_rate": 0.0,
         "unlearned_trade_net_pnl": 0.0,
         "learned_trade_reason_counts": {},
+        "learned_trade_effect_counts": {},
+        "learned_trade_effect_summary": {},
         "neutral_signal_count": 0,
         "neutral_signal_ratio": 0.0,
         "neutral_accountability_complete_rate": 1.0,
@@ -343,9 +352,16 @@ def calculate_optimization_acceptance_metrics(
             if end_date:
                 recommendation_filters.append("substr(trading_date, 1, 10) <= ?")
                 recommendation_params.append(end_date)
+            cursor.execute("PRAGMA table_info(futures_recommendation)")
+            recommendation_columns = {str(row["name"]) for row in cursor.fetchall()}
+            snapshot_artifact_cols = (
+                ", signal_snapshot_artifact_path, signal_snapshot_sha256"
+                if {"signal_snapshot_artifact_path", "signal_snapshot_sha256"}.issubset(recommendation_columns)
+                else ""
+            )
             cursor.execute(
                 f"""
-                SELECT id, underlying_code, signal_snapshot
+                SELECT id, underlying_code, signal_snapshot{snapshot_artifact_cols}
                 FROM futures_recommendation
                 WHERE {' AND '.join(recommendation_filters)}
                 """,
@@ -358,10 +374,11 @@ def calculate_optimization_acceptance_metrics(
             free_text_violations = 0
             neutral_recommendations = []
             for row in recommendation_rows:
-                try:
-                    snapshot = json.loads(row["signal_snapshot"] or "{}")
-                except Exception:
-                    snapshot = {}
+                snapshot = load_externalized_json(
+                    row.get("signal_snapshot"),
+                    row.get("signal_snapshot_artifact_path"),
+                    row.get("signal_snapshot_sha256"),
+                ) or {}
                 if not isinstance(snapshot, dict):
                     snapshot = {}
                 neutral_recommendations.append(
@@ -425,17 +442,29 @@ def calculate_optimization_acceptance_metrics(
             recommendation_lookup = {}
             if recommendation_ids:
                 placeholders = ", ".join(["?"] * len(recommendation_ids))
+                cursor.execute("PRAGMA table_info(futures_recommendation)")
+                recommendation_columns = {str(row["name"]) for row in cursor.fetchall()}
+                snapshot_artifact_cols = (
+                    ", signal_snapshot_artifact_path, signal_snapshot_sha256"
+                    if {"signal_snapshot_artifact_path", "signal_snapshot_sha256"}.issubset(recommendation_columns)
+                    else ""
+                )
                 cursor.execute(
-                    f"SELECT id, signal_snapshot FROM futures_recommendation WHERE id IN ({placeholders})",
+                    f"""
+                    SELECT id, signal_snapshot{snapshot_artifact_cols}
+                    FROM futures_recommendation
+                    WHERE id IN ({placeholders})
+                    """,
                     tuple(recommendation_ids),
                 )
                 recommendation_lookup = {str(row["id"]): dict(row) for row in cursor.fetchall()}
 
             def _snapshot(row: Dict) -> Dict:
-                try:
-                    loaded = json.loads(row.get("signal_snapshot") or "{}")
-                except Exception:
-                    loaded = {}
+                loaded = load_externalized_json(
+                    row.get("signal_snapshot"),
+                    row.get("signal_snapshot_artifact_path"),
+                    row.get("signal_snapshot_sha256"),
+                ) or {}
                 return loaded if isinstance(loaded, dict) else {}
 
             def _collect_reasons(plan: Dict) -> List[str]:
@@ -459,41 +488,28 @@ def calculate_optimization_acceptance_metrics(
                         reasons.extend(str(item) for item in value if item)
                 return reasons
 
-            def _learning_tags(row: Dict) -> List[str]:
+            def _learning_attribution(row: Dict) -> Tuple[List[str], List[str]]:
                 snapshot = _snapshot(row)
                 plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-                tags: List[str] = []
-                for reason in _collect_reasons(plan):
-                    if reason.startswith("adaptive_policy_"):
-                        tags.append("adaptive_policy")
-                    elif reason.startswith("strategy_memory_"):
-                        tags.append("strategy_memory")
-                    elif reason.startswith("provisional_policy_"):
-                        tags.append("provisional_policy")
-                    elif reason in {"capital_utilization_memory_protected", "capital_utilization_same_side_add_on"}:
-                        tags.append("capital_learning")
-                controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-                diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-                if isinstance(diagnostics.get("capital_utilization_learning"), dict):
-                    tags.append("capital_learning")
                 auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
                 auditor_diag = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-                if auditor_diag.get("adaptive_policy_applied"):
-                    tags.append("adaptive_policy")
-                if auditor_diag.get("provisional_policy_applied"):
-                    tags.append("provisional_policy")
-                if auditor_diag.get("strategy_memory_rule") or auditor_diag.get("strategy_memory"):
-                    tags.append("strategy_memory")
-                return sorted(set(tags))
+                reasons = _collect_reasons(plan)
+                return (
+                    learning_tags_from_context(reasons, auditor_diag),
+                    learning_effects_from_context(reasons, auditor_diag),
+                )
 
             learned_pairs = []
             unlearned_pairs = []
             reason_counts = {}
             for pair in pairs:
                 recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
-                tags = _learning_tags(recommendation) if recommendation else []
-                if tags:
-                    learned_pairs.append(pair)
+                tags, effects = _learning_attribution(recommendation) if recommendation else ([], [])
+                if tags and effects:
+                    item = dict(pair)
+                    item["learning_tags"] = tags
+                    item["learning_effects"] = effects
+                    learned_pairs.append(item)
                     for tag in tags:
                         reason_counts[tag] = reason_counts.get(tag, 0) + 1
                 else:
@@ -507,6 +523,8 @@ def calculate_optimization_acceptance_metrics(
             metrics["unlearned_trade_win_rate"] = float(unlearned_summary.get("win_rate") or 0.0)
             metrics["unlearned_trade_net_pnl"] = float(unlearned_summary.get("total_pnl") or 0.0)
             metrics["learned_trade_reason_counts"] = reason_counts
+            metrics["learned_trade_effect_counts"] = learning_effect_counts(learned_pairs)
+            metrics["learned_trade_effect_summary"] = summarize_pairs_by_learning_effect(learned_pairs)
         except sqlite3.Error:
             pass
     except Exception as exc:
@@ -836,6 +854,7 @@ def calculate_futures_transaction_win_rate(
         'total_trades': 0,
         'realized_trade_pnl': 0.0,
         'unmatched_close_lots': 0,
+        'inherited_close_lots': 0,
         'rollover_transaction_count': 0,
     }
 
@@ -892,6 +911,7 @@ def calculate_futures_transaction_win_rate(
         flat_trades = 0
         realized_trade_pnl = 0.0
         unmatched_close_lots = 0
+        inherited_close_lots = 0
         rollover_transaction_count = 0
 
         for row in transactions:
@@ -967,10 +987,18 @@ def calculate_futures_transaction_win_rate(
 
             if remaining_close_lots > 0:
                 unmatched_close_lots += remaining_close_lots
-                logger.warning(
-                    "Unmatched futures close lots in transaction win-rate calculation: "
-                    f"ticker={row['ticker']}, contract={contract_code}, side={side}, lots={remaining_close_lots}"
-                )
+                if start_date:
+                    inherited_close_lots += remaining_close_lots
+                    logger.info(
+                        "Inherited futures close lots excluded from sub-window transaction win-rate calculation: "
+                        f"ticker={row['ticker']}, contract={contract_code}, side={side}, lots={remaining_close_lots}, "
+                        f"window_start={start_date}"
+                    )
+                else:
+                    logger.warning(
+                        "Unmatched futures close lots in transaction win-rate calculation: "
+                        f"ticker={row['ticker']}, contract={contract_code}, side={side}, lots={remaining_close_lots}"
+                    )
 
         total_trades = winning_trades + losing_trades + flat_trades
         win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
@@ -994,6 +1022,7 @@ def calculate_futures_transaction_win_rate(
             'total_trades': total_trades,
             'realized_trade_pnl': realized_trade_pnl,
             'unmatched_close_lots': unmatched_close_lots,
+            'inherited_close_lots': inherited_close_lots,
             'rollover_transaction_count': rollover_transaction_count,
         }
 

@@ -1,11 +1,11 @@
 # AgentQuant 策略绩效优化方案与回测前验收结论
 
-更新日期：2026-05-22
+更新日期：2026-05-25
 
 本文档是本轮优化工作的回测前验收版。它不再只是优化设想，而是记录：
 
 1. 该系统的两大基础功能与六大优化目的。
-2. 本轮九次代码验收得到的结论。
+2. 本轮代码验收和 2026-05-24 追加收口得到的结论。
 3. 下一轮至少 6 个月正式回测期间，必须验收哪些优化成果。
 
 本轮优化的底线是：代码层面该改的都必须在正式回测前完成，正式回测只用于验证策略效果、资金利用率、收益质量、学习效果和实盘可复刻性，不能再用短窗口结果反复小修小改。
@@ -41,7 +41,7 @@
 
 ### 2. 提高资金利用率
 
-将平均保证金占用从约 2% 提升到 capacity-aware 的真实可用区间：基础目标 8%-12%，强机会目标 16%-20%。资金释放只能给 protected、deployable 或确认充分的 recovering 模板，不能用 watchlist、weak_block 或低质量信号硬凑仓位。
+将平均保证金占用从约 2% 提升到 capacity-aware 的真实可用区间：续跑观察期先验收普通确认机会 6%-8%，后续在稳定达标后再评估 8%-12%；强机会目标为 16%-20%。资金释放只能给 protected、deployable 或确认充分的 recovering 模板，不能用 watchlist、weak_block 或低质量信号硬凑仓位。
 
 ### 3. 实现正收益并改善收益质量
 
@@ -59,7 +59,7 @@
 
 盘前策略只能基于 T-1 及以前信息；盘中交易员只能使用当时已经发生的分钟线；会计师只能在收盘后使用 T 日结算价；复盘者只能在 Phase3 完成后使用当日及以前结果。回测、模拟盘、未来实盘必须共享同一套交易员、会计师和复盘者逻辑。
 
-## 三、九次代码验收结论
+## 三、代码验收结论
 
 ### 验收 1：三个分析师
 
@@ -102,11 +102,12 @@ PM 已从简单融合信号升级为质量感知的组合资金分配器。
 
 1. PM 读取结构化分析师信号、horizon、业务质量、市场确认、strategy memory、adaptive policy、provisional policy。
 2. PM 能区分 technical 短线执行信号、fundamental 中期方向锚、commodity_news 事件窗口。
-3. 资金利用率目标改为 capacity-aware：基础目标 8%-12%，强机会目标 16%-20%。
+3. 资金利用率目标改为 capacity-aware：普通确认机会先验收 6%-8%，稳定后再评估 8%-12%；强机会目标 16%-20%。
 4. protected/deployable/recovering/watchlist/weak_block 模板状态会影响仓位权限。
 5. `signal_fusion`、`risk_controls`、`capital_allocator`、`position_lifecycle` 等模块已形成可测试拆分。
+6. 组合总保证金硬闸最终由 `max_total_margin_ratio` 控制；学习 overlay 的 `max_margin_ratio_after_scaling` 只能收紧有效上限，不能把主动资金上限抬高到 20% 以上。
 
-回测关注点：资金占用是否从约 2% 提升到 8%-12%；强机会日是否接近 16%；未达目标时是否能区分 `system_under_deployed` 与 `alpha_capacity_limited`。
+回测关注点：资金占用是否从约 2% 提升到 6%-8%；强机会日是否接近 16%；未达目标时是否能区分 `system_under_deployed` 与 `alpha_capacity_limited`。
 
 ### 验收 4：交易员 Trader
 
@@ -207,9 +208,88 @@ Reviewer 已从日终日志生成器升级为学习闭环核心。
 
 回测关注点：正式回测必须使用新的 `config_id` 或 `--reset-config`，避免旧数据库中未来日期学习结果污染历史窗口。
 
+### 验收 10：数据库瘦身与 Artifact 外置
+
+结论：已通过代码验收，仍需长窗口稳定性验收。
+
+已验收内容：
+
+1. `agentquant.db` 保持唯一运行主库，只保存结构化学习结论、账本、状态、索引、摘要和 artifact 指针。
+2. 大对象不再长期全量塞进 SQLite，包括 `signal_snapshot`、`audit_payload`、Reviewer 原始 prompt/response、signal artifact、交易审计 prompt 等。
+3. 外置 artifact 保存到 `src/logs/artifacts/`，主库保存 `artifact_path`、`sha256`、`size`、`summary_json`。
+4. `database/validate_artifacts.py --json` 可自动校验主库指针与外置文件的存在性、hash 和大小。
+5. `agentquantcheck.db` 只作为可选轻量查看副本，由 `database/build_check_db.py` 从主库重建，不参与任何智能体运行或学习。
+
+回测关注点：三个月及以上回测后主库体积不应因长文本快速膨胀；artifact 校验必须 `missing=0`、`hash_mismatch=0`、`size_mismatch=0`。
+
+### 验收 11：PandaAI 官方行情缓存与连接稳定性
+
+结论：已完成代码层优化，尚需 2025-02-26 起继续回测验收。
+
+已验收内容：
+
+1. PandaAI token 初始化改为进程内共享，减少同一回测日反复登录。
+2. PandaAI 日行情增加持久化本地缓存 `src/assets/pandaai_market_cache.db`；成功拉到的官方日行情后续进程可直接复用。
+3. 已知交易所后缀可优先使用本地映射，避免为常见合约反复调用合约详情接口。
+4. `WinError 10048` 等临时 socket/网络错误被识别为 transient，可进入 retry/cooldown。
+5. Phase3 会计结算仍严格要求当日官方结算价；缓存和重试只能帮助取得官方价，不能用成交价、上一日结算价或估算价替代。
+
+回测关注点：2025-02-26 起不得再因为 PandaAI 登录/端口耗尽导致 Phase3 中断；若官方结算价仍取不到，应停在当日修数据链路，而不是伪造账本。
+
+### 验收 12：品种日 PnL 分解与查看库
+
+结论：已完成代码层优化，已在 2025-02-10 至 2025-02-25 窗口中发挥诊断作用。
+
+已验收内容：
+
+1. `ticker_daily_pnl` 保存 `holding_pnl`、`new_position_pnl`、`close_pnl`、`commission`、`settle_price`。
+2. 评估 2025-02-10 至 2025-02-25 时，能清楚定位 TA 是主要亏损来源：该窗口 TA PnL 约 -120,420。
+3. `agentquantcheck.db` 可同步这些字段，方便人工区分持仓浮亏、新开仓当日亏损、平仓亏损和手续费。
+
+回测关注点：后续分析亏损时必须先看 PnL 分解，不能把所有品种日亏损粗暴归因为“每天交易错误”。
+
+### 验收 13：Learned 干预类型拆分
+
+结论：已完成代码层优化，尚需 2025-02-26 起继续回测验证效果。
+
+已验收内容：
+
+1. learned 交易不再只给混合净 PnL，而是拆成 `alpha_release`、`risk_suppression`、`evidence_rejection` 等干预类型。
+2. `evaluate_config` 与 Reviewer learning report 均能输出 `learned_effect_counts` 和 `learned_effect_summary`。
+3. 2025-02-11 至 2025-02-25 评估显示 `alpha_release` 为主要负贡献，说明学习放大逻辑需要进一步被后续样本验证和约束。
+
+回测关注点：2025-02-26 起必须单独观察 `alpha_release` 是否收敛，不能用 mixed learned PnL 掩盖放大逻辑失败。
+
+### 验收 14：强机会泛化记忆与止损边界闸门
+
+结论：已完成代码层优化，尚未经过 2025-02-26 起新样本验收。
+
+已验收内容：
+
+1. `signal_combo="*"` 或仅 ticker-side 泛化 protected 记忆不能直接触发 16%-20% 强机会资金带。
+2. 强机会扩仓必须来自当前 `ticker-side-signal_combo` 的特异、多日验证结果。
+3. 强机会扩仓必须在 Phase1 盘前信号里已有 `invalidation_level` 或 `atr_stop_distance`。
+4. `invalidation_level` 必须来自 T-1 及以前价格结构；`atr_stop_distance` 必须来自 T-1 及以前波动率。Reviewer 只能总结未来规则，不能事后补当天止损价。
+5. 缺少这些条件时，PM 记录 `protected_evidence_rejected`、`specific_signal_combo=false` 或 `missing_stop_protection_for_strong_scaling`，并降级为普通确认机会或小仓试探。
+
+回测关注点：2025-02-13 TA 这类“泛化 protected + 无明确风险边界”的放大路径不应再出现；真正强机会仍可在证据充分且有止损边界时逐步提高资金使用。
+
+### 验收 15：Codex GPT-5.5 Reasoning Effort 与 OpenRouter 移除
+
+结论：已完成配置与调用路径统一。
+
+已验收内容：
+
+1. `dev.yaml` 与 `planner.yaml` 的 `gpt-5.5` reasoning effort 均为 `medium`。
+2. AgentQuant 主 LLM provider 固定为 `CodexOpenAI`；OpenRouter 不再作为可选 provider、环境变量或运行脚本入口。
+2. Planner、三个分析师、Portfolio Manager 和 Reviewer LLM 因果候选默认继承主 `llm` 配置。
+3. `CodexOpenAI` OpenAI-compatible provider 路径已支持从 `codex_openai.reasoning_effort` 传递 `reasoning_effort`；当前配置为 `medium`。
+
+回测关注点：日志与 artifact 中的 LLM model/provider 应保持 `provider=CodexOpenAI, model=gpt-5.5`；后续不得因短期收益自动切换 provider/model 或 reasoning effort。
+
 ## 四、回测前总验收状态
 
-截至 2026-05-22，代码层面已完成以下回测前验收：
+截至 2026-05-24，代码层面已完成以下回测前验收：
 
 1. `dev.yaml` 启用 15 个目标合约。
 2. 启用分析师为 `commodity_news`、`fundamental`、`technical`。
@@ -218,7 +298,8 @@ Reviewer 已从日终日志生成器升级为学习闭环核心。
 5. 15 个目标合约均有本地新闻 txt。
 6. Finoview catalog 对 15 个目标合约覆盖 `all_ready=True`。
 7. `compileall` 通过。
-8. 完整单元测试通过：`Ran 60 tests ... OK`。
+8. 关键回归测试通过：`test_reviewer_learning.py` 39 passed，`test_phase_flow_regression.py` 相关官方结算与 PandaAI 回归测试通过，`compileall` 通过。
+9. PandaAI 扩展数据、持久化行情缓存、stale fundamental 闸门、learned 干预类型拆分、子窗口继承持仓评估、20% 组合主动资金硬闸、artifact 外置、强机会泛化记忆闸门和止损边界闸门均已进入 `check_list.md` 的继续回测验收项。
 
 因此，除正式回测才能验证的绩效结果外，当前没有发现必须在回测前继续修改的阻塞项。
 
@@ -253,7 +334,7 @@ Reviewer 已从日终日志生成器升级为学习闭环核心。
 
 必须验收：
 
-1. 平均保证金占用是否从约 2% 提升到 8%-12%。
+1. 平均保证金占用是否先从约 2% 提升到 6%-8%，并为后续 8%-12% 留出可验收路径。
 2. 强机会交易日是否接近或进入 16%。
 3. 16%-20% 未达成时，原因是否被明确记录。
 4. 是否区分 `system_under_deployed` 与 `alpha_capacity_limited`。
@@ -354,7 +435,7 @@ Reviewer 已从日终日志生成器升级为学习闭环核心。
 6 个月正式回测通过，至少应同时满足：
 
 1. 账户权益收益转正，且收益来源可归因。
-2. 平均保证金占用进入 8%-12% 区间，强机会日能接近 16%。
+2. 平均保证金占用先进入 6%-8% 观察区间；稳定后可评估 8%-12%，强机会日能接近 16%。
 3. protected/deployable 模板收益为正，且仓位明显高于普通模板。
 4. weak_block/watchlist 新开仓显著减少。
 5. auditor block 不再是最大资金空转原因。
@@ -378,6 +459,6 @@ Reviewer 已从日终日志生成器升级为学习闭环核心。
 
 ## 七、当前结论
 
-基于本轮九次代码验收，AgentQuant 已经具备再次正式回测的代码条件。现在可以进行至少 6 个月的新一轮回测。
+基于本轮代码验收和 2026-05-24 追加收口，AgentQuant 已经具备再次正式回测的代码条件。现在可以进行至少 6 个月的新一轮回测。
 
-执行正式回测时，必须使用 `src/config/dev.yaml`，并使用新的实验状态或 `--reset-config`，避免旧数据库中未来日期学习结果污染历史窗口。
+当前为了节省资源，可继续使用 `src/config/dev.yaml` 和同一 `exp_name` 从 2025-02-26 续跑，专门验收最近代码收口后的稳定性与策略改善。若要做最终半年正式绩效口径，应在代码冻结后使用新的 `exp_name/config_id` 从起点完整重跑，避免旧代码生成的交易记录与新代码行为混在一起。

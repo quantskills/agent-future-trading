@@ -177,6 +177,29 @@ def _strategy_memory_record(strategy_memory: Dict[str, Any], states: Sequence[st
     return _memory_strategy_record(strategy_memory, states)
 
 
+def _memory_row_passes_evidence_floor(row: Dict[str, Any], audit_config: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    min_samples = _safe_int(audit_config.get("protected_min_sample_count"), 5)
+    min_win_rate = _safe_float(audit_config.get("protected_min_win_rate"), 0.60)
+    min_net_pnl = _safe_float(audit_config.get("protected_min_net_pnl"), 1000.0)
+    sample_count = _safe_int(row.get("sample_count"), 0)
+    win_rate = _safe_float(row.get("win_rate"), 0.0)
+    net_pnl = _safe_float(row.get("net_pnl"), 0.0)
+    diagnostics = {
+        "sample_count": sample_count,
+        "min_sample_count": min_samples,
+        "win_rate": win_rate,
+        "min_win_rate": min_win_rate,
+        "net_pnl": net_pnl,
+        "min_net_pnl": min_net_pnl,
+    }
+    return (
+        sample_count >= min_samples
+        and win_rate >= min_win_rate
+        and net_pnl >= min_net_pnl,
+        diagnostics,
+    )
+
+
 def _context_from_metadata(metadata: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
     for key in (
         f"{agent_name}_context",
@@ -245,12 +268,25 @@ class AttributionFeedbackCalibrator:
         protected_rule = self._protected_side_rule(payload, target_side)
         side_override = ((self.trade_config.get("side_overrides") or {}).get(payload.ticker) or {})
         override_key = f"{target_side}_cap_multiplier"
-        if override_key in side_override and not protected_rule:
+        if protected_rule.get("rejected"):
+            diagnostics["protected_memory_rejected"] = protected_rule
+            reasons.append("protected_memory_evidence_rejected")
+            notes.append(
+                f"{payload.ticker} {target_side} protected memory ignored: "
+                f"sample_count={protected_rule.get('sample_count')}<"
+                f"{protected_rule.get('min_sample_count')} or "
+                f"win_rate={_safe_float(protected_rule.get('win_rate')):.2%}<"
+                f"{_safe_float(protected_rule.get('min_win_rate')):.2%} or "
+                f"net_pnl={_safe_float(protected_rule.get('net_pnl')):.0f}<"
+                f"{_safe_float(protected_rule.get('min_net_pnl')):.0f}"
+            )
+        protected_rule_active = bool(protected_rule) and not protected_rule.get("rejected")
+        if override_key in side_override and not protected_rule_active:
             side_multiplier = max(0.0, _safe_float(side_override.get(override_key), 1.0))
             multiplier = min(multiplier, side_multiplier)
             reasons.append("static_side_cap")
             notes.append(f"{payload.ticker} {target_side} static attribution cap multiplier={side_multiplier:.2f}")
-        elif override_key in side_override and protected_rule:
+        elif override_key in side_override and protected_rule_active:
             diagnostics["protected_ticker_side"] = {
                 "ticker": payload.ticker,
                 "side": target_side,
@@ -298,6 +334,16 @@ class AttributionFeedbackCalibrator:
         memory_row = _strategy_memory_record(payload.strategy_memory or {}, ["protected", "deployable"])
         if memory_row:
             audit_config = (self.memory_config.get("audit") or {})
+            evidence_ok, evidence_floor = _memory_row_passes_evidence_floor(memory_row, audit_config)
+            if not evidence_ok:
+                return {
+                    "enabled": False,
+                    "rejected": True,
+                    "source": "strategy_memory",
+                    "reason": "protected_memory_evidence_below_auditor_floor",
+                    "memory_state": memory_row.get("memory_state"),
+                    **evidence_floor,
+                }
             return {
                 "source": "strategy_memory",
                 "min_confirmation_score": audit_config.get("protected_min_confirmation_score", 0.50),
@@ -433,7 +479,10 @@ class AttributionFeedbackCalibrator:
                 )
                 protected_rule = self._protected_side_rule(payload, target_side)
                 protected_score = _safe_float(protected_rule.get("min_confirmation_score"), 0.50)
-                if protected_rule and confirmation_score >= protected_score:
+                if protected_rule.get("rejected"):
+                    result["diagnostics"]["protected_memory_rejected"] = protected_rule
+                    result["reasons"].append("protected_memory_evidence_rejected")
+                if protected_rule and not protected_rule.get("rejected") and confirmation_score >= protected_score:
                     protected_multiplier = max(
                         0.0,
                         _safe_float(
@@ -512,6 +561,16 @@ class AttributionFeedbackCalibrator:
         ):
             protected_rule = self._protected_side_rule(payload, target_side)
             protected_score = _safe_float(protected_rule.get("min_confirmation_score"), 0.50)
+            if protected_rule.get("rejected"):
+                return {
+                    "block": True,
+                    "multiplier": 0.0,
+                    "reasons": ["cold_start_weak_combo_block", "protected_memory_evidence_rejected"],
+                    "notes": [
+                        f"cold start blocked weak combo {signal_combo}: protected memory evidence "
+                        f"is too shallow for override; confirmation_score={confirmation_score:.2f}"
+                    ],
+                }
             if protected_rule and confirmation_score >= protected_score:
                 protected_multiplier = max(
                     0.0,

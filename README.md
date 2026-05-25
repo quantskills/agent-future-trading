@@ -80,7 +80,7 @@ than aggressively maximize turnover:
 
 - Total margin usage has a hard portfolio cap from config, with additional
   capital-utilization controls for normal scaling.
-- Position sizing considers target margin, single-position limits, signal
+- Position sizing considers target margin, base per-opportunity sizing anchors, signal
   strength, market confirmation, quality gates, recent ticker behavior, and
   strategy memory.
 - The trade auditor applies deterministic business-quality, neutralization,
@@ -240,7 +240,7 @@ python -m compileall src
 AgentQuant/
   README.md
   docs/
-    futures_trading_mechanisms.md
+    design_philosophy.md
   environment.yml
   pyproject.toml
   src/

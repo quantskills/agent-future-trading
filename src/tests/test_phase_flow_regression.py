@@ -44,6 +44,7 @@ from util.futures_audit import (
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.trading_calendar import get_previous_trading_day
 from run.validate_phase_flow import _expected_settlement_balance_change
+from tools.agent_tools.trader_exit_policy import evaluate_exit_policy
 
 
 class _FakeRouter:
@@ -282,6 +283,9 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                     "audit": {
                         "protected_min_confirmation_score": 0.50,
                         "protected_multiplier": 0.50,
+                        "protected_min_sample_count": 5,
+                        "protected_min_win_rate": 0.60,
+                        "protected_min_net_pnl": 1000,
                         "watchlist_min_confirmation_score": 0.60,
                         "watchlist_cap_multiplier": 0.50,
                         "weak_block_min_confirmation_score": 0.65,
@@ -417,6 +421,46 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertEqual(output.decision, "scale_down")
         self.assertIn("protected_ticker_side_cold_start", output.reasons)
         self.assertNotEqual(output.position_ratio_multiplier, 0.0)
+
+    def test_shallow_protected_memory_does_not_override_weak_combo_block(self):
+        config = self._auditor().full_config
+        config["trade_frequency_control"]["weak_signal_combos"] = [["Bullish", "Neutral", "Neutral"]]
+        config["market_confirmation"]["conflicted_probe_min_confirmation_score"] = 0.90
+        auditor = TradeAuditor(config)
+
+        output = auditor.plan(
+            TradeAuditorInput(
+                ticker="M",
+                analyst_signals=[
+                    {"agent_name": "technical", "signal": "Bullish", "confidence": 0.55, "metadata": {"tradeability": "medium"}},
+                    {"agent_name": "fundamental", "signal": "Neutral", "confidence": 0.52, "metadata": {"tradeability": "medium"}},
+                    {"agent_name": "commodity_news", "signal": "Neutral", "confidence": 0.55, "metadata": {"tradeability": "medium"}},
+                ],
+                signal_combo=["Bullish", "Neutral", "Neutral"],
+                raw_position_ratio=0.12,
+                current_position_ratio=0.0,
+                signal_strength=0.45,
+                market_confirmation={
+                    "enabled": True,
+                    "confirmation_score": 0.55,
+                    "features": [{"feature": "basis"}],
+                    "confirmations": ["basis"],
+                    "conflicts": ["contract_daily_indicators"],
+                },
+                strategy_memory={
+                    "side_memory": {
+                        "memory_state": "protected",
+                        "sample_count": 3,
+                        "win_rate": 1.0,
+                        "net_pnl": 2331.97,
+                    }
+                },
+            )
+        )
+
+        self.assertEqual(output.decision, "probe_only")
+        self.assertIn("protected_memory_evidence_rejected", output.reasons)
+        self.assertIn("cold_start_weak_combo_block", output.reasons)
 
     def test_weak_ticker_side_rule_blocks_latest_bad_p_long_template(self):
         output = self._auditor().plan(
@@ -574,6 +618,37 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("net exposure exceeds cap", errors[0])
 
+    def test_net_exposure_review_uses_dynamic_strong_opportunity_cap(self):
+        warnings = []
+        errors = []
+
+        _apply_net_exposure_review(
+            trading_date="2025-02-10",
+            cfg={"net_exposure_control": {"max_net_exposure": 0.50, "phase4_drift_tolerance": 0.01}},
+            net_exposure=1.4617,
+            warnings=warnings,
+            errors=errors,
+            recommendations=[
+                {
+                    "underlying_code": "M",
+                    "signal_snapshot": json.dumps(
+                        {
+                            "execution_translation": {
+                                "dynamic_net_exposure_control": {
+                                    "mode": "strong_opportunity",
+                                    "max_net_exposure": 2.0,
+                                }
+                            }
+                        }
+                    ),
+                }
+            ],
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("dynamic strong-opportunity cap", warnings[0])
+
     def test_market_confirmation_quality_warnings_are_aggregated_by_status(self):
         recommendations = [
             {
@@ -625,8 +700,10 @@ class ValidationRegressionTest(unittest.TestCase):
         warnings, summary = _collect_recommendation_quality_warnings(recommendations)
 
         self.assertTrue(any("market confirmation parameter errors" in item for item in warnings))
-        self.assertTrue(any("market confirmation no data" in item for item in warnings))
-        self.assertTrue(any("market confirmation fallback covered missing" in item for item in warnings))
+        self.assertFalse(any("market confirmation no data" in item for item in warnings))
+        self.assertFalse(any("market confirmation fallback covered missing" in item for item in warnings))
+        self.assertTrue(any("market confirmation optional no data" in item for item in summary["info_messages"]))
+        self.assertTrue(any("market confirmation fallback covered optional missing" in item for item in summary["info_messages"]))
         self.assertFalse(any(": market confirmation data missing:" in item for item in warnings))
         self.assertEqual(summary["missing_by_status"]["parameter_error"], ["BU"])
         self.assertEqual(summary["missing_by_status_feature"]["no_data"]["warehouse_receipt"], ["RB"])
@@ -863,6 +940,113 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertEqual(result.decision, "wait")
         self.assertEqual(result.reason, "intraday_opening_range_incomplete")
         self.assertFalse(result.features["opening_range"]["complete"])
+
+    def test_cutoff_datetime_prevents_future_minute_bars_from_triggering(self):
+        signal_bars = [
+            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 100, "low": 99, "close": 99, "volume": 10},
+            {"datetime": "2025-01-06 14:45:00", "open": 101, "high": 105, "low": 101, "close": 105, "volume": 20},
+        ]
+        execution_bars = [
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 99, "high": 100, "low": 98, "close": 99, "volume": 10},
+            {"datetime": "2025-01-06 14:46:00", "open": 105, "high": 106, "low": 104, "close": 105, "volume": 20},
+        ]
+
+        result = select_intraday_execution(
+            signal_bars=signal_bars,
+            execution_bars=execution_bars,
+            action="open_long",
+            config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
+            cutoff_datetime=datetime(2025, 1, 6, 10, 5, 0),
+            finalize_untriggered=False,
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.decision, "wait")
+        self.assertEqual(result.reason, "intraday_waiting_for_trigger")
+        self.assertEqual(result.features["signal_bars"], 1)
+        self.assertEqual(result.features["execution_bars"], 3)
+
+    def test_protected_confirmed_memory_can_use_vwap_fallback_without_breakout(self):
+        signal_bars = [
+            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
+        ]
+        execution_bars = [
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 100.9, "high": 101, "low": 100, "close": 100.9, "volume": 10},
+        ]
+
+        result = select_intraday_execution(
+            signal_bars=signal_bars,
+            execution_bars=execution_bars,
+            action="open_long",
+            config={
+                "opening_range_minutes": 2,
+                "min_execution_volume": 1,
+                "max_chase_ratio": 0.02,
+                "allow_confirmed_memory_vwap_fallback": True,
+                "confirmed_memory_min_market_confirmation_score": 0.70,
+                "confirmed_memory_min_confirmations": 3,
+                "confirmed_memory_max_opening_range_miss": 0.002,
+            },
+            market_confirmation={
+                "confirmation_score": 0.75,
+                "confirmations": ["basis", "position_rank", "net_cap"],
+            },
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "sample_count": 4,
+                    "win_rate": 1.0,
+                    "net_pnl": 9000,
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.reason, "intraday_confirmed_memory_vwap_fallback")
+        self.assertEqual(result.features["execution_mode"], "confirmed_memory_vwap_fallback")
+
+    def test_vwap_fallback_does_not_apply_without_high_quality_memory(self):
+        signal_bars = [
+            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
+        ]
+        execution_bars = [
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 100.9, "high": 101, "low": 100, "close": 100.9, "volume": 10},
+        ]
+
+        result = select_intraday_execution(
+            signal_bars=signal_bars,
+            execution_bars=execution_bars,
+            action="open_long",
+            config={
+                "opening_range_minutes": 2,
+                "min_execution_volume": 1,
+                "allow_confirmed_memory_vwap_fallback": True,
+                "confirmed_memory_min_market_confirmation_score": 0.70,
+                "confirmed_memory_min_confirmations": 3,
+                "confirmed_memory_max_opening_range_miss": 0.002,
+            },
+            market_confirmation={
+                "confirmation_score": 0.75,
+                "confirmations": ["basis", "position_rank", "net_cap"],
+            },
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "watchlist",
+                    "sample_count": 4,
+                    "win_rate": 0.25,
+                    "net_pnl": -5000,
+                }
+            },
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.reason, "intraday_trigger_not_met")
 
 
 class MarginAuditRegressionTest(unittest.TestCase):
@@ -1345,6 +1529,104 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertIn("signal_invalidation_level", translation.get("rewrite_reasons", []))
         self.assertEqual(translation["phase2_order_plan"]["signal_lifecycle"]["invalidation_level"], 4400.0)
 
+    def test_time_stop_does_not_flatten_supported_same_direction_hold(self):
+        current_position = SimpleNamespace(entry_date="2025-02-10", entry_price=3000.0)
+
+        result = evaluate_exit_policy(
+            ticker="M",
+            current_price=3020.0,
+            current_lots=10,
+            target_lots=12,
+            lifecycle={"template_state": "protected", "template_name": "trend_follow"},
+            current_position=current_position,
+            trading_date="2025-02-20",
+            config={
+                "execution": {
+                    "exit_policy": {
+                        "enabled": True,
+                        "defaults": {"trend_time_stop_days": 5, "probe_time_stop_days": 2},
+                    }
+                }
+            },
+        )
+
+        self.assertFalse(result["exit_required"])
+        self.assertEqual(result["target_lots"], 12)
+        self.assertTrue(result["same_direction_supported"])
+
+    def test_phase2_honors_dynamic_opportunity_budget_from_phase1(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5000000.0,
+            margin_used=0.0,
+            positions={},
+        )
+        recommendation = {
+            "underlying_code": "TA",
+            "contract_code": "ta601",
+            "signal_snapshot": {
+                "technical": {
+                    "signal": "Bearish",
+                    "invalidation_level": 4800.0,
+                },
+                "pre_open_plan": {
+                    "target_position_ratio": -1.62,
+                    "target_margin_ratio_estimate": 0.162,
+                    "target_lots_estimate": -162,
+                    "strategy_controls": {
+                        "diagnostics": {
+                            "capital_utilization_target": {
+                                "target_mode": "strong_opportunity",
+                                "high_quality_memory": True,
+                                "dynamic_allocation_tier": "validated_with_stop",
+                                "dynamic_opportunity_margin_ratio_budget": 0.162,
+                                "dynamic_opportunity_margin_ratio_cap": 0.162,
+                                "stop_protected": True,
+                            },
+                            "net_exposure_control": {
+                                "cap_mode": "strong_opportunity",
+                                "max_net_exposure": 2.0,
+                            }
+                        }
+                    },
+                },
+            },
+        }
+        config = {
+            "cashflow": 5000000,
+            "capital_utilization_control": {"max_margin_ratio_after_scaling": 0.20},
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+        snapshot = {}
+
+        decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=4566.0),
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(decision.action, FuturesAction.OPEN_SHORT)
+        self.assertGreaterEqual(decision.lots, 39)
+        self.assertNotIn(
+            "single_position_cap",
+            snapshot.get("execution_translation", {}).get("rewrite_reasons", []),
+        )
+        self.assertNotIn(
+            "base_sizing_anchor_cap",
+            snapshot.get("execution_translation", {}).get("rewrite_reasons", []),
+        )
+        self.assertEqual(
+            snapshot["execution_translation"]["dynamic_opportunity_budget_control"]["mode"],
+            "validated_with_stop",
+        )
+
     def test_rollover_reconciliation_records_close_only_execution_type(self):
         rollover = {
             "underlying_code": "C",
@@ -1512,6 +1794,50 @@ class EvaluationRegressionTest(unittest.TestCase):
             self.assertEqual(metrics["flat_trades"], 0)
             self.assertAlmostEqual(metrics["win_rate"], 2 / 3)
             self.assertAlmostEqual(metrics["realized_trade_pnl"], 192.0)
+        finally:
+            os.remove(db_path)
+
+    def test_subwindow_transaction_win_rate_classifies_inherited_closes(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE futures_transactions (
+                    config_id TEXT,
+                    trading_date TEXT,
+                    created_at TEXT,
+                    ticker TEXT,
+                    contract_code TEXT,
+                    action TEXT,
+                    lots INTEGER,
+                    execution_price REAL,
+                    price REAL,
+                    contract_multiplier REAL,
+                    commission REAL
+                )
+                """
+            )
+            rows = [
+                ("cfg", "2025-10-10", "2025-10-10T09:00:00", "M", "m2601", "open_long", 2, 100.0, 100.0, 10.0, 2.0),
+                ("cfg", "2025-10-14", "2025-10-14T09:00:00", "M", "m2601", "close_long", 2, 90.0, 90.0, 10.0, 2.0),
+            ]
+            cur.executemany(
+                """
+                INSERT INTO futures_transactions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+            conn.close()
+
+            metrics = calculate_futures_transaction_win_rate("cfg", db_path, start_date="2025-10-13")
+            self.assertEqual(metrics["total_trades"], 0)
+            self.assertEqual(metrics["unmatched_close_lots"], 2)
+            self.assertEqual(metrics["inherited_close_lots"], 2)
         finally:
             os.remove(db_path)
 

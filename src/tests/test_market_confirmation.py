@@ -136,6 +136,35 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         )
         self.assertIn("variety_position_rank", [item["feature"] for item in result["features"]])
 
+    def test_market_confirmation_uses_t_minus_one_reference_date(self):
+        records = {
+            "basis": [{"date": "2025-01-03", "basis_ratio": 0.03}],
+        }
+        snapshot = {
+            "records": records,
+            "record_counts": {key: len(value) for key, value in records.items()},
+            "errors": [],
+        }
+        router = _SnapshotRouter(snapshot)
+
+        with patch(
+            "tools.agent_tools.market_confirmation.get_previous_trading_day",
+            return_value=datetime(2025, 1, 3),
+        ) as previous_day:
+            result = MarketConfirmationEngine(_config(), router=router).evaluate(
+                underlying_code="BU",
+                trading_date="2025-01-06",
+                target_direction="long",
+                signal_strength=0.5,
+                contract_code="bu2503",
+            )
+
+        previous_day.assert_called_once()
+        self.assertEqual(router.calls[0]["reference_date"].strftime("%Y-%m-%d"), "2025-01-03")
+        self.assertEqual(result["reference_date"], "2025-01-03")
+        self.assertEqual(result["info_cutoff"], "T-1_or_earlier")
+        self.assertEqual(result["confirmations"], ["basis"])
+
     def test_net_flow_empty_remains_missing_without_replacement_features(self):
         records = {
             "net_flow_long": [],

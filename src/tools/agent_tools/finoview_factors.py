@@ -39,7 +39,7 @@ FRESHNESS_DAYS = {
     "unknown": 14,
 }
 
-PRIORITY_TICKERS = {"I", "BU", "EB", "J", "SR"}
+TRADING_UNIVERSE_TICKERS = {"BU", "C", "CF", "EB", "HC", "I", "J", "M", "MA", "P", "PB", "RB", "SR", "TA", "ZN"}
 
 EXPLICIT_FACTOR_GROUP_OVERRIDES = {
     "i_arrivals": "import_export",
@@ -288,7 +288,7 @@ def build_factor_catalog(
 
 def factor_coverage_audit(catalog: Dict[str, List[Dict[str, Any]]], tickers: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     required_groups = {"price_basis", "inventory", "supply", "demand", "cost_profit", "import_export"}
-    targets = {str(item).upper() for item in tickers or PRIORITY_TICKERS}
+    targets = {str(item).upper() for item in tickers or TRADING_UNIVERSE_TICKERS}
     rows = {}
     for ticker in sorted(targets):
         entries = catalog.get(ticker, [])
@@ -301,9 +301,9 @@ def factor_coverage_audit(catalog: Dict[str, List[Dict[str, Any]]], tickers: Opt
         }
     return {
         "required_groups": sorted(required_groups),
-        "priority_tickers": sorted(targets),
+        "coverage_tickers": sorted(targets),
         "rows": rows,
-        "all_priority_tickers_ready": all(row["tradable_minimum_coverage"] for row in rows.values()),
+        "all_coverage_tickers_ready": all(row["tradable_minimum_coverage"] for row in rows.values()),
     }
 
 

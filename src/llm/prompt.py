@@ -234,8 +234,8 @@ Margin limits:
 - Max total margin ratio: {max_total_margin_ratio:.1%}
   -> Maximum allowed margin: {max_allowed_margin:,.0f}
   -> Remaining available: {remaining_margin:,.0f}
-- Max single margin ratio: {max_single_margin_ratio:.1%}
-  -> Maximum margin for one position: {max_single_margin:,.0f}
+- Base per-opportunity sizing anchor: {max_single_margin_ratio:.1%}
+  -> Base notional anchor for one new opportunity: {max_single_margin:,.0f}
 
 Critical constraints:
 1. Required margin = |target_position_ratio| * total_portfolio_value * margin_rate
@@ -243,8 +243,9 @@ Critical constraints:
 2. If current_margin_ratio >= max_total_margin_ratio:
    - Set position_ratio = 0.
    - State clearly in the justification that total margin is already at the cap.
-3. If required_margin > max_single_margin:
-   - Cap position_ratio at: max_single_margin / (total_portfolio_value * margin_rate)
+3. Treat the base per-opportunity anchor as a starting sizing guide, not a hard capital rule.
+   - Learning, market confirmation, stop protection, and portfolio-level controls may later resize the plan.
+   - The hard capital gate is the total portfolio margin ratio above.
 """
 
 # Single-analyst decision logic.

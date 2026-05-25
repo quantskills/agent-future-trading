@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime
 from enum import Enum
@@ -26,7 +27,7 @@ from tools.agent_tools.market_confirmation import MarketConfirmationEngine
 from tools.agent_tools.business_quality import summarize_business_quality
 from tools.agent_tools.contracts import attach_snapshot_contract
 from tools.agent_tools.capital_allocator import (
-    has_adaptive_policy_action as _capital_has_adaptive_policy_action,
+    conflicting_weak_memory_record as _capital_conflicting_weak_memory_record,
     high_quality_learning_context,
     strategy_memory_record as _capital_strategy_memory_record,
 )
@@ -111,14 +112,16 @@ def get_position_scaling_factor(risk_level: RiskLevel, config) -> float:
 
 def get_max_single_position_ratio(risk_level: RiskLevel, config) -> float:
     """
-    Return the maximum single-position ratio for the current risk level.
+    Return the base per-opportunity sizing anchor for the current risk level.
 
     Args:
         risk_level: Current portfolio risk classification.
         config: Runtime configuration.
 
     Returns:
-        The per-instrument position cap.
+        A starting notional ratio anchor for weak or unverified opportunities.
+        Validated opportunities can receive a larger dynamic budget, while the
+        portfolio margin ceiling remains the hard capital constraint.
     """
     risk_control = config.get('risk_control', {})
     max_single_position = risk_control.get('max_single_position_ratio', {
@@ -128,6 +131,151 @@ def get_max_single_position_ratio(risk_level: RiskLevel, config) -> float:
     })
 
     return max_single_position.get(risk_level.value.lower(), 0.15)
+
+
+def get_hard_allocation_margin_ratio(config: dict) -> float:
+    """Return the active portfolio margin ceiling for new or increasing exposure.
+
+    ``max_total_margin_ratio`` is the portfolio-level hard gate. Learning
+    overlays may make the active target more conservative, but cannot lift the
+    hard tradable-capital ceiling above this value.
+    """
+    def _ratio(value, default):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
+
+    hard_cap = _ratio((config or {}).get("max_total_margin_ratio"), 0.20)
+    capital_control = (config or {}).get("capital_utilization_control", {}) or {}
+    learned_cap = _ratio(capital_control.get("max_margin_ratio_after_scaling"), hard_cap)
+    return min(hard_cap, learned_cap)
+
+
+def _has_explicit_stop_protection(signals: list) -> bool:
+    for signal in signals or []:
+        if getattr(signal, "invalidation_level", None) is not None:
+            return True
+        try:
+            if float(getattr(signal, "atr_stop_distance", 0.0) or 0.0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _resolve_dynamic_opportunity_budget(
+    *,
+    control: dict,
+    high_quality_memory: bool,
+    confirmation_score: float,
+    stop_protected: bool,
+    learning_evidence: dict | None,
+    current_margin_ratio: float,
+    target_total_margin_ratio: float,
+    max_after_scaling: float,
+) -> tuple[float, str, dict[str, float]]:
+    """Resolve a soft opportunity budget from current evidence.
+
+    The only hard ceiling is the portfolio-level tradable-capital limit. This
+    helper decides how much of the remaining capacity a recommendation may use
+    today, while reserving some capacity for other opportunities when the
+    portfolio is otherwise empty.
+    """
+    residual_capacity = max(0.0, max_after_scaling - current_margin_ratio)
+    if residual_capacity <= 0:
+        return 0.0, "no_capacity", {
+            "residual_capacity": 0.0,
+            "allocation_fraction": 0.0,
+            "reserved_for_other_opportunities": 0.0,
+        }
+
+    confirmation = max(0.0, min(1.0, confirmation_score))
+    evidence = learning_evidence or {}
+
+    def _float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    exceptional_enabled = bool(control.get("exceptional_validated_enabled", True))
+    exceptional_requires_stop = bool(control.get("exceptional_validated_requires_stop_protection", True))
+    exceptional_candidate = (
+        high_quality_memory
+        and exceptional_enabled
+        and (stop_protected or not exceptional_requires_stop)
+        and confirmation >= _float(control.get("exceptional_validated_min_confirmation_score"), 0.85)
+        and _int(evidence.get("sample_count")) >= _int(control.get("exceptional_validated_min_sample_count"), 8)
+        and _float(evidence.get("win_rate")) >= _float(control.get("exceptional_validated_min_win_rate"), 0.70)
+        and _float(evidence.get("net_pnl")) >= _float(control.get("exceptional_validated_min_net_pnl"), 5000.0)
+    )
+
+    reserve_key = (
+        "exceptional_other_opportunity_reserve_fraction_of_tradable_capital"
+        if exceptional_candidate
+        else "other_opportunity_reserve_fraction_of_tradable_capital"
+    )
+    reserve_default = 0.10 if exceptional_candidate else 0.10
+    reserve_fraction = max(0.0, min(0.50, float(control.get(reserve_key, reserve_default) or reserve_default)))
+    reserve_margin = max_after_scaling * reserve_fraction
+    reserved_for_other = max(0.0, reserve_margin - current_margin_ratio)
+    usable_after_reserve = max(0.0, residual_capacity - reserved_for_other)
+
+    if not high_quality_memory:
+        probe_fraction = max(0.0, min(1.0, float(
+            control.get("unverified_probe_fraction_of_remaining_capacity", 0.12) or 0.12
+        )))
+        allocation_fraction = probe_fraction * max(0.25, confirmation)
+        tier = "probe_unverified"
+    else:
+        if exceptional_candidate:
+            min_fraction = max(0.0, min(1.0, float(
+                control.get("exceptional_validated_min_fraction_of_remaining_capacity", 0.75) or 0.75
+            )))
+            max_fraction = max(min_fraction, min(1.0, float(
+                control.get("exceptional_validated_max_fraction_of_remaining_capacity", 0.95) or 0.95
+            )))
+            power = max(0.25, float(control.get("exceptional_confirmation_allocation_power", 1.0) or 1.0))
+            tier = "exceptional_validated_with_stop" if stop_protected else "exceptional_validated"
+        else:
+            min_fraction = max(0.0, min(1.0, float(
+                control.get("validated_min_fraction_of_remaining_capacity", 0.35) or 0.35
+            )))
+            max_fraction = max(min_fraction, min(1.0, float(
+                control.get("validated_max_fraction_of_remaining_capacity", 0.90) or 0.90
+            )))
+            power = max(0.25, float(control.get("confirmation_allocation_power", 1.25) or 1.25))
+            tier = "validated"
+        evidence = confirmation ** power
+        allocation_fraction = min_fraction + (max_fraction - min_fraction) * evidence
+        if stop_protected and not exceptional_candidate:
+            bonus = max(0.0, min(1.0, float(
+                control.get("stop_protection_allocation_bonus", 0.15) or 0.15
+            )))
+            allocation_fraction += (1.0 - allocation_fraction) * bonus
+            tier = "validated_with_stop"
+
+    allocation_fraction = max(0.0, min(1.0, allocation_fraction))
+    budget = min(usable_after_reserve, residual_capacity * allocation_fraction)
+    if budget <= 0 and not high_quality_memory:
+        budget = min(residual_capacity, residual_capacity * allocation_fraction)
+    return max(0.0, budget), tier, {
+        "residual_capacity": residual_capacity,
+        "allocation_fraction": allocation_fraction,
+        "reserved_for_other_opportunities": reserved_for_other,
+        "usable_after_reserve": usable_after_reserve,
+        "reserve_fraction": reserve_fraction,
+        "exceptional_validated": exceptional_candidate,
+        "target_total_margin_ratio": target_total_margin_ratio,
+    }
 
 # Portfolio Manager Thresholds
 thresholds = {
@@ -484,6 +632,25 @@ def _current_net_exposure(portfolio, account_equity: float) -> float:
     return net_exposure
 
 
+def _resolve_net_exposure_control(full_config: dict, control_diagnostics: dict | None = None) -> tuple[float, bool, str]:
+    net_exposure_config = full_config.get('net_exposure_control')
+    if net_exposure_config is None:
+        risk_control = full_config.get('risk_control', {})
+        net_exposure_config = risk_control.get('net_exposure_control', {})
+    max_net_exposure = float(net_exposure_config.get('max_net_exposure', 0.50))
+    symmetric_scaling = bool(net_exposure_config.get('symmetric_scaling', True))
+    cap_mode = "base"
+
+    target = (control_diagnostics or {}).get("capital_utilization_target")
+    if isinstance(target, dict) and target.get("target_mode") == "strong_opportunity" and target.get("high_quality_memory"):
+        strong_cap = net_exposure_config.get("strong_opportunity_max_net_exposure")
+        if strong_cap is not None:
+            max_net_exposure = max(max_net_exposure, float(strong_cap))
+            cap_mode = "strong_opportunity"
+
+    return max_net_exposure, symmetric_scaling, cap_mode
+
+
 def _days_held(entry_date: str, trading_date) -> int:
     """Best-effort holding-period calculation using normalized YYYY-MM-DD strings."""
     if not entry_date or trading_date is None:
@@ -605,12 +772,14 @@ def _build_pre_open_plan_snapshot(
     risk_level: RiskLevel,
     long_scores: dict,
     short_scores: dict,
+    margin_rate: float = 0.0,
 ) -> dict:
     direction = _resolve_pre_open_signal_direction(target_lots)
     return {
         "signal_direction": direction,
         "signal_confidence": _resolve_pre_open_signal_confidence(direction, long_scores, short_scores),
         "target_position_ratio": float(position_ratio),
+        "target_margin_ratio_estimate": abs(float(position_ratio)) * max(0.0, float(margin_rate or 0.0)),
         "target_lots_estimate": int(target_lots),
         "reference_price": float(current_price),
         "risk_level": risk_level.value,
@@ -641,8 +810,324 @@ def _strategy_memory_record(strategy_memory: dict, states: set[str]) -> dict:
     return _capital_strategy_memory_record(strategy_memory, states)
 
 
-def _has_adaptive_policy_action(rows: list, actions: set[str]) -> bool:
-    return _capital_has_adaptive_policy_action(rows, actions)
+def _conflicting_weak_memory_record(strategy_memory: dict, signal_combo: tuple[str, str, str]) -> dict:
+    return _capital_conflicting_weak_memory_record(strategy_memory, signal_combo)
+
+
+def _normalize_trading_day_value(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def _block_new_or_incremental_exposure(target_ratio: float, current_ratio: float) -> float:
+    """Block only new/incremental risk while preserving existing same-side exposure."""
+    if abs(current_ratio) > 1e-12 and _same_sign(target_ratio, current_ratio):
+        return float(current_ratio)
+    return 0.0
+
+
+def _cap_new_or_incremental_exposure(
+    *,
+    target_ratio: float,
+    current_ratio: float,
+    max_abs_target_ratio: float,
+) -> float:
+    """Cap the target without turning a same-side add-on into a forced reduction."""
+    max_abs_target_ratio = max(0.0, float(max_abs_target_ratio or 0.0))
+    if abs(target_ratio) <= 1e-12:
+        return 0.0
+    target_sign = 1.0 if target_ratio > 0 else -1.0
+    if abs(current_ratio) > 1e-12 and _same_sign(target_ratio, current_ratio):
+        capped_abs = min(abs(target_ratio), max(abs(current_ratio), max_abs_target_ratio))
+    else:
+        capped_abs = min(abs(target_ratio), max_abs_target_ratio)
+    return target_sign * capped_abs
+
+
+def _cap_by_incremental_margin_budget(
+    *,
+    target_ratio: float,
+    current_ratio: float,
+    margin_rate: float,
+    allowed_increment_margin_ratio: float,
+) -> float:
+    if margin_rate <= 0:
+        return target_ratio
+    allowed_increment_margin_ratio = max(0.0, float(allowed_increment_margin_ratio or 0.0))
+    target_sign = 1.0 if target_ratio > 0 else -1.0
+    if abs(current_ratio) > 1e-12 and _same_sign(target_ratio, current_ratio):
+        current_margin = abs(current_ratio) * margin_rate
+        max_target_margin = current_margin + allowed_increment_margin_ratio
+    else:
+        max_target_margin = allowed_increment_margin_ratio
+    max_abs_target_ratio = max_target_margin / margin_rate
+    return _cap_new_or_incremental_exposure(
+        target_ratio=target_ratio,
+        current_ratio=current_ratio,
+        max_abs_target_ratio=max_abs_target_ratio,
+    )
+
+
+def _drawdown_hard_streak_state(
+    *,
+    db,
+    config_id: str,
+    trading_date,
+    initial_capital: float,
+    hard_drawdown: float,
+) -> dict:
+    trading_day_value = _normalize_trading_day_value(trading_date)
+    if not db or not config_id or not trading_day_value:
+        return {"consecutive_hard_days": 0, "latest_hard_date": None}
+    conn = None
+    try:
+        conn = db._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT ds.trading_date, ds.current_balance, ds.current_margin
+            FROM daily_settlement ds
+            JOIN portfolio p ON ds.portfolio_id = p.id
+            WHERE p.config_id = ?
+              AND substr(ds.trading_date, 1, 10) < ?
+            ORDER BY substr(ds.trading_date, 1, 10), ds.created_at
+            ''',
+            (config_id, trading_day_value),
+        )
+        peak_equity = float(initial_capital or 0.0)
+        hard_streak = 0
+        latest_hard_date = None
+        for row in cursor.fetchall():
+            equity = float(row["current_balance"] or 0.0) + float(row["current_margin"] or 0.0)
+            peak_equity = max(peak_equity, equity)
+            drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+            if drawdown >= hard_drawdown:
+                hard_streak += 1
+                latest_hard_date = _normalize_trading_day_value(row["trading_date"])
+            else:
+                hard_streak = 0
+                latest_hard_date = None
+        return {
+            "consecutive_hard_days": hard_streak,
+            "latest_hard_date": latest_hard_date,
+        }
+    except Exception as exc:
+        logger.warning(f"Drawdown hard-streak state unavailable: {exc}")
+        return {"consecutive_hard_days": 0, "latest_hard_date": None, "error": str(exc)}
+    finally:
+        if conn:
+            conn.close()
+
+
+def _load_drawdown_control_from_recommendation(db, recommendation_row: dict) -> dict:
+    try:
+        loader = getattr(db, "_deserialize_external_json", None)
+        if callable(loader):
+            snapshot = loader(recommendation_row, "signal_snapshot")
+        else:
+            raw_snapshot = recommendation_row.get("signal_snapshot")
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) and raw_snapshot.strip() else {}
+    except Exception:
+        snapshot = {}
+    if not isinstance(snapshot, dict):
+        return {}
+    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
+    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
+    drawdown = diagnostics.get("drawdown_control") if isinstance(diagnostics.get("drawdown_control"), dict) else {}
+    return drawdown if isinstance(drawdown, dict) else {}
+
+
+def _trading_days_between_settlements(
+    *,
+    db,
+    config_id: str,
+    after_date: str,
+    before_date: str,
+) -> int:
+    if not after_date or not before_date:
+        return 0
+    conn = None
+    try:
+        conn = db._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT COUNT(DISTINCT substr(ds.trading_date, 1, 10)) AS day_count
+            FROM daily_settlement ds
+            JOIN portfolio p ON ds.portfolio_id = p.id
+            WHERE p.config_id = ?
+              AND substr(ds.trading_date, 1, 10) > ?
+              AND substr(ds.trading_date, 1, 10) < ?
+            ''',
+            (config_id, after_date, before_date),
+        )
+        row = cursor.fetchone()
+        return int((row["day_count"] if row else 0) or 0)
+    except Exception as exc:
+        logger.warning(f"Recovery cooldown day count unavailable: {exc}")
+        return 0
+    finally:
+        if conn:
+            conn.close()
+
+
+def _drawdown_recovery_probe_history(
+    *,
+    db,
+    config_id: str,
+    trading_date,
+    control: dict,
+) -> dict:
+    trading_day_value = _normalize_trading_day_value(trading_date)
+    if not db or not config_id or not trading_day_value:
+        return {"probe_days": 0, "loss_count": 0, "consecutive_profit_days": 0, "cooldown_active": False}
+    conn = None
+    try:
+        conn = db._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT tdp.trading_date, tdp.ticker, tdp.daily_pnl
+            FROM ticker_daily_pnl tdp
+            JOIN portfolio p ON tdp.portfolio_id = p.id
+            WHERE p.config_id = ?
+              AND substr(tdp.trading_date, 1, 10) < ?
+            ''',
+            (config_id, trading_day_value),
+        )
+        ticker_daily_pnl = {
+            (_normalize_trading_day_value(row["trading_date"]), str(row["ticker"] or "").upper()):
+            float(row["daily_pnl"] or 0.0)
+            for row in cursor.fetchall()
+        }
+        cursor.execute(
+            '''
+            SELECT ft.trading_date,
+                   ft.ticker,
+                   ft.action,
+                   ft.recommendation_id,
+                   fr.signal_snapshot,
+                   fr.signal_snapshot_artifact_path,
+                   fr.signal_snapshot_sha256
+            FROM futures_transactions ft
+            JOIN futures_recommendation fr ON fr.id = ft.recommendation_id
+            WHERE ft.config_id = ?
+              AND substr(ft.trading_date, 1, 10) < ?
+              AND ft.action IN ('open_long', 'open_short')
+            ORDER BY substr(ft.trading_date, 1, 10), ft.created_at, ft.id
+            ''',
+            (config_id, trading_day_value),
+        )
+        probe_by_day: dict[tuple[str, str], float] = {}
+        for row in cursor.fetchall():
+            record = dict(row)
+            drawdown_diag = _load_drawdown_control_from_recommendation(db, record)
+            if str(drawdown_diag.get("mode") or "") != "hard_recovery_probe":
+                continue
+            day = _normalize_trading_day_value(record.get("trading_date"))
+            ticker = str(record.get("ticker") or "").upper()
+            cumulative_pnl = sum(
+                pnl
+                for (pnl_day, pnl_ticker), pnl in ticker_daily_pnl.items()
+                if pnl_ticker == ticker and day <= pnl_day < trading_day_value
+            )
+            probe_by_day[(day, ticker)] = cumulative_pnl
+
+        ordered_probe_days = sorted(
+            [
+                {"trading_date": day, "ticker": ticker, "probe_cumulative_pnl": pnl}
+                for (day, ticker), pnl in probe_by_day.items()
+            ],
+            key=lambda item: (item["trading_date"], item["ticker"]),
+        )
+        loss_days = [item for item in ordered_probe_days if float(item.get("probe_cumulative_pnl") or 0.0) < 0]
+        last_loss_date = loss_days[-1]["trading_date"] if loss_days else None
+        consecutive_profit_days = 0
+        for item in reversed(ordered_probe_days):
+            if last_loss_date and item["trading_date"] <= last_loss_date:
+                break
+            if float(item.get("probe_cumulative_pnl") or 0.0) > 0:
+                consecutive_profit_days += 1
+            elif float(item.get("probe_cumulative_pnl") or 0.0) < 0:
+                break
+
+        loss_count = len(loss_days)
+        first_loss_cooldown = int(control.get("first_probe_loss_cooldown_days", 2))
+        second_loss_cooldown = int(control.get("second_probe_loss_cooldown_days", 3))
+        increment = int(control.get("cooldown_increment_days", 1))
+        cooldown_days = 0
+        days_elapsed = 0
+        cooldown_active = False
+        if last_loss_date:
+            if loss_count <= 1:
+                cooldown_days = first_loss_cooldown
+            elif loss_count == 2:
+                cooldown_days = second_loss_cooldown
+            else:
+                cooldown_days = second_loss_cooldown + (loss_count - 2) * increment
+            days_elapsed = _trading_days_between_settlements(
+                db=db,
+                config_id=config_id,
+                after_date=last_loss_date,
+                before_date=trading_day_value,
+            )
+            cooldown_active = days_elapsed < cooldown_days
+
+        return {
+            "probe_days": len(ordered_probe_days),
+            "loss_count": loss_count,
+            "last_loss_date": last_loss_date,
+            "cooldown_days": cooldown_days,
+            "cooldown_days_elapsed": days_elapsed,
+            "cooldown_active": cooldown_active,
+            "observation_only": cooldown_active and loss_count >= 2,
+            "consecutive_profit_days": consecutive_profit_days,
+            "recent_probe_days": ordered_probe_days[-5:],
+        }
+    except Exception as exc:
+        logger.warning(f"Drawdown recovery probe history unavailable: {exc}")
+        return {
+            "probe_days": 0,
+            "loss_count": 0,
+            "consecutive_profit_days": 0,
+            "cooldown_active": False,
+            "error": str(exc),
+        }
+    finally:
+        if conn:
+            conn.close()
+
+
+def _recovery_probe_budget(control: dict, recovery_history: dict) -> float:
+    steps = control.get("recovery_restore_step_margin_ratios") or []
+    parsed_steps = []
+    for item in steps:
+        value = _safe_float(item, 0.0)
+        if value > 0:
+            parsed_steps.append(value)
+    if not parsed_steps:
+        parsed_steps = [float(control.get("recovery_probe_margin_ratio_max", 0.02))]
+    index = min(int(recovery_history.get("consecutive_profit_days", 0) or 0), len(parsed_steps) - 1)
+    return max(0.0, parsed_steps[index])
+
+
+def _memory_signal_combo_is_specific(row: dict, signal_combo: tuple[str, str, str]) -> bool:
+    raw_combo = (row or {}).get("signal_combo")
+    if isinstance(raw_combo, (list, tuple)):
+        row_combo = tuple(str(item).strip() for item in raw_combo)
+    else:
+        text = str(raw_combo or "").strip()
+        if not text or text == "*":
+            return False
+        if "|" in text:
+            row_combo = tuple(part.strip() for part in text.split("|"))
+        else:
+            return False
+    return row_combo == tuple(signal_combo)
 
 
 def _apply_trade_plan_multiplier(
@@ -886,6 +1371,12 @@ def _apply_drawdown_and_ticker_loss_control(
     trading_date,
     position_ratio: float,
     current_ratio: float,
+    current_margin_ratio: float = 0.0,
+    margin_rate: float = 0.0,
+    market_confirmation: dict | None = None,
+    signal_combo: tuple[str, str, str] | None = None,
+    strategy_memory: dict | None = None,
+    analyst_signals: list | None = None,
     full_config: dict,
 ) -> tuple[float, list[str], list[str], dict]:
     reasons: list[str] = []
@@ -902,18 +1393,205 @@ def _apply_drawdown_and_ticker_loss_control(
             initial_capital=float(full_config.get("cashflow", 0.0) or 0.0),
         )
         diagnostics["drawdown_state"] = drawdown_state
-        drawdown = float(drawdown_state.get("drawdown", 0.0) or 0.0)
-        if drawdown >= float(drawdown_control.get("hard_drawdown", 0.025)):
-            position_ratio = 0.0
-            reasons.append("drawdown_control")
-            notes.append(f"hard drawdown control: drawdown={drawdown:.2%}, new exposure blocked")
-        elif drawdown >= float(drawdown_control.get("soft_drawdown", 0.015)):
-            before = position_ratio
-            position_ratio = _scale_signed_ratio(position_ratio, float(drawdown_control.get("soft_cap_multiplier", 0.70)))
-            reasons.append("drawdown_control")
-            notes.append(
-                f"soft drawdown control: drawdown={drawdown:.2%}, ratio {before:.2%}->{position_ratio:.2%}"
+        drawdown = _safe_float(drawdown_state.get("drawdown"), 0.0)
+        warning_drawdown = _safe_float(
+            drawdown_control.get("warning_drawdown", drawdown_control.get("soft_drawdown")),
+            0.04,
+        )
+        hard_drawdown = _safe_float(drawdown_control.get("hard_drawdown"), 0.05)
+        confirmation = market_confirmation or {}
+        confirmations = confirmation.get("confirmations") or []
+        confirmation_score = _safe_float(confirmation.get("confirmation_score"), 0.0)
+        stop_protected = _has_explicit_stop_protection(analyst_signals or [])
+        target_side = _target_side_from_ratio(position_ratio)
+        drawdown_diag = {
+            "enabled": True,
+            "drawdown": drawdown,
+            "warning_drawdown": warning_drawdown,
+            "hard_drawdown": hard_drawdown,
+            "current_margin_ratio": float(current_margin_ratio or 0.0),
+            "margin_rate": float(margin_rate or 0.0),
+            "target_side": target_side,
+            "stop_protected": bool(stop_protected),
+            "confirmation_score": confirmation_score,
+            "confirmation_count": len(confirmations),
+            "pre_control_ratio": float(position_ratio),
+            "current_ratio": float(current_ratio),
+        }
+        diagnostics["drawdown_control"] = drawdown_diag
+
+        if drawdown >= hard_drawdown:
+            hard_streak = _drawdown_hard_streak_state(
+                db=db,
+                config_id=config_id,
+                trading_date=trading_date,
+                initial_capital=float(full_config.get("cashflow", 0.0) or 0.0),
+                hard_drawdown=hard_drawdown,
             )
+            recovery_history = _drawdown_recovery_probe_history(
+                db=db,
+                config_id=config_id,
+                trading_date=trading_date,
+                control=drawdown_control,
+            )
+            initial_cooldown_days = max(0, int(drawdown_control.get("initial_hard_cooldown_days", 1)))
+            initial_cooldown_active = (
+                initial_cooldown_days > 0
+                and int(hard_streak.get("consecutive_hard_days", 0) or 0) <= initial_cooldown_days
+            )
+            drawdown_diag.update({
+                "state": "hard_protection",
+                "hard_streak": hard_streak,
+                "recovery_history": recovery_history,
+                "initial_cooldown_days": initial_cooldown_days,
+                "initial_cooldown_active": initial_cooldown_active,
+            })
+
+            if initial_cooldown_active or bool(recovery_history.get("cooldown_active")):
+                before = position_ratio
+                position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
+                reasons.append("drawdown_control")
+                mode = "hard_initial_cooldown" if initial_cooldown_active else "hard_observation_only"
+                drawdown_diag.update({
+                    "mode": mode,
+                    "shadow_recommendation": True,
+                    "final_ratio": float(position_ratio),
+                })
+                notes.append(
+                    f"hard drawdown {mode}: drawdown={drawdown:.2%}; "
+                    f"new/incremental exposure {before:.2%}->{position_ratio:.2%}; "
+                    "agents continue analysis and shadow recommendation logging"
+                )
+            else:
+                min_score = _safe_float(drawdown_control.get("recovery_probe_min_confirmation_score"), 0.65)
+                min_confirmations = int(drawdown_control.get("recovery_probe_min_confirmations", 3))
+                require_stop = bool(drawdown_control.get("recovery_probe_require_stop_protection", True))
+                weak_conflict = (
+                    _conflicting_weak_memory_record(strategy_memory or {}, signal_combo or ("*", "*", "*"))
+                    if bool(drawdown_control.get("recovery_probe_block_weak_memory", True))
+                    else {}
+                )
+                gate_failures = []
+                if target_side not in {"long", "short"}:
+                    gate_failures.append("no_directional_new_entry")
+                if len(confirmations) < min_confirmations:
+                    gate_failures.append("insufficient_market_confirmations")
+                if confirmation_score < min_score:
+                    gate_failures.append("market_confirmation_score_below_probe_threshold")
+                if require_stop and not stop_protected:
+                    gate_failures.append("missing_stop_or_invalidation_boundary")
+                if weak_conflict:
+                    gate_failures.append("conflicting_weak_memory")
+
+                drawdown_diag.update({
+                    "mode": "hard_recovery_probe_candidate",
+                    "recovery_probe_min_confirmation_score": min_score,
+                    "recovery_probe_min_confirmations": min_confirmations,
+                    "recovery_probe_require_stop_protection": require_stop,
+                    "weak_conflict": weak_conflict,
+                    "gate_failures": gate_failures,
+                })
+
+                if gate_failures:
+                    before = position_ratio
+                    position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
+                    reasons.append("drawdown_control")
+                    drawdown_diag.update({
+                        "mode": "hard_recovery_shadow_only",
+                        "shadow_recommendation": True,
+                        "final_ratio": float(position_ratio),
+                    })
+                    notes.append(
+                        f"hard drawdown recovery shadow-only: failures={gate_failures}; "
+                        f"new/incremental exposure {before:.2%}->{position_ratio:.2%}"
+                    )
+                else:
+                    before = position_ratio
+                    recovery_budget = _recovery_probe_budget(drawdown_control, recovery_history)
+                    recovery_budget = min(
+                        recovery_budget,
+                        _safe_float(drawdown_control.get("recovery_probe_margin_ratio_max"), recovery_budget or 0.02),
+                    )
+                    if recovery_budget <= 0:
+                        recovery_budget = _safe_float(drawdown_control.get("recovery_probe_margin_ratio_max"), 0.02)
+                    allowed_increment_margin = max(0.0, recovery_budget - float(current_margin_ratio or 0.0))
+                    if allowed_increment_margin <= 0 and not (
+                        abs(current_ratio) > 1e-12 and _same_sign(position_ratio, current_ratio)
+                    ):
+                        position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
+                        reasons.append("drawdown_control")
+                        drawdown_diag.update({
+                            "mode": "hard_recovery_shadow_only",
+                            "shadow_recommendation": True,
+                            "recovery_probe_margin_ratio_budget": recovery_budget,
+                            "allowed_increment_margin_ratio": allowed_increment_margin,
+                            "gate_failures": ["no_capacity_under_recovery_probe_budget"],
+                            "final_ratio": float(position_ratio),
+                        })
+                        notes.append(
+                            f"hard drawdown recovery shadow-only: current_margin={float(current_margin_ratio or 0.0):.2%} "
+                            f">= recovery_budget={recovery_budget:.2%}; "
+                            f"new/incremental exposure {before:.2%}->{position_ratio:.2%}"
+                        )
+                    else:
+                        position_ratio = _cap_by_incremental_margin_budget(
+                            target_ratio=position_ratio,
+                            current_ratio=current_ratio,
+                            margin_rate=margin_rate,
+                            allowed_increment_margin_ratio=allowed_increment_margin,
+                        )
+                        if abs(position_ratio - before) > 1e-12:
+                            reasons.append("drawdown_recovery_probe")
+                        drawdown_diag.update({
+                            "mode": "hard_recovery_probe",
+                            "shadow_recommendation": False,
+                            "recovery_probe_margin_ratio_budget": recovery_budget,
+                            "allowed_increment_margin_ratio": allowed_increment_margin,
+                            "final_ratio": float(position_ratio),
+                        })
+                        notes.append(
+                            f"hard drawdown recovery probe allowed: drawdown={drawdown:.2%}, "
+                            f"budget={recovery_budget:.2%}, ratio {before:.2%}->{position_ratio:.2%}"
+                        )
+        elif drawdown >= warning_drawdown:
+            before = position_ratio
+            warning_multiplier = _safe_float(
+                drawdown_control.get("warning_cap_multiplier", drawdown_control.get("soft_cap_multiplier")),
+                0.60,
+            )
+            position_ratio = _scale_signed_ratio(position_ratio, warning_multiplier)
+            warning_target = _safe_float(drawdown_control.get("warning_target_margin_ratio_max"), 0.04)
+            if warning_target > 0 and margin_rate > 0:
+                allowed_increment_margin = max(0.0, warning_target - float(current_margin_ratio or 0.0))
+                if allowed_increment_margin <= 0 and not (
+                    abs(current_ratio) > 1e-12 and _same_sign(position_ratio, current_ratio)
+                ):
+                    position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
+                else:
+                    position_ratio = _cap_by_incremental_margin_budget(
+                        target_ratio=position_ratio,
+                        current_ratio=current_ratio,
+                        margin_rate=margin_rate,
+                        allowed_increment_margin_ratio=allowed_increment_margin,
+                    )
+            reasons.append("drawdown_control")
+            drawdown_diag.update({
+                "state": "warning",
+                "mode": "warning_scaled_risk",
+                "warning_cap_multiplier": warning_multiplier,
+                "warning_target_margin_ratio_max": warning_target,
+                "final_ratio": float(position_ratio),
+            })
+            notes.append(
+                f"warning drawdown control: drawdown={drawdown:.2%}, "
+                f"ratio {before:.2%}->{position_ratio:.2%}; high-conviction scaling disabled"
+            )
+        else:
+            drawdown_diag.update({
+                "state": "normal",
+                "mode": "normal",
+                "final_ratio": float(position_ratio),
+            })
 
     ticker_loss_control = full_config.get("ticker_loss_control", {}) or {}
     if ticker_loss_control.get("enabled", False) and db and config_id and abs(position_ratio) > 0:
@@ -927,7 +1605,7 @@ def _apply_drawdown_and_ticker_loss_control(
         loss_threshold = float(ticker_loss_control.get("loss_threshold", -8000))
         consecutive_limit = int(ticker_loss_control.get("block_new_entries_after_consecutive_losses", 3))
         if int(loss_state.get("consecutive_loss_days", 0) or 0) >= consecutive_limit:
-            position_ratio = 0.0
+            position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
             reasons.append("ticker_loss_control")
             notes.append(
                 f"{ticker} blocked by consecutive loss days={loss_state.get('consecutive_loss_days')}"
@@ -960,6 +1638,7 @@ def _apply_capital_utilization_control(
     signal_combo: tuple[str, str, str],
     strategy_memory: dict | None = None,
     adaptive_policy_state: list | None = None,
+    analyst_signals: list | None = None,
 ) -> tuple[float, list[str], list[str], dict]:
     reasons: list[str] = []
     notes: list[str] = []
@@ -979,6 +1658,68 @@ def _apply_capital_utilization_control(
         allow_memory_protected_scaling=allow_protected_scaling,
         allow_recovering_template_scaling=allow_recovering_scaling,
     )
+    learning_evidence = (
+        learning_diagnostics.get("protected_memory")
+        if isinstance(learning_diagnostics.get("protected_memory"), dict)
+        else {}
+    )
+    if high_quality_memory and not learning_evidence:
+        adaptive_evidence = (
+            learning_diagnostics.get("adaptive_protect_record")
+            if isinstance(learning_diagnostics.get("adaptive_protect_record"), dict)
+            else {}
+        )
+        if adaptive_evidence:
+            learning_evidence = adaptive_evidence
+    weak_conflict = _conflicting_weak_memory_record(strategy_memory or {}, signal_combo)
+    protected_row = (
+        learning_diagnostics.get("protected_memory")
+        if isinstance(learning_diagnostics.get("protected_memory"), dict)
+        else {}
+    )
+    adaptive_protect_row = (
+        learning_diagnostics.get("adaptive_protect_record")
+        if isinstance(learning_diagnostics.get("adaptive_protect_record"), dict)
+        else {}
+    )
+    evidence_row = protected_row or adaptive_protect_row
+    if high_quality_memory and evidence_row:
+        min_protected_samples = int(control.get("protected_min_sample_count_for_scaling", 5) or 5)
+        min_protected_win_rate = float(control.get("protected_min_win_rate_for_scaling", 0.60) or 0.60)
+        min_protected_net_pnl = float(control.get("protected_min_net_pnl_for_scaling", 1000) or 1000)
+        require_specific_combo = bool(control.get("require_specific_signal_combo_for_strong_scaling", True))
+        combo_specific = _memory_signal_combo_is_specific(evidence_row, signal_combo)
+        sample_count = int(evidence_row.get("sample_count") or 0)
+        win_rate = float(evidence_row.get("win_rate") or 0.0)
+        net_pnl = float(evidence_row.get("net_pnl") or 0.0)
+        evidence_ok = (
+            sample_count >= min_protected_samples
+            and win_rate >= min_protected_win_rate
+            and net_pnl >= min_protected_net_pnl
+            and (combo_specific or not require_specific_combo)
+        )
+        if not evidence_ok:
+            high_quality_memory = False
+            learning_evidence = {}
+            learning_diagnostics["protected_evidence_rejected"] = {
+                "reason": "protected_memory_evidence_below_scaling_threshold",
+                "sample_count": sample_count,
+                "min_sample_count": min_protected_samples,
+                "win_rate": win_rate,
+                "min_win_rate": min_protected_win_rate,
+                "net_pnl": net_pnl,
+                "min_net_pnl": min_protected_net_pnl,
+                "specific_signal_combo": combo_specific,
+                "require_specific_signal_combo": require_specific_combo,
+                "evidence_source": "strategy_memory" if protected_row else "adaptive_policy_state",
+            }
+            diagnostics["capital_utilization_learning"] = learning_diagnostics
+    if weak_conflict:
+        learning_diagnostics["conflicting_weak_memory"] = weak_conflict
+        if bool(control.get("block_scaling_on_conflicting_weak_memory", True)):
+            diagnostics["capital_utilization_learning"] = learning_diagnostics
+            diagnostics["capital_utilization_skip"] = "conflicting_weak_memory"
+            return position_ratio, reasons, notes, diagnostics
     if high_quality_memory:
         diagnostics["capital_utilization_learning"] = learning_diagnostics
 
@@ -1021,6 +1762,19 @@ def _apply_capital_utilization_control(
         return position_ratio, reasons, notes, diagnostics
 
     confirmation_score = float(market_confirmation.get("confirmation_score", 0.0) or 0.0)
+    stop_protected = _has_explicit_stop_protection(analyst_signals or [])
+    if (
+        high_quality_memory
+        and bool(control.get("require_stop_protection_for_strong_scaling", True))
+        and not stop_protected
+    ):
+        high_quality_memory = False
+        learning_diagnostics["protected_evidence_rejected"] = {
+            **(learning_diagnostics.get("protected_evidence_rejected") or {}),
+            "reason": "missing_stop_protection_for_strong_scaling",
+            "require_stop_protection": True,
+        }
+        diagnostics["capital_utilization_learning"] = learning_diagnostics
     min_score = float(control.get("min_confirmation_score_for_scaling", 0.60))
     if high_quality_memory:
         protected_min_score = float(
@@ -1072,15 +1826,74 @@ def _apply_capital_utilization_control(
 
     target_min = float(control.get("target_margin_ratio_min", 0.16))
     target_max = float(control.get("target_margin_ratio_max", control.get("max_margin_ratio_after_scaling", 0.20)))
-    target_total_margin_ratio = float(control.get("target_margin_ratio_confirmed", target_min))
+    if high_quality_memory:
+        target_min = float(control.get("strong_opportunity_target_margin_ratio_min", target_min))
+        target_max = float(control.get("strong_opportunity_target_margin_ratio_max", target_max))
+        target_total_margin_ratio = float(control.get("strong_opportunity_target_margin_ratio_confirmed", target_min))
+        target_mode = "strong_opportunity"
+    else:
+        target_total_margin_ratio = float(control.get("target_margin_ratio_confirmed", target_min))
+        target_mode = "confirmed_observation"
     target_total_margin_ratio = min(max(target_total_margin_ratio, target_min), target_max)
     max_after_scaling = float(control.get("max_margin_ratio_after_scaling", target_max))
-    max_after_scaling = min(max_after_scaling, target_max)
+    effective_max_position_ratio = float(max_position_ratio)
+    single_position_cap_lifted = False
+    dynamic_margin_budget = None
+    dynamic_allocation_tier = "base"
+    dynamic_budget_diagnostics: dict[str, float] = {}
+    opportunity_margin_cap_limited = False
+    if bool(control.get("dynamic_concentration_enabled", True)):
+        dynamic_margin_budget, dynamic_allocation_tier, dynamic_budget_diagnostics = _resolve_dynamic_opportunity_budget(
+            control=control,
+            high_quality_memory=high_quality_memory,
+            confirmation_score=confirmation_score,
+            stop_protected=stop_protected,
+            learning_evidence=learning_evidence,
+            current_margin_ratio=current_margin_ratio,
+            target_total_margin_ratio=target_total_margin_ratio,
+            max_after_scaling=max_after_scaling,
+        )
+        if dynamic_margin_budget > 0 and margin_rate > 0:
+            effective_max_position_ratio = max(effective_max_position_ratio, dynamic_margin_budget / margin_rate)
+    elif high_quality_memory:
+        strong_cap_multiplier = float(control.get("strong_opportunity_max_position_ratio_multiplier", 1.0) or 1.0)
+        strong_cap = float(control.get("strong_opportunity_max_position_ratio_cap", max_position_ratio) or max_position_ratio)
+        risk_caps = ((full_config.get("risk_control") or {}).get("max_single_position_ratio") or {})
+        safe_single_cap = float(risk_caps.get("safe", max_position_ratio) or max_position_ratio)
+        cap_lift_allowed = max_position_ratio >= safe_single_cap * 0.95
+        if cap_lift_allowed and (strong_cap_multiplier > 1.0 or strong_cap > max_position_ratio):
+            effective_max_position_ratio = min(strong_cap, max_position_ratio * max(1.0, strong_cap_multiplier))
+        single_margin_cap_raw = control.get("strong_opportunity_max_single_margin_ratio_cap")
+        if single_margin_cap_raw is not None:
+            try:
+                dynamic_margin_budget = max(0.0, float(single_margin_cap_raw))
+                dynamic_allocation_tier = "legacy_single_margin_cap"
+            except (TypeError, ValueError):
+                dynamic_margin_budget = None
+    if dynamic_margin_budget and margin_rate > 0:
+        margin_cap_position_ratio = dynamic_margin_budget / margin_rate
+        if margin_cap_position_ratio < effective_max_position_ratio - 1e-12:
+            opportunity_margin_cap_limited = True
+        effective_max_position_ratio = min(effective_max_position_ratio, margin_cap_position_ratio)
+    single_position_cap_lifted = effective_max_position_ratio > max_position_ratio + 1e-12
     diagnostics["capital_utilization_target"] = {
+        "target_mode": target_mode,
+        "high_quality_memory": high_quality_memory,
         "current_margin_ratio": current_margin_ratio,
         "target_margin_ratio_min": target_min,
         "target_margin_ratio_max": target_max,
         "target_margin_ratio_confirmed": target_total_margin_ratio,
+        "base_max_position_ratio": float(max_position_ratio),
+        "effective_max_position_ratio": float(effective_max_position_ratio),
+        "effective_single_margin_ratio_cap": float(effective_max_position_ratio * margin_rate),
+        "dynamic_opportunity_margin_ratio_budget": dynamic_margin_budget,
+        "dynamic_opportunity_margin_ratio_cap": dynamic_margin_budget,
+        "dynamic_allocation_tier": dynamic_allocation_tier,
+        "dynamic_budget_diagnostics": dynamic_budget_diagnostics,
+        "stop_protected": stop_protected,
+        "base_position_anchor_lifted": single_position_cap_lifted,
+        "single_position_cap_lifted": single_position_cap_lifted,
+        "opportunity_margin_cap_limited": opportunity_margin_cap_limited,
         "underutilization_breach": current_margin_ratio < target_min,
         "capital_allocation_tier": (
             "under_deployed"
@@ -1093,6 +1906,14 @@ def _apply_capital_utilization_control(
         target_total_margin_ratio - current_margin_ratio,
         max_after_scaling - current_margin_ratio,
     ))
+    if (
+        allowed_increment_margin_ratio <= 0
+        and not high_quality_memory
+        and bool(control.get("allow_probe_above_observation_target", True))
+        and dynamic_margin_budget
+        and current_margin_ratio < max_after_scaling
+    ):
+        allowed_increment_margin_ratio = max(0.0, max_after_scaling - current_margin_ratio)
     if allowed_increment_margin_ratio <= 0:
         diagnostics["capital_utilization_skip"] = (
             "target_margin_already_reached"
@@ -1101,7 +1922,7 @@ def _apply_capital_utilization_control(
         )
         return position_ratio, reasons, notes, diagnostics
 
-    proposed_abs_ratio = min(max_position_ratio, allowed_increment_margin_ratio / margin_rate)
+    proposed_abs_ratio = min(effective_max_position_ratio, allowed_increment_margin_ratio / margin_rate)
     if proposed_abs_ratio > abs(position_ratio):
         before = position_ratio
         position_ratio = (1.0 if position_ratio > 0 else -1.0) * proposed_abs_ratio
@@ -1124,6 +1945,8 @@ def _apply_capital_utilization_control(
 
 def _safe_float(value, default: float = 0.0) -> float:
     try:
+        if value is None:
+            return default
         return float(value)
     except (TypeError, ValueError):
         return default
@@ -1652,7 +2475,7 @@ def portfolio_agent_futures(state: FundState):
     )
     state["full_config"] = full_config
 
-    max_total_margin_ratio = full_config.get("max_total_margin_ratio", cfg.get("max_total_margin_ratio", 0.40))
+    max_total_margin_ratio = get_hard_allocation_margin_ratio(full_config)
     risk_buffer_ratio = full_config.get("risk_buffer_ratio", cfg.get("risk_buffer_ratio", 0.10))
     risk_level, cashflow_ratio = check_risk_level(portfolio, full_config)
 
@@ -1676,26 +2499,26 @@ def portfolio_agent_futures(state: FundState):
         cumulative_pnl = float(ticker_perf.get("cumulative_pnl", 0.0) or 0.0)
         win_rate = float(ticker_perf.get("win_rate", 0.0) or 0.0)
         original_cap = max_single_margin_ratio
-        hard_trigger = (
-            avg_pnl <= float(performance_control.get("hard_avg_pnl_below", -800))
+        severe_trigger = (
+            avg_pnl <= float(performance_control.get("severe_avg_pnl_below", performance_control.get("hard_avg_pnl_below", -800)))
             or (
                 cumulative_pnl < 0
-                and win_rate <= float(performance_control.get("hard_win_rate_below", 0.35))
+                and win_rate <= float(performance_control.get("severe_win_rate_below", performance_control.get("hard_win_rate_below", 0.35)))
             )
         )
-        if hard_trigger:
-            hard_cap = float(performance_control.get("hard_cap_ratio", 0.03))
-            max_single_margin_ratio = min(max_single_margin_ratio, hard_cap)
+        if severe_trigger:
+            severe_anchor = float(performance_control.get("severe_anchor_ratio", performance_control.get("hard_cap_ratio", 0.03)))
+            max_single_margin_ratio = min(max_single_margin_ratio, severe_anchor)
             logger.info(
-                f"Ticker performance hard cap for {ticker}: avg_daily_pnl={avg_pnl:.0f}, "
+                f"Ticker performance severe anchor for {ticker}: avg_daily_pnl={avg_pnl:.0f}, "
                 f"win_rate={win_rate:.0%}, cumulative_pnl={cumulative_pnl:.0f}, "
-                f"single-position cap {original_cap:.2%} -> {max_single_margin_ratio:.2%}"
+                f"base sizing anchor {original_cap:.2%} -> {max_single_margin_ratio:.2%}"
             )
         elif avg_pnl < float(performance_control.get("soft_avg_pnl_below", -300)):
             max_single_margin_ratio *= float(performance_control.get("soft_cap_multiplier", 0.50))
             logger.info(
                 f"Ticker performance scaling for {ticker}: avg_daily_pnl={avg_pnl:.0f}, "
-                f"single-position cap {original_cap:.2%} -> {max_single_margin_ratio:.2%}"
+                f"base sizing anchor {original_cap:.2%} -> {max_single_margin_ratio:.2%}"
             )
         elif avg_pnl > float(performance_control.get("recovery_avg_pnl_above", 200)):
             max_single_margin_ratio = min(
@@ -1708,7 +2531,7 @@ def portfolio_agent_futures(state: FundState):
         logger.warning(
             f"WARNING futures risk state: account_equity={_portfolio_account_equity(portfolio):,.0f} "
             f"({cashflow_ratio*100:.1f}%), position_scaling={position_scaling*100:.0f}%, "
-            f"max_single_margin_ratio={max_single_margin_ratio*100:.0f}%"
+            f"base_sizing_anchor={max_single_margin_ratio*100:.0f}%"
         )
     elif risk_level == RiskLevel.DANGER:
         logger.error(
@@ -2416,6 +3239,11 @@ def portfolio_agent_futures(state: FundState):
         control_notes.extend(notes)
         control_diagnostics.update(diagnostics)
 
+    prospective_margin_rate = float(
+        contract_info['margin_rate_long']
+        if position_risk.optimal_position_ratio >= 0
+        else contract_info['margin_rate_short']
+    )
     position_risk.optimal_position_ratio, reasons, notes, diagnostics = _apply_drawdown_and_ticker_loss_control(
         db=db,
         config_id=config_id,
@@ -2423,17 +3251,18 @@ def portfolio_agent_futures(state: FundState):
         trading_date=trading_date,
         position_ratio=position_risk.optimal_position_ratio,
         current_ratio=current_ticker_exposure,
+        current_margin_ratio=current_margin_ratio,
+        margin_rate=prospective_margin_rate,
+        market_confirmation=market_confirmation,
+        signal_combo=signal_combo,
+        strategy_memory=strategy_memory,
+        analyst_signals=analyst_signals,
         full_config=full_config,
     )
     control_reasons.extend(reasons)
     control_notes.extend(notes)
     control_diagnostics.update(diagnostics)
 
-    prospective_margin_rate = float(
-        contract_info['margin_rate_long']
-        if position_risk.optimal_position_ratio >= 0
-        else contract_info['margin_rate_short']
-    )
     position_risk.optimal_position_ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
         db=db,
         config_id=config_id,
@@ -2449,6 +3278,7 @@ def portfolio_agent_futures(state: FundState):
         signal_combo=signal_combo,
         strategy_memory=strategy_memory,
         adaptive_policy_state=adaptive_policy_state,
+        analyst_signals=analyst_signals,
     )
     control_reasons.extend(reasons)
     control_notes.extend(notes)
@@ -2487,12 +3317,15 @@ def portfolio_agent_futures(state: FundState):
     target_exposure = position_risk.optimal_position_ratio
     new_net_exposure = current_net_exposure - current_ticker_exposure + target_exposure
 
-    net_exposure_config = full_config.get('net_exposure_control')
-    if net_exposure_config is None:
-        risk_control = full_config.get('risk_control', {})
-        net_exposure_config = risk_control.get('net_exposure_control', {})
-    max_net_exposure = net_exposure_config.get('max_net_exposure', 0.50)
-    symmetric_scaling = net_exposure_config.get('symmetric_scaling', True)
+    max_net_exposure, symmetric_scaling, net_exposure_cap_mode = _resolve_net_exposure_control(
+        full_config,
+        control_diagnostics,
+    )
+    control_diagnostics["net_exposure_control"] = {
+        "max_net_exposure": float(max_net_exposure),
+        "cap_mode": net_exposure_cap_mode,
+        "projected_net_exposure_before_cap": float(new_net_exposure),
+    }
 
     # Apply a symmetric net-exposure cap before translating the target into lots.
     if new_net_exposure > max_net_exposure:
@@ -2692,6 +3525,7 @@ def portfolio_agent_futures(state: FundState):
         risk_level=risk_level,
         long_scores=long_scores,
         short_scores=short_scores,
+        margin_rate=margin_rate,
     )
     plan_snapshot["current_lots_before_open"] = int(current_lots)
     plan_snapshot["target_value"] = float(target_value)
@@ -2736,6 +3570,20 @@ def portfolio_agent_futures(state: FundState):
         "reason": lots_to_trade_reason or (control_reasons[-1] if control_reasons else "target_plan"),
         "control_reasons": sorted(set(control_reasons)),
     }
+    holding_diagnostics = {}
+    if isinstance(control_diagnostics, dict):
+        holding_diagnostics = (
+            control_diagnostics.get("holding_rebalance_control")
+            if isinstance(control_diagnostics.get("holding_rebalance_control"), dict)
+            else {}
+        )
+    if holding_diagnostics:
+        plan_snapshot["rebalance_summary"]["lifecycle_decision"] = holding_diagnostics.get("decision")
+        plan_snapshot["rebalance_summary"]["lifecycle_classification"] = holding_diagnostics.get("lifecycle_classification")
+        plan_snapshot["rebalance_summary"]["position_pnl_ratio"] = holding_diagnostics.get("position_pnl_ratio")
+        plan_snapshot["rebalance_summary"]["market_confirmation_score"] = holding_diagnostics.get("confirmation_score")
+        plan_snapshot["rebalance_summary"]["current_side_strength"] = holding_diagnostics.get("current_side_strength")
+        plan_snapshot["rebalance_summary"]["target_side_strength"] = holding_diagnostics.get("reversal_or_exit_strength")
     plan_snapshot["portfolio_manager_llm"] = {
         "mode": "cloud_only",
         "provider": portfolio_llm_config.get("provider"),
@@ -2960,7 +3808,7 @@ Decision framework:
 2. Do not let a low-tradeability analyst dominate the direction, even when its raw confidence is high.
 3. Use the sector-specific weighting as a prior, then respect the quality-adjusted weights above.
 4. Convert the blended signal into LONG, SHORT, or NEUTRAL.
-5. Respect the risk cap and recommend an optimal position ratio no larger than {max_position_ratio:.2f}.
+5. Use the base sizing anchor and recommend an initial position ratio no larger than {max_position_ratio:.2f}; dynamic capital-utilization control may resize validated opportunities later.
 6. Treat fundamental signals as medium-term anchors, technical signals as timing filters, and news as event shocks only when quality is high.
 7. Existing positions should not be flipped or fully closed unless the contrary evidence is materially stronger than the evidence required for a new entry.
 
@@ -2986,7 +3834,7 @@ def calculate_position_ratio_with_balance(
         ticker: Underlying code.
         long_scores: Aggregated bullish score payload.
         short_scores: Aggregated bearish score payload.
-        max_position_ratio: Upper bound for absolute position size.
+        max_position_ratio: Base sizing anchor for the initial absolute position size.
         risk_level: Current portfolio risk classification.
         full_config: Runtime configuration.
 

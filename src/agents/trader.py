@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from agents.portfolio_manager import (
     RiskLevel,
     check_risk_level,
+    get_hard_allocation_margin_ratio,
     get_max_single_position_ratio,
 )
 from apis.contract_info_cache import FuturesContractInfoCache
@@ -114,6 +115,65 @@ def _current_net_exposure(portfolio: Portfolio, total_portfolio_value: float) ->
         sign = 1.0 if position.shares > 0 else -1.0
         net_exposure += sign * (float(getattr(position, "value", 0.0) or 0.0) / total_portfolio_value)
     return net_exposure
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _phase1_capital_diagnostics(pre_open_plan: Dict[str, Any]) -> Dict[str, Any]:
+    diagnostics = (
+        ((pre_open_plan or {}).get("strategy_controls") or {})
+        .get("diagnostics", {})
+        .get("capital_utilization_target", {})
+    )
+    if not isinstance(diagnostics, dict):
+        return {}
+    return diagnostics
+
+
+def _phase1_dynamic_margin_cap(
+    pre_open_plan: Dict[str, Any],
+    base_single_margin_ratio: float,
+    margin_rate: float,
+) -> tuple[float, str]:
+    diagnostics = _phase1_capital_diagnostics(pre_open_plan)
+    if not diagnostics:
+        return base_single_margin_ratio, "base"
+
+    target_cap = _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_budget"), 0.0)
+    if target_cap <= 0:
+        target_cap = _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_cap"), 0.0)
+    target_estimate = _safe_float((pre_open_plan or {}).get("target_margin_ratio_estimate"), 0.0)
+    if target_cap <= 0 and bool(diagnostics.get("high_quality_memory")):
+        target_cap = target_estimate
+    if target_cap <= 0:
+        return base_single_margin_ratio, "base"
+    if margin_rate > 0:
+        target_cap = target_cap / margin_rate
+    return target_cap, str(diagnostics.get("dynamic_allocation_tier") or "dynamic")
+
+
+def _phase1_dynamic_net_exposure_cap(pre_open_plan: Dict[str, Any], base_max_net_exposure: float) -> tuple[float, str]:
+    control = (
+        ((pre_open_plan or {}).get("strategy_controls") or {})
+        .get("diagnostics", {})
+        .get("net_exposure_control", {})
+    )
+    capital = _phase1_capital_diagnostics(pre_open_plan)
+    if (
+        isinstance(control, dict)
+        and str(control.get("cap_mode") or "") == "strong_opportunity"
+        and bool(capital.get("high_quality_memory"))
+    ):
+        max_net = _safe_float(control.get("max_net_exposure"), base_max_net_exposure)
+        return max(base_max_net_exposure, max_net), "strong_opportunity"
+    return base_max_net_exposure, "base"
 
 
 def _signal_invalidation_breached(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> bool:
@@ -341,6 +401,8 @@ def _resolve_phase2_execution_basis(
         trading_date=cfg["trading_date"],
         action=decision.action,
         contract_code=decision.contract_code or recommendation.get("contract_code"),
+        market_confirmation=_market_confirmation_from_recommendation(recommendation),
+        strategy_memory=_strategy_memory_from_recommendation(recommendation),
         cutoff_datetime=cutoff_datetime,
         finalize_untriggered=finalize_untriggered,
         force_immediate=force_immediate,
@@ -352,6 +414,49 @@ def _resolve_phase2_execution_basis(
         )
         return morning_price_context, None
     return basis, selection
+
+
+def _market_confirmation_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = recommendation.get("signal_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        return {}
+    confirmation = snapshot.get("market_confirmation")
+    if isinstance(confirmation, dict):
+        return confirmation
+    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+    confirmation = plan.get("market_confirmation") if isinstance(plan, dict) else None
+    return confirmation if isinstance(confirmation, dict) else {}
+
+
+def _strategy_memory_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = recommendation.get("signal_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        return {}
+    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+    if not isinstance(plan, dict):
+        return {}
+    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
+    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
+    trade_auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
+    auditor_diag = (
+        trade_auditor.get("diagnostics")
+        if isinstance(trade_auditor, dict) and isinstance(trade_auditor.get("diagnostics"), dict)
+        else {}
+    )
+    memory = auditor_diag.get("strategy_memory") if isinstance(auditor_diag.get("strategy_memory"), dict) else {}
+    if memory:
+        return memory
+    learning = (
+        diagnostics.get("capital_utilization_learning")
+        if isinstance(diagnostics.get("capital_utilization_learning"), dict)
+        else {}
+    )
+    records = [
+        row
+        for row in (learning.get("protected_memory"), learning.get("recovering_memory"))
+        if isinstance(row, dict) and row
+    ]
+    return {"records": records} if records else {}
 
 
 def _mark_intraday_non_execution(
@@ -599,12 +704,20 @@ def _translate_pre_open_recommendation_to_order(
         account_equity = float(portfolio.cashflow or 0.0)
     current_margin_used = sum(float(getattr(pos, "margin_used", 0.0) or 0.0) for pos in portfolio.positions.values())
     current_margin_ratio = current_margin_used / account_equity if account_equity > 0 else 0.0
-    max_total_margin_ratio = float(config.get("max_total_margin_ratio", 0.40))
+    max_total_margin_ratio = get_hard_allocation_margin_ratio(config)
     max_allowed_margin = account_equity * max_total_margin_ratio
     remaining_margin = max_allowed_margin - current_margin_used
 
     risk_level, cashflow_ratio = check_risk_level(portfolio, config)
     max_single_margin_ratio = get_max_single_position_ratio(risk_level, config)
+    target_margin_rate_for_cap = float(contract_info["margin_rate_long"])
+    if pre_open_plan and float(pre_open_plan.get("target_position_ratio") or 0.0) < 0:
+        target_margin_rate_for_cap = float(contract_info["margin_rate_short"])
+    max_single_margin_ratio, single_cap_mode = _phase1_dynamic_margin_cap(
+        pre_open_plan or {},
+        max_single_margin_ratio,
+        target_margin_rate_for_cap,
+    )
     max_single_margin = account_equity * max_single_margin_ratio
     force_reduce_only = current_margin_ratio >= max_total_margin_ratio
 
@@ -623,6 +736,10 @@ def _translate_pre_open_recommendation_to_order(
             net_exposure_config, _ = resolve_net_exposure_config(config)
             max_net_exposure = float(net_exposure_config.get("max_net_exposure", 0.50))
             symmetric_scaling = bool(net_exposure_config.get("symmetric_scaling", True))
+            max_net_exposure, net_cap_mode = _phase1_dynamic_net_exposure_cap(
+                pre_open_plan or {},
+                max_net_exposure,
+            )
 
             current_net_exposure = _current_net_exposure(portfolio, account_equity)
             current_ticker_ratio = _signed_position_ratio(current_position, account_equity)
@@ -642,6 +759,11 @@ def _translate_pre_open_recommendation_to_order(
                     target_position_ratio = min(0.0, allowed_ratio)
                 else:
                     target_position_ratio = max(target_position_ratio, min(0.0, allowed_ratio))
+            if net_cap_mode != "base":
+                ensure_execution_translation(snapshot)["dynamic_net_exposure_control"] = {
+                    "mode": net_cap_mode,
+                    "max_net_exposure": max_net_exposure,
+                }
 
             target_lots = lots_from_target_ratio(
                 account_equity=account_equity,
@@ -694,13 +816,14 @@ def _translate_pre_open_recommendation_to_order(
     )
     phase2_execution["execution_simulation"] = execution_price_basis(morning_price_context)
 
+    phase1_plan_available = isinstance(pre_open_plan, dict) and bool(pre_open_plan)
     max_target_notional = account_equity * max_single_margin_ratio
-    if current_price > 0 and multiplier > 0 and max_target_notional > 0:
+    if not phase1_plan_available and current_price > 0 and multiplier > 0 and max_target_notional > 0:
         max_abs_target_lots = int(max_target_notional / (current_price * multiplier))
         capped_target_lots = _cap_target_lots_by_abs_limit(target_lots, max_abs_target_lots)
         if capped_target_lots != target_lots:
             target_lots = capped_target_lots
-            add_rewrite_reason(snapshot, "single_position_cap")
+            add_rewrite_reason(snapshot, "base_sizing_anchor_cap")
 
     if risk_level == RiskLevel.DANGER and current_lots == 0 and target_lots != 0:
         target_lots = 0
@@ -850,17 +973,34 @@ def _translate_pre_open_recommendation_to_order(
             add_rewrite_reason(snapshot, "margin_insufficient")
 
     single_position_margin = abs(decision.lots) * decision.price * multiplier * decision.margin_rate
-    if single_position_margin > max_single_margin and decision.action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}:
+    if (
+        not phase1_plan_available
+        and single_position_margin > max_single_margin
+        and decision.action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}
+    ):
         max_lots_for_single = int(max_single_margin / (decision.price * multiplier * decision.margin_rate)) if max_single_margin > 0 else 0
         if max_lots_for_single > 0:
             decision.lots = min(decision.lots, max_lots_for_single)
-            decision.justification += f" [Single-position cap adjustment: reduced lots to {decision.lots}.]"
-            add_rewrite_reason(snapshot, "single_position_cap")
+            decision.justification += f" [Base sizing anchor adjustment: reduced lots to {decision.lots}.]"
+            add_rewrite_reason(snapshot, "base_sizing_anchor_cap")
         else:
             decision.action = FuturesAction.HOLD
             decision.lots = 0
-            decision.justification += " [Single-position cap: converted to HOLD.]"
-            add_rewrite_reason(snapshot, "single_position_cap")
+            decision.justification += " [Base sizing anchor: converted to HOLD.]"
+            add_rewrite_reason(snapshot, "base_sizing_anchor_cap")
+    if single_cap_mode != "base":
+        translation = ensure_execution_translation(snapshot)
+        diagnostics = _phase1_capital_diagnostics(pre_open_plan or {})
+        payload = {
+            "mode": single_cap_mode,
+            "max_single_margin_ratio": max_single_margin_ratio,
+            "dynamic_opportunity_margin_ratio_budget": _safe_float(
+                diagnostics.get("dynamic_opportunity_margin_ratio_budget"),
+                _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_cap"), 0.0),
+            ),
+        }
+        translation["dynamic_opportunity_budget_control"] = payload
+        translation["dynamic_concentration_control"] = payload
 
     if force_reduce_only and decision.action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}:
         if current_lots > 0 and decision.action == FuturesAction.OPEN_SHORT:

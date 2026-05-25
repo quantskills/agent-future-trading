@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 import yaml
 from dotenv import load_dotenv
 
+from database.artifact_store import load_externalized_json
 from database.sqlite_setup import DB_PATH
 from util.db_helper import db_initialize, get_db
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
@@ -60,12 +61,7 @@ def _fetch_rows(db_path: str, query: str, params: tuple = ()) -> List[Dict[str, 
 
 
 def _deserialize_json(value: Any) -> Any:
-    if value is None or isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(value)
-    except Exception:
-        return value
+    return load_externalized_json(value)
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -996,10 +992,19 @@ def build_attribution_report(
         if _date_in_window(row.get("trading_date"), start_date, end_date)
     ]
 
+    recommendation_columns = {
+        row["name"]
+        for row in _fetch_rows(db_path, "PRAGMA table_info(futures_recommendation)")
+    }
+    snapshot_artifact_cols = (
+        ", signal_snapshot_artifact_path, signal_snapshot_sha256"
+        if {"signal_snapshot_artifact_path", "signal_snapshot_sha256"}.issubset(recommendation_columns)
+        else ""
+    )
     recommendations = _fetch_rows(
         db_path,
-        """
-        SELECT id, trading_date, source_type, status, action, lots, signal_snapshot
+        f"""
+        SELECT id, trading_date, source_type, status, action, lots, signal_snapshot{snapshot_artifact_cols}
         FROM futures_recommendation
         WHERE config_id = ?
         """,

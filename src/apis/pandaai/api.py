@@ -5,9 +5,11 @@ from __future__ import annotations
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, List, Optional
 
 try:
@@ -26,6 +28,18 @@ class PandaAIAPI:
 
     _request_lock = threading.Lock()
     _last_request_at = 0.0
+    _rate_limit_cooldown_until = 0.0
+    _shared_history_cache: dict[tuple, list[dict[str, Any]]] = {}
+    _shared_quote_cache: dict[tuple, list[dict[str, Any]]] = {}
+    _shared_minute_cache: dict[tuple, list[dict[str, Any]]] = {}
+    _shared_extra_cache: dict[tuple, list[dict[str, Any]]] = {}
+    _shared_extra_diagnostics_cache: dict[tuple, dict[str, Any]] = {}
+    _shared_exchange_suffix_cache: dict[tuple, str] = {}
+    _shared_sdk_method_aliases: dict[str, str] = {}
+    _shared_token_initialized = False
+    _shared_token_lock = threading.Lock()
+    _market_cache_db_initialized = False
+    _market_cache_db_lock = threading.Lock()
 
     RATE_LIMIT_ERROR_CODE = "500010"
     RATE_LIMIT_ERROR_TEXT = "\u8bf7\u6c42\u6b21\u6570\u8d85\u9650"
@@ -74,16 +88,21 @@ class PandaAIAPI:
 
         self._panda_data = None
         self._token_initialized = False
-        self._history_cache: dict[tuple, list[dict[str, Any]]] = {}
-        self._quote_cache: dict[tuple, list[dict[str, Any]]] = {}
-        self._minute_cache: dict[tuple, list[dict[str, Any]]] = {}
-        self._extra_cache: dict[tuple, list[dict[str, Any]]] = {}
-        self._extra_diagnostics_cache: dict[tuple, dict[str, Any]] = {}
-        self._exchange_suffix_cache: dict[str, str] = {}
-        self._min_request_interval_seconds = self._env_float("PANDAAI_MIN_REQUEST_INTERVAL_SECONDS", 1.1)
+        self._history_cache = self.__class__._shared_history_cache
+        self._quote_cache = self.__class__._shared_quote_cache
+        self._minute_cache = self.__class__._shared_minute_cache
+        self._extra_cache = self.__class__._shared_extra_cache
+        self._extra_diagnostics_cache = self.__class__._shared_extra_diagnostics_cache
+        self._exchange_suffix_cache = self.__class__._shared_exchange_suffix_cache
+        self._min_request_interval_seconds = self._env_float("PANDAAI_MIN_REQUEST_INTERVAL_SECONDS", 1.35)
         self._retry_attempts = self._env_int("PANDAAI_RETRY_ATTEMPTS", 5)
         self._retry_initial_wait_seconds = self._env_float("PANDAAI_RETRY_INITIAL_WAIT_SECONDS", 30.0)
         self._retry_max_wait_seconds = self._env_float("PANDAAI_RETRY_MAX_WAIT_SECONDS", 90.0)
+        self._network_retry_initial_wait_seconds = self._env_float("PANDAAI_NETWORK_RETRY_INITIAL_WAIT_SECONDS", 3.0)
+        self._network_retry_max_wait_seconds = self._env_float("PANDAAI_NETWORK_RETRY_MAX_WAIT_SECONDS", 12.0)
+        self._sdk_method_aliases = self.__class__._shared_sdk_method_aliases
+        self._persistent_market_cache_enabled = self._env_bool("PANDAAI_PERSISTENT_MARKET_CACHE", True)
+        self._market_cache_db_path = self._resolve_market_cache_db_path()
 
     def _env_float(self, name: str, default: float) -> float:
         try:
@@ -97,6 +116,12 @@ class PandaAIAPI:
         except Exception:
             return default
 
+    def _env_bool(self, name: str, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
     def _dependency_error_message(self, feature_name: str) -> str:
         detail = str(_PANDAS_IMPORT_ERROR) if _PANDAS_IMPORT_ERROR else "pandas is unavailable"
         return (
@@ -109,6 +134,12 @@ class PandaAIAPI:
         if pd is None:
             raise RuntimeError(self._dependency_error_message(feature_name))
 
+    def _resolve_market_cache_db_path(self) -> Path:
+        raw = os.environ.get("PANDAAI_MARKET_CACHE_DB")
+        if raw:
+            return Path(raw)
+        return Path(__file__).resolve().parents[2] / "assets" / "pandaai_market_cache.db"
+
     def _ensure_token(self) -> None:
         if self._panda_data is None:
             try:
@@ -117,9 +148,30 @@ class PandaAIAPI:
                 raise ImportError("panda-data SDK not found. Please install it using: pip install panda-data") from exc
             self._panda_data = panda_data
 
-        if not self._token_initialized:
-            self._panda_data.init_token(username=self.username, password=self.password)
+        if self._token_initialized or self.__class__._shared_token_initialized:
             self._token_initialized = True
+            return
+
+        with self.__class__._shared_token_lock:
+            if not self.__class__._shared_token_initialized:
+                self._panda_data.init_token(username=self.username, password=self.password)
+                self.__class__._shared_token_initialized = True
+            self._token_initialized = True
+
+    def _sdk_cache_namespace(self) -> tuple[str, int, str]:
+        module = self._panda_data
+        if module is None:
+            try:
+                import panda_data
+            except ImportError as exc:
+                raise ImportError("panda-data SDK not found. Please install it using: pip install panda-data") from exc
+            self._panda_data = panda_data
+            module = self._panda_data
+        return (
+            str(getattr(module, "__name__", "panda_data")),
+            id(module),
+            str(getattr(module, "__file__", "")),
+        )
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
         message = str(exc)
@@ -131,47 +183,207 @@ class PandaAIAPI:
             or "too many requests" in lowered
         )
 
+    def _is_transient_network_error(self, exc: Exception) -> bool:
+        message = str(exc)
+        lowered = message.lower()
+        return (
+            "winerror 10048" in lowered
+            or "only one usage of each socket address" in lowered
+            or "socket address" in lowered
+            or "temporarily unavailable" in lowered
+            or "connection reset" in lowered
+            or "connection aborted" in lowered
+            or "timed out" in lowered
+            or "urlopen error" in lowered
+        )
+
     def _wait_for_request_slot(self) -> None:
-        interval = self._min_request_interval_seconds
-        if interval <= 0:
-            return
+        interval = max(0.0, self._min_request_interval_seconds)
 
         with self.__class__._request_lock:
-            elapsed = time.monotonic() - self.__class__._last_request_at
-            wait_seconds = interval - elapsed
+            now = time.monotonic()
+            next_allowed_at = self.__class__._rate_limit_cooldown_until
+            if interval > 0:
+                next_allowed_at = max(next_allowed_at, self.__class__._last_request_at + interval)
+            wait_seconds = next_allowed_at - now
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
             self.__class__._last_request_at = time.monotonic()
 
     def _call_pandaai(self, method_name: str, **kwargs):
         self._ensure_token()
-        method = getattr(self._panda_data, method_name, None)
+        sdk_method_name = self._resolve_sdk_method_name(method_name)
+        method = getattr(self._panda_data, sdk_method_name, None)
         if method is None:
             raise AttributeError(f"PandaAI SDK method is unavailable: {method_name}")
 
         attempts = max(1, self._retry_attempts)
         wait_seconds = self._retry_initial_wait_seconds
+        network_wait_seconds = self._network_retry_initial_wait_seconds
         for attempt in range(1, attempts + 1):
             self._wait_for_request_slot()
             try:
                 return method(**kwargs)
             except Exception as exc:
-                if not self._is_rate_limit_error(exc) or attempt >= attempts:
+                is_rate_limited = self._is_rate_limit_error(exc)
+                is_transient_network = self._is_transient_network_error(exc)
+                if (not is_rate_limited and not is_transient_network) or attempt >= attempts:
                     raise
+                if is_transient_network:
+                    logger.warning(
+                        "PandaAI transient network/socket error; retrying | "
+                        f"method={sdk_method_name} | attempt={attempt}/{attempts} | "
+                        f"sleep={network_wait_seconds:.1f}s | error={exc}"
+                    )
+                    with self.__class__._request_lock:
+                        self.__class__._rate_limit_cooldown_until = max(
+                            self.__class__._rate_limit_cooldown_until,
+                            time.monotonic() + network_wait_seconds,
+                        )
+                    time.sleep(network_wait_seconds)
+                    network_wait_seconds = min(
+                        self._network_retry_max_wait_seconds,
+                        max(network_wait_seconds * 2.0, 1.0),
+                    )
+                    continue
                 logger.warning(
                     "PandaAI request rate-limited; retrying | "
-                    f"method={method_name} | attempt={attempt}/{attempts} | "
+                    f"method={sdk_method_name} | attempt={attempt}/{attempts} | "
                     f"sleep={wait_seconds:.1f}s | error={exc}"
+                )
+                with self.__class__._request_lock:
+                    self.__class__._rate_limit_cooldown_until = max(
+                        self.__class__._rate_limit_cooldown_until,
+                        time.monotonic() + wait_seconds,
                 )
                 time.sleep(wait_seconds)
                 wait_seconds = min(self._retry_max_wait_seconds, max(wait_seconds * 2.0, 1.0))
 
+    def _ensure_market_cache_db(self) -> None:
+        if not self._persistent_market_cache_enabled:
+            return
+        if self.__class__._market_cache_db_initialized and self._market_cache_db_path.exists():
+            return
+        with self.__class__._market_cache_db_lock:
+            if self.__class__._market_cache_db_initialized and self._market_cache_db_path.exists():
+                return
+            self._market_cache_db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(self._market_cache_db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pandaai_market_data_cache (
+                        symbol TEXT NOT NULL,
+                        start_date TEXT NOT NULL,
+                        end_date TEXT NOT NULL,
+                        records_json TEXT NOT NULL,
+                        row_count INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (symbol, start_date, end_date)
+                    )
+                    """
+                )
+                conn.commit()
+            self.__class__._market_cache_db_initialized = True
+
+    def _read_persistent_market_cache(self, symbol: str, start_key: str, end_key: str) -> Optional[list[dict[str, Any]]]:
+        if not self._persistent_market_cache_enabled:
+            return None
+        self._ensure_market_cache_db()
+        try:
+            with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
+                row = conn.execute(
+                    """
+                    SELECT records_json
+                    FROM pandaai_market_data_cache
+                    WHERE symbol = ? AND start_date = ? AND end_date = ?
+                    """,
+                    (symbol.upper(), start_key, end_key),
+                ).fetchone()
+            if not row:
+                return None
+            import json
+
+            records = json.loads(row[0])
+            if isinstance(records, list):
+                return [dict(item) for item in records if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning(f"PandaAI persistent market cache read failed: {exc}")
+        return None
+
+    def _write_persistent_market_cache(
+        self,
+        symbol: str,
+        start_key: str,
+        end_key: str,
+        records: list[dict[str, Any]],
+    ) -> None:
+        if not self._persistent_market_cache_enabled:
+            return
+        self._ensure_market_cache_db()
+        try:
+            import json
+
+            with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO pandaai_market_data_cache (
+                        symbol, start_date, end_date, records_json, row_count, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol.upper(),
+                        start_key,
+                        end_key,
+                        json.dumps(records, ensure_ascii=False, default=str),
+                        len(records),
+                        datetime.utcnow().isoformat(),
+                    ),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning(f"PandaAI persistent market cache write failed: {exc}")
+
+    def _resolve_sdk_method_name(self, method_name: str) -> str:
+        """Map documented/legacy PandaAI names to the installed SDK names."""
+        self._ensure_token()
+        if hasattr(self._panda_data, method_name):
+            return method_name
+        if method_name in self._sdk_method_aliases:
+            return self._sdk_method_aliases[method_name]
+
+        aliases = {
+            "get_future_market_post": "get_future_daily_post",
+            "get_future_wr": "get_future_warehouse_receipt",
+            "get_future_variety_posi_rank": "get_future_variety_posi",
+            "get_future_symbol_posi_rank": "get_future_symbol_posi",
+            "get_broker_net_margin": "get_broker_netmarg",
+            "get_broker_net_margin_change": "get_broker_netmarg_change",
+            "get_broker_total_margin": "get_broker_totlmarg",
+            "get_future_net_cap_change": "get_future_netcap_change",
+            "get_future_contract_daily_indicators": "get_future_contract_indicators",
+        }
+        candidate = aliases.get(method_name)
+        if candidate and hasattr(self._panda_data, candidate):
+            self._sdk_method_aliases[method_name] = candidate
+            return candidate
+        return method_name
+
     def _query_market_data(self, symbol: str, start_date: datetime, end_date: datetime) -> list[dict[str, Any]]:
         start_key = start_date.strftime("%Y%m%d")
         end_key = end_date.strftime("%Y%m%d")
-        cache_key = (symbol.upper(), start_key, end_key)
+        cache_key = (self._sdk_cache_namespace(), symbol.upper(), start_key, end_key)
         if cache_key in self._history_cache:
             return list(self._history_cache[cache_key])
+
+        cached_records = self._read_persistent_market_cache(symbol, start_key, end_key)
+        if cached_records is not None:
+            self._history_cache[cache_key] = cached_records
+            logger.info(
+                "PandaAI futures market data loaded from persistent cache | "
+                f"provider=PandaAI | method=get_market_data | data_type=future | "
+                f"symbol={symbol.upper()} | start={start_key} | end={end_key} | rows={len(cached_records)}"
+            )
+            return list(cached_records)
 
         response = self._call_pandaai(
             "get_market_data",
@@ -190,6 +402,7 @@ class PandaAIAPI:
             f"symbol={symbol.upper()} | start={start_key} | end={end_key} | rows={len(records)}"
         )
         self._history_cache[cache_key] = records
+        self._write_persistent_market_cache(symbol, start_key, end_key, records)
         return list(records)
 
     def _query_market_min_data(
@@ -207,7 +420,7 @@ class PandaAIAPI:
 
         start_key = start_date.strftime("%Y%m%d")
         end_key = end_date.strftime("%Y%m%d")
-        cache_key = (symbol.upper(), start_key, end_key, frequency, str(time_zone or ""))
+        cache_key = (self._sdk_cache_namespace(), symbol.upper(), start_key, end_key, frequency, str(time_zone or ""))
         if cache_key in self._minute_cache:
             return list(self._minute_cache[cache_key])
 
@@ -233,7 +446,7 @@ class PandaAIAPI:
 
     def _query_exact_quote(self, symbol: str, trading_date: datetime) -> list[dict[str, Any]]:
         date_key = trading_date.strftime("%Y%m%d")
-        cache_key = (symbol.upper(), date_key)
+        cache_key = (self._sdk_cache_namespace(), symbol.upper(), date_key)
         if cache_key in self._quote_cache:
             return list(self._quote_cache[cache_key])
 
@@ -254,14 +467,15 @@ class PandaAIAPI:
                 for key, value in kwargs.items()
             )
         )
-        cache_key = (method_name, normalized_kwargs)
+        cache_key = (self._sdk_cache_namespace(), method_name, normalized_kwargs)
         if cache_key in self._extra_cache:
             diagnostic = dict(self._extra_diagnostics_cache.get(cache_key, {}))
             diagnostic["records"] = list(self._extra_cache[cache_key])
             return diagnostic
 
         self._ensure_token()
-        method = getattr(self._panda_data, method_name, None)
+        sdk_method_name = self._resolve_sdk_method_name(method_name)
+        method = getattr(self._panda_data, sdk_method_name, None)
         if method is None:
             logger.warning(f"PandaAI extra data method is unavailable: {method_name}")
             self._extra_cache[cache_key] = []
@@ -271,6 +485,7 @@ class PandaAIAPI:
                 "reason": "sdk_method_unavailable",
                 "error": f"PandaAI SDK method is unavailable: {method_name}",
                 "method": method_name,
+                "sdk_method": sdk_method_name,
                 "params": dict(kwargs),
             }
             self._extra_diagnostics_cache[cache_key] = diagnostic
@@ -283,7 +498,8 @@ class PandaAIAPI:
             reason = None if records else "empty_response"
             logger.info(
                 "PandaAI futures extra data loaded | "
-                f"provider=PandaAI | method={method_name} | rows={len(records)} | params={kwargs}"
+                f"provider=PandaAI | method={method_name} | sdk_method={sdk_method_name} | "
+                f"rows={len(records)} | params={kwargs}"
             )
             self._extra_cache[cache_key] = records
             diagnostic = {
@@ -292,6 +508,7 @@ class PandaAIAPI:
                 "reason": reason,
                 "error": None,
                 "method": method_name,
+                "sdk_method": sdk_method_name,
                 "params": dict(kwargs),
                 "row_count": len(records),
             }
@@ -301,7 +518,7 @@ class PandaAIAPI:
             status, reason = self._classify_extra_data_error(exc)
             logger.warning(
                 "PandaAI futures extra data skipped | "
-                f"provider=PandaAI | method={method_name} | status={status} | "
+                f"provider=PandaAI | method={method_name} | sdk_method={sdk_method_name} | status={status} | "
                 f"reason={reason} | params={kwargs} | error={exc}"
             )
             self._extra_cache[cache_key] = []
@@ -311,6 +528,7 @@ class PandaAIAPI:
                 "reason": reason,
                 "error": str(exc),
                 "method": method_name,
+                "sdk_method": sdk_method_name,
                 "params": dict(kwargs),
                 "row_count": 0,
             }
@@ -514,7 +732,8 @@ class PandaAIAPI:
         return symbol.replace("_DOMINANT", "").lower()
 
     def _load_exchange_suffix_cache(self) -> None:
-        if self._exchange_suffix_cache:
+        namespace = self._sdk_cache_namespace()
+        if any(isinstance(key, tuple) and key[0] == namespace for key in self._exchange_suffix_cache):
             return
 
         try:
@@ -529,15 +748,20 @@ class PandaAIAPI:
                 exchange = str(row.get("exchange") or "").upper().strip()
                 suffix = self.EXCHANGE_SUFFIX_BY_EXCHANGE.get(exchange, exchange)
                 if underlying and suffix:
-                    self._exchange_suffix_cache[underlying] = suffix
+                    self._exchange_suffix_cache[(namespace, underlying)] = suffix
         except Exception:
-            self._exchange_suffix_cache = {}
+            for key in list(self._exchange_suffix_cache):
+                if isinstance(key, tuple) and key[0] == namespace:
+                    self._exchange_suffix_cache.pop(key, None)
 
     def _resolve_pandaai_suffix(self, underlying_code: str) -> str:
         underlying = underlying_code.upper()
+        if underlying in self.FALLBACK_SUFFIX_BY_UNDERLYING:
+            return self.FALLBACK_SUFFIX_BY_UNDERLYING[underlying]
         self._load_exchange_suffix_cache()
-        if underlying in self._exchange_suffix_cache:
-            return self._exchange_suffix_cache[underlying]
+        cache_key = (self._sdk_cache_namespace(), underlying)
+        if cache_key in self._exchange_suffix_cache:
+            return self._exchange_suffix_cache[cache_key]
         if underlying in self.FALLBACK_SUFFIX_BY_UNDERLYING:
             return self.FALLBACK_SUFFIX_BY_UNDERLYING[underlying]
         raise RuntimeError(f"Unable to resolve PandaAI exchange suffix for {underlying_code}")

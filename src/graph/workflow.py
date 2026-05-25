@@ -175,8 +175,8 @@ class AgentWorkflow:
             info_cutoff="pre_open",
             recommendation=None,
             config={
-                'max_total_margin_ratio': self.config.get('max_total_margin_ratio', 0.40),
-                'max_single_margin_ratio': self.config.get('max_single_margin_ratio', 0.15),
+                'max_total_margin_ratio': self.config.get('max_total_margin_ratio', 0.20),
+                'max_single_margin_ratio': self.config.get('max_single_margin_ratio', 0.12),
             },
             full_config=self.config,
             router=self.router,

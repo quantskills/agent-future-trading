@@ -48,6 +48,8 @@ def resolve_intraday_execution_basis(
     trading_date,
     action: Any,
     contract_code: Optional[str] = None,
+    market_confirmation: Optional[Dict[str, Any]] = None,
+    strategy_memory: Optional[Dict[str, Any]] = None,
     cutoff_datetime: Optional[datetime] = None,
     finalize_untriggered: bool = True,
     force_immediate: bool = False,
@@ -87,6 +89,8 @@ def resolve_intraday_execution_basis(
             execution_bars=execution_bars,
             action=action_value,
             config=intraday_config,
+            market_confirmation=market_confirmation,
+            strategy_memory=strategy_memory,
             cutoff_datetime=cutoff_datetime,
             finalize_untriggered=finalize_untriggered,
             force_immediate=force_immediate,
@@ -116,6 +120,8 @@ def select_intraday_execution(
     execution_bars: Iterable[Dict[str, Any]],
     action: Any,
     config: Dict[str, Any],
+    market_confirmation: Optional[Dict[str, Any]] = None,
+    strategy_memory: Optional[Dict[str, Any]] = None,
     cutoff_datetime: Optional[datetime] = None,
     finalize_untriggered: bool = True,
     force_immediate: bool = False,
@@ -245,6 +251,19 @@ def select_intraday_execution(
             source=BasePriceSource.INTRADAY_NEXT_1M_OPEN,
         )
 
+    fallback_selection = _confirmed_memory_fallback_selection(
+        action_value=action_value,
+        normalized_execution_bars=normalized_execution_bars,
+        signal_bars_for_trigger=signal_bars_for_trigger,
+        opening_range=opening_range,
+        min_volume=min_volume,
+        config=config,
+        market_confirmation=market_confirmation,
+        strategy_memory=strategy_memory,
+    )
+    if fallback_selection is not None:
+        return fallback_selection
+
     return IntradayExecutionSelection(
         decision="skip" if finalize_untriggered else "wait",
         reason="intraday_trigger_not_met" if finalize_untriggered else "intraday_waiting_for_trigger",
@@ -257,6 +276,138 @@ def select_intraday_execution(
             "finalize_untriggered": finalize_untriggered,
         },
     )
+
+
+def _confirmed_memory_fallback_selection(
+    *,
+    action_value: str,
+    normalized_execution_bars: List[Dict[str, Any]],
+    signal_bars_for_trigger: List[Dict[str, Any]],
+    opening_range: Dict[str, Any],
+    min_volume: float,
+    config: Dict[str, Any],
+    market_confirmation: Optional[Dict[str, Any]],
+    strategy_memory: Optional[Dict[str, Any]],
+) -> Optional[IntradayExecutionSelection]:
+    """Allow proven templates to execute on VWAP support when breakout is narrowly absent."""
+    if not bool(config.get("allow_confirmed_memory_vwap_fallback", False)):
+        return None
+    if action_value not in _BUY_LIKE_ACTIONS | _SELL_LIKE_ACTIONS:
+        return None
+    if not _has_high_quality_memory(strategy_memory):
+        return None
+    confirmation = market_confirmation or {}
+    confirmations = confirmation.get("confirmations") or []
+    min_score = float(config.get("confirmed_memory_min_market_confirmation_score", 0.70) or 0.70)
+    min_confirmations = int(config.get("confirmed_memory_min_confirmations", 3) or 3)
+    confirmation_score = _float(confirmation.get("confirmation_score"), 0.0) or 0.0
+    if confirmation_score < min_score or len(confirmations) < min_confirmations:
+        return None
+    if not signal_bars_for_trigger:
+        return None
+
+    max_opening_range_miss = float(config.get("confirmed_memory_max_opening_range_miss", 0.002) or 0.002)
+    fallback_source = BasePriceSource.INTRADAY_NEXT_1M_OPEN
+    for signal_bar in signal_bars_for_trigger:
+        historical_exec_bars = [bar for bar in normalized_execution_bars if bar["dt"] <= signal_bar["dt"]]
+        if not historical_exec_bars:
+            continue
+        signal_close = _float(signal_bar.get("close"))
+        vwap_value = _vwap(historical_exec_bars)
+        if signal_close is None or vwap_value is None or signal_close <= 0:
+            continue
+
+        long_vwap_support = action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value
+        short_vwap_support = action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value
+        long_range_miss = _relative_miss(signal_close, opening_range.get("high"), direction="long")
+        short_range_miss = _relative_miss(signal_close, opening_range.get("low"), direction="short")
+        long_fallback = long_vwap_support and long_range_miss <= max_opening_range_miss
+        short_fallback = short_vwap_support and short_range_miss <= max_opening_range_miss
+        if not (long_fallback or short_fallback):
+            continue
+
+        execution_bar = _next_execution_bar(
+            normalized_execution_bars,
+            after_dt=signal_bar["dt"],
+            min_volume=min_volume,
+        )
+        if execution_bar is None:
+            continue
+        chase_check = _passes_chase_filter(
+            action_value=action_value,
+            signal_close=signal_close,
+            execution_open=_float(execution_bar.get("open")),
+            config=config,
+        )
+        if not chase_check["passed"]:
+            continue
+
+        return _execution_selection(
+            reason="intraday_confirmed_memory_vwap_fallback",
+            execution_bar=execution_bar,
+            signal_bar=signal_bar,
+            features={
+                "execution_mode": "confirmed_memory_vwap_fallback",
+                "action": action_value,
+                "signal_close": signal_close,
+                "vwap": vwap_value,
+                "opening_range": opening_range,
+                "opening_range_miss": long_range_miss if long_fallback else short_range_miss,
+                "max_opening_range_miss": max_opening_range_miss,
+                "market_confirmation_score": confirmation_score,
+                "market_confirmation_count": len(confirmations),
+                "strategy_memory": _memory_summary(strategy_memory),
+                "eligible_signal_bars": len(signal_bars_for_trigger),
+                "execution_bars": len(normalized_execution_bars),
+                "chase_check": chase_check,
+            },
+            source=fallback_source,
+        )
+    return None
+
+
+def _has_high_quality_memory(strategy_memory: Optional[Dict[str, Any]]) -> bool:
+    for row in _memory_rows(strategy_memory):
+        if str(row.get("memory_state") or "").lower() in {"protected", "deployable"}:
+            return True
+    return False
+
+
+def _memory_summary(strategy_memory: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    for row in _memory_rows(strategy_memory):
+        state = str(row.get("memory_state") or "").lower()
+        if state in {"protected", "deployable"}:
+            return {
+                "memory_state": state,
+                "sample_count": row.get("sample_count"),
+                "win_rate": row.get("win_rate"),
+                "net_pnl": row.get("net_pnl"),
+                "source": row.get("source"),
+            }
+    return {}
+
+
+def _memory_rows(strategy_memory: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(strategy_memory, dict):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for key in ("combo", "side_memory"):
+        row = strategy_memory.get(key)
+        if isinstance(row, dict):
+            rows.append(row)
+    for row in strategy_memory.get("records") or []:
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _relative_miss(signal_close: float, barrier: Any, *, direction: str) -> float:
+    barrier_value = _float(barrier)
+    if barrier_value is None or barrier_value <= 0:
+        return float("inf")
+    if direction == "long":
+        return max(0.0, (barrier_value - signal_close) / barrier_value)
+    return max(0.0, (signal_close - barrier_value) / barrier_value)
 
 
 def intraday_confirmation_enabled(config: Dict[str, Any]) -> bool:

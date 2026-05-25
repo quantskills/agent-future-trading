@@ -46,6 +46,24 @@ def _ensure_columns(cursor: sqlite3.Cursor, table_name: str, column_defs: dict) 
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
+def _json_artifact_columns(prefix: str) -> dict:
+    return {
+        f"{prefix}_artifact_path": "TEXT",
+        f"{prefix}_sha256": "TEXT",
+        f"{prefix}_size": "INTEGER",
+        f"{prefix}_summary_json": "TEXT",
+    }
+
+
+def _text_artifact_columns(prefix: str) -> dict:
+    return {
+        f"{prefix}_artifact_path": "TEXT",
+        f"{prefix}_sha256": "TEXT",
+        f"{prefix}_size": "INTEGER",
+        f"{prefix}_summary_json": "TEXT",
+    }
+
+
 def _create_futures_transactions_table(cursor: sqlite3.Cursor, table_name: str = "futures_transactions") -> None:
     cursor.execute(f'''
     CREATE TABLE IF NOT EXISTS {table_name} (
@@ -81,10 +99,18 @@ def _create_futures_transactions_table(cursor: sqlite3.Cursor, table_name: str =
         margin_delta REAL,
         post_trade_margin_used REAL,
         audit_payload TEXT,
+        audit_payload_artifact_path TEXT,
+        audit_payload_sha256 TEXT,
+        audit_payload_size INTEGER,
+        audit_payload_summary_json TEXT,
         warning_message TEXT,
         booked_in_settlement BOOLEAN DEFAULT 0,
         justification TEXT,
         llm_prompt TEXT,
+        llm_prompt_artifact_path TEXT,
+        llm_prompt_sha256 TEXT,
+        llm_prompt_size INTEGER,
+        llm_prompt_summary_json TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (portfolio_id) REFERENCES portfolio(id),
         FOREIGN KEY (config_id) REFERENCES config(id)
@@ -112,8 +138,13 @@ def _rebuild_futures_transactions_table(cursor: sqlite3.Cursor) -> None:
         margin_rate, margin_used, daily_pnl, commission, source_type, execution_phase,
         execution_price_basis, base_price, base_price_source, base_price_date, open_price,
         prev_close_price, slippage_model, slippage_ticks, slippage_amount, released_margin,
-        margin_delta, post_trade_margin_used, audit_payload, warning_message,
-        booked_in_settlement, justification, llm_prompt, created_at
+        margin_delta, post_trade_margin_used, audit_payload,
+        audit_payload_artifact_path, audit_payload_sha256,
+        audit_payload_size, audit_payload_summary_json,
+        warning_message, booked_in_settlement, justification, llm_prompt,
+        llm_prompt_artifact_path, llm_prompt_sha256,
+        llm_prompt_size, llm_prompt_summary_json,
+        created_at
     )
     SELECT
         ft.id,
@@ -148,10 +179,18 @@ def _rebuild_futures_transactions_table(cursor: sqlite3.Cursor) -> None:
         {legacy_expr("margin_delta")} AS margin_delta,
         {legacy_expr("post_trade_margin_used")} AS post_trade_margin_used,
         {legacy_expr("audit_payload")} AS audit_payload,
+        {legacy_expr("audit_payload_artifact_path")} AS audit_payload_artifact_path,
+        {legacy_expr("audit_payload_sha256")} AS audit_payload_sha256,
+        {legacy_expr("audit_payload_size")} AS audit_payload_size,
+        {legacy_expr("audit_payload_summary_json")} AS audit_payload_summary_json,
         {legacy_expr("warning_message")} AS warning_message,
         {legacy_expr("booked_in_settlement", "0")} AS booked_in_settlement,
         {legacy_expr("justification")} AS justification,
         {legacy_expr("llm_prompt")} AS llm_prompt,
+        {legacy_expr("llm_prompt_artifact_path")} AS llm_prompt_artifact_path,
+        {legacy_expr("llm_prompt_sha256")} AS llm_prompt_sha256,
+        {legacy_expr("llm_prompt_size")} AS llm_prompt_size,
+        {legacy_expr("llm_prompt_summary_json")} AS llm_prompt_summary_json,
         ft.created_at
     FROM futures_transactions_legacy ft
     LEFT JOIN portfolio p ON ft.portfolio_id = p.id
@@ -185,10 +224,10 @@ def _ensure_futures_transactions_schema(cursor: sqlite3.Cursor) -> None:
             "released_margin",
             "margin_delta",
             "post_trade_margin_used",
-            "audit_payload",
-            "warning_message",
-            "booked_in_settlement",
-        }
+                "audit_payload",
+                "warning_message",
+                "booked_in_settlement",
+            }
         settle_notnull = existing.get("settle_price", {}).get("notnull", 0) == 1
         if settle_notnull or not required_columns.issubset(existing):
             _rebuild_futures_transactions_table(cursor)
@@ -217,8 +256,10 @@ def _ensure_futures_transactions_schema(cursor: sqlite3.Cursor) -> None:
                 "margin_delta": "REAL",
                 "post_trade_margin_used": "REAL",
                 "audit_payload": "TEXT",
+                **_json_artifact_columns("audit_payload"),
                 "warning_message": "TEXT",
                 "booked_in_settlement": "BOOLEAN DEFAULT 0",
+                **_text_artifact_columns("llm_prompt"),
             },
         )
 
@@ -285,6 +326,10 @@ def _ensure_futures_recommendation_schema(cursor: sqlite3.Cursor) -> None:
                 "audit_payload": "TEXT",
             },
         )
+    artifact_columns = {}
+    artifact_columns.update(_json_artifact_columns("signal_snapshot"))
+    artifact_columns.update(_json_artifact_columns("audit_payload"))
+    _ensure_columns(cursor, "futures_recommendation", artifact_columns)
 
 
 def _ensure_futures_intraday_decision_schema(cursor: sqlite3.Cursor) -> None:
@@ -516,6 +561,9 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             "price_percentile": "REAL",
             "invalidation_level": "REAL",
             "target_return": "REAL",
+            **_json_artifact_columns("analyst_signals"),
+            **_json_artifact_columns("market_confirmation"),
+            **_json_artifact_columns("pre_open_plan"),
         },
     )
     _ensure_columns(
@@ -621,6 +669,15 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
+    )
+    _ensure_columns(
+        cursor,
+        "reviewer_llm_notes",
+        {
+            **_text_artifact_columns("raw_prompt"),
+            **_text_artifact_columns("raw_response"),
+            **_json_artifact_columns("payload"),
+        },
     )
     cursor.execute(
         '''
@@ -786,6 +843,8 @@ def init_database():
                 "business_quality_score": "REAL DEFAULT 0",
                 "horizon_class": "TEXT DEFAULT 'unknown'",
                 "template_name": "TEXT DEFAULT 'unknown'",
+                **_text_artifact_columns("llm_prompt"),
+                **_json_artifact_columns("artifact_json"),
             },
         )
 
@@ -867,6 +926,9 @@ def init_database():
             ticker TEXT NOT NULL,
             daily_pnl REAL NOT NULL,
             commission REAL DEFAULT 0,
+            holding_pnl REAL DEFAULT 0,
+            new_position_pnl REAL DEFAULT 0,
+            close_pnl REAL DEFAULT 0,
             position_type TEXT,
             lots REAL NOT NULL,
             entry_price REAL NOT NULL,
@@ -878,6 +940,15 @@ def init_database():
         ''')
 
         # Create indices for better query performance
+        _ensure_columns(
+            cursor,
+            "ticker_daily_pnl",
+            {
+                "holding_pnl": "REAL DEFAULT 0",
+                "new_position_pnl": "REAL DEFAULT 0",
+                "close_pnl": "REAL DEFAULT 0",
+            },
+        )
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_config_exp_name ON config(exp_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_updated ON portfolio(updated_at)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_trading_date ON portfolio(trading_date)')

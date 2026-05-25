@@ -4,25 +4,32 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.auditor import TradeAuditor, TradeAuditorInput
-from agents.portfolio_manager import _apply_capital_utilization_control, _quality_aware_fusion_context
+from agents.portfolio_manager import (
+    _apply_capital_utilization_control,
+    _quality_aware_fusion_context,
+    _resolve_net_exposure_control,
+    get_hard_allocation_margin_ratio,
+)
 from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_strategy_memory_schema
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.business_quality import apply_business_quality_enrichment
 from tools.agent_tools.contracts import attach_snapshot_contract, validate_artifact_header
-from tools.agent_tools.template_prior import load_template_prior_if_enabled
+from tools.agent_tools.template_prior import classify_template_prior_item, load_template_prior_if_enabled
 from tools.agent_tools.dynamic_weights import calibrate_weights_by_signal_history
 from tools.agent_tools.learning_context import apply_config_learning_overlay, build_learning_context
 from tools.agent_tools.neutral_accountability import (
     build_neutral_accountability_summary,
     classify_neutral_signal,
 )
+from tools.agent_tools.quality import build_technical_context, apply_signal_quality_gate
 from tools.agent_tools.reviewer_tools import (
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
@@ -261,6 +268,35 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
         self.assertAlmostEqual(output.position_ratio_multiplier, 0.5)
         self.assertIn("adaptive_policy_cap", output.reasons)
 
+    def test_learning_overlay_cannot_raise_portfolio_hard_margin_cap(self):
+        self.assertAlmostEqual(
+            get_hard_allocation_margin_ratio(
+                {
+                    "max_total_margin_ratio": 0.20,
+                    "capital_utilization_control": {"max_margin_ratio_after_scaling": 0.35},
+                }
+            ),
+            0.20,
+        )
+        self.assertAlmostEqual(
+            get_hard_allocation_margin_ratio(
+                {
+                    "max_total_margin_ratio": 0.20,
+                    "capital_utilization_control": {"max_margin_ratio_after_scaling": 0.12},
+                }
+            ),
+            0.12,
+        )
+        self.assertAlmostEqual(
+            get_hard_allocation_margin_ratio(
+                {
+                    "max_total_margin_ratio": 0.20,
+                    "capital_utilization_control": {"max_margin_ratio_after_scaling": "bad"},
+                }
+            ),
+            0.20,
+        )
+
     def test_capital_utilization_scales_protected_memory_template(self):
         ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
             db=None,
@@ -284,6 +320,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
                     "allow_memory_protected_scaling": True,
                     "memory_protected_min_confirmation_score": 0.45,
                     "disable_scaling_when_weak_combo": True,
+                    "protected_min_sample_count_for_scaling": 4,
                 },
                 "trade_frequency_control": {
                     "weak_signal_combos": [["Bullish", "Bullish", "Neutral"]],
@@ -293,18 +330,549 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             strategy_memory={
                 "combo": {
                     "memory_state": "protected",
+                    "signal_combo": "Bullish|Bullish|Neutral",
                     "sample_count": 4,
                     "win_rate": 0.75,
                     "net_pnl": 3200.0,
                 }
             },
             adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+            ],
         )
 
-        self.assertAlmostEqual(ratio, 0.12)
+        self.assertGreater(ratio * 0.10, 0.08)
+        self.assertLess(ratio * 0.10, 0.18)
         self.assertIn("capital_utilization_guard", reasons)
         self.assertIn("capital_utilization_memory_protected", reasons)
         self.assertIn("capital_utilization_learning", diagnostics)
+
+    def test_repeatedly_validated_alpha_gets_more_budget_without_fixed_single_name_cap(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-10",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.03,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.82},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "memory_protected_min_confirmation_score": 0.45,
+                    "dynamic_concentration_enabled": True,
+                    "other_opportunity_reserve_fraction_of_tradable_capital": 0.10,
+                    "validated_min_fraction_of_remaining_capacity": 0.35,
+                    "validated_max_fraction_of_remaining_capacity": 0.90,
+                    "confirmation_allocation_power": 1.25,
+                    "allow_memory_protected_scaling": True,
+                }
+            },
+            signal_combo=("Bullish", "Bullish", "Neutral"),
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "signal_combo": "Bullish|Bullish|Neutral",
+                    "sample_count": 5,
+                    "win_rate": 0.8,
+                    "net_pnl": 6000,
+                }
+            },
+            adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+            ],
+        )
+
+        # This is not a fixed single-name cap: budget is a function of remaining
+        # capacity and evidence strength, while reserving capacity for others.
+        self.assertGreater(ratio * 0.10, 0.08)
+        self.assertLess(ratio * 0.10, 0.17)
+        self.assertGreater(ratio, 0.12)
+        self.assertIn("capital_utilization_memory_protected", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "strong_opportunity")
+        self.assertTrue(diagnostics["capital_utilization_target"]["high_quality_memory"])
+        self.assertTrue(diagnostics["capital_utilization_target"]["base_position_anchor_lifted"])
+        self.assertEqual(diagnostics["capital_utilization_target"]["dynamic_allocation_tier"], "validated_with_stop")
+        budget_diagnostics = diagnostics["capital_utilization_target"]["dynamic_budget_diagnostics"]
+        self.assertEqual(budget_diagnostics["reserved_for_other_opportunities"], 0.0)
+        self.assertGreater(budget_diagnostics["usable_after_reserve"], 0.0)
+
+    def test_wildcard_protected_memory_cannot_trigger_strong_scaling(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="TA",
+            trading_date="2025-02-13",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.037,
+            margin_rate=0.07,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.64},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                    "protected_min_win_rate_for_scaling": 0.60,
+                    "protected_min_net_pnl_for_scaling": 1000,
+                    "require_specific_signal_combo_for_strong_scaling": True,
+                    "require_stop_protection_for_strong_scaling": True,
+                }
+            },
+            signal_combo=("Bullish", "Neutral", "Bullish"),
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "signal_combo": "*",
+                    "sample_count": 5,
+                    "win_rate": 0.8,
+                    "net_pnl": 2174.0,
+                }
+            },
+            adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=5100.0, atr_stop_distance=None),
+            ],
+        )
+
+        self.assertLess(ratio * 0.07, 0.08)
+        self.assertNotIn("capital_utilization_memory_protected", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
+        rejected = diagnostics.get("capital_utilization_learning", {}).get("protected_evidence_rejected", {})
+        self.assertFalse(rejected.get("specific_signal_combo"))
+
+    def test_missing_stop_protection_cannot_trigger_strong_scaling(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="TA",
+            trading_date="2025-02-13",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.037,
+            margin_rate=0.07,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.70},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                    "protected_min_win_rate_for_scaling": 0.60,
+                    "protected_min_net_pnl_for_scaling": 1000,
+                    "require_specific_signal_combo_for_strong_scaling": True,
+                    "require_stop_protection_for_strong_scaling": True,
+                }
+            },
+            signal_combo=("Bullish", "Neutral", "Bullish"),
+            strategy_memory={
+                "combo": {
+                    "memory_state": "protected",
+                    "signal_combo": "Bullish|Neutral|Bullish",
+                    "sample_count": 8,
+                    "win_rate": 0.75,
+                    "net_pnl": 8000.0,
+                }
+            },
+            adaptive_policy_state=[],
+            analyst_signals=[],
+        )
+
+        self.assertLess(ratio * 0.07, 0.08)
+        self.assertNotIn("capital_utilization_memory_protected", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
+        rejected = diagnostics.get("capital_utilization_learning", {}).get("protected_evidence_rejected", {})
+        self.assertEqual(rejected.get("reason"), "missing_stop_protection_for_strong_scaling")
+
+    def test_protected_memory_does_not_scale_when_current_combo_is_weak(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="M",
+            trading_date="2025-02-20",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.00,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.82},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                    "block_scaling_on_conflicting_weak_memory": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                }
+            },
+            signal_combo=("Bullish", "Bullish", "Neutral"),
+            strategy_memory={
+                "combo": {
+                    "memory_state": "watchlist",
+                    "signal_combo": "Bullish|Bullish|Neutral",
+                    "sample_count": 3,
+                    "win_rate": 0.0,
+                    "net_pnl": -109208,
+                },
+                "side_memory": {
+                    "memory_state": "protected",
+                    "signal_combo": "Neutral|Bullish|Neutral",
+                    "sample_count": 6,
+                    "win_rate": 0.83,
+                    "net_pnl": 12000,
+                },
+            },
+            adaptive_policy_state=[],
+        )
+
+        self.assertAlmostEqual(ratio, 0.03)
+        self.assertEqual(reasons, [])
+        self.assertEqual(diagnostics["capital_utilization_skip"], "conflicting_weak_memory")
+        self.assertIn("conflicting_weak_memory", diagnostics["capital_utilization_learning"])
+
+    def test_protected_memory_requires_sufficient_samples_before_strong_scaling(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-20",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.03,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.82},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                }
+            },
+            signal_combo=("Bullish", "Neutral", "Neutral"),
+            strategy_memory={
+                "combo": {
+                    "memory_state": "protected",
+                    "signal_combo": "Bullish|Neutral|Neutral",
+                    "sample_count": 3,
+                    "win_rate": 1.0,
+                    "net_pnl": 8000,
+                }
+            },
+            adaptive_policy_state=[],
+        )
+
+        self.assertLess(ratio * 0.10, 0.08)
+        self.assertIn("capital_utilization_guard", reasons)
+        self.assertNotIn("capital_utilization_memory_protected", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
+        self.assertIn(
+            "protected_evidence_rejected",
+            diagnostics.get("capital_utilization_learning", {}),
+        )
+
+    def test_adaptive_protect_requires_sufficient_samples_before_strong_scaling(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-20",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.03,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.82},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                    "protected_min_win_rate_for_scaling": 0.60,
+                    "protected_min_net_pnl_for_scaling": 1000,
+                }
+            },
+            signal_combo=("Bullish", "Neutral", "Neutral"),
+            strategy_memory={},
+            adaptive_policy_state=[
+                {
+                    "policy_action": "protect",
+                    "sample_count": 3,
+                    "win_rate": 1.0,
+                    "net_pnl": 8000,
+                    "confidence_score": 0.9,
+                }
+            ],
+        )
+
+        self.assertLess(ratio * 0.10, 0.08)
+        self.assertNotIn("capital_utilization_memory_protected", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
+        self.assertIn(
+            "protected_evidence_rejected",
+            diagnostics.get("capital_utilization_learning", {}),
+        )
+
+    def test_stop_protected_validated_alpha_gets_more_budget_but_not_all_in(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-10",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.00,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.82},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "memory_protected_min_confirmation_score": 0.45,
+                    "dynamic_concentration_enabled": True,
+                    "other_opportunity_reserve_fraction_of_tradable_capital": 0.10,
+                    "validated_min_fraction_of_remaining_capacity": 0.35,
+                    "validated_max_fraction_of_remaining_capacity": 0.90,
+                    "confirmation_allocation_power": 1.25,
+                    "stop_protection_allocation_bonus": 0.15,
+                    "allow_memory_protected_scaling": True,
+                }
+            },
+            signal_combo=("Bullish", "Bullish", "Neutral"),
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "signal_combo": "Bullish|Bullish|Neutral",
+                    "sample_count": 5,
+                    "win_rate": 0.8,
+                    "net_pnl": 6000,
+                }
+            },
+            adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+            ],
+        )
+
+        self.assertGreater(ratio * 0.10, 0.16)
+        self.assertLess(ratio * 0.10, 0.20)
+        self.assertIn("capital_utilization_memory_protected", reasons)
+        self.assertTrue(diagnostics["capital_utilization_target"]["base_position_anchor_lifted"])
+        self.assertEqual(diagnostics["capital_utilization_target"]["dynamic_allocation_tier"], "validated_with_stop")
+        self.assertTrue(diagnostics["capital_utilization_target"]["stop_protected"])
+        self.assertGreater(
+            diagnostics["capital_utilization_target"]["dynamic_budget_diagnostics"]["reserved_for_other_opportunities"],
+            0.0,
+        )
+
+    def test_exceptional_validated_alpha_can_take_most_capacity_but_reserves_some(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-20",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.00,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.92},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "memory_protected_min_confirmation_score": 0.60,
+                    "dynamic_concentration_enabled": True,
+                    "other_opportunity_reserve_fraction_of_tradable_capital": 0.15,
+                    "validated_min_fraction_of_remaining_capacity": 0.25,
+                    "validated_max_fraction_of_remaining_capacity": 0.65,
+                    "confirmation_allocation_power": 1.75,
+                    "stop_protection_allocation_bonus": 0.15,
+                    "allow_memory_protected_scaling": True,
+                    "protected_min_sample_count_for_scaling": 5,
+                    "protected_min_win_rate_for_scaling": 0.60,
+                    "protected_min_net_pnl_for_scaling": 1000,
+                    "exceptional_validated_enabled": True,
+                    "exceptional_validated_requires_stop_protection": True,
+                    "exceptional_validated_min_confirmation_score": 0.85,
+                    "exceptional_validated_min_sample_count": 8,
+                    "exceptional_validated_min_win_rate": 0.70,
+                    "exceptional_validated_min_net_pnl": 5000,
+                    "exceptional_other_opportunity_reserve_fraction_of_tradable_capital": 0.05,
+                    "exceptional_validated_min_fraction_of_remaining_capacity": 0.75,
+                    "exceptional_validated_max_fraction_of_remaining_capacity": 0.95,
+                    "exceptional_confirmation_allocation_power": 1.00,
+                }
+            },
+            signal_combo=("Bullish", "Bullish", "Neutral"),
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "signal_combo": "Bullish|Bullish|Neutral",
+                    "sample_count": 9,
+                    "win_rate": 0.78,
+                    "net_pnl": 12000,
+                }
+            },
+            adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+            ],
+        )
+
+        margin_ratio = ratio * 0.10
+        self.assertGreater(margin_ratio, 0.17)
+        self.assertLessEqual(margin_ratio, 0.20)
+        self.assertIn("capital_utilization_memory_protected", reasons)
+        target = diagnostics["capital_utilization_target"]
+        self.assertEqual(target["dynamic_allocation_tier"], "exceptional_validated_with_stop")
+        self.assertTrue(target["dynamic_budget_diagnostics"]["exceptional_validated"])
+        self.assertGreaterEqual(
+            target["dynamic_budget_diagnostics"]["reserved_for_other_opportunities"],
+            0.01,
+        )
+
+    def test_strong_opportunity_can_use_configured_net_exposure_weak_param(self):
+        max_net, symmetric, mode = _resolve_net_exposure_control(
+            {
+                "net_exposure_control": {
+                    "max_net_exposure": 0.50,
+                    "strong_opportunity_max_net_exposure": 2.00,
+                    "symmetric_scaling": True,
+                }
+            },
+            {
+                "capital_utilization_target": {
+                    "target_mode": "strong_opportunity",
+                    "high_quality_memory": True,
+                }
+            },
+        )
+
+        self.assertEqual(max_net, 2.00)
+        self.assertTrue(symmetric)
+        self.assertEqual(mode, "strong_opportunity")
+
+    def test_unproven_signal_keeps_base_net_exposure_weak_param(self):
+        max_net, symmetric, mode = _resolve_net_exposure_control(
+            {
+                "net_exposure_control": {
+                    "max_net_exposure": 0.50,
+                    "strong_opportunity_max_net_exposure": 2.00,
+                    "symmetric_scaling": True,
+                }
+            },
+            {
+                "capital_utilization_target": {
+                    "target_mode": "confirmed_observation",
+                    "high_quality_memory": False,
+                }
+            },
+        )
+
+        self.assertEqual(max_net, 0.50)
+        self.assertTrue(symmetric)
+        self.assertEqual(mode, "base")
+
+    def test_capital_utilization_uses_observation_band_for_unproven_confirmed_signal(self):
+        ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
+            db=None,
+            config_id="cfg",
+            ticker="BU",
+            trading_date="2025-02-10",
+            position_ratio=0.03,
+            current_ratio=0.0,
+            current_margin_ratio=0.03,
+            margin_rate=0.10,
+            max_position_ratio=0.12,
+            market_confirmation={"confirmation_score": 0.72},
+            full_config={
+                "capital_utilization_control": {
+                    "enabled": True,
+                    "target_margin_ratio_min": 0.06,
+                    "target_margin_ratio_max": 0.08,
+                    "target_margin_ratio_confirmed": 0.07,
+                    "strong_opportunity_target_margin_ratio_min": 0.16,
+                    "strong_opportunity_target_margin_ratio_max": 0.20,
+                    "max_margin_ratio_after_scaling": 0.20,
+                    "min_confirmation_score_for_scaling": 0.60,
+                    "allow_memory_protected_scaling": True,
+                }
+            },
+            signal_combo=("Bullish", "Bullish", "Neutral"),
+            strategy_memory={},
+            adaptive_policy_state=[],
+        )
+
+        self.assertLess(ratio * 0.10, 0.04)
+        self.assertGreater(ratio * 0.10, 0.0)
+        self.assertIn("capital_utilization_guard", reasons)
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
 
     def test_capital_utilization_adds_to_matched_high_quality_same_side_position(self):
         ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
@@ -329,21 +897,27 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
                     "allow_memory_protected_scaling": True,
                     "memory_protected_min_confirmation_score": 0.45,
                     "allow_confirmed_same_side_add_on": True,
+                    "protected_min_sample_count_for_scaling": 4,
                 }
             },
             signal_combo=("Bullish", "Bullish", "Neutral"),
             strategy_memory={
                 "combo": {
                     "memory_state": "deployable",
+                    "signal_combo": "Bullish|Bullish|Neutral",
                     "sample_count": 4,
                     "win_rate": 0.75,
                     "net_pnl": 3200.0,
                 }
             },
             adaptive_policy_state=[],
+            analyst_signals=[
+                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+            ],
         )
 
-        self.assertAlmostEqual(ratio, 0.12)
+        self.assertGreater(ratio * 0.10, 0.08)
+        self.assertLess(ratio * 0.10, 0.17)
         self.assertIn("capital_utilization_same_side_add_on", reasons)
         self.assertIn("capital_utilization_same_side_add_on", diagnostics)
 
@@ -381,6 +955,42 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
 
 
 class StrictCompletionRegressionTest(unittest.TestCase):
+    def test_technical_tradeability_is_evidence_driven_not_product_watchlist_driven(self):
+        signal_results = {
+            "trend": Signal.BULLISH,
+            "macd": Signal.BULLISH,
+            "adx": Signal.BULLISH,
+            "settlement_trend": Signal.BULLISH,
+        }
+        features = {"trend_strength": 24.0, "volatility": 0.12, "volume_ratio": 1.05}
+
+        former_watchlist_context = build_technical_context("MA", signal_results, features)
+        control_context = build_technical_context("SR", signal_results, features)
+
+        self.assertEqual(former_watchlist_context["tradeability"], control_context["tradeability"])
+        self.assertEqual(former_watchlist_context["dominant_direction"], "bullish")
+        self.assertNotIn("long_watchlist_requires_stronger_trend", former_watchlist_context["risk_flags"])
+        self.assertNotIn("watchlist_long_weak_trend", former_watchlist_context["risk_flags"])
+        self.assertNotIn("high_caution_ticker", former_watchlist_context["risk_flags"])
+
+    def test_technical_tradeability_tightens_on_evidence_quality(self):
+        signal_results = {
+            "trend": Signal.BULLISH,
+            "macd": Signal.BULLISH,
+            "adx": Signal.BULLISH,
+            "settlement_trend": Signal.BULLISH,
+        }
+
+        context = build_technical_context(
+            "SR",
+            signal_results,
+            {"trend_strength": 21.0, "volatility": 0.36, "volume_ratio": 1.0},
+        )
+
+        self.assertEqual(context["tradeability"], "medium")
+        self.assertIn("high_volatility", context["risk_flags"])
+        self.assertIn("high_volatility_requires_extra_alignment", context["risk_flags"])
+
     def test_analyst_signal_has_explicit_context_fields(self):
         signal = AnalystSignal(
             signal=Signal.BULLISH,
@@ -421,6 +1031,49 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertIn("technical", context["analyst_applicability_profile"])
         self.assertGreater(context["quality_adjusted_weights"]["technical"], 0.0)
 
+    def test_analyst_applicability_profile_preserves_horizon_sector_regime_dimensions(self):
+        signals = [
+            AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.7, horizon_class="short", market_regime="trending"),
+            AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.7, horizon_class="medium", market_regime="ranging"),
+            AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.4, horizon_class="event_short", market_regime="event_driven", expected_horizon_days=1),
+        ]
+        context = _quality_aware_fusion_context(
+            ticker="RB",
+            analyst_signals=signals,
+            dynamic_weights={"technical": 1 / 3, "fundamental": 1 / 3, "commodity_news": 1 / 3},
+            full_config={
+                "analyst_applicability_profile": {
+                    "enabled": True,
+                    "technical": {
+                        "horizon_multipliers": {"short": 1.2},
+                        "sector_multipliers": {"ferrous": 1.1},
+                        "market_regime_multipliers": {"trending": 1.2},
+                    },
+                    "fundamental": {
+                        "horizon_multipliers": {"medium": 1.2},
+                        "sector_multipliers": {"ferrous": 1.15},
+                        "market_regime_multipliers": {"ranging": 1.1},
+                    },
+                    "commodity_news": {
+                        "event_window_days": 3,
+                        "outside_event_window_multiplier": 0.5,
+                        "horizon_multipliers": {"event_short": 1.25},
+                        "sector_multipliers": {"ferrous": 0.95},
+                        "market_regime_multipliers": {"event_driven": 1.2},
+                    },
+                }
+            },
+        )
+
+        adjustments = context["analyst_applicability_profile"]
+        self.assertEqual(context["sector"], "ferrous")
+        self.assertEqual(adjustments["technical"]["horizon_class"], "short")
+        self.assertEqual(adjustments["technical"]["sector"], "ferrous")
+        self.assertEqual(adjustments["technical"]["market_regime"], "trending")
+        self.assertEqual(adjustments["fundamental"]["horizon_class"], "medium")
+        self.assertEqual(adjustments["commodity_news"]["horizon_class"], "event_short")
+        self.assertGreater(adjustments["fundamental"]["multiplier"], 1.0)
+
     def test_neutral_signal_is_allowed_but_accountable(self):
         signal = AnalystSignal(
             agent_name="technical",
@@ -447,6 +1100,40 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertTrue(enriched.would_change_view_if)
         self.assertLessEqual(enriched.business_quality_score, 0.56)
         self.assertIn("business_quality", enriched.metadata)
+
+    def test_stale_fundamental_direction_is_forced_to_accountable_neutral(self):
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.82,
+            justification="inventory and demand look supportive",
+            horizon_class="medium",
+        )
+
+        gated = apply_signal_quality_gate(
+            signal,
+            quality_context={
+                "tradeability": "medium",
+                "risk_flags": ["stale_fundamental_inputs"],
+                "data_quality": {
+                    "stale_ratio": 0.42,
+                    "factor_freshness_score": 0.30,
+                },
+            },
+            full_config={
+                "analyst_llm": {
+                    "force_neutral_stale_fundamental": True,
+                    "cap_stale_fundamental_confidence": 0.30,
+                }
+            },
+            analyst="fundamental",
+        )
+
+        self.assertEqual(gated.signal, Signal.NEUTRAL)
+        self.assertLessEqual(gated.confidence, 0.30)
+        self.assertIn("fresh supply-demand anchor", gated.missing_evidence)
+        self.assertIn("stale_fundamental_direction_block", gated.metadata["risk_flags"])
+        self.assertTrue(gated.metadata["quality_gate"]["stale_fundamental_direction_block"])
 
     def test_neutral_accountability_distinguishes_risk_avoidance_from_evidence_gap(self):
         snapshot = {
@@ -602,6 +1289,109 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(row["side"], "long")
         self.assertEqual(row["memory_state"], "protected")
         self.assertEqual(row["source"], "template_prior")
+
+    def test_template_prior_refreshes_when_source_marker_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            prior_path = tmp_path / "template_prior.json"
+            db_path = tmp_path / "agentquant.db"
+            db = _PriorBootstrapDB(db_path)
+            cfg = {
+                "market_type": "china_futures",
+                "trading_date": "2025-01-26",
+                "strategy_memory": {"weak_block_total_pnl_below": -2500},
+                "learning": {
+                    "memory_expires_after_days": 30,
+                    "template_prior": {
+                        "enabled": True,
+                        "load_on_backtest_start": True,
+                        "path": str(prior_path),
+                    },
+                },
+            }
+            prior_path.write_text(
+                json.dumps(
+                    {
+                        "exported_at_trading_date": "2025-01-24",
+                        "templates": [
+                            {
+                                "ticker": "P",
+                                "side": "long",
+                                "prior_state": "recovering",
+                                "sample_count": 4,
+                                "win_rate": 0.25,
+                                "net_pnl": -7400,
+                                "avg_pnl": -1850,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            first_count = load_template_prior_if_enabled(cfg, db, "cfg")
+            same_count = load_template_prior_if_enabled(cfg, db, "cfg")
+            prior_path.write_text(
+                json.dumps(
+                    {
+                        "exported_at_trading_date": "2025-01-25",
+                        "templates": [
+                            {
+                                "ticker": "BU",
+                                "side": "long",
+                                "prior_state": "protected",
+                                "sample_count": 4,
+                                "win_rate": 1.0,
+                                "net_pnl": 9650,
+                                "avg_pnl": 2412,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            refreshed_count = load_template_prior_if_enabled(cfg, db, "cfg")
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT ticker, side, memory_state, payload_json FROM strategy_memory WHERE config_id = ?",
+                    ("cfg",),
+                ).fetchall()
+            finally:
+                conn.close()
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(same_count, 0)
+        self.assertEqual(refreshed_count, 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ticker"], "BU")
+        self.assertEqual(rows[0]["memory_state"], "protected")
+        payload = json.loads(rows[0]["payload_json"])
+        self.assertEqual(payload["source_exported_at_trading_date"], "2025-01-25")
+
+    def test_template_prior_reclassifies_with_strategy_memory_thresholds(self):
+        item = {
+            "ticker": "MA",
+            "side": "long",
+            "prior_state": "recovering",
+            "sample_count": 5,
+            "win_rate": 0.40,
+            "net_pnl": -8800,
+        }
+
+        state = classify_template_prior_item(
+            item,
+            {
+                "strategy_memory": {
+                    "min_samples_weak_block": 4,
+                    "weak_block_win_rate_below": 0.30,
+                    "weak_block_total_pnl_below": -2500,
+                }
+            },
+        )
+
+        self.assertEqual(state, "weak_block")
 
 
 class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
@@ -813,6 +1603,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertGreater(summary["learned"]["net_pnl"], 0)
             self.assertLess(summary["unlearned"]["net_pnl"], 0)
             self.assertEqual(summary["learned_reason_counts"]["adaptive_policy"], 1)
+            self.assertEqual(summary["learned_effect_counts"]["alpha_release"], 1)
+            self.assertEqual(summary["learned_effect_summary"]["alpha_release"]["total_trades"], 1)
         finally:
             conn.close()
 

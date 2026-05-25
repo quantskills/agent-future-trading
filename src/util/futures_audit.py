@@ -21,6 +21,7 @@ EXPECTED_NO_TRADE_REASONS = {
     "net_exposure_limit",
     "reduce_only",
     "single_position_cap",
+    "base_sizing_anchor_cap",
     "margin_adjustment_to_zero",
     "cooling_period",
     "trade_frequency_control",

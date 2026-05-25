@@ -141,13 +141,37 @@ class PandaAIAdapterTest(unittest.TestCase):
             fake.calls.append({"func": "get_future_basis", **kwargs})
             return [{"underlying_symbol": "M", "date": "2025-01-03", "basis": 80.0, "basis_ratio": 0.03}]
 
-        def get_future_wr(**kwargs):
-            fake.calls.append({"func": "get_future_wr", **kwargs})
+        def get_future_warehouse_receipt(**kwargs):
+            fake.calls.append({"func": "get_future_warehouse_receipt", **kwargs})
             return [{"underlying_symbol": "M", "date": "2025-01-03", "wr_lot_change": -10, "wr_lot_quantity": 100}]
 
         def get_future_ls_ratio(**kwargs):
             fake.calls.append({"func": "get_future_ls_ratio", **kwargs})
             return [{"symbol": "M2505.DCE", "date": "2025-01-03", "ls_ratio": 1.2}]
+
+        def get_future_variety_posi(**kwargs):
+            fake.calls.append({"func": "get_future_variety_posi", **kwargs})
+            return [{"underlying_symbol": "M", "date": "2025-01-03", "change_oi": 12, "open_interest": 100, "position_type": kwargs.get("position_type")}]
+
+        def get_future_symbol_posi(**kwargs):
+            fake.calls.append({"func": "get_future_symbol_posi", **kwargs})
+            return [{"symbol": "M2505.DCE", "date": "2025-01-03", "change_oi": 8, "open_interest": 80, "position": kwargs.get("position_type")}]
+
+        def get_broker_netmarg_change(**kwargs):
+            fake.calls.append({"func": "get_broker_netmarg_change", **kwargs})
+            return [{"underlying_symbol": "M", "date": "2025-01-03", "margin_change": 1000.0}]
+
+        def get_broker_netmarg(**kwargs):
+            fake.calls.append({"func": "get_broker_netmarg", **kwargs})
+            return [{"underlying_symbol": "M", "date": "2025-01-03", "net_margin": 2000.0}]
+
+        def get_future_netcap_change(**kwargs):
+            fake.calls.append({"func": "get_future_netcap_change", **kwargs})
+            return [{"symbol": "M2505.DCE", "date": "2025-01-03", "net_cap_value": 3000.0}]
+
+        def get_future_contract_indicators(**kwargs):
+            fake.calls.append({"func": "get_future_contract_indicators", **kwargs})
+            return [{"symbol": "M2505.DCE", "date": "2025-01-03", "ratio": 1.1}]
 
         def get_future_contract_rank(**kwargs):
             fake.calls.append({"func": "get_future_contract_rank", **kwargs})
@@ -169,11 +193,21 @@ class PandaAIAdapterTest(unittest.TestCase):
         fake.get_market_data = get_market_data
         fake.get_market_min_data = get_market_min_data
         fake.get_future_basis = get_future_basis
-        fake.get_future_wr = get_future_wr
+        fake.get_future_warehouse_receipt = get_future_warehouse_receipt
         fake.get_future_ls_ratio = get_future_ls_ratio
+        fake.get_future_variety_posi = get_future_variety_posi
+        fake.get_future_symbol_posi = get_future_symbol_posi
+        fake.get_broker_netmarg_change = get_broker_netmarg_change
+        fake.get_broker_netmarg = get_broker_netmarg
+        fake.get_future_netcap_change = get_future_netcap_change
+        fake.get_future_contract_indicators = get_future_contract_indicators
         fake.get_future_contract_rank = get_future_contract_rank
 
-        env = {"PANDAAI_USERNAME": "user", "PANDAAI_PASSWORD": "pass"}
+        env = {
+            "PANDAAI_USERNAME": "user",
+            "PANDAAI_PASSWORD": "pass",
+            "PANDAAI_PERSISTENT_MARKET_CACHE": "0",
+        }
         modules = {"panda_data": fake}
         return fake, patch.dict(os.environ, env), patch.dict(sys.modules, modules)
 
@@ -219,6 +253,7 @@ class PandaAIAdapterTest(unittest.TestCase):
         market_call = next(call for call in fake.calls if call["func"] == "get_market_data")
         self.assertEqual(market_call["symbol"], "M2505.DCE")
         self.assertEqual(quote.ticker, "m2505")
+        self.assertFalse(any(call["func"] == "get_future_detail" for call in fake.calls))
 
     def test_market_data_call_logs_provider_symbol_and_row_count(self):
         fake, env_patch, module_patch = self._build_api()
@@ -268,6 +303,42 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(snapshot["record_counts"]["ls_ratio"], 1)
         basis_call = next(call for call in fake.calls if call["func"] == "get_future_basis")
         self.assertEqual(basis_call["end_date"], "20250103")
+        self.assertTrue(any(call["func"] == "get_future_warehouse_receipt" for call in fake.calls))
+
+    def test_extra_snapshot_maps_legacy_names_to_installed_sdk_names(self):
+        fake, env_patch, module_patch = self._build_api()
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            snapshot = api.get_futures_extra_snapshot(
+                underlying_code="M",
+                reference_date=datetime(2025, 1, 3),
+                lookback_days=5,
+                contract_id="m2505",
+                features={
+                    "warehouse_receipt": True,
+                    "variety_position_rank": True,
+                    "symbol_position_rank": True,
+                    "broker_net_margin_change": True,
+                    "broker_net_margin": True,
+                    "net_cap_change": True,
+                    "contract_daily_indicators": True,
+                },
+            )
+
+        called = {call["func"] for call in fake.calls}
+        self.assertIn("get_future_warehouse_receipt", called)
+        self.assertIn("get_future_variety_posi", called)
+        self.assertIn("get_future_symbol_posi", called)
+        self.assertIn("get_broker_netmarg_change", called)
+        self.assertIn("get_broker_netmarg", called)
+        self.assertIn("get_future_netcap_change", called)
+        self.assertIn("get_future_contract_indicators", called)
+        self.assertEqual(snapshot["feature_status"]["warehouse_receipt"], "ok")
+        self.assertEqual(snapshot["feature_diagnostics"]["warehouse_receipt"]["sdk_method"], "get_future_warehouse_receipt")
+        self.assertEqual(snapshot["record_counts"]["variety_position_rank_long"], 1)
+        self.assertEqual(snapshot["record_counts"]["symbol_position_rank_short"], 1)
+        self.assertEqual(snapshot["record_counts"]["broker_net_margin_change"], 1)
+        self.assertEqual(snapshot["record_counts"]["contract_daily_indicators"], 1)
 
     def test_contract_rank_extra_snapshot_supplies_required_rank_type(self):
         fake, env_patch, module_patch = self._build_api()

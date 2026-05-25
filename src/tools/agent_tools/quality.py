@@ -59,10 +59,6 @@ SECTOR_GUIDANCE = {
     },
 }
 
-HIGH_CAUTION_TICKERS = {"P", "RB", "EB", "HC", "J"}
-LONG_ENTRY_WATCHLIST = {"MA", "I", "PB"}
-
-
 def get_sector(ticker: str) -> str:
     return SECTOR_BY_TICKER.get(str(ticker).upper(), "generic")
 
@@ -84,6 +80,10 @@ def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[st
         "force_neutral_low_tradeability": bool(cfg.get("force_neutral_low_tradeability", True)),
         "cap_medium_tradeability_confidence": float(cfg.get("cap_medium_tradeability_confidence", 0.65)),
         "cap_low_tradeability_confidence": float(cfg.get("cap_low_tradeability_confidence", 0.35)),
+        "force_neutral_stale_fundamental": bool(cfg.get("force_neutral_stale_fundamental", True)),
+        "stale_fundamental_stale_ratio": float(cfg.get("stale_fundamental_stale_ratio", 0.35)),
+        "stale_fundamental_freshness_score": float(cfg.get("stale_fundamental_freshness_score", 0.45)),
+        "cap_stale_fundamental_confidence": float(cfg.get("cap_stale_fundamental_confidence", 0.30)),
     }
 
 
@@ -96,6 +96,15 @@ def signal_value(value: Any) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     return str(value)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def normalize_trading_date(value: Any) -> str:
@@ -154,43 +163,35 @@ def build_technical_context(
         regime = "range"
 
     aligned = max(bullish, bearish)
-    ticker_upper = str(ticker).upper()
-    required_aligned = 5 if ticker_upper in HIGH_CAUTION_TICKERS else 4
-    if ticker_upper in LONG_ENTRY_WATCHLIST and dominant_direction == "bullish":
-        required_aligned = max(required_aligned, 5)
+    required_aligned = 4
+    if volatility >= 0.35 or conflict_count >= 2:
+        required_aligned = 5
     risk_flags: List[str] = []
-    if ticker_upper in HIGH_CAUTION_TICKERS:
-        risk_flags.append("high_caution_ticker")
-    if ticker_upper in LONG_ENTRY_WATCHLIST and dominant_direction == "bullish":
-        risk_flags.append("long_watchlist_requires_stronger_trend")
     if trend_strength < 18:
         risk_flags.append("weak_adx")
     if conflict_count >= 2:
         risk_flags.append("conflicting_indicators")
     if volatility >= 0.35:
         risk_flags.append("high_volatility")
+    if volatility >= 0.35 and aligned < required_aligned:
+        risk_flags.append("high_volatility_requires_extra_alignment")
     if volume_ratio < 0.8:
         risk_flags.append("weak_volume_confirmation")
+    if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
+        risk_flags.append("bullish_setup_lacks_trend_volume_confirmation")
 
-    if aligned >= required_aligned and conflict_count <= 1 and trend_strength >= 20:
+    if aligned >= required_aligned and conflict_count <= 1 and trend_strength >= 20 and volume_ratio >= 0.8:
         tradeability = "high"
     elif aligned >= 3 and conflict_count <= 2 and trend_strength >= 18:
         tradeability = "medium"
     else:
         tradeability = "low"
 
-    if ticker_upper in LONG_ENTRY_WATCHLIST and dominant_direction == "bullish":
-        if trend_strength < 22 or conflict_count > 0 or volume_ratio < 0.9:
-            tradeability = "low"
-            if trend_strength < 22:
-                risk_flags.append("watchlist_long_weak_trend")
-            if conflict_count > 0:
-                risk_flags.append("watchlist_long_indicator_conflict")
-            if volume_ratio < 0.9:
-                risk_flags.append("watchlist_long_weak_volume")
-        elif tradeability == "high" and trend_strength < 25:
-            tradeability = "medium"
-            risk_flags.append("watchlist_long_medium_trend_only")
+    if volatility >= 0.35 and tradeability == "high" and trend_strength < 25:
+        tradeability = "medium"
+        risk_flags.append("high_volatility_caps_tradeability")
+    if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
+        tradeability = "low"
 
     return {
         "sector": get_sector(ticker),
@@ -533,16 +534,48 @@ def apply_signal_quality_gate(
     original_confidence = float(signal.confidence or 0.0)
     reason = None
 
+    data_quality = quality_context.get("data_quality") if isinstance(quality_context.get("data_quality"), dict) else {}
+    stale_ratio = _safe_float(data_quality.get("stale_ratio"), 0.0)
+    freshness_score = _safe_float(data_quality.get("factor_freshness_score"), 0.0)
+    stale_fundamental_direction = (
+        str(analyst) == "fundamental"
+        and original_signal != Signal.NEUTRAL.value
+        and cfg.get("force_neutral_stale_fundamental", True)
+        and (
+            "stale_fundamental_inputs" in risk_flags
+            or stale_ratio >= float(cfg.get("stale_fundamental_stale_ratio", 0.35))
+            or (freshness_score > 0 and freshness_score < float(cfg.get("stale_fundamental_freshness_score", 0.45)))
+        )
+    )
+    if stale_fundamental_direction:
+        signal.signal = Signal.NEUTRAL
+        signal.confidence = min(original_confidence, _safe_float(cfg.get("cap_stale_fundamental_confidence"), 0.30))
+        reason = (
+            "stale fundamental inputs; forced Neutral until fresh supply-demand evidence confirms; "
+            f"stale_ratio={stale_ratio:.2f}; freshness_score={freshness_score:.2f}; flags={risk_flags}"
+        )
+        signal.neutral_reason = signal.neutral_reason or "stale fundamental inputs; directional anchor withheld"
+        missing = list(getattr(signal, "missing_evidence", []) or [])
+        for item in ("fresh supply-demand anchor", "fresh inventory/basis confirmation", "current positioning flow"):
+            if item not in missing:
+                missing.append(item)
+        signal.missing_evidence = missing
+        conflicts = list(getattr(signal, "conflicting_factors", []) or [])
+        if "stale_fundamental_inputs" not in conflicts:
+            conflicts.append("stale_fundamental_inputs")
+        signal.conflicting_factors = conflicts
+        signal.do_not_trade_reason = signal.do_not_trade_reason or "fundamental_direction_blocked_by_stale_data"
+
     if tradeability == "low":
-        signal.confidence = min(original_confidence, cfg["cap_low_tradeability_confidence"])
+        signal.confidence = min(float(signal.confidence or original_confidence), cfg["cap_low_tradeability_confidence"])
         if cfg["force_neutral_low_tradeability"]:
             signal.signal = Signal.NEUTRAL
-            reason = f"low tradeability; forced Neutral; flags={risk_flags}"
+            reason = reason or f"low tradeability; forced Neutral; flags={risk_flags}"
         else:
-            reason = f"low tradeability; confidence capped; flags={risk_flags}"
+            reason = reason or f"low tradeability; confidence capped; flags={risk_flags}"
     elif tradeability == "medium":
-        signal.confidence = min(original_confidence, cfg["cap_medium_tradeability_confidence"])
-        reason = "medium tradeability; confidence capped"
+        signal.confidence = min(float(signal.confidence or original_confidence), cfg["cap_medium_tradeability_confidence"])
+        reason = reason or "medium tradeability; confidence capped"
 
     if reason:
         signal.justification += (
@@ -550,6 +583,8 @@ def apply_signal_quality_gate(
             f"{signal_value(signal.signal)}/{signal.confidence:.2f}; {reason}]"
         )
 
+    if stale_fundamental_direction and "stale_fundamental_direction_block" not in risk_flags:
+        risk_flags.append("stale_fundamental_direction_block")
     signal.metadata = {
         **(getattr(signal, "metadata", {}) or {}),
         "tradeability": tradeability,
@@ -559,6 +594,8 @@ def apply_signal_quality_gate(
             "original_confidence": original_confidence,
             "final_signal": signal_value(signal.signal),
             "final_confidence": float(signal.confidence or 0.0),
+            "stale_fundamental_direction_block": stale_fundamental_direction,
+            "data_quality": data_quality,
         },
     }
     return signal

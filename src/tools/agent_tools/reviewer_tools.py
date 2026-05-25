@@ -13,6 +13,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from database.artifact_store import (
+    externalize_json_for_db,
+    externalize_text_for_db,
+    load_externalized_json,
+)
 from graph.schema import RecommendationSourceType, TradingPhase
 from util.futures_audit import (
     build_actual_transactions,
@@ -21,6 +26,12 @@ from util.futures_audit import (
     normalize_no_trade_reason,
 )
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
+from util.learning_attribution import (
+    learning_effect_counts,
+    learning_effects_from_context,
+    learning_tags_from_context,
+    summarize_pairs_by_learning_effect,
+)
 from util.logger import logger
 from tools.agent_tools.neutral_accountability import build_neutral_accountability_summary
 
@@ -120,9 +131,49 @@ def _apply_net_exposure_review(
     net_exposure: float,
     warnings: List[str],
     errors: List[str],
+    recommendations: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     net_exposure_config = cfg.get("net_exposure_control") or cfg.get("risk_control", {}).get("net_exposure_control", {})
-    max_net_exposure = float(net_exposure_config.get("max_net_exposure", 0.50))
+    base_max_net_exposure = float(net_exposure_config.get("max_net_exposure", 0.50))
+    max_net_exposure = base_max_net_exposure
+    cap_mode = "base"
+    cap_source = ""
+    for recommendation in recommendations or []:
+        snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
+        if not isinstance(snapshot, dict):
+            continue
+        pre_open_plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
+        control_diagnostics = (
+            pre_open_plan.get("control_diagnostics")
+            if isinstance(pre_open_plan.get("control_diagnostics"), dict)
+            else {}
+        )
+        execution_translation = (
+            snapshot.get("execution_translation")
+            if isinstance(snapshot.get("execution_translation"), dict)
+            else {}
+        )
+        candidates = [
+            execution_translation.get("dynamic_net_exposure_control"),
+            snapshot.get("dynamic_net_exposure_control"),
+            control_diagnostics.get("net_exposure_control"),
+            pre_open_plan.get("dynamic_net_exposure_control"),
+        ]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            mode = str(candidate.get("mode") or candidate.get("cap_mode") or "").lower()
+            if mode != "strong_opportunity":
+                continue
+            try:
+                candidate_cap = float(candidate.get("max_net_exposure"))
+            except (TypeError, ValueError):
+                continue
+            if candidate_cap > max_net_exposure:
+                max_net_exposure = candidate_cap
+                cap_mode = "strong_opportunity"
+                cap_source = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "")
+
     drift_tolerance = float(net_exposure_config.get("phase4_drift_tolerance", 0.01))
     hard_limit = max_net_exposure + max(0.001, drift_tolerance)
 
@@ -135,6 +186,12 @@ def _apply_net_exposure_review(
         warnings.append(
             f"net exposure drifted above cap on {trading_date} but stayed within tolerance: "
             f"{net_exposure:.2%} <= {hard_limit:.2%}"
+        )
+    elif cap_mode == "strong_opportunity" and abs(net_exposure) > base_max_net_exposure + 0.001:
+        source_text = f" via {cap_source}" if cap_source else ""
+        warnings.append(
+            f"net exposure above base cap on {trading_date} but within dynamic strong-opportunity cap"
+            f"{source_text}: {net_exposure:.2%} <= {max_net_exposure:.2%}"
         )
 
 
@@ -314,9 +371,6 @@ def _market_confirmation_quality_warnings(summary: Dict[str, Any]) -> List[str]:
     warnings: List[str] = []
     parameter_tickers = summary.get("tickers_with_parameter_errors") or []
     provider_tickers = summary.get("tickers_with_provider_errors") or []
-    missing_by_status = summary.get("missing_by_status") or {}
-    missing_by_status_feature = summary.get("missing_by_status_feature") or {}
-    fallback_by_feature = summary.get("fallback_covered_by_feature") or {}
     unsupported_by_feature = summary.get("unsupported_by_feature") or {}
 
     if parameter_tickers:
@@ -330,16 +384,6 @@ def _market_confirmation_quality_warnings(summary: Dict[str, Any]) -> List[str]:
             f"tickers={_format_compact_list(provider_tickers)}"
         )
 
-    no_data_tickers = sorted(set(missing_by_status.get("no_data") or []))
-    no_data_feature_map = missing_by_status_feature.get("no_data") or {}
-    no_data_features = sorted(no_data_feature_map)
-    if no_data_features:
-        warnings.append(
-            "market confirmation no data: "
-            f"features={_format_compact_list(no_data_features)} | "
-            f"tickers={_format_compact_list(no_data_tickers)}"
-        )
-
     if unsupported_by_feature:
         warnings.append(
             "market confirmation unsupported features: "
@@ -348,21 +392,41 @@ def _market_confirmation_quality_warnings(summary: Dict[str, Any]) -> List[str]:
                 for feature, tickers in sorted(unsupported_by_feature.items())
             )
         )
+    return warnings
+
+
+def _market_confirmation_quality_infos(summary: Dict[str, Any]) -> List[str]:
+    infos: List[str] = []
+    missing_by_status = summary.get("missing_by_status") or {}
+    missing_by_status_feature = summary.get("missing_by_status_feature") or {}
+    fallback_by_feature = summary.get("fallback_covered_by_feature") or {}
+
+    no_data_tickers = sorted(set(missing_by_status.get("no_data") or []))
+    no_data_feature_map = missing_by_status_feature.get("no_data") or {}
+    no_data_features = sorted(no_data_feature_map)
+    if no_data_features:
+        infos.append(
+            "market confirmation optional no data: "
+            f"features={_format_compact_list(no_data_features)} | "
+            f"tickers={_format_compact_list(no_data_tickers)}"
+        )
+
     if fallback_by_feature:
-        warnings.append(
-            "market confirmation fallback covered missing: "
+        infos.append(
+            "market confirmation fallback covered optional missing: "
             + "; ".join(
                 f"{feature}({len(tickers)} tickers)"
                 for feature, tickers in sorted(fallback_by_feature.items())
             )
         )
-    return warnings
+    return infos
 
 
 def _collect_recommendation_quality_warnings(recommendations: List[Dict[str, Any]]) -> Tuple[List[str], Dict[str, Any]]:
     warnings: List[str] = []
     market_summary = _collect_market_confirmation_quality_summary(recommendations)
     warnings.extend(_market_confirmation_quality_warnings(market_summary))
+    market_summary["info_messages"] = _market_confirmation_quality_infos(market_summary)
     for recommendation in recommendations:
         snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
         if not isinstance(snapshot, dict):
@@ -488,7 +552,6 @@ CAPITAL_HARD_RISK_REASON_TOKENS = (
     "ticker_loss",
     "margin_insufficient",
     "net_exposure",
-    "single_position_cap",
     "danger",
     "emergency",
     "weak_block",
@@ -950,7 +1013,12 @@ def _build_daily_transaction_report(
         lines.append("- none")
     for ticker in sorted(grouped_transactions):
         pnl_row = ticker_pnl.get(ticker, {})
-        lines.append(f"- {ticker}: daily_pnl={_signed_money(pnl_row.get('daily_pnl'))}")
+        lines.append(
+            f"- {ticker}: daily_pnl={_signed_money(pnl_row.get('daily_pnl'))}; "
+            f"holding={_signed_money(pnl_row.get('holding_pnl'))}; "
+            f"new={_signed_money(pnl_row.get('new_position_pnl'))}; "
+            f"close={_signed_money(pnl_row.get('close_pnl'))}"
+        )
         for tx in grouped_transactions[ticker]:
             lines.append(
                 "  "
@@ -1146,10 +1214,17 @@ def _write_reviewer_learning_report(
         config_id=config_id,
         trading_date=trading_date,
     )
+    cursor.execute("PRAGMA table_info(futures_recommendation)")
+    recommendation_columns = {str(row["name"]) for row in cursor.fetchall()}
+    snapshot_artifact_cols = (
+        ", signal_snapshot_artifact_path, signal_snapshot_sha256"
+        if {"signal_snapshot_artifact_path", "signal_snapshot_sha256"}.issubset(recommendation_columns)
+        else ""
+    )
     neutral_rows = _report_rows(
         cursor,
-        '''
-        SELECT id, underlying_code, signal_snapshot
+        f'''
+        SELECT id, underlying_code, signal_snapshot{snapshot_artifact_cols}
         FROM futures_recommendation
         WHERE config_id = ?
           AND substr(trading_date, 1, 10) = ?
@@ -1161,7 +1236,7 @@ def _write_reviewer_learning_report(
     neutral_recommendations = []
     for row in neutral_rows:
         item = dict(row)
-        item["signal_snapshot"] = _json_loads(item.get("signal_snapshot")) or {}
+        item["signal_snapshot"] = _recommendation_snapshot(item)
         neutral_recommendations.append(item)
     neutral_accountability = build_neutral_accountability_summary(neutral_recommendations, cfg)
 
@@ -1254,6 +1329,11 @@ def _write_reviewer_learning_report(
     lines.append(_trade_performance_report_line("learned", learned_vs_unlearned.get("learned") or {}))
     lines.append(_trade_performance_report_line("unlearned", learned_vs_unlearned.get("unlearned") or {}))
     lines.append(f"- learned_reason_counts: {learned_vs_unlearned.get('learned_reason_counts', {})}")
+    lines.append(f"- learned_effect_counts: {learned_vs_unlearned.get('learned_effect_counts', {})}")
+    effect_summary = learned_vs_unlearned.get("learned_effect_summary") or {}
+    if isinstance(effect_summary, dict):
+        for effect, payload in effect_summary.items():
+            lines.append(_trade_performance_report_line(f"effect:{effect}", payload))
     lines.append(f"- sample_status: {learned_vs_unlearned.get('status', 'unknown')}")
     lines.extend(["", "## Neutral Accountability"])
     lines.extend(
@@ -1331,12 +1411,8 @@ def _json_dumps(value: Any) -> str:
 
 
 def _json_loads(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (dict, list)):
-        return value
     try:
-        return json.loads(value)
+        return load_externalized_json(value)
     except Exception:
         return None
 
@@ -1425,7 +1501,11 @@ def _analyst_field(snapshot: Dict[str, Any], analyst: str, field_name: str, defa
 
 
 def _recommendation_snapshot(recommendation: Dict[str, Any]) -> Dict[str, Any]:
-    snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
+    snapshot = load_externalized_json(
+        recommendation.get("signal_snapshot"),
+        recommendation.get("signal_snapshot_artifact_path"),
+        recommendation.get("signal_snapshot_sha256"),
+    ) or {}
     return snapshot if isinstance(snapshot, dict) else {}
 
 
@@ -1756,6 +1836,32 @@ def _write_signal_context_history(
         combo = _signal_combo_from_snapshot(snapshot)
         expected_days = _expected_horizon_days(snapshot, side)
         template = _signal_template(side, combo, snapshot)
+        row_id = str(uuid.uuid4())
+        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
+        analyst_ext = externalize_json_for_db(
+            _analyst_payloads(snapshot),
+            category="signal_context",
+            record_id=row_id,
+            field_name="analyst_signals",
+            config_id=config_id,
+            trading_date=trading_date,
+        )
+        market_ext = externalize_json_for_db(
+            _market_confirmation(snapshot),
+            category="signal_context",
+            record_id=row_id,
+            field_name="market_confirmation",
+            config_id=config_id,
+            trading_date=trading_date,
+        )
+        plan_ext = externalize_json_for_db(
+            _pre_open_plan(snapshot),
+            category="signal_context",
+            record_id=row_id,
+            field_name="pre_open_plan",
+            config_id=config_id,
+            trading_date=trading_date,
+        )
         cursor.execute(
             '''
             INSERT INTO signal_context_history (
@@ -1764,15 +1870,21 @@ def _write_signal_context_history(
                 market_regime, price_stage, price_percentile, trigger_type, entry_type,
                 invalidation_level, target_return,
                 analyst_signals_json, market_confirmation_json, pre_open_plan_json,
+                analyst_signals_artifact_path, analyst_signals_sha256,
+                analyst_signals_size, analyst_signals_summary_json,
+                market_confirmation_artifact_path, market_confirmation_sha256,
+                market_confirmation_size, market_confirmation_summary_json,
+                pre_open_plan_artifact_path, pre_open_plan_sha256,
+                pre_open_plan_size, pre_open_plan_summary_json,
                 outcome_status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
-                str(uuid.uuid4()),
+                row_id,
                 config_id,
                 trading_date,
                 recommendation.get("id"),
-                str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper(),
+                ticker,
                 side,
                 _json_dumps(combo),
                 template,
@@ -1785,9 +1897,21 @@ def _write_signal_context_history(
                 _entry_type(recommendation, snapshot),
                 _invalidation_level(snapshot),
                 _target_return(snapshot),
-                _json_dumps(_analyst_payloads(snapshot)),
-                _json_dumps(_market_confirmation(snapshot)),
-                _json_dumps(_pre_open_plan(snapshot)),
+                analyst_ext.inline_value,
+                market_ext.inline_value,
+                plan_ext.inline_value,
+                analyst_ext.artifact_path,
+                analyst_ext.sha256,
+                analyst_ext.size_bytes,
+                analyst_ext.summary_json,
+                market_ext.artifact_path,
+                market_ext.sha256,
+                market_ext.size_bytes,
+                market_ext.summary_json,
+                plan_ext.artifact_path,
+                plan_ext.sha256,
+                plan_ext.size_bytes,
+                plan_ext.summary_json,
                 "pending",
                 now,
             ),
@@ -2107,7 +2231,7 @@ def _causal_candidate_scope(
     try:
         cursor.execute(
             """
-            SELECT payload_json
+            SELECT payload_json, payload_artifact_path, payload_sha256
             FROM reviewer_llm_notes
             WHERE config_id = ?
               AND evidence_pack_id = ?
@@ -2119,7 +2243,15 @@ def _causal_candidate_scope(
         row = cursor.fetchone()
     except sqlite3.Error:
         row = None
-    evidence = _json_loads(row["payload_json"]) if row else {}
+    evidence = (
+        load_externalized_json(
+            row["payload_json"],
+            row["payload_artifact_path"] if "payload_artifact_path" in row.keys() else None,
+            row["payload_sha256"] if "payload_sha256" in row.keys() else None,
+        )
+        if row
+        else {}
+    )
     for item in (evidence or {}).get("pre_trade_evidence") or []:
         if not isinstance(item, dict):
             continue
@@ -2460,34 +2592,21 @@ def _trade_pair_performance_summary(pairs: List[Dict[str, Any]]) -> Dict[str, An
     }
 
 
-def _learning_tags_from_recommendation(recommendation: Dict[str, Any]) -> List[str]:
+def _learning_attribution_from_recommendation(recommendation: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     snapshot = _recommendation_snapshot(recommendation or {})
     plan = _pre_open_plan(snapshot)
-    tags: List[str] = []
-    for reason in _control_reasons_from_plan(plan):
-        if str(reason).startswith("adaptive_policy_"):
-            tags.append("adaptive_policy")
-        elif str(reason).startswith("strategy_memory_"):
-            tags.append("strategy_memory")
-        elif str(reason).startswith("provisional_policy_"):
-            tags.append("provisional_policy")
-        elif reason in {"capital_utilization_memory_protected", "capital_utilization_same_side_add_on"}:
-            tags.append("capital_learning")
-
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    control_diag = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    if isinstance(control_diag.get("capital_utilization_learning"), dict):
-        tags.append("capital_learning")
-
     auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
     diagnostics = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-    if diagnostics.get("adaptive_policy_applied"):
-        tags.append("adaptive_policy")
-    if diagnostics.get("provisional_policy_applied"):
-        tags.append("provisional_policy")
-    if diagnostics.get("strategy_memory_rule") or diagnostics.get("strategy_memory"):
-        tags.append("strategy_memory")
-    return sorted(set(tags))
+    reasons = _control_reasons_from_plan(plan)
+    return (
+        learning_tags_from_context(reasons, diagnostics),
+        learning_effects_from_context(reasons, diagnostics),
+    )
+
+
+def _learning_tags_from_recommendation(recommendation: Dict[str, Any]) -> List[str]:
+    tags, _effects = _learning_attribution_from_recommendation(recommendation)
+    return tags
 
 
 def _learned_vs_unlearned_trade_performance(
@@ -2514,10 +2633,11 @@ def _learned_vs_unlearned_trade_performance(
             missing_recommendations += 1
             unlearned_pairs.append(dict(pair))
             continue
-        tags = _learning_tags_from_recommendation(recommendation)
+        tags, effects = _learning_attribution_from_recommendation(recommendation)
         item = dict(pair)
         item["learning_tags"] = tags
-        if tags:
+        item["learning_effects"] = effects
+        if tags and effects:
             learned_pairs.append(item)
             reason_counts.update(tags)
         else:
@@ -2528,6 +2648,8 @@ def _learned_vs_unlearned_trade_performance(
         "learned": _trade_pair_performance_summary(learned_pairs),
         "unlearned": _trade_pair_performance_summary(unlearned_pairs),
         "learned_reason_counts": _sorted_counter_dict(reason_counts),
+        "learned_effect_counts": learning_effect_counts(learned_pairs),
+        "learned_effect_summary": summarize_pairs_by_learning_effect(learned_pairs),
         "missing_open_recommendations": missing_recommendations,
     }
 
@@ -3233,12 +3355,42 @@ def _run_reviewer_causal_review(
         raw_response = "llm disabled; deterministic candidate only"
 
     note_id = str(uuid.uuid4())
+    prompt_ext = externalize_text_for_db(
+        prompt,
+        category="reviewer_llm_notes",
+        record_id=note_id,
+        field_name="raw_prompt",
+        config_id=config_id,
+        trading_date=trading_date,
+    )
+    response_ext = externalize_text_for_db(
+        raw_response,
+        category="reviewer_llm_notes",
+        record_id=note_id,
+        field_name="raw_response",
+        config_id=config_id,
+        trading_date=trading_date,
+    )
+    payload_ext = externalize_json_for_db(
+        evidence,
+        category="reviewer_llm_notes",
+        record_id=note_id,
+        field_name="payload",
+        config_id=config_id,
+        trading_date=trading_date,
+    )
     cursor.execute(
         """
         INSERT INTO reviewer_llm_notes (
             id, config_id, trading_date, evidence_pack_id, ticker,
-            raw_prompt, raw_response, created_at, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            raw_prompt, raw_response, created_at, payload_json,
+            raw_prompt_artifact_path, raw_prompt_sha256,
+            raw_prompt_size, raw_prompt_summary_json,
+            raw_response_artifact_path, raw_response_sha256,
+            raw_response_size, raw_response_summary_json,
+            payload_artifact_path, payload_sha256,
+            payload_size, payload_summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             note_id,
@@ -3246,10 +3398,22 @@ def _run_reviewer_causal_review(
             trading_date,
             evidence["evidence_pack_id"],
             "*",
-            prompt,
-            raw_response,
+            prompt_ext.inline_value,
+            response_ext.inline_value,
             _utc_now(),
-            _json_dumps(evidence),
+            payload_ext.inline_value,
+            prompt_ext.artifact_path,
+            prompt_ext.sha256,
+            prompt_ext.size_bytes,
+            prompt_ext.summary_json,
+            response_ext.artifact_path,
+            response_ext.sha256,
+            response_ext.size_bytes,
+            response_ext.summary_json,
+            payload_ext.artifact_path,
+            payload_ext.sha256,
+            payload_ext.size_bytes,
+            payload_ext.summary_json,
         ),
     )
     candidate_payload = output.model_dump() if hasattr(output, "model_dump") else {}
@@ -3552,6 +3716,7 @@ def run_phase4_review(
                     net_exposure=net_exposure,
                     warnings=warnings,
                     errors=errors,
+                    recommendations=strategy_recommendations,
                 )
 
                 max_single_config = cfg.get("risk_control", {}).get("max_single_position_ratio", {})
@@ -3568,8 +3733,9 @@ def run_phase4_review(
                     formatted = ", ".join(
                         f"{ticker}={ratio:.2%}" for ticker, ratio in sorted(single_breaches.items())
                     )
-                    errors.append(
-                        f"single-position exposure exceeds base cap {max_single_position_ratio:.2%}: {formatted}"
+                    warnings.append(
+                        f"single-position exposure exceeds base soft cap {max_single_position_ratio:.2%}: {formatted}; "
+                        "review dynamic opportunity budget and stop protection, but only portfolio tradable-capital usage is a hard gate"
                     )
 
         unbooked = [tx["id"] for tx in phase2_transactions if not tx.get("booked_in_settlement")]
@@ -3624,6 +3790,8 @@ def run_phase4_review(
 
         for warning in warnings:
             logger.warning(warning)
+        for info_message in market_confirmation_quality.get("info_messages", []):
+            logger.info(info_message)
         for error in errors:
             logger.error(error)
 
@@ -3710,6 +3878,13 @@ def run_phase4_review(
             "learning_summary": learning_summary,
         }
     except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+                conn = None
+            except sqlite3.Error as rollback_exc:
+                logger.warning(f"Phase4 rollback before failure status failed: {rollback_exc}")
         db.complete_trading_day_phase(config_id, trading_date, TradingPhase.PHASE4, "failed", str(exc))
         raise
     finally:
