@@ -1,109 +1,45 @@
-# AgentQuant 2025-02-26 起继续回测验收清单
+# AgentQuant 待回测验收清单
 
-生成日期：2026-05-25
+更新时间：2026-05-31
 
-适用范围：继续使用当前 `exp_name=agentquant-futures-trading-2025`，从 `2025-02-26` 开始续跑。此清单只保留已经在代码层面落地、但尚未通过 2025-02-26 之后新样本充分验收的优化项。
+本文档只保留已经 100% 代码落地、但还没有经过下一轮干净回测验收的项目。正式机制说明见 `mechanism_data_model.md`、`mechanism_research.md`、`mechanism_future_trade.md`、`mechanism_mutiagents.md`。
 
-## 1. 已回测窗口结论
+## 一、待验收项目
 
-### 1.1 2025-01-02 至 2025-02-09
+| 编号 | 待验收项目 | 验收重点 |
+|---|---|---|
+| V1 | 四阶段与智能体边界 | Phase1-4 完整；Reviewer 只验收流程、账务、日志；Researcher 写记忆与研究；Trader/Accountant 不被 LLM 或学习越权 |
+| V2 | 完整交易日志 | 每个交易日生成 `src/logs/<交易日>_transaction.log`，结构和信息密度对齐模板 |
+| V3 | 数据质量与数据依据 | `src/logs/data_quality/<交易日>.json` 生成；推荐、signal artifact、交易记忆和未交易记忆包含数据可用性、滞后性、字段依据 |
+| V4 | 无未来数据污染 | Phase1 只用盘前可见数据；Phase2 只用当时盘中数据；Phase4 shadow 与学习只影响未来交易日 |
+| V5 | 模型调用审计 | Analyst、PM、Researcher 可追踪 provider/model/reasoning effort；Reviewer、Trader、Accountant 无 LLM 决策越权 |
+| V6 | 回测加速与落库稳定 | 多品种分析并行、预取、缓存、LLM 并发门生效；无数据库锁、重复 signal、缺失 signal、日期错位 |
+| V7 | signal artifact 机器可读元数据 | signal artifact 顶层可读 `llm_path`、`data_usage_summary`、`technical_parameter_calibration`、`adaptive_params` |
+| V8 | Phase4 signal 完整性 | daily summary 写入 `extra_audit.signal_persistence`；每个交易日覆盖全部 `ticker × analyst`，重复/缺失会被 Reviewer 拦截 |
+| V9 | 研究与交易契约 | Analyst/PM snapshot、记忆、探索假设、策略状态含下一轮可用记忆、使用边界和仓位影响条件 |
+| V10 | 真实交易与未交易机会记忆 | `trade_episode_memory`、`no_trade_opportunity_memory`、`exploratory_hypothesis`、`learning_event_log` 按 Phase4 写入 |
+| V11 | 亏损模板观察性研究 | 已结算亏损模板写入 candidate `loss_template_observation`；只做分析先验，不写品种黑名单，不直接放仓或压仓 |
+| V12 | no-trade 与 Neutral shadow | no-trade、涨跌停错失成交 shadow、Neutral 后续窗口只在未来结算后回填，不进入真实账务 |
+| V13 | 候选假设边界 | candidate hypothesis 不能支撑放仓、加仓、`position_matched` 或亏损仓继续持有 |
+| V14 | 成熟经验落仓 | protected/deployable/alpha promotion 只有在当日证据、market confirmation、失效边界和 Auditor 通过时影响仓位 |
+| V15 | learned vs unlearned | learned 交易不应长期显著跑输 unlearned；若跑输，同作用域 demote 应出现并反映到后续仓位 |
+| V16 | tail-loss 与 horizon | 新仓快速亏损需当日证据复核；中期基本面不能单独触发短线新仓、加仓或亏损持有 |
+| V17 | alpha release 与资金利用 | 普通机会可接近 6%-8%；强 alpha 才可接近 16%-20%；不硬拉 weak/watchlist 仓位 |
+| V18 | 回撤保护与恢复 | 4%/5% 回撤场景中 warning、hard protection、cooling、recovery probe 按配置生效 |
+| V19 | PandaAI/Finoview 缺口降级 | 可选缺口不打断；关键缺口降级为小仓、观察或 Neutral，不伪造成方向证据 |
+| V20 | 评估与画图稳定 | `evaluate_config.py` 整体/区间评估正常；`plot_config.py` 只输出组合净值图和有交易品种图 |
+| V21 | 收益与学习有效性 | 干净回测后观察收益曲线、learned/unlearned、alpha promotion、tail-loss、资金利用率是否改善 |
+| V22 | 学习弱参 | 观察记忆有效期、overlay、provisional policy、exploratory research、loss template observation、shadow windows、prompt budget 是否需要调整 |
+| V23 | 实战化交易业务机制 | 涨跌停成交保护、动态保证金回退、换约成本审计、临近交割新仓保护、未成交原因完整性和数据缓存通过回测验收 |
+| V24 | 情境化弱参校准 | `contextual_rule_calibration` 按品种/方向/周期/市场状态写入并读取；只校准软阈值，不突破 20% 上限 |
+| V25 | 技术参数情境校准 | Researcher 写入 `contextual_rule_calibration:technical_parameters`；Technical Analyst 只小幅校准 EMA/RSI/Bollinger，并在 metadata 中记录 `adaptive_params` 与 `technical_parameter_calibration` |
 
-该窗口四阶段流程已跑通，21 个结算交易日的 Phase1-4 全部 completed。
+## 二、回测后快速检查
 
-关键结果：
-
-- 累计结算 PnL：约 `+17,130`
-- 手续费：约 `1,753.91`
-- 平均保证金比例：约 `3.84%`
-- 峰值保证金比例：约 `5.62%`
-- 盈利日/亏损日：`12/9`
-
-结论：工程链路、账务链路、学习写回链路具备继续续跑条件，但资金利用率仍低于 6%-8% 普通确认目标。
-
-### 1.2 2025-02-10 至 2025-02-25
-
-该窗口 12 个结算交易日的 Phase1-4 也全部 completed，但绩效明显恶化。
-
-关键结果：
-
-- 累计结算 PnL：约 `-136,900`
-- 手续费：约 `1,533.43`
-- 平均保证金比例：约 `2.12%`
-- 峰值保证金比例：约 `9.66%`
-- 盈利日/亏损日：`4/7`
-- 主要亏损来源：TA 约 `-120,420`
-
-核心诊断：
-
-1. 2025-02-13 TA long 被过度放大，主要来自泛化 protected 记忆覆盖当前信号组合。
-2. 2025-02-11 至 2025-02-25 的 learned 交易表现为负，尤其 `alpha_release` 负贡献明显。
-3. 风控后续开始收缩，但已经晚于主要亏损发生日。
-4. 2025-02-18 曾出现 PandaAI `WinError 10048` socket/端口耗尽，最终重跑完成；该问题需要 2025-02-26 起验证缓存和共享 token 是否解决。
-
-## 2. 已经回测验收通过的内容
-
-以下内容已经在 2025-01-02 至 2025-02-25 的回测窗口中完成基本工程验收，后续只做常规巡检，不再作为本清单重点：
-
-1. Phase1 / Phase2 / Phase3 / Phase4 可以完整闭环。
-2. `daily_settlement`、`futures_transactions`、`futures_recommendation`、`signal_context_history`、Reviewer 学习表均能落库。
-3. Artifact 外置机制已能被 `validate_artifacts.py --json` 校验；最近一次校验 `checked=4908`，缺失、hash mismatch、size mismatch 均为 0。
-4. `ticker_daily_pnl` 已能分解 holding/new_position/close PnL，并用于定位 TA 主亏损。
-5. Neutral accountability、causal candidate、learning event、capital deployment state 均有持续产出。
-6. Phase3 会计路径严格使用官方结算价；不得使用成交价或上一结算价替代。
-
-## 3. 2025-02-26 起仍需重点验收的优化项
-
-| 编号 | 待验收优化 | 验收位置 | 2025-02-26 起通过标准 |
-|---|---|---|---|
-| V1 | PandaAI 持久化日行情缓存与共享 token | 日志、`src/assets/pandaai_market_cache.db`、Phase3 settlement | 不再因 `WinError 10048`、重复登录或端口耗尽打断 Phase；缓存只能复用官方行情，不能污染学习状态 |
-| V2 | Phase3 官方结算价强约束 | Phase3 日志、`daily_settlement`、`futures_transactions.settle_price` | 当日交易必须有当日官方结算价；若取不到，应停在当日修数据链路并重跑，不能用 fallback 伪造账本 |
-| V3 | 强机会泛化记忆闸门 | PM `capital_utilization_learning`、recommendation artifact | `signal_combo="*"` 或仅 ticker-side 泛化 protected 不得直接进入 `target_mode=strong_opportunity`；应记录 `specific_signal_combo=false` 或降级普通确认/试探 |
-| V4 | 强机会止损/失效边界闸门 | Analyst signal、PM diagnostics、Trader exit policy | 若没有 Phase1 盘前生成的 `invalidation_level` 或 `atr_stop_distance`，不得强机会扩仓；应记录 `missing_stop_protection_for_strong_scaling` |
-| V5 | learned 干预类型拆分后的真实效果 | `evaluate_config`、Reviewer learning report | 必须单独看 `alpha_release`、`risk_suppression`、`evidence_rejection`；`alpha_release` 不能继续成为主要负贡献 |
-| V6 | TA 类失败路径是否被修复 | TA recommendation、TA `ticker_daily_pnl`、PM/Auditor diagnostics | 不得再出现 2025-02-13 这种泛化 protected + 无风险边界的大额 TA 扩仓；若 TA 再亏，要能区分信号、执行、止损还是市场确认问题 |
-| V7 | 资金利用率改善但不盲目放大 | `daily_settlement.margin_ratio`、capital deployment state | 普通确认机会逐步接近 6%-8%；强机会接近 16%-20% 只能发生在特异证据、market confirmation、止损边界同时满足时 |
-| V8 | 弱模板与浅样本防乐观 | strategy memory、adaptive policy、Auditor diagnostics | 样本数、胜率、净收益不足时必须看到 `protected_evidence_rejected`；watchlist/weak_block 不得被其它泛化 protected 覆盖 |
-| V9 | 持仓生命周期与低换手 | `rebalance_summary`、Phase2 exit policy、ticker PnL 分解 | 日频分析不等于日频交易；同向趋势仓位应能继续持有或受控加仓，不能机械日内反复开平 |
-| V10 | Codex GPT-5.5 reasoning effort 与 OpenRouter 移除 | `dev.yaml`、`planner.yaml`、LLM call artifact、环境变量模板 | 当前主模型保持 `provider=CodexOpenAI, model=gpt-5.5, reasoning_effort=medium`；不得因短期收益自动切换 provider/model/effort；不得再出现 OpenRouter provider、API key 或运行脚本入口 |
-
-## 4. 每日最小检查清单
-
-从 2025-02-26 起，每跑完一段，至少检查：
-
-1. 每个实际交易日 Phase1-4 是否全部 completed。
-2. 日志是否有 `Traceback`、未处理 `ERROR`、`database is locked`、Phase3 结算价缺失。
-3. 是否还出现 PandaAI `WinError 10048`、rate limit、method not found、参数缺失 warning。
-4. 当日 `daily_settlement.margin_ratio` 是否低于 6%、位于 6%-12%、还是进入 16%-20%。
-5. 若出现强机会扩仓，是否同时满足当前 signal_combo 特异验证、market confirmation、止损/失效边界和组合 20% 硬闸。
-6. 若没有扩仓，是否能解释为 alpha 信号不足、auditor 抑制、执行门槛、风险状态、持仓已匹配或容量约束。
-7. learned 交易必须拆分干预类型，不得用混合 learned PnL 判断学习成功。
-8. 对亏损品种先看 `ticker_daily_pnl.holding_pnl/new_position_pnl/close_pnl`，再判断是否需要修信号、执行或止损。
-9. Artifact 外置文件可通过 `python database/validate_artifacts.py --json` 校验。
-10. `agentquantcheck.db` 只能通过 `python database/build_check_db.py` 重建用于人工查看，不参与系统运行。
-
-## 5. 续跑命令
-
-当前目标是节省资源，先继续当前 exp 做 2025-02-26 至 2025-02-28 的 smoke 验收：
-
-```powershell
-cd D:\research\AgentQuant\src
-conda activate deepfund
-
-python run\backtest.py --config config\dev.yaml --start-date 2025-02-26 --end-date 2025-02-28 --local-db
-python evaluation\evaluate_config.py --config config\dev.yaml --start-date 2025-02-26 --end-date 2025-02-28 --local-db
-python evaluation\evaluate_config.py --config config\dev.yaml --start-date 2025-02-10 --end-date 2025-02-28 --local-db
-python database\validate_artifacts.py --json
-python database\build_check_db.py
-```
-
-注意：
-
-- 不要使用 `--reset-config`。
-- 不需要删除 `pandaai_market_cache.db`；它只缓存官方行情，不保存学习状态。
-- 若 2025-02-26 至 2025-02-28 仍出现 Phase 中断、PandaAI socket 错误、官方结算价缺失或强机会无边界扩仓，应暂停扩大回测并先修代码。
-
-## 6. 后续扩大回测判定
-
-2025-02-26 至 2025-02-28 通过后，可以继续跑至 2025-03-31 做月度检验。若仍稳定，再考虑三个月窗口。
-
-正式半年绩效口径应在代码冻结后使用新的 `exp_name/config_id` 从起点完整重跑；当前同一 exp 的续跑用于节省资源、验证最近修复是否奏效，不能单独作为最终半年收益能力结论。
+1. 四阶段状态、Traceback、数据库锁、LLM/PandaAI 错误。
+2. 交易流水、结算、手续费、保证金、持仓、账户权益是否对账。
+3. 完整交易日志、data quality JSON、daily summary 是否按日生成。
+4. 推荐快照、signal 表、signal artifact 是否完整、唯一、可机器读取。
+5. 学习表是否写入，prompt 是否读取，候选记忆与成熟记忆是否越权。
+6. learned vs unlearned、Neutral、no-trade shadow、loss template observation、资金利用率和收益曲线是否改善。
+7. 技术参数校准是否来自已结算样本，是否改善 technical 信号质量，且没有造成过拟合或低交易频率。

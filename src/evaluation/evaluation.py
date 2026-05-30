@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import json
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from database.artifact_store import load_externalized_json
 from database.sqlite_setup import DB_PATH
-from tools.agent_tools.neutral_accountability import build_neutral_accountability_summary
+from tools.agent_tools.research.neutral_accountability import build_neutral_accountability_summary
 from util.learning_attribution import (
     learning_effect_counts,
     learning_effects_from_context,
@@ -128,7 +128,7 @@ def calculate_optimization_acceptance_metrics(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict:
-    """Metrics tied to strategy_performance_optimization.md acceptance gates."""
+    """Metrics tied to optimization_task.md acceptance gates."""
     conn = None
     metrics = {
         "base_capacity_days_8_12": 0,
@@ -1036,6 +1036,336 @@ def calculate_futures_transaction_win_rate(
             conn.close()
 
 
+def _sqlite_table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _sqlite_columns(cursor: sqlite3.Cursor, table_name: str) -> set:
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def _max_negative_streak(values: List[float]) -> int:
+    max_streak = 0
+    current = 0
+    for value in values:
+        if value < 0:
+            current += 1
+            max_streak = max(max_streak, current)
+        else:
+            current = 0
+    return max_streak
+
+
+def calculate_futures_strategy_quality_metrics(
+    config_id: str,
+    db_path: str,
+    *,
+    initial_capital: float = 0.0,
+    total_return: float = 0.0,
+    annualized_return: float = 0.0,
+    max_drawdown: float = 0.0,
+    start_date: str = None,
+    end_date: str = None,
+) -> Dict:
+    """Calculate futures strategy-quality metrics beyond headline P&L."""
+    metrics = {
+        "net_settlement_pnl": 0.0,
+        "calmar_ratio": 0.0,
+        "return_drawdown_ratio": 0.0,
+        "profit_factor": 0.0,
+        "payoff_ratio": 0.0,
+        "trade_expectancy": 0.0,
+        "avg_win_pnl": 0.0,
+        "avg_loss_pnl": 0.0,
+        "max_trade_gain": 0.0,
+        "max_trade_loss": 0.0,
+        "max_consecutive_losing_trades": 0,
+        "max_consecutive_losing_days": 0,
+        "return_on_avg_margin": 0.0,
+        "commission_drag_ratio": 0.0,
+        "margin_cap_violation_days": 0,
+        "ticker_abs_contribution_top3_ratio": 0.0,
+        "profitable_ticker_count": 0,
+        "losing_ticker_count": 0,
+        "top_profit_ticker": "",
+        "top_profit_ticker_pnl": 0.0,
+        "worst_loss_ticker": "",
+        "worst_loss_ticker_pnl": 0.0,
+        "long_trade_net_pnl": 0.0,
+        "short_trade_net_pnl": 0.0,
+        "ticker_net_pnl": {},
+    }
+    metrics["calmar_ratio"] = (
+        float(annualized_return) / float(max_drawdown)
+        if max_drawdown and max_drawdown > 0
+        else 0.0
+    )
+    metrics["return_drawdown_ratio"] = (
+        float(total_return) / float(max_drawdown)
+        if max_drawdown and max_drawdown > 0
+        else 0.0
+    )
+
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        if _sqlite_table_exists(cursor, "daily_settlement"):
+            settlement_query = """
+                SELECT
+                    ds.trading_date,
+                    COALESCE(ds.daily_pnl, 0) AS daily_pnl,
+                    COALESCE(ds.commission, 0) AS commission,
+                    COALESCE(ds.previous_margin, 0) AS previous_margin,
+                    COALESCE(ds.current_margin, 0) AS current_margin,
+                    COALESCE(ds.margin_ratio, 0) AS margin_ratio
+                FROM daily_settlement ds
+                JOIN portfolio p ON ds.portfolio_id = p.id
+                WHERE p.config_id = ?
+            """
+            params: List = [config_id]
+            if start_date:
+                settlement_query += " AND ds.trading_date >= ?"
+                params.append(start_date)
+            if end_date:
+                settlement_query += " AND ds.trading_date <= ?"
+                params.append(end_date + "T23:59:59")
+            settlement_query += " ORDER BY ds.trading_date ASC"
+            cursor.execute(settlement_query, params)
+            settlements = cursor.fetchall()
+            if settlements:
+                daily_pnls = [float(row["daily_pnl"] or 0.0) for row in settlements]
+                commissions = [float(row["commission"] or 0.0) for row in settlements]
+                margin_bases = [
+                    (
+                        float(row["current_margin"] or 0.0) + float(row["previous_margin"] or 0.0)
+                    ) / 2.0
+                    for row in settlements
+                ]
+                net_settlement_pnl = sum(daily_pnls) - sum(commissions)
+                margin_returns = [
+                    (daily_pnl - commission) / margin
+                    for daily_pnl, commission, margin in zip(daily_pnls, commissions, margin_bases)
+                    if margin > 0
+                ]
+                gross_pnl_activity = sum(abs(value) for value in daily_pnls)
+
+                metrics["net_settlement_pnl"] = net_settlement_pnl
+                metrics["max_consecutive_losing_days"] = _max_negative_streak(daily_pnls)
+                metrics["return_on_avg_margin"] = float(np.mean(margin_returns)) if margin_returns else 0.0
+                metrics["commission_drag_ratio"] = sum(commissions) / gross_pnl_activity if gross_pnl_activity > 0 else 0.0
+                metrics["margin_cap_violation_days"] = sum(
+                    1 for row in settlements if float(row["margin_ratio"] or 0.0) > 0.20
+                )
+
+        if _sqlite_table_exists(cursor, "futures_transactions"):
+            tx_columns = _sqlite_columns(cursor, "futures_transactions")
+            select_parts = [
+                "id" if "id" in tx_columns else "NULL AS id",
+                "recommendation_id" if "recommendation_id" in tx_columns else "NULL AS recommendation_id",
+                "trading_date",
+                "created_at" if "created_at" in tx_columns else "trading_date AS created_at",
+                "ticker",
+                "contract_code" if "contract_code" in tx_columns else "ticker AS contract_code",
+                "action",
+                "lots",
+                "execution_price" if "execution_price" in tx_columns else "price AS execution_price",
+                "price" if "price" in tx_columns else "execution_price AS price",
+                "contract_multiplier" if "contract_multiplier" in tx_columns else "1.0 AS contract_multiplier",
+                "commission" if "commission" in tx_columns else "0.0 AS commission",
+                "source_type" if "source_type" in tx_columns else "'strategy' AS source_type",
+            ]
+            tx_query = f"""
+                SELECT {', '.join(select_parts)}
+                FROM futures_transactions
+                WHERE config_id = ?
+                  AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
+            """
+            tx_params: List = [config_id]
+            if start_date:
+                tx_query += " AND trading_date >= ?"
+                tx_params.append(start_date)
+            if end_date:
+                tx_query += " AND trading_date <= ?"
+                tx_params.append(end_date + "T23:59:59")
+            tx_query += " ORDER BY trading_date ASC, created_at ASC"
+            cursor.execute(tx_query, tx_params)
+            pairs = build_completed_trade_pairs(cursor.fetchall())
+            if pairs:
+                pairs = sorted(pairs, key=lambda row: (row.get("close_date") or "", row.get("open_date") or ""))
+                pnls = [float(row.get("net_pnl") or 0.0) for row in pairs]
+                wins = [value for value in pnls if value > 0]
+                losses = [value for value in pnls if value < 0]
+                gross_profit = sum(wins)
+                gross_loss = abs(sum(losses))
+                avg_win = float(np.mean(wins)) if wins else 0.0
+                avg_loss = float(np.mean(losses)) if losses else 0.0
+
+                metrics["profit_factor"] = gross_profit / gross_loss if gross_loss > 0 else 0.0
+                metrics["avg_win_pnl"] = avg_win
+                metrics["avg_loss_pnl"] = avg_loss
+                metrics["payoff_ratio"] = avg_win / abs(avg_loss) if avg_loss < 0 else 0.0
+                metrics["trade_expectancy"] = sum(pnls) / len(pnls)
+                metrics["max_trade_gain"] = max(pnls)
+                metrics["max_trade_loss"] = min(pnls)
+                metrics["max_consecutive_losing_trades"] = _max_negative_streak(pnls)
+                metrics["long_trade_net_pnl"] = sum(
+                    float(row.get("net_pnl") or 0.0) for row in pairs if row.get("side") == "long"
+                )
+                metrics["short_trade_net_pnl"] = sum(
+                    float(row.get("net_pnl") or 0.0) for row in pairs if row.get("side") == "short"
+                )
+
+        if _sqlite_table_exists(cursor, "ticker_daily_pnl"):
+            tdp_columns = _sqlite_columns(cursor, "ticker_daily_pnl")
+            commission_expr = "COALESCE(tdp.commission, 0)" if "commission" in tdp_columns else "0"
+            ticker_query = f"""
+                SELECT
+                    UPPER(tdp.ticker) AS ticker,
+                    SUM(COALESCE(tdp.daily_pnl, 0) - {commission_expr}) AS net_pnl
+                FROM ticker_daily_pnl tdp
+                JOIN portfolio p ON tdp.portfolio_id = p.id
+                WHERE p.config_id = ?
+            """
+            ticker_params: List = [config_id]
+            if start_date:
+                ticker_query += " AND tdp.trading_date >= ?"
+                ticker_params.append(start_date)
+            if end_date:
+                ticker_query += " AND tdp.trading_date <= ?"
+                ticker_params.append(end_date + "T23:59:59")
+            ticker_query += " GROUP BY UPPER(tdp.ticker)"
+            cursor.execute(ticker_query, ticker_params)
+            ticker_pnl = {
+                str(row["ticker"] or "").upper(): float(row["net_pnl"] or 0.0)
+                for row in cursor.fetchall()
+                if row["ticker"]
+            }
+            if ticker_pnl:
+                metrics["ticker_net_pnl"] = ticker_pnl
+                metrics["profitable_ticker_count"] = sum(1 for value in ticker_pnl.values() if value > 0)
+                metrics["losing_ticker_count"] = sum(1 for value in ticker_pnl.values() if value < 0)
+                top_ticker, top_pnl = max(ticker_pnl.items(), key=lambda item: item[1])
+                worst_ticker, worst_pnl = min(ticker_pnl.items(), key=lambda item: item[1])
+                metrics["top_profit_ticker"] = top_ticker
+                metrics["top_profit_ticker_pnl"] = top_pnl
+                metrics["worst_loss_ticker"] = worst_ticker
+                metrics["worst_loss_ticker_pnl"] = worst_pnl
+                abs_values = sorted((abs(value) for value in ticker_pnl.values()), reverse=True)
+                abs_total = sum(abs_values)
+                metrics["ticker_abs_contribution_top3_ratio"] = (
+                    sum(abs_values[:3]) / abs_total if abs_total > 0 else 0.0
+                )
+
+    except Exception as exc:
+        logger.warning(f"Futures strategy quality metrics unavailable: {exc}")
+    finally:
+        if conn:
+            conn.close()
+    return metrics
+
+
+def calculate_learning_usage_metrics(
+    config_id: str,
+    db_path: str,
+    start_date: str = None,
+    end_date: str = None,
+) -> Dict:
+    """Measure whether free-exploration learning memories are written and reused."""
+    metrics = {
+        "trade_episode_memory_count": 0,
+        "exploratory_hypothesis_count": 0,
+        "learning_context_budget_rows": 0,
+        "learning_context_with_episode_rows": 0,
+        "learning_context_with_hypothesis_rows": 0,
+        "learning_context_with_memory_ratio": 0.0,
+        "avg_learning_context_chars": 0.0,
+    }
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        if _sqlite_table_exists(cursor, "trade_episode_memory"):
+            columns = _sqlite_columns(cursor, "trade_episode_memory")
+            date_expr = "trading_date"
+            if {"episode_date", "close_date", "trading_date"}.issubset(columns):
+                date_expr = "COALESCE(episode_date, close_date, trading_date)"
+            query = f"SELECT COUNT(*) AS cnt FROM trade_episode_memory WHERE config_id = ?"
+            params: List = [config_id]
+            if start_date:
+                query += f" AND {date_expr} >= ?"
+                params.append(start_date)
+            if end_date:
+                query += f" AND {date_expr} <= ?"
+                params.append(end_date + "T23:59:59")
+            cursor.execute(query, params)
+            metrics["trade_episode_memory_count"] = int(cursor.fetchone()["cnt"] or 0)
+
+        if _sqlite_table_exists(cursor, "exploratory_hypothesis"):
+            query = "SELECT COUNT(*) AS cnt FROM exploratory_hypothesis WHERE config_id = ?"
+            params = [config_id]
+            if start_date:
+                query += " AND trading_date >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND trading_date <= ?"
+                params.append(end_date + "T23:59:59")
+            cursor.execute(query, params)
+            metrics["exploratory_hypothesis_count"] = int(cursor.fetchone()["cnt"] or 0)
+
+        if _sqlite_table_exists(cursor, "learning_context_budget"):
+            columns = _sqlite_columns(cursor, "learning_context_budget")
+            episode_expr = "trade_episode_count" if "trade_episode_count" in columns else "0"
+            hypothesis_expr = "hypothesis_count" if "hypothesis_count" in columns else "0"
+            chars_expr = "total_context_chars" if "total_context_chars" in columns else "selected_chars"
+            query = f"""
+                SELECT
+                    COUNT(*) AS rows,
+                    SUM(CASE WHEN COALESCE({episode_expr}, 0) > 0 THEN 1 ELSE 0 END) AS episode_rows,
+                    SUM(CASE WHEN COALESCE({hypothesis_expr}, 0) > 0 THEN 1 ELSE 0 END) AS hypothesis_rows,
+                    SUM(CASE WHEN COALESCE({episode_expr}, 0) > 0 OR COALESCE({hypothesis_expr}, 0) > 0 THEN 1 ELSE 0 END) AS memory_rows,
+                    AVG(COALESCE({chars_expr}, 0)) AS avg_chars
+                FROM learning_context_budget
+                WHERE config_id = ?
+            """
+            params = [config_id]
+            if start_date:
+                query += " AND trading_date >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND trading_date <= ?"
+                params.append(end_date + "T23:59:59")
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            budget_rows = int(row["rows"] or 0)
+            episode_rows = int(row["episode_rows"] or 0)
+            hypothesis_rows = int(row["hypothesis_rows"] or 0)
+            memory_rows = int(row["memory_rows"] or 0)
+            metrics["learning_context_budget_rows"] = budget_rows
+            metrics["learning_context_with_episode_rows"] = episode_rows
+            metrics["learning_context_with_hypothesis_rows"] = hypothesis_rows
+            metrics["avg_learning_context_chars"] = float(row["avg_chars"] or 0.0)
+            metrics["learning_context_with_memory_ratio"] = (
+                min(1.0, memory_rows / budget_rows) if budget_rows > 0 else 0.0
+            )
+
+    except Exception as exc:
+        logger.warning(f"Learning usage metrics unavailable: {exc}")
+    finally:
+        if conn:
+            conn.close()
+    return metrics
+
+
 def calculate_futures_metrics(
     config_id: str, db_path: str,
     start_date: str = None, end_date: str = None,
@@ -1116,11 +1446,11 @@ def calculate_futures_metrics(
 
         # Debug: print balance changes with margin details
         logger.info(f"Daily settlement analysis ({len(settlements)} days):")
-        logger.info(f"  {'Day':<4} {'PnL':>10} {'Comm':>8} {'PrevBal':>13} {'CurrBal':>13} {'PrevMgn':>10} {'CurrMgn':>10} {'Chg':>10} {'Exp':>10} {'MgnChg':>10}")
+        logger.info(f"  {'Day':<4} {'PnL':>10} {'Comm':>8} {'PrevCash':>13} {'CurrCash':>13} {'PrevMgn':>10} {'CurrMgn':>10} {'CashChg':>10} {'ExpCash':>10} {'MgnChg':>10}")
         for i, s in enumerate(settlements):
             daily_change = s['current_balance'] - s['previous_balance']
-            expected_change = (s['daily_pnl'] or 0) - (s['commission'] or 0)
             margin_change = (s['previous_margin'] or 0) - (s['current_margin'] or 0)
+            expected_change = (s['daily_pnl'] or 0) - (s['commission'] or 0) + margin_change
             logger.info(f"  {i+1:<4} {s['daily_pnl']:>+10,.2f} {s['commission']:>8,.2f} "
                        f"{s['previous_balance']:>13,.2f} {s['current_balance']:>13,.2f} "
                        f"{s['previous_margin'] or 0:>10,.2f} {s['current_margin'] or 0:>10,.2f} "
@@ -1766,6 +2096,17 @@ def evaluate_config(
         daily_win_rate_metrics = calculate_futures_trade_win_rate(config_id, db_path, start_date, end_date)
         win_rate_metrics = calculate_futures_transaction_win_rate(config_id, db_path, start_date, end_date)
         optimization_metrics = calculate_optimization_acceptance_metrics(config_id, db_path, start_date, end_date)
+        quality_metrics = calculate_futures_strategy_quality_metrics(
+            config_id,
+            db_path,
+            initial_capital=initial_capital,
+            total_return=total_return,
+            annualized_return=annualized_return,
+            max_drawdown=max_drawdown,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        learning_usage_metrics = calculate_learning_usage_metrics(config_id, db_path, start_date, end_date)
         # Generate data quality warnings
         if effective_period_days < 30:
             warnings.append({
@@ -1879,6 +2220,8 @@ def evaluate_config(
 
             # Optimization-plan acceptance metrics
             **optimization_metrics,
+            **quality_metrics,
+            **learning_usage_metrics,
 
             # Data quality warnings
             'warnings': warnings

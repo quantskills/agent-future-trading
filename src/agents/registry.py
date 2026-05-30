@@ -1,5 +1,5 @@
-from typing import Dict, Callable, List
-from agents.analysts import *
+﻿from typing import Dict, Callable, List
+from agents.analysis_team import *
 from graph.constants import AgentKey
 
 class AgentRegistry:
@@ -14,8 +14,6 @@ class AgentRegistry:
         AgentKey.TECHNICAL,
         AgentKey.FUNDAMENTAL,
         AgentKey.COMMODITY_NEWS,
-        AgentKey.MACROECONOMIC,
-        AgentKey.POLICY
     ]
 
     @classmethod
@@ -73,14 +71,3 @@ class AgentRegistry:
             agent_doc="Technical analysis specialist using multiple technical analysis strategies."
         )
 
-        cls.register_agent(
-            key=AgentKey.MACROECONOMIC,
-            agent_func=macroeconomic_agent,
-            agent_doc="Macroeconomic analysis specialist focusing on economic indicators, interest rates, inflation and market trends."
-        )
-
-        cls.register_agent(
-            key=AgentKey.POLICY,
-            agent_func=policy_agent,
-            agent_doc="Policy analysis specialist focusing on fiscal and monetary policy."
-        )

@@ -1,4 +1,4 @@
-# AgentQuant 期货策略负收益根因分析
+﻿# AgentQuant 期货策略负收益根因分析
 
 > 分析日期：2026-05-21  
 > 分析对象：`agentquant-futures-trading-2025`  
@@ -29,10 +29,10 @@ AgentQuant 当前是一个四阶段、多智能体的中国期货日频策略系
 
 | 阶段 | 入口 | 主要职责 | 关键代码 |
 |---|---|---|---|
-| Phase1 | `src/run/proposal.py` | 按交易日、按品种生成盘前建议 | `src/graph/workflow.py`、`src/agents/analysts/*`、`src/agents/portfolio_manager.py` |
-| Phase2 | `src/run/order.py` | trader 将建议转为可执行交易，做盘中触发确认 | `src/agents/trader.py`、`src/tools/agent_tools/futures_execution.py`、`intraday_execution.py` |
-| Phase3 | `src/run/settlement.py` | accountant 逐日盯市、手续费、保证金、官方组合持久化 | `src/agents/accountant.py`、`futures_settlement.py` |
-| Phase4 | `src/run/validate_phase_flow.py` | reviewer 校验前 3 阶段、写交易日报和学习表 | `src/agents/reviewer.py`、`reviewer_tools.py` |
+| Phase1 | `src/run/proposal.py` | 按交易日、按品种生成盘前建议 | `src/graph/workflow.py`、`src/agents/analysis_team/*`、`src/agents/decision_team/portfolio_manager.py` |
+| Phase2 | `src/run/order.py` | trader 将建议转为可执行交易，做盘中触发确认 | `src/agents/execution_team/trader.py`、`src/tools/agent_tools/futures_execution.py`、`intraday_execution.py` |
+| Phase3 | `src/run/settlement.py` | accountant 逐日盯市、手续费、保证金、官方组合持久化 | `src/agents/execution_team/accountant.py`、`futures_settlement.py` |
+| Phase4 | `src/run/validate_phase_flow.py` | reviewer 校验前 3 阶段、写交易日报和学习表 | `src/agents/research_team/reviewer.py`、`reviewer_tools.py` |
 
 源码显示，Phase1 的真实决策路径不是单一 LLM 直接下单，而是：
 

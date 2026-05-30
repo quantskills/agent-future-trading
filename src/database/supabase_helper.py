@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from graph.schema import AnalystSignal
 from database.interface import BaseDB
+from database.signal_artifact import build_signal_artifact_payload
 from supabase import create_client
 from util.logger import logger
 
@@ -238,7 +239,7 @@ class SupabaseDB(BaseDB):
                 'analyst': analyst,
                 'signal': str(signal.signal),
                 'justification': signal.justification,
-                'artifact_json': signal.model_dump() if hasattr(signal, "model_dump") else {},
+                'artifact_json': build_signal_artifact_payload(signal),
                 'business_quality_score': float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 'horizon_class': str(getattr(signal, "horizon_class", "unknown") or "unknown"),
                 'template_name': str(getattr(signal, "template_name", "unknown") or "unknown"),

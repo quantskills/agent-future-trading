@@ -239,10 +239,25 @@ class AgentQuantLogger:
         self.trade_logger.info("=" * 70)
         self.trade_logger.info(f"DAILY SETTLEMENT - {trading_date}")
         self.trade_logger.info("=" * 70)
-        self.trade_logger.info("Balance")
+        self.trade_logger.info("Cash Available")
         self.trade_logger.info(f"  Previous:      {settlement.previous_balance:>15,.2f}")
         self.trade_logger.info(f"  Current:       {settlement.current_balance:>15,.2f}")
         self.trade_logger.info(f"  Change:        {settlement.current_balance - settlement.previous_balance:>+15,.2f}")
+        previous_equity = getattr(
+            settlement,
+            "previous_account_equity",
+            settlement.previous_balance + settlement.previous_margin,
+        )
+        current_equity = getattr(
+            settlement,
+            "current_account_equity",
+            settlement.current_balance + settlement.current_margin,
+        )
+        self.trade_logger.info("")
+        self.trade_logger.info("Account Equity")
+        self.trade_logger.info(f"  Previous:      {previous_equity:>15,.2f}")
+        self.trade_logger.info(f"  Current:       {current_equity:>15,.2f}")
+        self.trade_logger.info(f"  Change:        {current_equity - previous_equity:>+15,.2f}")
         self.trade_logger.info("")
         self.trade_logger.info("Margin")
         self.trade_logger.info(f"  Previous:      {settlement.previous_margin:>15,.2f}")

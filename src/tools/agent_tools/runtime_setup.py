@@ -21,6 +21,9 @@ def load_portfolio_config(cfg: Dict[str, Any], db, reset_portfolio: bool = False
             raise RuntimeError(f"Failed to create config for {cfg['exp_name']}")
     else:
         logger.info(f"Using existing config {config_id[:8]}... for {cfg['exp_name']}")
+        sync_metadata = getattr(db, "sync_config_runtime_metadata", None)
+        if callable(sync_metadata):
+            sync_metadata(config_id, cfg)
 
     return config_id
 

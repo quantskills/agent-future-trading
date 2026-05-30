@@ -39,6 +39,10 @@ Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
 - would_change_view_if
 - opportunity_cost_risk
 - recommended_observation_window
+- neutral_opportunity_bucket: watchlist_trigger / evidence_gap / conflict_avoidance / low_tradeability / horizon_mismatch / accountable_observation
+- neutral_trigger_condition: concrete price/data/timing condition that would make the setup tradeable
+- neutral_shadow_side: long / short / flat, only if there is a directional opportunity worth tracking
+- neutral_watchlist_priority: none / low / medium / high
 - accountability_tag
 
 Provide well-reasoned analysis considering all aspects.

@@ -3,13 +3,16 @@ Configuration Plot Runner
 
 Generate all visualization charts for one AgentQuant futures config:
 - strategy net value curve
-- per-traded-ticker net value contribution + price curve + open markers
+- one single-future chart per traded ticker
+  - upper panel: single ticker contribution net value curve
+  - lower panel: price curve with open/close markers when transactions exist
 
 Usage:
     python src/run/plot_config.py --config src/config/dev.yaml
 
 Output:
-    Generates PNG files under AgentQuant/image by default.
+    Generates PNG files under AgentQuant/image by default. If the portfolio
+    and 15 traded futures tickers exist, this runner produces 16 charts.
 """
 
 import argparse
@@ -158,7 +161,7 @@ class ConfigPlotRunner:
             print("Skipping strategy net value curve by request.")
             return True
 
-        print("\n[1/2] Generating strategy net value curve...")
+        print("\n[1/2] Generating portfolio net value curve...")
         plotter = PortfolioCurvePlotter(
             self.config_path,
             output_dir=self.output_dir,
@@ -174,10 +177,10 @@ class ConfigPlotRunner:
         return load_traded_tickers(self.db_path, self.config_id)
 
     def _run_ticker_plots(self, tickers: Sequence[str]) -> List[str]:
-        failures = []
-        total = len(tickers)
+        print("\n[2/2] Generating per-traded-future charts...")
+        failures: List[str] = []
         for index, ticker in enumerate(tickers, start=1):
-            print(f"\n[2/2] Generating traded-ticker chart {index}/{total}: {ticker}")
+            print(f"\n  [{index}/{len(tickers)}] {ticker}: net value + price/open-close markers")
             plotter = SingleFutureCurvePlotter(
                 self.config_path,
                 ticker,
@@ -187,9 +190,6 @@ class ConfigPlotRunner:
             )
             if not plotter.run():
                 failures.append(ticker)
-                print(f"Failed to generate chart for {ticker}")
-                if self.strict:
-                    break
         return failures
 
     def run(self) -> bool:
@@ -215,13 +215,15 @@ class ConfigPlotRunner:
 
         print("\n" + "=" * 72)
         if portfolio_ok and not failures:
-            print("All config charts generated successfully.")
+            expected = 0 if self.skip_portfolio else 1
+            expected += len(tickers)
+            print(f"Config charts generated successfully. Total charts: {expected}")
             success = True
         else:
             if not portfolio_ok:
-                print("Strategy net value chart failed.")
+                print("Portfolio net value chart failed.")
             if failures:
-                print(f"Ticker chart failures: {', '.join(failures)}")
+                print(f"Per-future chart failures: {', '.join(failures)}")
             success = False
         print("=" * 72 + "\n")
         return success

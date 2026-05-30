@@ -12,6 +12,27 @@ _MARKET_PREVIOUS_TRADING_DAY_CACHE: dict[tuple[str, int, int], datetime] = {}
 _MARKET_NEXT_TRADING_DAY_CACHE: dict[tuple[str, int], datetime] = {}
 
 
+def map_datetime_to_futures_trading_day(
+    router,
+    timestamp,
+    underlying_code: str,
+    *,
+    night_session_start_hour: int = 21,
+    lookahead_days: int = 14,
+) -> datetime:
+    """Map a clock timestamp to the exchange trading day used by futures settlement."""
+    event_dt = _normalize_datetime(timestamp)
+    event_date = datetime.combine(event_dt.date(), datetime.min.time())
+    if event_dt.hour >= int(night_session_start_hour):
+        return get_next_trading_day(
+            router=router,
+            trading_date=event_date,
+            underlying_code=underlying_code,
+            lookahead_days=lookahead_days,
+        )
+    return event_date
+
+
 def get_previous_trading_day(
     router,
     trading_date,
@@ -154,6 +175,22 @@ def _normalize_date(value) -> datetime:
     if isinstance(value, date):
         return datetime.combine(value, datetime.min.time())
     return _parse_trade_date(value)
+
+
+def _normalize_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Empty datetime value")
+    normalized = text.replace("T", " ").replace("Z", "")
+    try:
+        return datetime.fromisoformat(normalized).replace(microsecond=0)
+    except ValueError:
+        return datetime.strptime(normalized[:19], "%Y-%m-%d %H:%M:%S")
 
 
 def _parse_trade_date(value) -> datetime:

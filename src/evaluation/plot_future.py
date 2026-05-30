@@ -1,11 +1,10 @@
 """
-Single Futures Net Value Curve Plotter
+Futures Net Value Curve Plotter
 
-This script generates a contribution net value curve plot for a SINGLE
-futures ticker within the portfolio. It tracks the ticker's cumulative
-net P&L contribution across the full settlement calendar, and overlays
-the futures price curve plus open-position markers when price/trade data
-is available.
+This script generates one chart for a SINGLE futures ticker. The chart has
+two panels when price or transaction data is available:
+- upper panel: the ticker contribution net value curve
+- lower panel: price curve with open and close markers when transactions exist
 
 Usage:
     python src/evaluation/plot_future.py --config src/config/dev.yaml --ticker M
@@ -670,7 +669,7 @@ class SingleFutureCurvePlotter:
         ax.set_xlabel('交易日期', fontsize=12, fontweight='bold')
         ax.set_ylabel('单品种贡献净值', fontsize=12, fontweight='bold')
 
-        title = f"{self.ticker} 期货净值贡献与价格开仓点"
+        title = f"{self.ticker}期货净值贡献与价格曲线+开平仓点位"
         ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
 
         # Add legend
@@ -731,6 +730,7 @@ class SingleFutureCurvePlotter:
                 tx = self.transaction_data.copy()
                 tx = tx[tx['execution_price'] > 0]
                 open_tx = tx[tx['action'].isin(['open_long', 'open_short'])]
+                close_tx = tx[tx['action'].isin(['close_long', 'close_short'])]
 
                 marker_styles = {
                     'open_long': ('开多点', '^', '#C0392B'),
@@ -756,6 +756,36 @@ class SingleFutureCurvePlotter:
                             f"{int(row['lots'])}手",
                             (row['trading_date'], row['execution_price']),
                             xytext=(0, 8 if action == 'open_long' else -14),
+                            textcoords='offset points',
+                            ha='center',
+                            fontsize=8,
+                            color=color,
+                        )
+
+                close_marker_styles = {
+                    'close_long': ('平多点', 'X', '#C0392B'),
+                    'close_short': ('平空点', 'X', '#16A085'),
+                }
+                for action, (label, marker, color) in close_marker_styles.items():
+                    side_tx = close_tx[close_tx['action'] == action]
+                    if side_tx.empty:
+                        continue
+                    ax_price.scatter(
+                        side_tx['trading_date'],
+                        side_tx['execution_price'],
+                        marker=marker,
+                        s=82,
+                        color=color,
+                        edgecolors='white',
+                        linewidths=0.8,
+                        label=label,
+                        zorder=6,
+                    )
+                    for _, row in side_tx.iterrows():
+                        ax_price.annotate(
+                            f"{int(row['lots'])}手",
+                            (row['trading_date'], row['execution_price']),
+                            xytext=(0, -16 if action == 'close_long' else 10),
                             textcoords='offset points',
                             ha='center',
                             fontsize=8,

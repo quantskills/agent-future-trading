@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field, fields
@@ -17,6 +18,7 @@ class LLMConfig:
     temperature: Optional[float] = 0.5
     max_retries: int = 3
     structured_output_method: Optional[str] = None
+    max_concurrent_calls: Optional[int] = None
     failure_policy: Dict[str, str] = field(default_factory=dict)
     codex_openai: Dict[str, Any] = field(default_factory=dict)
     deepseek: Dict[str, Any] = field(default_factory=dict)
@@ -30,6 +32,28 @@ DEFAULT_FAILURE_POLICY = {
     "server_error": "retry_then_default",
     "unknown": "retry_then_default",
 }
+
+
+_LLM_SEMAPHORES: Dict[tuple[str, str, int], threading.BoundedSemaphore] = {}
+_LLM_SEMAPHORES_LOCK = threading.Lock()
+
+
+def _resolve_llm_semaphore(config: LLMConfig) -> Optional[threading.BoundedSemaphore]:
+    """Return a process-local provider/model concurrency limiter when configured."""
+    try:
+        max_concurrent = int(config.max_concurrent_calls or 0)
+    except (TypeError, ValueError):
+        max_concurrent = 0
+    if max_concurrent <= 0:
+        return None
+
+    key = (str(config.provider), str(config.model), max_concurrent)
+    with _LLM_SEMAPHORES_LOCK:
+        semaphore = _LLM_SEMAPHORES.get(key)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(max_concurrent)
+            _LLM_SEMAPHORES[key] = semaphore
+        return semaphore
 
 
 def _classify_llm_error(exc: Exception) -> str:
@@ -97,6 +121,51 @@ def _resolve_provider_base_url(provider: Provider, model_config, config: LLMConf
     return model_config.base_url
 
 
+def _resolve_provider_api_key(provider: Provider, model_config, config: LLMConfig) -> str:
+    """Resolve API keys, allowing CodexOpenAI to target multiple compatible gateways."""
+    env_candidates = []
+    if provider == Provider.CODEX_OPENAI:
+        codex_config = config.codex_openai or {}
+        has_explicit_env_config = "api_key_env" in codex_config or "api_key_env_fallbacks" in codex_config
+        explicit_env = codex_config.get("api_key_env")
+        if explicit_env:
+            env_candidates.append(str(explicit_env))
+        fallback_envs = codex_config.get("api_key_env_fallbacks") or []
+        if isinstance(fallback_envs, str):
+            fallback_envs = [fallback_envs]
+        for item in fallback_envs:
+            if not item:
+                continue
+            env_candidates.append(str(item))
+    else:
+        has_explicit_env_config = False
+
+    if model_config.env_key and not has_explicit_env_config:
+        env_candidates.append(model_config.env_key)
+
+    seen = set()
+    deduped_candidates = []
+    for env_key in env_candidates:
+        if env_key in seen:
+            continue
+        seen.add(env_key)
+        deduped_candidates.append(env_key)
+
+    for env_key in deduped_candidates:
+        api_key = os.getenv(env_key)
+        if api_key:
+            return api_key
+
+    logger.error(
+        "API Key Error: Please set one of "
+        f"{', '.join(deduped_candidates) if deduped_candidates else '[no env key configured]'}."
+    )
+    raise ValueError(
+        f"{provider} API key not found. Please set one of "
+        f"{', '.join(deduped_candidates) if deduped_candidates else '[no env key configured]'}."
+    )
+
+
 def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, Any]:
     """Build provider-specific kwargs without hard-coding a model choice."""
     if provider == Provider.CODEX_OPENAI:
@@ -122,6 +191,32 @@ def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, A
     return kwargs
 
 
+def llm_audit_metadata(raw_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return non-secret LLM routing metadata for logs and artifacts."""
+    llm_cfg = _normalize_llm_config(raw_config)
+    provider = Provider(llm_cfg.provider)
+    model_config = provider.config
+    base_url = _resolve_provider_base_url(provider, model_config, llm_cfg)
+    metadata: Dict[str, Any] = {
+        "provider": provider.value,
+        "model": llm_cfg.model,
+        "base_url": base_url,
+        "api_key_env": None,
+        "reasoning_effort": None,
+    }
+    if provider == Provider.CODEX_OPENAI:
+        codex_config = llm_cfg.codex_openai or {}
+        reasoning_config = codex_config.get("reasoning") or {}
+        metadata["api_key_env"] = codex_config.get("api_key_env")
+        metadata["reasoning_effort"] = codex_config.get("reasoning_effort") or reasoning_config.get("effort")
+    elif provider == Provider.DEEPSEEK:
+        metadata["api_key_env"] = model_config.env_key
+        metadata["reasoning_effort"] = (llm_cfg.deepseek or {}).get("reasoning_effort")
+    else:
+        metadata["api_key_env"] = model_config.env_key
+    return metadata
+
+
 def _normalize_llm_config(raw_config: Dict[str, Any]) -> LLMConfig:
     """Ignore removed/legacy provider keys while keeping current config strict."""
     allowed = {item.name for item in fields(LLMConfig)}
@@ -137,10 +232,7 @@ def get_model(config: LLMConfig):
     base_url = _resolve_provider_base_url(provider, model_config, config)
 
     if model_config.requires_api_key:
-        api_key = os.getenv(model_config.env_key)
-        if not api_key:
-            logger.error(f"API Key Error: Please make sure {model_config.env_key} is set in your .env file.")
-            raise ValueError(f"{provider} API key not found. Please set {model_config.env_key} in .env file.")
+        api_key = _resolve_provider_api_key(provider, model_config, config)
     
     kwargs = {
         "model": config.model,
@@ -171,6 +263,8 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
     llm = get_model(llm_cfg)
     provider = Provider(llm_cfg.provider)
     model_config = provider.config
+    audit_metadata = llm_audit_metadata(llm_config)
+    semaphore = _resolve_llm_semaphore(llm_cfg)
 
     structured_method = llm_cfg.structured_output_method or model_config.structured_output_method
     if structured_method == "json_mode":
@@ -189,13 +283,25 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
     llm = llm.with_structured_output(pydantic_model, method=structured_method)
     logger.info(
         f"LLM call configured: provider={provider.value}, model={llm_cfg.model}, "
-        f"structured_output={structured_method}, max_retries={llm_cfg.max_retries}"
+        f"reasoning_effort={audit_metadata.get('reasoning_effort')}, "
+        f"base_url={audit_metadata.get('base_url')}, "
+        f"api_key_env={audit_metadata.get('api_key_env')}, "
+        f"structured_output={structured_method}, max_retries={llm_cfg.max_retries}, "
+        f"max_concurrent_calls={llm_cfg.max_concurrent_calls or 'unlimited'}"
     )
 
     for attempt in range(llm_cfg.max_retries):
         started_at = time.monotonic()
         try:
-            result = llm.invoke(prompt)
+            if semaphore is not None:
+                logger.info(
+                    f"LLM concurrency gate entered: provider={provider.value}, "
+                    f"model={llm_cfg.model}, max_concurrent_calls={llm_cfg.max_concurrent_calls}"
+                )
+                with semaphore:
+                    result = llm.invoke(prompt)
+            else:
+                result = llm.invoke(prompt)
             if result is None:
                 raise ValueError("LLM returned None")
             if isinstance(result, dict):

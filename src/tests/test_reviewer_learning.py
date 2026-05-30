@@ -1,17 +1,19 @@
-import json
+﻿import json
 import sqlite3
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agents.auditor import TradeAuditor, TradeAuditorInput
-from agents.portfolio_manager import (
+from agents.decision_team.auditor import TradeAuditor, TradeAuditorInput
+from agents.decision_team.portfolio_manager import (
     _apply_capital_utilization_control,
     _quality_aware_fusion_context,
     _resolve_net_exposure_control,
@@ -20,22 +22,46 @@ from agents.portfolio_manager import (
 from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_strategy_memory_schema
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
 from tools.agent_tools.contracts import attach_snapshot_contract, validate_artifact_header
-from tools.agent_tools.template_prior import classify_template_prior_item, load_template_prior_if_enabled
-from tools.agent_tools.dynamic_weights import calibrate_weights_by_signal_history
-from tools.agent_tools.learning_context import apply_config_learning_overlay, build_learning_context
-from tools.agent_tools.neutral_accountability import (
+from database.artifact_store import load_externalized_json
+from tools.agent_tools.research.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
+from tools.agent_tools.analysis.dynamic_weights import calibrate_weights_by_signal_history
+from tools.agent_tools.analysis.learning_context import (
+    apply_config_learning_overlay,
+    build_learning_context,
+    clear_learning_context_cache,
+)
+from tools.agent_tools.analysis.technical_parameter_calibration import apply_technical_parameter_calibration
+from tools.agent_tools.research.learning_contract import CONTRACT_KEY
+from tools.agent_tools.research.neutral_accountability import (
     build_neutral_accountability_summary,
     classify_neutral_signal,
 )
-from tools.agent_tools.quality import build_technical_context, apply_signal_quality_gate
-from tools.agent_tools.reviewer_tools import (
+from tools.agent_tools.analysis.quality import build_technical_context, apply_signal_quality_gate
+from tools.agent_tools.research.researcher_tools import (
+    ExploratoryHypothesisItem,
+    ExploratoryHypothesisLLMOutput,
+    write_exploratory_hypotheses,
+)
+from tools.agent_tools.research.reviewer_tools import (
+    _export_template_prior,
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
+    _backfill_neutral_forward_shadow_tracking,
+    _neutral_shadow_tracking_summary,
+    _write_trade_episode_memory,
+    _write_learned_vs_unlearned_policy_state,
     _write_validated_causal_policy_rules,
     _write_config_overlay,
+    _backfill_no_trade_opportunity_shadow_results,
     _write_reviewer_learning_report,
+    _write_alpha_promotion_state,
+    _write_contextual_rule_calibration_state,
+    _write_no_trade_opportunity_memory,
+    _write_tail_loss_sentinel_state,
+    _write_loss_template_observation_research,
+    _validate_phase1_signal_persistence,
     _write_signal_context_history,
 )
 
@@ -43,8 +69,10 @@ from tools.agent_tools.reviewer_tools import (
 class _FakeLearningDB:
     def __init__(self):
         self.budgets = []
+        self.digest_calls = 0
 
     def get_analyst_learning_digest(self, **kwargs):
+        self.digest_calls += 1
         return [
             {
                 "id": f"digest-{idx}",
@@ -61,6 +89,95 @@ class _FakeLearningDB:
     def save_learning_context_budget(self, **kwargs):
         self.budgets.append(kwargs)
         return True
+
+
+class _ExploratoryLearningDB(_FakeLearningDB):
+    def get_analyst_learning_digest(self, **kwargs):
+        self.digest_calls += 1
+        return []
+
+    def get_trade_episode_memory(self, **kwargs):
+        return [
+            {
+                "id": "episode-1",
+                "ticker": kwargs.get("ticker", "BU"),
+                "side": "long",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "signal_template": "long_breakout_short",
+                "holding_days": 2,
+                "net_pnl": 1250.0,
+                "lesson_text": "breakout held while inventory and price trend agreed",
+                "payload": {
+                    CONTRACT_KEY: {
+                        "usable_memory": ["same-scope breakout episode worked"],
+                        "usage_boundary": ["same-scope prior only"],
+                        "position_impact_conditions": ["current confirmation and invalidation required"],
+                    }
+                },
+            }
+        ]
+
+    def get_no_trade_opportunity_memory(self, **kwargs):
+        return [
+            {
+                "id": "no-trade-1",
+                "ticker": kwargs.get("ticker", "BU"),
+                "side": "long",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "signal_template": "long_breakout_short",
+                "opportunity_type": "trend_continuation",
+                "classification": "missed_opportunity",
+                "pm_reason": "intraday trigger not met",
+                "shadow_results": [{"horizon_days": 3, "shadow_pnl": 1800.0}],
+                "payload": {
+                    "neutral_opportunity_observations": [
+                        {
+                            "analyst": "technical",
+                            "bucket": "watchlist_trigger",
+                            "watchlist_priority": "medium",
+                            "trigger_condition": "breakout confirms with volume",
+                            "shadow_side": "long",
+                        }
+                    ],
+                    CONTRACT_KEY: {
+                        "usable_memory": ["skipped breakout became a missed opportunity"],
+                        "usage_boundary": ["watchlist only until current trigger confirms"],
+                        "position_impact_conditions": ["no sizing impact without current confirmation"],
+                    },
+                },
+            }
+        ]
+
+    def get_exploratory_hypotheses(self, **kwargs):
+        return [
+            {
+                "id": "hypothesis-1",
+                "ticker": kwargs.get("ticker", "BU"),
+                "sector": kwargs.get("sector", "energy"),
+                "side": "long",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "hypothesis_text": "BU trend probes need current price confirmation plus explicit invalidation.",
+                "suggested_use": "analyst_prior",
+                "payload": {
+                    "entry_timing_hint": "wait for trend confirmation",
+                    "exit_timing_hint": "cut if confirmation fails",
+                    "holding_period_hint": "short",
+                    "invalidation_condition": "price falls back below breakout level",
+                    "validation_plan": "track next similar BU trend probes",
+                    CONTRACT_KEY: {
+                        "usable_memory": ["BU trend probes need confirmation"],
+                        "usage_boundary": ["candidate hypothesis cannot control position"],
+                        "position_impact_conditions": ["probe only until validated"],
+                    },
+                },
+                "confidence_score": 0.55,
+                "sample_count": 3,
+                "status": "candidate",
+            }
+        ]
 
 
 class _FallbackLearningDB:
@@ -150,7 +267,11 @@ class _PriorBootstrapDB:
 
 
 class ReviewerLearningContextTest(unittest.TestCase):
+    def tearDown(self):
+        clear_learning_context_cache()
+
     def test_learning_context_is_bounded_and_budget_logged(self):
+        clear_learning_context_cache()
         db = _FakeLearningDB()
         context = build_learning_context(
             db=db,
@@ -168,9 +289,50 @@ class ReviewerLearningContextTest(unittest.TestCase):
 
         self.assertTrue(context["enabled"])
         self.assertLessEqual(len(context["selected_ids"]), 3)
-        self.assertLessEqual(len(context["text"]), 420)
+        self.assertLessEqual(len(context["text"]), 520)
         self.assertEqual(len(db.budgets), 1)
         self.assertGreater(db.budgets[0]["dropped_count"], 0)
+        self.assertEqual(db.budgets[0]["digest_count"], len(context["selected_ids"]))
+        self.assertEqual(db.budgets[0]["trade_episode_count"], 0)
+        self.assertEqual(db.budgets[0]["hypothesis_count"], 0)
+        self.assertGreater(db.budgets[0]["total_context_chars"], 0)
+
+    def test_learning_context_cache_reuses_same_day_same_scope_result(self):
+        clear_learning_context_cache()
+        db = _FakeLearningDB()
+        full_config = {
+            "learning": {"enabled": True},
+            "learning_context": {
+                "enabled": True,
+                "cache": {"enabled": True},
+                "max_items_per_prompt": 3,
+                "max_chars_per_prompt": 260,
+            },
+        }
+        first = build_learning_context(
+            db=db,
+            full_config=full_config,
+            config_id="cfg",
+            trading_date="2025-02-10",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+        second = build_learning_context(
+            db=db,
+            full_config=full_config,
+            config_id="cfg",
+            trading_date="2025-02-10",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+
+        self.assertEqual(first["selected_ids"], second["selected_ids"])
+        self.assertEqual(db.digest_calls, 1)
+        self.assertEqual(len(db.budgets), 1)
 
     def test_learning_context_falls_back_when_requested_horizon_is_missing(self):
         db = _FallbackLearningDB()
@@ -218,6 +380,56 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(context["selected_ids"], ["sector-digest"])
         self.assertIn("same_sector", ",".join(context["retrieval_scopes"]))
 
+    def test_learning_context_includes_exploratory_memory_as_prior_only(self):
+        db = _ExploratoryLearningDB()
+        context = build_learning_context(
+            db=db,
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 3,
+                    "max_chars_per_prompt": 500,
+                    "exploratory_memory": {
+                        "enabled": True,
+                        "max_episode_items": 2,
+                        "max_episode_chars": 900,
+                        "max_hypothesis_items": 2,
+                        "max_hypothesis_chars": 900,
+                    },
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-12",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+
+        self.assertIn("Similar completed trade episodes", context["text"])
+        self.assertIn("No-trade opportunity memories", context["text"])
+        self.assertIn("neutral=technical:watchlist_trigger/medium", context["text"])
+        self.assertIn("trigger=breakout confirms with volume", context["text"])
+        self.assertIn("Exploratory hypotheses under validation", context["text"])
+        self.assertIn("not trading authority", context["text"])
+        self.assertIn("cannot size, add, justify position_matched", context["text"])
+        self.assertIn("Next-round strategy update", context["text"])
+        self.assertIn("position=current confirmation and invalidation required", context["text"])
+        self.assertIn("position=no sizing impact without current confirmati", context["text"])
+        self.assertIn("position=probe only until validated", context["text"])
+        self.assertIn("rebuttable priors", context["text"])
+        self.assertIn("confirms or contradicts", context["text"])
+        self.assertIn("entry=wait for trend confirmation", context["text"])
+        self.assertIn("invalidation=price falls back below breakout level", context["text"])
+        self.assertEqual(len(context["trade_episode_items"]), 1)
+        self.assertEqual(len(context["no_trade_opportunity_items"]), 1)
+        self.assertEqual(len(context["hypothesis_items"]), 1)
+        self.assertEqual(context["candidate_hypothesis_count"], 1)
+        self.assertEqual(db.budgets[0]["trade_episode_count"], 1)
+        self.assertEqual(db.budgets[0]["hypothesis_count"], 1)
+        self.assertGreater(db.budgets[0]["total_context_chars"], db.budgets[0]["selected_chars"])
+
     def test_config_overlay_uses_allowlist(self):
         config = apply_config_learning_overlay(
             {"learning": {"enabled": True, "config_overlay": {"enabled": True}}, "llm": {"model": "keep"}},
@@ -230,6 +442,503 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(config["llm"]["model"], "keep")
         self.assertEqual(len(config["runtime_learning_overlay"]["applied"]), 1)
         self.assertEqual(len(config["runtime_learning_overlay"]["skipped"]), 1)
+
+    def test_reviewer_writes_trade_episode_memory_from_closed_trade(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        cursor.execute(
+            """
+            CREATE TABLE futures_recommendation (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                reference_portfolio_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                effective_trade_date TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                underlying_code TEXT NOT NULL,
+                from_contract TEXT,
+                to_contract TEXT,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                base_price REAL,
+                base_price_source TEXT,
+                base_price_date TEXT,
+                open_price REAL,
+                prev_close_price REAL,
+                slippage_model TEXT,
+                slippage_ticks INTEGER,
+                slippage_amount REAL,
+                execution_price REAL,
+                justification TEXT,
+                signal_snapshot TEXT,
+                signal_snapshot_artifact_path TEXT,
+                signal_snapshot_sha256 TEXT,
+                audit_payload TEXT,
+                audit_payload_artifact_path TEXT,
+                audit_payload_sha256 TEXT,
+                warning_message TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE futures_transactions (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                config_id TEXT,
+                recommendation_id TEXT,
+                trading_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                price REAL,
+                execution_price REAL NOT NULL,
+                settle_price REAL,
+                contract_multiplier REAL NOT NULL,
+                margin_rate REAL NOT NULL,
+                margin_used REAL NOT NULL,
+                daily_pnl REAL DEFAULT 0,
+                commission REAL DEFAULT 0,
+                source_type TEXT,
+                execution_phase TEXT,
+                audit_payload TEXT,
+                warning_message TEXT,
+                booked_in_settlement BOOLEAN DEFAULT 0,
+                justification TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_reviewer_learning_schema(cursor)
+        snapshot = {
+            "technical": {"signal": "Bullish", "confidence": 0.72, "template_name": "breakout", "horizon_class": "short"},
+            "fundamental": {"signal": "Neutral", "confidence": 0.40, "horizon_class": "medium"},
+            "commodity_news": {"signal": "Bullish", "confidence": 0.61, "horizon_class": "event_short"},
+            "pre_open_plan": {"invalidation_level": 3180, "market_regime": "trend"},
+            "market_confirmation": {"confirmation_score": 0.74},
+        }
+        cursor.execute(
+            """
+            INSERT INTO futures_recommendation (
+                id, config_id, reference_portfolio_id, trading_date, effective_trade_date,
+                source_type, underlying_code, contract_code, action, lots, execution_price,
+                justification, signal_snapshot, status, created_at
+            ) VALUES (?, 'cfg', 'pf', '2025-03-10', '2025-03-10',
+                'strategy', 'BU', 'bu2506', 'open_long', 1, 3200,
+                'open long', ?, 'pending', '2025-03-10T09:00:00')
+            """,
+            ("rec-open", json.dumps(snapshot, ensure_ascii=False)),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_transactions (
+                id, portfolio_id, config_id, recommendation_id, trading_date, ticker,
+                contract_code, action, lots, price, execution_price, settle_price,
+                contract_multiplier, margin_rate, margin_used, daily_pnl,
+                commission, source_type, execution_phase, created_at
+            ) VALUES (?, 'pf', 'cfg', ?, ?, 'BU', 'bu2506', ?, 1, ?, ?, ?,
+                10, 0.1, 3200, 0, 1, 'strategy', 'phase2', ?)
+            """,
+            [
+                ("tx-open", "rec-open", "2025-03-10", "open_long", 3200.0, 3200.0, 3200.0, "2025-03-10T09:30:00"),
+                ("tx-close", "rec-close", "2025-03-12", "close_long", 3340.0, 3340.0, 3340.0, "2025-03-12T14:30:00"),
+            ],
+        )
+
+        rows = _write_trade_episode_memory(
+            cursor,
+            cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-12",
+        )
+
+        self.assertEqual(rows, 1)
+        cursor.execute("SELECT * FROM trade_episode_memory WHERE config_id='cfg'")
+        item = dict(cursor.fetchone())
+        self.assertEqual(item["ticker"], "BU")
+        self.assertEqual(item["side"], "long")
+        self.assertEqual(item["trading_date"], "2025-03-12")
+        self.assertEqual(item["episode_date"], "2025-03-12")
+        self.assertTrue(item["first_seen_at"])
+        self.assertTrue(item["last_reviewed_at"])
+        self.assertEqual(item["outcome_label"], "winner")
+        self.assertIn("BU long winner", item["lesson_text"])
+        payload = load_externalized_json(item["payload_json"])
+        contract = payload[CONTRACT_KEY]
+        self.assertEqual(contract["memory_type"], "trade_episode_memory")
+        self.assertEqual(contract["contract_version"], "next_round_strategy_update_v2")
+        self.assertEqual(contract["scope_priority"], "ticker_side_template")
+        self.assertIn("analyst_action_items", contract)
+        self.assertIn("pm_action_conditions", contract)
+        self.assertIn("invalidates_when", contract)
+        self.assertEqual(contract["position_authority"], "analysis_or_watchlist_only")
+        self.assertEqual(contract["max_position_impact"], "no_direct_position_impact")
+        self.assertIn("position_impact_conditions", contract)
+        self.assertIn("current-day data", " ".join(contract["usage_boundary"]))
+        event = cursor.execute(
+            "SELECT action_json FROM learning_event_log WHERE event_type='trade_episode_memory'"
+        ).fetchone()
+        self.assertIn(CONTRACT_KEY, json.loads(event["action_json"]))
+        conn.close()
+
+    def test_trade_episode_memory_keeps_original_review_date_on_refresh(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        cursor.execute(
+            """
+            CREATE TABLE futures_recommendation (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                reference_portfolio_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                effective_trade_date TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                underlying_code TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                execution_price REAL,
+                justification TEXT,
+                signal_snapshot TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE futures_transactions (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                config_id TEXT,
+                recommendation_id TEXT,
+                trading_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                price REAL,
+                execution_price REAL NOT NULL,
+                settle_price REAL,
+                contract_multiplier REAL NOT NULL,
+                margin_rate REAL NOT NULL,
+                margin_used REAL NOT NULL,
+                daily_pnl REAL DEFAULT 0,
+                commission REAL DEFAULT 0,
+                source_type TEXT,
+                execution_phase TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_reviewer_learning_schema(cursor)
+        cursor.execute(
+            """
+            INSERT INTO futures_recommendation (
+                id, config_id, reference_portfolio_id, trading_date, effective_trade_date,
+                source_type, underlying_code, contract_code, action, lots, execution_price,
+                justification, signal_snapshot, status, created_at
+            ) VALUES ('rec-open', 'cfg', 'pf', '2025-03-10', '2025-03-10',
+                'strategy', 'BU', 'bu2506', 'open_long', 1, 3200,
+                'open long', '{"pre_open_plan":{"market_regime":"trend"}}', 'pending',
+                '2025-03-10T09:00:00')
+            """
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_transactions (
+                id, portfolio_id, config_id, recommendation_id, trading_date, ticker,
+                contract_code, action, lots, price, execution_price, settle_price,
+                contract_multiplier, margin_rate, margin_used, daily_pnl,
+                commission, source_type, execution_phase, created_at
+            ) VALUES (?, 'pf', 'cfg', ?, ?, 'BU', 'bu2506', ?, 1, ?, ?, ?,
+                10, 0.1, 3200, 0, 1, 'strategy', 'phase2', ?)
+            """,
+            [
+                ("tx-open", "rec-open", "2025-03-10", "open_long", 3200.0, 3200.0, 3200.0, "2025-03-10T09:30:00"),
+                ("tx-close", "rec-close", "2025-03-12", "close_long", 3340.0, 3340.0, 3340.0, "2025-03-12T14:30:00"),
+            ],
+        )
+
+        _write_trade_episode_memory(
+            cursor,
+            cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-12",
+        )
+        cursor.execute("SELECT trading_date, first_seen_at FROM trade_episode_memory WHERE config_id='cfg'")
+        first = dict(cursor.fetchone())
+        _write_trade_episode_memory(
+            cursor,
+            cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-20",
+        )
+        cursor.execute(
+            "SELECT trading_date, episode_date, first_seen_at, last_reviewed_at FROM trade_episode_memory WHERE config_id='cfg'"
+        )
+        refreshed = dict(cursor.fetchone())
+        self.assertEqual(refreshed["trading_date"], "2025-03-12")
+        self.assertEqual(refreshed["episode_date"], "2025-03-12")
+        self.assertEqual(refreshed["first_seen_at"], first["first_seen_at"])
+        self.assertTrue(refreshed["last_reviewed_at"])
+        conn.close()
+
+    def test_loss_template_observation_is_candidate_memory_only(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        cursor.execute(
+            """
+            CREATE TABLE futures_recommendation (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                reference_portfolio_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                effective_trade_date TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                underlying_code TEXT NOT NULL,
+                from_contract TEXT,
+                to_contract TEXT,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                base_price REAL,
+                base_price_source TEXT,
+                base_price_date TEXT,
+                open_price REAL,
+                prev_close_price REAL,
+                slippage_model TEXT,
+                slippage_ticks INTEGER,
+                slippage_amount REAL,
+                execution_price REAL,
+                justification TEXT,
+                signal_snapshot TEXT,
+                signal_snapshot_artifact_path TEXT,
+                signal_snapshot_sha256 TEXT,
+                audit_payload TEXT,
+                audit_payload_artifact_path TEXT,
+                audit_payload_sha256 TEXT,
+                warning_message TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE futures_transactions (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                config_id TEXT,
+                recommendation_id TEXT,
+                trading_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                price REAL,
+                execution_price REAL NOT NULL,
+                settle_price REAL,
+                contract_multiplier REAL NOT NULL,
+                margin_rate REAL NOT NULL,
+                margin_used REAL NOT NULL,
+                daily_pnl REAL DEFAULT 0,
+                commission REAL DEFAULT 0,
+                source_type TEXT,
+                execution_phase TEXT,
+                audit_payload TEXT,
+                warning_message TEXT,
+                booked_in_settlement BOOLEAN DEFAULT 0,
+                justification TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_reviewer_learning_schema(cursor)
+        snapshot = {
+            "technical": {
+                "signal": "Bearish",
+                "confidence": 0.62,
+                "template_name": "breakdown",
+                "horizon_class": "short",
+                "metadata": {
+                    "data_usage_summary": {
+                        "pandaai_daily": {"available": True, "used_in_signal": True}
+                    }
+                },
+            },
+            "fundamental": {"signal": "Neutral", "confidence": 0.45, "horizon_class": "medium"},
+            "commodity_news": {"signal": "Bearish", "confidence": 0.58, "horizon_class": "event_short"},
+            "pre_open_plan": {"market_regime": "range"},
+        }
+        cursor.execute(
+            """
+            INSERT INTO futures_recommendation (
+                id, config_id, reference_portfolio_id, trading_date, effective_trade_date,
+                source_type, underlying_code, contract_code, action, lots, execution_price,
+                justification, signal_snapshot, status, created_at
+            ) VALUES (?, 'cfg', 'pf', '2025-01-06', '2025-01-06',
+                'strategy', 'TA', 'ta2505', 'open_short', 1, 5800,
+                'open short', ?, 'pending', '2025-01-06T09:00:00')
+            """,
+            ("rec-ta-open", json.dumps(snapshot, ensure_ascii=False)),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_transactions (
+                id, portfolio_id, config_id, recommendation_id, trading_date, ticker,
+                contract_code, action, lots, price, execution_price, settle_price,
+                contract_multiplier, margin_rate, margin_used, daily_pnl,
+                commission, source_type, execution_phase, created_at
+            ) VALUES (?, 'pf', 'cfg', ?, ?, 'TA', 'ta2505', ?, 1, ?, ?, ?,
+                5, 0.1, 2900, 0, 1, 'strategy', 'phase2', ?)
+            """,
+            [
+                ("tx-ta-open", "rec-ta-open", "2025-01-06", "open_short", 5800.0, 5800.0, 5800.0, "2025-01-06T09:30:00"),
+                ("tx-ta-close", "rec-ta-close", "2025-01-08", "close_short", 5900.0, 5900.0, 5900.0, "2025-01-08T14:30:00"),
+            ],
+        )
+
+        rows = _write_loss_template_observation_research(
+            cursor,
+            cfg={
+                "learning": {
+                    "loss_template_observation": {
+                        "enabled": True,
+                        "lookback_days": 30,
+                        "min_loss_samples": 1,
+                        "min_cumulative_loss_abs": 1,
+                        "max_rows_per_day": 2,
+                    }
+                }
+            },
+            config_id="cfg",
+            trading_date="2025-01-08",
+        )
+
+        self.assertEqual(rows, 1)
+        item = cursor.execute("SELECT * FROM exploratory_hypothesis WHERE config_id='cfg'").fetchone()
+        self.assertEqual(item["ticker"], "TA")
+        self.assertEqual(item["status"], "candidate")
+        payload = load_externalized_json(
+            item["payload_json"],
+            item["payload_artifact_path"],
+            item["payload_sha256"],
+        )
+        contract = payload[CONTRACT_KEY]
+        self.assertEqual(contract["memory_type"], "loss_template_observation")
+        self.assertEqual(contract["position_authority"], "analysis_or_watchlist_only")
+        self.assertEqual(contract["max_position_impact"], "no_direct_position_impact")
+        self.assertTrue(payload["observation_only"])
+        event = cursor.execute(
+            "SELECT action_json FROM learning_event_log WHERE event_type='loss_template_observation'"
+        ).fetchone()
+        self.assertIn(CONTRACT_KEY, json.loads(event["action_json"]))
+        conn.close()
+
+    def test_reviewer_exploratory_hypotheses_are_candidate_priors(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        _ensure_reviewer_learning_schema(cursor)
+        cursor.execute(
+            """
+            INSERT INTO trade_episode_memory (
+                id, config_id, trading_date, ticker, side, sector, signal_template,
+                signal_combo, horizon_class, market_regime, open_date, close_date,
+                holding_days, net_pnl, return_on_notional, outcome_label,
+                lesson_text, payload_json, created_at
+            ) VALUES
+                ('e1', 'cfg', '2025-03-11', 'BU', 'long', 'energy', 'long_breakout_short',
+                 '["Bullish","Neutral","Bullish"]', 'short', 'trend', '2025-03-10',
+                 '2025-03-11', 1, 1200, 0.02, 'winner', 'BU breakout worked', '{}', 'now'),
+                ('e2', 'cfg', '2025-03-12', 'BU', 'long', 'energy', 'long_breakout_short',
+                 '["Bullish","Neutral","Bullish"]', 'short', 'trend', '2025-03-11',
+                 '2025-03-12', 1, -400, -0.01, 'loser', 'late breakout failed', '{}', 'now')
+            """
+        )
+
+        def fake_agent_call(**kwargs):
+            return ExploratoryHypothesisLLMOutput(
+                hypotheses=[
+                    ExploratoryHypothesisItem(
+                        ticker="BU",
+                        sector="energy",
+                        side="long",
+                        horizon_class="short",
+                        market_regime="trend",
+                        hypothesis_text="BU long breakouts require current confirmation and explicit invalidation.",
+                        evidence_summary="two recent BU episodes",
+                        suggested_use="probe_candidate",
+                        entry_timing_hint="wait for price confirmation",
+                        exit_timing_hint="exit if confirmation disappears",
+                        holding_period_hint="short",
+                        invalidation_condition="breakout fails before close",
+                        validation_plan="validate with future BU trend samples",
+                        confidence_score=0.52,
+                    )
+                ]
+            )
+
+        with patch("llm.inference.agent_call", side_effect=fake_agent_call):
+            summary = write_exploratory_hypotheses(
+                cursor,
+                cfg={
+                    "llm": {"model": "unit-test"},
+                    "max_total_margin_ratio": 0.20,
+                    "learning": {
+                        "memory_expires_after_days": 30,
+                        "exploratory_research": {
+                            "enabled": True,
+                            "use_llm": True,
+                            "min_episode_samples": 2,
+                            "max_episode_samples": 4,
+                            "max_hypotheses_per_day": 3,
+                        },
+                    },
+                },
+                config_id="cfg",
+                trading_date="2025-03-12",
+            )
+
+        self.assertEqual(summary["rows"], 1)
+        cursor.execute("SELECT * FROM exploratory_hypothesis WHERE config_id='cfg'")
+        item = dict(cursor.fetchone())
+        self.assertEqual(item["status"], "candidate")
+        self.assertIn("prompt prior only", item["suggested_use"])
+        self.assertIn("explicit invalidation", item["hypothesis_text"])
+        payload = load_externalized_json(item["payload_json"], item["payload_artifact_path"], item["payload_sha256"])
+        self.assertTrue(payload["hard_constraints"]["prompt_prior_only"])
+        self.assertTrue(payload["hard_constraints"]["candidate_hypothesis_cannot_control_position"])
+        self.assertAlmostEqual(payload["hard_constraints"]["max_total_margin_ratio"], 0.20)
+        contract = payload[CONTRACT_KEY]
+        self.assertEqual(contract["contract_version"], "next_round_strategy_update_v2")
+        self.assertEqual(contract["position_authority"], "analysis_or_watchlist_only")
+        self.assertEqual(contract["max_position_impact"], "no_direct_position_impact")
+        self.assertIn("pm_action_conditions", contract)
+        self.assertEqual(payload["entry_timing_hint"], "wait for price confirmation")
+        self.assertEqual(payload["agent_name"], "researcher")
+        cursor.execute("SELECT raw_prompt FROM reviewer_llm_notes WHERE config_id='cfg'")
+        note = dict(cursor.fetchone())
+        self.assertIn("AgentQuant Researcher", note["raw_prompt"])
+        self.assertNotIn("AgentQuant Reviewer acting as a research memory curator", note["raw_prompt"])
+        self.assertEqual(payload["invalidation_condition"], "breakout fails before close")
+        conn.close()
 
 
 class AdaptivePolicyAuditorTest(unittest.TestCase):
@@ -402,7 +1111,8 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
         self.assertLess(ratio * 0.10, 0.17)
         self.assertGreater(ratio, 0.12)
         self.assertIn("capital_utilization_memory_protected", reasons)
-        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "strong_opportunity")
+        self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "alpha_release_boost")
+        self.assertEqual(diagnostics["capital_utilization_target"]["alpha_release_tier"], "boost")
         self.assertTrue(diagnostics["capital_utilization_target"]["high_quality_memory"])
         self.assertTrue(diagnostics["capital_utilization_target"]["base_position_anchor_lifted"])
         self.assertEqual(diagnostics["capital_utilization_target"]["dynamic_allocation_tier"], "validated_with_stop")
@@ -512,7 +1222,8 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
         self.assertNotIn("capital_utilization_memory_protected", reasons)
         self.assertEqual(diagnostics["capital_utilization_target"]["target_mode"], "confirmed_observation")
         rejected = diagnostics.get("capital_utilization_learning", {}).get("protected_evidence_rejected", {})
-        self.assertEqual(rejected.get("reason"), "missing_stop_protection_for_strong_scaling")
+        self.assertEqual(rejected.get("reason"), "missing_pretrade_invalidation")
+        self.assertEqual(rejected.get("alpha_release_tier"), "probe")
 
     def test_protected_memory_does_not_scale_when_current_combo_is_weak(self):
         ratio, reasons, notes, diagnostics = _apply_capital_utilization_control(
@@ -797,7 +1508,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             0.01,
         )
 
-    def test_strong_opportunity_can_use_configured_net_exposure_weak_param(self):
+    def test_alpha_release_can_use_configured_net_exposure_weak_param(self):
         max_net, symmetric, mode = _resolve_net_exposure_control(
             {
                 "net_exposure_control": {
@@ -808,7 +1519,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             {
                 "capital_utilization_target": {
-                    "target_mode": "strong_opportunity",
+                    "target_mode": "alpha_release_boost",
                     "high_quality_memory": True,
                 }
             },
@@ -816,7 +1527,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
 
         self.assertEqual(max_net, 2.00)
         self.assertTrue(symmetric)
-        self.assertEqual(mode, "strong_opportunity")
+        self.assertEqual(mode, "alpha_release")
 
     def test_unproven_signal_keeps_base_net_exposure_weak_param(self):
         max_net, symmetric, mode = _resolve_net_exposure_control(
@@ -1100,6 +1811,54 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertTrue(enriched.would_change_view_if)
         self.assertLessEqual(enriched.business_quality_score, 0.56)
         self.assertIn("business_quality", enriched.metadata)
+        self.assertIn("neutral_opportunity_contract", enriched.metadata)
+        self.assertEqual(enriched.neutral_opportunity_bucket, "conflict_avoidance")
+        self.assertEqual(enriched.neutral_watchlist_priority, "low")
+
+    def test_neutral_conditional_watchlist_is_structured_not_trade_permission(self):
+        snapshot = {
+            "technical": {
+                "signal": "Neutral",
+                "neutral_reason": "waiting for breakout confirmation",
+                "missing_evidence": [],
+                "conflicting_factors": [],
+                "would_change_view_if": "price breaks above 3200 with volume",
+                "neutral_opportunity_bucket": "watchlist_trigger",
+                "neutral_trigger_condition": "price breaks above 3200 with volume",
+                "neutral_shadow_side": "long",
+                "neutral_watchlist_priority": "medium",
+                "metadata": {
+                    "neutral_opportunity_contract": {
+                        "bucket": "watchlist_trigger",
+                        "trigger_condition": "price breaks above 3200 with volume",
+                        "shadow_side": "long",
+                        "watchlist_priority": "medium",
+                        "tracking_only": True,
+                        "trade_permission": "none_without_current_confirmation",
+                    }
+                },
+            },
+            "fundamental": {"signal": "Neutral", "confidence": 0.5},
+            "commodity_news": {"signal": "Neutral", "confidence": 0.5},
+        }
+
+        item = classify_neutral_signal(
+            analyst="technical",
+            payload=snapshot["technical"],
+            snapshot=snapshot,
+            cfg={},
+        )
+        summary = build_neutral_accountability_summary(
+            [{"id": "rec-1", "underlying_code": "BU", "signal_snapshot": snapshot}],
+            {},
+        )
+
+        self.assertEqual(item["category"], "conditional_watchlist")
+        contract = item["neutral_opportunity_contract"]
+        self.assertTrue(contract["tracking_only"])
+        self.assertEqual(contract["trade_permission"], "none_without_current_confirmation")
+        self.assertEqual(summary["category_counts"]["conditional_watchlist"], 1)
+        self.assertEqual(summary["by_analyst"]["technical"]["conditional_watchlist_count"], 1)
 
     def test_stale_fundamental_direction_is_forced_to_accountable_neutral(self):
         signal = AnalystSignal(
@@ -1393,6 +2152,61 @@ class StrictCompletionRegressionTest(unittest.TestCase):
 
         self.assertEqual(state, "weak_block")
 
+    def test_template_prior_loader_uses_project_root_for_relative_path(self):
+        path = _project_path("src/logs/attribution/template_prior.json")
+
+        self.assertEqual(path, SRC_ROOT / "logs" / "attribution" / "template_prior.json")
+        self.assertNotIn("src\\src", str(path))
+        self.assertNotIn("src/src", str(path))
+
+    def test_template_prior_export_uses_project_relative_path_without_src_duplication(self):
+        temp_parent = SRC_ROOT / "logs"
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_parent) as tmpdir:
+            tmp_path = Path(tmpdir)
+            project_root = SRC_ROOT.parent
+            export_file = tmp_path / "template_prior.json"
+            relative_export_path = export_file.relative_to(project_root)
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+            _ensure_reviewer_learning_schema(cursor)
+            cursor.execute(
+                """
+                INSERT INTO signal_template_performance (
+                    id, config_id, ticker, side, signal_template, horizon_class,
+                    market_regime, sample_count, win_rate, net_pnl, avg_pnl,
+                    profit_factor, confidence_score, last_updated, payload_json
+                ) VALUES (
+                    'perf', 'cfg', 'BU', 'long', 'long_breakout_short', 'short',
+                    'trend', 3, 0.67, 3000, 1000, 1.5, 0.7, 'now', '{}'
+                )
+                """
+            )
+
+            prior_path = _export_template_prior(
+                cursor,
+                cfg={
+                    "learning": {
+                        "template_prior": {
+                            "enabled": True,
+                            "export_on_backtest_end": True,
+                            "path": str(relative_export_path),
+                        }
+                    }
+                },
+                config_id="cfg",
+                trading_date="2025-03-20",
+            )
+            conn.close()
+
+            self.assertTrue(prior_path)
+            self.assertNotIn("src\\src", prior_path)
+            self.assertNotIn("src/src", prior_path)
+            self.assertTrue(Path(prior_path).exists())
+
 
 class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
     def _connection(self):
@@ -1432,7 +2246,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             """
         )
 
-    def _signal_snapshot(self, *, learned: bool = False):
+    def _signal_snapshot(self, *, learned: bool = False, learning_reason: str = "adaptive_policy_protect"):
         plan = {
             "analyst_signal_combo": ["Bullish", "Bullish", "Neutral"],
             "decision_horizon": "short",
@@ -1442,7 +2256,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         if learned:
             plan["trade_auditor"] = {
                 "decision": "allow",
-                "reasons": ["adaptive_policy_protect"],
+                "reasons": [learning_reason],
                 "diagnostics": {"adaptive_policy_applied": [{"policy_type": "causal_review_rule"}]},
             }
         return {
@@ -1562,6 +2376,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(policy["side"], "long")
             self.assertEqual(policy["policy_action"], "protect")
             self.assertEqual(policy["sample_count"], 2)
+            policy_payload = json.loads(policy["payload_json"])
+            self.assertEqual(policy_payload[CONTRACT_KEY]["contract_version"], "next_round_strategy_update_v2")
+            self.assertEqual(policy_payload[CONTRACT_KEY]["position_authority"], "pm_auditor_conditioned")
+            self.assertIn("may_support_alpha_scaling", policy_payload[CONTRACT_KEY]["max_position_impact"])
             self.assertEqual(candidate["rule_validation_status"], "validated_rule_applied")
             self.assertEqual(json.loads(candidate["payload_json"])["rule_validation"]["applied_rule_count"], 1)
         finally:
@@ -1605,6 +2423,1053 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(summary["learned_reason_counts"]["adaptive_policy"], 1)
             self.assertEqual(summary["learned_effect_counts"]["alpha_release"], 1)
             self.assertEqual(summary["learned_effect_summary"]["alpha_release"]["total_trades"], 1)
+        finally:
+            conn.close()
+
+    def test_learned_underperformance_writes_scoped_alpha_demote_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_trade_tables(cursor)
+            recommendations = []
+            transactions = []
+            for idx in range(3):
+                rec_id = f"learned-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=True))))
+                transactions.extend(
+                    [
+                        (f"lo-{idx}", "cfg", rec_id, f"2025-02-0{idx + 1}", f"2025-02-0{idx + 1}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"lc-{idx}", "cfg", f"lc-{idx}", f"2025-02-1{idx + 1}", f"2025-02-1{idx + 1}T14:55:00", "ZZ", "zz2505", "close_long", 1, 90.0, 90.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            for idx in range(3):
+                rec_id = f"plain-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=False))))
+                transactions.extend(
+                    [
+                        (f"uo-{idx}", "cfg", rec_id, f"2025-02-2{idx}", f"2025-02-2{idx}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"uc-{idx}", "cfg", f"uc-{idx}", f"2025-02-2{idx}", f"2025-02-2{idx}T14:55:00", "ZZ", "zz2505", "close_long", 1, 115.0, 115.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            cursor.executemany("INSERT INTO futures_recommendation VALUES (?, ?, ?)", recommendations)
+            cursor.executemany(
+                """
+                INSERT INTO futures_transactions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                transactions,
+            )
+
+            result = _write_learned_vs_unlearned_policy_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-02-28",
+                cfg={"learning": {"learned_vs_unlearned_policy": {"enabled": True}}},
+            )
+
+            row = cursor.execute(
+                """
+                SELECT *
+                FROM adaptive_policy_state
+                WHERE config_id = ? AND policy_type = ?
+                """,
+                ("cfg", "learned_vs_unlearned"),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["ticker"], "ZZ")
+            self.assertEqual(row["side"], "long")
+            self.assertEqual(row["signal_template"], "long_reversal_confirmed_short")
+            self.assertEqual(row["policy_action"], "demote")
+            self.assertEqual(result["status"], "scoped_demote_applied")
+        finally:
+            conn.close()
+
+    def test_learned_underperformance_writes_scoped_risk_suppression_demote_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_trade_tables(cursor)
+            recommendations = []
+            transactions = []
+            for idx in range(3):
+                rec_id = f"learned-risk-{idx}"
+                recommendations.append(
+                    (
+                        rec_id,
+                        "cfg",
+                        json.dumps(
+                            self._signal_snapshot(
+                                learned=True,
+                                learning_reason="strategy_memory_watchlist_cap",
+                            )
+                        ),
+                    )
+                )
+                transactions.extend(
+                    [
+                        (f"lro-{idx}", "cfg", rec_id, f"2025-02-0{idx + 1}", f"2025-02-0{idx + 1}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"lrc-{idx}", "cfg", f"lrc-{idx}", f"2025-02-1{idx + 1}", f"2025-02-1{idx + 1}T14:55:00", "ZZ", "zz2505", "close_long", 1, 90.0, 90.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            for idx in range(3):
+                rec_id = f"plain-risk-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=False))))
+                transactions.extend(
+                    [
+                        (f"uro-{idx}", "cfg", rec_id, f"2025-02-2{idx}", f"2025-02-2{idx}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"urc-{idx}", "cfg", f"urc-{idx}", f"2025-02-2{idx}", f"2025-02-2{idx}T14:55:00", "ZZ", "zz2505", "close_long", 1, 115.0, 115.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            cursor.executemany("INSERT INTO futures_recommendation VALUES (?, ?, ?)", recommendations)
+            cursor.executemany(
+                """
+                INSERT INTO futures_transactions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                transactions,
+            )
+
+            result = _write_learned_vs_unlearned_policy_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-02-28",
+                cfg={"learning": {"learned_vs_unlearned_policy": {"enabled": True}}},
+            )
+
+            row = cursor.execute(
+                """
+                SELECT *
+                FROM adaptive_policy_state
+                WHERE config_id = ? AND policy_type = ?
+                """,
+                ("cfg", "learned_vs_unlearned"),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["ticker"], "ZZ")
+            self.assertEqual(row["policy_action"], "demote")
+            self.assertIn("risk_suppression", row["reason"])
+            self.assertEqual(result["status"], "scoped_demote_applied")
+        finally:
+            conn.close()
+
+    def test_global_learned_underperformance_without_scoped_alpha_is_diagnostic_only(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_trade_tables(cursor)
+            recommendations = []
+            transactions = []
+            for idx in range(3):
+                rec_id = f"learned-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=True))))
+                ticker = f"Z{idx}"
+                transactions.extend(
+                    [
+                        (f"lo-{idx}", "cfg", rec_id, f"2025-02-0{idx + 1}", f"2025-02-0{idx + 1}T09:00:00", ticker, "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"lc-{idx}", "cfg", f"lc-{idx}", f"2025-02-1{idx + 1}", f"2025-02-1{idx + 1}T14:55:00", ticker, "zz2505", "close_long", 1, 90.0, 90.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            for idx in range(3):
+                rec_id = f"plain-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=False))))
+                transactions.extend(
+                    [
+                        (f"uo-{idx}", "cfg", rec_id, f"2025-02-2{idx}", f"2025-02-2{idx}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"uc-{idx}", "cfg", f"uc-{idx}", f"2025-02-2{idx}", f"2025-02-2{idx}T14:55:00", "ZZ", "zz2505", "close_long", 1, 115.0, 115.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            cursor.executemany("INSERT INTO futures_recommendation VALUES (?, ?, ?)", recommendations)
+            cursor.executemany(
+                """
+                INSERT INTO futures_transactions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                transactions,
+            )
+
+            result = _write_learned_vs_unlearned_policy_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-02-28",
+                cfg={"learning": {"learned_vs_unlearned_policy": {"enabled": True}}},
+            )
+
+            self.assertEqual(result["status"], "global_underperformance_diagnostic_only")
+            rows = cursor.execute(
+                """
+                SELECT *
+                FROM adaptive_policy_state
+                WHERE config_id = ? AND policy_type = ?
+                """,
+                ("cfg", "learned_vs_unlearned"),
+            ).fetchall()
+            self.assertEqual(rows, [])
+        finally:
+            conn.close()
+
+    def test_scoped_learned_self_loss_demotes_without_benchmark(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_trade_tables(cursor)
+            recommendations = []
+            transactions = []
+            for idx in range(3):
+                rec_id = f"learned-self-loss-{idx}"
+                recommendations.append((rec_id, "cfg", json.dumps(self._signal_snapshot(learned=True))))
+                transactions.extend(
+                    [
+                        (f"slo-{idx}", "cfg", rec_id, f"2025-02-0{idx + 1}", f"2025-02-0{idx + 1}T09:00:00", "ZZ", "zz2505", "open_long", 1, 100.0, 100.0, 10.0, 1.0, "strategy"),
+                        (f"slc-{idx}", "cfg", f"slc-{idx}", f"2025-02-1{idx + 1}", f"2025-02-1{idx + 1}T14:55:00", "ZZ", "zz2505", "close_long", 1, 50.0, 50.0, 10.0, 1.0, "strategy"),
+                    ]
+                )
+            cursor.executemany("INSERT INTO futures_recommendation VALUES (?, ?, ?)", recommendations)
+            cursor.executemany(
+                """
+                INSERT INTO futures_transactions
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                transactions,
+            )
+
+            result = _write_learned_vs_unlearned_policy_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-02-28",
+                cfg={
+                    "learning": {
+                        "learned_vs_unlearned_policy": {
+                            "enabled": True,
+                            "min_scoped_alpha_samples": 3,
+                            "allow_self_loss_demote_without_benchmark": True,
+                            "min_self_loss_net_pnl": -1000,
+                        }
+                    }
+                },
+            )
+
+            row = cursor.execute(
+                """
+                SELECT *
+                FROM adaptive_policy_state
+                WHERE config_id = ? AND policy_type = ?
+                """,
+                ("cfg", "learned_vs_unlearned"),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(result["status"], "scoped_demote_applied")
+            payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(
+                payload["scoped_underperformance"]["comparison_status"],
+                "same_scope_self_loss_without_benchmark",
+            )
+        finally:
+            conn.close()
+
+    def test_neutral_shadow_tracking_records_missed_opportunity_without_policy_action(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE portfolio (
+                    id TEXT,
+                    config_id TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
+            cursor.execute("INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)", ("p1", "2025-02-10", "ZZ", 1200.0))
+
+            summary = _neutral_shadow_tracking_summary(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-02-10",
+                recommendations=[
+                    {
+                        "id": "rec-neutral",
+                        "underlying_code": "ZZ",
+                        "signal_snapshot": {
+                            "technical": {
+                                "signal": "Neutral",
+                                "neutral_reason": "needs confirmation",
+                                "missing_evidence": ["volume"],
+                                "conflicting_factors": [],
+                                "would_change_view_if": "breakout confirms",
+                            },
+                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
+                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                        },
+                    }
+                ],
+            )
+
+            self.assertEqual(summary["observation_count"], 1)
+            self.assertEqual(summary["missed_opportunity_count"], 1)
+            self.assertGreater(summary["total_shadow_pnl"], 0)
+            event = cursor.execute(
+                "SELECT action_json FROM learning_event_log WHERE event_type = ?",
+                ("neutral_shadow_tracking",),
+            ).fetchone()
+            self.assertTrue(json.loads(event["action_json"])["tracking_only"])
+        finally:
+            conn.close()
+
+    def test_neutral_shadow_tracking_uses_only_settled_forward_window(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            cursor.execute(
+                """
+                CREATE TABLE daily_settlement (
+                    portfolio_id TEXT,
+                    trading_date TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
+            cursor.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [
+                    ("p1", "2025-02-11"),
+                    ("p1", "2025-02-12"),
+                    ("p1", "2025-02-13"),
+                    ("p1", "2025-02-14"),
+                ],
+            )
+            cursor.executemany(
+                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)",
+                [
+                    ("p1", "2025-02-11", "ZZ", 100.0),
+                    ("p1", "2025-02-12", "ZZ", 200.0),
+                    ("p1", "2025-02-13", "ZZ", 300.0),
+                    ("p1", "2025-02-14", "ZZ", 5000.0),
+                ],
+            )
+
+            summary = _neutral_shadow_tracking_summary(
+                cursor,
+                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                config_id="cfg",
+                trading_date="2025-02-10",
+                recommendations=[
+                    {
+                        "id": "rec-neutral",
+                        "underlying_code": "ZZ",
+                        "signal_snapshot": {
+                            "technical": {"signal": "Neutral"},
+                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
+                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                        },
+                    }
+                ],
+                write_event=False,
+            )
+
+            self.assertEqual(summary["forward_status"], "applied")
+            self.assertEqual(summary["forward_window_dates"], ["2025-02-11", "2025-02-12", "2025-02-13"])
+            self.assertEqual(summary["forward_observation_count"], 1)
+            self.assertEqual(summary["forward_total_shadow_pnl"], 600.0)
+            self.assertEqual(summary["forward_missed_opportunity_count"], 1)
+        finally:
+            conn.close()
+
+    def test_neutral_forward_shadow_backfill_waits_for_future_settlements(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            cursor.execute("CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)")
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE futures_recommendation (
+                    id TEXT,
+                    config_id TEXT,
+                    trading_date TEXT,
+                    source_type TEXT,
+                    underlying_code TEXT,
+                    signal_snapshot TEXT,
+                    signal_snapshot_artifact_path TEXT,
+                    signal_snapshot_sha256 TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
+            cursor.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [
+                    ("p1", "2025-02-10"),
+                    ("p1", "2025-02-11"),
+                    ("p1", "2025-02-12"),
+                    ("p1", "2025-02-13"),
+                ],
+            )
+            cursor.executemany(
+                "INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)",
+                [
+                    ("p1", "2025-02-11", "ZZ", 100.0),
+                    ("p1", "2025-02-12", "ZZ", 200.0),
+                    ("p1", "2025-02-13", "ZZ", 300.0),
+                ],
+            )
+            cursor.execute(
+                "INSERT INTO futures_recommendation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "rec-neutral",
+                    "cfg",
+                    "2025-02-10",
+                    "strategy",
+                    "ZZ",
+                    json.dumps(
+                        {
+                            "technical": {"signal": "Neutral"},
+                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
+                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                        }
+                    ),
+                    None,
+                    None,
+                    "now",
+                ),
+            )
+
+            pending = _backfill_neutral_forward_shadow_tracking(
+                cursor,
+                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                config_id="cfg",
+                trading_date="2025-02-12",
+            )
+            applied = _backfill_neutral_forward_shadow_tracking(
+                cursor,
+                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                config_id="cfg",
+                trading_date="2025-02-13",
+            )
+
+            self.assertEqual(pending["rows"], 0)
+            self.assertEqual(applied["rows"], 1)
+            row = cursor.execute(
+                "SELECT evidence_json FROM learning_event_log WHERE event_type = ?",
+                ("neutral_forward_shadow_tracking",),
+            ).fetchone()
+            evidence = json.loads(row["evidence_json"])
+            self.assertEqual(evidence["forward_window_dates"], ["2025-02-11", "2025-02-12", "2025-02-13"])
+            self.assertEqual(evidence["forward_total_shadow_pnl"], 600.0)
+        finally:
+            conn.close()
+
+    def test_no_trade_opportunity_memory_backfills_shadow_only_after_settlement(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            cursor.execute("CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)")
+            cursor.execute(
+                """
+                CREATE TABLE futures_recommendation (
+                    id TEXT,
+                    config_id TEXT,
+                    reference_portfolio_id TEXT,
+                    trading_date TEXT,
+                    effective_trade_date TEXT,
+                    source_type TEXT,
+                    underlying_code TEXT,
+                    contract_code TEXT,
+                    action TEXT,
+                    lots INTEGER,
+                    base_price REAL,
+                    execution_price REAL,
+                    open_price REAL,
+                    prev_close_price REAL,
+                    signal_snapshot TEXT,
+                    signal_snapshot_artifact_path TEXT,
+                    signal_snapshot_sha256 TEXT,
+                    warning_message TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
+            snapshot = {
+                "technical": {
+                    "signal": "Bullish",
+                    "confidence": 0.7,
+                    "template_name": "breakout",
+                    "horizon_class": "short",
+                    "opportunity_type": "trend_continuation",
+                    "opportunity_layer": "tradeable_setup",
+                    "factor_focus": ["trend"],
+                    "current_evidence_conflict": [],
+                },
+                "fundamental": {"signal": "Bullish", "confidence": 0.6},
+                "commodity_news": {
+                    "signal": "Neutral",
+                    "confidence": 0.3,
+                    "neutral_reason": "news impact needs price confirmation",
+                    "missing_evidence": [],
+                    "conflicting_factors": [],
+                    "would_change_view_if": "price confirms upside event follow-through",
+                    "neutral_opportunity_bucket": "watchlist_trigger",
+                    "neutral_trigger_condition": "price confirms upside event follow-through",
+                    "neutral_shadow_side": "long",
+                    "neutral_watchlist_priority": "medium",
+                    "metadata": {
+                        "neutral_opportunity_contract": {
+                            "bucket": "watchlist_trigger",
+                            "trigger_condition": "price confirms upside event follow-through",
+                            "shadow_side": "long",
+                            "watchlist_priority": "medium",
+                            "tracking_only": True,
+                            "trade_permission": "none_without_current_confirmation",
+                        }
+                    },
+                },
+                "pre_open_plan": {
+                    "analyst_signal_combo": ["Bullish", "Bullish", "Neutral"],
+                    "tradable_lots_reason": "intraday_trigger_not_met",
+                    "decision_horizon": "short",
+                    "market_regime": "trend",
+                },
+                "trade_research_contracts": {
+                    "technical": {
+                        "opportunity_type": "trend_continuation",
+                        "opportunity_layer": "tradeable_setup",
+                        "factor_focus": ["trend"],
+                        "current_evidence_conflict": [],
+                    }
+                },
+            }
+            cursor.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [("p1", "2025-03-04"), ("p1", "2025-03-05"), ("p1", "2025-03-06")],
+            )
+            cursor.executemany(
+                """
+                INSERT INTO futures_recommendation VALUES (?, 'cfg', 'p1', ?, ?, 'strategy', 'BU', 'bu2506',
+                    ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, ?)
+                """,
+                [
+                    ("rec-nt", "2025-03-03", "2025-03-03", "hold", 0, 3200.0, json.dumps(snapshot), "2025-03-03T09:00:00"),
+                    ("rec-p1", "2025-03-04", "2025-03-04", "hold", 0, 3210.0, "{}", "2025-03-04T09:00:00"),
+                    ("rec-p2", "2025-03-05", "2025-03-05", "hold", 0, 3220.0, "{}", "2025-03-05T09:00:00"),
+                    ("rec-p3", "2025-03-06", "2025-03-06", "hold", 0, 3230.0, "{}", "2025-03-06T09:00:00"),
+                ],
+            )
+
+            rows = _write_no_trade_opportunity_memory(
+                cursor,
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-03",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-nt",
+                        "config_id": "cfg",
+                        "underlying_code": "BU",
+                        "action": "hold",
+                        "lots": 0,
+                        "base_price": 3200.0,
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+            )
+            pending = _backfill_no_trade_opportunity_shadow_results(
+                cursor,
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "shadow_forward_days": [3]}}},
+                config_id="cfg",
+                trading_date="2025-03-05",
+            )
+            applied = _backfill_no_trade_opportunity_shadow_results(
+                cursor,
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "shadow_forward_days": [3]}}},
+                config_id="cfg",
+                trading_date="2025-03-06",
+            )
+
+            self.assertEqual(rows, 1)
+            self.assertEqual(pending["status"], "no_ready_rows")
+            self.assertEqual(applied["updated_rows"], 1)
+            item = cursor.execute("SELECT * FROM no_trade_opportunity_memory").fetchone()
+            results = json.loads(item["shadow_results_json"])
+            payload = load_externalized_json(item["payload_json"])
+            self.assertEqual(results[0]["horizon_days"], 3)
+            self.assertEqual(item["classification"], "missed_opportunity")
+            self.assertEqual(payload["neutral_opportunity_observations"][0]["bucket"], "watchlist_trigger")
+            self.assertEqual(payload["no_trade_reason"], "intraday_trigger_not_met")
+            self.assertEqual(payload["no_trade_reason_category"]["category"], "timing")
+            self.assertEqual(payload["no_trade_reason_category"]["category_label"], "择时")
+            self.assertEqual(payload[CONTRACT_KEY]["memory_type"], "no_trade_opportunity_memory")
+            self.assertIn("position_impact_conditions", payload[CONTRACT_KEY])
+            self.assertIn("not increase size", " ".join(payload[CONTRACT_KEY]["position_impact_conditions"]))
+            self.assertIn("neutral_condition=commodity_news:watchlist_trigger", item["evidence_summary"])
+            self.assertIn("no_trade_category=择时:timing", item["evidence_summary"])
+            event_row = cursor.execute(
+                "SELECT evidence_json FROM learning_event_log WHERE event_type = ?",
+                ("no_trade_opportunity_memory",),
+            ).fetchone()
+            event_evidence = json.loads(event_row["evidence_json"])
+            self.assertEqual(event_evidence["no_trade_reason_categories"], {"timing": 1})
+        finally:
+            conn.close()
+
+    def test_limit_locked_skip_writes_timing_opportunity_memory(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            snapshot = {
+                "technical": {
+                    "signal": "Bullish",
+                    "template_name": "breakout_continuation",
+                    "horizon_class": "short",
+                },
+                "fundamental": {"signal": "Bullish"},
+                "commodity_news": {"signal": "Neutral"},
+                "pre_open_plan": {
+                    "analyst_signal_combo": ["Bullish", "Bullish", "Neutral"],
+                    "signal_direction": "long",
+                    "decision_horizon": "short",
+                    "market_regime": "trend",
+                },
+                "execution_translation": {
+                    "market_rule_block": {
+                        "limit_lock": {
+                            "blocked": True,
+                            "reason": "limit_locked_no_fill",
+                            "side": "buy_like",
+                            "execution_price": 3500.0,
+                            "limit_price": 3500.0,
+                            "limit_up": 3500.0,
+                        }
+                    }
+                },
+                "execution_result": {
+                    "outcome": "skipped",
+                    "status": "skipped",
+                    "transaction_count": 0,
+                    "no_trade_reason": "limit_locked_no_fill",
+                },
+            }
+
+            rows = _write_no_trade_opportunity_memory(
+                cursor,
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-10",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-limit",
+                        "config_id": "cfg",
+                        "underlying_code": "RB",
+                        "action": "open_long",
+                        "lots": 2,
+                        "base_price": 3499.0,
+                        "execution_price": 3500.0,
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+            )
+
+            self.assertEqual(rows, 1)
+            item = cursor.execute("SELECT * FROM no_trade_opportunity_memory").fetchone()
+            payload = load_externalized_json(item["payload_json"], item["payload_artifact_path"], item["payload_sha256"])
+            contract = payload[CONTRACT_KEY]
+            self.assertEqual(item["execution_reason"], "limit_locked_no_fill")
+            self.assertEqual(item["candidate_lots"], 2)
+            self.assertEqual(item["shadow_lots"], 1)
+            self.assertEqual(payload["execution_no_trade_reason"], "limit_locked_no_fill")
+            self.assertEqual(payload["no_trade_reason_category"]["category"], "execution")
+            self.assertEqual(payload["no_trade_reason_category"]["category_label"], "执行")
+            self.assertEqual(payload["limit_lock_audit"]["reason"], "limit_locked_no_fill")
+            self.assertIn("execution_timing_case=limit_locked_no_fill", item["evidence_summary"])
+            self.assertIn("no_trade_category=执行:execution", item["evidence_summary"])
+            self.assertIn("limit_locked_no_fill timing_case", " ".join(contract["usable_memory"]))
+            self.assertIn("No-trade category=execution", " ".join(contract["analysis_strategy_updates"]))
+            self.assertIn("entry/exit timing research question", " ".join(contract["analysis_strategy_updates"]))
+            self.assertIn("Do not chase at the limit price", " ".join(contract["trading_strategy_updates"]))
+            self.assertIn("not increase size", " ".join(contract["position_impact_conditions"]))
+        finally:
+            conn.close()
+
+    def test_tail_loss_sentinel_and_alpha_promotion_write_adaptive_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            cursor.execute(
+                """
+                CREATE TABLE daily_settlement (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    current_account_equity REAL,
+                    current_balance REAL,
+                    created_at TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL,
+                    new_position_pnl REAL,
+                    position_type TEXT
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE futures_recommendation (
+                    id TEXT,
+                    config_id TEXT,
+                    effective_trade_date TEXT,
+                    source_type TEXT,
+                    underlying_code TEXT,
+                    action TEXT,
+                    lots INTEGER,
+                    signal_snapshot TEXT,
+                    signal_snapshot_artifact_path TEXT,
+                    signal_snapshot_sha256 TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
+            cursor.execute("INSERT INTO daily_settlement VALUES (?, ?, ?, ?, ?)", ("p1", "2025-03-07", 5000000.0, 4850000.0, "now"))
+            cursor.execute("INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?, ?, ?)", ("p1", "2025-03-07", "TA", -36000.0, -36000.0, "long"))
+            snapshot = {
+                "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+                "pre_open_plan": {"analyst_signal_combo": ["Bullish", "Neutral", "Neutral"], "decision_horizon": "short", "market_regime": "trend"},
+            }
+            cursor.execute(
+                "INSERT INTO futures_recommendation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("rec-ta", "cfg", "2025-03-07", "strategy", "TA", "open_long", 1, json.dumps(snapshot), None, None, "now"),
+            )
+            cursor.execute(
+                """
+                INSERT INTO signal_template_performance (
+                    id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                    sample_count, win_rate, net_pnl, avg_pnl, profit_factor,
+                    confidence_score, last_updated, valid_until, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("tpl-alpha", "cfg", "BU", "long", "long_breakout_short", "short", "trend", 5, 0.8, 6000, 1200, 2.1, 0.85, "now", "2025-04-01", "{}"),
+            )
+
+            tail_rows = _write_tail_loss_sentinel_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-07",
+                cfg={"learning": {"tail_loss_sentinel": {"enabled": True, "min_abs_loss": 25000, "valid_days": 5}}},
+            )
+            alpha_rows = _write_alpha_promotion_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-07",
+                cfg={"learning": {"alpha_promotion": {"enabled": True, "min_sample_count": 5, "min_win_rate": 0.6, "min_net_pnl": 1000}}},
+            )
+
+            self.assertEqual(tail_rows, 1)
+            self.assertEqual(alpha_rows, 1)
+            rows = cursor.execute("SELECT policy_type, policy_action, payload_json FROM adaptive_policy_state ORDER BY policy_type").fetchall()
+            self.assertEqual([(row["policy_type"], row["policy_action"]) for row in rows], [("alpha_promotion", "protect"), ("tail_loss_sentinel", "cap")])
+            alpha_payload = load_externalized_json(rows[0]["payload_json"])
+            tail_payload = load_externalized_json(rows[1]["payload_json"])
+            self.assertEqual(alpha_payload[CONTRACT_KEY]["position_authority"], "pm_auditor_conditioned")
+            self.assertEqual(tail_payload[CONTRACT_KEY]["position_authority"], "risk_reduction_conditioned")
+        finally:
+            conn.close()
+
+    def test_contextual_rule_calibration_writes_intraday_policy_from_missed_timing_shadow(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            payload = {"rule": "timing sample"}
+            cursor.execute(
+                """
+                INSERT INTO no_trade_opportunity_memory (
+                    id, config_id, trading_date, ticker, side, sector, signal_template,
+                    signal_combo, horizon_class, market_regime, opportunity_type,
+                    opportunity_layer, candidate_lots, shadow_lots, shadow_entry_price,
+                    pm_reason, auditor_reason, execution_reason, evidence_summary,
+                    status, classification, shadow_results_json, payload_json,
+                    created_at, last_reviewed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "nt-1",
+                    "cfg",
+                    "2025-03-03",
+                    "BU",
+                    "long",
+                    "energy",
+                    "long_breakout_short",
+                    json.dumps(["Bullish", "Neutral", "Neutral"]),
+                    "short",
+                    "trend",
+                    "probe",
+                    "tradeable_setup",
+                    1,
+                    1,
+                    3500.0,
+                    "intraday_trigger_not_met",
+                    "",
+                    "intraday_trigger_not_met",
+                    "timing miss",
+                    "closed",
+                    "missed_opportunity",
+                    json.dumps([{"horizon_days": 3, "shadow_pnl": 2500.0}]),
+                    json.dumps(payload),
+                    "now",
+                    "now",
+                ),
+            )
+
+            rows = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "min_shadow_pnl_for_relaxation": 1000,
+                            "relaxed_opening_range_miss": 0.003,
+                            "relaxed_intraday_confirmation_score": 0.65,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertEqual(rows, 1)
+            row = cursor.execute(
+                """
+                SELECT policy_type, ticker, side, horizon_class, market_regime, payload_json
+                FROM adaptive_policy_state
+                WHERE policy_type = 'contextual_rule_calibration:intraday_confirmation'
+                """
+            ).fetchone()
+            self.assertEqual(row["ticker"], "BU")
+            self.assertEqual(row["side"], "long")
+            saved_payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(saved_payload["rule_group"], "intraday_confirmation")
+            self.assertIn("intraday_confirmation", saved_payload["rule_adjustments"])
+            self.assertEqual(
+                saved_payload["rule_adjustments"]["intraday_confirmation"]["confirmed_memory_min_market_confirmation_score"],
+                0.65,
+            )
+        finally:
+            conn.close()
+
+    def test_contextual_rule_calibration_writes_technical_parameter_policy(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO analyst_performance (
+                    id, config_id, analyst, ticker, sector, horizon_class, signal_side,
+                    sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
+                    last_updated, valid_until, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ap-technical",
+                    "cfg",
+                    "technical",
+                    "BU",
+                    "energy",
+                    "short",
+                    "long",
+                    4,
+                    0.75,
+                    1200.0,
+                    4800.0,
+                    0.55,
+                    "now",
+                    "2025-03-30",
+                    json.dumps({"sample_count": 4}),
+                ),
+            )
+
+            rows = _write_contextual_rule_calibration_state(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-10",
+                cfg={
+                    "learning": {
+                        "contextual_rule_calibration": {
+                            "enabled": True,
+                            "valid_days": 5,
+                            "max_rows_per_day": 10,
+                            "min_analyst_samples": 3,
+                            "min_analyst_confidence": 0.35,
+                            "technical_positive_hit_rate": 0.60,
+                            "technical_weak_hit_rate": 0.40,
+                        }
+                    }
+                },
+                strategy_recommendations=[],
+                no_trade_reason_counter=Counter(),
+            )
+
+            self.assertGreaterEqual(rows, 1)
+            row = cursor.execute(
+                """
+                SELECT policy_type, ticker, side, horizon_class, market_regime, sample_count, payload_json
+                FROM adaptive_policy_state
+                WHERE policy_type = 'contextual_rule_calibration:technical_parameters'
+                """
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["ticker"], "BU")
+            self.assertEqual(row["side"], "*")
+            self.assertEqual(row["horizon_class"], "short")
+            payload = load_externalized_json(row["payload_json"])
+            self.assertIn("technical_parameters", payload["rule_adjustments"])
+            self.assertIn("trend_short_multiplier", payload["rule_adjustments"]["technical_parameters"])
+        finally:
+            conn.close()
+
+    def test_technical_parameter_calibration_applies_bounded_adjustments(self):
+        params = {
+            "trend": {"short": 8, "medium": 21, "long": 55},
+            "rsi": {"period": 14, "bullish": 30, "bearish": 70},
+            "mean_reversion": {"bollinger_std": 2.0, "bollinger_window": 20, "rolling_window": 50},
+        }
+        row = {
+            "id": "policy-1",
+            "ticker": "BU",
+            "side": "*",
+            "horizon_class": "short",
+            "market_regime": "*",
+            "policy_type": "contextual_rule_calibration:technical_parameters",
+            "confidence_score": 0.55,
+            "sample_count": 4,
+            "reason": "test",
+            "payload": {
+                "rule_adjustments": {
+                    "technical_parameters": {
+                        "trend_short_multiplier": 0.50,
+                        "trend_long_multiplier": 2.0,
+                        "rsi_bullish_shift": -20,
+                        "rsi_bearish_shift": 20,
+                        "bollinger_std_multiplier": 1.50,
+                    }
+                }
+            },
+        }
+
+        adjusted, diagnostics = apply_technical_parameter_calibration(
+            params,
+            [row],
+            ticker="BU",
+            horizon_class="short",
+            market_regime="trend",
+        )
+
+        self.assertEqual(adjusted["trend"]["short"], 7)
+        self.assertEqual(adjusted["trend"]["long"], 63)
+        self.assertEqual(adjusted["rsi"]["bullish"], 25)
+        self.assertEqual(adjusted["rsi"]["bearish"], 75)
+        self.assertEqual(adjusted["mean_reversion"]["bollinger_std"], 2.2)
+        self.assertEqual(len(diagnostics["applied"]), 1)
+
+    def test_phase1_signal_persistence_uses_recommendation_reference_portfolio(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(
+                """
+                CREATE TABLE portfolio (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    trading_date TEXT
+                );
+                CREATE TABLE signal (
+                    id TEXT PRIMARY KEY,
+                    portfolio_id TEXT,
+                    ticker TEXT,
+                    analyst TEXT
+                );
+                """
+            )
+            cursor.execute("INSERT INTO portfolio VALUES ('phase1-p', 'cfg', '2025-01-01')")
+            cursor.execute("INSERT INTO portfolio VALUES ('settled-p', 'cfg', '2025-01-02')")
+            for ticker in ("BU", "RB"):
+                for analyst in ("commodity_news", "fundamental", "technical"):
+                    cursor.execute(
+                        "INSERT INTO signal VALUES (?, 'phase1-p', ?, ?)",
+                        (f"{ticker}-{analyst}", ticker, analyst),
+                    )
+            recommendations = []
+            for ticker in ("BU", "RB"):
+                recommendations.append(
+                    {
+                        "underlying_code": ticker,
+                        "reference_portfolio_id": "phase1-p",
+                        "signal_snapshot": {
+                            "commodity_news": {"signal": "Neutral"},
+                            "fundamental": {"signal": "Neutral"},
+                            "technical": {"signal": "Neutral"},
+                        },
+                    }
+                )
+            errors = []
+            warnings = []
+
+            audit = _validate_phase1_signal_persistence(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-01-02",
+                strategy_recommendations=recommendations,
+                expected_tickers=2,
+                expected_analysts=("commodity_news", "fundamental", "technical"),
+                errors=errors,
+                warnings=warnings,
+            )
+
+            self.assertEqual(errors, [])
+            self.assertTrue(audit["verified"])
+            self.assertEqual(audit["db_pairs"], 6)
+            self.assertEqual(audit["reference_portfolio_ids"], ["phase1-p"])
         finally:
             conn.close()
 

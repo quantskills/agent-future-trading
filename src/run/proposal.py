@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import sys
 from pathlib import Path
 
@@ -13,7 +13,7 @@ from tools.agent_tools.runtime_setup import (
     load_portfolio_config,
     resolve_net_exposure_config,
 )
-from tools.agent_tools.template_prior import load_template_prior_if_enabled
+from tools.agent_tools.research.template_prior import load_template_prior_if_enabled
 from util.config import ConfigParser
 from util.logger import logger
 from util.db_helper import db_initialize, get_db

@@ -40,7 +40,7 @@ class Provider(str, Enum):
             ),
             Provider.CODEX_OPENAI: ModelConfig(
                 model_class=ChatOpenAI,
-                base_url="http://47.245.121.52/v1",
+                base_url="http://47.74.0.65/v1",
                 env_key="CODEX_OPENAI_API_KEY",
                 structured_output_method="json_mode",
             ),

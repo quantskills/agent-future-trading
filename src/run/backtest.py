@@ -251,7 +251,7 @@ def main() -> int:
         raise ValueError("--run-eval and --skip-eval cannot be used together.")
 
     if not args.skip_eval:
-        eval_command = [sys.executable, str(SRC_ROOT / "evaluation" / "evaluate_config.py"), "--config", config_arg]
+        eval_command = [sys.executable, str(RUN_DIR / "evaluate_config.py"), "--config", config_arg]
         if args.local_db:
             eval_command.append("--local-db")
         eval_command.append("--update")

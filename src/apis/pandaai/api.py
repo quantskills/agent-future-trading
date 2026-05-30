@@ -19,7 +19,7 @@ except Exception as exc:  # pragma: no cover - depends on runtime environment
     pd = None
     _PANDAS_IMPORT_ERROR = exc
 
-from apis.datayes.api_model import FuturesDailyQuote, FuturesDailyQuoteOptimized, FuturesMainContract
+from apis.pandaai.api_model import FuturesDailyQuote, FuturesDailyQuoteOptimized, FuturesMainContract, FuturesMargin
 from util.logger import logger
 
 
@@ -1125,6 +1125,8 @@ class PandaAIAPI:
             lowest_price=self._coerce_float(row.get("low"), 0),
             close_price=self._coerce_float(close_price, 0),
             settle_price=self._coerce_optional_float(settle_price),
+            limit_up=self._coerce_optional_float(row.get("limit_up")),
+            limit_down=self._coerce_optional_float(row.get("limit_down")),
             turnover_vol=self._coerce_int(row.get("volume"), 0),
             turnover_value=self._coerce_float(row.get("amount"), 0),
             open_int=self._coerce_int(row.get("open_interest"), 0),
@@ -1367,6 +1369,46 @@ class PandaAIAPI:
                 contracts.append(contract)
         return sorted(set(contracts))
 
+    def get_futures_contract_detail(self, contract_id: str, reference_date: Optional[datetime] = None) -> Optional[dict[str, Any]]:
+        """Return quasi-static contract detail from PandaAI with shared caching."""
+        if not contract_id:
+            return None
+        reference_dt = self._normalize_datetime(reference_date, default=datetime.now())
+        symbol = self._contract_symbol(contract_id, reference_date=reference_dt)
+        cache_key = (self._sdk_cache_namespace(), "get_future_detail_exact", symbol.upper())
+        if cache_key in self._extra_cache:
+            records = self._extra_cache[cache_key]
+        else:
+            response = self._call_pandaai(
+                "get_future_detail",
+                symbol=[symbol],
+                fields=[
+                    "symbol",
+                    "exchange",
+                    "underlying_symbol",
+                    "trading_code",
+                    "margin_rate",
+                    "de_listed_date",
+                    "maturity_date",
+                    "start_delivery_date",
+                    "end_delivery_date",
+                    "contract_multiplier",
+                    "is_trading",
+                ],
+                is_trading=None,
+            )
+            records = self._records_from_response(response)
+            self._extra_cache[cache_key] = records
+        if not records:
+            return None
+        normalized = self._normalize_internal_contract(contract_id)
+        for row in records:
+            record = self._coerce_record(row)
+            row_contract = self._normalize_internal_contract(record.get("trading_code") or record.get("symbol"))
+            if row_contract == normalized:
+                return dict(record)
+        return dict(self._coerce_record(records[0]))
+
     def get_futures_daily_candles_optimized(
         self,
         contract_id: str = None,
@@ -1436,4 +1478,17 @@ class PandaAIAPI:
         return latest_quote.settle_price or latest_quote.close_price
 
     def get_futures_margin(self, contract_id: str):
-        return None
+        detail = self.get_futures_contract_detail(contract_id)
+        if not detail:
+            return None
+        margin_rate = self._coerce_optional_float(detail.get("margin_rate"))
+        if margin_rate is None or margin_rate <= 0:
+            return None
+        if margin_rate > 1:
+            margin_rate = margin_rate / 100.0
+        return FuturesMargin(
+            contract_id=self._normalize_internal_contract(detail.get("trading_code") or detail.get("symbol") or contract_id),
+            long_margin_rate=margin_rate,
+            short_margin_rate=margin_rate,
+            update_date=datetime.now().strftime("%Y-%m-%d"),
+        )

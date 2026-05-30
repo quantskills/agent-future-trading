@@ -215,6 +215,34 @@ class BaseDB(ABC):
         """Get DB-backed strategy memory for ticker + side + optional signal combo."""
         raise NotImplementedError
 
+    def get_trade_episode_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Get completed trade episodes as non-authoritative learning context."""
+        raise NotImplementedError
+
+    def get_exploratory_hypotheses(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Get reviewer research hypotheses as prompt priors."""
+        raise NotImplementedError
+
     def get_provisional_policy_state(
         self,
         config_id: str,

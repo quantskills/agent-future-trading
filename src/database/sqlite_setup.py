@@ -733,6 +733,10 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             ticker TEXT NOT NULL,
             selected_digest_ids TEXT,
             selected_chars INTEGER DEFAULT 0,
+            digest_count INTEGER DEFAULT 0,
+            trade_episode_count INTEGER DEFAULT 0,
+            hypothesis_count INTEGER DEFAULT 0,
+            total_context_chars INTEGER DEFAULT 0,
             dropped_count INTEGER DEFAULT 0,
             max_items INTEGER DEFAULT 0,
             max_chars INTEGER DEFAULT 0,
@@ -741,6 +745,136 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
         )
         '''
     )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS trade_episode_memory (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
+            sector TEXT DEFAULT 'unknown',
+            signal_template TEXT NOT NULL DEFAULT '*',
+            signal_combo TEXT NOT NULL DEFAULT '*',
+            horizon_class TEXT DEFAULT 'unknown',
+            market_regime TEXT DEFAULT 'unknown',
+            episode_date TEXT,
+            first_seen_at TEXT,
+            last_reviewed_at TEXT,
+            open_date TEXT,
+            close_date TEXT,
+            holding_days INTEGER DEFAULT 0,
+            net_pnl REAL DEFAULT 0,
+            return_on_notional REAL DEFAULT 0,
+            outcome_label TEXT DEFAULT 'flat',
+            lesson_text TEXT,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(config_id, ticker, side, open_date, close_date, signal_template),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS no_trade_opportunity_memory (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
+            sector TEXT DEFAULT 'unknown',
+            signal_template TEXT NOT NULL DEFAULT '*',
+            signal_combo TEXT NOT NULL DEFAULT '*',
+            horizon_class TEXT DEFAULT 'unknown',
+            market_regime TEXT DEFAULT 'unknown',
+            opportunity_type TEXT DEFAULT 'unknown',
+            opportunity_layer TEXT DEFAULT 'direction_only',
+            candidate_lots INTEGER DEFAULT 1,
+            shadow_lots INTEGER DEFAULT 1,
+            shadow_entry_price REAL,
+            pm_reason TEXT,
+            auditor_reason TEXT,
+            execution_reason TEXT,
+            evidence_summary TEXT,
+            status TEXT DEFAULT 'open',
+            classification TEXT DEFAULT 'pending',
+            shadow_results_json TEXT,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            last_reviewed_at TEXT,
+            UNIQUE(config_id, trading_date, ticker, side, signal_template),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS exploratory_hypothesis (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            scope_type TEXT NOT NULL DEFAULT 'research',
+            scope_key TEXT NOT NULL DEFAULT '*',
+            ticker TEXT NOT NULL DEFAULT '*',
+            sector TEXT NOT NULL DEFAULT '*',
+            side TEXT NOT NULL DEFAULT '*',
+            horizon_class TEXT NOT NULL DEFAULT '*',
+            market_regime TEXT NOT NULL DEFAULT '*',
+            hypothesis_text TEXT NOT NULL,
+            evidence_summary TEXT,
+            suggested_use TEXT,
+            confidence_score REAL DEFAULT 0,
+            sample_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'candidate',
+            created_at TEXT NOT NULL,
+            valid_until TEXT,
+            payload_json TEXT,
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    _ensure_columns(
+        cursor,
+        "learning_context_budget",
+        {
+            "digest_count": "INTEGER DEFAULT 0",
+            "trade_episode_count": "INTEGER DEFAULT 0",
+            "hypothesis_count": "INTEGER DEFAULT 0",
+            "total_context_chars": "INTEGER DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "trade_episode_memory",
+        {
+            "episode_date": "TEXT",
+            "first_seen_at": "TEXT",
+            "last_reviewed_at": "TEXT",
+            **_json_artifact_columns("payload"),
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "no_trade_opportunity_memory",
+        {
+            "opportunity_type": "TEXT DEFAULT 'unknown'",
+            "opportunity_layer": "TEXT DEFAULT 'direction_only'",
+            "candidate_lots": "INTEGER DEFAULT 1",
+            "shadow_lots": "INTEGER DEFAULT 1",
+            "shadow_entry_price": "REAL",
+            "pm_reason": "TEXT",
+            "auditor_reason": "TEXT",
+            "execution_reason": "TEXT",
+            "evidence_summary": "TEXT",
+            "status": "TEXT DEFAULT 'open'",
+            "classification": "TEXT DEFAULT 'pending'",
+            "shadow_results_json": "TEXT",
+            "last_reviewed_at": "TEXT",
+            **_json_artifact_columns("payload"),
+        },
+    )
+    _ensure_columns(cursor, "exploratory_hypothesis", _json_artifact_columns("payload"))
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_strategy_memory_history_lookup "
         "ON strategy_memory_history(config_id, trading_date, ticker, side)"
@@ -773,6 +907,22 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_learning_event_lookup "
         "ON learning_event_log(config_id, trading_date, event_type)"
     )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_episode_lookup "
+        "ON trade_episode_memory(config_id, ticker, sector, horizon_class, market_regime, close_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_no_trade_opportunity_lookup "
+        "ON no_trade_opportunity_memory(config_id, ticker, sector, horizon_class, market_regime, trading_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_no_trade_opportunity_shadow "
+        "ON no_trade_opportunity_memory(config_id, status, classification, trading_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_exploratory_hypothesis_lookup "
+        "ON exploratory_hypothesis(config_id, ticker, sector, horizon_class, market_regime, status, valid_until)"
+    )
 
 
 def init_database():
@@ -802,6 +952,8 @@ def init_database():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             trading_date TIMESTAMP NOT NULL,
             cashflow DECIMAL(15,2) NOT NULL,
+            account_equity DECIMAL(15,2) DEFAULT 0,
+            cash_available DECIMAL(15,2) DEFAULT 0,
             total_assets DECIMAL(15,2) NOT NULL,
             positions JSON NOT NULL,
             previous_portfolio_id TEXT,
@@ -816,6 +968,14 @@ def init_database():
             FOREIGN KEY (settlement_event_id) REFERENCES portfolio_forced_settlement(id)
         )
         ''')
+        _ensure_columns(
+            cursor,
+            "portfolio",
+            {
+                "account_equity": "DECIMAL(15,2) DEFAULT 0",
+                "cash_available": "DECIMAL(15,2) DEFAULT 0",
+            },
+        )
 
         # Create signal table
         cursor.execute('''
@@ -900,6 +1060,10 @@ def init_database():
             trading_date TEXT NOT NULL,
             previous_balance REAL NOT NULL,
             current_balance REAL NOT NULL,
+            previous_account_equity REAL DEFAULT 0,
+            current_account_equity REAL DEFAULT 0,
+            cash_available REAL DEFAULT 0,
+            reserved_margin REAL DEFAULT 0,
             previous_margin REAL DEFAULT 0,
             current_margin REAL DEFAULT 0,
             margin_as_asset_prev REAL DEFAULT 0,
@@ -917,6 +1081,16 @@ def init_database():
             FOREIGN KEY (portfolio_id) REFERENCES portfolio(id)
         )
         ''')
+        _ensure_columns(
+            cursor,
+            "daily_settlement",
+            {
+                "previous_account_equity": "REAL DEFAULT 0",
+                "current_account_equity": "REAL DEFAULT 0",
+                "cash_available": "REAL DEFAULT 0",
+                "reserved_margin": "REAL DEFAULT 0",
+            },
+        )
 
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS ticker_daily_pnl (

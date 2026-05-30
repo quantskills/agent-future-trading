@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from util.trading_calendar import get_previous_trading_day
+from tools.agent_tools.analysis.data_usage import read_finoview_feather_cached, read_text_cached
 
 try:
     import pandas as pd
@@ -17,8 +18,6 @@ except Exception as exc:  # pragma: no cover - depends on runtime environment
     _PANDAS_IMPORT_ERROR = exc
 
 class APISource:
-    ALPHA_VANTAGE = "alpha_vantage"
-    DATAYES = "datayes"
     PANDAAI = "pandaai"
 
 class Router():
@@ -29,24 +28,19 @@ class Router():
         Initialize Router with API source and market type.
 
         Args:
-            source: API source (ALPHA_VANTAGE, DATAYES, or PANDAAI)
+            source: API source. AgentQuant currently supports PandaAI for futures market data.
             market_type: Current runtime market type. AgentQuant now runs in china_futures mode.
             config: Optional runtime config; used to resolve local Finoview/news paths.
         """
         self.market_type = market_type
         self.config = config or {}
-        if source == APISource.ALPHA_VANTAGE:
-            from apis.alphavantage import AlphaVantageAPI
-            self.api = AlphaVantageAPI()
-        elif source == APISource.DATAYES:
-            from apis.datayes import DataYesAPI
-            self.api = DataYesAPI()
-        elif source == APISource.PANDAAI:
+        if source == APISource.PANDAAI:
             from apis.pandaai import PandaAIAPI
             self.api = PandaAIAPI()
         else:
-            raise ValueError(f"Invalid API source: {source}")
+            raise ValueError(f"Unsupported API source for AgentQuant futures mode: {source}")
         self.last_fundamentals_metadata = None
+        self.last_news_metadata = None
 
     def _project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -69,12 +63,14 @@ class Router():
         )
     
     def get_market_news(self, topic, trading_date, news_count):
-        """Legacy market-news helper retained for policy/macro analyst refactors."""
-        return self.api.get_news(topic=topic, trading_date=trading_date, limit=news_count)
+        raise RuntimeError(
+            "Router.get_market_news is retired. Futures news is loaded from local Finoview txt files."
+        )
     
     def get_us_economic_indicators(self):
-        """Get economic indicators."""
-        return self.api.get_economic_indicators()
+        raise RuntimeError(
+            "Router.get_us_economic_indicators is retired. AgentQuant futures mode uses PandaAI and local Finoview data only."
+        )
 
     # China futures helpers backed by the configured futures market data provider.
 
@@ -835,7 +831,7 @@ class Router():
                 continue
 
             try:
-                df = pd.read_feather(file_path)
+                df = read_finoview_feather_cached(file_path)
                 if df.empty:
                     logger.warning(f"{ticker} - {name_cn}: Empty DataFrame")
                     self.last_fundamentals_metadata["empty_frame_count"] += 1
@@ -1091,7 +1087,7 @@ class Router():
 
         self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
         try:
-            from tools.agent_tools.finoview_factors import (
+            from tools.agent_tools.analysis.finoview_factors import (
                 build_factor_attribution_payload,
                 build_factor_catalog,
                 build_factor_snapshot,
@@ -1185,23 +1181,27 @@ class Router():
             "data/News_data/Future_news",
         )
         news_file = news_dir / f"{ticker}.txt"
+        self.last_news_metadata = {
+            "ticker": ticker,
+            "trading_date": str(trading_date)[:10],
+            "file_path": str(news_file),
+            "file_exists": news_file.exists(),
+            "encoding": None,
+            "raw_block_count": 0,
+            "parsed_news_count": 0,
+            "selected_news_count": 0,
+            "latest_news_date": None,
+            "news_cutoff": f"{'<' if pre_open_only else '<='}{str(trading_date)[:10]}",
+            "errors": [],
+        }
 
         if not news_file.exists():
             logger.error(f"{ticker}: News file not found: {news_file}")
             return []
 
         try:
-            content = None
-            for encoding in ("utf-8-sig", "utf-8", "gb18030"):
-                try:
-                    with open(news_file, 'r', encoding=encoding) as f:
-                        content = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
-
-            if content is None:
-                raise UnicodeDecodeError('news_file', b'', 0, 1, 'unable to decode with supported encodings')
+            content, encoding = read_text_cached(news_file)
+            self.last_news_metadata["encoding"] = encoding
 
             raw_lines = [line.strip() for line in content.splitlines()]
             news_blocks = []
@@ -1229,6 +1229,7 @@ class Router():
 
             if current_block:
                 news_blocks.append(current_block)
+            self.last_news_metadata["raw_block_count"] = len(news_blocks)
 
             news_items = []
 
@@ -1275,13 +1276,19 @@ class Router():
                     logger.warning(f"{ticker}: Failed to parse news block: {exc}")
                     continue
 
+            self.last_news_metadata["parsed_news_count"] = len(news_items)
             news_items.sort(key=lambda x: x.publish_time, reverse=True)
             news_items = news_items[:news_count]
+            self.last_news_metadata["selected_news_count"] = len(news_items)
+            if news_items:
+                self.last_news_metadata["latest_news_date"] = str(news_items[0].publish_time)[:10]
             logger.info(f"{ticker}: Loaded {len(news_items)} news items from {news_file}")
             return news_items
 
         except Exception as exc:
             logger.error(f"{ticker}: Error reading news file {news_file}: {exc}")
+            if isinstance(getattr(self, "last_news_metadata", None), dict):
+                self.last_news_metadata.setdefault("errors", []).append(str(exc))
             import traceback
             logger.error(traceback.format_exc())
             return []

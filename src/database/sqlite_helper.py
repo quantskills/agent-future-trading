@@ -1,6 +1,7 @@
 ﻿import sqlite3
 import json
 import uuid
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from graph.schema import AnalystSignal
@@ -10,6 +11,7 @@ from database.artifact_store import (
     externalize_text_for_db,
     load_externalized_json,
 )
+from database.signal_artifact import build_signal_artifact_payload
 from database.sqlite_setup import (
     DB_PATH,
     _ensure_columns,
@@ -18,39 +20,68 @@ from database.sqlite_setup import (
     _text_artifact_columns,
 )
 from util.logger import logger
+from tools.agent_tools.research.learning_contract import attach_or_upgrade_next_round_memory_contract
 
 class SQLiteDB(BaseDB):
     def __init__(self):
         self.db_path = DB_PATH
         self._runtime_schema_ready = False
+        self._runtime_schema_lock = threading.Lock()
 
     def _get_connection(self):
         """Get a database connection with row factory."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row # access columns by name
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+        except Exception:
+            pass
         if not self._runtime_schema_ready:
-            try:
-                # Old local backtest DBs may miss newly added auxiliary tables.
-                # Patch them lazily on first connect so new controls actually participate.
-                cursor = conn.cursor()
-                self._ensure_strategy_memory_schema(cursor)
-                self._ensure_reviewer_learning_schema(cursor)
-                if self._table_exists(cursor, "signal"):
-                    _ensure_columns(
-                        cursor,
-                        "signal",
-                        {
-                            "artifact_json": "TEXT",
-                            "business_quality_score": "REAL DEFAULT 0",
-                            "horizon_class": "TEXT DEFAULT 'unknown'",
-                            "template_name": "TEXT DEFAULT 'unknown'",
-                        },
-                    )
-                self._ensure_artifact_runtime_schema(cursor)
-                conn.commit()
-                self._runtime_schema_ready = True
-            except Exception as exc:
-                logger.warning(f"Runtime schema bootstrap skipped: {exc}")
+            with self._runtime_schema_lock:
+                if self._runtime_schema_ready:
+                    return conn
+                try:
+                    # Old local backtest DBs may miss newly added auxiliary tables.
+                    # Patch them lazily on first connect so new controls actually participate.
+                    cursor = conn.cursor()
+                    self._ensure_strategy_memory_schema(cursor)
+                    self._ensure_reviewer_learning_schema(cursor)
+                    if self._table_exists(cursor, "portfolio"):
+                        _ensure_columns(
+                            cursor,
+                            "portfolio",
+                            {
+                                "account_equity": "REAL DEFAULT 0",
+                                "cash_available": "REAL DEFAULT 0",
+                            },
+                        )
+                    if self._table_exists(cursor, "daily_settlement"):
+                        _ensure_columns(
+                            cursor,
+                            "daily_settlement",
+                            {
+                                "previous_account_equity": "REAL DEFAULT 0",
+                                "current_account_equity": "REAL DEFAULT 0",
+                                "cash_available": "REAL DEFAULT 0",
+                                "reserved_margin": "REAL DEFAULT 0",
+                            },
+                        )
+                    if self._table_exists(cursor, "signal"):
+                        _ensure_columns(
+                            cursor,
+                            "signal",
+                            {
+                                "artifact_json": "TEXT",
+                                "business_quality_score": "REAL DEFAULT 0",
+                                "horizon_class": "TEXT DEFAULT 'unknown'",
+                                "template_name": "TEXT DEFAULT 'unknown'",
+                            },
+                        )
+                    self._ensure_artifact_runtime_schema(cursor)
+                    conn.commit()
+                    self._runtime_schema_ready = True
+                except Exception as exc:
+                    logger.warning(f"Runtime schema bootstrap skipped: {exc}")
         return conn
 
     def _table_exists(self, cursor: sqlite3.Cursor, table_name: str) -> bool:
@@ -118,6 +149,44 @@ class SQLiteDB(BaseDB):
                     **_json_artifact_columns("payload"),
                 },
             )
+        if self._table_exists(cursor, "trade_episode_memory"):
+            _ensure_columns(
+                cursor,
+                "trade_episode_memory",
+                {
+                    "episode_date": "TEXT",
+                    "first_seen_at": "TEXT",
+                    "last_reviewed_at": "TEXT",
+                    **_json_artifact_columns("payload"),
+                },
+            )
+        if self._table_exists(cursor, "learning_context_budget"):
+            _ensure_columns(
+                cursor,
+                "learning_context_budget",
+                {
+                    "digest_count": "INTEGER DEFAULT 0",
+                    "trade_episode_count": "INTEGER DEFAULT 0",
+                    "hypothesis_count": "INTEGER DEFAULT 0",
+                    "total_context_chars": "INTEGER DEFAULT 0",
+                },
+            )
+        if self._table_exists(cursor, "exploratory_hypothesis"):
+            _ensure_columns(
+                cursor,
+                "exploratory_hypothesis",
+                {
+                    **_json_artifact_columns("payload"),
+                },
+            )
+        if self._table_exists(cursor, "no_trade_opportunity_memory"):
+            _ensure_columns(
+                cursor,
+                "no_trade_opportunity_memory",
+                {
+                    **_json_artifact_columns("payload"),
+                },
+            )
 
     def _model_to_dict(self, obj: Any) -> Dict[str, Any]:
         """Convert pydantic models / sqlite rows / dict-like objects into plain dicts."""
@@ -181,16 +250,28 @@ class SQLiteDB(BaseDB):
         except Exception:
             positions = {}
 
-        available_cash = row["available_cash"] if "available_cash" in row.keys() else 0
+        margin_used = row["margin_used"] if "margin_used" in row.keys() else 0
+        available_cash = (
+            row["cash_available"]
+            if "cash_available" in row.keys() and row["cash_available"] not in (None, 0)
+            else row["available_cash"] if "available_cash" in row.keys() else row["cashflow"]
+        )
+        account_equity = (
+            row["account_equity"]
+            if "account_equity" in row.keys() and row["account_equity"] not in (None, 0)
+            else float(row["cashflow"] or 0.0) + float(margin_used or 0.0)
+        )
         return {
             "id": row["id"],
             "config_id": row["config_id"] if "config_id" in row.keys() else None,
             "updated_at": row["updated_at"] if "updated_at" in row.keys() else None,
             "trading_date": self._normalize_trading_day_value(row["trading_date"]) if "trading_date" in row.keys() else None,
             "cashflow": row["cashflow"],
+            "account_equity": account_equity,
+            "cash_available": available_cash,
             "total_assets": row["total_assets"] if "total_assets" in row.keys() else row["cashflow"],
             "positions": positions,
-            "margin_used": row["margin_used"] if "margin_used" in row.keys() else 0,
+            "margin_used": margin_used,
             "available_cash": available_cash,
             "margin_available": available_cash,
             "daily_settlement_pnl": row["daily_settlement_pnl"] if "daily_settlement_pnl" in row.keys() else 0,
@@ -382,16 +463,48 @@ class SQLiteDB(BaseDB):
             if state == "neutral":
                 continue
             sample_count = int(summary.get("total_trades") or 0)
-            payload = {
-                "ticker": ticker,
-                "side": side,
-                "signal_combo": "*" if combo_key == "*" else self._deserialize_json(combo_key),
-                "state": state,
-                "reason": reason,
-                "summary": summary,
-                "cutoff_trading_date": trading_day_value,
-                "source": source,
-            }
+            payload = attach_or_upgrade_next_round_memory_contract(
+                {
+                    "ticker": ticker,
+                    "side": side,
+                    "signal_combo": "*" if combo_key == "*" else self._deserialize_json(combo_key),
+                    "state": state,
+                    "reason": reason,
+                    "summary": summary,
+                    "cutoff_trading_date": trading_day_value,
+                    "source": source,
+                },
+                memory_type="strategy_memory",
+                maturity_state=state,
+                scope={
+                    "ticker": ticker,
+                    "side": side,
+                    "signal_template": "*",
+                    "horizon_class": "*",
+                    "market_regime": "*",
+                },
+                usable_memory=[
+                    f"state={state}; reason={reason}",
+                    f"sample_count={sample_count}; win_rate={float(summary.get('win_rate') or 0.0):.2f}; net_pnl={float(summary.get('total_pnl') or 0.0):.0f}",
+                ],
+                analysis_strategy_updates=[
+                    "Use as same ticker/side strategy memory; verify today's signal combo and data drivers before citing.",
+                    "Treat wildcard signal-combo memory as weaker than exact combo memory.",
+                ],
+                trading_strategy_updates=[
+                    "Protected/deployable memory can support sizing only through PM/Auditor and current confirmation.",
+                    "Watchlist/weak memory can cap or reduce confidence but is not a permanent product ban.",
+                ],
+                pm_action_conditions=[
+                    "If protected/recovering, require current market confirmation, explicit invalidation, and no weak conflicting same-scope memory before scaling.",
+                    "If watchlist/weak_block, cap/probe/reduce unless current evidence explicitly repairs the same-scope weakness.",
+                ],
+                validation_plan=[
+                    "Refresh from completed same-scope trade pairs after each settlement.",
+                ],
+                sample_count=sample_count,
+                confidence_score=self._strategy_memory_confidence(summary),
+            )
             cursor.execute(
                 '''
                 INSERT OR REPLACE INTO strategy_memory (
@@ -619,6 +732,40 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
+    def sync_config_runtime_metadata(self, config_id: str, config: Dict) -> bool:
+        """Keep reusable config rows aligned with current non-state runtime metadata."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE config
+                SET updated_at = ?,
+                    tickers = ?,
+                    has_planner = ?,
+                    llm_model = ?,
+                    llm_provider = ?
+                WHERE id = ?
+                ''',
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    json.dumps(config["tickers"]),
+                    config["planner_mode"],
+                    config["llm"]["model"],
+                    config["llm"]["provider"],
+                    config_id,
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.warning(f"Config runtime metadata sync skipped for {config_id[:8]}...: {e}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+
     def get_latest_trading_date(self, config_id: str) -> Optional[datetime]:
         """Get the latest trading date for a config."""
         conn = None
@@ -688,14 +835,17 @@ class SQLiteDB(BaseDB):
 
             # 淇锛氭坊鍔犳湡璐т笓鐢ㄥ瓧娈?
             cursor.execute('''
-                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow, total_assets, positions,
+                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
+                                      account_equity, cash_available, total_assets, positions,
                                       margin_used, available_cash, daily_settlement_pnl, leverage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time
                 trading_day_value,
+                cashflow,
+                cashflow,
                 cashflow,
                 cashflow,
                 json.dumps({}),
@@ -710,6 +860,8 @@ class SQLiteDB(BaseDB):
             return {
                 'id': portfolio_id,
                 'cashflow': cashflow,
+                'account_equity': cashflow,
+                'cash_available': cashflow,
                 'total_assets': cashflow,
                 'positions': {},
                 'margin_used': 0,
@@ -740,20 +892,27 @@ class SQLiteDB(BaseDB):
 
             # 淇锛氭坊鍔犳湡璐т笓鐢ㄥ瓧娈?
             margin_used = portfolio.get('margin_used', 0)
-            available_cash = portfolio.get('margin_available', portfolio['cashflow'] - margin_used)
+            available_cash = portfolio.get(
+                'cash_available',
+                portfolio.get('margin_available', portfolio['cashflow'])
+            )
+            account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
             daily_pnl = portfolio.get('daily_settlement_pnl', 0)
             leverage = portfolio.get('leverage', 1.0)
 
             cursor.execute('''
-                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow, total_assets, positions,
+                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
+                                      account_equity, cash_available, total_assets, positions,
                                       margin_used, available_cash, daily_settlement_pnl, leverage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time
                 trading_day_value,
                 portfolio['cashflow'],
+                account_equity,
+                available_cash,
                 total_assets,
                 json.dumps(portfolio['positions']),
                 margin_used,
@@ -767,6 +926,8 @@ class SQLiteDB(BaseDB):
             return {
                 'id': portfolio_id,
                 'cashflow': portfolio['cashflow'],
+                'account_equity': account_equity,
+                'cash_available': available_cash,
                 'positions': portfolio['positions'],
                 'margin_used': margin_used,
                 'margin_available': available_cash,
@@ -806,28 +967,50 @@ class SQLiteDB(BaseDB):
             if existing_row:
                 # 宸插瓨鍦ㄨ鏃ユ湡鐨勮褰曪紝杩斿洖瀹冪敤浜庢洿鏂?
                 logger.info(f"Found existing portfolio {existing_row['id'][:8]}... for trading date {trading_day_value}")
+                margin_used = portfolio.get('margin_used', 0)
+                available_cash = portfolio.get(
+                    'cash_available',
+                    portfolio.get('margin_available', portfolio.get('cashflow', existing_row['cashflow']))
+                )
+                account_equity = portfolio.get('account_equity', portfolio.get('cashflow', existing_row['cashflow']) + margin_used)
                 return {
                     'id': existing_row['id'],
                     'cashflow': existing_row['cashflow'],
+                    'account_equity': account_equity,
+                    'cash_available': available_cash,
+                    'margin_used': margin_used,
+                    'margin_available': available_cash,
                     'positions': json.loads(existing_row['positions']) if existing_row['positions'] else {}
                 }
 
             # 涓嶅瓨鍦紝鍒欏垱寤烘柊鐨?portfolio 璁板綍
             portfolio_id = str(uuid.uuid4())
             total_assets = portfolio['cashflow'] + sum(position['value'] for position in portfolio['positions'].values())
+            margin_used = portfolio.get('margin_used', 0)
+            available_cash = portfolio.get(
+                'cash_available',
+                portfolio.get('margin_available', portfolio['cashflow'])
+            )
+            account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
             logger.info(f"Creating new portfolio {portfolio_id[:8]}... for trading date {trading_day_value}")
 
             cursor.execute('''
-                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow, total_assets, positions)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
+                                      account_equity, cash_available, total_assets, positions,
+                                      margin_used, available_cash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time
                 trading_day_value,
                 portfolio['cashflow'],
+                account_equity,
+                available_cash,
                 total_assets,
-                json.dumps(portfolio['positions'])
+                json.dumps(portfolio['positions']),
+                margin_used,
+                available_cash
             ))
 
             conn.commit()
@@ -835,7 +1018,11 @@ class SQLiteDB(BaseDB):
             return {
                 'id': portfolio_id,
                 'cashflow': portfolio['cashflow'],
-                'positions': portfolio['positions']
+                'account_equity': account_equity,
+                'cash_available': available_cash,
+                'positions': portfolio['positions'],
+                'margin_used': margin_used,
+                'margin_available': available_cash,
             }
         except Exception as e:
             logger.error(f"Error in get_or_create_portfolio_for_date: {e}")
@@ -858,13 +1045,18 @@ class SQLiteDB(BaseDB):
             # 淇锛氭坊鍔犳湡璐т笓鐢ㄥ瓧娈电殑鏇存柊
             # 浠巔ortfolio瀛楀吀涓幏鍙栨湡璐у瓧娈碉紙濡傛灉瀛樺湪锛?
             margin_used = portfolio.get('margin_used', 0)
-            available_cash = portfolio.get('margin_available', portfolio['cashflow'] - margin_used)
+            available_cash = portfolio.get(
+                'cash_available',
+                portfolio.get('margin_available', portfolio['cashflow'])
+            )
+            account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
             daily_pnl = portfolio.get('daily_settlement_pnl', 0)
             leverage = portfolio.get('leverage', 1.0)
 
             cursor.execute('''
                 UPDATE portfolio
-                SET config_id = ?, updated_at = ?, trading_date = ?, cashflow = ?, total_assets = ?, positions = ?,
+                SET config_id = ?, updated_at = ?, trading_date = ?, cashflow = ?,
+                    account_equity = ?, cash_available = ?, total_assets = ?, positions = ?,
                     margin_used = ?, available_cash = ?, daily_settlement_pnl = ?, leverage = ?
                 WHERE id = ?
             ''', (
@@ -872,6 +1064,8 @@ class SQLiteDB(BaseDB):
                 datetime.now(timezone.utc).isoformat(), # UTC time
                 trading_day_value,
                 portfolio['cashflow'],
+                account_equity,
+                available_cash,
                 total_assets,
                 json.dumps(portfolio['positions']),
                 margin_used,
@@ -897,9 +1091,12 @@ class SQLiteDB(BaseDB):
                 conn.close()
         
     def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: AnalystSignal) -> Optional[str]:
-        """Save a new signal."""
+        """Save the final signal for one portfolio/ticker/analyst scope."""
         conn = None
         try:
+            analyst_key = getattr(analyst, "value", analyst)
+            analyst_key = str(analyst_key)
+            ticker_key = str(ticker).upper()
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -920,7 +1117,7 @@ class SQLiteDB(BaseDB):
                 config_id=config_id,
                 trading_date=trading_date,
             )
-            artifact_payload = signal.model_dump() if hasattr(signal, "model_dump") else signal
+            artifact_payload = build_signal_artifact_payload(signal)
             artifact_ext = externalize_json_for_db(
                 artifact_payload,
                 category="signal",
@@ -928,6 +1125,15 @@ class SQLiteDB(BaseDB):
                 field_name="artifact_json",
                 config_id=config_id,
                 trading_date=trading_date,
+            )
+            cursor.execute(
+                '''
+                DELETE FROM signal
+                WHERE portfolio_id = ?
+                  AND ticker = ?
+                  AND analyst = ?
+                ''',
+                (portfolio_id, ticker_key, analyst_key),
             )
             cursor.execute('''
                 INSERT INTO signal (id, portfolio_id, updated_at, ticker, llm_prompt,
@@ -942,9 +1148,9 @@ class SQLiteDB(BaseDB):
                 signal_id,
                 portfolio_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time 
-                ticker,
+                ticker_key,
                 prompt_ext.inline_value,
-                analyst,
+                analyst_key,
                 str(signal.signal),
                 signal.justification,
                 artifact_ext.inline_value,
@@ -2340,6 +2546,215 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
+    def get_trade_episode_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve compact historical trade episodes for exploratory learning."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            sector_value = str(sector or "*")
+            params: List[Any] = [config_id]
+            where = ["config_id = ?"]
+            if ticker_value and ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if sector_value and sector_value != "*":
+                where.append("sector IN (?, '*')")
+                params.append(sector_value)
+            if side and str(side) != "*":
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if horizon_class and str(horizon_class) != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime and str(market_regime) != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(close_date IS NULL OR close_date < ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM trade_episode_memory
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
+                    ABS(net_pnl) DESC,
+                    close_date DESC,
+                    created_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", sector_value or "*", int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_external_json(item, "payload")
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Trade episode memory unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_no_trade_opportunity_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve no-trade candidate memories with forward shadow results."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            sector_value = str(sector or "*")
+            params: List[Any] = [config_id]
+            where = ["config_id = ?"]
+            if ticker_value and ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if sector_value and sector_value != "*":
+                where.append("sector IN (?, '*')")
+                params.append(sector_value)
+            if side and str(side) != "*":
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if horizon_class and str(horizon_class) != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime and str(market_regime) != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("trading_date < ?")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM no_trade_opportunity_memory
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
+                    CASE classification
+                        WHEN 'missed_opportunity' THEN 0
+                        WHEN 'correct_avoidance' THEN 1
+                        ELSE 2
+                    END,
+                    trading_date DESC,
+                    created_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", sector_value or "*", int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["shadow_results"] = self._deserialize_json(item.get("shadow_results_json")) or []
+                item["payload"] = self._deserialize_external_json(item, "payload")
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"No-trade opportunity memory unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_exploratory_hypotheses(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve reviewer research hypotheses as non-authoritative priors."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            sector_value = str(sector or "*")
+            params: List[Any] = [config_id]
+            where = ["config_id = ?", "status IN ('candidate', 'monitoring', 'validated')"]
+            if ticker_value and ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if sector_value and sector_value != "*":
+                where.append("sector IN (?, '*')")
+                params.append(sector_value)
+            if side and str(side) != "*":
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if horizon_class and str(horizon_class) != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime and str(market_regime) != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.append(trading_day_value)
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM exploratory_hypothesis
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
+                    confidence_score DESC,
+                    sample_count DESC,
+                    created_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", sector_value or "*", int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_external_json(item, "payload")
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Exploratory hypotheses unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
     def get_analyst_performance(
         self,
         config_id: str,
@@ -2395,9 +2810,13 @@ class SQLiteDB(BaseDB):
         ticker: str,
         selected_digest_ids: List[str],
         selected_chars: int,
-        dropped_count: int,
-        max_items: int,
-        max_chars: int,
+        digest_count: int = 0,
+        trade_episode_count: int = 0,
+        hypothesis_count: int = 0,
+        total_context_chars: int = 0,
+        dropped_count: int = 0,
+        max_items: int = 0,
+        max_chars: int = 0,
     ) -> bool:
         conn = None
         try:
@@ -2408,8 +2827,9 @@ class SQLiteDB(BaseDB):
                 '''
                 INSERT INTO learning_context_budget (
                     id, config_id, trading_date, analyst, ticker, selected_digest_ids,
-                    selected_chars, dropped_count, max_items, max_chars, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    selected_chars, digest_count, trade_episode_count, hypothesis_count,
+                    total_context_chars, dropped_count, max_items, max_chars, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     str(uuid.uuid4()),
@@ -2419,6 +2839,10 @@ class SQLiteDB(BaseDB):
                     ticker.upper(),
                     json.dumps(selected_digest_ids or [], ensure_ascii=False),
                     int(selected_chars),
+                    int(digest_count),
+                    int(trade_episode_count),
+                    int(hypothesis_count),
+                    int(total_context_chars),
                     int(dropped_count),
                     int(max_items),
                     int(max_chars),
@@ -2611,7 +3035,7 @@ class SQLiteDB(BaseDB):
 
             row = cursor.fetchone()
             if row:
-                from apis.datayes.api_model import FuturesSettlementRecord
+                from apis.pandaai.api_model import FuturesSettlementRecord
                 # Convert sqlite3.Row to dict for easier access
                 row_dict = dict(row)
                 positions_detail_val = row_dict.get('positions_snapshot')
@@ -2625,6 +3049,16 @@ class SQLiteDB(BaseDB):
                     trading_date=row['trading_date'],
                     previous_balance=row['previous_balance'],
                     current_balance=row['current_balance'],
+                    previous_account_equity=row_dict.get(
+                        'previous_account_equity',
+                        row['previous_balance'] + row['previous_margin'],
+                    ),
+                    current_account_equity=row_dict.get(
+                        'current_account_equity',
+                        row['current_balance'] + row['current_margin'],
+                    ),
+                    cash_available=row_dict.get('cash_available', row['current_balance']),
+                    reserved_margin=row_dict.get('reserved_margin', row['current_margin']),
                     previous_margin=row['previous_margin'],
                     current_margin=row['current_margin'],
                     margin_as_asset_prev=row['margin_as_asset_prev'],
@@ -2747,9 +3181,32 @@ class SQLiteDB(BaseDB):
 
                     logger.info("daily_settlement table migrated to the latest schema")
 
+            _ensure_columns(
+                cursor,
+                "daily_settlement",
+                {
+                    "previous_account_equity": "REAL DEFAULT 0",
+                    "current_account_equity": "REAL DEFAULT 0",
+                    "cash_available": "REAL DEFAULT 0",
+                    "reserved_margin": "REAL DEFAULT 0",
+                },
+            )
+
             # 灏唒ositions_detail杞崲涓篔SON瀛楃涓插瓨鍌?
             import json
             positions_json = json.dumps(settlement.positions_detail) if settlement.positions_detail else None
+            previous_account_equity = getattr(
+                settlement,
+                "previous_account_equity",
+                settlement.previous_balance + settlement.previous_margin,
+            )
+            current_account_equity = getattr(
+                settlement,
+                "current_account_equity",
+                settlement.current_balance + settlement.current_margin,
+            )
+            cash_available = getattr(settlement, "cash_available", settlement.current_balance)
+            reserved_margin = getattr(settlement, "reserved_margin", settlement.current_margin)
 
             # 妫€鏌ユ槸鍚﹀凡瀛樺湪鐩稿悓 portfolio_id 鍜?trading_date 鐨勮褰?
             cursor.execute('''
@@ -2766,6 +3223,10 @@ class SQLiteDB(BaseDB):
                     UPDATE daily_settlement
                     SET previous_balance = ?,
                         current_balance = ?,
+                        previous_account_equity = ?,
+                        current_account_equity = ?,
+                        cash_available = ?,
+                        reserved_margin = ?,
                         previous_margin = ?,
                         current_margin = ?,
                         margin_as_asset_prev = ?,
@@ -2783,6 +3244,10 @@ class SQLiteDB(BaseDB):
                 ''', (
                     settlement.previous_balance,
                     settlement.current_balance,
+                    previous_account_equity,
+                    current_account_equity,
+                    cash_available,
+                    reserved_margin,
                     settlement.previous_margin,
                     settlement.current_margin,
                     settlement.margin_as_asset_prev,
@@ -2804,16 +3269,21 @@ class SQLiteDB(BaseDB):
                 cursor.execute('''
                     INSERT INTO daily_settlement
                     (id, portfolio_id, trading_date, previous_balance, current_balance,
+                     previous_account_equity, current_account_equity, cash_available, reserved_margin,
                      previous_margin, current_margin, margin_as_asset_prev, margin_as_asset_curr,
                      daily_pnl, deposit, withdraw, commission, margin_ratio,
                      is_warning, is_liquidation, positions_snapshot, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     settlement_id,
                     portfolio_id,
                     settlement.trading_date,
                     settlement.previous_balance,
                     settlement.current_balance,
+                    previous_account_equity,
+                    current_account_equity,
+                    cash_available,
+                    reserved_margin,
                     settlement.previous_margin,
                     settlement.current_margin,
                     settlement.margin_as_asset_prev,

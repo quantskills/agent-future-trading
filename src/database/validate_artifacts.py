@@ -47,9 +47,32 @@ def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
-def _iter_artifact_rows(cursor: sqlite3.Cursor, table_name: str, fields: Iterable[str]):
+def _date_column(columns: set[str]) -> str | None:
+    for column in ("trading_date", "effective_trade_date", "updated_at", "created_at"):
+        if column in columns:
+            return column
+    return None
+
+
+def _iter_artifact_rows(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    fields: Iterable[str],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
     columns = _table_columns(cursor, table_name)
-    id_expr = "id" if "id" in columns else "rowid AS id"
+    table_alias = "t"
+    from_clause = f"{table_name} {table_alias}"
+    if table_name == "signal" and "portfolio_id" in columns and _table_exists(cursor, "portfolio"):
+        from_clause = f"{table_name} {table_alias} JOIN portfolio p ON {table_alias}.portfolio_id = p.id"
+        date_expr = "p.trading_date"
+    else:
+        date_column = _date_column(columns)
+        date_expr = f"{table_alias}.{date_column}" if date_column else None
+
+    id_expr = f"{table_alias}.id AS id" if "id" in columns else f"{table_alias}.rowid AS id"
     select_parts = [id_expr]
     valid_fields = []
     for field in fields:
@@ -62,25 +85,41 @@ def _iter_artifact_rows(cursor: sqlite3.Cursor, table_name: str, fields: Iterabl
             valid_fields.append(field)
             select_parts.extend(
                 [
-                    f"{field}_artifact_path",
-                    f"{field}_sha256",
-                    f"{field}_size",
+                    f"{table_alias}.{field}_artifact_path AS {field}_artifact_path",
+                    f"{table_alias}.{field}_sha256 AS {field}_sha256",
+                    f"{table_alias}.{field}_size AS {field}_size",
                 ]
             )
     if not valid_fields:
         return []
-    where_clause = " OR ".join(f"{field}_artifact_path IS NOT NULL" for field in valid_fields)
+    where_clause = " OR ".join(f"{table_alias}.{field}_artifact_path IS NOT NULL" for field in valid_fields)
+    params: list[str] = []
+    if date_expr and (start_date or end_date):
+        if start_date:
+            where_clause = f"({where_clause}) AND substr({date_expr}, 1, 10) >= ?"
+            params.append(start_date)
+        if end_date:
+            where_clause = f"({where_clause}) AND substr({date_expr}, 1, 10) <= ?"
+            params.append(end_date)
     cursor.execute(
-        f"SELECT {', '.join(select_parts)} FROM {table_name} WHERE {where_clause}"
+        f"SELECT {', '.join(select_parts)} FROM {from_clause} WHERE {where_clause}",
+        params,
     )
     return [(dict(row), valid_fields) for row in cursor.fetchall()]
 
 
-def validate_artifacts(db_path: str | Path = DB_PATH) -> dict:
+def validate_artifacts(
+    db_path: str | Path = DB_PATH,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     report = {
         "db_path": str(db_path),
+        "start_date": start_date,
+        "end_date": end_date,
         "checked": 0,
         "missing": [],
         "hash_mismatch": [],
@@ -93,7 +132,13 @@ def validate_artifacts(db_path: str | Path = DB_PATH) -> dict:
             if not _table_exists(cursor, table_name):
                 continue
             table_report = {"checked": 0, "fields": {}}
-            for row, valid_fields in _iter_artifact_rows(cursor, table_name, fields):
+            for row, valid_fields in _iter_artifact_rows(
+                cursor,
+                table_name,
+                fields,
+                start_date=start_date,
+                end_date=end_date,
+            ):
                 row_id = str(row.get("id"))
                 for field in valid_fields:
                     path_value = row.get(f"{field}_artifact_path")
@@ -124,9 +169,11 @@ def validate_artifacts(db_path: str | Path = DB_PATH) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate AgentQuant external artifact paths and checksums.")
     parser.add_argument("--db", default=DB_PATH, help="Runtime agentquant.db path.")
+    parser.add_argument("--start-date", default=None, help="Only validate artifacts from this trading date or later.")
+    parser.add_argument("--end-date", default=None, help="Only validate artifacts through this trading date.")
     parser.add_argument("--json", action="store_true", help="Print full JSON report.")
     args = parser.parse_args()
-    report = validate_artifacts(args.db)
+    report = validate_artifacts(args.db, start_date=args.start_date, end_date=args.end_date)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

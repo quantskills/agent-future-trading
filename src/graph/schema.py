@@ -68,12 +68,37 @@ class AnalystSignal(BaseModel):
     factor_alignment_score: float = Field(default=0.0, description="How well factors align with the signal")
     data_coverage_score: float = Field(default=0.0, description="Data coverage score from 0.0 to 1.0")
     tradeability_reason: str = Field(default="", description="Why this signal is or is not tradeable")
+    opportunity_type: str = Field(
+        default="unknown",
+        description=(
+            "Opportunity taxonomy: trend_continuation / reversal / range_breakout / "
+            "event_driven / medium_fundamental / short_timing / probe / no_trade / unknown"
+        ),
+    )
+    opportunity_layer: str = Field(
+        default="direction_only",
+        description="direction_only / tradeable_setup / deployable_alpha / risk_reduction / no_trade",
+    )
+    entry_trigger: str = Field(default="", description="Structured pre-trade entry or timing trigger")
+    exit_hint: str = Field(default="", description="Structured exit, reduction, or invalidation hint")
+    holding_period_hint: str = Field(default="", description="Expected holding style/window in plain text")
+    factor_focus: List[str] = Field(default_factory=list, description="Primary factor groups or evidence surfaces")
+    current_evidence_conflict: List[str] = Field(default_factory=list, description="Current evidence that conflicts with the view")
+    research_contract_version: str = Field(default="agentquant.research.v1", description="Trade research contract version")
+    message_contract_version: str = Field(default="agentquant.message.v1", description="Internal message contract version")
     neutral_reason: str = Field(default="", description="Required reason when signal is Neutral")
     missing_evidence: List[str] = Field(default_factory=list, description="Evidence missing for a directional call")
     conflicting_factors: List[str] = Field(default_factory=list, description="Factors that conflict with the signal")
     would_change_view_if: str = Field(default="", description="Condition that would change Neutral or directional view")
     opportunity_cost_risk: str = Field(default="", description="Risk of missing a trade by staying Neutral")
     recommended_observation_window: str = Field(default="", description="Suggested observation window for Neutral")
+    neutral_opportunity_bucket: str = Field(
+        default="unknown",
+        description="Neutral opportunity bucket: watchlist_trigger / evidence_gap / conflict_avoidance / low_tradeability / horizon_mismatch / accountable_observation / unaccountable",
+    )
+    neutral_trigger_condition: str = Field(default="", description="Concrete condition that can move Neutral into a tradeable setup")
+    neutral_shadow_side: str = Field(default="flat", description="Shadow direction to track for Neutral: long / short / flat")
+    neutral_watchlist_priority: str = Field(default="none", description="none / low / medium / high priority for conditional Neutral observation")
     accountability_tag: str = Field(default="", description="Post-trade accountability label")
     similar_past_cases: List[str] = Field(default_factory=list, description="Reviewer-provided similar past cases")
     do_not_trade_reason: str = Field(default="", description="Reviewer/business reason to avoid trading")
@@ -94,6 +119,8 @@ class AnalystSignal(BaseModel):
         "missing_evidence",
         "conflicting_factors",
         "similar_past_cases",
+        "factor_focus",
+        "current_evidence_conflict",
         mode="before",
     )
     @classmethod
@@ -139,10 +166,21 @@ class AnalystSignal(BaseModel):
         "secondary_confirmation",
         "counter_evidence",
         "tradeability_reason",
+        "opportunity_type",
+        "opportunity_layer",
+        "entry_trigger",
+        "exit_hint",
+        "holding_period_hint",
+        "research_contract_version",
+        "message_contract_version",
         "neutral_reason",
         "would_change_view_if",
         "opportunity_cost_risk",
         "recommended_observation_window",
+        "neutral_opportunity_bucket",
+        "neutral_trigger_condition",
+        "neutral_shadow_side",
+        "neutral_watchlist_priority",
         "accountability_tag",
         "do_not_trade_reason",
         mode="before",
@@ -374,10 +412,12 @@ class Portfolio(BaseModel):
     """Portfolio state during workflow execution."""
 
     id: str = Field(description="Portfolio id")
-    cashflow: float = Field(description="Cash balance")
+    cashflow: float = Field(description="Cash available after reserved margin")
+    account_equity: float = Field(default=0.0, description="Cash balance plus reserved margin")
+    cash_available: float = Field(default=0.0, description="Cash available after reserved margin")
     positions: Dict[str, Position] = Field(description="Ticker positions")
     margin_used: float = Field(default=0.0, description="Reserved margin")
-    margin_available: float = Field(default=0.0, description="Available margin")
+    margin_available: float = Field(default=0.0, description="Legacy alias for cash_available")
     margin_ratio: float = Field(default=0.0, description="Margin ratio")
     daily_settlement_pnl: float = Field(default=0.0, description="Daily settlement PnL")
     risk_status: str = Field(default="NORMAL", description="NORMAL / WARNING / LIQUIDATION")

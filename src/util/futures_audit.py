@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,7 @@ EXPECTED_NO_TRADE_REASONS = {
     "position_matched",
     "cold_start_small_cap",
     "hold_or_zero_lots",
+    "pending_rollover_required",
     "margin_insufficient",
     "danger_zone_ban",
     "net_exposure_limit",
@@ -32,11 +34,15 @@ EXPECTED_NO_TRADE_REASONS = {
     "ticker_loss_control",
     "capital_utilization_guard",
     "capital_utilization_memory_protected",
+    "learned_underperformance_policy",
+    "provisional_policy_probe_only",
+    "provisional_policy_cap",
     "market_confirmation_quality_gate",
     "minimum_new_entry_threshold",
     "minimum_rebalance_threshold",
     "holding_period_control",
     "fundamental_anchor_rebalance_cap",
+    "horizon_consistency_requires_short_timing",
     "reverse_requires_stronger_evidence",
     "decision_planner_block",
     "decision_planner_reduce_to_zero",
@@ -44,11 +50,13 @@ EXPECTED_NO_TRADE_REASONS = {
     "trade_auditor_reduce_to_zero",
     "trade_auditor_scale_to_zero",
     "trade_auditor_reduce_only",
+    "soft_block_converted_to_probe_only",
     "business_quality_observe_or_block",
     "business_quality_probe_only",
     "business_quality_below_probe",
     "conditional_performance_block",
     "weak_conditional_combo",
+    "weak_ticker_side_history",
     "weak_ticker_side_quality_gate",
     "weak_ticker_side_cap",
     "news_only_directional_trade",
@@ -70,12 +78,106 @@ EXPECTED_NO_TRADE_REASONS = {
     "atr_trailing_stop_short",
     "time_stop",
     "signal_horizon_audit",
+    "limit_locked_no_fill",
+    "near_expiry_new_entry_block",
 }
 
 LEGACY_NO_TRADE_REASON_ALIASES = {
     "decision_planner_block": "trade_auditor_block",
     "decision_planner_reduce_to_zero": "trade_auditor_reduce_to_zero",
     "trade_auditor_reduce_to_zero": "trade_auditor_scale_to_zero",
+}
+
+NO_TRADE_REASON_CATEGORY_LABELS = {
+    "signal": "信号",
+    "risk": "风控",
+    "timing": "择时",
+    "execution": "执行",
+    "business": "业务",
+    "learning": "学习",
+}
+
+NO_TRADE_REASON_CATEGORY_DESCRIPTIONS = {
+    "signal": "不会看或暂时没有可交易信号：方向、证据、质量或分析一致性不足。",
+    "risk": "不敢做：组合风险、资金、回撤、频率、仓位或审计边界阻止交易。",
+    "timing": "没等到：盘中触发、短线确认或交易时间窗没有满足。",
+    "execution": "做不了：数据、执行基准、成交可行性、涨跌停或系统执行状态阻止成交。",
+    "business": "本来不该做：已有仓位、换约、交割、持仓生命周期等业务状态不要求成交。",
+    "learning": "学习边界：历史经验、候选假设、弱样本或策略状态限制交易权限。",
+}
+
+NO_TRADE_REASON_CATEGORY_MAP = {
+    "llm_neutral": "signal",
+    "weak_signal_combo": "signal",
+    "market_confirmation_conflict": "signal",
+    "market_confirmation_quality_gate": "signal",
+    "business_quality_observe_or_block": "signal",
+    "business_quality_probe_only": "signal",
+    "business_quality_below_probe": "signal",
+    "news_only_directional_trade": "signal",
+    "news_without_fundamental_anchor": "signal",
+    "fundamental_anchor_rebalance_cap": "signal",
+    "reverse_requires_stronger_evidence": "signal",
+    "signal_invalidation_level": "signal",
+    "invalidation_level_long": "signal",
+    "invalidation_level_short": "signal",
+    "signal_horizon_audit": "signal",
+    "margin_insufficient": "risk",
+    "danger_zone_ban": "risk",
+    "net_exposure_limit": "risk",
+    "reduce_only": "risk",
+    "single_position_cap": "risk",
+    "base_sizing_anchor_cap": "risk",
+    "margin_adjustment_to_zero": "risk",
+    "cooling_period": "risk",
+    "trade_frequency_control": "risk",
+    "drawdown_control": "risk",
+    "ticker_loss_control": "risk",
+    "capital_utilization_guard": "risk",
+    "minimum_new_entry_threshold": "risk",
+    "minimum_rebalance_threshold": "risk",
+    "trade_auditor_block": "risk",
+    "trade_auditor_scale_to_zero": "risk",
+    "trade_auditor_reduce_only": "risk",
+    "soft_block_converted_to_probe_only": "risk",
+    "atr_trailing_stop_long": "risk",
+    "atr_trailing_stop_short": "risk",
+    "time_stop": "risk",
+    "horizon_consistency_requires_short_timing": "timing",
+    "intraday_trigger_not_met": "timing",
+    "intraday_waiting_for_trigger": "timing",
+    "intraday_opening_range_incomplete": "timing",
+    "intraday_no_valid_bar": "timing",
+    "after_last_entry_time": "timing",
+    "missing_execution_basis": "execution",
+    "missing_previous_close": "execution",
+    "no_executable_basis": "execution",
+    "data_error": "execution",
+    "duplicate_execution_prevented": "execution",
+    "limit_locked_no_fill": "execution",
+    "cancelled": "execution",
+    "rejected": "execution",
+    "expired": "execution",
+    "position_matched": "business",
+    "hold_or_zero_lots": "business",
+    "pending_rollover_required": "business",
+    "holding_period_control": "business",
+    "near_expiry_new_entry_block": "business",
+    "cold_start_small_cap": "learning",
+    "side_performance_block": "learning",
+    "capital_utilization_memory_protected": "learning",
+    "learned_underperformance_policy": "learning",
+    "provisional_policy_probe_only": "learning",
+    "provisional_policy_cap": "learning",
+    "conditional_performance_block": "learning",
+    "weak_conditional_combo": "learning",
+    "weak_ticker_side_history": "learning",
+    "weak_ticker_side_quality_gate": "learning",
+    "weak_ticker_side_cap": "learning",
+    "protected_ticker_side_weak_combo": "learning",
+    "protected_ticker_side_cold_start": "learning",
+    "strategy_memory_weak_block": "learning",
+    "strategy_memory_watchlist_cap": "learning",
 }
 
 _EMPTY_NO_TRADE_REASONS = {
@@ -97,6 +199,40 @@ def normalize_no_trade_reason(reason: Optional[str]) -> Optional[str]:
     if normalized.lower() in _EMPTY_NO_TRADE_REASONS:
         return None
     return LEGACY_NO_TRADE_REASON_ALIASES.get(normalized, normalized)
+
+
+def _infer_no_trade_reason_category(reason: Optional[str]) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "signal"
+    if any(token in text for token in ("rollover", "expiry", "delivery", "position_matched", "matched", "hold_or_zero")):
+        return "business"
+    if any(token in text for token in ("learn", "memory", "hypothesis", "template", "history", "policy", "protected", "deployable", "watchlist")):
+        return "learning"
+    if any(token in text for token in ("trigger", "timing", "opening", "intraday", "after_last_entry", "horizon")):
+        return "timing"
+    if any(token in text for token in ("execution", "basis", "data", "limit", "cancel", "reject", "expired", "duplicate", "fill")):
+        return "execution"
+    if any(token in text for token in ("margin", "risk", "drawdown", "cooling", "frequency", "cap", "threshold", "auditor", "reduce", "danger", "loss", "exposure")):
+        return "risk"
+    return "signal"
+
+
+def categorize_no_trade_reason(reason: Optional[str]) -> Dict[str, Any]:
+    normalized = normalize_no_trade_reason(reason)
+    category = NO_TRADE_REASON_CATEGORY_MAP.get(normalized or "")
+    source = "explicit_map" if category else "keyword_fallback"
+    if not category:
+        category = _infer_no_trade_reason_category(normalized)
+        if not normalized:
+            source = "default_signal_missing_reason"
+    return {
+        "reason": normalized or "unknown",
+        "category": category,
+        "category_label": NO_TRADE_REASON_CATEGORY_LABELS[category],
+        "category_description": NO_TRADE_REASON_CATEGORY_DESCRIPTIONS[category],
+        "source": source,
+    }
 
 
 def ensure_signal_snapshot(value: Any) -> Dict[str, Any]:
@@ -267,6 +403,49 @@ def build_actual_transactions(transactions: List[Dict[str, Any]]) -> List[Dict[s
     return actual
 
 
+def _result_consistency_against_phase2_plan(snapshot: Dict[str, Any], result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    translation = snapshot.get("execution_translation")
+    if not isinstance(translation, dict):
+        return None
+    plan = translation.get("phase2_order_plan")
+    if not isinstance(plan, dict):
+        return None
+
+    plan_action = enum_value(plan.get("action"))
+    plan_lots = int(plan.get("lots", 0) or 0)
+    actual_action = result.get("actual_action")
+    actual_lots = result.get("actual_lots")
+    plan_consistency = plan.get("consistency_diagnostics") if isinstance(plan.get("consistency_diagnostics"), dict) else {}
+    expected = plan_consistency.get("expected") if isinstance(plan_consistency.get("expected"), dict) else {}
+    issues: List[str] = []
+
+    if result.get("outcome") == "executed":
+        if actual_action == "multi":
+            if actual_lots is not None and int(actual_lots or 0) != plan_lots:
+                issues.append("multi_transaction_lots_mismatch")
+        else:
+            if actual_action != plan_action:
+                issues.append("actual_action_mismatch")
+            allowed_lots = {plan_lots}
+            if expected.get("requires_two_step_reversal") and int(expected.get("first_leg_lots") or 0) > 0:
+                allowed_lots.add(int(expected.get("first_leg_lots") or 0))
+            if actual_lots is not None and int(actual_lots or 0) not in allowed_lots:
+                issues.append("actual_lots_mismatch")
+    elif result.get("outcome") == "executed_without_transaction":
+        if plan_action != "hold" and plan_lots > 0:
+            issues.append("planned_trade_without_transaction")
+
+    return {
+        "status": "ok" if not issues else "warning",
+        "issues": issues,
+        "phase2_plan_action": plan_action,
+        "phase2_plan_lots": plan_lots,
+        "actual_action": actual_action,
+        "actual_lots": actual_lots,
+        "no_trade_reason": result.get("no_trade_reason"),
+    }
+
+
 def set_execution_result(
     snapshot: Dict[str, Any],
     *,
@@ -291,6 +470,9 @@ def set_execution_result(
             "warning_message": warning_message,
         }
     )
+    consistency = _result_consistency_against_phase2_plan(snapshot, result)
+    if consistency is not None:
+        result["consistency_diagnostics"] = consistency
 
 
 def classify_no_trade_reason(reason: Optional[str]) -> str:
@@ -313,6 +495,17 @@ def classify_no_trade_reasons(reasons: List[Optional[str]]) -> str:
     if all(item == "expected" for item in classes):
         return "expected"
     return "unknown"
+
+
+def summarize_no_trade_reason_categories(reasons: List[Optional[str]]) -> Dict[str, int]:
+    counter: Counter = Counter()
+    for reason in reasons:
+        normalized = normalize_no_trade_reason(reason)
+        if not normalized:
+            continue
+        category = categorize_no_trade_reason(normalized)["category"]
+        counter[category] += 1
+    return {str(key): int(value) for key, value in counter.most_common()}
 
 
 def infer_no_trade_reason(
@@ -386,6 +579,7 @@ def classify_zero_transaction_day(recommendations: List[Dict[str, Any]]) -> Dict
     return {
         "classification": classify_no_trade_reasons(reasons),
         "reasons": reasons,
+        "reason_categories": summarize_no_trade_reason_categories(reasons),
     }
 
 

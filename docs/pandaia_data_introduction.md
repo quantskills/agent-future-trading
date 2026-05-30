@@ -1,4 +1,4 @@
-# PandaAI 数据接入说明
+﻿# PandaAI 数据接入说明
 
 更新时间：2026-05-12
 
@@ -139,7 +139,7 @@ ZN_DOMINANT.SHF
 3. Phase3 才读取 T 日结算价。  
    结算价只用于收盘后账务，不参与当日盘前策略生成。
 
-Phase3 的实际执行者是 `src/agents/accountant.py` 会计师智能体；它通过 `src/tools/agent_tools/futures_settlement.py` 调用 PandaAI 结算价并完成账务入账。
+Phase3 的实际执行者是 `src/agents/execution_team/accountant.py` 会计师智能体；它通过 `src/tools/agent_tools/futures_settlement.py` 调用 PandaAI 结算价并完成账务入账。
 
 ## 五、盘中执行确认中的 PandaAI 用法
 
@@ -147,7 +147,7 @@ Phase3 的实际执行者是 `src/agents/accountant.py` 会计师智能体；它
 
 ```text
 pending recommendation
--> src/agents/trader.py
+-> src/agents/execution_team/trader.py
 -> Router.get_china_futures_minute_bars(frequency="15m")
 -> Router.get_china_futures_minute_bars(frequency="1m")
 -> intraday_execution.select_intraday_execution
@@ -192,8 +192,8 @@ src/tools/agent_tools/market_confirmation.py
 src/tools/agent_tools/intraday_execution.py
 src/tools/agent_tools/futures_execution.py
 src/tools/agent_tools/futures_settlement.py
-src/agents/trader.py
-src/agents/accountant.py
+src/agents/execution_team/trader.py
+src/agents/execution_team/accountant.py
 src/run/order.py
 src/run/settlement.py
 ```

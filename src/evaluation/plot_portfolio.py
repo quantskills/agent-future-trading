@@ -28,6 +28,12 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from database.sqlite_setup import DB_PATH
+from evaluation.evaluation import (
+    calculate_annualized_return,
+    calculate_returns,
+    calculate_sharpe_ratio,
+    calculate_volatility,
+)
 
 
 def _safe_filename(value: str) -> str:
@@ -342,40 +348,13 @@ class PortfolioCurvePlotter:
                         open_positions[key].pop(0)
         trade_win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
 
-        # Calculate Sharpe ratio using margin-based returns (same as evaluation.py)
-        if len(account_equity) > 1:
-            import numpy as np
-
-            # Use margin-based returns for futures volatility
-            margin_returns = []
-            for i in range(1, len(self.settlement_data)):
-                margin = self.settlement_data['current_margin'].iloc[i - 1]
-                if margin and margin > 0:
-                    pnl = self.settlement_data['daily_pnl'].iloc[i] or 0
-                    margin_returns.append(pnl / margin)
-
-            volatility = np.std(margin_returns) * np.sqrt(252) if margin_returns else 0
-            total_margin_return = sum(margin_returns)
-            annualization_days = len(margin_returns) if margin_returns else len(dates)
-            margin_annualized_return = (
-                (1 + total_margin_return) ** (252.0 / annualization_days) - 1
-                if annualization_days > 0 and total_margin_return > -1
-                else 0
-            )
-            # Display annualized return stays account equity based
-            display_annualized_return = (
-                (1 + (final_net_value - 1)) ** (252.0 / len(dates)) - 1
-                if len(dates) > 0 and (final_net_value - 1) > -1
-                else 0
-            )
-
-            risk_free_rate = 0.03
-            sharpe_ratio = (margin_annualized_return - risk_free_rate) / volatility if volatility > 0 else 0
-        else:
-            annualization_days = len(dates)
-            display_annualized_return = 0
-            volatility = 0
-            sharpe_ratio = 0
+        # Match evaluate_config.py: headline risk metrics use account-equity daily returns.
+        account_equity_curve = [float(initial_capital)] + [float(value) for value in account_equity]
+        account_returns = calculate_returns(account_equity_curve)
+        annualization_days = len(dates)
+        display_annualized_return = calculate_annualized_return(final_net_value - 1, annualization_days)
+        volatility = calculate_volatility(account_returns, len(account_returns))
+        sharpe_ratio = calculate_sharpe_ratio(display_annualized_return, volatility)
 
         # Plot net value curve
         ax.plot(dates, net_value.values,
@@ -415,8 +394,8 @@ class PortfolioCurvePlotter:
             f"总收益: {total_return:+.2f}%\n"
             f"年化收益: {display_annualized_return * 100:.2f}%\n"
             f"最大回撤: {max_drawdown:.2f}%\n"
-            f"夏普比率(保证金基准): {sharpe_ratio:.2f}\n"
-            f"波动率(保证金基准): {volatility * 100:.2f}%\n"
+            f"夏普比率(账户权益日收益): {sharpe_ratio:.4f}\n"
+            f"波动率(账户权益): {volatility * 100:.2f}%\n"
             f"交易胜率: {trade_win_rate:.1f}% ({winning_trades}/{total_trades})\n"
             f"结算交易日: {len(dates)}"
         )

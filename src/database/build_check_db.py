@@ -26,6 +26,14 @@ def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def _local_table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
+
+
 def _source_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
     cursor.execute(f"PRAGMA src.table_info({table_name})")
     return {str(row[1]) for row in cursor.fetchall()}
@@ -48,6 +56,79 @@ def _create_from_source(cursor: sqlite3.Cursor, target_table: str, source_table:
         FROM src.{source_table}
         """
     )
+
+
+def validate_check_db_consistency(source_db: str | Path = DB_PATH, check_db: str | Path = DEFAULT_CHECK_DB) -> dict:
+    source_path = Path(source_db)
+    target_path = Path(check_db)
+    if not source_path.exists():
+        raise FileNotFoundError(f"source database not found: {source_path}")
+    if not target_path.exists():
+        raise FileNotFoundError(f"check database not found: {target_path}")
+
+    conn = sqlite3.connect(target_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("ATTACH DATABASE ? AS src", (str(source_path),))
+        checks = [
+            ("daily_settlement", "check_daily_settlement"),
+            ("ticker_daily_pnl", "check_ticker_daily_pnl"),
+            ("futures_transactions", "check_transactions"),
+            ("futures_recommendation", "check_recommendations"),
+            ("strategy_memory", "check_strategy_memory"),
+            ("adaptive_policy_state", "check_adaptive_policy_state"),
+            ("capital_deployment_state", "check_capital_deployment_state"),
+            ("trading_day_phase", "check_trading_day_phase"),
+        ]
+        mismatches = []
+        row_counts = {}
+        for source_table, check_table in checks:
+            if not _table_exists(cursor, source_table):
+                continue
+            if not _local_table_exists(cursor, check_table):
+                mismatches.append({"table": check_table, "issue": "missing_check_table"})
+                continue
+            cursor.execute(f"SELECT COUNT(*) FROM src.{source_table}")
+            source_count = int(cursor.fetchone()[0])
+            cursor.execute(f"SELECT COUNT(*) FROM {check_table}")
+            check_count = int(cursor.fetchone()[0])
+            row_counts[check_table] = {"source": source_count, "check": check_count}
+            if source_count != check_count:
+                mismatches.append(
+                    {
+                        "table": check_table,
+                        "issue": "row_count_mismatch",
+                        "source": source_count,
+                        "check": check_count,
+                    }
+                )
+
+        required_daily_columns = {
+            "previous_account_equity",
+            "current_account_equity",
+            "cash_available",
+            "reserved_margin",
+        }
+        cursor.execute("PRAGMA table_info(check_daily_settlement)")
+        daily_columns = {str(row[1]) for row in cursor.fetchall()}
+        missing_daily_columns = sorted(required_daily_columns - daily_columns)
+        if missing_daily_columns:
+            mismatches.append(
+                {
+                    "table": "check_daily_settlement",
+                    "issue": "missing_required_columns",
+                    "columns": missing_daily_columns,
+                }
+            )
+
+        cursor.execute("DETACH DATABASE src")
+        return {
+            "ok": not mismatches,
+            "mismatches": mismatches,
+            "row_counts": row_counts,
+        }
+    finally:
+        conn.close()
 
 
 def rebuild_check_db(source_db: str | Path = DB_PATH, check_db: str | Path = DEFAULT_CHECK_DB) -> Path:
@@ -80,6 +161,8 @@ def rebuild_check_db(source_db: str | Path = DB_PATH, check_db: str | Path = DEF
                 "config_id",
                 "trading_date",
                 "cashflow",
+                "account_equity",
+                "cash_available",
                 "total_assets",
                 "margin_used",
                 "available_cash",
@@ -96,6 +179,10 @@ def rebuild_check_db(source_db: str | Path = DB_PATH, check_db: str | Path = DEF
                 "trading_date",
                 "previous_balance",
                 "current_balance",
+                "previous_account_equity",
+                "current_account_equity",
+                "cash_available",
+                "reserved_margin",
                 "previous_margin",
                 "current_margin",
                 "daily_pnl",
@@ -273,9 +360,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build a lightweight read-only inspection copy of agentquant.db.")
     parser.add_argument("--source", default=DB_PATH, help="Runtime agentquant.db path.")
     parser.add_argument("--target", default=str(DEFAULT_CHECK_DB), help="Lightweight check DB output path.")
+    parser.add_argument("--validate", action="store_true", help="Validate source/check row counts after rebuild.")
     args = parser.parse_args()
     path = rebuild_check_db(args.source, args.target)
     print(f"agentquantcheck.db rebuilt: {path}")
+    if args.validate:
+        result = validate_check_db_consistency(args.source, args.target)
+        print(f"agentquantcheck.db validation: {result}")
 
 
 if __name__ == "__main__":
