@@ -106,15 +106,42 @@ def _signal_combo(snapshot: Dict[str, Any]) -> str:
 
 
 def _trade_auditor(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    auditor = (plan.get("trade_auditor") or plan.get("decision_planner")) if isinstance(plan, dict) else None
-    return auditor if isinstance(auditor, dict) else {}
+    audit = snapshot.get("active_opportunity_audit")
+    if isinstance(audit, dict):
+        decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
+        if decision:
+            return {
+                "decision": decision.get("audit_decision") or decision.get("decision") or decision.get("authority_type"),
+                "reasons": audit.get("reason_codes") or decision.get("reason_codes") or [],
+                "source": "active_opportunity_audit",
+            }
+    contract = snapshot.get("final_action_contract")
+    if isinstance(contract, dict):
+        return {
+            "decision": contract.get("authority_type") or contract.get("final_action"),
+            "reasons": contract.get("reason_codes") or [],
+            "source": "final_action_contract",
+        }
+    return {}
 
 
 def _rebalance_summary_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    summary = plan.get("rebalance_summary") if isinstance(plan.get("rebalance_summary"), dict) else {}
-    return summary if isinstance(summary, dict) else {}
+    contract = snapshot.get("final_action_contract")
+    if not isinstance(contract, dict):
+        return {}
+    current_lots = int(contract.get("current_lots") or 0)
+    target_lots = int(contract.get("target_lots") or 0)
+    return {
+        "action_type": contract.get("final_action") or "unknown",
+        "reason": ",".join(str(item) for item in (contract.get("reason_codes") or []) if item) or "none",
+        "control_reasons": contract.get("reason_codes") or [],
+        "holding_days": None,
+        "turnover_notional_estimate": 0.0,
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "lots_delta": int(contract.get("lots_delta") or (target_lots - current_lots)),
+        "source": "final_action_contract",
+    }
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -211,11 +238,10 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
             if not snapshot.get("artifact_validation_errors"):
                 artifact_validation_pass += 1
 
-        plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-        controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-        if isinstance(plan.get("strategy_controls"), str):
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        if isinstance(contract.get("strategy_controls"), str):
             free_text_control_violation_count += 1
-        for reason in controls.get("reasons") or []:
+        for reason in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []):
             control_reason_counts[str(reason)] += 1
 
         context = _fundamental_context_from_snapshot(snapshot)

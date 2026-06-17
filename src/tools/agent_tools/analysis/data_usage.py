@@ -254,6 +254,7 @@ def build_fundamental_data_usage(
 ) -> Dict[str, Any]:
     metadata = fundamentals_metadata or {}
     extra = pandaai_extra_context or {}
+    availability_audit = metadata.get("local_finoview_availability_audit") or {}
     finoview_available = int(metadata.get("loaded_indicator_count") or 0) > 0
     extra_features = extra.get("features") if isinstance(extra.get("features"), list) else []
     return {
@@ -278,6 +279,22 @@ def build_fundamental_data_usage(
                 "factor_groups": metadata.get("indicator_role_counts") or {},
                 "freshness_score": metadata.get("factor_freshness_score"),
                 "no_lookahead_status": metadata.get("no_lookahead_status", "unchecked"),
+                "local_availability_audit": availability_audit,
+                "coverage_status": (
+                    availability_audit.get("coverage_status")
+                    if isinstance(availability_audit, dict)
+                    else None
+                ),
+                "supports_trade_setup": bool(
+                    availability_audit.get("supports_fundamental_trade_setup", False)
+                )
+                if isinstance(availability_audit, dict)
+                else False,
+                "runtime_data_boundary": (
+                    availability_audit.get("runtime_data_boundary")
+                    if isinstance(availability_audit, dict)
+                    else "local_feather_only"
+                ),
             },
             "pandaai_extra": {
                 "source": "PandaAI",
@@ -378,6 +395,7 @@ def build_pm_data_quality_summary(
     unavailable_sources: List[str] = []
     stale_sources: List[str] = []
     used_sources: List[str] = []
+    fundamental_trade_setup_gaps: List[str] = []
     for analyst, usage in analysts.items():
         sources = usage.get("sources") if isinstance(usage, dict) else {}
         for name, source in (sources or {}).items():
@@ -388,6 +406,9 @@ def build_pm_data_quality_summary(
             if source.get("stale_indicator_count") or source.get("stale_ratio"):
                 if float(source.get("stale_ratio") or 0.0) > 0:
                     stale_sources.append(f"{analyst}.{name}")
+            if name == "finoview_fundamental" and source.get("used_in_signal"):
+                if not bool(source.get("supports_trade_setup", True)):
+                    fundamental_trade_setup_gaps.append(f"{analyst}.{name}")
     for name, source in pm_sources.items():
         if source.get("used_in_signal"):
             used_sources.append(f"pm.{name}")
@@ -399,6 +420,8 @@ def build_pm_data_quality_summary(
         "used_sources": sorted(set(used_sources)),
         "unavailable_sources": sorted(set(unavailable_sources)),
         "stale_sources": sorted(set(stale_sources)),
+        "fundamental_trade_setup_gaps": sorted(set(fundamental_trade_setup_gaps)),
+        "fundamental_trade_setup_gap": bool(fundamental_trade_setup_gaps),
     }
 
 

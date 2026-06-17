@@ -65,6 +65,123 @@ SECTOR_GUIDANCE = {
     },
 }
 
+SECTOR_TECHNICAL_SETUP_POLICY = {
+    "energy": {
+        "preferred_setups": ["trend_breakout", "trend_pullback", "volatility_breakout"],
+        "caution_setups": ["range_reversal"],
+        "primary_confirmation": ["volume_ratio", "open_interest", "crude_cost_context"],
+        "execution_focus": "avoid_chasing_after_cost_spikes",
+    },
+    "chemical": {
+        "preferred_setups": ["range_reversal", "trend_breakout", "trend_pullback"],
+        "caution_setups": ["volatility_breakout"],
+        "primary_confirmation": ["cost_margin", "inventory_cycle", "volume_ratio"],
+        "execution_focus": "confirm_cost_inventory_regime_before_breakout",
+    },
+    "ferrous": {
+        "preferred_setups": ["trend_breakout", "trend_pullback"],
+        "caution_setups": ["range_reversal", "volatility_breakout"],
+        "primary_confirmation": ["chain_confirmation", "volume_ratio", "open_interest"],
+        "execution_focus": "prefer_chain_confirmed_breakouts",
+    },
+    "nonferrous": {
+        "preferred_setups": ["trend_breakout", "volatility_breakout", "trend_pullback"],
+        "caution_setups": ["range_reversal"],
+        "primary_confirmation": ["macro_inventory_confirmation", "volume_ratio", "external_market_alignment"],
+        "execution_focus": "guard_false_breakout_under_macro_volatility",
+    },
+    "agricultural": {
+        "preferred_setups": ["range_reversal", "trend_breakout"],
+        "caution_setups": ["volatility_breakout"],
+        "primary_confirmation": ["seasonal_weather_policy_context", "volume_ratio", "price_location"],
+        "execution_focus": "require_current_confirmation_against_weather_policy_noise",
+    },
+    "generic": {
+        "preferred_setups": ["trend_breakout", "range_reversal", "volatility_breakout"],
+        "caution_setups": [],
+        "primary_confirmation": ["volume_ratio", "market_confirmation"],
+        "execution_focus": "use_current_confirmation",
+    },
+}
+
+SECTOR_FUNDAMENTAL_FACTOR_TREE = {
+    "energy": {
+        "primary_drivers": ["cost", "supply", "inventory", "demand"],
+        "supporting_drivers": ["basis", "profit", "import_export"],
+        "risk_drivers": ["macro_policy", "context"],
+        "short_trigger_groups": ["inventory", "basis", "demand"],
+    },
+    "chemical": {
+        "primary_drivers": ["profit", "inventory", "supply", "demand"],
+        "supporting_drivers": ["basis", "cost", "import_export"],
+        "risk_drivers": ["macro_policy", "context"],
+        "short_trigger_groups": ["profit", "inventory", "demand", "basis"],
+    },
+    "ferrous": {
+        "primary_drivers": ["demand", "inventory", "profit", "supply"],
+        "supporting_drivers": ["basis", "import_export", "macro_policy"],
+        "risk_drivers": ["macro_policy", "context"],
+        "short_trigger_groups": ["demand", "inventory", "basis"],
+    },
+    "nonferrous": {
+        "primary_drivers": ["supply", "inventory", "import_export", "basis"],
+        "supporting_drivers": ["profit", "macro_policy", "capital_flow"],
+        "risk_drivers": ["macro_policy", "context", "positioning"],
+        "short_trigger_groups": ["inventory", "basis", "capital_flow"],
+    },
+    "agricultural": {
+        "primary_drivers": ["supply", "demand", "inventory", "import_export"],
+        "supporting_drivers": ["basis", "profit", "macro_policy"],
+        "risk_drivers": ["weather", "policy", "context"],
+        "short_trigger_groups": ["inventory", "basis", "import_export", "weather"],
+    },
+    "generic": {
+        "primary_drivers": ["supply", "demand", "inventory", "basis"],
+        "supporting_drivers": ["profit", "import_export", "macro_policy"],
+        "risk_drivers": ["context"],
+        "short_trigger_groups": ["inventory", "basis"],
+    },
+}
+
+SECTOR_NEWS_CATALYST_POLICY = {
+    "energy": {
+        "tradable_catalysts": ["supply", "inventory", "policy", "macro"],
+        "risk_events": ["policy", "macro"],
+        "noise_events": ["context"],
+        "event_window_days": 3,
+    },
+    "chemical": {
+        "tradable_catalysts": ["supply", "inventory", "demand"],
+        "risk_events": ["policy", "macro"],
+        "noise_events": ["context"],
+        "event_window_days": 3,
+    },
+    "ferrous": {
+        "tradable_catalysts": ["demand", "inventory", "policy", "supply"],
+        "risk_events": ["policy", "macro"],
+        "noise_events": ["context"],
+        "event_window_days": 3,
+    },
+    "nonferrous": {
+        "tradable_catalysts": ["overseas", "inventory", "supply", "macro"],
+        "risk_events": ["macro", "overseas", "policy"],
+        "noise_events": ["context"],
+        "event_window_days": 3,
+    },
+    "agricultural": {
+        "tradable_catalysts": ["weather", "import_export", "policy", "inventory"],
+        "risk_events": ["weather", "policy"],
+        "noise_events": ["macro", "context"],
+        "event_window_days": 5,
+    },
+    "generic": {
+        "tradable_catalysts": ["supply", "demand", "inventory", "policy"],
+        "risk_events": ["policy", "macro"],
+        "noise_events": ["context"],
+        "event_window_days": 3,
+    },
+}
+
 def get_sector(ticker: str) -> str:
     return SECTOR_BY_TICKER.get(str(ticker).upper(), "generic")
 
@@ -73,6 +190,33 @@ def get_sector_guidance(ticker: str, analyst: str) -> str:
     sector = get_sector(ticker)
     guidance = SECTOR_GUIDANCE.get(sector, {})
     return guidance.get(analyst, "Use commodity-specific evidence and prefer Neutral when evidence is mixed.")
+
+
+def _technical_setup_policy(ticker: str) -> Dict[str, Any]:
+    return dict(SECTOR_TECHNICAL_SETUP_POLICY.get(get_sector(ticker), SECTOR_TECHNICAL_SETUP_POLICY["generic"]))
+
+
+def _fundamental_factor_tree(ticker: str) -> Dict[str, Any]:
+    return dict(SECTOR_FUNDAMENTAL_FACTOR_TREE.get(get_sector(ticker), SECTOR_FUNDAMENTAL_FACTOR_TREE["generic"]))
+
+
+def _news_catalyst_policy(ticker: str) -> Dict[str, Any]:
+    return dict(SECTOR_NEWS_CATALYST_POLICY.get(get_sector(ticker), SECTOR_NEWS_CATALYST_POLICY["generic"]))
+
+
+def _group_names_with_direction(group_counts: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for group, counts in (group_counts or {}).items():
+        if not isinstance(counts, Counter):
+            counts = Counter(counts or {})
+        if counts.get("up", 0) or counts.get("down", 0):
+            names.append(str(group))
+    return sorted(set(names))
+
+
+def _intersect_ordered(items: Iterable[Any], available: Iterable[Any]) -> List[str]:
+    available_set = {str(item) for item in available}
+    return [str(item) for item in items or [] if str(item) in available_set]
 
 
 def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[str, Any]:
@@ -96,14 +240,19 @@ def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[st
 def llm_path_label(full_config: Dict[str, Any], analyst: str) -> str:
     base = get_analyst_llm_config(full_config, analyst)
     llm_cfg = full_config.get("llm", {}) or {}
-    codex_cfg = llm_cfg.get("codex_openai", {}) or {}
-    reasoning_cfg = codex_cfg.get("reasoning", {}) or {}
+    provider_key = str(llm_cfg.get("provider") or "").lower()
+    provider_cfg_key = {
+        "codexopenai": "codex_openai",
+        "tqxai": "tqxai",
+    }.get(provider_key)
+    provider_cfg = llm_cfg.get(provider_cfg_key, {}) if provider_cfg_key else {}
+    reasoning_cfg = provider_cfg.get("reasoning", {}) or {}
     parts = [str(base.get("mode") or "cloud_only")]
     if llm_cfg.get("provider"):
         parts.append(f"provider={llm_cfg.get('provider')}")
     if base.get("cloud_model"):
         parts.append(f"model={base.get('cloud_model')}")
-    effort = codex_cfg.get("reasoning_effort") or reasoning_cfg.get("effort")
+    effort = provider_cfg.get("reasoning_effort") or reasoning_cfg.get("effort")
     if effort:
         parts.append(f"reasoning_effort={effort}")
     return "; ".join(parts)
@@ -210,6 +359,642 @@ def _holding_period_hint(signal: AnalystSignal) -> str:
     return horizon
 
 
+def _has_actionable_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or text in {"unknown", "none", "n/a", "null"}:
+        return False
+    generic_markers = {
+        "requires_current_confirmation",
+        "primary driver and secondary confirmation align with acceptable reward/risk",
+        "exit/reduce if current confirmation fails",
+    }
+    return text not in generic_markers
+
+
+_GENERIC_ENTRY_MARKERS = {
+    "requires_current_confirmation",
+    "technical_price_trigger",
+    "fundamental_anchor",
+    "news_event_trigger",
+    "direction_anchor",
+    "initial_or_rebalance",
+}
+
+
+def _is_generic_entry_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    if text in _GENERIC_ENTRY_MARKERS:
+        return True
+    if text.endswith("_trigger") or text.endswith("_anchor"):
+        return True
+    if text.startswith("requires ") and "before entry" in text:
+        return True
+    return False
+
+
+def _has_specific_entry_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not _has_actionable_text(text) or _is_generic_entry_text(text):
+        return False
+    return any(
+        token in text
+        for token in (
+            "break",
+            "breakout",
+            "pullback",
+            "vwap",
+            "volume",
+            "close",
+            "cross",
+            "above",
+            "below",
+            "confirm",
+            "entry",
+            "open",
+            "probe",
+            "momentum",
+            "support",
+            "resistance",
+        )
+    )
+
+
+_FUNDAMENTAL_DERIVED_SHORT_TRIGGER_MARKERS = (
+    "short-term technical/price confirmation aligns with fundamental factor groups",
+)
+
+
+def _is_derived_fundamental_short_trigger(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _FUNDAMENTAL_DERIVED_SHORT_TRIGGER_MARKERS)
+
+
+def _has_explicit_fundamental_short_trigger(signal: AnalystSignal, quality_context: Dict[str, Any]) -> bool:
+    """True only when a fundamental anchor has a real short-horizon entry condition.
+
+    The auto-derived "wait for short-term confirmation" wording is an auditable
+    condition, not proof that confirmation already exists. Treating it as a
+    completed trigger lets medium fundamental direction views become real probes.
+    """
+    metadata = getattr(signal, "metadata", {}) or {}
+    current_confirmation_flags = (
+        "short_term_trigger_confirmed",
+        "short_term_confirmation_confirmed",
+        "technical_confirmation_confirmed",
+        "price_trigger_confirmed",
+        "intraday_confirmation_confirmed",
+        "market_confirmation_confirmed",
+        "execution_trigger_confirmed",
+    )
+    for flag in current_confirmation_flags:
+        if bool(quality_context.get(flag)) or bool(metadata.get(flag)):
+            return True
+
+    entry_trigger = getattr(signal, "entry_trigger", "")
+    if _is_derived_fundamental_short_trigger(entry_trigger):
+        return False
+    return _has_specific_entry_text(entry_trigger)
+
+
+def _current_confirmation_flag(signal: AnalystSignal, quality_context: Dict[str, Any], *names: str) -> bool:
+    metadata = getattr(signal, "metadata", {}) or {}
+    for name in names:
+        if bool(quality_context.get(name)) or bool(metadata.get(name)):
+            return True
+    return False
+
+
+def _build_action_evidence_contract(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    *,
+    analyst: str,
+    opportunity_type: str,
+    layer: str,
+    entry_trigger: str,
+    exit_hint: str,
+    has_invalidation: bool,
+) -> Dict[str, Any]:
+    base = quality_context.get("action_evidence_contract")
+    contract: Dict[str, Any] = dict(base) if isinstance(base, dict) else {}
+    sector = str(quality_context.get("sector") or "")
+    side = _signal_side(signal)
+    contract.update(
+        {
+            "contract_version": "agentquant.action_evidence.v1",
+            "analyst": analyst,
+            "sector": sector,
+            "side": side,
+            "opportunity_type": opportunity_type,
+            "opportunity_layer": layer,
+            "entry_trigger": entry_trigger,
+            "exit_hint": exit_hint,
+            "has_invalidation": bool(has_invalidation),
+            "money_objective": "improve_signal_quality_then_route_to_pm_trader_research",
+        }
+    )
+    learning_scope = dict(contract.get("learning_scope") or {})
+    if analyst == "technical":
+        setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+        learning_scope.update(
+            {
+                "setup_family": setup.get("setup_family") or opportunity_type,
+                "sector_setup_alignment": setup.get("sector_setup_alignment"),
+                "market_regime": quality_context.get("market_regime"),
+            }
+        )
+    elif analyst == "fundamental":
+        roles = quality_context.get("fundamental_driver_roles") if isinstance(quality_context.get("fundamental_driver_roles"), dict) else {}
+        learning_scope.update(
+            {
+                "primary_driver_groups": roles.get("primary_driver_groups") or [],
+                "short_trigger_groups": roles.get("short_trigger_groups") or [],
+                "conflict_groups": roles.get("conflict_groups") or [],
+            }
+        )
+    elif analyst == "commodity_news":
+        classification = quality_context.get("catalyst_classification") if isinstance(quality_context.get("catalyst_classification"), dict) else {}
+        learning_scope.update(
+            {
+                "event_regime": quality_context.get("event_regime"),
+                "catalyst_classification": classification,
+            }
+        )
+    contract["learning_scope"] = learning_scope
+    execution = dict(contract.get("execution") or {})
+    execution.update(
+        {
+            "trigger_checked_by_trader": True,
+            "trigger_source": analyst,
+            "requires_current_confirmation": not bool(getattr(signal, "trigger_valid", False)),
+            "invalidation_required": True,
+        }
+    )
+    contract["execution"] = execution
+    return contract
+
+
+def _has_specific_invalidation_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not _has_actionable_text(text):
+        return False
+    if text in {"exit/reduce if current confirmation fails"}:
+        return False
+    if text.startswith("would change view"):
+        return False
+    return any(
+        token in text
+        for token in (
+            "invalid",
+            "fails",
+            "failure",
+            "breaks",
+            "below",
+            "above",
+            "close",
+            "stop",
+            "exit",
+            "reduce",
+            "contradict",
+            "conflict",
+            "reverses",
+            "loses",
+            "regime flips",
+            "price fails",
+            "volume fails",
+        )
+    )
+
+
+def _signal_side(signal: AnalystSignal) -> str:
+    value = signal_value(getattr(signal, "signal", Signal.NEUTRAL))
+    if value == Signal.BULLISH.value:
+        return "long"
+    if value == Signal.BEARISH.value:
+        return "short"
+    return "flat"
+
+
+def _has_trade_setup_text(signal: AnalystSignal) -> bool:
+    return (
+        _has_specific_entry_text(getattr(signal, "entry_trigger", ""))
+        or _has_actionable_text(getattr(signal, "trade_setup", ""))
+    )
+
+
+def _trade_setup_contract_presence(signal: AnalystSignal) -> Dict[str, bool]:
+    entry_present = _has_trade_setup_text(signal)
+    invalidation_present = bool(
+        getattr(signal, "invalidation_level", None) is not None
+        or _has_specific_invalidation_text(getattr(signal, "would_change_view_if", ""))
+        or _has_specific_invalidation_text(getattr(signal, "invalidation_condition", ""))
+        or _has_specific_invalidation_text((getattr(signal, "metadata", {}) or {}).get("invalidation_condition"))
+    )
+    exit_present = (
+        _has_actionable_text(getattr(signal, "exit_hint", ""))
+        or _has_actionable_text(getattr(signal, "counter_evidence", ""))
+        or invalidation_present
+    )
+    holding_present = _has_actionable_text(getattr(signal, "holding_period_hint", "")) or _has_actionable_text(
+        _holding_period_hint(signal)
+    )
+    tradable_why_present = bool(
+        _has_actionable_text(getattr(signal, "template_name", ""))
+        or _clean_list(getattr(signal, "factor_focus", []), max_items=2)
+        or _has_actionable_text(getattr(signal, "justification", ""))
+    )
+    return {
+        "why_tradable_present": tradable_why_present,
+        "entry_trigger_present": entry_present,
+        "invalidation_present": invalidation_present,
+        "exit_hint_present": exit_present,
+        "holding_period_present": holding_present,
+    }
+
+
+def _trade_setup_missing_fields(presence: Dict[str, bool]) -> List[str]:
+    return [key for key, ok in presence.items() if not ok]
+
+
+def _direction_word(signal: AnalystSignal) -> str:
+    side = _signal_side(signal)
+    return "long" if side == "long" else "short" if side == "short" else "flat"
+
+
+def _side_matches_context(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> bool:
+    side = _signal_side(signal)
+    if side == "flat":
+        return False
+    if analyst == "technical":
+        expected = "bullish" if side == "long" else "bearish"
+        dominant = str(quality_context.get("dominant_direction") or "").lower()
+        if dominant:
+            return dominant == expected
+        votes = quality_context.get("indicator_votes") or {}
+        details = votes.get("details") if isinstance(votes, dict) else {}
+        if isinstance(details, dict):
+            expected_count = sum(1 for item in details.values() if str(item).lower() == expected)
+            opposite = "bearish" if expected == "bullish" else "bullish"
+            opposite_count = sum(1 for item in details.values() if str(item).lower() == opposite)
+            return expected_count >= 2 and expected_count > opposite_count
+        return False
+    if analyst == "commodity_news":
+        counts = quality_context.get("direction_counts") or {}
+        if not isinstance(counts, dict):
+            return False
+        expected = "bullish" if side == "long" else "bearish"
+        opposite = "bearish" if side == "long" else "bullish"
+        return int(counts.get(expected, 0) or 0) > int(counts.get(opposite, 0) or 0)
+    if analyst == "fundamental":
+        return str(quality_context.get("tradeability") or "").lower() in {"medium", "high"}
+    return False
+
+
+def _derive_analyst_trade_setup_fields(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    analyst: str,
+) -> Dict[str, Any]:
+    """Derive auditable trade conditions from current-day context.
+
+    The function does not invent price levels. It only converts existing
+    technical/fundamental/news context into explicit conditions that PM can
+    audit. If the context is too weak, the entry condition stays empty and the
+    signal remains direction_only/no_trade downstream.
+    """
+    if signal_value(signal.signal) == Signal.NEUTRAL.value:
+        return {"notes": ["neutral_no_derived_trade_setup"]}
+    tradeability = str(quality_context.get("tradeability") or "unknown").lower()
+    direction = _direction_word(signal)
+    side_ok = _side_matches_context(signal, quality_context, analyst)
+    updates: Dict[str, Any] = {"notes": []}
+
+    if not _has_specific_entry_text(getattr(signal, "entry_trigger", "")):
+        entry = ""
+        if analyst == "technical" and side_ok and tradeability in {"medium", "high"}:
+            features = quality_context.get("features") or {}
+            regime = str(quality_context.get("market_regime") or "technical_state")
+            setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+            setup_family = str(setup.get("setup_family") or "technical_setup")
+            required_confirmation = str(setup.get("required_confirmation") or "current technical confirmation")
+            entry = (
+                f"{direction} {setup_family} entry only after T-day price confirms {regime} direction: "
+                f"{required_confirmation}; volume_ratio >= 0.80 and no new opposite technical vote; "
+                f"current trend_strength={_safe_float(features.get('trend_strength'), 0.0):.2f}"
+            )
+        elif analyst == "fundamental" and side_ok and tradeability in {"medium", "high"}:
+            group_counts = quality_context.get("factor_group_counts") or {}
+            factor_groups = ", ".join(sorted(group_counts.keys())[:4]) if isinstance(group_counts, dict) else "fundamental factors"
+            entry = (
+                f"{direction} entry only after short-term technical/price confirmation aligns with "
+                f"fundamental factor groups ({factor_groups}) before execution"
+            )
+        elif analyst == "commodity_news" and side_ok and bool(quality_context.get("tradable_event")):
+            event_types = quality_context.get("event_type_counts") or {}
+            event_names = ", ".join(sorted(event_types.keys())[:4]) if isinstance(event_types, dict) else "event catalyst"
+            entry = (
+                f"{direction} event probe only after catalyst remains fresh and T-day price/volume "
+                f"confirms the news direction ({event_names})"
+            )
+        if entry:
+            updates["entry_trigger"] = entry
+            updates["notes"].append(f"{analyst}_derived_specific_entry_condition")
+
+    metadata = getattr(signal, "metadata", {}) or {}
+    invalidation_text = (
+        getattr(signal, "invalidation_condition", "")
+        or metadata.get("invalidation_condition", "")
+        or getattr(signal, "would_change_view_if", "")
+        or getattr(signal, "exit_hint", "")
+    )
+    if not _has_specific_invalidation_text(invalidation_text):
+        invalidation = ""
+        if analyst == "technical" and side_ok:
+            setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+            setup_family = str(setup.get("setup_family") or "technical_setup")
+            invalidation_template = str(
+                setup.get("invalidation_template")
+                or "T-day confirmation fails, price closes back inside the failed trigger area, or opposite momentum/volume confirmation appears"
+            )
+            invalidation = (
+                f"{direction} {setup_family} invalid if {invalidation_template}"
+            )
+        elif analyst == "fundamental" and side_ok:
+            invalidation = (
+                f"{direction} fundamental anchor invalid for entry if short-term technical confirmation "
+                "fails, fresh local fundamental data contradicts the thesis, or basis/inventory evidence reverses"
+            )
+        elif analyst == "commodity_news" and side_ok:
+            invalidation = (
+                f"{direction} news idea invalid if the catalyst is not confirmed by T-day price/volume, "
+                "new contradictory news appears, or the event impact window expires"
+            )
+        if invalidation:
+            updates["invalidation_condition"] = invalidation
+            updates["exit_hint"] = getattr(signal, "exit_hint", "") if _has_specific_invalidation_text(getattr(signal, "exit_hint", "")) else invalidation
+            updates["notes"].append(f"{analyst}_derived_specific_invalidation_condition")
+
+    if analyst == "commodity_news" and bool(quality_context.get("tradable_event")) and not bool(quality_context.get("price_reaction_confirmed")):
+        updates["notes"].append("news_catalyst_requires_execution_confirmation")
+    return updates
+
+
+def _price_percentile(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return None
+
+
+def _setup_quality_assessment(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    *,
+    analyst: str,
+    setup_presence: Dict[str, bool],
+    opportunity_type: str,
+    has_invalidation: bool,
+) -> Dict[str, Any]:
+    """Score whether a directional signal is a tradable setup, not just a view.
+
+    This is deliberately generic: it scores price location, entry trigger,
+    invalidation, market regime, data coverage, and conflict. It does not
+    blacklist or boost any specific product.
+    """
+    if signal_value(signal.signal) == Signal.NEUTRAL.value:
+        return {
+            "score": 0.0,
+            "entry_quality": "unknown",
+            "notes": ["neutral_signal_no_trade_setup"],
+        }
+
+    notes: List[str] = []
+    score = 0.0
+    if setup_presence.get("why_tradable_present"):
+        score += 0.12
+    else:
+        notes.append("missing_why_tradable")
+    if setup_presence.get("entry_trigger_present"):
+        score += 0.18
+    else:
+        notes.append("missing_entry_trigger")
+    if has_invalidation:
+        score += 0.18
+    else:
+        notes.append("missing_invalidation_boundary")
+    if setup_presence.get("exit_hint_present"):
+        score += 0.08
+    else:
+        notes.append("missing_exit_hint")
+    if setup_presence.get("holding_period_present"):
+        score += 0.08
+    else:
+        notes.append("missing_holding_period")
+
+    business_score = _safe_float(getattr(signal, "business_quality_score", 0.0), 0.0)
+    data_score = max(
+        _safe_float(getattr(signal, "data_coverage_score", 0.0), 0.0),
+        _safe_float((quality_context.get("data_quality") or {}).get("coverage_ratio"), 0.0)
+        if isinstance(quality_context.get("data_quality"), dict)
+        else 0.0,
+        _safe_float(quality_context.get("freshness_score"), 0.0),
+    )
+    score += 0.18 * business_score
+    score += 0.10 * data_score
+
+    conflicts = _clean_list(getattr(signal, "current_evidence_conflict", []), max_items=8)
+    risk_flags = _clean_list(quality_context.get("risk_flags"), max_items=8)
+    soft_risk_flags = {"high_volatility"}
+    conflicts.extend(item for item in risk_flags if item not in conflicts)
+    score_conflicts = [item for item in conflicts if str(item) not in soft_risk_flags]
+    if score_conflicts:
+        score -= min(0.18, 0.04 * len(score_conflicts))
+        notes.append("current_evidence_conflict")
+    elif risk_flags:
+        notes.append("soft_risk_flag_for_pm_sizing")
+
+    regime = str(quality_context.get("market_regime") or getattr(signal, "market_regime", "") or "").lower()
+    trend_like = "trend" in str(opportunity_type or "").lower()
+    if trend_like and regime in {"choppy", "range", "weak_trend", "high_volatility"}:
+        score -= 0.16
+        notes.append("trend_setup_in_choppy_or_range_regime")
+
+    percentile = _price_percentile(getattr(signal, "price_percentile", None))
+    side = signal_value(signal.signal)
+    if percentile is not None:
+        if side == Signal.BULLISH.value and percentile >= 0.82:
+            score -= 0.12
+            notes.append("late_long_entry_price_near_upper_range")
+        elif side == Signal.BEARISH.value and percentile <= 0.18:
+            score -= 0.12
+            notes.append("late_short_entry_price_near_lower_range")
+        elif side == Signal.BULLISH.value and 0.25 <= percentile <= 0.70:
+            score += 0.04
+            notes.append("long_entry_price_location_reasonable")
+        elif side == Signal.BEARISH.value and 0.30 <= percentile <= 0.75:
+            score += 0.04
+            notes.append("short_entry_price_location_reasonable")
+
+    if analyst == "commodity_news" and not bool(quality_context.get("price_reaction_confirmed")):
+        score -= 0.08
+        notes.append("news_lacks_price_reaction_confirmation")
+    if analyst == "fundamental" and str(getattr(signal, "horizon_class", "") or "").lower() in {"medium", "long"}:
+        if not _has_actionable_text(getattr(signal, "entry_trigger", "")):
+            score -= 0.10
+            notes.append("medium_fundamental_missing_short_timing_trigger")
+
+    score = max(0.0, min(1.0, score))
+    if score >= 0.78:
+        entry_quality = "strong"
+    elif score >= 0.60:
+        entry_quality = "acceptable"
+    elif score >= 0.42:
+        entry_quality = "weak"
+    else:
+        entry_quality = "poor"
+    return {
+        "score": score,
+        "entry_quality": entry_quality,
+        "notes": sorted(set(notes)),
+    }
+
+
+def _resolve_opportunity_layer(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    *,
+    analyst: str,
+    base_layer: str,
+    opportunity_type: str,
+    has_invalidation: bool,
+) -> tuple[str, List[str]]:
+    """Convert analyst output into a tradeability layer without hard product rules."""
+    risk_flags = _clean_list(quality_context.get("risk_flags"), max_items=12)
+    layer_notes: List[str] = []
+    signal_text = signal_value(signal.signal)
+    if signal_text == Signal.NEUTRAL.value:
+        return "no_trade", layer_notes
+
+    if analyst == "commodity_news":
+        tradable_event = bool(quality_context.get("tradable_event"))
+        price_reaction_confirmed = bool(quality_context.get("price_reaction_confirmed"))
+        if not tradable_event:
+            layer_notes.append("news_event_not_tradable_catalyst")
+            return "direction_only", layer_notes
+        if quality_context.get("price_reaction_required", True) and not price_reaction_confirmed:
+            layer_notes.append("news_event_requires_price_or_intraday_confirmation")
+            return "direction_only", layer_notes
+
+    if analyst == "technical":
+        regime = str(quality_context.get("market_regime") or "").lower()
+        trend_like = "trend" in str(opportunity_type or "").lower()
+        if trend_like and regime in {"choppy", "range", "weak_trend", "high_volatility"}:
+            if not bool(quality_context.get("trend_continuation_tradeable")):
+                layer_notes.append("technical_trend_requires_regime_confirmation")
+                return "direction_only", layer_notes
+
+    if analyst == "fundamental":
+        # Fundamental evidence is a medium anchor. It may support PM sizing, but
+        # it should not be treated as a short-horizon setup by itself.
+        entry_trigger = getattr(signal, "entry_trigger", "")
+        data_quality = quality_context.get("data_quality") if isinstance(quality_context, dict) else {}
+        if isinstance(data_quality, dict) and not bool(data_quality.get("supports_fundamental_trade_setup", True)):
+            layer_notes.append("fundamental_local_data_insufficient_for_trade_setup")
+            return "direction_only", layer_notes
+        if str(getattr(signal, "horizon_class", "") or "").lower() in {"medium", "long", "unknown"}:
+            if not has_invalidation or not _has_explicit_fundamental_short_trigger(signal, quality_context):
+                layer_notes.append("fundamental_anchor_requires_short_trigger_and_invalidation")
+                return "direction_only", layer_notes
+            layer_notes.append("fundamental_anchor_has_short_trigger_and_invalidation")
+            if base_layer == "deployable_alpha" and not bool(quality_context.get("fundamental_deployable_confirmed")):
+                layer_notes.append("fundamental_anchor_tradeable_until_pm_confirmation")
+                return "tradeable_setup", layer_notes
+            return base_layer, layer_notes
+
+    return base_layer, layer_notes
+
+
+VALID_OPPORTUNITY_STATES = {
+    "no_opportunity",
+    "watch_for_trigger",
+    "probe_candidate",
+    "tradeable_candidate",
+    "risk_reduction_candidate",
+}
+
+
+def _resolve_opportunity_state(
+    signal: AnalystSignal,
+    *,
+    layer: str,
+    has_invalidation: bool,
+    entry_trigger: str,
+    exit_hint: str,
+) -> str:
+    """Summarize analyst evidence into PM-readable opportunity state.
+
+    This does not create trade authority. It only prevents Neutral/direction-only
+    evidence from hiding whether a setup is absent, trackable, probe-worthy, or
+    tradeable.
+    """
+    layer_text = str(layer or "direction_only").strip().lower()
+    signal_text = signal_value(signal.signal)
+    if layer_text == "risk_reduction":
+        return "risk_reduction_candidate"
+    if layer_text == "no_trade":
+        neutral_bucket = str(getattr(signal, "neutral_opportunity_bucket", "") or "").strip().lower()
+        neutral_trigger = str(getattr(signal, "neutral_trigger_condition", "") or "").strip()
+        shadow_side = str(getattr(signal, "neutral_shadow_side", "") or "").strip().lower()
+        if signal_text == Signal.NEUTRAL.value and (
+            neutral_bucket in {"watchlist_trigger", "accountable_observation", "evidence_gap"}
+            or bool(neutral_trigger)
+            or shadow_side in {"long", "short"}
+        ):
+            return "watch_for_trigger"
+        return "no_opportunity"
+    if layer_text == "deployable_alpha":
+        return "tradeable_candidate"
+    if layer_text == "tradeable_setup":
+        if has_invalidation and _has_specific_entry_text(entry_trigger):
+            return "tradeable_candidate"
+        return "probe_candidate"
+    if layer_text == "direction_only":
+        if has_invalidation and _has_specific_entry_text(entry_trigger):
+            return "probe_candidate"
+        return "watch_for_trigger"
+    if str(exit_hint or "").strip() and signal_text == Signal.NEUTRAL.value:
+        return "watch_for_trigger"
+    return "watch_for_trigger"
+
+
+def _sync_learning_impact_summary(signal: AnalystSignal, *, opportunity_state: str) -> Dict[str, Any]:
+    summary = dict(getattr(signal, "learning_impact_summary", {}) or {})
+    if not summary:
+        summary = {
+            "contract_version": "agentquant.analyst_learning_impact.v1",
+            "historical_support": [],
+            "historical_contradiction": [],
+            "current_evidence_confirmed": [],
+            "current_evidence_missing": [],
+            "authority_boundary": "evidence_explanation_only_no_trade_authority_no_lots_no_margin_no_execution",
+        }
+    summary["opportunity_state"] = opportunity_state
+    if not summary.get("opportunity_state_reason"):
+        summary["opportunity_state_reason"] = (
+            f"current structured evidence resolved opportunity_state={opportunity_state}; "
+            "PM/Auditor/final_action_contract still decide any trade"
+        )
+    summary["authority_boundary"] = "evidence_explanation_only_no_trade_authority_no_lots_no_margin_no_execution"
+    signal.learning_impact_summary = summary
+    return summary
+
+
 def apply_trade_research_contract(
     signal: AnalystSignal,
     quality_context: Dict[str, Any],
@@ -227,10 +1012,41 @@ def apply_trade_research_contract(
     focus = _clean_list(getattr(signal, "factor_focus", []), max_items=8) or _factor_focus_from_context(quality_context, analyst)
 
     is_neutral = signal_value(signal.signal) == Signal.NEUTRAL.value
-    has_invalidation = getattr(signal, "invalidation_level", None) is not None or bool(getattr(signal, "would_change_view_if", ""))
+    derived_setup = _derive_analyst_trade_setup_fields(signal, quality_context, analyst)
+    if derived_setup.get("entry_trigger"):
+        signal.entry_trigger = str(derived_setup["entry_trigger"])
+    derived_invalidation = str(derived_setup.get("invalidation_condition") or "").strip()
+    if derived_invalidation:
+        metadata = {**metadata, "invalidation_condition": derived_invalidation}
+        if not _has_specific_invalidation_text(getattr(signal, "would_change_view_if", "")):
+            signal.would_change_view_if = derived_invalidation
+    if derived_setup.get("exit_hint"):
+        signal.exit_hint = str(derived_setup["exit_hint"])
+    derived_notes = _clean_list(derived_setup.get("notes"), max_items=12)
+    if derived_notes:
+        existing_notes = _clean_list(getattr(signal, "setup_quality_notes", []), max_items=12)
+        signal.setup_quality_notes = sorted(set(existing_notes + derived_notes))
+
+    setup_presence = _trade_setup_contract_presence(signal)
+    missing_setup_fields = _trade_setup_missing_fields(setup_presence)
+    has_invalidation = setup_presence.get("invalidation_present", False)
     if is_neutral:
         layer = "no_trade"
-    elif tradeability == "high" and has_invalidation and float(getattr(signal, "business_quality_score", 0.0) or 0.0) >= 0.60:
+    elif (
+        tradeability == "high"
+        and has_invalidation
+        and _has_trade_setup_text(signal)
+        and float(getattr(signal, "business_quality_score", 0.0) or 0.0) >= 0.75
+        and float(getattr(signal, "confidence", 0.0) or 0.0) >= 0.65
+        and not _clean_list(conflicts, max_items=4)
+    ):
+        layer = "deployable_alpha"
+    elif (
+        tradeability == "high"
+        and has_invalidation
+        and _has_trade_setup_text(signal)
+        and float(getattr(signal, "business_quality_score", 0.0) or 0.0) >= 0.60
+    ):
         layer = "tradeable_setup"
     elif tradeability in {"medium", "high"} and float(getattr(signal, "confidence", 0.0) or 0.0) >= 0.45:
         layer = "direction_only"
@@ -241,7 +1057,19 @@ def apply_trade_research_contract(
     if not opportunity_type or opportunity_type == "unknown":
         opportunity_type = infer_opportunity_type(signal, quality_context, analyst)
 
-    entry_trigger = getattr(signal, "entry_trigger", "") or getattr(signal, "trigger_type", "") or "requires_current_confirmation"
+    setup_quality = _setup_quality_assessment(
+        signal,
+        quality_context,
+        analyst=analyst,
+        setup_presence=setup_presence,
+        opportunity_type=opportunity_type,
+        has_invalidation=has_invalidation,
+    )
+    entry_trigger = (
+        getattr(signal, "entry_trigger", "")
+        or getattr(signal, "trigger_type", "")
+        or "requires_current_confirmation"
+    )
     exit_hint = (
         getattr(signal, "exit_hint", "")
         or getattr(signal, "counter_evidence", "")
@@ -249,9 +1077,110 @@ def apply_trade_research_contract(
         or "exit/reduce if current confirmation fails"
     )
     holding_hint = getattr(signal, "holding_period_hint", "") or _holding_period_hint(signal)
+    layer, layer_notes = _resolve_opportunity_layer(
+        signal,
+        quality_context,
+        analyst=analyst,
+        base_layer=layer,
+        opportunity_type=opportunity_type,
+        has_invalidation=has_invalidation,
+    )
+    if layer_notes:
+        conflicts = list(conflicts or [])
+        for note in layer_notes:
+            if note not in conflicts:
+                conflicts.append(note)
+    if not is_neutral:
+        setup_score = _safe_float(setup_quality.get("score"), 0.0)
+        if setup_score < 0.42:
+            if "setup_quality_poor_downgrade" not in layer_notes:
+                layer_notes.append("setup_quality_poor_downgrade")
+            if "setup_quality_poor_downgrade" not in conflicts:
+                conflicts.append("setup_quality_poor_downgrade")
+            layer = "direction_only"
+        elif setup_score < 0.60 and layer == "deployable_alpha":
+            layer = "tradeable_setup"
+            if "setup_quality_not_strong_enough_for_deployable_alpha" not in layer_notes:
+                layer_notes.append("setup_quality_not_strong_enough_for_deployable_alpha")
+    critical_missing_setup_fields = [
+        field
+        for field in missing_setup_fields
+        if field in {"entry_trigger_present", "invalidation_present"}
+    ]
+    if not is_neutral and missing_setup_fields:
+        missing_note = "missing_trade_setup_contract:" + ",".join(missing_setup_fields)
+        if missing_note not in conflicts:
+            conflicts.append(missing_note)
+        if critical_missing_setup_fields and layer in {"deployable_alpha", "tradeable_setup"}:
+            layer = "direction_only"
+            if "trade_setup_contract_incomplete_downgrade" not in layer_notes:
+                layer_notes.append("trade_setup_contract_incomplete_downgrade")
+    action_evidence_contract = _build_action_evidence_contract(
+        signal,
+        quality_context,
+        analyst=analyst,
+        opportunity_type=opportunity_type,
+        layer=layer,
+        entry_trigger=entry_trigger,
+        exit_hint=exit_hint,
+        has_invalidation=has_invalidation,
+    )
+    opportunity_state = _resolve_opportunity_state(
+        signal,
+        layer=layer,
+        has_invalidation=has_invalidation,
+        entry_trigger=entry_trigger,
+        exit_hint=exit_hint,
+    )
+    action_evidence_contract["opportunity_state"] = opportunity_state
+    action_evidence_contract["state_permissions"] = {
+        "no_opportunity": {
+            "pm_use": "ignore_for_new_entry",
+            "can_seed_probe": False,
+            "can_seed_real_entry": False,
+        },
+        "watch_for_trigger": {
+            "pm_use": "watchlist_only_until_current_trigger",
+            "can_seed_probe": False,
+            "can_seed_real_entry": False,
+        },
+        "probe_candidate": {
+            "pm_use": "probe_candidate_requires_pm_auditor_authority",
+            "can_seed_probe": True,
+            "can_seed_real_entry": False,
+        },
+        "tradeable_candidate": {
+            "pm_use": "tradeable_candidate_requires_pm_auditor_authority",
+            "can_seed_probe": True,
+            "can_seed_real_entry": True,
+        },
+        "risk_reduction_candidate": {
+            "pm_use": "holding_protection_candidate_only",
+            "can_seed_probe": False,
+            "can_seed_real_entry": False,
+        },
+    }.get(opportunity_state, {})
+    product_context = {
+        "ticker": str(ticker or ""),
+        "sector": str(quality_context.get("sector") or ""),
+        "analyst": str(analyst or ""),
+        "setup_family": (action_evidence_contract.get("learning_scope") or {}).get("setup_family"),
+        "market_regime": (action_evidence_contract.get("learning_scope") or {}).get("market_regime")
+        or quality_context.get("market_regime"),
+        "differentiation_role": (
+            "technical_setup_selection"
+            if analyst == "technical"
+            else "fundamental_driver_selection"
+            if analyst == "fundamental"
+            else "news_catalyst_selection"
+            if analyst == "commodity_news"
+            else "generic_evidence"
+        ),
+    }
     research_contract = build_trade_research_contract(
         opportunity_type=opportunity_type,
         opportunity_layer=layer,
+        opportunity_state=opportunity_state,
         entry_trigger=entry_trigger,
         exit_hint=exit_hint,
         holding_period_hint=holding_hint,
@@ -261,6 +1190,8 @@ def apply_trade_research_contract(
         atr_stop_distance=getattr(signal, "atr_stop_distance", None),
         sample_state="current_day_evidence",
         maturity="candidate" if layer != "deployable_alpha" else "validated",
+        action_evidence_contract=action_evidence_contract,
+        product_context=product_context,
     )
     research_errors = validate_trade_research_contract(research_contract)
     message_contract = build_internal_message_contract(
@@ -277,13 +1208,85 @@ def apply_trade_research_contract(
 
     signal.opportunity_type = opportunity_type
     signal.opportunity_layer = layer
+    signal.opportunity_state = opportunity_state
+    signal.setup_quality_score = _safe_float(setup_quality.get("score"), 0.0)
+    signal.entry_quality = str(setup_quality.get("entry_quality") or "unknown")
+    signal.setup_quality_notes = sorted(set(list(setup_quality.get("notes") or []) + derived_notes))
     signal.entry_trigger = entry_trigger
     signal.exit_hint = exit_hint
     signal.holding_period_hint = holding_hint
+    signal.evidence_role = {
+        "technical": "entry_timing",
+        "fundamental": "direction_context",
+        "commodity_news": "event_catalyst",
+        "company_news": "event_catalyst",
+    }.get(str(analyst), "risk_context")
+    signal.direction_context = (
+        "long" if signal_value(signal.signal) == Signal.BULLISH.value
+        else "short" if signal_value(signal.signal) == Signal.BEARISH.value
+        else "neutral"
+    )
+    signal.trade_trigger = entry_trigger
+    signal.position_horizon = holding_hint
+    current_trade_setup = (
+        quality_context.get("current_trade_setup")
+        if isinstance(quality_context.get("current_trade_setup"), dict)
+        else {}
+    )
+    if str(analyst) == "technical":
+        signal.trend_direction = str(
+            quality_context.get("dominant_direction")
+            or getattr(signal, "trend_stage", "")
+            or signal.direction_context
+            or "unknown"
+        )
+        setup_family = str(current_trade_setup.get("setup_family") or opportunity_type or "unknown")
+        signal.entry_timing_signal = (
+            setup_family
+            if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
+            else "trend_direction_only"
+        )
+        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
+        signal.trigger_valid = bool(
+            setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
+            and _has_specific_entry_text(entry_trigger)
+            and has_invalidation
+            and signal.entry_quality not in {"poor", "weak"}
+        )
+    else:
+        signal.trend_direction = signal.direction_context
+        signal.entry_timing_signal = (
+            "event_requires_market_confirmation"
+            if str(analyst) == "commodity_news"
+            else "requires_technical_or_market_timing"
+        )
+        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
+        if str(analyst) == "commodity_news":
+            signal.trigger_valid = bool(
+                quality_context.get("tradable_event")
+                and not quality_context.get("price_reaction_required", True)
+                or _current_confirmation_flag(
+                    signal,
+                    quality_context,
+                    "price_reaction_confirmed",
+                    "market_confirmation_confirmed",
+                    "execution_trigger_confirmed",
+                )
+            ) and bool(has_invalidation)
+        else:
+            signal.trigger_valid = bool(
+                _has_explicit_fundamental_short_trigger(signal, quality_context)
+                and has_invalidation
+            )
+    signal.invalidation_present = bool(has_invalidation)
     signal.factor_focus = focus
     signal.current_evidence_conflict = conflicts
     signal.research_contract_version = research_contract["contract_version"]
     signal.message_contract_version = message_contract["contract_version"]
+    learning_impact_summary = _sync_learning_impact_summary(
+        signal,
+        opportunity_state=opportunity_state,
+    )
     validation_errors = list(getattr(signal, "validation_errors", []) or [])
     for error in research_errors + message_errors:
         if error not in validation_errors:
@@ -292,9 +1295,31 @@ def apply_trade_research_contract(
     signal.metadata = {
         **metadata,
         "trade_research_contract": research_contract,
+        "action_evidence_contract": action_evidence_contract,
         "internal_message_contract": message_contract,
         "research_contract_validation_errors": research_errors,
         "internal_message_validation_errors": message_errors,
+        "tradeability": tradeability,
+        "risk_flags": risk_flags,
+        "opportunity_layer_notes": layer_notes,
+        "opportunity_state": opportunity_state,
+        "learning_impact_summary": learning_impact_summary,
+        "setup_quality": {
+            "score": signal.setup_quality_score,
+            "entry_quality": signal.entry_quality,
+            "notes": signal.setup_quality_notes,
+            "price_percentile": getattr(signal, "price_percentile", None),
+            "not_product_rule": True,
+        },
+        "trade_setup_contract_status": {
+            "presence": setup_presence,
+            "missing_fields": missing_setup_fields,
+            "critical_missing_fields": critical_missing_setup_fields,
+            "non_neutral_requires_complete_setup": not is_neutral,
+            "if_critical_missing_then_direction_only": True,
+            "derived_setup_notes": derived_notes,
+        },
+        "learning_scope": action_evidence_contract.get("learning_scope") or {},
     }
     return signal
 
@@ -364,6 +1389,15 @@ def build_technical_context(
         risk_flags.append("weak_volume_confirmation")
     if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
         risk_flags.append("bullish_setup_lacks_trend_volume_confirmation")
+    trend_continuation_tradeable = (
+        dominant_direction in {"bullish", "bearish"}
+        and trend_strength >= 25
+        and conflict_count <= 1
+        and volume_ratio >= 0.8
+        and aligned >= required_aligned
+    )
+    if regime in {"choppy", "range", "weak_trend", "high_volatility"} and not trend_continuation_tradeable:
+        risk_flags.append("trend_continuation_requires_breakout_confirmation")
 
     if aligned >= required_aligned and conflict_count <= 1 and trend_strength >= 20 and volume_ratio >= 0.8:
         tradeability = "high"
@@ -378,12 +1412,105 @@ def build_technical_context(
     if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
         tradeability = "low"
 
+    range_reversal_tradeable = (
+        regime in {"range", "weak_trend", "choppy"}
+        and dominant_direction in {"bullish", "bearish"}
+        and conflict_count <= 2
+        and aligned >= 3
+        and volume_ratio >= 0.75
+    )
+    volatility_breakout_candidate = (
+        regime == "high_volatility"
+        and dominant_direction in {"bullish", "bearish"}
+        and aligned >= required_aligned
+        and conflict_count <= 1
+        and volume_ratio >= 1.0
+        and trend_strength >= 22
+    )
+    if trend_continuation_tradeable:
+        setup_family = "trend_breakout"
+        required_confirmation = "trend/MACD/DI alignment plus volume or open-interest confirmation"
+        invalidation_template = "price closes back inside the failed breakout area or opposite momentum/volume confirmation appears"
+    elif range_reversal_tradeable:
+        setup_family = "range_reversal"
+        required_confirmation = "RSI/Stochastic/mean-reversion signal aligns with nearby support/resistance and volume is not weak"
+        invalidation_template = "price fails to hold the reversal area or resumes breakout against the reversal side"
+    elif volatility_breakout_candidate:
+        setup_family = "volatility_breakout"
+        required_confirmation = "high-volatility breakout keeps direction with strong volume and no opposite technical vote"
+        invalidation_template = "breakout fails on volume or closes back through the trigger zone"
+    elif dominant_direction in {"bullish", "bearish"}:
+        setup_family = "direction_watchlist"
+        required_confirmation = "wait for current price/volume confirmation before any real position"
+        invalidation_template = "opposite technical vote or failed trigger keeps the idea on watchlist"
+    else:
+        setup_family = "no_trade"
+        required_confirmation = "no directional technical setup"
+        invalidation_template = "not applicable"
+
+    sector_policy = _technical_setup_policy(ticker)
+    preferred_setups = set(str(item) for item in sector_policy.get("preferred_setups") or [])
+    caution_setups = set(str(item) for item in sector_policy.get("caution_setups") or [])
+    sector_setup_alignment = (
+        "preferred"
+        if setup_family in preferred_setups
+        else "caution"
+        if setup_family in caution_setups
+        else "neutral"
+    )
+    if sector_setup_alignment == "caution" and setup_family not in {"direction_watchlist", "no_trade"}:
+        risk_flags.append("sector_caution_setup_requires_stronger_confirmation")
+
+    current_trade_setup = {
+        "setup_family": setup_family,
+        "dominant_direction": dominant_direction,
+        "required_confirmation": required_confirmation,
+        "invalidation_template": invalidation_template,
+        "sector_setup_alignment": sector_setup_alignment,
+        "sector_preferred_setups": sorted(preferred_setups),
+        "sector_caution_setups": sorted(caution_setups),
+        "primary_confirmation": sector_policy.get("primary_confirmation") or [],
+        "execution_focus": sector_policy.get("execution_focus"),
+        "trend_continuation_tradeable": trend_continuation_tradeable,
+        "range_reversal_tradeable": range_reversal_tradeable,
+        "volatility_breakout_candidate": volatility_breakout_candidate,
+        "pm_layer_hint": "tradeable_setup"
+        if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"} and tradeability in {"medium", "high"}
+        else "direction_only" if dominant_direction in {"bullish", "bearish"} else "no_trade",
+    }
+
     return {
         "sector": get_sector(ticker),
         "sector_guidance": get_sector_guidance(ticker, "technical"),
+        "sector_setup_policy": sector_policy,
+        "sector_setup_alignment": sector_setup_alignment,
         "market_regime": regime,
         "dominant_direction": dominant_direction,
         "tradeability": tradeability,
+        "trend_continuation_tradeable": trend_continuation_tradeable,
+        "range_reversal_tradeable": range_reversal_tradeable,
+        "volatility_breakout_candidate": volatility_breakout_candidate,
+        "current_trade_setup": current_trade_setup,
+        "action_evidence_contract": {
+            "analyst": "technical",
+            "open": {
+                "setup_family": setup_family,
+                "requires_current_trigger": setup_family not in {"no_trade", "direction_watchlist"},
+                "sector_setup_alignment": sector_setup_alignment,
+                "primary_confirmation": sector_policy.get("primary_confirmation") or [],
+            },
+            "hold": {
+                "evidence": ["trend_direction", "market_regime", "invalidation_boundary"],
+            },
+            "exit": {
+                "evidence": ["trigger_failure", "opposite_technical_vote", "invalidation_boundary"],
+            },
+            "execution": {
+                "trigger_source": "technical",
+                "execution_focus": sector_policy.get("execution_focus"),
+            },
+        },
+        "range_or_choppy_state": regime in {"choppy", "range", "weak_trend"},
         "indicator_votes": votes,
         "features": {
             "volatility": volatility,
@@ -402,6 +1529,9 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         "demand": "demand",
         "trade_flow": "import_export",
         "cost_profit": "profit",
+        "cost": "cost",
+        "weather": "weather",
+        "policy": "policy",
         "price_basis": "basis",
         "price_anchor": "basis",
         "macro_downstream": "macro_policy",
@@ -432,6 +1562,7 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
     factor_judgment = quality.get("finoview_factor_judgment") or {}
     factor_snapshot = quality.get("finoview_factor_snapshot") or {}
     factor_attribution = quality.get("finoview_factor_attribution") or {}
+    availability_audit = quality.get("local_finoview_availability_audit") or {}
     configured = int(quality.get("configured_indicator_count") or 0)
     loaded = int(quality.get("loaded_indicator_count") or 0)
     missing_like = int(quality.get("missing_like_count") or 0)
@@ -460,18 +1591,44 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         risk_flags.append("near_stale_fundamental_inputs")
     if low_confidence > 0:
         risk_flags.append("low_confidence_inputs")
+    excluded_stale = quality.get("excluded_stale_indicators") or []
+    excluded_stale_count = int(quality.get("excluded_stale_indicator_count") or len(excluded_stale or []))
+    if excluded_stale_count > 0:
+        risk_flags.append("stale_fundamental_inputs_excluded_from_direction")
+    if isinstance(availability_audit, dict) and not availability_audit.get("supports_fundamental_trade_setup", True):
+        risk_flags.append("fundamental_local_data_not_enough_for_trade_setup")
 
     group_counts = {
         group: Counter(item["trend"] for item in items)
         for group, items in groups.items()
     }
+    sector_factor_tree = _fundamental_factor_tree(ticker)
+    directional_group_names = _group_names_with_direction(group_counts)
+    primary_driver_groups = _intersect_ordered(
+        sector_factor_tree.get("primary_drivers") or [],
+        directional_group_names,
+    )
+    supporting_driver_groups = _intersect_ordered(
+        sector_factor_tree.get("supporting_drivers") or [],
+        directional_group_names,
+    )
+    short_trigger_groups = _intersect_ordered(
+        sector_factor_tree.get("short_trigger_groups") or [],
+        directional_group_names,
+    )
+    risk_driver_groups = _intersect_ordered(
+        sector_factor_tree.get("risk_drivers") or [],
+        list(group_counts.keys()),
+    )
     directional_groups = 0
     conflicting_groups = 0
+    conflict_groups: List[str] = []
     for group, counts in group_counts.items():
         if counts.get("up", 0) or counts.get("down", 0):
             directional_groups += 1
         if counts.get("up", 0) and counts.get("down", 0):
             conflicting_groups += 1
+            conflict_groups.append(str(group))
 
     factor_tradable = bool(factor_judgment.get("tradable_coverage"))
     if risk_flags and ("low_coverage" in risk_flags or "stale_fundamental_inputs" in risk_flags):
@@ -488,11 +1645,21 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
     return {
         "sector": get_sector(ticker),
         "sector_guidance": get_sector_guidance(ticker, "fundamental"),
+        "sector_factor_tree": sector_factor_tree,
+        "fundamental_driver_roles": {
+            "primary_driver_groups": primary_driver_groups,
+            "supporting_driver_groups": supporting_driver_groups,
+            "risk_driver_groups": risk_driver_groups,
+            "short_trigger_groups": short_trigger_groups,
+            "conflict_groups": sorted(set(conflict_groups)),
+            "directional_group_names": directional_group_names,
+        },
         "factor_groups": {group: items[:8] for group, items in groups.items()},
         "factor_group_counts": {group: dict(counts) for group, counts in group_counts.items()},
         "finoview_factor_snapshot": factor_snapshot,
         "finoview_factor_judgment": factor_judgment,
         "finoview_factor_attribution": factor_attribution,
+        "local_finoview_availability_audit": availability_audit,
         "data_quality": {
             "configured": configured,
             "loaded": loaded,
@@ -501,12 +1668,51 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
             "stale_ratio": stale_ratio,
             "near_stale_ratio": near_stale_ratio,
             "low_confidence_count": low_confidence,
+            "excluded_stale_indicator_count": excluded_stale_count,
+            "excluded_stale_indicators": excluded_stale[:12] if isinstance(excluded_stale, list) else [],
             "factor_coverage_score": float(factor_judgment.get("coverage_score") or 0.0),
+            "usable_factor_count": int(factor_judgment.get("usable_factor_count") or 0),
+            "usable_coverage_score": float(factor_judgment.get("usable_coverage_score") or 0.0),
             "factor_freshness_score": float(factor_judgment.get("freshness_score") or 0.0),
             "no_lookahead_status": factor_judgment.get("no_lookahead_status", "unchecked"),
+            "local_finoview_coverage_status": (
+                availability_audit.get("coverage_status")
+                if isinstance(availability_audit, dict)
+                else None
+            ),
+            "supports_fundamental_trade_setup": bool(
+                availability_audit.get("supports_fundamental_trade_setup", False)
+            )
+            if isinstance(availability_audit, dict)
+            else False,
         },
         "basis": quality.get("basis"),
         "tradeability": tradeability,
+        "action_evidence_contract": {
+            "analyst": "fundamental",
+            "open": {
+                "role": "context_or_short_trigger",
+                "can_create_trade_authority_alone": False,
+                "primary_driver_groups": primary_driver_groups,
+                "short_trigger_groups": short_trigger_groups,
+                "requires_technical_or_market_confirmation": True,
+            },
+            "hold": {
+                "role": "medium_background",
+                "primary_driver_groups": primary_driver_groups,
+                "supporting_driver_groups": supporting_driver_groups,
+            },
+            "exit": {
+                "role": "thesis_invalidation",
+                "conflict_groups": sorted(set(conflict_groups)),
+                "risk_driver_groups": risk_driver_groups,
+            },
+            "learning_scope": {
+                "factor_tree": get_sector(ticker),
+                "primary_driver_groups": primary_driver_groups,
+                "short_trigger_groups": short_trigger_groups,
+            },
+        },
         "risk_flags": risk_flags,
     }
 
@@ -633,15 +1839,43 @@ BEARISH_NEWS_WORDS = ["增产", "累库", "上升", "宽松", "下跌", "进口�
 STRONG_EVENT_WORDS = ["大幅", "显著", "紧张", "短缺", "创", "暴跌", "暴涨", "政策", "限产", "检修"]
 
 
-def summarize_news_events(news_items: Iterable[Any], ticker: str) -> Dict[str, Any]:
+def _parse_date(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def summarize_news_events(news_items: Iterable[Any], ticker: str, trading_date: Any = None) -> Dict[str, Any]:
     seen_titles = set()
     events = []
     direction_counts = Counter()
     type_counts = Counter()
+    latest_event_dt: Optional[datetime] = None
+    trading_dt = _parse_date(trading_date)
+    sector_policy = _news_catalyst_policy(ticker)
+    tradable_event_types = set(str(item) for item in sector_policy.get("tradable_catalysts") or [])
+    risk_event_types = set(str(item) for item in sector_policy.get("risk_events") or [])
+    noise_event_types = set(str(item) for item in sector_policy.get("noise_events") or [])
     for item in news_items:
         title = getattr(item, "title", "") or ""
         content = getattr(item, "content", "") or ""
         publish_time = getattr(item, "publish_time", "") or ""
+        publish_dt = _parse_date(publish_time)
+        if publish_dt is not None and (latest_event_dt is None or publish_dt > latest_event_dt):
+            latest_event_dt = publish_dt
         normalized_title = re.sub(r"\s+", " ", title).strip()
         if not normalized_title or normalized_title in seen_titles:
             continue
@@ -669,39 +1903,127 @@ def summarize_news_events(news_items: Iterable[Any], ticker: str) -> Dict[str, A
                 "title": normalized_title,
                 "publish_time": str(publish_time),
                 "event_types": event_types,
+                "sector_tradable_event_match": bool(set(event_types) & tradable_event_types),
+                "sector_risk_event_match": bool(set(event_types) & risk_event_types),
+                "sector_noise_event_match": bool(set(event_types) & noise_event_types),
                 "direction_hint": direction,
                 "strength": strength,
             }
         )
 
+    latest_news_date = latest_event_dt.strftime("%Y-%m-%d") if latest_event_dt is not None else None
+    age_days = None
+    if trading_dt is not None and latest_event_dt is not None:
+        age_days = max(0, (trading_dt.date() - latest_event_dt.date()).days)
+    if age_days is None:
+        freshness_score = 1.0 if events else 0.0
+    elif age_days <= 2:
+        freshness_score = 1.0
+    elif age_days <= 5:
+        freshness_score = 0.7
+    elif age_days <= 10:
+        freshness_score = 0.4
+    else:
+        freshness_score = 0.1
+
     mixed = bool(direction_counts.get("bullish", 0) and direction_counts.get("bearish", 0))
     strong_direction = max(direction_counts.get("bullish", 0), direction_counts.get("bearish", 0))
+    strong_event_count = sum(1 for item in events if item.get("strength") == "strong")
+    directional_event_count = direction_counts.get("bullish", 0) + direction_counts.get("bearish", 0)
+    sector_tradable_event_count = sum(1 for item in events if item.get("sector_tradable_event_match"))
+    sector_risk_event_count = sum(1 for item in events if item.get("sector_risk_event_match"))
     risk_flags: List[str] = []
     if not events:
         risk_flags.append("no_news")
+    if age_days is not None and age_days > 5:
+        risk_flags.append("stale_news_window")
     if mixed:
         risk_flags.append("mixed_news_direction")
     if strong_direction == 0:
         risk_flags.append("no_directional_news")
     if len(events) <= 2:
         risk_flags.append("thin_news_sample")
+    if strong_event_count <= 0 and directional_event_count > 0:
+        risk_flags.append("news_direction_lacks_strong_catalyst")
 
-    if strong_direction >= 3 and not mixed:
+    event_window_days = int(sector_policy.get("event_window_days") or 3)
+    fresh_enough_for_event = freshness_score >= 0.7 and (age_days is None or age_days <= event_window_days)
+    tradable_event = (
+        strong_direction >= 1
+        and strong_event_count >= 1
+        and sector_tradable_event_count >= 1
+        and not mixed
+        and fresh_enough_for_event
+    )
+    if not fresh_enough_for_event and events:
+        tradeability = "low"
+    elif tradable_event and strong_direction >= 3:
         tradeability = "high"
-    elif strong_direction >= 2 and len(risk_flags) <= 1:
+    elif tradable_event or (strong_direction >= 2 and len(risk_flags) <= 1):
         tradeability = "medium"
     else:
         tradeability = "low"
+    event_regime = (
+        "mixed_event"
+        if mixed
+        else "tradable_catalyst" if tradable_event
+        else "directional_noise" if directional_event_count > 0
+        else "no_trade_news"
+    )
+    catalyst_classification = {
+        "tradable_catalyst": bool(tradable_event),
+        "background_news": bool(events and not tradable_event and not mixed),
+        "risk_event": bool(sector_risk_event_count > 0 or mixed),
+        "stale_or_noise": bool((age_days is not None and age_days > event_window_days) or not events),
+        "conflict_event": bool(mixed),
+        "sector_tradable_event_count": sector_tradable_event_count,
+        "sector_risk_event_count": sector_risk_event_count,
+        "event_window_days": event_window_days,
+    }
 
     return {
         "sector": get_sector(ticker),
         "sector_guidance": get_sector_guidance(ticker, "news"),
+        "sector_catalyst_policy": sector_policy,
+        "catalyst_classification": catalyst_classification,
         "events": events[:10],
         "event_type_counts": dict(type_counts),
         "direction_counts": dict(direction_counts),
-        "freshness_score": 1.0 if events else 0.0,
+        "freshness_score": freshness_score,
+        "latest_news_date": latest_news_date,
+        "news_age_days": age_days,
         "relevance_score": 0.8 if events else 0.0,
+        "strong_event_count": strong_event_count,
+        "directional_event_count": directional_event_count,
+        "event_regime": event_regime,
+        "tradable_event": tradable_event,
+        "price_reaction_required": True,
+        "price_reaction_confirmed": False,
         "tradeability": tradeability,
+        "action_evidence_contract": {
+            "analyst": "commodity_news",
+            "open": {
+                "role": "event_catalyst",
+                "tradable_catalyst": bool(tradable_event),
+                "price_reaction_required": True,
+                "event_window_days": event_window_days,
+                "sector_tradable_event_count": sector_tradable_event_count,
+            },
+            "hold": {
+                "role": "event_background_or_risk",
+                "risk_event": bool(catalyst_classification["risk_event"]),
+            },
+            "exit": {
+                "role": "risk_or_catalyst_failure",
+                "conflict_event": bool(mixed),
+                "stale_or_noise": bool(catalyst_classification["stale_or_noise"]),
+            },
+            "learning_scope": {
+                "event_regime": event_regime,
+                "event_type_counts": dict(type_counts),
+                "catalyst_classification": catalyst_classification,
+            },
+        },
         "risk_flags": risk_flags,
     }
 
@@ -877,6 +2199,8 @@ def format_fundamental_summary_for_prompt(context: Dict[str, Any]) -> str:
         f"Basis: {_format_json_block(context.get('basis'))}\n"
         f"PandaAI extra factor context: {_format_json_block(context.get('pandaai_extra_factors'))}\n"
         f"Risk flags: {', '.join(context.get('risk_flags') or []) or 'none'}\n"
+        "Stale-data discipline: indicators listed as excluded_stale_indicators are audit context only; "
+        "do not use them as bullish/bearish evidence or as a tradeable setup trigger.\n"
         "Directional discipline: require at least two independent factor groups supporting a direction. "
         "If factors or data quality are weak, prefer Neutral.\n"
     )
@@ -889,6 +2213,8 @@ def format_news_summary_for_prompt(context: Dict[str, Any]) -> str:
         f"Sector guidance: {context.get('sector_guidance')}\n"
         f"Tradeability: {context.get('tradeability')}\n"
         f"Freshness score: {context.get('freshness_score')}\n"
+        f"Latest news date: {context.get('latest_news_date')}\n"
+        f"News age days: {context.get('news_age_days')}\n"
         f"Relevance score: {context.get('relevance_score')}\n"
         f"Event type counts: {_format_json_block(context.get('event_type_counts'))}\n"
         f"Direction counts: {_format_json_block(context.get('direction_counts'))}\n"

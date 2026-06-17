@@ -26,6 +26,7 @@ def researcher_agent(
     recommendations: List[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
+    transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     logger.log_agent_status("researcher", trading_date, "Writing future learning memory and research hypotheses")
     return apply_researcher_learning(
@@ -38,4 +39,5 @@ def researcher_agent(
         recommendations=recommendations,
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
+        transactions_by_recommendation=transactions_by_recommendation or {},
     )

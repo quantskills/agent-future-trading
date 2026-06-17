@@ -44,6 +44,8 @@ def business_quality_position_gate(
     min_deploy = _safe_float(cfg.get("min_score_for_deployable"), 0.60)
     probe_multiplier = _safe_float(cfg.get("probe_multiplier"), 0.25)
     low_multiplier = _safe_float(cfg.get("low_quality_multiplier"), 0.0)
+    if bool(cfg.get("soft_gate_never_zero", False)) and low_multiplier <= 0:
+        low_multiplier = max(0.05, _safe_float(cfg.get("minimum_soft_multiplier"), 0.10))
     target_signal = "Bullish" if target_side == "long" else "Bearish"
     directional_scores: list[float] = []
     all_scores: list[float] = []

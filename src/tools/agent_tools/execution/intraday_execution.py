@@ -30,6 +30,19 @@ class IntradayExecutionSelection:
         return self.decision == "execute" and self.base_price is not None
 
     def to_audit_payload(self) -> Dict[str, Any]:
+        features = self.features if isinstance(self.features, dict) else {}
+        chase_check = features.get("chase_check") if isinstance(features.get("chase_check"), dict) else {}
+        trigger_checked = self.reason not in {"hold_or_zero_lots"}
+        trigger_passed = self.decision == "execute" and self.reason in {
+            "intraday_trigger_confirmed",
+            "intraday_immediate_execution",
+            "intraday_event_immediate_execution",
+            "intraday_pullback_confirmed",
+            "intraday_vwap_confirmed",
+            "intraday_confirmed_memory_vwap_fallback",
+        }
+        execution_failure_reason = "" if self.decision == "execute" else self.reason
+        missed_opportunity_flag = bool(self.decision in {"skip", "wait"} and self.reason not in {"hold_or_zero_lots"})
         return {
             "decision": self.decision,
             "reason": self.reason,
@@ -37,7 +50,13 @@ class IntradayExecutionSelection:
             "base_datetime": self.base_datetime,
             "base_price_source": self.base_price_source.value if self.base_price_source else None,
             "signal_datetime": self.signal_datetime,
-            "features": self.features,
+            "features": features,
+            "trigger_checked": bool(trigger_checked),
+            "trigger_passed": bool(trigger_passed),
+            "price_chase_check": chase_check or {"checked": False, "passed": None},
+            "execution_failure_reason": execution_failure_reason,
+            "missed_opportunity_flag": missed_opportunity_flag,
+            "learning_writeback_contract": "trigger_failure_price_chase_and_missed_opportunity_feed_researcher",
         }
 
 
@@ -150,27 +169,45 @@ def select_intraday_execution(
     normalized_signal_bars = _normalize_bars(signal_bars, cutoff_datetime=cutoff_datetime)
     normalized_execution_bars = _normalize_bars(execution_bars, cutoff_datetime=cutoff_datetime)
     min_volume = float(config.get("min_execution_volume", 0) or 0)
+    execution_plan = (
+        decision_context.get("execution_plan")
+        if isinstance(decision_context.get("execution_plan"), dict)
+        else {}
+    )
+    execution_profile = _execution_profile_from_context(decision_context)
+    can_execute_without_intraday_trigger = bool(execution_plan.get("can_execute_without_intraday_trigger"))
 
     if not normalized_execution_bars:
         return IntradayExecutionSelection(
             decision="skip" if finalize_untriggered else "wait",
             reason="intraday_no_valid_bar",
-            features={"execution_bars": 0},
+            features={"execution_bars": 0, "execution_profile": execution_profile},
         )
 
-    if force_immediate or action_value in _IMMEDIATE_ACTIONS:
+    immediate_event = execution_profile == "event_immediate" and can_execute_without_intraday_trigger
+    if force_immediate or action_value in _IMMEDIATE_ACTIONS or immediate_event:
         execution_bar = _first_valid_execution_bar(normalized_execution_bars, min_volume=min_volume)
         if execution_bar is None:
             return IntradayExecutionSelection(
                 decision="skip" if finalize_untriggered else "wait",
                 reason="intraday_no_valid_bar",
-                features={"execution_bars": len(normalized_execution_bars), "min_execution_volume": min_volume},
+                features={
+                    "execution_bars": len(normalized_execution_bars),
+                    "min_execution_volume": min_volume,
+                    "execution_profile": execution_profile,
+                },
             )
+        reason = "intraday_event_immediate_execution" if immediate_event else "intraday_immediate_execution"
         return _execution_selection(
-            reason="intraday_immediate_execution",
+            reason=reason,
             execution_bar=execution_bar,
             signal_bar=None,
-            features={"execution_mode": "immediate", "execution_bars": len(normalized_execution_bars)},
+            features={
+                "execution_mode": "immediate",
+                "execution_profile": execution_profile,
+                "execution_plan": execution_plan,
+                "execution_bars": len(normalized_execution_bars),
+            },
             source=BasePriceSource.INTRADAY_FIRST_VALID_1M_OPEN,
         )
 
@@ -178,14 +215,18 @@ def select_intraday_execution(
         return IntradayExecutionSelection(
             decision="wait" if not finalize_untriggered else "skip",
             reason="hold_or_zero_lots",
-            features={"action": action_value},
+            features={"action": action_value, "execution_profile": execution_profile},
         )
 
     if not normalized_signal_bars:
         return IntradayExecutionSelection(
             decision="skip" if finalize_untriggered else "wait",
             reason="intraday_no_valid_bar",
-            features={"signal_bars": 0, "execution_bars": len(normalized_execution_bars)},
+            features={
+                "signal_bars": 0,
+                "execution_bars": len(normalized_execution_bars),
+                "execution_profile": execution_profile,
+            },
         )
 
     opening_range, opening_range_complete_at = _opening_range(normalized_execution_bars, config)
@@ -203,6 +244,7 @@ def select_intraday_execution(
                     "opening_range": opening_range,
                     "latest_execution_bar": latest_execution_dt.strftime("%Y-%m-%d %H:%M:%S"),
                     "finalize_untriggered": finalize_untriggered,
+                    "execution_profile": execution_profile,
                 },
             )
         signal_bars_for_trigger = [
@@ -221,16 +263,31 @@ def select_intraday_execution(
         if signal_close is None or vwap_value is None:
             continue
 
-        long_trigger = (
-            action_value in _BUY_LIKE_ACTIONS
+        long_breakout = action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value and signal_close >= opening_range["high"]
+        short_breakout = action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value and signal_close <= opening_range["low"]
+        long_pullback = (
+            execution_profile == "pullback"
+            and action_value in _BUY_LIKE_ACTIONS
             and signal_close >= vwap_value
-            and signal_close >= opening_range["high"]
+            and signal_close > opening_range["low"]
         )
-        short_trigger = (
-            action_value in _SELL_LIKE_ACTIONS
+        short_pullback = (
+            execution_profile == "pullback"
+            and action_value in _SELL_LIKE_ACTIONS
             and signal_close <= vwap_value
-            and signal_close <= opening_range["low"]
+            and signal_close < opening_range["high"]
         )
+        long_vwap_confirmed = execution_profile == "vwap_confirmed" and action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value
+        short_vwap_confirmed = execution_profile == "vwap_confirmed" and action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value
+        if execution_profile == "pullback":
+            long_trigger = long_pullback
+            short_trigger = short_pullback
+        elif execution_profile == "vwap_confirmed":
+            long_trigger = long_vwap_confirmed
+            short_trigger = short_vwap_confirmed
+        else:
+            long_trigger = long_breakout
+            short_trigger = short_breakout
         if not (long_trigger or short_trigger):
             continue
 
@@ -251,16 +308,31 @@ def select_intraday_execution(
         if not chase_check["passed"]:
             continue
 
+        if execution_profile == "pullback":
+            trigger_reason = "intraday_pullback_confirmed"
+            execution_mode = "pullback_confirmed"
+            trigger_rule = "vwap_pullback_support"
+        elif execution_profile == "vwap_confirmed":
+            trigger_reason = "intraday_vwap_confirmed"
+            execution_mode = "vwap_confirmed"
+            trigger_rule = "vwap_direction_confirmation"
+        else:
+            trigger_reason = "intraday_trigger_confirmed"
+            execution_mode = "confirmed"
+            trigger_rule = "opening_range_breakout"
         return _execution_selection(
-            reason="intraday_trigger_confirmed",
+            reason=trigger_reason,
             execution_bar=execution_bar,
             signal_bar=signal_bar,
             features={
-                "execution_mode": "confirmed",
+                "execution_mode": execution_mode,
+                "execution_profile": execution_profile,
+                "execution_plan": execution_plan,
                 "action": action_value,
                 "signal_close": signal_close,
                 "vwap": vwap_value,
                 "opening_range": opening_range,
+                "trigger_rule": trigger_rule,
                 "signal_bars": len(normalized_signal_bars),
                 "eligible_signal_bars": len(signal_bars_for_trigger),
                 "execution_bars": len(normalized_execution_bars),
@@ -280,6 +352,8 @@ def select_intraday_execution(
         market_confirmation=market_confirmation,
         strategy_memory=strategy_memory,
         contextual_diag=contextual_diag,
+        execution_profile=execution_profile,
+        execution_plan=execution_plan,
     )
     if fallback_selection is not None:
         return fallback_selection
@@ -292,11 +366,13 @@ def select_intraday_execution(
             "signal_bars": len(normalized_signal_bars),
             "eligible_signal_bars": len(signal_bars_for_trigger),
             "execution_bars": len(normalized_execution_bars),
-                "opening_range": opening_range,
-                "finalize_untriggered": finalize_untriggered,
-                "contextual_rule_calibration": contextual_diag,
-            },
-        )
+            "opening_range": opening_range,
+            "finalize_untriggered": finalize_untriggered,
+            "contextual_rule_calibration": contextual_diag,
+            "execution_profile": execution_profile,
+            "execution_plan": execution_plan,
+        },
+    )
 
 
 def _confirmed_memory_fallback_selection(
@@ -310,9 +386,14 @@ def _confirmed_memory_fallback_selection(
     market_confirmation: Optional[Dict[str, Any]],
     strategy_memory: Optional[Dict[str, Any]],
     contextual_diag: Optional[Dict[str, Any]] = None,
+    execution_profile: str = "breakout",
+    execution_plan: Optional[Dict[str, Any]] = None,
 ) -> Optional[IntradayExecutionSelection]:
     """Allow proven templates to execute on VWAP support when breakout is narrowly absent."""
     if not bool(config.get("allow_confirmed_memory_vwap_fallback", False)):
+        return None
+    execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
+    if not bool(execution_plan.get("allow_confirmed_memory_vwap_fallback", False)):
         return None
     if action_value not in _BUY_LIKE_ACTIONS | _SELL_LIKE_ACTIONS:
         return None
@@ -371,6 +452,13 @@ def _confirmed_memory_fallback_selection(
             signal_bar=signal_bar,
             features={
                 "execution_mode": "confirmed_memory_vwap_fallback",
+                "execution_profile": execution_profile,
+                "execution_plan": execution_plan,
+                "fallback_authorized_by_pm": True,
+                "fallback_authority_boundary": (
+                    "confirmed_memory_vwap_fallback_requires_pm_execution_plan_flag_"
+                    "plus_protected_or_deployable_memory_market_confirmation_and_chase_check"
+                ),
                 "action": action_value,
                 "signal_close": signal_close,
                 "vwap": vwap_value,
@@ -462,6 +550,17 @@ def _side_from_action(action_value: str) -> str:
     if action_value in _SELL_LIKE_ACTIONS:
         return "short"
     return "flat"
+
+
+def _execution_profile_from_context(decision_context: Dict[str, Any]) -> str:
+    execution_plan = (
+        decision_context.get("execution_plan")
+        if isinstance(decision_context.get("execution_plan"), dict)
+        else {}
+    )
+    profile = str(execution_plan.get("execution_profile") or decision_context.get("execution_profile") or "breakout").lower()
+    allowed = {"breakout", "pullback", "vwap_confirmed", "event_immediate", "exit_immediate", "hold"}
+    return profile if profile in allowed else "breakout"
 
 
 def _relative_miss(signal_close: float, barrier: Any, *, direction: str) -> float:

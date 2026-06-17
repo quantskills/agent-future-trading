@@ -1,0 +1,432 @@
+# PM 与市场确认策略目录。
+# 由 config_normalizer.py 展开到 market_confirmation / directional_override_control / portfolio_manager。
+# 这些是冷启动业务策略，不是交易所事实；任何学习校准都不能突破 20% 总保证金硬上限。
+
+gatekeeping_policy:
+  # 统一门控语义，不是新增一套交易权限。
+  # 旧 block/cap/probe 字段仍保留给运行时代码兼容读取，但业务上必须先被 reason_effects.py
+  # 解释为 hard_block / soft_limit / learning_adjustment / release_signal，再由 PM 最终出口仲裁。
+  # 统一出口主线：所有 scorecard、action-value、lifecycle 和 learning 信号只生成 action candidate；
+  # 最终交易事实只能来自 final_action_contract / final_new_entry_trade_authority。
+  mode: pm_final_authority_arbiter
+  final_authority_fields: [authority_type, lots, margin_ratio, reason_codes, final_new_entry_trade_authority]
+  hard_risk_role: must_block
+  soft_risk_role: tag_then_pm_arbitrate
+  release_signal_role: may_release_soft_risk_only_with_current_evidence
+  auditor_role: hard_risk_and_exit_consistency_only
+  trader_role: execute_authorized_plan_only
+  legacy_block_cap_fields_are_trade_authority: false
+  soft_risk_tags_do_not_compound_to_zero: true
+  release_signals_cannot_override_hard_risk: true
+  preserve_user_budget_parameters: true
+
+market_confirmation:
+  # 用 PandaAI 扩展数据确认、缩放或阻断 Phase1 目标方向。
+  enabled: true
+  min_confirmations_for_new_entry: 2
+  min_confirmation_score_for_new_entry: 0.55
+  min_confirmation_score_for_weak_combo: 0.60
+  max_conflicts_for_new_entry: 4
+  quality_gate_enabled: true
+  quality_gate_cap_multiplier: 0.50
+  quality_gate_block_weak_signal: false
+  weak_signal_strength: 0.25
+  conflict_cap_multiplier: 0.50
+  block_weak_conflicting_signal: false
+  allow_conflicted_probe_with_strong_confirmation: true
+  conflicted_probe_min_confirmation_score: 0.65
+  conflicted_probe_min_confirmations: 3
+  # 辅助证据可缺；关键缺口过多时降级，不把缺口当方向证据。
+  missing_data_degradation_enabled: true
+  max_actionable_missing_for_normal_entry: 2
+  min_usable_features_after_data_gap: 1
+  data_gap_cap_multiplier: 0.50
+  data_gap_block_when_no_features: true
+  data_gap_block_weak_signal: false
+
+directional_override_control:
+  enabled: true
+  allow_high_quality_short: true
+  min_short_score: 0.45
+  min_short_confidence: 0.55
+  min_short_strength: 0.30
+  min_short_edge: 0.08
+  short_probe_max_ratio: 0.015
+
+trade_auditor:
+  # 交易计划审计策略：不调用 LLM，不下单，只做质量审核。
+  enabled: true
+  mode: deterministic
+  use_llm: false
+  learning_mode: audit_only
+  policy_version: deterministic_v1
+  quality_gate:
+    enabled: true
+    min_supporting_analysts: 2
+    block_low_tradeability_count: 2
+    conflict_block_confirmation_below: 0.45
+    no_support_block_confirmation_below: 0.65
+    medium_quality_multiplier: 0.65
+    allow_single_high_quality_probe: true
+    single_high_quality_min_business_quality: 0.60
+    single_high_quality_min_confidence: 0.55
+    single_high_quality_min_confirmation_score: 0.45
+    single_high_quality_multiplier: 0.35
+    low_tradeability_cap_multiplier: 0.35
+    low_quality_news_cap_multiplier: 0.35
+    soft_probe_floor_ratio: 0.008
+    soft_probe_max_ratio: 0.015
+    qualified_support_min_confidence: 0.45
+    news_driver_control:
+      enabled: true
+      min_news_confidence: 0.60
+      min_market_confirmation_score: 0.60
+      min_freshness_score: 0.70
+      min_relevance_score: 0.70
+      block_when_core_opposes: true
+      cap_without_fundamental_confirmation: true
+      cap_multiplier: 0.50
+  attribution_feedback:
+    enabled: true
+    lookback_trades: 30
+    min_samples_soft: 3
+    min_samples_hard: 6
+    weak_win_rate_below: 0.40
+    severe_win_rate_below: 0.30
+    weak_total_pnl_below: -1500
+    severe_total_pnl_below: -5000
+    weak_combo_requires_confirmation_score: 0.60
+    block_severe_negative_combo: true
+  cold_start:
+    policy: small_cap
+    max_position_ratio_multiplier: 0.65
+    block_weak_combo_new_entries: true
+    block_conflict_confirmation_below: 0.60
+  audit:
+    write_to_signal_snapshot: true
+    log_decision_reasons: true
+
+trade_frequency_control:
+  # 通用历史样本保护。block/cap 字段名为旧 runtime 兼容输入；
+  # 业务上先经 reason_effects.py 归类为软风险/学习调整，再由 PM 最终出口仲裁。
+  # 它们不能单独成为真实开仓或永久封杀依据。
+  enabled: true
+  lookback_trades: 20
+  min_completed_trades: 6
+  weak_win_rate_below: 0.38
+  severe_win_rate_below: 0.30
+  weak_total_pnl_below: -1500
+  severe_total_pnl_below: -5000
+  weak_cap_multiplier: 0.50
+  severe_block_new_entries: false
+  weak_combo_probe_max_ratio: 0.015
+  weak_combo_probe_floor_ratio: 0.008
+  churn_control_enabled: true
+  churn_min_completed_trades: 6
+  churn_total_pnl_below: -1000
+  churn_cap_multiplier: 0.55
+
+ticker_performance_control:
+  # 品种近期表现保护：调低基础 sizing anchor，不是单品种硬上限。
+  enabled: true
+  lookback_days: 20
+  min_trade_days: 3
+  soft_avg_pnl_below: -300
+  soft_cap_multiplier: 0.50
+  severe_avg_pnl_below: -800
+  severe_win_rate_below: 0.35
+  severe_anchor_ratio: 0.03
+  recovery_avg_pnl_above: 200
+  recovery_cap_multiplier: 1.10
+
+ticker_loss_control:
+  # 防止单个品种短窗口连续拖累组合。连续亏损只产生同作用域软风险标签，
+  # 不写品种黑名单；有更强当日确认和有效失效边界时仍可进入受控 probe。
+  enabled: true
+  lookback_days: 5
+  loss_threshold: -3000
+  cap_multiplier: 0.50
+  block_new_entries_after_consecutive_losses: 2
+
+dynamic_weights:
+  # 运行期动态先验边界；最终交易权限仍来自 action evidence router。
+  enabled: true
+  min_weight: 0.05
+  max_weight: 0.70
+
+portfolio_manager:
+  # PM 默认继承主模型；自适应能力来自融合、审计和持仓控制。
+  llm_mode: cloud_only
+  # null 表示继承 llm.model；仅在 PM 需要单独模型时覆盖。
+  # cloud_model: "claude-opus-4-6-1"
+  cloud_model: null
+
+  holding_rebalance_control:
+    # 持仓周期与再平衡：技术看短线，基本面做中期锚，新闻处理事件冲击。
+    # 这里的 cap/probe/reduction 字段只描述目标 lots 倾向；最终交易事实仍以
+    # final_new_entry_trade_authority、target_lots、reason_codes 和 Trader 执行为准。
+    enabled: true
+    min_rebalance_ratio: 0.008
+    min_new_entry_ratio: 0.004
+    max_daily_reduction_ratio: 0.40
+    reverse_min_signal_strength: 0.55
+    reverse_min_confirmation_score: 0.65
+    exit_min_signal_strength: 0.35
+    exit_min_confirmation_score: 0.45
+    min_fundamental_anchor_confidence: 0.40
+    min_fundamental_anchor_business_quality: 0.55
+    min_signal_support_confidence: 0.35
+    fundamental_anchor_tradeability: [high, medium]
+    news_override_tradeability: high
+    news_override_min_confidence: 0.60
+    news_override_min_freshness: 0.70
+    news_override_min_relevance: 0.70
+    position_lifecycle:
+      enabled: true
+      trend_min_profit_ratio: 0.03
+      trend_min_confirmation_score: 0.60
+      trend_min_signal_strength: 0.30
+      failed_loss_ratio: -0.05
+      failed_max_confirmation_score: 0.45
+      # 亏损后继续持有必须有当日确认，历史记忆只能作先验。
+      loss_revalidation_min_hold_days: 1
+      loss_revalidation_ratio: -0.02
+      loss_revalidation_min_confirmation_score: 0.55
+      loss_revalidation_min_signal_strength: 0.25
+      loss_revalidation_anchor_min_confirmation_score: 0.50
+      loss_revalidation_anchor_min_signal_strength: 0.20
+      loss_revalidation_reduction_multiplier: 0.50
+      loss_revalidation_exit_ratio: -0.04
+      loss_revalidation_exit_confirmation_score: 0.45
+      # 新仓快速亏损需当日再验证，不能只靠候选假设或历史记忆。
+      new_loss_revalidation_enabled: true
+      new_loss_revalidation_max_hold_days: 2
+      new_loss_revalidation_ratio: -0.005
+      new_loss_revalidation_exit_ratio: -0.02
+      new_loss_revalidation_min_confirmation_score: 0.55
+      new_loss_revalidation_min_signal_strength: 0.25
+      new_loss_revalidation_reduction_multiplier: 0.50
+      # 盈利持仓延续：证据仍支持时，不让普通日频噪声过早平仓/减仓/反手。
+      # 只保护已盈利且当日同向证据仍存在的仓位；亏损仓仍按再验证、失效边界和当日证据处理。
+      profitable_hold_continuation_enabled: true
+      profitable_hold_min_pnl_ratio: 0.003
+      profitable_hold_min_confirmation_score: 0.45
+      profitable_hold_min_signal_strength: 0.20
+      # 盈利持仓的同向基本面/新闻锚定阈值：只用于已有盈利仓延续，不用于新开仓放大。
+      profitable_hold_anchor_min_confirmation_score: 0.35
+      profitable_hold_anchor_min_signal_strength: 0.12
+      profitable_hold_anchor_min_analyst_confidence: 0.35
+      profitable_hold_anchor_tradeability: [high, medium]
+      profitable_hold_min_supporting_signals: 1
+      profitable_hold_max_opposite_signals: 0
+      probe_max_hold_days: 2
+      probe_min_profit_ratio: 0.01
+      probe_min_confirmation_score: 0.55
+      # 日频探索仓再确认：观察层/unknown/exploration 仓位次日必须被当日证据重新确认。
+      # 目的不是压死交易，而是避免最小一手把弱机会放大成真实亏损仓。
+      exploration_reconfirm_enabled: true
+      exploration_reconfirm_min_hold_days: 1
+      exploration_reconfirm_layers: [direction_only, unknown]
+      exploration_reconfirm_min_confirmation_score: 0.55
+      exploration_reconfirm_exit_confirmation_score: 0.48
+      exploration_reconfirm_min_signal_strength: 0.30
+      exploration_reconfirm_exit_ratio: -0.003
+      exploration_reconfirm_reduction_multiplier: 0.50
+      exploration_reconfirm_profit_keep_ratio: 0.005
+      exploration_reconfirm_profit_min_confirmation: 0.45
+      # 受控 probe 转为真实一手前，检查一手在日频系统里的实际风险。
+      probe_one_lot_risk_budget:
+        enabled: true
+        max_one_lot_notional_ratio: 0.025
+        max_one_lot_margin_ratio: 0.003
+        max_price_limit_risk_ratio: 0.003
+        max_price_gap_risk_ratio: 0.002
+        min_positive_expectancy_multiplier: 1.5
+        allow_positive_expectancy_override: true
+      # 新开/加仓必须有失效边界；缺失时只允许小仓试探。
+      require_pretrade_invalidation_for_new_entry: true
+      missing_invalidation_cap_multiplier: 0.35
+      missing_invalidation_probe_max_ratio: 0.015
+    direction_only_new_entry:
+      # 语义边界：该旧字段只表示“方向观点观察候选”，不是交易授权。
+      # 即使 allow_probe=true，也必须经过 final_new_entry_trade_authority，不能单独生成真实开仓。
+      semantic_role: observation_candidate_only
+      audit_name: direction_only_observation_candidate
+      can_create_trade_authority: false
+      requires_final_new_entry_trade_authority: true
+      # 方向观点不能等同于可交易机会；默认只允许极小仓探索，不能开正常仓。
+      # 若后续研究证明无效，可改为 allow_probe=false；若证明有效，再调高 probe_max_ratio。
+      enabled: true
+      allow_probe: true
+      probe_max_ratio: 0.015
+      probe_floor_ratio: 0.008
+      scorecard_probe_min_supporting_signals: 2
+      scorecard_probe_min_score: 0.35
+      scorecard_probe_block_on_critical_data_gap: true
+      allow_single_high_quality_probe: true
+      single_high_quality_probe_min_score: 0.52
+      single_high_quality_probe_min_setup_quality: 0.60
+      single_high_quality_probe_min_business_quality: 0.60
+      single_high_quality_probe_min_confirmation_score: 0.45
+      # 已被 PM scorecard 判定为 tradeable_setup 的机会，若市场确认足够强且无硬失败，
+      # 可以进入受控最小 probe；纯方向观点仍不能走这条路径。
+      scorecard_tradeable_setup_probe_min_confirmation_score: 0.68
+    winning_template_continuation:
+      # 盈利模板延续：已有盈利仓位若同向证据仍成立，允许少减仓/继续持有。
+      # 仅作用于盈利持仓，不保护亏损仓，不突破 20% 总保证金硬上限。
+      enabled: true
+      min_profit_ratio: 0.012
+      min_confirmation_score: 0.52
+      require_tradeable_support: true
+      preserve_current_multiplier: 0.85
+    mature_alpha_release:
+      # 成熟 alpha 不是自动加仓；必须同作用域策略状态、当日确认、失效边界和可交易支持同时成立。
+      # 通过后只做受控仓位释放，仍受 20% 总保证金硬上限、Auditor 和 Trader 执行约束。
+      enabled: true
+      min_confirmation_score: 0.60
+      min_policy_confidence: 0.60
+      min_policy_samples: 5
+      min_target_ratio: 0.015
+      max_target_ratio: 0.045
+      release_multiplier: 1.20
+      require_tradeable_support: true
+      require_invalidation: true
+      allow_learning_mechanism_protect: true
+    fast_candidate_alpha_probe:
+      # 错过机会经未来 shadow 证明为正后，只允许下一轮同作用域极小仓 probe。
+      # 仍必须有当日确认、可交易 setup 和失效边界；不是品种白名单，也不支撑加仓硬扛。
+      enabled: true
+      min_confirmation_score: 0.58
+      min_policy_confidence: 0.50
+      probe_ratio: 0.012
+      require_tradeable_support: true
+      require_invalidation: true
+    daily_tradeability_gate:
+      # 日频新仓交易性门槛：中期方向观点不能在震荡/弱趋势里直接变成日频新仓。
+      # 不是品种黑名单；有短线触发、强新闻催化、强市场确认或成熟 alpha 时仍允许落仓。
+      # 该 gate 只定义证据质量边界，不能绕过 PM 最终交易权限。
+      enabled: true
+      apply_to_new_entries: true
+      block_direction_only_medium_in_choppy: true
+      regimes_requiring_short_timing: ["choppy", "range", "ranging", "range_bound", "weak_trend"]
+      horizons_requiring_short_timing: ["medium", "long"]
+      allow_with_tradeable_support: true
+      allow_with_strong_market_confirmation: true
+      strong_market_confirmation_score: 0.68
+      allow_with_mature_alpha: true
+      min_mature_alpha_confidence: 0.60
+      min_mature_alpha_samples: 5
+      allow_with_high_quality_news: true
+      allow_with_technical_timing: true
+    horizon_consistency:
+      # 中期观点不能单独触发短线交易或亏损持有。
+      enabled: true
+      apply_to_new_entries: true
+      apply_to_losing_holds: true
+      medium_requires_short_timing: true
+      medium_requires_invalidation: true
+      min_short_timing_confidence: 0.40
+      min_confirmation_score: 0.50
+      allow_mismatch_probe: true
+      mismatch_probe_max_ratio: 0.015
+      mismatch_probe_floor_ratio: 0.008
+      losing_hold_exit_ratio: -0.02
+      losing_hold_reduction_multiplier: 0.50
+    min_hold_days_by_sector:
+      energy: 3
+      chemical: 5
+      ferrous: 5
+      nonferrous: 4
+      agricultural: 7
+      generic: 4
+
+  adaptive_fusion:
+    enabled: true
+    sector_weight: 0.40
+
+  quality_aware_fusion:
+    enabled: true
+    tradeability_multipliers:
+      high: 1.00
+      medium: 0.65
+      low: 0.15
+      unknown: 0.75
+    confidence_caps:
+      high: 1.00
+      medium: 0.65
+      low: 0.35
+      unknown: 0.55
+    severe_risk_flag_multiplier: 0.80
+    min_quality_multiplier: 0.05
+    opportunity_layer_multipliers:
+      # PM 融合时区分“方向观点”和“可交易机会”，避免弱信号直接落仓。
+      deployable_alpha: 1.10
+      tradeable_setup: 1.00
+      risk_reduction: 0.90
+      direction_only: 0.60
+      no_trade: 0.0
+      unknown: 0.50
+    opportunity_scorecard:
+      # 统一机会评分：把分析师 setup、数据质量、market confirmation、学习状态合成机器可读机会层级。
+      # 该评分不是品种偏好，不突破 20% 上限；只帮助 PM 区分真机会、方向观点和 no-trade。
+      deployable_threshold: 0.72
+      tradeable_threshold: 0.58
+      weak_confirmation_threshold: 0.45
+      # 入场质量阈值：用当前 setup、失效边界、市场状态和价格位置评分，避免弱 setup 大仓落地。
+      min_deployable_setup_quality: 0.72
+      min_tradeable_setup_quality: 0.55
+      # 单一分析师也能贡献真实机会，但必须是完整 setup，并有强当日市场确认；
+      # 技术面明确反向时不晋升，避免把方向观点误当交易机会。
+      single_tradeable_setup_confirmation_score: 0.68
+      single_tradeable_setup_min_business_quality: 0.60
+      single_tradeable_setup_min_confidence: 0.42
+      technical_opposition_min_confidence: 0.45
+      block_single_setup_on_technical_opposition: true
+    position_quality_sizing:
+      # 仓位大小跟机会质量绑定：强机会敢受控落仓，弱机会只小仓/观察，不突破 20% 总保证金硬上限。
+      enabled: true
+      layer_multipliers:
+        deployable_alpha: 1.10
+        tradeable_setup: 0.90
+        direction_only: 0.45
+        no_trade: 0.0
+        unknown: 0.45
+      weak_setup_quality_below: 0.42
+      weak_setup_multiplier: 0.35
+    alpha_setup_ev_fusion:
+      # PM 将 Alpha Setup 档案与 action-value 转成仓位影响。
+      # 这是收益主链路：正期望受控放大，未知机会小仓探索，负期望降级/退出。
+      # 不是产品偏好，不突破 20% 总保证金上限；候选档案不能支撑加仓、position_matched 或亏损硬扛。
+      # 正/负 action-value 必须按 open/hold/exit/execution 动作维度使用，不能跨动作裸迁移。
+      # PM 只读取 open/hold/exit 对仓位生命周期的偏好；execution lane 由 PM 写入 final_action_contract.execution_profile。
+      # 分析师只能读取 signal_calibration 校准证据质量；similar SQL/RAG 和 shadow 只能作弱先验。
+      # 单样本 exact-state 正收益会先成为 positive_candidate_* 动作偏好；
+      # 它只能支持更积极确认或 0.8%-1.5% probe 候选，不能直接晋升 real_budget_entry。
+      # 样本、置信和当日证据达标后，才可进入 qualified_positive_expectancy 并参与放大。
+      enabled: true
+      min_profile_confidence: 0.45
+      min_confirmation_score: 0.52
+      min_action_value_confidence: 0.35
+      min_action_value_samples: 2
+      positive_reward_mean_min: 0.0
+      negative_reward_mean_max: -0.01
+      negative_reward_sum_max: -500.0
+      positive_expectancy_multiplier: 1.15
+      unknown_expectancy_probe_multiplier: 0.50
+      negative_expectancy_multiplier: 0.20
+      exit_negative_existing_when_current_weak: true
+      require_tradeable_support_for_release: true
+      require_invalidation_for_release: true
+      failed_release_multiplier: 0.70
+      candidate_profile_multiplier: 0.45
+      negative_profile_multiplier: 0.25
+      lifecycle_multipliers:
+        deployable: 1.15
+        protected: 1.05
+        watchlist: 0.75
+        candidate: 0.50
+        capped: 0.35
+        rejected: 0.0
+
+  # sector_weights 与 strategic_view_weights 由 analyst_prior_profiles.yaml 展开。
+  # 日频交易用 trade_timing 权重；中期方向背景用 strategic_view 权重。

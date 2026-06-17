@@ -16,8 +16,11 @@ from tools.agent_tools.research.neutral_accountability import build_neutral_acco
 from util.learning_attribution import (
     learning_effect_counts,
     learning_effects_from_context,
+    learning_mechanism_counts,
+    learning_mechanisms_from_context,
     learning_tags_from_context,
     summarize_pairs_by_learning_effect,
+    summarize_pairs_by_learning_mechanism,
 )
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.logger import logger
@@ -128,7 +131,7 @@ def calculate_optimization_acceptance_metrics(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> Dict:
-    """Metrics tied to optimization_task.md acceptance gates."""
+    """Metrics tied to post-backtest acceptance and deployment checks."""
     conn = None
     metrics = {
         "base_capacity_days_8_12": 0,
@@ -160,6 +163,8 @@ def calculate_optimization_acceptance_metrics(
         "learned_trade_reason_counts": {},
         "learned_trade_effect_counts": {},
         "learned_trade_effect_summary": {},
+        "learning_mechanism_counts": {},
+        "learning_mechanism_summary": {},
         "neutral_signal_count": 0,
         "neutral_signal_ratio": 0.0,
         "neutral_accountability_complete_rate": 1.0,
@@ -388,15 +393,22 @@ def calculate_optimization_acceptance_metrics(
                         "signal_snapshot": snapshot,
                     }
                 )
-                plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-                auditor = plan.get("trade_auditor") if isinstance(plan.get("trade_auditor"), dict) else {}
-                decision = str(auditor.get("decision") or "none")
+                contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+                audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+                audit_decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
+                decision = str(
+                    audit_decision.get("audit_decision")
+                    or audit_decision.get("decision")
+                    or contract.get("authority_type")
+                    or contract.get("final_action")
+                    or "none"
+                )
                 decision_counts[decision] = decision_counts.get(decision, 0) + 1
                 if "artifact_validation_errors" in snapshot:
                     validation_total += 1
                     if not snapshot.get("artifact_validation_errors"):
                         validation_ok += 1
-                if isinstance(plan.get("strategy_controls"), str):
+                if isinstance(contract.get("strategy_controls"), str):
                     free_text_violations += 1
             metrics["trade_auditor_decision_counts"] = decision_counts
             metrics["artifact_contract_validation_pass_rate"] = (
@@ -467,36 +479,28 @@ def calculate_optimization_acceptance_metrics(
                 ) or {}
                 return loaded if isinstance(loaded, dict) else {}
 
-            def _collect_reasons(plan: Dict) -> List[str]:
+            def _collect_reasons(snapshot: Dict) -> List[str]:
                 reasons: List[str] = []
-                for key in ("control_reasons", "reasons"):
-                    value = plan.get(key)
+                contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+                audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+                for key in ("reason_codes", "risk_flags"):
+                    value = contract.get(key)
                     if isinstance(value, list):
                         reasons.extend(str(item) for item in value if item)
-                rebalance = plan.get("rebalance_summary") if isinstance(plan.get("rebalance_summary"), dict) else {}
-                value = rebalance.get("control_reasons")
+                value = audit.get("reason_codes")
                 if isinstance(value, list):
                     reasons.extend(str(item) for item in value if item)
-                controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-                value = controls.get("reasons")
-                if isinstance(value, list):
-                    reasons.extend(str(item) for item in value if item)
-                auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-                if isinstance(auditor, dict):
-                    value = auditor.get("reasons")
-                    if isinstance(value, list):
-                        reasons.extend(str(item) for item in value if item)
                 return reasons
 
-            def _learning_attribution(row: Dict) -> Tuple[List[str], List[str]]:
+            def _learning_attribution(row: Dict) -> Tuple[List[str], List[str], List[str]]:
                 snapshot = _snapshot(row)
-                plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-                auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-                auditor_diag = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-                reasons = _collect_reasons(plan)
+                contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+                auditor_diag = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+                reasons = _collect_reasons(snapshot)
                 return (
                     learning_tags_from_context(reasons, auditor_diag),
                     learning_effects_from_context(reasons, auditor_diag),
+                    learning_mechanisms_from_context(reasons, auditor_diag, snapshot=snapshot),
                 )
 
             learned_pairs = []
@@ -504,11 +508,12 @@ def calculate_optimization_acceptance_metrics(
             reason_counts = {}
             for pair in pairs:
                 recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
-                tags, effects = _learning_attribution(recommendation) if recommendation else ([], [])
+                tags, effects, mechanisms = _learning_attribution(recommendation) if recommendation else ([], [], [])
                 if tags and effects:
                     item = dict(pair)
                     item["learning_tags"] = tags
                     item["learning_effects"] = effects
+                    item["learning_mechanisms"] = mechanisms
                     learned_pairs.append(item)
                     for tag in tags:
                         reason_counts[tag] = reason_counts.get(tag, 0) + 1
@@ -525,6 +530,8 @@ def calculate_optimization_acceptance_metrics(
             metrics["learned_trade_reason_counts"] = reason_counts
             metrics["learned_trade_effect_counts"] = learning_effect_counts(learned_pairs)
             metrics["learned_trade_effect_summary"] = summarize_pairs_by_learning_effect(learned_pairs)
+            metrics["learning_mechanism_counts"] = learning_mechanism_counts(learned_pairs)
+            metrics["learning_mechanism_summary"] = summarize_pairs_by_learning_mechanism(learned_pairs)
         except sqlite3.Error:
             pass
     except Exception as exc:

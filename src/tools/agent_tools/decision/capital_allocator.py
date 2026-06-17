@@ -7,6 +7,22 @@ from typing import Any, Iterable, Mapping
 
 HIGH_QUALITY_MEMORY_STATES = {"protected", "deployable"}
 WEAK_MEMORY_STATES = {"watchlist", "weak_block"}
+SCOPED_DEMOTE_POLICY_TYPES = {
+    "learned_vs_unlearned",
+    "fast_loss_sentinel",
+    "tail_loss_sentinel",
+    "loss_template_policy",
+}
+
+
+def _is_specific_policy_scope(row: Mapping[str, Any], policy_type: str) -> bool:
+    """Return True only when a learned cap/demote is scoped enough to size money."""
+    if policy_type not in SCOPED_DEMOTE_POLICY_TYPES:
+        return True
+    return all(
+        str(row.get(key) or "*") not in {"*", "", "unknown"}
+        for key in ("ticker", "side", "signal_template")
+    )
 
 
 def _normalize_combo(value: Any) -> tuple[str, ...]:
@@ -70,16 +86,27 @@ def strategy_memory_record(strategy_memory: Mapping[str, Any] | None, states: se
     return {}
 
 
-def adaptive_policy_record(rows: Iterable[Mapping[str, Any]] | None, actions: set[str]) -> dict[str, Any]:
+def adaptive_policy_record(
+    rows: Iterable[Mapping[str, Any]] | None,
+    actions: set[str],
+    *,
+    policy_types: set[str] | None = None,
+    policy_prefixes: tuple[str, ...] = (),
+) -> dict[str, Any]:
     best_row: dict[str, Any] = {}
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
         if str(row.get("policy_action") or "").lower() in actions:
-            if (
-                str(row.get("policy_type") or "").lower() == "learned_vs_unlearned"
-                and str(row.get("ticker") or "*") == "*"
-            ):
+            policy_type = str(row.get("policy_type") or "").lower()
+            if policy_types is not None or policy_prefixes:
+                type_match = policy_types is not None and policy_type in policy_types
+                prefix_match = bool(policy_prefixes) and any(policy_type.startswith(prefix) for prefix in policy_prefixes)
+                if not (type_match or prefix_match):
+                    continue
+            if not _is_specific_policy_scope(row, policy_type):
+                continue
+            if policy_type == "learned_vs_unlearned" and str(row.get("ticker") or "*") == "*":
                 # Global learned-vs-unlearned diagnostics are useful for reports,
                 # but PM sizing must not treat them as a blanket product/template cap.
                 continue
@@ -100,6 +127,41 @@ def adaptive_policy_record(rows: Iterable[Mapping[str, Any]] | None, actions: se
     return best_row
 
 
+def enriched_policy_evidence(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Expose policy payload performance as row-level evidence for PM sizing gates."""
+    if not isinstance(row, Mapping) or not row:
+        return {}
+    result = dict(row)
+    payload = result.get("payload")
+    if not isinstance(payload, Mapping):
+        payload = {}
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, Mapping):
+        evidence = {}
+    summary = evidence.get("summary")
+    if not isinstance(summary, Mapping):
+        summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    for target_key, source_keys in {
+        "sample_count": ("sample_count", "total_trades"),
+        "win_rate": ("win_rate",),
+        "net_pnl": ("net_pnl", "total_pnl"),
+        "avg_pnl": ("avg_pnl",),
+    }.items():
+        if result.get(target_key) not in (None, "", 0, 0.0):
+            continue
+        for source in source_keys:
+            if evidence.get(source) not in (None, ""):
+                result[target_key] = evidence.get(source)
+                break
+            if summary.get(source) not in (None, ""):
+                result[target_key] = summary.get(source)
+                break
+    result["payload"] = payload
+    if result.get("policy_type"):
+        result["evidence_source"] = "adaptive_policy_state"
+    return result
+
+
 def has_adaptive_policy_action(rows: Iterable[Mapping[str, Any]] | None, actions: set[str]) -> bool:
     return bool(adaptive_policy_record(rows, actions))
 
@@ -113,10 +175,17 @@ def high_quality_learning_context(
 ) -> tuple[bool, dict[str, Any]]:
     protected_memory = strategy_memory_record(strategy_memory, HIGH_QUALITY_MEMORY_STATES)
     recovering_memory = strategy_memory_record(strategy_memory, {"recovering"})
-    learned_demote_record = adaptive_policy_record(adaptive_policy_state, {"demote", "cap"})
+    learned_demote_record = adaptive_policy_record(
+        adaptive_policy_state,
+        {"demote", "cap"},
+        policy_types=SCOPED_DEMOTE_POLICY_TYPES,
+        policy_prefixes=("learning_mechanism:",),
+    )
     adaptive_protect_record = {}
     if not learned_demote_record:
         adaptive_protect_record = adaptive_policy_record(adaptive_policy_state, {"protect", "allow"})
+    learned_demote_record = enriched_policy_evidence(learned_demote_record)
+    adaptive_protect_record = enriched_policy_evidence(adaptive_protect_record)
     adaptive_protect = bool(adaptive_protect_record)
     high_quality_memory = bool(allow_memory_protected_scaling and protected_memory)
     high_quality_memory = high_quality_memory or bool(allow_recovering_template_scaling and recovering_memory)

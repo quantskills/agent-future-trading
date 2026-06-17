@@ -32,6 +32,7 @@ from util.futures_audit import (
     build_actual_transactions,
     build_audit_payload,
     calculate_margin_audit,
+    categorize_no_trade_reason,
     ensure_execution_translation,
     ensure_signal_snapshot,
     extract_signal_lifecycle,
@@ -115,15 +116,16 @@ class FuturesExecutionEngine:
             set_execution_result(
                 snapshot,
                 outcome="executed_without_transaction",
-                status=RecommendationStatus.EXECUTED.value,
+                status=RecommendationStatus.SKIPPED.value,
                 transaction_count=0,
                 no_trade_reason=no_trade_reason,
                 warning_message=warning_message,
             )
             self.db.update_futures_recommendation_status(
                 recommendation_id,
-                RecommendationStatus.EXECUTED.value,
+                RecommendationStatus.SKIPPED.value,
                 execution_price=None,
+                warning_message=no_trade_reason or warning_message,
                 signal_snapshot=snapshot,
                 audit_payload=build_audit_payload(snapshot),
             )
@@ -298,9 +300,36 @@ class FuturesExecutionEngine:
             "slippage_model": transaction.get("slippage_model") or self.execution_config.get("slippage_model", "tick"),
             "slippage_ticks": transaction.get("slippage_ticks"),
             "slippage_amount": transaction.get("slippage_amount"),
+            "intraday_execution": (
+                (recommendation.get("signal_snapshot") or {})
+                .get("execution_translation", {})
+                .get("intraday_execution")
+                if isinstance(recommendation.get("signal_snapshot"), dict)
+                else None
+            ),
+            "execution_learning_fields": self._execution_learning_fields(
+                (
+                    (recommendation.get("signal_snapshot") or {})
+                    .get("execution_translation", {})
+                    .get("intraday_execution")
+                    if isinstance(recommendation.get("signal_snapshot"), dict)
+                    else None
+                )
+            ),
             "signal_lifecycle": extract_signal_lifecycle(
                 recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
             ),
+        }
+
+    @staticmethod
+    def _execution_learning_fields(intraday_audit: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        audit = intraday_audit if isinstance(intraday_audit, dict) else {}
+        return {
+            "trigger_checked": bool(audit.get("trigger_checked")),
+            "trigger_passed": bool(audit.get("trigger_passed")),
+            "price_chase_check": audit.get("price_chase_check") if isinstance(audit.get("price_chase_check"), dict) else {},
+            "execution_failure_reason": str(audit.get("execution_failure_reason") or ""),
+            "missed_opportunity_flag": bool(audit.get("missed_opportunity_flag")),
         }
 
     def _expand_rollover_recommendation(
@@ -914,7 +943,28 @@ class FuturesExecutionEngine:
             self._dynamic_margin_cache[key] = dict(audit)
             return provider_rate, audit
 
-        audit["status"] = "fallback_static_no_provider_margin"
+        allow_static_fallback = bool(cfg.get("fallback_to_static_contract_cache", True))
+        if not allow_static_fallback:
+            audit.update(
+                {
+                    "status": "provider_margin_missing",
+                    "source": "pandaai_future_detail",
+                    "selected_margin_rate": None,
+                    "fallback_to_static_contract_cache": False,
+                }
+            )
+            self._dynamic_margin_cache[key] = dict(audit)
+            raise RuntimeError(
+                "Dynamic margin is enabled but PandaAI contract margin is unavailable "
+                f"for {contract_code} on {date_value}; static contract-cache fallback is disabled."
+            )
+
+        audit.update(
+            {
+                "status": "fallback_static_no_provider_margin",
+                "fallback_to_static_contract_cache": True,
+            }
+        )
 
         self._dynamic_margin_cache[key] = dict(audit)
         return static_rate, audit
@@ -1032,6 +1082,7 @@ class FuturesExecutionEngine:
         translation = ensure_execution_translation(snapshot)
         translation["market_rule_block"] = blocked.audit_payload
         add_rewrite_reason(snapshot, blocked.reason)
+        reason_category = categorize_no_trade_reason(blocked.reason)
         set_execution_result(
             snapshot,
             outcome="skipped",
@@ -1040,6 +1091,17 @@ class FuturesExecutionEngine:
             no_trade_reason=blocked.reason,
             warning_message=warning_message,
         )
+        snapshot["execution_result"]["execution_learning_trace"] = {
+            "no_trade_reason": blocked.reason,
+            "no_trade_reason_category": reason_category,
+            "execution_learning_type": "market_rule_or_execution_block",
+            "turn_into_memory": True,
+            "timing_strategy_question": (
+                "If same-scope shadow results later show missed alpha, test whether earlier entry, "
+                "pullback entry, or lower chase tolerance would have improved execution without using future data."
+            ),
+            "not_direction_evidence": True,
+        }
         self.db.update_futures_recommendation_status(
             recommendation_id,
             RecommendationStatus.SKIPPED.value,

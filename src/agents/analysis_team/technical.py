@@ -12,6 +12,7 @@ except Exception as exc:  # pragma: no cover - depends on runtime environment
 from graph.schema import FundState, AnalystSignal
 from graph.constants import Signal, AgentKey
 from llm.inference import agent_call
+from llm.prompt import build_futures_technical_prompt
 from apis.router import Router, APISource
 from util.db_helper import get_db
 from util.logger import logger
@@ -27,6 +28,7 @@ from tools.agent_tools.analysis.quality import (
     write_analyst_report,
 )
 from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.data_usage import build_technical_data_usage
 from tools.agent_tools.analysis.technical_parameter_calibration import apply_technical_parameter_calibration
@@ -109,6 +111,40 @@ thresholds = {
 
 }
 
+
+def _latest_price_data_date(prices_df) -> Optional[pd.Timestamp]:
+    """Return the latest date represented in a price DataFrame."""
+    if prices_df is None or getattr(prices_df, "empty", True):
+        return None
+    for candidate in ("date", "trade_date", "tradeDate", "datetime"):
+        if candidate in getattr(prices_df, "columns", []):
+            latest = pd.to_datetime(prices_df[candidate].iloc[-1], errors="coerce")
+            return None if pd.isna(latest) else latest
+    index = getattr(prices_df, "index", None)
+    if index is None or len(index) == 0:
+        return None
+    latest = pd.to_datetime(index[-1], errors="coerce")
+    return None if pd.isna(latest) else latest
+
+
+def _validate_pre_open_price_window(ticker: str, trading_date, prices_df, pre_open_only: bool) -> str:
+    """Ensure pre-open technical signals only use completed bars before trading_date."""
+    latest = _latest_price_data_date(prices_df)
+    if latest is None:
+        raise RuntimeError(
+            f"{ticker}: unable to determine latest technical price data date; "
+            "cannot verify no-lookahead boundary"
+        )
+    latest_day = latest.normalize()
+    trading_day = pd.to_datetime(trading_date).normalize()
+    if pre_open_only and latest_day >= trading_day:
+        raise RuntimeError(
+            f"{ticker}: technical pre-open price window includes {latest_day.strftime('%Y-%m-%d')} "
+            f"for trading_date={trading_day.strftime('%Y-%m-%d')}; expected latest price date < trading_date"
+        )
+    return latest_day.strftime("%Y-%m-%d")
+
+
 def technical_agent(state: FundState):
     """Technical analysis specialist that excels at short to medium-term price movement predictions."""
     agent_name = AgentKey.TECHNICAL
@@ -124,10 +160,11 @@ def technical_agent(state: FundState):
     save_outputs = bool(state.get("save_analyst_outputs", True))
 
     if market_type != "china_futures":
-        logger.error(
+        message = (
             f"Technical analyst only supports china_futures, got market_type={market_type!r}"
         )
-        return state
+        logger.error(message)
+        raise RuntimeError(message)
 
     # Get db instance
     db = get_db()
@@ -147,8 +184,10 @@ def technical_agent(state: FundState):
 
         # Ensure the returned frame contains the core close-price series.
         if prices_df.empty or 'close' not in prices_df.columns:
-            logger.error(f"Price data for {ticker} is empty or missing 'close' column. Columns: {prices_df.columns.tolist() if not prices_df.empty else 'DataFrame is empty'}")
-            return state
+            columns = prices_df.columns.tolist() if not prices_df.empty else "DataFrame is empty"
+            message = f"Price data for {ticker} is empty or missing 'close' column. Columns: {columns}"
+            logger.error(message)
+            raise RuntimeError(message)
 
         logger.info(f"Successfully loaded {len(prices_df)} rows of price data for {ticker}")
         cfg = state.get("config", {}) or {}
@@ -166,7 +205,18 @@ def technical_agent(state: FundState):
 
     except Exception as e:
         logger.error(f"Failed to fetch price data for {ticker}: {e}")
-        return state
+        raise RuntimeError(f"Failed to fetch price data for {ticker}: {e}") from e
+
+    latest_price_data_date = _validate_pre_open_price_window(
+        ticker=ticker,
+        trading_date=trading_date,
+        prices_df=prices_df,
+        pre_open_only=pre_open_only,
+    )
+    logger.info(
+        f"{ticker}: Technical no-lookahead boundary ok | latest_price_data_date={latest_price_data_date} | "
+        f"trading_date={trading_date} | pre_open_only={pre_open_only}"
+    )
 
     # Compute adaptive market features before building indicator signals.
     features = calculate_market_features(prices_df)
@@ -280,12 +330,19 @@ def technical_agent(state: FundState):
 
     llm_path = llm_path_label(full_config, "technical")
 
-    # Build the futures-only technical-analysis prompt.
-    prompt = build_futures_technical_prompt_enhanced_v2(
+    signal_results_compact = {
+        k: format_signal_compact(v)
+        for k, v in signal_results.items()
+        if isinstance(v, Signal)
+    }
+    # Build the futures-only technical-analysis prompt from the centralized
+    # prompt module. Data preparation and learning retrieval remain here.
+    prompt = build_futures_technical_prompt(
         ticker=ticker,
-        signal_results=signal_results,
+        signal_results_compact=signal_results_compact,
+        gap_analysis=signal_results.get("gap_analysis", "N/A"),
+        technical_summary=format_technical_summary_for_prompt(technical_context),
         features=features,
-        technical_context=technical_context,
         llm_path=llm_path,
     )
     learning_context = build_learning_context(
@@ -299,6 +356,14 @@ def technical_agent(state: FundState):
         horizon_class="short",
     )
     prompt += learning_context.get("text", "")
+    prompt += (
+        "\n\n=== Learning-to-signal requirement ===\n"
+        "When reviewer memories are present, use them only as rebuttable priors. "
+        "State whether today's market regime and technical evidence confirm or contradict them. "
+        "If the signal is Neutral, specify the concrete technical condition that would convert it "
+        "to probe/open and the condition that keeps it on watchlist. Candidate memories cannot "
+        "authorize sizing, add-ons, or holding a losing position.\n"
+    )
 
     # Get LLM signal
     signal = agent_call(
@@ -309,6 +374,8 @@ def technical_agent(state: FundState):
 
     # Preserve agent identity explicitly for downstream ordering and auditing.
     signal.agent_name = agent_name
+    signal.data_cutoff = info_cutoff
+    signal.no_lookahead_status = "ok"
     try:
         close = prices_df["close"].dropna()
         latest_close = float(close.iloc[-1]) if not close.empty else None
@@ -345,8 +412,27 @@ def technical_agent(state: FundState):
         "reviewer_learning_context": {
             "selected_ids": learning_context.get("selected_ids", []),
             "horizon_class": learning_context.get("horizon_class", "short"),
+            "memory_trace": learning_context.get("memory_trace", {}),
+            "current_day_evidence_required": True,
+            "candidate_hypothesis_authority": "prior_only_no_position_authority",
+        },
+        "analysis_strategy_trace": {
+            "analyst": "technical",
+            "market_state_adaptation": {
+                "market_regime": technical_context.get("market_regime"),
+                "tradeability": technical_context.get("tradeability"),
+                "technical_parameter_calibration": technical_calibration_diag,
+            },
+            "neutral_to_opportunity_required": True,
+            "position_authority_boundary": "signal_requires_pm_auditor_trader_confirmation",
         },
     }
+    signal = calibrate_signal_with_learning_context(
+        signal,
+        analyst="technical",
+        ticker=ticker,
+        learning_context=learning_context,
+    )
     signal = apply_signal_quality_gate(signal, technical_context, full_config, "technical")
     signal = apply_business_quality_enrichment(signal, technical_context, full_config, "technical")
     signal = apply_trade_research_contract(
@@ -358,6 +444,7 @@ def technical_agent(state: FundState):
     )
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
+        f"latest_price_data_date={latest_price_data_date}; "
         f"gap_analysis={'disabled_pre_open' if pre_open_only else 'standard'}; "
         f"llm_path={llm_path}; tradeability={technical_context.get('tradeability')}; "
         f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
@@ -543,8 +630,10 @@ def get_mean_reversion_signal(prices_df, params):
     # Calculate normalized position within Bollinger Bands
     price_vs_bb = (prices_df["close"].iloc[-1] - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
 
-    # Use threshold values for signal conditions
-    if z_score.iloc[-1] < params["z_score_extreme"] and price_vs_bb < params["bb_position_threshold"]:
+    # Use threshold values for signal conditions.
+    # Negative z-score means price is stretched below its recent mean; positive
+    # z-score means price is stretched above it.
+    if z_score.iloc[-1] < -params["z_score_extreme"] and price_vs_bb < params["bb_position_threshold"]:
         signal = Signal.BULLISH
     elif z_score.iloc[-1] > params["z_score_extreme"] and price_vs_bb > (1 - params["bb_position_threshold"]):
         signal = Signal.BEARISH
@@ -656,16 +745,38 @@ def get_adx_signal(prices_df: pd.DataFrame, params: dict) -> Signal:
 
     adx = _calculate_adx(prices_df, period)
     latest_adx = adx.iloc[-1]
+    latest_plus_di = _calculate_di(prices_df, period, positive=True).iloc[-1]
+    latest_minus_di = _calculate_di(prices_df, period, positive=False).iloc[-1]
 
-    # Similar to common ADX momentum thresholds.
-    if latest_adx > 25:
-        signal = Signal.BULLISH  # Strong trend supports trend-following setups.
-    elif latest_adx < 20:
-        signal = Signal.BEARISH  # Weak trend favors mean-reversion expectations.
+    # ADX is trend strength, not direction. Direction comes from +/-DI.
+    if latest_adx > 25 and latest_plus_di > latest_minus_di:
+        signal = Signal.BULLISH
+    elif latest_adx > 25 and latest_minus_di > latest_plus_di:
+        signal = Signal.BEARISH
     else:
         signal = Signal.NEUTRAL
 
     return signal
+
+
+def _calculate_di(prices_df: pd.DataFrame, period: int = 14, *, positive: bool = True) -> pd.Series:
+    """Calculate +DI or -DI for directional ADX confirmation."""
+    high = prices_df["high"]
+    low = prices_df["low"]
+    close = prices_df["close"]
+
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    dm = plus_dm if positive else minus_dm
+    return 100 * (dm.ewm(span=period, adjust=False).mean() / atr)
 
 def get_volatility_signal(prices_df, params):
     """Volatility-based trading strategy"""
@@ -1067,74 +1178,17 @@ def build_futures_technical_prompt_enhanced_v2(ticker: str, signal_results: dict
                                                  features: dict = None,
                                                  technical_context: Optional[Dict[str, Any]] = None,
                                                  llm_path: str = "cloud_only") -> str:
-    """Build a clean futures-specific technical prompt for the phase1 analyst."""
+    """Deprecated compatibility wrapper around llm.prompt.build_futures_technical_prompt."""
     signal_results_compact = {k: format_signal_compact(v) for k, v in signal_results.items() if isinstance(v, Signal)}
-
-    base_prompt = f"""You are a futures technical analyst for {ticker}.
-
-LLM path: {llm_path}
-
-Indicator snapshot (Bullish / Bearish / Neutral):
-[Primary] TR:{signal_results_compact.get('trend', '?')} MACD:{signal_results_compact.get('macd', '?')} ADX:{signal_results_compact.get('adx', '?')} OI:{signal_results_compact.get('open_interest', '?')}
-[Context] ST:{signal_results_compact.get('settlement_price', '?')} VOL:{signal_results_compact.get('futures_volatility', '?')} TV:{signal_results_compact.get('turnover_value', '?')}
-[Filters] MR:{signal_results_compact.get('mean_reversion', '?')} RSI:{signal_results_compact.get('rsi', '?')} Stoch:{signal_results_compact.get('stochastic', '?')}
-Open-context signal:
-GAP_DETAIL: {signal_results.get('gap_analysis', 'N/A')}
-"""
-
-    if technical_context:
-        base_prompt += "\n" + format_technical_summary_for_prompt(technical_context)
-
-    if features:
-        analysis_section = f"""
-=== Market features ===
-- Volatility: {features['volatility']:.2%}
-- Trend strength (ADX): {features['trend_strength']:.2f}
-- Price range: {features['price_range']:.2%}
-- Volume ratio: {features['volume_ratio']:.2f}
-
-=== Decision guidance ===
-- In trending markets, emphasize trend, MACD, and ADX signals.
-- In ranging markets, emphasize mean-reversion, RSI, and stochastic signals.
-- In reversal conditions, focus on oversold / overbought evidence and support-resistance context.
-- If ADX > 25, increase the weight of trend-following signals.
-- If ADX < 20, increase the weight of mean-reversion signals.
-- If volatility is high, lower confidence unless multiple signals agree.
-- If volume ratio is elevated, treat aligned signals as more reliable.
-"""
-        base_prompt += analysis_section
-
-    base_prompt += """
-Signal priority: market regime context > primary trend signals > filter signals
-
-Quality discipline:
-- Do not force Bullish or Bearish when the structured precheck says tradeability is low.
-- High confidence requires aligned trend, momentum, volume/open-interest or settlement evidence.
-- For high-caution tickers, require stronger confirmation before issuing directional signals.
-- Prefer Neutral when indicators conflict, trend quality is weak, or the setup is not tradable.
-
-Output format:
-- signal: "Bullish" / "Bearish" / "Neutral"
-- confidence: 0.0-1.0
-- horizon_class: "short"
-- expected_horizon_days: 1-2
-- market_regime: current technical regime
-- trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
-- price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
-- trigger_type: breakout_continuation / reversal_confirmed / pullback_repair / range_filter / technical_price_trigger
-- entry_type: initial / add / reduce / hold / initial_or_rebalance
-- invalidation_level: nearest invalidation price if inferable, otherwise null
-- opportunity_type: trend_continuation / reversal / range_breakout / short_timing / probe / no_trade
-- opportunity_layer: direction_only / tradeable_setup / risk_reduction / no_trade
-- entry_trigger: current technical timing condition that must be visible before trading
-- exit_hint: current evidence or price condition that would require reduce/exit
-- holding_period_hint: expected short-term holding style/window
-- factor_focus: list of key technical factor groups that matter for this ticker today
-- current_evidence_conflict: list of technical evidence that conflicts with the signal
-- justification: explain the market regime, the bullish evidence, the bearish evidence, conflicts, and why the setup is or is not tradable
-- metadata: include tradeability, market_regime, indicator_votes, risk_flags, and llm_path
-
-Provide a concise, well-reasoned futures technical view.
-"""
-
-    return base_prompt
+    return build_futures_technical_prompt(
+        ticker=ticker,
+        signal_results_compact=signal_results_compact,
+        gap_analysis=signal_results.get("gap_analysis", "N/A"),
+        technical_summary=(
+            format_technical_summary_for_prompt(technical_context)
+            if technical_context
+            else ""
+        ),
+        features=features,
+        llm_path=llm_path,
+    )

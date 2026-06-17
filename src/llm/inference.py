@@ -21,6 +21,7 @@ class LLMConfig:
     max_concurrent_calls: Optional[int] = None
     failure_policy: Dict[str, str] = field(default_factory=dict)
     codex_openai: Dict[str, Any] = field(default_factory=dict)
+    tqxai: Dict[str, Any] = field(default_factory=dict)
     deepseek: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -115,22 +116,36 @@ def _normalize_openai_compatible_root(base_url: str) -> str:
 def _resolve_provider_base_url(provider: Provider, model_config, config: LLMConfig) -> Optional[str]:
     """Resolve provider base URLs, including env/config overrides for local gateways."""
     if provider == Provider.CODEX_OPENAI:
-        codex_config = config.codex_openai or {}
-        base_url = codex_config.get("base_url") or os.getenv("CODEX_OPENAI_BASE_URL") or model_config.base_url
+        provider_config = config.codex_openai or {}
+        base_url = provider_config.get("base_url") or os.getenv("CODEX_OPENAI_BASE_URL") or model_config.base_url
+        return _normalize_openai_compatible_root(base_url) if base_url else None
+    if provider == Provider.TQXAI:
+        provider_config = config.tqxai or {}
+        base_url = (
+            provider_config.get("base_url")
+            or os.getenv("TQX_LLM_BASE_URL")
+            or os.getenv("TQXAI_BASE_URL")
+            or os.getenv("ANTHROPIC_BASE_URL")
+            or model_config.base_url
+        )
         return _normalize_openai_compatible_root(base_url) if base_url else None
     return model_config.base_url
 
 
 def _resolve_provider_api_key(provider: Provider, model_config, config: LLMConfig) -> str:
-    """Resolve API keys, allowing CodexOpenAI to target multiple compatible gateways."""
+    """Resolve API keys with explicit env overrides for compatible gateways."""
     env_candidates = []
-    if provider == Provider.CODEX_OPENAI:
-        codex_config = config.codex_openai or {}
-        has_explicit_env_config = "api_key_env" in codex_config or "api_key_env_fallbacks" in codex_config
-        explicit_env = codex_config.get("api_key_env")
+    if provider in {Provider.CODEX_OPENAI, Provider.TQXAI}:
+        provider_config = (
+            (config.codex_openai or {})
+            if provider == Provider.CODEX_OPENAI
+            else (config.tqxai or {})
+        )
+        has_explicit_env_config = "api_key_env" in provider_config or "api_key_env_fallbacks" in provider_config
+        explicit_env = provider_config.get("api_key_env")
         if explicit_env:
             env_candidates.append(str(explicit_env))
-        fallback_envs = codex_config.get("api_key_env_fallbacks") or []
+        fallback_envs = provider_config.get("api_key_env_fallbacks") or []
         if isinstance(fallback_envs, str):
             fallback_envs = [fallback_envs]
         for item in fallback_envs:
@@ -168,10 +183,14 @@ def _resolve_provider_api_key(provider: Provider, model_config, config: LLMConfi
 
 def _build_provider_kwargs(provider: Provider, config: LLMConfig) -> Dict[str, Any]:
     """Build provider-specific kwargs without hard-coding a model choice."""
-    if provider == Provider.CODEX_OPENAI:
-        codex_config = config.codex_openai or {}
-        reasoning_config = codex_config.get("reasoning") or {}
-        effort = codex_config.get("reasoning_effort") or reasoning_config.get("effort")
+    if provider in {Provider.CODEX_OPENAI, Provider.TQXAI}:
+        provider_config = (
+            (config.codex_openai or {})
+            if provider == Provider.CODEX_OPENAI
+            else (config.tqxai or {})
+        )
+        reasoning_config = provider_config.get("reasoning") or {}
+        effort = provider_config.get("reasoning_effort") or reasoning_config.get("effort")
         return {"extra_body": {"reasoning_effort": effort}} if effort else {}
 
     if provider != Provider.DEEPSEEK:
@@ -204,11 +223,15 @@ def llm_audit_metadata(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "api_key_env": None,
         "reasoning_effort": None,
     }
-    if provider == Provider.CODEX_OPENAI:
-        codex_config = llm_cfg.codex_openai or {}
-        reasoning_config = codex_config.get("reasoning") or {}
-        metadata["api_key_env"] = codex_config.get("api_key_env")
-        metadata["reasoning_effort"] = codex_config.get("reasoning_effort") or reasoning_config.get("effort")
+    if provider in {Provider.CODEX_OPENAI, Provider.TQXAI}:
+        provider_config = (
+            (llm_cfg.codex_openai or {})
+            if provider == Provider.CODEX_OPENAI
+            else (llm_cfg.tqxai or {})
+        )
+        reasoning_config = provider_config.get("reasoning") or {}
+        metadata["api_key_env"] = provider_config.get("api_key_env") or model_config.env_key
+        metadata["reasoning_effort"] = provider_config.get("reasoning_effort") or reasoning_config.get("effort")
     elif provider == Provider.DEEPSEEK:
         metadata["api_key_env"] = model_config.env_key
         metadata["reasoning_effort"] = (llm_cfg.deepseek or {}).get("reasoning_effort")

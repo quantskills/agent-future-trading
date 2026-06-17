@@ -169,6 +169,35 @@ def _counter_evidence_from_context(quality_context: Dict[str, Any]) -> str:
     return "no explicit counter-evidence flagged by deterministic precheck"
 
 
+def _shadow_side_from_context(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
+    text_signal = _signal_value(getattr(signal, "signal", Signal.NEUTRAL))
+    if text_signal == Signal.BULLISH.value:
+        return "long"
+    if text_signal == Signal.BEARISH.value:
+        return "short"
+    if analyst == "technical":
+        direction = str(quality_context.get("dominant_direction") or "").lower()
+        if direction == "bullish":
+            return "long"
+        if direction == "bearish":
+            return "short"
+    if analyst == "commodity_news":
+        counts = quality_context.get("direction_counts") or {}
+        bullish = int(counts.get("bullish", 0) or 0)
+        bearish = int(counts.get("bearish", 0) or 0)
+        if bullish > bearish and bullish >= 1:
+            return "long"
+        if bearish > bullish and bearish >= 1:
+            return "short"
+    if analyst == "fundamental":
+        anchor = str(getattr(signal, "direction_anchor", "") or "").lower()
+        if anchor in {"bullish", "long"}:
+            return "long"
+        if anchor in {"bearish", "short"}:
+            return "short"
+    return "flat"
+
+
 def _neutral_missing_evidence(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> List[str]:
     missing = _as_text_list(getattr(signal, "missing_evidence", []))
     if missing:
@@ -208,7 +237,7 @@ def _neutral_opportunity_contract(
     if raw_shadow_side in {"long", "short", "flat"}:
         shadow_side = raw_shadow_side
     else:
-        shadow_side = "flat"
+        shadow_side = _shadow_side_from_context(signal, quality_context, analyst)
 
     trigger = _first_nonempty(
         getattr(signal, "neutral_trigger_condition", ""),

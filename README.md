@@ -17,7 +17,7 @@ AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段
    技术面、基本面、新闻面分析师读取当日盘前可见数据，生成结构化信号；Portfolio Manager 汇总分析师信号、账户状态、市场确认、研究记忆和风控状态，生成每个品种的盘前期货推荐。
 
 2. **Phase2 交易执行**  
-   Trader 读取 Phase1 推荐，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。Trader 只执行或跳过已批准计划，不创造新的交易策略。
+   Trader 读取 Phase1 审计后的 `final_action_contract`，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。Trader 只执行或跳过已批准计划，不创造新的交易策略，不从 PM 草稿或研究 action-value 推导交易。
 
 3. **Phase3 日终结算**  
    Accountant 使用成交流水、合约乘数、保证金率、手续费和官方结算价逐日盯市，更新组合账户、持仓、日结算和品种日 PnL。账务事实不由 LLM 或研究解释改写。
@@ -35,7 +35,7 @@ src/agents/
   decision_team/      # portfolio_manager、auditor
   execution_team/     # trader、accountant
   research_team/      # reviewer、researcher
-  control_team/       # planner
+  control_team/       # planner、protocol_governor
 ```
 
 主要职责如下：
@@ -45,9 +45,9 @@ src/agents/
 | Technical Analyst | 读取 PandaAI 行情与学习上下文，分析价格行为、趋势、波动率、成交量、技术指标和短线交易条件 |
 | Fundamental Analyst | 读取 Finoview 本地基本面数据与 PandaAI 衍生数据，分析供需、库存、基差、仓单、产业链和数据质量 |
 | Commodity News Analyst | 读取本地期货新闻，分析事件方向、强度、新鲜度、相关性和可交易性 |
-| Portfolio Manager | 汇总分析师信号、学习记忆、账户、持仓、市场确认和风控状态，生成目标仓位和期货推荐 |
-| Auditor | 做确定性交易审核，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
-| Trader | 执行 Phase1 推荐，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
+| Portfolio Manager | 汇总分析师信号、学习记忆、账户、持仓、市场确认和风控状态，生成唯一 `final_action_contract` 和期货推荐 |
+| Auditor | 做确定性交易审核，审 PM 的最终合约，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
+| Trader | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
 | Accountant | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |
 | Reviewer | 做 Phase4 确定性验收并输出完整交易日志，不调用 LLM |
 | Researcher | 在 Reviewer 验证通过后写入记忆、研究假设、策略状态和学习事件，可调用 LLM 做研究 |
@@ -55,7 +55,7 @@ src/agents/
 
 更多细节见：
 
-- `docs/mechanism_mutiagents.md`
+- `docs/mechanism_multiagents.md`
 - `docs/mechanism_research.md`
 
 ## 三、数据与模型
@@ -134,6 +134,7 @@ AgentQuant 的学习目标不是写死更多交易规则，而是让智能体从
 
 - 候选假设只能作为分析先验，不能直接放仓、加仓、`position_matched` 或支撑亏损仓继续持有。
 - 成熟经验也必须经过当日证据、市场确认、失效边界、PM、Auditor、Trader 和 20% 保证金硬门槛。
+- Researcher 写入的 action-value 只形成固定动作偏好；PM 读取 open/hold/exit 偏好并把 execution 偏好写入最终合约，Trader 不直接读取研究 action-value。
 - Researcher 写入的 `loss_template_observation` 只是亏损模板观察记忆，不是品种黑名单，也不能直接压仓或放仓。
 - 技术参数情境校准只允许 Technical Analyst 小幅调整 EMA、RSI、Bollinger 等技术参数，不直接生成交易授权。
 
@@ -299,8 +300,8 @@ python -m compileall src
 
 最新已经代码落地、但仍需要通过干净回测观察的项目，见：
 
-- `docs/check_list.md`
-- `docs/optimization_check_list.md`
+- `docs/work_log.md`
+- `docs/parameter.md`
 
 当前尤其要关注：
 
@@ -310,6 +311,7 @@ python -m compileall src
 - signal 表和推荐快照是否覆盖全部 `ticker × analyst`，且没有重复。
 - signal artifact 是否能机器读取 `llm_path`、`data_usage_summary`、`technical_parameter_calibration`、`adaptive_params`。
 - Researcher 写入的候选记忆是否进入 prompt，但没有越权直接影响仓位。
+- `final_action_contract` 是否仍是策略交易唯一事实来源，Trader/Researcher/audit 是否没有回退到 PM 草稿。
 - learned vs unlearned、资金利用率、收益曲线和回撤是否改善。
 
 ## 十三、设计边界

@@ -1,0 +1,30 @@
+# 手续费事实表。
+# by_value 按成交额比例；by_lot 按每手固定金额。
+# 这是交易成本事实配置，不是学习参数；只有真实手续费规则变化时才调整。
+
+commission:
+  enabled: true
+  basis: execution_price
+  rounding: 0.01
+  require_explicit_rule_for_all_tickers: true
+  by_underlying:
+    AL: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+    AU: {mode: by_lot,   open: 10.0,    close: 10.0,    close_today: 10.0}
+    BU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    C:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    CF: {mode: by_lot,   open: 4.3,     close: 4.3,     close_today: 4.3}
+    CU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    EB: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    HC: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+    I:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    J:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    JM: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    M:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    MA: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+    P:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
+    PB: {mode: by_value, open: 0.00004, close: 0.00004, close_today: 0.00004}
+    RB: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
+    SC: {mode: by_lot,   open: 40.0,    close: 40.0,    close_today: 240.0}
+    SR: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+    TA: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
+    ZN: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}

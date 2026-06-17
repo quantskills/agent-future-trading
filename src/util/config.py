@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from util.logger import logger
 from typing import Dict, Any
+from util.config_normalizer import normalize_config
 
 class ConfigParser:
     """Manages configuration loading and validation."""
@@ -39,6 +40,7 @@ class ConfigParser:
         except yaml.YAMLError as e:
             raise ValueError(f"Error parsing configuration file: {e}")
 
+        cfg = normalize_config(cfg, self.config_path)
         cfg['trading_date'] = datetime.strptime(self.trading_date, '%Y-%m-%d')
         cfg['planner_mode'] = cfg.get('planner_mode', False)
         if 'trade_auditor' not in cfg and 'decision_planner' in cfg:

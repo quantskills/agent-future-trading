@@ -384,6 +384,7 @@ def _ensure_strategy_memory_schema(cursor: sqlite3.Cursor) -> None:
             confidence_score REAL DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'attribution_auto',
             reason TEXT,
+            source_trading_date TEXT,
             updated_at TEXT NOT NULL,
             valid_until TEXT,
             payload_json TEXT,
@@ -400,6 +401,7 @@ def _ensure_strategy_memory_schema(cursor: sqlite3.Cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_strategy_memory_state "
         "ON strategy_memory(config_id, memory_state)"
     )
+    _ensure_columns(cursor, "strategy_memory", {"source_trading_date": "TEXT"})
 
 
 def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
@@ -472,6 +474,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             avg_pnl REAL DEFAULT 0,
             profit_factor REAL DEFAULT 0,
             confidence_score REAL DEFAULT 0,
+            last_sample_date TEXT,
             last_updated TEXT NOT NULL,
             valid_until TEXT,
             payload_json TEXT,
@@ -495,6 +498,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             avg_pnl REAL DEFAULT 0,
             net_pnl REAL DEFAULT 0,
             confidence_score REAL DEFAULT 0,
+            last_sample_date TEXT,
             last_updated TEXT NOT NULL,
             valid_until TEXT,
             payload_json TEXT,
@@ -520,6 +524,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             sample_count INTEGER DEFAULT 0,
             reason TEXT,
             source_event_id TEXT,
+            source_trading_date TEXT,
             created_at TEXT NOT NULL,
             valid_until TEXT,
             payload_json TEXT,
@@ -656,6 +661,148 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         '''
+        CREATE TABLE IF NOT EXISTS research_position_feedback (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'flat',
+            signal_template TEXT NOT NULL DEFAULT '*',
+            horizon_class TEXT NOT NULL DEFAULT '*',
+            market_regime TEXT NOT NULL DEFAULT '*',
+            recommendation_id TEXT,
+            transaction_count INTEGER DEFAULT 0,
+            executed_lots INTEGER DEFAULT 0,
+            target_lots INTEGER DEFAULT 0,
+            current_lots INTEGER DEFAULT 0,
+            position_delta_lots INTEGER DEFAULT 0,
+            target_position_ratio REAL DEFAULT 0,
+            memory_refs_json TEXT,
+            policy_refs_json TEXT,
+            pm_effect_json TEXT,
+            auditor_effect_json TEXT,
+            trader_effect_json TEXT,
+            outcome_json TEXT,
+            feedback_label TEXT DEFAULT 'observed',
+            created_at TEXT NOT NULL,
+            valid_until TEXT,
+            payload_json TEXT,
+            UNIQUE(config_id, trading_date, ticker, recommendation_id),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS alpha_setup_profile (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT '*',
+            sector TEXT NOT NULL DEFAULT 'unknown',
+            horizon_class TEXT NOT NULL DEFAULT 'unknown',
+            market_regime TEXT NOT NULL DEFAULT 'unknown',
+            setup_type TEXT NOT NULL DEFAULT 'unknown',
+            data_combo TEXT NOT NULL DEFAULT 'unknown',
+            scope_key TEXT NOT NULL,
+            lifecycle_state TEXT NOT NULL DEFAULT 'candidate',
+            action_bias TEXT NOT NULL DEFAULT 'watchlist',
+            sample_count INTEGER DEFAULT 0,
+            trade_count INTEGER DEFAULT 0,
+            no_trade_count INTEGER DEFAULT 0,
+            win_count INTEGER DEFAULT 0,
+            loss_count INTEGER DEFAULT 0,
+            gross_profit REAL DEFAULT 0,
+            gross_loss REAL DEFAULT 0,
+            net_pnl REAL DEFAULT 0,
+            total_commission REAL DEFAULT 0,
+            profit_factor REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            max_loss REAL DEFAULT 0,
+            avg_holding_days REAL DEFAULT 0,
+            confidence_score REAL DEFAULT 0,
+            max_position_impact REAL DEFAULT 0,
+            last_sample_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            valid_until TEXT,
+            active INTEGER DEFAULT 1,
+            payload_json TEXT,
+            UNIQUE(config_id, scope_key),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS alpha_setup_sample (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT '*',
+            sector TEXT NOT NULL DEFAULT 'unknown',
+            horizon_class TEXT NOT NULL DEFAULT 'unknown',
+            market_regime TEXT NOT NULL DEFAULT 'unknown',
+            setup_type TEXT NOT NULL DEFAULT 'unknown',
+            data_combo TEXT NOT NULL DEFAULT 'unknown',
+            scope_key TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'trade',
+            recommendation_id TEXT,
+            action_taken TEXT,
+            pm_action TEXT,
+            auditor_decision TEXT,
+            trader_status TEXT,
+            target_lots INTEGER DEFAULT 0,
+            executed_lots INTEGER DEFAULT 0,
+            net_pnl REAL DEFAULT 0,
+            commission REAL DEFAULT 0,
+            holding_days INTEGER DEFAULT 0,
+            outcome_label TEXT DEFAULT 'observed',
+            setup_quality_score REAL DEFAULT 0,
+            opportunity_layer TEXT DEFAULT 'unknown',
+            evidence_json TEXT,
+            result_json TEXT,
+            created_at TEXT NOT NULL,
+            payload_json TEXT,
+            UNIQUE(config_id, trading_date, ticker, side, setup_type, source_type, recommendation_id),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS alpha_setup_action_value (
+            id TEXT PRIMARY KEY,
+            config_id TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            ticker TEXT NOT NULL DEFAULT '*',
+            side TEXT NOT NULL DEFAULT '*',
+            horizon_class TEXT NOT NULL DEFAULT '*',
+            market_regime TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
+            data_combo TEXT NOT NULL DEFAULT '*',
+            action_name TEXT NOT NULL,
+            sample_count INTEGER DEFAULT 0,
+            reward_sum REAL DEFAULT 0,
+            reward_mean REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            confidence_score REAL DEFAULT 0,
+            policy_hint TEXT DEFAULT 'observe',
+            max_position_impact REAL DEFAULT 0,
+            last_sample_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            valid_until TEXT,
+            active INTEGER DEFAULT 1,
+            payload_json TEXT,
+            UNIQUE(config_id, scope_key, action_name),
+            FOREIGN KEY (config_id) REFERENCES config(id)
+        )
+        '''
+    )
+    cursor.execute(
+        '''
         CREATE TABLE IF NOT EXISTS reviewer_llm_notes (
             id TEXT PRIMARY KEY,
             config_id TEXT NOT NULL,
@@ -713,6 +860,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             trigger_type TEXT,
             sample_count INTEGER DEFAULT 0,
             reason TEXT,
+            source_trading_date TEXT,
             rollback_value_json TEXT,
             created_at TEXT NOT NULL,
             valid_until TEXT,
@@ -856,6 +1004,62 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     _ensure_columns(
         cursor,
+        "research_position_feedback",
+        {
+            "valid_until": "TEXT",
+            "payload_json": "TEXT",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "signal_template_performance",
+        {
+            "last_sample_date": "TEXT",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "analyst_performance",
+        {
+            "last_sample_date": "TEXT",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "alpha_setup_profile",
+        {
+            "payload_json": "TEXT",
+            "active": "INTEGER DEFAULT 1",
+            "max_position_impact": "REAL DEFAULT 0",
+            "last_sample_date": "TEXT",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "adaptive_policy_state",
+        {
+            "source_trading_date": "TEXT",
+        },
+    )
+    _ensure_columns(
+        cursor,
+        "provisional_policy_state",
+        {
+            "source_trading_date": "TEXT",
+        },
+    )
+    _ensure_columns(cursor, "alpha_setup_sample", {"payload_json": "TEXT"})
+    _ensure_columns(
+        cursor,
+        "alpha_setup_action_value",
+        {
+            "payload_json": "TEXT",
+            "active": "INTEGER DEFAULT 1",
+            "max_position_impact": "REAL DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        cursor,
         "no_trade_opportunity_memory",
         {
             "opportunity_type": "TEXT DEFAULT 'unknown'",
@@ -894,6 +1098,18 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_adaptive_policy_lookup "
         "ON adaptive_policy_state(config_id, ticker, side, policy_type, active)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alpha_setup_profile_lookup "
+        "ON alpha_setup_profile(config_id, ticker, side, horizon_class, market_regime, lifecycle_state, active)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alpha_setup_sample_lookup "
+        "ON alpha_setup_sample(config_id, trading_date, ticker, side, scope_key)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alpha_setup_action_lookup "
+        "ON alpha_setup_action_value(config_id, ticker, side, action_name, active)"
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_config_overlay_lookup "
@@ -962,6 +1178,10 @@ def init_database():
             margin_used DECIMAL(15,2) DEFAULT 0,
             available_cash DECIMAL(15,2) DEFAULT 0,
             daily_settlement_pnl DECIMAL(15,2) DEFAULT 0,
+            margin_ratio DECIMAL(10,6) DEFAULT 0,
+            risk_status TEXT DEFAULT 'NORMAL',
+            last_settle_date TEXT,
+            is_settled BOOLEAN DEFAULT 0,
             leverage DECIMAL(10,2) DEFAULT 1.0,
             FOREIGN KEY (config_id) REFERENCES config(id),
             FOREIGN KEY (previous_portfolio_id) REFERENCES portfolio(id),
@@ -974,6 +1194,10 @@ def init_database():
             {
                 "account_equity": "DECIMAL(15,2) DEFAULT 0",
                 "cash_available": "DECIMAL(15,2) DEFAULT 0",
+                "margin_ratio": "DECIMAL(10,6) DEFAULT 0",
+                "risk_status": "TEXT DEFAULT 'NORMAL'",
+                "last_settle_date": "TEXT",
+                "is_settled": "BOOLEAN DEFAULT 0",
             },
         )
 

@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import types
 import unittest
 from datetime import datetime
@@ -14,6 +15,18 @@ from apis.pandaai.api import PandaAIAPI
 
 
 class PandaAIAdapterTest(unittest.TestCase):
+    def setUp(self):
+        PandaAIAPI._shared_history_cache.clear()
+        PandaAIAPI._shared_quote_cache.clear()
+        PandaAIAPI._shared_minute_cache.clear()
+        PandaAIAPI._shared_extra_cache.clear()
+        PandaAIAPI._shared_extra_diagnostics_cache.clear()
+        PandaAIAPI._shared_unavailable_extra_feature_cache.clear()
+        PandaAIAPI._shared_exchange_suffix_cache.clear()
+        PandaAIAPI._shared_sdk_method_aliases.clear()
+        PandaAIAPI._shared_token_initialized = False
+        PandaAIAPI._shared_sdk_user_cache_configured = False
+
     def _build_api(self):
         fake = types.ModuleType("panda_data")
         fake.calls = []
@@ -210,6 +223,54 @@ class PandaAIAdapterTest(unittest.TestCase):
         }
         modules = {"panda_data": fake}
         return fake, patch.dict(os.environ, env), patch.dict(sys.modules, modules)
+
+    def test_sdk_user_cache_is_redirected_to_writable_runtime_dir(self):
+        fake, env_patch, module_patch = self._build_api()
+        common_utils = types.ModuleType("panda_data.utils.common_utils")
+        init_token_module = types.ModuleType("panda_data.readers.init_token")
+        http_module = types.ModuleType("panda_data.transport.http")
+        future_reader_module = types.ModuleType("panda_data.readers.future_reader")
+        client_module = types.ModuleType("panda_data.client")
+
+        for module in (common_utils, init_token_module, http_module, future_reader_module, client_module):
+            module.find_project_root = lambda current_path, markers=None: r"C:\ProgramData\miniconda3"
+
+        modules = {
+            "panda_data": fake,
+            "panda_data.utils.common_utils": common_utils,
+            "panda_data.readers.init_token": init_token_module,
+            "panda_data.transport.http": http_module,
+            "panda_data.readers.future_reader": future_reader_module,
+            "panda_data.client": client_module,
+        }
+        env = {
+            "PANDAAI_USERNAME": "user",
+            "PANDAAI_PASSWORD": "pass",
+            "PANDAAI_PERSISTENT_MARKET_CACHE": "0",
+        }
+        original_configured = PandaAIAPI._shared_sdk_user_cache_configured
+        original_token_initialized = PandaAIAPI._shared_token_initialized
+        PandaAIAPI._shared_sdk_user_cache_configured = False
+        PandaAIAPI._shared_token_initialized = False
+        try:
+            with tempfile.TemporaryDirectory(prefix="agentquant_pandaai_sdk_auth_") as tmpdir:
+                cache_root = Path(tmpdir) / "sdk_auth"
+                env["PANDAAI_SDK_USER_CACHE_DIR"] = str(cache_root)
+                with env_patch, module_patch, patch.dict(os.environ, env), patch.dict(sys.modules, modules):
+                    api = PandaAIAPI()
+                    api._ensure_token()
+
+                    self.assertEqual(common_utils.find_project_root("ignored"), str(cache_root))
+                    self.assertEqual(init_token_module.find_project_root("ignored"), str(cache_root))
+                    self.assertEqual(http_module.find_project_root("ignored"), str(cache_root))
+                    self.assertEqual(future_reader_module.find_project_root("ignored"), str(cache_root))
+                    self.assertEqual(client_module.find_project_root("ignored"), str(cache_root))
+                    self.assertEqual(os.environ["PANDAAI_SDK_USER_CACHE_DIR"], str(cache_root))
+                    self.assertTrue(cache_root.exists())
+                    self.assertEqual(fake.calls[0]["func"], "init_token")
+        finally:
+            PandaAIAPI._shared_sdk_user_cache_configured = original_configured
+            PandaAIAPI._shared_token_initialized = original_token_initialized
 
     def test_historical_window_excludes_end_date_and_sorts_ascending(self):
         fake, env_patch, module_patch = self._build_api()

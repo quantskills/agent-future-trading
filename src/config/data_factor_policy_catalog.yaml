@@ -1,0 +1,74 @@
+# 数据因子与数据质量策略目录。
+# 由 config_normalizer.py 展开到 fundamental_quality_control / pandaai_extra_data / factor_data。
+# 这里定义 PandaAI、Finoview、本地新闻入口和质量校验；alpha 学习结果仍写数据库状态。
+
+fundamental_quality_control:
+  # Finoview 覆盖、陈旧或缺失较差时下调基本面权重。
+  enabled: true
+  min_coverage_ratio: 0.65
+  stale_ratio_warn: 0.20
+  stale_ratio_severe: 0.35
+  missing_ratio_warn: 0.20
+  missing_ratio_severe: 0.40
+  low_coverage_multiplier: 0.70
+  stale_warn_multiplier: 0.85
+  stale_severe_multiplier: 0.65
+  missing_warn_multiplier: 0.85
+  missing_severe_multiplier: 0.65
+  min_multiplier: 0.25
+
+pandaai_extra_data:
+  # PandaAI 扩展数据用于因子上下文、盘前确认和仓位缩放，不单独生成信号。
+  enabled: true
+  mode: confirm_and_factor_context
+  reference_lag_days: 1
+  lookback_days: 5
+  fail_policy: soft_skip
+  use_in_fundamental_analyst: true
+  features:
+    # 默认启用：已实测可用，且适合做盘前确认。
+    basis: true
+    warehouse_receipt: true
+    net_flow: true
+    variety_position_rank: true
+    symbol_position_rank: true
+    ls_ratio: true
+    broker_net_margin_change: true
+    broker_variety_profit: true
+    netposi_rank: true
+    net_cap_change: true
+    contract_daily_indicators: true
+    contract_rank: true
+
+    # 默认关闭：接口可用但耗时更长，避免大规模回测被拖慢。
+    broker_net_margin: false
+  fundamental_features:
+    # fundamental 分析师读取的 PandaAI 因子集合。
+    basis: true
+    warehouse_receipt: true
+    net_flow: true
+    variety_position_rank: true
+    symbol_position_rank: true
+    ls_ratio: true
+    broker_net_margin_change: true
+    broker_variety_profit: true
+    netposi_rank: true
+    contract_daily_indicators: true
+    contract_rank: true
+    broker_net_margin: false
+    net_cap_change: true
+
+factor_data:
+  # 本地数据源入口；字段映射放在 finoview_factor_catalog.yaml。
+  finoview_enabled: true
+  data_dir: data/Fundamental_data/Finoview_data
+  catalog_path: src/config/finoview_factor_catalog.yaml
+  no_lookahead_snapshot: true
+  freshness_gate: true
+  unknown_factor_trade_weight: 0.0
+  coverage_audit_tickers: [BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN]
+  news:
+    enabled: true
+    data_dir: data/News_data/Future_news
+    pre_open_only: true
+    require_fundamental_or_pandaai_confirmation_for_large_position: true

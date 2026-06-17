@@ -79,9 +79,49 @@ class AnalystSignal(BaseModel):
         default="direction_only",
         description="direction_only / tradeable_setup / deployable_alpha / risk_reduction / no_trade",
     )
+    opportunity_state: str = Field(
+        default="watch_for_trigger",
+        description=(
+            "Analyst opportunity state: no_opportunity / watch_for_trigger / "
+            "probe_candidate / tradeable_candidate / risk_reduction_candidate"
+        ),
+    )
+    learning_impact_summary: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Structured explanation of how past-only learning affected today's evidence judgment. "
+            "It must not contain trade authority, lots, margin, or execution instructions."
+        ),
+    )
+    factor_calibration_summary: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Fundamental analyst factor calibration summary; empty for non-fundamental analysts",
+    )
+    event_calibration_summary: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Commodity-news analyst event calibration summary; empty for non-news analysts",
+    )
+    setup_quality_score: float = Field(default=0.0, description="Trade setup quality from 0.0 to 1.0")
+    entry_quality: str = Field(default="unknown", description="entry quality: poor / weak / acceptable / strong / unknown")
+    setup_quality_notes: List[str] = Field(default_factory=list, description="Machine-readable setup quality notes")
     entry_trigger: str = Field(default="", description="Structured pre-trade entry or timing trigger")
     exit_hint: str = Field(default="", description="Structured exit, reduction, or invalidation hint")
     holding_period_hint: str = Field(default="", description="Expected holding style/window in plain text")
+    evidence_role: str = Field(
+        default="",
+        description=(
+            "How PM should use this signal: entry_timing / direction_context / event_catalyst / "
+            "risk_context / execution_context. risk_context is an evidence role, not an agent."
+        ),
+    )
+    direction_context: str = Field(default="", description="Directional background supplied by this analyst")
+    trade_trigger: str = Field(default="", description="Concrete trade trigger consumed by PM/Trader")
+    position_horizon: str = Field(default="", description="Position horizon consumed by PM and Researcher")
+    trend_direction: str = Field(default="", description="Technical trend direction, separated from entry timing")
+    entry_timing_signal: str = Field(default="", description="Technical entry timing classification")
+    price_location: str = Field(default="", description="Price location or zone used for entry timing")
+    trigger_valid: bool = Field(default=False, description="Whether current trigger is valid for a real trade candidate")
+    invalidation_present: bool = Field(default=False, description="Whether invalidation boundary is present")
     factor_focus: List[str] = Field(default_factory=list, description="Primary factor groups or evidence surfaces")
     current_evidence_conflict: List[str] = Field(default_factory=list, description="Current evidence that conflicts with the view")
     research_contract_version: str = Field(default="agentquant.research.v1", description="Trade research contract version")
@@ -114,6 +154,17 @@ class AnalystSignal(BaseModel):
         return {} if value is None else value
 
     @field_validator(
+        "learning_impact_summary",
+        "factor_calibration_summary",
+        "event_calibration_summary",
+        mode="before",
+    )
+    @classmethod
+    def normalize_dict_fields(cls, value):
+        """Treat model-emitted null structured summaries as empty dictionaries."""
+        return value if isinstance(value, dict) else {}
+
+    @field_validator(
         "source_artifacts",
         "validation_errors",
         "missing_evidence",
@@ -121,6 +172,7 @@ class AnalystSignal(BaseModel):
         "similar_past_cases",
         "factor_focus",
         "current_evidence_conflict",
+        "setup_quality_notes",
         mode="before",
     )
     @classmethod
@@ -168,6 +220,8 @@ class AnalystSignal(BaseModel):
         "tradeability_reason",
         "opportunity_type",
         "opportunity_layer",
+        "opportunity_state",
+        "entry_quality",
         "entry_trigger",
         "exit_hint",
         "holding_period_hint",
@@ -200,6 +254,15 @@ class AnalystSignal(BaseModel):
     @field_validator("confidence", "business_quality_score", "factor_alignment_score", "data_coverage_score", mode="before")
     @classmethod
     def normalize_score_fields(cls, value):
+        try:
+            score = float(value if value is not None else 0.0)
+        except Exception:
+            score = 0.0
+        return max(0.0, min(1.0, score))
+
+    @field_validator("setup_quality_score", mode="before")
+    @classmethod
+    def normalize_setup_quality_score(cls, value):
         try:
             score = float(value if value is not None else 0.0)
         except Exception:

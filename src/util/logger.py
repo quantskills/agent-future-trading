@@ -13,7 +13,11 @@ class AgentQuantLogger:
     """Logger for the AgentQuant application."""
 
     def __init__(self, log_level: str = "INFO"):
-        self.log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs"))
+        configured_log_dir = os.getenv("AGENTQUANT_LOG_DIR")
+        if configured_log_dir:
+            self.log_dir = os.path.abspath(configured_log_dir)
+        else:
+            self.log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs"))
         self.log_level = log_level
         self.run_id = os.getenv("AGENTQUANT_RUN_ID") or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.log_namespace = os.getenv("AGENTQUANT_LOG_NAMESPACE", "").strip("_")

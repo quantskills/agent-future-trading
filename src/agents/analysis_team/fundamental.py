@@ -2,10 +2,10 @@
 from typing import Any, Dict, Optional
 
 from apis.router import APISource, Router
-from graph.constants import AgentKey
+from graph.constants import AgentKey, Signal
 from graph.schema import AnalystSignal, FundState
 from llm.inference import agent_call
-from llm.prompt import FUTURES_FUNDAMENTAL_PROMPT
+from llm.prompt import build_futures_fundamental_prompt
 from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
@@ -19,6 +19,7 @@ from tools.agent_tools.analysis.quality import (
     write_analyst_report,
 )
 from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.data_usage import build_fundamental_data_usage
 from util.trading_calendar import get_previous_trading_day
@@ -89,6 +90,80 @@ def _build_fundamental_signal_metadata(metadata: Optional[Dict[str, Any]]) -> Di
     if metadata.get("basis"):
         result["basis"] = metadata["basis"]
     return result
+
+
+def _build_no_fundamental_data_signal(
+    *,
+    ticker: str,
+    trading_date,
+    agent_name: str,
+    metadata: Optional[Dict[str, Any]],
+    pre_open_only: bool,
+    info_cutoff: str,
+) -> AnalystSignal:
+    trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
+    signal = AnalystSignal(
+        agent_name=agent_name,
+        signal=Signal.NEUTRAL,
+        confidence=0.0,
+        justification=(
+            f"{ticker}: no local Finoview fundamental data available before {trading_date_value}; "
+            "fundamental analyst emits explicit no_trade instead of inventing directional evidence."
+        ),
+        data_cutoff=info_cutoff,
+        no_lookahead_status="ok",
+        determinism_mode="deterministic_data_gap_no_trade",
+        horizon_class="medium",
+        analyst_horizon="medium",
+        expected_horizon_days=0,
+        horizon_days=0,
+        market_regime="data_gap",
+        trend_stage="data_gap",
+        trigger_type="none",
+        entry_type="hold",
+        data_freshness="missing",
+        evidence_quality="low",
+        business_quality_score=0.0,
+        factor_alignment_score=0.0,
+        data_coverage_score=0.0,
+        tradeability_reason="local Finoview fundamental data unavailable",
+        opportunity_type="no_trade",
+        opportunity_layer="no_trade",
+        setup_quality_score=0.0,
+        entry_quality="poor",
+        setup_quality_notes=["fundamental_data_unavailable"],
+        entry_trigger="",
+        exit_hint="",
+        holding_period_hint="no fundamental trade",
+        factor_focus=["fundamental_data_availability"],
+        current_evidence_conflict=["missing_fundamental_evidence"],
+        neutral_reason="fundamental_data_unavailable",
+        missing_evidence=["local_finoview_fundamental_data"],
+        would_change_view_if="fresh local Finoview fundamental fields become available before the decision cutoff",
+        neutral_opportunity_bucket="evidence_gap",
+        neutral_trigger_condition="fresh fundamental evidence plus short-timing confirmation",
+        neutral_shadow_side="flat",
+        neutral_watchlist_priority="none",
+        do_not_trade_reason="fundamental_data_unavailable",
+        metadata={
+            **_build_fundamental_signal_metadata(metadata),
+            "data_usage_summary": {
+                "ticker": ticker,
+                "trading_date": trading_date_value,
+                "pre_open_only": pre_open_only,
+                "info_cutoff": info_cutoff,
+                "data_available": False,
+                "data_gap_reason": "local_finoview_fundamental_data_unavailable",
+                "metadata": metadata or {},
+            },
+            "analysis_strategy_trace": {
+                "analyst": "fundamental",
+                "data_gap_no_trade": True,
+                "position_authority_boundary": "no_fundamental_data_cannot_authorize_position",
+            },
+        },
+    )
+    return signal
 
 
 def _resolve_pandaai_extra_reference_date(router: Router, ticker: str, trading_date, lag_days: int):
@@ -318,10 +393,11 @@ def fundamental_agent(state: FundState):
     full_config = state.get("full_config", cfg) or {}
 
     if market_type != "china_futures":
-        logger.error(
+        message = (
             f"Fundamental analyst only supports china_futures, got market_type={market_type!r}"
         )
-        return state
+        logger.error(message)
+        raise RuntimeError(message)
 
     db = get_db()
     logger.log_agent_status(agent_name, ticker, "Analyzing fundamental data")
@@ -335,8 +411,50 @@ def fundamental_agent(state: FundState):
         fundamentals_metadata = getattr(router, "last_fundamentals_metadata", None)
 
         if not fundamentals:
-            logger.error(f"{ticker}: No fundamental data returned from router")
-            return state
+            logger.warning(f"{ticker}: No fundamental data returned from router; emitting explicit no_trade signal")
+            signal = _build_no_fundamental_data_signal(
+                ticker=ticker,
+                trading_date=trading_date,
+                agent_name=agent_name,
+                metadata=fundamentals_metadata,
+                pre_open_only=pre_open_only,
+                info_cutoff=info_cutoff,
+            )
+            prompt = (
+                f"{ticker} fundamental data unavailable before {trading_date}; "
+                "deterministic no_trade artifact produced."
+            )
+            report_sections = {
+                "Data Usage Summary": signal.metadata.get("data_usage_summary"),
+                "Data Quality": (fundamentals_metadata or {}),
+                "Reason": "local_finoview_fundamental_data_unavailable",
+            }
+            if save_outputs:
+                report_path = write_analyst_report(
+                    analyst="fundamental",
+                    ticker=ticker,
+                    trading_date=trading_date,
+                    signal=signal,
+                    full_config=full_config,
+                    sections=report_sections,
+                )
+                if report_path:
+                    signal.metadata["decision_report_path"] = report_path
+                db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+            logger.log_signal(agent_name, ticker, signal)
+            return {
+                "analyst_signals": [signal],
+                "analyst_outputs": [
+                    {
+                        "analyst": agent_name,
+                        "ticker": ticker,
+                        "trading_date": trading_date,
+                        "prompt": prompt,
+                        "signal": signal,
+                        "report_sections": report_sections,
+                    }
+                ],
+            }
 
         logger.info(f"{ticker}: Got fundamental data from router:\n{fundamentals}")
         fundamental_context = parse_fundamental_factors(fundamentals, fundamentals_metadata, ticker)
@@ -386,20 +504,6 @@ def fundamental_agent(state: FundState):
         llm_path = llm_path_label(full_config, "fundamental")
         fundamentals_for_prompt += f"\n\n=== LLM Path ===\n{llm_path}\n"
 
-        prompt = FUTURES_FUNDAMENTAL_PROMPT.format(
-            ticker=ticker,
-            fundamentals=fundamentals_for_prompt,
-        )
-        prompt += (
-            "\n\nTrade research contract fields to fill when possible:\n"
-            "- opportunity_type: medium_fundamental / trend_continuation / event_driven / probe / no_trade\n"
-            "- opportunity_layer: direction_only / tradeable_setup / risk_reduction / no_trade\n"
-            "- entry_trigger: short-timing evidence needed before the medium thesis is tradable\n"
-            "- exit_hint: fundamental or price evidence that invalidates or weakens the thesis\n"
-            "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
-            "- factor_focus: factor groups most relevant for this ticker now\n"
-            "- current_evidence_conflict: current evidence contradicting the direction\n"
-        )
         learning_context = build_learning_context(
             db=db,
             full_config=full_config,
@@ -410,14 +514,18 @@ def fundamental_agent(state: FundState):
             context=fundamental_context,
             horizon_class="medium",
         )
-        prompt += learning_context.get("text", "")
+        prompt = build_futures_fundamental_prompt(
+            ticker=ticker,
+            fundamentals=fundamentals_for_prompt,
+            learning_context_text=learning_context.get("text", ""),
+        )
         logger.info(f"{ticker}: Fundamental prompt created, length={len(prompt)}")
     except Exception as exc:
         logger.error(f"{ticker}: Failed to fetch futures fundamentals: {exc}")
         import traceback
 
         logger.error(traceback.format_exc())
-        return state
+        raise RuntimeError(f"{ticker}: Failed to fetch futures fundamentals: {exc}") from exc
 
     signal = agent_call(
         prompt=prompt,
@@ -451,8 +559,28 @@ def fundamental_agent(state: FundState):
         "reviewer_learning_context": {
             "selected_ids": learning_context.get("selected_ids", []),
             "horizon_class": learning_context.get("horizon_class", "medium"),
+            "memory_trace": learning_context.get("memory_trace", {}),
+            "current_day_evidence_required": True,
+            "candidate_hypothesis_authority": "prior_only_no_position_authority",
+        },
+        "analysis_strategy_trace": {
+            "analyst": "fundamental",
+            "market_state_adaptation": {
+                "market_regime": fundamental_context.get("market_regime"),
+                "tradeability": fundamental_context.get("tradeability"),
+                "data_quality": (fundamentals_metadata or {}),
+            },
+            "short_trigger_required_for_trade": True,
+            "neutral_to_opportunity_required": True,
+            "position_authority_boundary": "medium_thesis_requires_pm_auditor_trader_confirmation",
         },
     }
+    signal = calibrate_signal_with_learning_context(
+        signal,
+        analyst="fundamental",
+        ticker=ticker,
+        learning_context=learning_context,
+    )
     signal = apply_signal_quality_gate(signal, fundamental_context, full_config, "fundamental")
     signal = apply_business_quality_enrichment(signal, fundamental_context, full_config, "fundamental")
     signal = apply_trade_research_contract(

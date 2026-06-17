@@ -43,8 +43,10 @@ from tools.agent_tools.execution.intraday_execution import (
 )
 from tools.agent_tools.execution.entry_timing import phase2_entry_audit
 from tools.agent_tools.execution.execution_simulator import execution_price_basis
-from tools.agent_tools.execution.order_sizing import cap_target_lots_by_phase1_plan, lots_from_target_ratio
-from tools.agent_tools.execution.order_semantics import build_lot_intent_consistency
+from tools.agent_tools.execution.order_semantics import (
+    build_lot_intent_consistency,
+    phase2_order_intent_from_lots,
+)
 from tools.agent_tools.decision.position_lifecycle import cap_signed_lots_by_abs_limit
 from tools.agent_tools.runtime_setup import (
     ensure_seed_settled_portfolio,
@@ -58,6 +60,7 @@ from util.futures_audit import (
     add_rewrite_reason,
     append_translated_order,
     build_audit_payload,
+    categorize_no_trade_reason,
     ensure_execution_translation,
     ensure_signal_snapshot,
     extract_signal_lifecycle,
@@ -127,54 +130,13 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _phase1_capital_diagnostics(pre_open_plan: Dict[str, Any]) -> Dict[str, Any]:
-    diagnostics = (
-        ((pre_open_plan or {}).get("strategy_controls") or {})
-        .get("diagnostics", {})
-        .get("capital_utilization_target", {})
-    )
-    if not isinstance(diagnostics, dict):
-        return {}
-    return diagnostics
-
-
-def _phase1_dynamic_margin_cap(
-    pre_open_plan: Dict[str, Any],
-    base_single_margin_ratio: float,
-    margin_rate: float,
-) -> tuple[float, str]:
-    diagnostics = _phase1_capital_diagnostics(pre_open_plan)
-    if not diagnostics:
-        return base_single_margin_ratio, "base"
-
-    target_cap = _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_budget"), 0.0)
-    if target_cap <= 0:
-        target_cap = _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_cap"), 0.0)
-    target_estimate = _safe_float((pre_open_plan or {}).get("target_margin_ratio_estimate"), 0.0)
-    if target_cap <= 0 and bool(diagnostics.get("high_quality_memory")):
-        target_cap = target_estimate
-    if target_cap <= 0:
-        return base_single_margin_ratio, "base"
-    if margin_rate > 0:
-        target_cap = target_cap / margin_rate
-    return target_cap, str(diagnostics.get("dynamic_allocation_tier") or "dynamic")
-
-
-def _phase1_dynamic_net_exposure_cap(pre_open_plan: Dict[str, Any], base_max_net_exposure: float) -> tuple[float, str]:
-    control = (
-        ((pre_open_plan or {}).get("strategy_controls") or {})
-        .get("diagnostics", {})
-        .get("net_exposure_control", {})
-    )
-    capital = _phase1_capital_diagnostics(pre_open_plan)
-    if (
-        isinstance(control, dict)
-        and str(control.get("cap_mode") or "") in {"strong_opportunity", "alpha_release"}
-        and bool(capital.get("high_quality_memory"))
-    ):
-        max_net = _safe_float(control.get("max_net_exposure"), base_max_net_exposure)
-        return max(base_max_net_exposure, max_net), str(control.get("cap_mode") or "alpha_release")
-    return base_max_net_exposure, "base"
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except Exception:
+        return default
 
 
 def _signal_invalidation_breached(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> bool:
@@ -193,6 +155,74 @@ def _signal_invalidation_breached(current_price: Optional[float], target_lots: i
     if target_lots < 0:
         return price >= level
     return False
+
+
+def _signal_side(signal_value: Any) -> str:
+    value = str(_enum_value(signal_value) or "").strip().lower()
+    if value in {"bullish", "long", "buy"}:
+        return "long"
+    if value in {"bearish", "short", "sell"}:
+        return "short"
+    return "flat"
+
+
+def _safe_lifecycle_float(value: Any) -> Optional[float]:
+    if value in (None, "", "unknown", "UNKNOWN"):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _align_signal_lifecycle_to_target(
+    snapshot: Dict[str, Any],
+    target_lots: int,
+    lifecycle: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep execution invalidation aligned with the final target direction.
+
+    Analysts can disagree. A bullish fundamental invalidation boundary is not a
+    valid stop for a short order, and vice versa. Without this guard Phase2 can
+    incorrectly invalidate a trade before intraday confirmation has a chance to
+    evaluate it.
+    """
+    if target_lots == 0 or not isinstance(snapshot, dict):
+        return lifecycle
+
+    target_side = "long" if target_lots > 0 else "short"
+    selected = None
+    ignored = []
+    for analyst in ("technical", "fundamental", "commodity_news"):
+        item = snapshot.get(analyst)
+        if not isinstance(item, dict):
+            continue
+        level = _safe_lifecycle_float(item.get("invalidation_level"))
+        if level is None:
+            continue
+        side = _signal_side(item.get("signal"))
+        payload = {"analyst": analyst, "side": side, "invalidation_level": level}
+        if side == target_side and selected is None:
+            selected = payload
+        elif side in {"long", "short"} and side != target_side:
+            ignored.append(payload)
+
+    aligned = dict(lifecycle or {})
+    original_level = aligned.get("invalidation_level")
+    if selected is not None:
+        aligned["invalidation_level"] = selected["invalidation_level"]
+    elif ignored and original_level is not None:
+        aligned.pop("invalidation_level", None)
+
+    if ignored or selected is not None:
+        ensure_execution_translation(snapshot)["signal_lifecycle_direction_filter"] = {
+            "target_side": target_side,
+            "selected": selected,
+            "ignored_opposing": ignored,
+            "original_invalidation_level": original_level,
+            "effective_invalidation_level": aligned.get("invalidation_level"),
+        }
+    return aligned
 
 
 def _target_return_price(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> Optional[float]:
@@ -247,8 +277,149 @@ def _record_execution_translation_context(
     lifecycle = extract_signal_lifecycle(snapshot)
     if lifecycle:
         translation["signal_lifecycle"] = lifecycle
+    execution_plan = _execution_plan_from_snapshot(snapshot)
+    if execution_plan:
+        translation["execution_plan"] = execution_plan
     if getattr(morning_price_context, "intraday_audit", None):
         translation["intraday_execution"] = morning_price_context.intraday_audit
+
+
+def _execution_plan_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    final_contract = _final_action_contract_from_snapshot(snapshot)
+    contract_plan = (
+        final_contract.get("execution_plan")
+        if isinstance(final_contract, dict) and isinstance(final_contract.get("execution_plan"), dict)
+        else {}
+    )
+    return dict(contract_plan) if contract_plan else {}
+
+
+def _recommendation_source_type(recommendation: Dict[str, Any]) -> str:
+    return str(_enum_value(recommendation.get("source_type", RecommendationSourceType.STRATEGY.value)))
+
+
+def _is_strategy_recommendation(recommendation: Dict[str, Any]) -> bool:
+    return _recommendation_source_type(recommendation) == RecommendationSourceType.STRATEGY.value
+
+
+def _final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    direct = snapshot.get("final_new_entry_trade_authority")
+    if isinstance(direct, dict):
+        return direct
+    return {}
+
+
+def _authority_signature(authority: Dict[str, Any]) -> Tuple[Any, ...]:
+    authority = authority if isinstance(authority, dict) else {}
+    max_allowed = authority.get("max_allowed_margin_ratio")
+    try:
+        max_allowed = round(float(max_allowed), 10)
+    except (TypeError, ValueError):
+        max_allowed = None
+    return (
+        authority.get("authority_type"),
+        bool(authority.get("can_open_real_position")),
+        bool(authority.get("can_apply_min_real_floor")),
+        max_allowed,
+    )
+
+
+def _final_entry_authority_consistency(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate mirrored PM final-authority fields before Trader opens exposure."""
+    if not isinstance(snapshot, dict):
+        return {"passed": False, "reason": "missing_signal_snapshot", "selected_authority": {}}
+
+    sources: List[Dict[str, Any]] = []
+    direct = snapshot.get("final_new_entry_trade_authority")
+    if isinstance(direct, dict):
+        sources.append({"source": "signal_snapshot.final_new_entry_trade_authority", "authority": direct})
+
+    if not sources:
+        return {"passed": False, "reason": "missing_final_new_entry_trade_authority", "selected_authority": {}}
+
+    signatures = {_authority_signature(item["authority"]) for item in sources}
+    selected = dict(sources[0]["authority"])
+    audit_sources = [
+        {
+            "source": item["source"],
+            "authority_type": item["authority"].get("authority_type"),
+            "can_open_real_position": bool(item["authority"].get("can_open_real_position")),
+            "can_apply_min_real_floor": bool(item["authority"].get("can_apply_min_real_floor")),
+            "max_allowed_margin_ratio": item["authority"].get("max_allowed_margin_ratio"),
+        }
+        for item in sources
+    ]
+    if len(signatures) > 1:
+        return {
+            "passed": False,
+            "reason": "final_new_entry_trade_authority_source_mismatch",
+            "selected_authority": selected,
+            "sources": audit_sources,
+            "business_boundary": "Trader must not choose among conflicting PM authority mirrors",
+        }
+    return {
+        "passed": True,
+        "reason": "final_new_entry_trade_authority_sources_consistent",
+        "selected_authority": selected,
+        "sources": audit_sources,
+    }
+
+
+def _requires_entry_authority(current_lots: int, target_lots: int) -> bool:
+    current_lots = int(current_lots or 0)
+    target_lots = int(target_lots or 0)
+    if target_lots == 0 or target_lots == current_lots:
+        return False
+    if current_lots == 0:
+        return True
+    if (current_lots > 0) != (target_lots > 0):
+        return True
+    return abs(target_lots) > abs(current_lots)
+
+
+def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
+    authority_type = str((authority or {}).get("authority_type") or "")
+    if authority_type == "real_budget_entry":
+        return bool(authority.get("can_open_real_position"))
+    if authority_type == "exploration_probe":
+        if bool(authority.get("direction_only_block")):
+            return False
+        reason_codes = {str(item or "") for item in (authority.get("reason_codes") or [])}
+        hard_watchlist_codes = {
+            "pm_text_no_trade_blocks_new_entry",
+            "pm_text_no_entry_trigger_blocks_new_entry",
+            "pm_text_watchlist_only_blocks_new_entry",
+            "direction_only_cannot_open_position",
+            "daily_tradeability_watchlist_only",
+            "real_probe_qualification_not_met",
+        }
+        if reason_codes & hard_watchlist_codes:
+            return False
+        return bool(
+            authority.get("open_action_evidence")
+            or authority.get("strong_current_evidence")
+            or authority.get("technical_confirmation")
+            or authority.get("event_catalyst_confirmation")
+            or authority.get("executable_setup_confirmation")
+            or authority.get("market_confirmation")
+        )
+    return False
+
+
+def _target_lots_without_new_entry(current_lots: int, target_lots: int) -> int:
+    current_lots = int(current_lots or 0)
+    target_lots = int(target_lots or 0)
+    if not _requires_entry_authority(current_lots, target_lots):
+        return target_lots
+    if current_lots == 0:
+        return 0
+    if (current_lots > 0) != (target_lots > 0):
+        return 0
+    return current_lots
 
 
 def _ensure_phase2_execution(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -257,6 +428,88 @@ def _ensure_phase2_execution(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         audit = {}
     snapshot["phase2_execution"] = audit
     return audit
+
+
+def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    execution_plan = _execution_plan_from_snapshot(snapshot)
+    final_contract = _final_action_contract_from_snapshot(snapshot)
+    target_lots = _safe_int(final_contract.get("target_lots"), 0)
+    preferred_side = "long" if target_lots > 0 else "short" if target_lots < 0 else "flat"
+    analyst_roles = (
+        execution_plan.get("analyst_execution_roles")
+        if isinstance(execution_plan.get("analyst_execution_roles"), dict)
+        else {}
+    )
+    action_contracts = {
+        key: value.get("action_evidence_contract")
+        for key, value in analyst_roles.items()
+        if isinstance(value, dict) and isinstance(value.get("action_evidence_contract"), dict)
+    }
+    learning_scopes = {
+        key: value.get("learning_scope")
+        for key, value in analyst_roles.items()
+        if isinstance(value, dict) and isinstance(value.get("learning_scope"), dict)
+    }
+    return {
+        "setup_type": (
+            final_contract.get("setup_type")
+            or execution_plan.get("setup_type")
+            or execution_plan.get("execution_profile")
+            or "unknown"
+        ),
+        "opportunity_layer": final_contract.get("opportunity_layer") or final_contract.get("final_action") or "unknown",
+        "preferred_side": preferred_side or "flat",
+        "execution_plan": execution_plan,
+        "final_action_contract": final_contract,
+        "analyst_action_evidence_contracts": action_contracts,
+        "analyst_learning_scopes": learning_scopes,
+        "execution_contract": {
+            "profile": execution_plan.get("execution_profile"),
+            "trigger_source": execution_plan.get("trigger_source"),
+            "entry_trigger": execution_plan.get("entry_trigger"),
+            "invalidation": execution_plan.get("invalidation"),
+            "requires_intraday_confirmation": execution_plan.get("requires_intraday_confirmation"),
+            "can_execute_without_intraday_trigger": execution_plan.get("can_execute_without_intraday_trigger"),
+            "authority_type": execution_plan.get("authority_type"),
+        },
+        "learning_boundary": {
+            "trader_executes_only": True,
+            "execution_feedback_future_only": True,
+            "not_strategy_creation": True,
+            "pm_draft_pre_open_plan_not_learning_source": True,
+        },
+    }
+
+
+def _attach_setup_execution_learning(
+    snapshot: Dict[str, Any],
+    *,
+    status: str,
+    reason: Optional[str],
+    selection=None,
+) -> None:
+    audit = _ensure_phase2_execution(snapshot)
+    context = _setup_execution_learning_context(snapshot)
+    selection_payload = (
+        selection.to_audit_payload()
+        if selection is not None and hasattr(selection, "to_audit_payload")
+        else {}
+    )
+    context.update(
+        {
+            "phase2_status": status,
+            "no_trade_reason": reason,
+            "intraday_selection": selection_payload,
+            "reason_family": (
+                "execution_timing"
+                if reason and "intraday" in str(reason)
+                else "business_execution"
+                if reason
+                else "executed_or_hold"
+            ),
+        }
+    )
+    audit["setup_execution_learning"] = context
 
 
 def _format_datetime(value: Optional[datetime]) -> Optional[str]:
@@ -293,6 +546,9 @@ def _record_phase2_state(
             "reason": reason,
         }
     )
+    execution_plan = _execution_plan_from_snapshot(snapshot)
+    if execution_plan:
+        audit["execution_plan"] = execution_plan
     if current_lots_before is not None:
         audit["current_lots_before"] = int(current_lots_before)
     if decision is not None:
@@ -320,9 +576,10 @@ def _record_phase2_order_plan(
     max_single_margin_ratio: float,
     remaining_margin: float,
     decision: FuturesDecision,
+    signal_lifecycle: Optional[Dict[str, Any]] = None,
 ) -> None:
     translation = ensure_execution_translation(snapshot)
-    lifecycle = extract_signal_lifecycle(snapshot)
+    lifecycle = dict(signal_lifecycle or extract_signal_lifecycle(snapshot) or {})
     if lifecycle and target_lots != 0:
         target_price = _target_return_price(current_price, target_lots, lifecycle)
         if target_price is not None:
@@ -335,10 +592,6 @@ def _record_phase2_order_plan(
         lots=decision.lots,
         mode="phase2_execution",
     )
-    pre_open_plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    phase1_consistency = pre_open_plan.get("recommendation_position_consistency")
-    if isinstance(phase1_consistency, dict):
-        translation["phase1_recommendation_position_consistency"] = phase1_consistency
     translation["phase2_order_plan"] = {
         "current_lots": int(current_lots or 0),
         "target_lots": int(target_lots or 0),
@@ -355,6 +608,7 @@ def _record_phase2_order_plan(
         "max_single_margin_ratio": round(float(max_single_margin_ratio or 0.0), 6),
         "remaining_margin": round(float(remaining_margin or 0.0), 2),
         "signal_lifecycle": lifecycle,
+        "execution_plan": _execution_plan_from_snapshot(snapshot),
         "consistency_diagnostics": consistency_diagnostics,
     }
 
@@ -406,7 +660,21 @@ def _resolve_phase2_execution_basis(
     action_value = _enum_value(decision.action)
     if action_value == FuturesAction.HOLD.value or int(decision.lots or 0) <= 0:
         return morning_price_context, None
-    force_immediate = action_value in {FuturesAction.CLOSE_LONG.value, FuturesAction.CLOSE_SHORT.value}
+    decision_context = _decision_context_from_recommendation(recommendation, cfg)
+    execution_plan = (
+        decision_context.get("execution_plan")
+        if isinstance(decision_context.get("execution_plan"), dict)
+        else {}
+    )
+    execution_profile = str(execution_plan.get("execution_profile") or decision_context.get("execution_profile") or "")
+    force_immediate = bool(
+        action_value in {FuturesAction.CLOSE_LONG.value, FuturesAction.CLOSE_SHORT.value}
+        or execution_profile == "exit_immediate"
+        or (
+            execution_profile == "event_immediate"
+            and execution_plan.get("can_execute_without_intraday_trigger")
+        )
+    )
     basis, selection = resolve_intraday_execution_basis(
         router=router,
         config=cfg,
@@ -417,7 +685,7 @@ def _resolve_phase2_execution_basis(
         market_confirmation=_market_confirmation_from_recommendation(recommendation),
         strategy_memory=_strategy_memory_from_recommendation(recommendation),
         adaptive_policy_state=_adaptive_policy_state_from_recommendation(recommendation),
-        decision_context=_decision_context_from_recommendation(recommendation, cfg),
+        decision_context=decision_context,
         cutoff_datetime=cutoff_datetime,
         finalize_untriggered=finalize_untriggered,
         force_immediate=force_immediate,
@@ -436,68 +704,32 @@ def _market_confirmation_from_recommendation(recommendation: Dict[str, Any]) -> 
     if not isinstance(snapshot, dict):
         return {}
     confirmation = snapshot.get("market_confirmation")
-    if isinstance(confirmation, dict):
-        return confirmation
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    confirmation = plan.get("market_confirmation") if isinstance(plan, dict) else None
     return confirmation if isinstance(confirmation, dict) else {}
 
 
 def _strategy_memory_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
-    snapshot = recommendation.get("signal_snapshot") or {}
-    if not isinstance(snapshot, dict):
-        return {}
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    if not isinstance(plan, dict):
-        return {}
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    trade_auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    auditor_diag = (
-        trade_auditor.get("diagnostics")
-        if isinstance(trade_auditor, dict) and isinstance(trade_auditor.get("diagnostics"), dict)
-        else {}
-    )
-    memory = auditor_diag.get("strategy_memory") if isinstance(auditor_diag.get("strategy_memory"), dict) else {}
-    if memory:
-        return memory
-    learning = (
-        diagnostics.get("capital_utilization_learning")
-        if isinstance(diagnostics.get("capital_utilization_learning"), dict)
-        else {}
-    )
-    records = [
-        row
-        for row in (learning.get("protected_memory"), learning.get("recovering_memory"))
-        if isinstance(row, dict) and row
-    ]
-    return {"records": records} if records else {}
+    return {}
 
 
 def _adaptive_policy_state_from_recommendation(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
-    snapshot = recommendation.get("signal_snapshot") or {}
-    if not isinstance(snapshot, dict):
-        return []
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    trade_auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    diagnostics = (
-        trade_auditor.get("diagnostics")
-        if isinstance(trade_auditor, dict) and isinstance(trade_auditor.get("diagnostics"), dict)
-        else {}
-    )
-    rows = diagnostics.get("adaptive_policy_state")
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return []
 
 
 def _decision_context_from_recommendation(recommendation: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot = recommendation.get("signal_snapshot") or {}
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot, dict) and isinstance(snapshot.get("pre_open_plan"), dict) else {}
+    execution_plan = _execution_plan_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
+    final_contract = _final_action_contract_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
     return {
         "ticker": recommendation.get("underlying_code"),
         "underlying_code": recommendation.get("underlying_code"),
-        "horizon_class": plan.get("decision_horizon") or plan.get("horizon_class"),
-        "decision_horizon": plan.get("decision_horizon"),
-        "market_regime": plan.get("market_regime"),
+        "horizon_class": final_contract.get("horizon_class") or execution_plan.get("horizon_class"),
+        "decision_horizon": final_contract.get("decision_horizon") or execution_plan.get("decision_horizon"),
+        "market_regime": final_contract.get("market_regime") or execution_plan.get("market_regime"),
+        "execution_plan": execution_plan,
+        "execution_profile": execution_plan.get("execution_profile"),
+        "entry_trigger": execution_plan.get("entry_trigger"),
+        "invalidation": execution_plan.get("invalidation"),
+        "trigger_source": execution_plan.get("trigger_source"),
         "contextual_min_confidence": (((cfg or {}).get("learning") or {}).get("contextual_rule_calibration") or {}).get("min_confidence"),
     }
 
@@ -540,6 +772,7 @@ def _mark_intraday_non_execution(
         return
 
     no_trade_reason = selection.reason if selection is not None else "intraday_trigger_not_met"
+    reason_category = categorize_no_trade_reason(no_trade_reason)
     _record_phase2_state(
         audit_snapshot,
         mode=runtime_mode,
@@ -558,6 +791,24 @@ def _mark_intraday_non_execution(
         transaction_count=0,
         no_trade_reason=no_trade_reason,
         warning_message=no_trade_reason,
+    )
+    audit_snapshot["execution_result"]["execution_learning_trace"] = {
+        "no_trade_reason": no_trade_reason,
+        "no_trade_reason_category": reason_category,
+        "execution_learning_type": "intraday_timing_gate",
+        "turn_into_memory": True,
+        "timing_strategy_question": (
+            "Track whether this skipped setup becomes missed alpha after settlement; "
+            "if repeated in the same scope, Researcher may propose timing adjustments "
+            "such as pullback, VWAP confirmation, or opening-range calibration."
+        ),
+        "not_direction_evidence": True,
+    }
+    _attach_setup_execution_learning(
+        audit_snapshot,
+        status="skipped_intraday_trigger_not_met",
+        reason=no_trade_reason,
+        selection=selection,
     )
     db.update_futures_recommendation_status(
         recommendation["id"],
@@ -617,9 +868,10 @@ def _log_phase2_summary(prefix: str, summary: Dict[str, Any]) -> None:
 
 def _extract_target_lots_from_recommendation(recommendation: Dict[str, Any]) -> int:
     signal_snapshot = recommendation.get("signal_snapshot") or {}
-    pre_open_plan = signal_snapshot.get("pre_open_plan") if isinstance(signal_snapshot, dict) else None
-    if isinstance(pre_open_plan, dict) and pre_open_plan.get("target_lots_estimate") is not None:
-        return int(pre_open_plan.get("target_lots_estimate") or 0)
+    if isinstance(signal_snapshot, dict):
+        final_contract = _final_action_contract_from_snapshot(signal_snapshot)
+        if final_contract.get("target_lots") is not None:
+            return int(final_contract.get("target_lots") or 0)
 
     action_value = _enum_value(recommendation.get("action"))
     direct_lots = int(recommendation.get("lots", 0) or 0)
@@ -700,9 +952,52 @@ def _cap_target_lots_by_abs_limit(target_lots: int, abs_limit: int) -> int:
     return cap_signed_lots_by_abs_limit(target_lots, abs_limit)
 
 
-def _cap_target_lots_by_phase1_plan(target_lots: int, pre_open_plan: Dict[str, Any]) -> int:
-    """Do not let phase2 price translation enlarge the phase1 target lot estimate."""
-    return cap_target_lots_by_phase1_plan(target_lots, pre_open_plan)
+def _final_action_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    contract = snapshot.get("final_action_contract")
+    if isinstance(contract, dict) and contract:
+        return contract
+    return {}
+
+
+def _contract_type_allows_strategy_translation(contract: Dict[str, Any]) -> bool:
+    contract_type = str(contract.get("contract_type") or "strategy").strip().lower()
+    return contract_type in {"", "strategy"}
+
+
+def _decision_from_contract_target(
+    *,
+    ticker: str,
+    current_lots: int,
+    target_lots: int,
+    current_price: float,
+    multiplier: float,
+    contract_info: Dict[str, Any],
+    contract_code: Optional[str],
+    justification_prefix: str,
+) -> FuturesDecision:
+    intent = phase2_order_intent_from_lots(current_lots=current_lots, target_lots=target_lots)
+    action = FuturesAction(intent["action"])
+    margin_rate = float(
+        contract_info["margin_rate_long"]
+        if action in {FuturesAction.OPEN_LONG, FuturesAction.CLOSE_LONG, FuturesAction.HOLD}
+        else contract_info["margin_rate_short"]
+    )
+    return FuturesDecision(
+        ticker=ticker,
+        action=action,
+        lots=int(intent["lots"] or 0),
+        price=current_price,
+        settle_price=current_price,
+        margin_rate=margin_rate,
+        contract_multiplier=multiplier,
+        contract_code=contract_code,
+        justification=(
+            f"{justification_prefix}: target_lots={target_lots}, current_lots={current_lots}, "
+            f"lots_delta={intent['lots_delta']}."
+        ),
+    )
 
 
 def _translate_pre_open_recommendation_to_order(
@@ -714,7 +1009,16 @@ def _translate_pre_open_recommendation_to_order(
 ) -> FuturesDecision:
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
-    pre_open_plan = signal_snapshot.get("pre_open_plan") if isinstance(signal_snapshot, dict) else None
+    if isinstance(signal_snapshot, dict):
+        final_authority = signal_snapshot.get("final_new_entry_trade_authority")
+        if isinstance(final_authority, dict) and not isinstance(snapshot.get("final_new_entry_trade_authority"), dict):
+            snapshot["final_new_entry_trade_authority"] = dict(final_authority)
+        final_contract = signal_snapshot.get("final_action_contract")
+        if isinstance(final_contract, dict) and not isinstance(snapshot.get("final_action_contract"), dict):
+            snapshot["final_action_contract"] = dict(final_contract)
+        market_confirmation = signal_snapshot.get("market_confirmation")
+        if isinstance(market_confirmation, dict) and not isinstance(snapshot.get("market_confirmation"), dict):
+            snapshot["market_confirmation"] = dict(market_confirmation)
     signal_lifecycle = extract_signal_lifecycle(snapshot)
     if not signal_lifecycle and isinstance(signal_snapshot, dict):
         signal_lifecycle = extract_signal_lifecycle(signal_snapshot)
@@ -753,85 +1057,280 @@ def _translate_pre_open_recommendation_to_order(
 
     risk_level, cashflow_ratio = check_risk_level(portfolio, config)
     max_single_margin_ratio = get_max_single_position_ratio(risk_level, config)
-    target_margin_rate_for_cap = float(contract_info["margin_rate_long"])
-    if pre_open_plan and float(pre_open_plan.get("target_position_ratio") or 0.0) < 0:
-        target_margin_rate_for_cap = float(contract_info["margin_rate_short"])
-    max_single_margin_ratio, single_cap_mode = _phase1_dynamic_margin_cap(
-        pre_open_plan or {},
-        max_single_margin_ratio,
-        target_margin_rate_for_cap,
-    )
+    single_cap_mode = "base"
     max_single_margin = account_equity * max_single_margin_ratio
     force_reduce_only = current_margin_ratio >= max_total_margin_ratio
 
     current_position = portfolio.positions.get(ticker)
     current_lots = int(getattr(current_position, "shares", 0) or 0)
     contract_code = getattr(current_position, "contract_code", None) or recommendation.get("contract_code")
+    final_action_contract = _final_action_contract_from_snapshot(snapshot)
 
-    if pre_open_plan:
-        plan_reason = normalize_no_trade_reason(pre_open_plan.get("tradable_lots_reason"))
-        if plan_reason == "cooling_period":
+    if (
+        _is_strategy_recommendation(recommendation)
+        and final_action_contract
+        and not _contract_type_allows_strategy_translation(final_action_contract)
+    ):
+        add_rewrite_reason(snapshot, "unsupported_final_action_contract_type")
+        _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+            "passed": False,
+            "reason": "unsupported_final_action_contract_type",
+            "required_for": "strategy_recommendation",
+            "source_type": _recommendation_source_type(recommendation),
+            "contract_type": final_action_contract.get("contract_type"),
+            "current_lots": int(current_lots),
+            "target_lots_after_validation": int(current_lots),
+            "business_boundary": (
+                "strategy_recommendation_requires_strategy_final_action_contract; "
+                "Trader must not fall back to raw action/lots"
+            ),
+        }
+        decision = FuturesDecision(
+            ticker=ticker,
+            action=FuturesAction.HOLD,
+            lots=0,
+            price=current_price,
+            settle_price=current_price,
+            margin_rate=float(contract_info["margin_rate_long"]),
+            contract_multiplier=multiplier,
+            contract_code=contract_code,
+            justification=(
+                f"{ticker} strategy recommendation has unsupported final_action_contract "
+                "type; converted to HOLD so Trader cannot translate raw action/lots."
+            ),
+        )
+        _record_phase2_order_plan(
+            snapshot,
+            current_lots=current_lots,
+            target_lots=current_lots,
+            account_equity=account_equity,
+            current_price=current_price,
+            risk_level=risk_level,
+            cashflow_ratio=cashflow_ratio,
+            current_margin_ratio=current_margin_ratio,
+            max_total_margin_ratio=max_total_margin_ratio,
+            max_single_margin_ratio=max_single_margin_ratio,
+            remaining_margin=remaining_margin,
+            decision=decision,
+            signal_lifecycle=signal_lifecycle,
+        )
+        return decision
+
+    if (
+        _is_strategy_recommendation(recommendation)
+        and final_action_contract
+        and _contract_type_allows_strategy_translation(final_action_contract)
+    ):
+        contract_current_lots = _safe_int(final_action_contract.get("current_lots"), current_lots)
+        if contract_current_lots != current_lots:
+            add_rewrite_reason(snapshot, "final_action_contract_current_lots_mismatch")
+            _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                "passed": False,
+                "reason": "final_action_contract_current_lots_mismatch",
+                "source_type": _recommendation_source_type(recommendation),
+                "contract_current_lots": int(contract_current_lots),
+                "actual_current_lots": int(current_lots),
+                "business_boundary": "trader_must_execute_final_action_contract_current_lots",
+            }
             target_lots = current_lots
-            add_rewrite_reason(snapshot, "cooling_period")
         else:
-            target_position_ratio = float(pre_open_plan.get("target_position_ratio") or 0.0)
-
-            net_exposure_config, _ = resolve_net_exposure_config(config)
-            max_net_exposure = float(net_exposure_config.get("max_net_exposure", 0.50))
-            symmetric_scaling = bool(net_exposure_config.get("symmetric_scaling", True))
-            max_net_exposure, net_cap_mode = _phase1_dynamic_net_exposure_cap(
-                pre_open_plan or {},
-                max_net_exposure,
-            )
-
-            current_net_exposure = _current_net_exposure(portfolio, account_equity)
-            current_ticker_ratio = _signed_position_ratio(current_position, account_equity)
-            projected_net_exposure = current_net_exposure - current_ticker_ratio + target_position_ratio
-
-            if projected_net_exposure > max_net_exposure and target_position_ratio > 0:
-                add_rewrite_reason(snapshot, "net_exposure_limit")
-                allowed_ratio = max_net_exposure - (current_net_exposure - current_ticker_ratio)
-                if symmetric_scaling:
-                    target_position_ratio = max(0.0, allowed_ratio)
-                else:
-                    target_position_ratio = min(target_position_ratio, max(0.0, allowed_ratio))
-            elif projected_net_exposure < -max_net_exposure and target_position_ratio < 0:
-                add_rewrite_reason(snapshot, "net_exposure_limit")
-                allowed_ratio = -max_net_exposure - (current_net_exposure - current_ticker_ratio)
-                if symmetric_scaling:
-                    target_position_ratio = min(0.0, allowed_ratio)
-                else:
-                    target_position_ratio = max(target_position_ratio, min(0.0, allowed_ratio))
-            if net_cap_mode != "base":
-                ensure_execution_translation(snapshot)["dynamic_net_exposure_control"] = {
-                    "mode": net_cap_mode,
-                    "max_net_exposure": max_net_exposure,
+            target_lots = _safe_int(final_action_contract.get("target_lots"), current_lots)
+            lots_delta = _safe_int(final_action_contract.get("lots_delta"), target_lots - current_lots)
+            if lots_delta != target_lots - current_lots:
+                add_rewrite_reason(snapshot, "final_action_contract_lots_delta_mismatch")
+                target_lots = current_lots
+                _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                    "passed": False,
+                    "reason": "final_action_contract_lots_delta_mismatch",
+                    "source_type": _recommendation_source_type(recommendation),
+                    "contract_lots_delta": int(lots_delta),
+                    "expected_lots_delta": int(_safe_int(final_action_contract.get("target_lots"), current_lots) - current_lots),
+                    "business_boundary": "trader_must_execute_self_consistent_final_action_contract",
+                }
+            else:
+                _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                    "passed": True,
+                    "reason": "final_action_contract_present",
+                    "source_type": _recommendation_source_type(recommendation),
+                    "current_lots": int(current_lots),
+                    "target_lots": int(target_lots),
+                    "final_action_contract": final_action_contract,
+                    "business_boundary": "strategy_trade_target_lots_come_only_from_final_action_contract",
                 }
 
-            target_lots = lots_from_target_ratio(
-                account_equity=account_equity,
-                target_position_ratio=target_position_ratio,
-                current_price=current_price,
-                multiplier=multiplier,
-            )
-            capped_target_lots = _cap_target_lots_by_phase1_plan(target_lots, pre_open_plan)
-            if capped_target_lots != target_lots:
-                target_lots = capped_target_lots
-                add_rewrite_reason(snapshot, "phase1_target_lots_cap")
-    else:
-        action_value = _enum_value(recommendation.get("action"))
-        direct_lots = int(recommendation.get("lots", 0) or 0)
-        if action_value == FuturesAction.OPEN_LONG.value:
-            target_lots = direct_lots
-        elif action_value == FuturesAction.OPEN_SHORT.value:
-            target_lots = -direct_lots
-        elif action_value == FuturesAction.CLOSE_LONG.value:
-            target_lots = max(0, current_lots - direct_lots)
-        elif action_value == FuturesAction.CLOSE_SHORT.value:
-            target_lots = min(0, current_lots + direct_lots)
-        else:
-            target_lots = current_lots
+        ensure_execution_translation(snapshot)["final_action_contract_source"] = {
+            "source": "final_action_contract",
+            "contract_type": final_action_contract.get("contract_type") or "strategy",
+            "final_action": final_action_contract.get("final_action"),
+            "current_lots": int(current_lots),
+            "target_lots": int(target_lots),
+            "lots_delta": int(target_lots - current_lots),
+        }
+        signal_lifecycle = _align_signal_lifecycle_to_target(snapshot, target_lots, signal_lifecycle)
+        ensure_execution_translation(snapshot)["signal_lifecycle"] = dict(signal_lifecycle or {})
+        signal_invalidation_observed = _signal_invalidation_breached(
+            current_price,
+            target_lots,
+            signal_lifecycle,
+        )
+        exit_policy_result = evaluate_exit_policy(
+            ticker=ticker,
+            current_price=float(current_price),
+            current_lots=current_lots,
+            target_lots=target_lots,
+            lifecycle=signal_lifecycle,
+            current_position=current_position,
+            trading_date=recommendation.get("effective_trade_date") or recommendation.get("trading_date"),
+            config=config,
+        )
+        phase2_execution = _ensure_phase2_execution(snapshot)
+        phase2_execution["contract_execution_observation"] = {
+            "signal_invalidation_observed": bool(signal_invalidation_observed),
+            "exit_policy_required": bool(exit_policy_result.get("exit_required")),
+            "exit_policy_reason": exit_policy_result.get("reason"),
+            "business_boundary": (
+                "Trader records execution observations but does not rewrite "
+                "strategy final_action_contract target_lots; PM/Auditor must "
+                "encode reduce/exit/hold before Phase2."
+            ),
+        }
 
+        if _requires_entry_authority(current_lots, target_lots):
+            authority_consistency = _final_entry_authority_consistency(snapshot)
+            final_authority = authority_consistency.get("selected_authority") or {}
+            if not authority_consistency.get("passed") or not _authority_allows_entry(final_authority):
+                original_target_lots = int(target_lots or 0)
+                target_lots = int(current_lots)
+                block_reason = (
+                    str(authority_consistency.get("reason") or "final_new_entry_trade_authority_missing_or_not_met")
+                    if not authority_consistency.get("passed")
+                    else "final_new_entry_trade_authority_missing_or_not_met"
+                )
+                add_rewrite_reason(snapshot, block_reason)
+                _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                    "passed": False,
+                    "reason": block_reason,
+                    "source_type": _recommendation_source_type(recommendation),
+                    "current_lots": int(current_lots),
+                    "original_target_lots": int(original_target_lots),
+                    "target_lots_after_validation": int(target_lots),
+                    "final_new_entry_trade_authority": final_authority,
+                    "authority_consistency": authority_consistency,
+                    "business_boundary": (
+                        "invalid final_action_contract authority cannot be partially "
+                        "retranslated by Trader; no strategy transaction is emitted"
+                    ),
+                }
+
+        phase2_execution["exit_policy"] = exit_policy_result
+        phase2_execution["entry_timing"] = phase2_entry_audit(
+            target_lots=target_lots,
+            current_lots=current_lots,
+            price_context=morning_price_context,
+        )
+        phase2_execution["execution_simulation"] = execution_price_basis(morning_price_context)
+
+        if risk_level == RiskLevel.DANGER and current_lots == 0 and target_lots != 0:
+            target_lots = int(current_lots)
+            add_rewrite_reason(snapshot, "danger_zone_ban")
+        if risk_level == RiskLevel.EMERGENCY and current_lots == 0 and target_lots != 0:
+            target_lots = int(current_lots)
+            add_rewrite_reason(snapshot, "reduce_only")
+
+        target_margin_rate = float(contract_info["margin_rate_long"] if target_lots >= 0 else contract_info["margin_rate_short"])
+        margin_required = current_price * abs(target_lots) * multiplier * target_margin_rate
+        if margin_required > remaining_margin and abs(target_lots) > 0 and current_price > 0:
+            if _requires_entry_authority(current_lots, target_lots):
+                target_lots = int(current_lots)
+                add_rewrite_reason(snapshot, "margin_adjustment_to_no_new_entry")
+
+        decision = _decision_from_contract_target(
+            ticker=ticker,
+            current_lots=current_lots,
+            target_lots=target_lots,
+            current_price=current_price,
+            multiplier=multiplier,
+            contract_info=contract_info,
+            contract_code=contract_code,
+            justification_prefix="Final-action-contract translation",
+        )
+        if decision.action == FuturesAction.HOLD and decision.lots == 0:
+            add_rewrite_reason(snapshot, normalize_no_trade_reason(final_action_contract.get("tradable_lots_reason")) or "position_matched")
+
+        _record_phase2_order_plan(
+            snapshot,
+            current_lots=current_lots,
+            target_lots=target_lots,
+            account_equity=account_equity,
+            current_price=current_price,
+            risk_level=risk_level,
+            cashflow_ratio=cashflow_ratio,
+            current_margin_ratio=current_margin_ratio,
+            max_total_margin_ratio=max_total_margin_ratio,
+            max_single_margin_ratio=max_single_margin_ratio,
+            remaining_margin=remaining_margin,
+            decision=decision,
+            signal_lifecycle=signal_lifecycle,
+        )
+        return decision
+
+    if _is_strategy_recommendation(recommendation) and not final_action_contract:
+        add_rewrite_reason(snapshot, "missing_final_action_contract")
+        _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+            "passed": False,
+            "reason": "missing_final_action_contract",
+            "required_for": "strategy_recommendation",
+            "source_type": _recommendation_source_type(recommendation),
+            "current_lots": int(current_lots),
+            "target_lots_after_validation": int(current_lots),
+            "business_boundary": "strategy_recommendation_requires_final_action_contract",
+        }
+        decision = FuturesDecision(
+            ticker=ticker,
+            action=FuturesAction.HOLD,
+            lots=0,
+            price=current_price,
+            settle_price=current_price,
+            margin_rate=float(contract_info["margin_rate_long"]),
+            contract_multiplier=multiplier,
+            contract_code=contract_code,
+            justification=(
+                f"{ticker} strategy recommendation missing final_action_contract; "
+                "converted to HOLD so Trader cannot translate PM drafts or raw lots."
+            ),
+        )
+        _record_phase2_order_plan(
+            snapshot,
+            current_lots=current_lots,
+            target_lots=current_lots,
+            account_equity=account_equity,
+            current_price=current_price,
+            risk_level=risk_level,
+            cashflow_ratio=cashflow_ratio,
+            current_margin_ratio=current_margin_ratio,
+            max_total_margin_ratio=max_total_margin_ratio,
+            max_single_margin_ratio=max_single_margin_ratio,
+            remaining_margin=remaining_margin,
+            decision=decision,
+            signal_lifecycle=signal_lifecycle,
+        )
+        return decision
+
+    action_value = _enum_value(recommendation.get("action"))
+    direct_lots = int(recommendation.get("lots", 0) or 0)
+    if action_value == FuturesAction.OPEN_LONG.value:
+        target_lots = direct_lots
+    elif action_value == FuturesAction.OPEN_SHORT.value:
+        target_lots = -direct_lots
+    elif action_value == FuturesAction.CLOSE_LONG.value:
+        target_lots = max(0, current_lots - direct_lots)
+    elif action_value == FuturesAction.CLOSE_SHORT.value:
+        target_lots = min(0, current_lots + direct_lots)
+    else:
+        target_lots = current_lots
+
+    signal_lifecycle = _align_signal_lifecycle_to_target(snapshot, target_lots, signal_lifecycle)
+    ensure_execution_translation(snapshot)["signal_lifecycle"] = dict(signal_lifecycle or {})
     if _signal_invalidation_breached(current_price, target_lots, signal_lifecycle):
         target_lots = 0
         add_rewrite_reason(snapshot, "signal_invalidation_level")
@@ -849,19 +1348,62 @@ def _translate_pre_open_recommendation_to_order(
     if exit_policy_result.get("exit_required"):
         target_lots = int(exit_policy_result.get("target_lots") or 0)
         add_rewrite_reason(snapshot, str(exit_policy_result.get("reason") or "exit_policy"))
+
+    if _is_strategy_recommendation(recommendation) and _requires_entry_authority(current_lots, target_lots):
+        authority_consistency = _final_entry_authority_consistency(snapshot)
+        final_authority = authority_consistency.get("selected_authority") or {}
+        if not authority_consistency.get("passed"):
+            original_target_lots = int(target_lots or 0)
+            target_lots = _target_lots_without_new_entry(current_lots, target_lots)
+            block_reason = str(authority_consistency.get("reason") or "final_new_entry_trade_authority_missing_or_not_met")
+            add_rewrite_reason(snapshot, block_reason)
+            _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                "passed": False,
+                "reason": block_reason,
+                "source_type": _recommendation_source_type(recommendation),
+                "current_lots": int(current_lots),
+                "original_target_lots": int(original_target_lots),
+                "target_lots_after_validation": int(target_lots),
+                "final_new_entry_trade_authority": final_authority,
+                "authority_consistency": authority_consistency,
+                "business_boundary": "strategy_new_entry_requires_pm_final_trade_authority",
+            }
+        elif not _authority_allows_entry(final_authority):
+            original_target_lots = int(target_lots or 0)
+            target_lots = _target_lots_without_new_entry(current_lots, target_lots)
+            add_rewrite_reason(snapshot, "final_new_entry_trade_authority_missing_or_not_met")
+            _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                "passed": False,
+                "reason": "final_new_entry_trade_authority_missing_or_not_met",
+                "source_type": _recommendation_source_type(recommendation),
+                "current_lots": int(current_lots),
+                "original_target_lots": int(original_target_lots),
+                "target_lots_after_validation": int(target_lots),
+                "final_new_entry_trade_authority": final_authority,
+                "authority_consistency": authority_consistency,
+                "business_boundary": "strategy_new_entry_requires_pm_final_trade_authority",
+            }
+        else:
+            _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+                "passed": True,
+                "reason": "final_trade_authority_present",
+                "source_type": _recommendation_source_type(recommendation),
+                "current_lots": int(current_lots),
+                "target_lots": int(target_lots),
+                "final_new_entry_trade_authority": final_authority,
+                "authority_consistency": authority_consistency,
+            }
     phase2_execution = _ensure_phase2_execution(snapshot)
     phase2_execution["exit_policy"] = exit_policy_result
     phase2_execution["entry_timing"] = phase2_entry_audit(
         target_lots=target_lots,
         current_lots=current_lots,
         price_context=morning_price_context,
-        pre_open_plan=pre_open_plan,
     )
     phase2_execution["execution_simulation"] = execution_price_basis(morning_price_context)
 
-    phase1_plan_available = isinstance(pre_open_plan, dict) and bool(pre_open_plan)
     max_target_notional = account_equity * max_single_margin_ratio
-    if not phase1_plan_available and current_price > 0 and multiplier > 0 and max_target_notional > 0:
+    if current_price > 0 and multiplier > 0 and max_target_notional > 0:
         max_abs_target_lots = int(max_target_notional / (current_price * multiplier))
         capped_target_lots = _cap_target_lots_by_abs_limit(target_lots, max_abs_target_lots)
         if capped_target_lots != target_lots:
@@ -899,6 +1441,7 @@ def _translate_pre_open_recommendation_to_order(
                 max_single_margin_ratio=max_single_margin_ratio,
                 remaining_margin=remaining_margin,
                 decision=decision,
+                signal_lifecycle=signal_lifecycle,
             )
             return decision
         if current_lots < 0:
@@ -927,6 +1470,7 @@ def _translate_pre_open_recommendation_to_order(
                 max_single_margin_ratio=max_single_margin_ratio,
                 remaining_margin=remaining_margin,
                 decision=decision,
+                signal_lifecycle=signal_lifecycle,
             )
             return decision
         add_rewrite_reason(snapshot, "reduce_only")
@@ -954,6 +1498,7 @@ def _translate_pre_open_recommendation_to_order(
             max_single_margin_ratio=max_single_margin_ratio,
             remaining_margin=remaining_margin,
             decision=decision,
+            signal_lifecycle=signal_lifecycle,
         )
         return decision
 
@@ -1017,8 +1562,7 @@ def _translate_pre_open_recommendation_to_order(
 
     single_position_margin = abs(decision.lots) * decision.price * multiplier * decision.margin_rate
     if (
-        not phase1_plan_available
-        and single_position_margin > max_single_margin
+        single_position_margin > max_single_margin
         and decision.action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}
     ):
         max_lots_for_single = int(max_single_margin / (decision.price * multiplier * decision.margin_rate)) if max_single_margin > 0 else 0
@@ -1031,20 +1575,6 @@ def _translate_pre_open_recommendation_to_order(
             decision.lots = 0
             decision.justification += " [Base sizing anchor: converted to HOLD.]"
             add_rewrite_reason(snapshot, "base_sizing_anchor_cap")
-    if single_cap_mode != "base":
-        translation = ensure_execution_translation(snapshot)
-        diagnostics = _phase1_capital_diagnostics(pre_open_plan or {})
-        payload = {
-            "mode": single_cap_mode,
-            "max_single_margin_ratio": max_single_margin_ratio,
-            "dynamic_opportunity_margin_ratio_budget": _safe_float(
-                diagnostics.get("dynamic_opportunity_margin_ratio_budget"),
-                _safe_float(diagnostics.get("dynamic_opportunity_margin_ratio_cap"), 0.0),
-            ),
-        }
-        translation["dynamic_opportunity_budget_control"] = payload
-        translation["dynamic_concentration_control"] = payload
-
     if force_reduce_only and decision.action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}:
         if current_lots > 0 and decision.action == FuturesAction.OPEN_SHORT:
             decision.action = FuturesAction.CLOSE_LONG
@@ -1074,14 +1604,14 @@ def _translate_pre_open_recommendation_to_order(
         add_rewrite_reason(snapshot, "hold_or_zero_lots")
 
     if decision.action == FuturesAction.HOLD and decision.lots == 0:
-        plan_reason = (
-            normalize_no_trade_reason(pre_open_plan.get("tradable_lots_reason"))
-            if isinstance(pre_open_plan, dict)
-            else None
-        )
-        if current_lots == target_lots:
+        plan_reason = None
+        existing_reasons = ensure_execution_translation(snapshot).get("rewrite_reasons") or []
+        if current_lots == target_lots and not plan_reason and not existing_reasons:
             plan_reason = plan_reason or "position_matched"
-        add_rewrite_reason(snapshot, plan_reason or "hold_or_zero_lots")
+        elif not plan_reason and not existing_reasons:
+            plan_reason = "hold_or_zero_lots"
+        if plan_reason:
+            add_rewrite_reason(snapshot, plan_reason)
 
     _record_phase2_order_plan(
         snapshot,
@@ -1096,6 +1626,7 @@ def _translate_pre_open_recommendation_to_order(
         max_single_margin_ratio=max_single_margin_ratio,
         remaining_margin=remaining_margin,
         decision=decision,
+        signal_lifecycle=signal_lifecycle,
     )
     return decision
 
@@ -1149,6 +1680,11 @@ def _process_strategy_recommendations(
                 transaction_count=0,
                 no_trade_reason=no_trade_reason,
                 warning_message=morning_price_context.warning_message,
+            )
+            _attach_setup_execution_learning(
+                audit_snapshot,
+                status="skipped_missing_execution_basis",
+                reason=no_trade_reason,
             )
             db.update_futures_recommendation_status(
                 recommendation["id"],
@@ -1296,6 +1832,12 @@ def _process_strategy_recommendations(
             finalize_untriggered=finalize_untriggered,
             loop_iteration=loop_iteration,
             reason=infer_no_trade_reason(audit_snapshot) if final_status == "executed_without_transaction" else None,
+        )
+        _attach_setup_execution_learning(
+            audit_snapshot,
+            status=final_status,
+            reason=infer_no_trade_reason(audit_snapshot) if final_status == "executed_without_transaction" else None,
+            selection=intraday_selection,
         )
         executable_recommendation["signal_snapshot"] = audit_snapshot
         executable_recommendation["audit_payload"] = build_audit_payload(audit_snapshot)

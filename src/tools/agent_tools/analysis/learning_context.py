@@ -16,6 +16,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from util.logger import logger
 from tools.agent_tools.research.learning_contract import CONTRACT_KEY, contract_prompt_line
+from tools.agent_tools.research.alpha_setup import (
+    analyst_signal_calibration_prompt_line,
+    compact_action_value_for_analyst_trace,
+    compact_profile_for_trace,
+    profile_prompt_line,
+)
 
 
 DEFAULT_HORIZON_BY_ANALYST = {
@@ -222,6 +228,119 @@ def _budget_plain_lines(lines: Iterable[str], *, max_chars: int, max_items: int)
         selected.append(line)
         used += len(line) + 1
     return selected, dropped
+
+
+def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    contract = payload.get(CONTRACT_KEY) if isinstance(payload.get(CONTRACT_KEY), dict) else {}
+    return {
+        "memory_type": memory_type,
+        "id": str(item.get("id") or ""),
+        "ticker": str(item.get("ticker") or "*").upper(),
+        "side": str(item.get("side") or "*").lower(),
+        "sector": str(item.get("sector") or "*"),
+        "horizon_class": str(item.get("horizon_class") or "*"),
+        "market_regime": str(item.get("market_regime") or "*"),
+        "signal_template": str(item.get("signal_template") or "*"),
+        "status": str(item.get("status") or contract.get("maturity_state") or ""),
+        "sample_count": int(item.get("sample_count") or contract.get("sample_count") or 0),
+        "confidence_score": float(item.get("confidence_score") or 0.0),
+    }
+
+
+def _scope_authority_boundary(selected_scopes: Iterable[str]) -> Dict[str, Any]:
+    scopes = [str(scope or "") for scope in selected_scopes]
+    cross_scope = any(
+        scope.startswith("same_sector") or scope.startswith("global") or scope.startswith("wildcard")
+        for scope in scopes
+    )
+    return {
+        "same_ticker_scopes": [scope for scope in scopes if not (
+            scope.startswith("same_sector") or scope.startswith("global") or scope.startswith("wildcard")
+        )],
+        "cross_ticker_prior_scopes": [
+            scope for scope in scopes
+            if scope.startswith("same_sector") or scope.startswith("global") or scope.startswith("wildcard")
+        ],
+        "contains_cross_ticker_fallback": bool(cross_scope),
+        "same_sector_fallback_prior_only": bool(any(scope.startswith("same_sector") for scope in scopes)),
+        "global_fallback_prior_only": bool(any(scope.startswith("global") for scope in scopes)),
+        "can_create_trade_authority": False,
+        "can_override_same_scope_action_value": False,
+        "can_size_or_add_position": False,
+        "boundary": (
+            "broad learning fallback is prompt context only; PM trade authority must come from "
+            "same-scope action evidence or today's trigger/invalidation/confirmation"
+        ),
+    }
+
+
+def _build_memory_trace(
+    *,
+    analyst: str,
+    ticker: str,
+    horizon: str,
+    sector: str,
+    market_regime: str,
+    selected_scopes: List[str],
+    selected_ids: List[str],
+    items: List[Dict[str, Any]],
+    episode_items: List[Dict[str, Any]],
+    no_trade_items: List[Dict[str, Any]],
+    hypothesis_items: List[Dict[str, Any]],
+    lines: List[str],
+    episode_lines: List[str],
+    no_trade_lines: List[str],
+    hypothesis_lines: List[str],
+    dropped: int,
+    max_items: int,
+    max_chars: int,
+    alpha_setup_items: Optional[List[Dict[str, Any]]] = None,
+    alpha_action_value_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    selected_digest_items = [item for item in items if str(item.get("id") or "") in set(selected_ids)]
+    hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
+    refs: List[Dict[str, Any]] = []
+    for memory_type, collection, limit in (
+        ("analyst_learning_digest", selected_digest_items, max_items),
+        ("trade_episode_memory", episode_items, 4),
+        ("no_trade_opportunity_memory", no_trade_items, 4),
+        ("exploratory_hypothesis", hypothesis_items, 4),
+        ("alpha_setup_profile", alpha_setup_items or [], 4),
+        ("alpha_setup_action_value", alpha_action_value_items or [], 4),
+    ):
+        for item in collection[:limit]:
+            refs.append(_memory_trace_ref(item, memory_type))
+    return {
+        "analyst": str(analyst),
+        "ticker": str(ticker or "").upper(),
+        "horizon_class": horizon,
+        "sector": sector,
+        "market_regime": market_regime,
+        "retrieval_scopes": list(selected_scopes),
+        "fallback_authority_boundary": _scope_authority_boundary(selected_scopes),
+        "selected_digest_ids": list(selected_ids),
+        "selected_memory_refs": refs,
+        "selected_counts": {
+            "digest": len(lines),
+            "trade_episode": len(episode_lines),
+            "no_trade_opportunity": len(no_trade_lines),
+            "exploratory_hypothesis": len(hypothesis_lines),
+            "alpha_setup_profile": len(alpha_setup_items or []),
+            "alpha_setup_action_value": len(alpha_action_value_items or []),
+        },
+        "hypothesis_status_counts": dict(hypothesis_status_counts),
+        "candidate_hypothesis_count": int(hypothesis_status_counts.get("candidate", 0)),
+        "validated_hypothesis_count": int(hypothesis_status_counts.get("validated", 0)),
+        "dropped_count": int(dropped),
+        "max_items": int(max_items),
+        "max_chars": int(max_chars),
+        "current_day_evidence_required": True,
+        "candidate_boundary": (
+            "candidate_hypotheses_are_prompt_priors_only_no_sizing_add_position_matched_"
+            "losing_hold_or_auditor_bypass_without_current_evidence_and_validation"
+        ),
+    }
 
 
 def _compact_inline_text(value: Any, max_chars: int) -> str:
@@ -442,6 +561,10 @@ def build_learning_context(
     episode_items: List[Dict[str, Any]] = []
     no_trade_items: List[Dict[str, Any]] = []
     hypothesis_items: List[Dict[str, Any]] = []
+    alpha_setup_items: List[Dict[str, Any]] = []
+    alpha_action_value_items: List[Dict[str, Any]] = []
+    alpha_setup_lines: List[str] = []
+    alpha_action_value_lines: List[str] = []
     if exploration_enabled:
         episode_limit = int(exploration_cfg.get("max_episode_items", 3))
         no_trade_limit = int(exploration_cfg.get("max_no_trade_items", 3))
@@ -605,10 +728,13 @@ def build_learning_context(
                 ("exit", item.get("exit_timing_hint") or payload.get("exit_timing_hint")),
                 ("invalidation", item.get("invalidation_condition") or payload.get("invalidation_condition")),
                 ("hold", item.get("holding_period_hint") or payload.get("holding_period_hint")),
+                ("family", payload.get("failure_family")),
+                ("data", payload.get("data_combo")),
                 ("validate", item.get("validation_plan") or payload.get("validation_plan")),
             ):
                 if raw_value:
-                    structured_hints.append(f"{label}={_compact_inline_text(raw_value, 44)}")
+                    hint_limit = 72 if label in {"family", "data"} else 44
+                    structured_hints.append(f"{label}={_compact_inline_text(raw_value, hint_limit)}")
                 if len(structured_hints) >= max_hint_items:
                     break
             hint_text = (" Hints: " + "; ".join(structured_hints)) if structured_hints else ""
@@ -632,11 +758,121 @@ def build_learning_context(
         )
         dropped += hypothesis_dropped
 
+        alpha_cfg = exploration_cfg.get("alpha_setup_profile", {}) or {}
+        if bool(alpha_cfg.get("enabled", True)):
+            alpha_limit = int(alpha_cfg.get("max_items", 3) or 3)
+            alpha_chars = int(alpha_cfg.get("max_chars", max(300, remaining_chars // 3)) or 300)
+            action_limit = int(alpha_cfg.get("max_action_value_items", max(3, alpha_limit)) or max(3, alpha_limit))
+            action_chars = int(alpha_cfg.get("max_action_value_chars", max(300, alpha_chars)) or max(300, alpha_chars))
+            try:
+                if hasattr(db, "get_alpha_setup_profiles"):
+                    alpha_setup_items = db.get_alpha_setup_profiles(
+                        config_id=config_id,
+                        ticker=str(ticker or "").upper(),
+                        sector=sector,
+                        horizon_class=horizon,
+                        market_regime=market_regime,
+                        trading_date=trading_date,
+                        limit=max(alpha_limit * 2, alpha_limit),
+                    )
+                    if (
+                        not alpha_setup_items
+                        and allow_cross_ticker_sector_fallback
+                        and sector
+                        and sector != "*"
+                    ):
+                        alpha_setup_items = db.get_alpha_setup_profiles(
+                            config_id=config_id,
+                            ticker="*",
+                            sector=sector,
+                            horizon_class=horizon,
+                            market_regime=market_regime,
+                            trading_date=trading_date,
+                            limit=max(alpha_limit * 2, alpha_limit),
+                        )
+            except Exception as exc:
+                logger.warning(f"{ticker}: alpha setup profile retrieval skipped: {exc}")
+                alpha_setup_items = []
+            try:
+                if hasattr(db, "get_alpha_setup_action_values"):
+                    alpha_action_value_items = db.get_alpha_setup_action_values(
+                        config_id=config_id,
+                        ticker=str(ticker or "").upper(),
+                        horizon_class=horizon,
+                        market_regime=market_regime,
+                        trading_date=trading_date,
+                        limit=max(action_limit * 2, action_limit),
+                    )
+                    if (
+                        not alpha_action_value_items
+                        and allow_cross_ticker_sector_fallback
+                        and sector
+                        and sector != "*"
+                    ):
+                        alpha_action_value_items = db.get_alpha_setup_action_values(
+                            config_id=config_id,
+                            ticker="*",
+                            horizon_class=horizon,
+                            market_regime=market_regime,
+                            trading_date=trading_date,
+                            limit=max(action_limit * 2, action_limit),
+                        )
+            except Exception as exc:
+                logger.warning(f"{ticker}: alpha setup action-value retrieval skipped: {exc}")
+                alpha_action_value_items = []
+            try:
+                if hasattr(db, "get_similar_alpha_setup_action_values"):
+                    similar_items = db.get_similar_alpha_setup_action_values(
+                        config_id=config_id,
+                        ticker=str(ticker or "").upper(),
+                        sector=sector,
+                        horizon_class=horizon,
+                        market_regime=market_regime,
+                        trading_date=trading_date,
+                        limit=max(action_limit * 2, action_limit),
+                    )
+                    if similar_items:
+                        existing_keys = {
+                            (
+                                str(item.get("scope_key") or ""),
+                                str(item.get("action_name") or ""),
+                            )
+                            for item in alpha_action_value_items
+                        }
+                        for item in similar_items:
+                            key = (
+                                str(item.get("scope_key") or ""),
+                                str(item.get("action_name") or ""),
+                            )
+                            if key not in existing_keys:
+                                alpha_action_value_items.append(item)
+                                existing_keys.add(key)
+            except Exception as exc:
+                logger.warning(f"{ticker}: similar alpha setup action-value retrieval skipped: {exc}")
+            raw_alpha_lines = [f"- {profile_prompt_line(item)}" for item in alpha_setup_items]
+            alpha_setup_lines, alpha_setup_dropped = _budget_plain_lines(
+                raw_alpha_lines,
+                max_chars=alpha_chars,
+                max_items=alpha_limit,
+            )
+            dropped += alpha_setup_dropped
+            raw_action_value_lines = [
+                f"- {analyst_signal_calibration_prompt_line(item)}" for item in alpha_action_value_items
+            ]
+            alpha_action_value_lines, action_value_dropped = _budget_plain_lines(
+                raw_action_value_lines,
+                max_chars=action_chars,
+                max_items=action_limit,
+            )
+            dropped += action_value_dropped
+
     try:
         if hasattr(db, "save_learning_context_budget"):
             digest_chars = sum(len(line) + 1 for line in lines)
             episode_chars_used = sum(len(line) + 1 for line in episode_lines)
             hypothesis_chars_used = sum(len(line) + 1 for line in hypothesis_lines)
+            alpha_setup_chars_used = sum(len(line) + 1 for line in alpha_setup_lines)
+            alpha_action_value_chars_used = sum(len(line) + 1 for line in alpha_action_value_lines)
             db.save_learning_context_budget(
                 config_id=config_id,
                 trading_date=trading_date,
@@ -652,6 +888,8 @@ def build_learning_context(
                     + episode_chars_used
                     + sum(len(line) + 1 for line in no_trade_lines)
                     + hypothesis_chars_used
+                    + alpha_setup_chars_used
+                    + alpha_action_value_chars_used
                 ),
                 dropped_count=dropped,
                 max_items=max_items,
@@ -660,7 +898,36 @@ def build_learning_context(
     except Exception as exc:
         logger.warning(f"{ticker}: learning context budget logging skipped: {exc}")
 
-    if not lines and not episode_lines and not no_trade_lines and not hypothesis_lines:
+    if (
+        not lines
+        and not episode_lines
+        and not no_trade_lines
+        and not hypothesis_lines
+        and not alpha_setup_lines
+        and not alpha_action_value_lines
+    ):
+        memory_trace = _build_memory_trace(
+            analyst=analyst_key,
+            ticker=ticker,
+            horizon=horizon,
+            sector=sector,
+            market_regime=market_regime,
+            selected_scopes=selected_scopes,
+            selected_ids=[],
+            items=[],
+            episode_items=[],
+            no_trade_items=[],
+            hypothesis_items=[],
+            alpha_setup_items=[],
+            alpha_action_value_items=[],
+            lines=[],
+            episode_lines=[],
+            no_trade_lines=[],
+            hypothesis_lines=[],
+            dropped=dropped,
+            max_items=max_items,
+            max_chars=max_chars,
+        )
         result = {
             "enabled": True,
             "text": "",
@@ -668,13 +935,17 @@ def build_learning_context(
             "trade_episode_items": [],
             "no_trade_opportunity_items": [],
             "hypothesis_items": [],
+            "alpha_setup_items": [],
+            "alpha_setup_action_values": [],
             "selected_ids": [],
             "horizon_class": horizon,
             "requested_horizon_class": horizon,
             "matched_horizon_classes": [],
             "retrieval_scopes": selected_scopes,
+            "fallback_authority_boundary": memory_trace.get("fallback_authority_boundary"),
             "sector": sector,
             "market_regime": market_regime,
+            "memory_trace": memory_trace,
         }
         if cache_key is not None:
             with _LEARNING_CONTEXT_CACHE_LOCK:
@@ -687,6 +958,13 @@ def build_learning_context(
         "Use these as rebuttable priors and comparable cases. Keep today's data dominant; these notes are not trading authority.",
         "For any prior you cite, explicitly compare it with today's evidence and name the contradiction that would invalidate it.",
     ]
+    scope_boundary = _scope_authority_boundary(selected_scopes)
+    if scope_boundary["contains_cross_ticker_fallback"]:
+        text_parts.append(
+            "Scope boundary: same-sector/global fallback rows are broad priors only. "
+            "Do not cite them as same-ticker action-value, trade authority, sizing authority, "
+            "or permission to bypass today's trigger, invalidation, PM, Auditor, or Trader checks."
+        )
     if lines:
         text_parts.append("Mature reviewer digests:")
         text_parts.extend(lines)
@@ -707,8 +985,48 @@ def build_learning_context(
             "or bypass auditor without current evidence and future validation. Treat them as questions to test, not answers."
         )
         text_parts.extend(hypothesis_lines)
+    if alpha_setup_lines:
+        text_parts.append("Alpha setup profiles and action-value priors:")
+        text_parts.append(
+            "These profiles summarize same-scope setup outcomes. Deployable/protected profiles may support "
+            "controlled opportunity recognition only with today's trigger, invalidation, PM, Auditor, Trader, "
+            "and the 20% margin hard cap. Candidate/watchlist/capped/rejected profiles are rebuttable boundaries, "
+            "not product bans."
+        )
+        text_parts.extend(alpha_setup_lines)
+    if alpha_action_value_lines:
+        text_parts.append("Alpha setup action-value priors:")
+        text_parts.append(
+            "These rows summarize same-scope action outcomes after costs. Analysts may use only the "
+            "signal_calibration part to question evidence quality and setup reliability. Do not convert "
+            "open/hold/exit/execution preferences into trade authority, lots, margin, direction changes, "
+            "or PM/Trader decisions."
+        )
+        text_parts.extend(alpha_action_value_lines)
     text = "\n".join(text_parts) + "\n"
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
+    memory_trace = _build_memory_trace(
+        analyst=analyst_key,
+        ticker=ticker,
+        horizon=horizon,
+        sector=sector,
+        market_regime=market_regime,
+        selected_scopes=selected_scopes,
+        selected_ids=selected_ids,
+        items=items,
+        episode_items=episode_items,
+        no_trade_items=no_trade_items,
+        hypothesis_items=hypothesis_items,
+        alpha_setup_items=alpha_setup_items,
+        alpha_action_value_items=alpha_action_value_items,
+        lines=lines,
+        episode_lines=episode_lines,
+        no_trade_lines=no_trade_lines,
+        hypothesis_lines=hypothesis_lines,
+        dropped=dropped,
+        max_items=max_items,
+        max_chars=max_chars,
+    )
     result = {
         "enabled": True,
         "text": text,
@@ -716,16 +1034,22 @@ def build_learning_context(
         "trade_episode_items": episode_items,
         "no_trade_opportunity_items": no_trade_items,
         "hypothesis_items": hypothesis_items,
+        "alpha_setup_items": [compact_profile_for_trace(item) for item in alpha_setup_items],
+        "alpha_setup_action_values": [
+            compact_action_value_for_analyst_trace(item) for item in alpha_action_value_items
+        ],
         "selected_ids": selected_ids,
         "horizon_class": horizon,
         "requested_horizon_class": horizon,
         "matched_horizon_classes": matched_horizons,
         "retrieval_scopes": selected_scopes,
+        "fallback_authority_boundary": scope_boundary,
         "sector": sector,
         "market_regime": market_regime,
         "hypothesis_status_counts": dict(hypothesis_status_counts),
         "candidate_hypothesis_count": int(hypothesis_status_counts.get("candidate", 0)),
         "validated_hypothesis_count": int(hypothesis_status_counts.get("validated", 0)),
+        "memory_trace": memory_trace,
     }
     if cache_key is not None:
         with _LEARNING_CONTEXT_CACHE_LOCK:

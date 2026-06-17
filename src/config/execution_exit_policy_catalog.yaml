@@ -1,0 +1,20 @@
+# 退场策略冷启动目录。
+# ATR 止损、probe time stop、趋势仓 time stop 的初始经验放在这里。
+# 后续可以依据 setup/action 表现微调弱参，但不能替代硬风控或交易事实。
+
+exit_policy:
+  enabled: true
+  # 冷启动退场参数：只作为初始经验；后续由 setup/action 表现校准弱参，不突破硬风控。
+  defaults:
+    atr_multiplier: 1.8
+    probe_time_stop_days: 2
+    trend_time_stop_days: 5
+  sector_overrides:
+    ferrous: {atr_multiplier: 2.2, probe_time_stop_days: 2, trend_time_stop_days: 7}
+    agricultural: {atr_multiplier: 1.7, probe_time_stop_days: 2, trend_time_stop_days: 5}
+    chemical: {atr_multiplier: 1.9, probe_time_stop_days: 2, trend_time_stop_days: 6}
+    nonferrous: {atr_multiplier: 2.0, probe_time_stop_days: 2, trend_time_stop_days: 5}
+  template_overrides:
+    breakout_continuation: {atr_multiplier: 2.4, trend_time_stop_days: 8}
+    low_position_reversal_confirmed: {atr_multiplier: 2.0, trend_time_stop_days: 6}
+    news_event_probe: {atr_multiplier: 1.4, probe_time_stop_days: 1}

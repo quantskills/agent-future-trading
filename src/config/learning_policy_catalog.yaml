@@ -1,0 +1,410 @@
+# 学习、记忆与研究策略目录。
+# 由 config_normalizer.py 展开到 strategy_memory / learning / analyst_business_quality /
+# llm_signal_quality / learning_context / learning_retention。
+# 运行时学习结果写数据库 overlay/state；LLM 不直接改写本 YAML。
+
+learning_gatekeeping_policy:
+  # 学习结果服务 action preference，不直接下交易命令。
+  # 历史字段名中的 block/cap/probe 只表示同作用域的学习倾向或软风险标签；
+  # PM 必须结合当日证据、final_new_entry_trade_authority、Auditor 硬风险与 Trader 执行约束后再落仓。
+  # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
+  # 交易出口仍由 final_action_contract 统一落地。
+  # Researcher 写入的 action-value 必须带 usage_boundary：open 给 PM 开仓/放大候选，
+  # hold 给 PM 持仓生命周期，exit 给 PM 保护/退出，execution 由 PM 写入 final_action_contract.execution_profile；
+  # 分析师只能读取 signal_calibration 校准证据质量，不能把 action-value 转成交易授权。
+  action_value_role: action_preference_not_trade_authority
+  policy_action_role: compatibility_soft_adjustment
+  can_create_trade_authority_directly: false
+  same_scope_required_for_sizing: true
+  sector_fallback_role: prior_only_not_open_seed
+  hard_risk_override_allowed: false
+  action_dimensions: [open, hold, exit, execution]
+  research_output_contract_version: agentquant.research_action_value.v1
+  analyst_allowed_action_value_view: signal_calibration_only
+  pm_allowed_action_value_lanes: [open, hold, exit]
+  trader_allowed_action_value_lanes: []
+  similar_sql_rag_role: weak_prior_not_trade_authority
+  shadow_memory_role: observation_only_not_trade_authority
+  forbidden_cross_action_uses:
+    - exit_as_open_amplifier
+    - execution_changes_direction
+    - execution_changes_lots
+    - execution_changes_target_lots
+    - execution_changes_margin_ratio
+
+strategy_memory:
+  # 数据库驱动的策略记忆，Phase4 写入，下一交易日读取。
+  enabled: true
+  # 写入后只影响未来交易日。
+  update_on_phase4: true
+  source: attribution_auto
+  lookback_trades: 30
+  expires_after_days: 30
+  min_samples_watchlist: 2
+  min_samples_weak_block: 4
+  min_samples_protected: 3
+  protected_win_rate: 0.60
+  protected_total_pnl: 1000
+  watchlist_win_rate_below: 0.45
+  watchlist_total_pnl_below: -500
+  weak_block_win_rate_below: 0.30
+  weak_block_total_pnl_below: -2500
+  audit:
+    # protected 必须满足样本、胜率和净收益门槛。
+    protected_min_sample_count: 5
+    protected_min_win_rate: 0.60
+    protected_min_net_pnl: 1000
+    protected_min_confirmation_score: 0.45
+    protected_multiplier: 0.65
+    # watchlist 偏弱模板压仓。
+    watchlist_min_confirmation_score: 0.55
+    watchlist_cap_multiplier: 0.50
+    # weak_block 严格压制，但允许强确认边缘模板。
+    weak_block_min_confirmation_score: 0.60
+    weak_block_cap_multiplier: 0.35
+    # 暂时保持 2，不全局放松到 1，避免弱模板同时放宽过头。
+    min_qualified_supporters: 2
+
+learning:
+  # 学习层只调整弱参、模板权重、摘要和软风控，不突破硬约束。
+  enabled: true
+  memory_expires_after_days: 30
+  overlay_expires_after_days: 10
+  anti_overfit:
+    min_samples_for_template: 3
+    min_samples_for_policy: 4
+  alpha_setup_profile:
+    # Alpha Setup 档案层：把历史交易、未交易机会、执行结果沉淀为“品种/方向/周期/市场状态/setup/数据组合”的未来可用记忆。
+    # 不是品种黑名单，也不是硬规则；candidate/watchlist 只能提示分析，protected/deployable 也必须经过当日证据、PM、Auditor、Trader 与 20% 总保证金上限。
+    # max_position_impact 是学习侧建议影响上限，不是最终仓位参数；最终 margin/lots 仍由 PM 资金出口决定。
+    enabled: true
+    lookback_days: 90
+    valid_days: 35
+    min_samples_watchlist: 2
+    min_samples_protected: 4
+    min_samples_deployable: 7
+    protected_min_win_rate: 0.52
+    deployable_min_win_rate: 0.56
+    protected_min_profit_factor: 1.08
+    deployable_min_profit_factor: 1.25
+    protected_min_net_pnl: 800
+    deployable_min_net_pnl: 2500
+    cap_min_samples: 2
+    cap_min_loss_abs: 8000
+    reject_min_samples: 5
+    reject_min_loss_abs: 20000
+    reject_profit_factor_below: 0.65
+    candidate_max_position_impact: 0.010
+    watchlist_max_position_impact: 0.015
+    protected_max_position_impact: 0.030
+    deployable_max_position_impact: 0.045
+  alpha_setup_policy_state:
+    # 将 Alpha Setup 的正/负期望转成 PM 可读取的未来策略状态。
+    # 只影响同品种/方向/周期/市场状态；不做品种黑名单，不改当日交易。
+    # probe/cap_multiplier 是动作偏好，不是硬性交易命令。
+    # positive_candidate_*、negative_revalidate、tail_loss_protect 等偏好写入数据库，
+    # 由 PM 在下一交易日结合当前证据仲裁，不回写 YAML。
+    # open/hold/exit/execution 必须分账：open 正收益不能来自 exit/execution，
+    # exit/reduce 正收益不能反向支持开仓放大，execution 只能影响 Trader 触发方式。
+    enabled: true
+    valid_days: 10
+    max_rows_per_day: 12
+    min_candidate_trade_count: 1
+    min_candidate_net_pnl: 1000
+    min_candidate_confidence: 0.30
+    probe_multiplier: 0.75
+    cap_multiplier: 0.50
+  config_overlay:
+    # Researcher 写入 overlay，PM 下一交易日按 allowlist 读取。
+    enabled: true
+  adaptive_policy:
+    # 由成熟模板表现生成 protect/cap 等软策略，供 auditor 读取。
+    enabled: true
+    min_policy_confidence: 0.35
+  policy_promotion_guard:
+    # 防止小样本经验过早成熟，也防止亏损模板把交易压得太死。
+    # 只影响研究状态晋升/降级，不写品种黑名单，不绕过当日证据与风控。
+    enabled: true
+    min_distinct_trade_days_for_protect: 5
+    min_calendar_span_days_for_protect: 10
+    min_distinct_trade_days_for_cap: 3
+    min_calendar_span_days_for_cap: 5
+    max_single_trade_pnl_share: 0.65
+    shadow_reversal:
+      # 若同作用域被压制机会的影子结果持续为正，则自动撤销/降级对应 cap。
+      enabled: true
+      min_samples: 2
+      min_net_pnl: 3000
+  contextual_rule_calibration:
+    # 按品种/方向/周期/市场状态校准软阈值，不突破硬约束。
+    enabled: true
+    min_confidence: 0.55
+    valid_days: 10
+    max_rows_per_day: 6
+    min_shadow_pnl_for_relaxation: 1200
+    min_shadow_loss_for_tightening: 1200
+    # 盘中触发只允许同作用域成熟记忆小幅校准。
+    relaxed_opening_range_miss: 0.003
+    tightened_opening_range_miss: 0.001
+    relaxed_intraday_confirmation_score: 0.65
+    tightened_intraday_confirmation_score: 0.72
+    # 新仓亏损与 horizon 失败只做短期情境校准。
+    horizon_confirm_score_after_failure: 0.58
+    short_timing_confidence_after_failure: 0.48
+    losing_hold_reduction_after_failure: 0.45
+    new_loss_confirm_score_after_failure: 0.58
+    new_loss_signal_strength_after_failure: 0.28
+    new_loss_reduction_after_failure: 0.45
+    pm_observation_confidence: 0.55
+    min_analyst_samples: 4
+    min_analyst_confidence: 0.35
+    analyst_positive_hit_rate: 0.60
+    analyst_weak_hit_rate: 0.40
+    positive_medium_short_timing_confidence: 0.42
+    positive_medium_confirm_score: 0.52
+    weak_medium_short_timing_confidence: 0.50
+    weak_medium_confirm_score: 0.60
+    positive_probe_confirm_score: 0.50
+    weak_probe_confirm_score: 0.58
+    # 技术参数校准只影响 technical 分析师的 EMA/RSI/Bollinger 小幅微调。
+    # 它必须来自同品种 technical 短周期表现，不能突破硬风控，也不能直接放仓。
+    technical_min_confidence: 0.45
+    technical_positive_hit_rate: 0.62
+    technical_weak_hit_rate: 0.38
+    technical_valid_days: 10
+    # Auditor 仅允许软化以下历史表现类拦截。
+    auditor_softenable_reasons:
+      - strategy_memory_weak_block
+      - side_performance_block
+      - conditional_performance_block
+      - weak_ticker_side_quality_gate
+      - strict_ticker_side_quality_gate
+    softenable_hard_block_reasons:
+      - strategy_memory_weak_block
+      - side_performance_block
+      - conditional_performance_block
+      - weak_ticker_side_quality_gate
+      - strict_ticker_side_quality_gate
+  learned_vs_unlearned_policy:
+    # learned 跑输基准时写入降权策略，不写品种黑名单。
+    # 该策略只影响同作用域动作偏好，不能绕过 PM 当日证据和最终出口。
+    enabled: true
+    min_learned_samples: 3
+    min_net_pnl_underperformance: 1.0
+    demote_multiplier: 0.50
+    # 同作用域样本足够且真实亏损时可先行降权。
+    min_scoped_alpha_samples: 3
+    allow_self_loss_demote_without_benchmark: true
+    min_self_loss_net_pnl: -2500
+  learning_mechanism_policy:
+    # 将具体学习机制的同作用域绩效写入 adaptive_policy_state。
+    # 赚钱机制只在当日证据、PM、Auditor 通过后小幅影响仓位权限；亏钱机制只降权/cap，不写品种黑名单。
+    enabled: true
+    infer_from_full_trace: true
+    min_samples: 4
+    min_positive_win_rate: 0.58
+    min_positive_net_pnl: 1000
+    max_negative_win_rate: 0.42
+    max_negative_net_pnl: -1000
+    cap_multiplier: 0.50
+    valid_days: 10
+    max_rows_per_day: 12
+  position_feedback_loop:
+    # 研究闭环账本：记录记忆进入 prompt 后，是否被 PM/Auditor/Trader 落到仓位及结果。
+    # 只写下一轮可用反馈，不直接授权当日交易，不写品种黑名单。
+    enabled: true
+    valid_days: 30
+    max_digest_rows_per_day: 8
+    min_digest_confidence: 0.20
+  template_prior:
+    enabled: true
+    load_on_backtest_start: true
+    export_on_backtest_end: true
+    path: src/logs/attribution/template_prior.json
+  provisional_policy_state:
+    # 临时策略状态只在短窗口保护交易质量；它是软学习状态，不是永久规则。
+    enabled: true
+    anomaly_loss_cap_enabled: true
+    anomaly_loss_threshold: -8000
+    anomaly_loss_cap_multiplier: 0.25
+    consecutive_loss_probe_only_threshold: 2
+    consecutive_loss_multiplier: 0.35
+    valid_days: 10
+  trade_episode_memory:
+    # 完整交易片段记忆，只作 prompt 先验，不越过硬风控。
+    enabled: true
+  no_trade_opportunity_memory:
+    # no-trade 影子结果只在未来已结算后进入学习。
+    enabled: true
+    shadow_forward_days: [3, 5, 10]
+    max_rows_per_day: 30
+  missed_alpha_accountability:
+    # 高质量机会未落仓或未成交后，若未来 shadow 证明为正，只生成同作用域 fast_candidate_alpha。
+    # 它只能支持下一轮 probe/小仓复核，不是成熟 alpha，也不写品种白名单。
+    enabled: true
+    min_shadow_samples: 2
+    min_net_shadow_pnl: 1500
+    min_positive_rate: 0.55
+    probe_multiplier: 0.75
+    valid_days: 8
+    max_rows_per_day: 6
+    eligible_opportunity_layers: [direction_only, tradeable_setup, deployable_alpha]
+  tail_loss_sentinel:
+    # 新仓异常亏损写短期哨兵；不是品种黑名单。
+    # 哨兵只要求更强当日证据、压制晋升或触发保护，不直接删除后续探索权。
+    # tail_loss_protect 是退出/降级动作偏好，不是永久封杀，也不能绕过 PM/Auditor。
+    enabled: true
+    min_abs_loss: 25000
+    min_equity_loss_ratio: 0.005
+    cap_multiplier: 0.35
+    policy_action: cap
+    confidence_score: 0.70
+    valid_days: 5
+  fast_loss_sentinel:
+    # 低样本但快速出现的同作用域亏损，先短期保护，防止止损学习过慢。
+    # 只做 probe/cap/reduce 先验，不是长期亏损模板，也不是品种黑名单。
+    enabled: true
+    lookback_days: 5
+    min_loss_samples: 1
+    min_net_loss_abs: 3000
+    cap_multiplier: 0.50
+    valid_days: 5
+    max_rows_per_day: 6
+  alpha_promotion:
+    # 正向 alpha 达标后晋升，仍需当日证据和硬约束通过。
+    enabled: true
+    min_sample_count: 5
+    min_win_rate: 0.60
+    min_net_pnl: 1000
+    min_shadow_pnl: 1000
+    valid_days: 10
+  exploratory_research:
+    # Researcher 在 Phase4 后生成作用域假设；验证前只作候选先验。
+    enabled: true
+    use_llm: true
+    min_episode_samples: 2
+    max_episode_samples: 24
+    max_hypotheses_per_day: 3
+    valid_days: 30
+  loss_template_observation:
+    # 亏损模板先做观察性研究；样本和亏损达标后才晋升为短期、同作用域、可反驳、只可压仓/减仓的成熟策略状态。
+    enabled: true
+    lookback_days: 30
+    min_loss_samples: 2
+    min_cumulative_loss_abs: 5000
+    max_rows_per_day: 4
+    valid_days: 30
+    failure_family_policy:
+      enabled: true
+      include_data_combo: true
+      require_news_price_reaction_for_event_probe: true
+      require_choppy_trend_breakout_confirmation: true
+      require_medium_anchor_short_timing: true
+    policy_promotion:
+      # 不写品种黑名单；只匹配同品种、方向、模板、周期、市场状态，并且仍需当日证据和失效边界。
+      enabled: true
+      min_loss_samples: 3
+      min_cumulative_loss_abs: 15000
+      min_confidence: 0.60
+      cap_multiplier: 0.40
+      valid_days: 10
+  reviewer_causal_review:
+    enabled: true
+    use_llm: true
+    run_after_phase4_settlement: true
+    evidence_pack_no_lookahead: true
+    separate_pre_trade_evidence_and_post_trade_outcome: true
+    write_raw_llm_to_notes_only: true
+    rule_engine_required_for_apply: true
+    prohibit_direct_llm_trade_authority: true
+
+analyst_business_quality:
+  enabled: true
+  min_score_for_probe: 0.45
+  min_score_for_deployable: 0.60
+  min_score_for_protected: 0.75
+  confidence_capped_by_business_quality: true
+  require_primary_driver: true
+  require_counter_evidence: true
+  require_reward_risk_ratio: true
+  require_horizon_match: true
+  low_quality_action: observe_or_block
+  probe_multiplier: 0.25
+  low_quality_multiplier: 0.10
+  soft_gate_never_zero: true
+  minimum_soft_multiplier: 0.10
+
+llm_signal_quality:
+  # Neutral 合法，但必须说明原因、缺口、冲突和转向条件。
+  neutral_accountability:
+    enabled: true
+    allow_neutral_signal: true
+    require_neutral_reason: true
+    required_neutral_fields:
+      - neutral_reason
+      - missing_evidence
+      - conflicting_factors
+      - would_change_view_if
+    allowed_neutral_reasons:
+      - insufficient_evidence
+      - factor_conflict
+      - data_missing
+      - range_bound
+      - horizon_conflict
+      - reward_risk_insufficient
+    reviewer_must_attribute_missed_opportunity: true
+    # Neutral 追责进入结构化学习。
+    write_structured_learning: true
+    # 后续窗口只在未来已结算后回填。
+    shadow_forward_days: 3
+
+learning_context:
+  # 分析师 prompt 只注入 top-k 成熟摘要，避免无限膨胀。
+  enabled: true
+  # 缓存键含交易日，避免 Phase4 学习污染当日 Phase1。
+  cache:
+    enabled: true
+  max_items_per_prompt: 6
+  max_chars_per_prompt: 1800
+  # 优先同品种；只允许同板块回退，不默认全局回退。
+  # 同板块 fallback 只作为 prompt 先验和相似案例，不是同品种 action-value，也不能生成开仓/加仓权限。
+  allow_cross_ticker_sector_fallback: true
+  allow_global_fallback: false
+  allow_wildcard_sector_cross_ticker: false
+  exploratory_memory:
+    # 注入相似交易和假设，并控制数量防止过拟合与 prompt 膨胀。
+    enabled: true
+    max_episode_items: 3
+    max_episode_chars: 600
+    max_no_trade_items: 3
+    max_no_trade_chars: 500
+    max_hypothesis_items: 3
+    max_hypothesis_hint_items: 5
+    max_hypothesis_chars: 600
+    alpha_setup_profile:
+      # Prompt 中只放少量 Alpha Setup 档案，避免记忆膨胀；候选档案不能直接支撑仓位。
+      enabled: true
+      max_items: 3
+      max_chars: 420
+
+learning_retention:
+  # 自动清理只发生在 Phase4/Researcher 完成后；交易事实永不自动清理。
+  enabled: true
+  run_after_phase4: true
+  detail_retention_days: 90
+  aggregate_retention_days: 180
+  max_detail_rows_per_config: 50000
+  delete_expired_inactive: true
+  preserve_trade_facts: true
+  detail_tables:
+    - research_position_feedback
+    - analyst_learning_digest
+    - learning_context_budget
+    - reviewer_llm_notes
+    - learning_event_log
+    - config_learning_overlay
+    - alpha_setup_sample
+  aggregate_tables:
+    - alpha_setup_profile
+    - alpha_setup_action_value
+    - adaptive_policy_state

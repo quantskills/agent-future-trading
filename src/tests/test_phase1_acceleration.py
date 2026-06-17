@@ -41,6 +41,24 @@ class _FakeDB:
         self.saved_signals.append((portfolio_id, analyst, ticker, prompt, signal))
         return f"sig-{ticker}-{analyst}"
 
+    def get_signal_persistence_counts(self, portfolio_id, tickers, analysts):
+        rows = [
+            {"ticker": ticker, "analyst": analyst}
+            for saved_portfolio_id, analyst, ticker, _prompt, _signal in self.saved_signals
+            if saved_portfolio_id == portfolio_id
+        ]
+        pairs = [(str(row["ticker"]).upper(), str(row["analyst"])) for row in rows]
+        duplicate_pairs = []
+        for pair in sorted(set(pairs)):
+            if pairs.count(pair) > 1:
+                duplicate_pairs.append(f"{pair[0]}:{pair[1]}")
+        return {
+            "rows": rows,
+            "row_total": len(rows),
+            "distinct_pairs": len(set(pairs)),
+            "duplicate_pairs": duplicate_pairs,
+        }
+
     def save_futures_recommendation(self, recommendation):
         self.saved_recommendations.append(recommendation)
         return f"rec-{recommendation.underlying_code}"

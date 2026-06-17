@@ -39,6 +39,7 @@ REQUIRED_INTERNAL_MESSAGE_FIELDS = [
 REQUIRED_TRADE_RESEARCH_FIELDS = [
     "opportunity_type",
     "opportunity_layer",
+    "opportunity_state",
     "entry_trigger",
     "exit_hint",
     "holding_period_hint",
@@ -151,6 +152,7 @@ def build_trade_research_contract(
     *,
     opportunity_type: str = "unknown",
     opportunity_layer: str = "direction_only",
+    opportunity_state: str = "watch_for_trigger",
     entry_trigger: str = "",
     exit_hint: str = "",
     holding_period_hint: str = "",
@@ -160,11 +162,14 @@ def build_trade_research_contract(
     atr_stop_distance: Any = None,
     sample_state: str = "current_day_evidence",
     maturity: str = "candidate",
+    action_evidence_contract: Optional[Dict[str, Any]] = None,
+    product_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "contract_version": "agentquant.research.v1",
         "opportunity_type": str(opportunity_type or "unknown"),
         "opportunity_layer": str(opportunity_layer or "direction_only"),
+        "opportunity_state": str(opportunity_state or "watch_for_trigger"),
         "entry_trigger": str(entry_trigger or ""),
         "exit_hint": str(exit_hint or ""),
         "holding_period_hint": str(holding_period_hint or ""),
@@ -174,6 +179,8 @@ def build_trade_research_contract(
         "atr_stop_distance": atr_stop_distance,
         "sample_state": str(sample_state or "current_day_evidence"),
         "maturity": str(maturity or "candidate"),
+        "action_evidence_contract": action_evidence_contract or {},
+        "product_context": product_context or {},
     }
 
 

@@ -1,0 +1,29 @@
+# 滑点假设目录。
+# 按品种设置执行滑点 tick，用于回测与模拟盘执行成本估计。
+# 这不是学习参数；只有执行记录证明假设明显失真时才调整。
+
+slippage:
+  slippage_model: tick
+  default_slippage_ticks: 1
+  require_explicit_rule_for_all_tickers: true
+  slippage_ticks_by_underlying:
+    AL: 1
+    AU: 1
+    BU: 1
+    C: 1
+    CF: 2
+    CU: 1
+    EB: 2
+    HC: 1
+    I: 1
+    J: 1
+    JM: 2
+    M: 1
+    MA: 1
+    P: 1
+    PB: 1
+    RB: 1
+    SC: 2
+    SR: 1
+    TA: 2
+    ZN: 1

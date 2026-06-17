@@ -175,6 +175,7 @@ def summarize_trade_pairs(pairs: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     losses = sum(1 for row in rows if float(row.get("net_pnl") or 0.0) < 0)
     flats = total - wins - losses
     total_pnl = sum(float(row.get("net_pnl") or 0.0) for row in rows)
+    total_commission = sum(float(row.get("commission") or 0.0) for row in rows)
     avg_return = (
         sum(float(row.get("return_on_notional") or 0.0) for row in rows) / total
         if total
@@ -188,5 +189,7 @@ def summarize_trade_pairs(pairs: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "win_rate": wins / total if total else 0.0,
         "total_pnl": total_pnl,
         "avg_pnl": total_pnl / total if total else 0.0,
+        "total_commission": total_commission,
+        "avg_commission": total_commission / total if total else 0.0,
         "avg_return": avg_return,
     }

@@ -3,6 +3,7 @@ from langgraph.graph import StateGraph, START, END
 from typing import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from graph.schema import (
+    AnalystSignal,
     FundState,
     Portfolio,
     FuturesDecision,
@@ -13,7 +14,7 @@ from graph.schema import (
     RecommendationStatus,
     TradingPhase,
 )
-from graph.constants import AgentKey
+from graph.constants import AgentKey, Signal
 from agents.registry import AgentRegistry
 from agents.control_team.planner import planner_agent
 from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
@@ -71,6 +72,41 @@ class AgentWorkflow:
             self.phase1_runtime_cfg.get("allow_parallel_analyst_db_writes", False)
         )
         self._compiled_workflows: Dict[tuple[str, ...], Callable] = {}
+
+    def _safe_positive_ratio(self, value, default: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
+
+    def _phase1_compat_config(self) -> Dict[str, Any]:
+        """Expose legacy Phase1 sizing keys from the current unified config.
+
+        Some analyst/PM state consumers still read ``state["config"]`` for
+        historical compatibility. Keep those values aligned with the canonical
+        runtime config instead of hard-coded defaults.
+        """
+        capital_control = self.config.get("capital_utilization_control", {}) or {}
+        hard_total = self._safe_positive_ratio(self.config.get("max_total_margin_ratio"), 0.20)
+        learned_total = self._safe_positive_ratio(
+            capital_control.get("max_margin_ratio_after_scaling"),
+            hard_total,
+        )
+        risk_caps = (self.config.get("risk_control", {}) or {}).get("max_single_position_ratio", {}) or {}
+        safe_single_anchor = self._safe_positive_ratio(risk_caps.get("safe"), 0.15)
+        budget_policy = self.config.get("position_budget_policy", {}) or {}
+        single_ticker_margin_cap = self._safe_positive_ratio(
+            budget_policy.get("max_single_ticker_margin_ratio"),
+            safe_single_anchor,
+        )
+        return {
+            "max_total_margin_ratio": min(hard_total, learned_total),
+            "max_single_margin_ratio": safe_single_anchor,
+            "max_single_ticker_margin_ratio": single_ticker_margin_cap,
+            "position_budget_policy": budget_policy,
+            "capital_utilization_control": capital_control,
+        }
 
     def _phase1_acceleration_enabled(self) -> bool:
         return bool(self.phase1_runtime_cfg.get("enable_analysis_parallelism", True))
@@ -137,6 +173,70 @@ class AgentWorkflow:
                 metadata["signal_record_id"] = signal_id
                 metadata["parallel_phase1_saved_by"] = "AgentWorkflow"
                 signal.metadata = metadata
+
+    def _validate_phase1_signal_persistence(self, portfolio: Portfolio, tickers: list[str]) -> None:
+        expected_pairs = len(tickers) * len(self.workflow_analysts)
+        if expected_pairs <= 0:
+            return
+        if not hasattr(self.db, "get_signal_persistence_counts"):
+            raise RuntimeError("Database does not expose signal persistence verification")
+        counts = self.db.get_signal_persistence_counts(
+            portfolio.id,
+            tickers=tickers,
+            analysts=self.workflow_analysts,
+        )
+        rows = counts.get("rows") or []
+        db_pairs = {
+            (str(row.get("ticker") or "").upper(), str(row.get("analyst") or ""))
+            for row in rows
+        }
+        expected = {
+            (str(ticker).upper(), str(analyst))
+            for ticker in tickers
+            for analyst in self.workflow_analysts
+        }
+        missing = sorted(f"{ticker}:{analyst}" for ticker, analyst in expected - db_pairs)
+        extra = sorted(f"{ticker}:{analyst}" for ticker, analyst in db_pairs - expected)
+        duplicate_pairs = counts.get("duplicate_pairs") or []
+        if missing or extra or duplicate_pairs or int(counts.get("distinct_pairs") or 0) != expected_pairs:
+            raise RuntimeError(
+                "Phase1 analyst signal persistence incomplete: "
+                f"expected={expected_pairs}, distinct={counts.get('distinct_pairs')}, "
+                f"rows={counts.get('row_total')}, missing={missing[:12]}, "
+                f"extra={extra[:12]}, duplicate={duplicate_pairs[:12]}"
+            )
+
+    @staticmethod
+    def _normalize_analyst_name(name: str) -> str:
+        text = str(name or "").strip()
+        if text in {AgentKey.COMPANY_NEWS, "company_news"}:
+            return AgentKey.COMMODITY_NEWS
+        return text
+
+    @classmethod
+    def _validate_phase1_analyst_outputs(
+        cls,
+        ticker: str,
+        analysts: list[str],
+        analyst_signals: list[Any],
+    ) -> None:
+        expected = [cls._normalize_analyst_name(name) for name in analysts]
+        if not expected:
+            return
+        seen: dict[str, int] = {}
+        for signal in analyst_signals or []:
+            analyst = cls._normalize_analyst_name(getattr(signal, "agent_name", ""))
+            if analyst:
+                seen[analyst] = seen.get(analyst, 0) + 1
+        missing = [analyst for analyst in expected if seen.get(analyst, 0) < 1]
+        duplicate = [analyst for analyst, count in seen.items() if analyst in expected and count > 1]
+        extra = [analyst for analyst in seen if analyst not in expected]
+        if missing or duplicate or extra:
+            raise RuntimeError(
+                f"{ticker} phase1 analyst output incomplete before PM: "
+                f"expected={expected}, seen={seen}, missing={missing}, "
+                f"duplicate={duplicate}, extra={extra}"
+            )
 
     def _get_compiled_workflow(self, analysts: list[str]):
         key = tuple(analysts)
@@ -221,6 +321,7 @@ class AgentWorkflow:
             status = RecommendationStatus.SKIPPED
             action = RecommendationAction.HOLD
             lots = 0
+        signal_snapshot = final_state.get("signal_snapshot") or {}
 
         return FuturesRecommendation(
             config_id=self.config_id,
@@ -242,10 +343,104 @@ class AgentWorkflow:
             slippage_amount=None,
             execution_price=None,
             justification=getattr(decision, "justification", "") if decision else "",
-            signal_snapshot={},
+            signal_snapshot=signal_snapshot,
             warning_message=warning_message,
             status=status,
         )
+
+    def _build_missing_pre_open_reference_signals(
+        self,
+        ticker: str,
+        analysts: list[str],
+        morning_price_context,
+    ) -> list[AnalystSignal]:
+        warning_message = (
+            getattr(morning_price_context, "warning_message", None)
+            if morning_price_context is not None else None
+        )
+        reason = warning_message or "pre_open_reference_price_unavailable"
+        signals: list[AnalystSignal] = []
+        for analyst in analysts:
+            normalized_analyst = self._normalize_analyst_name(analyst)
+            signal = AnalystSignal(
+                agent_name=normalized_analyst,
+                signal=Signal.NEUTRAL,
+                confidence=0.0,
+                justification=(
+                    f"{ticker} cannot form a tradable Phase1 setup because the pre-open "
+                    f"reference price is unavailable: {reason}"
+                ),
+                data_cutoff="pre_open",
+                no_lookahead_status="ok",
+                determinism_mode="deterministic_data_gate",
+                horizon_class="flat",
+                analyst_horizon="flat",
+                decision_horizon="flat",
+                execution_horizon="flat",
+                validation_horizon="flat",
+                expected_horizon_days=0,
+                horizon_days=0,
+                market_regime="unknown",
+                template_name="data_unavailable_no_trade",
+                trigger_type="data_gate",
+                entry_type="hold",
+                data_freshness="missing",
+                evidence_quality="low",
+                business_quality_score=0.0,
+                data_coverage_score=0.0,
+                tradeability_reason="pre_open_reference_price_unavailable",
+                opportunity_type="no_trade",
+                opportunity_layer="no_trade",
+                setup_quality_score=0.0,
+                entry_quality="poor",
+                setup_quality_notes=["pre_open_reference_price_unavailable"],
+                entry_trigger="none",
+                exit_hint="none",
+                holding_period_hint="flat",
+                factor_focus=["pandaai_market_data"],
+                neutral_reason="pre_open_reference_price_unavailable",
+                missing_evidence=["pre_open_reference_price"],
+                would_change_view_if="PandaAI returns a valid previous trading day close for Phase1 planning",
+                neutral_opportunity_bucket="low_tradeability",
+                neutral_trigger_condition="valid_pre_open_reference_price",
+                neutral_shadow_side="flat",
+                neutral_watchlist_priority="none",
+                do_not_trade_reason="pre_open_reference_price_unavailable",
+                metadata={
+                    "data_usage_summary": {
+                        "ticker": ticker,
+                        "analyst": normalized_analyst,
+                        "pandaai_pre_open_reference": {
+                            "available": False,
+                            "used_in_signal": True,
+                            "reason": reason,
+                        },
+                    },
+                    "no_trade_reason": "pre_open_reference_price_unavailable",
+                    "no_trade_category": "data",
+                    "phase1_signal_contract": "complete_no_trade_signal",
+                    "warning_message": warning_message,
+                },
+            )
+            signals.append(signal)
+        self._validate_phase1_analyst_outputs(ticker, analysts, signals)
+        return signals
+
+    def _build_signal_snapshot_from_signals(self, analyst_signals: list[AnalystSignal]) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        for signal in analyst_signals or []:
+            analyst = self._normalize_analyst_name(getattr(signal, "agent_name", ""))
+            snapshot[analyst] = {
+                "signal": getattr(getattr(signal, "signal", None), "value", getattr(signal, "signal", "")),
+                "confidence": getattr(signal, "confidence", None),
+                "horizon_class": getattr(signal, "horizon_class", "unknown"),
+                "opportunity_layer": getattr(signal, "opportunity_layer", "unknown"),
+                "opportunity_type": getattr(signal, "opportunity_type", "unknown"),
+                "tradeability_reason": getattr(signal, "tradeability_reason", ""),
+                "neutral_reason": getattr(signal, "neutral_reason", ""),
+                "metadata": getattr(signal, "metadata", {}) or {},
+            }
+        return snapshot
 
     def _build_futures_phase1_state(self, ticker: str, portfolio: Portfolio, morning_price_context):
         return FundState(
@@ -263,10 +458,7 @@ class AgentWorkflow:
             pre_open_only=True,
             info_cutoff="pre_open",
             recommendation=None,
-            config={
-                'max_total_margin_ratio': self.config.get('max_total_margin_ratio', 0.20),
-                'max_single_margin_ratio': self.config.get('max_single_margin_ratio', 0.12),
-            },
+            config=self._phase1_compat_config(),
             full_config=self.config,
             router=self.router,
         )
@@ -316,6 +508,7 @@ class AgentWorkflow:
 
         order = {name: idx for idx, name in enumerate(analysts)}
         analyst_signals.sort(key=lambda signal: order.get(getattr(signal, "agent_name", ""), 999))
+        self._validate_phase1_analyst_outputs(ticker, analysts, analyst_signals)
         logger.info(
             f"{ticker} phase1 analyst fanout completed: analysts={analysts}, "
             f"signals={len(analyst_signals)}, elapsed={perf_counter() - started_at:.2f}s"
@@ -334,10 +527,7 @@ class AgentWorkflow:
             "info_cutoff": "pre_open",
             "num_tickers": len(self.tickers),
             "save_analyst_outputs": self.allow_analyst_db_writes,
-            "config": {
-                'max_total_margin_ratio': self.config.get('max_total_margin_ratio', 0.20),
-                'max_single_margin_ratio': self.config.get('max_single_margin_ratio', 0.12),
-            },
+            "config": self._phase1_compat_config(),
             "full_config": self.config,
             "router": self.router,
             "portfolio": portfolio,
@@ -353,6 +543,11 @@ class AgentWorkflow:
         state["num_tickers"] = len(self.tickers)
         state["decision"] = None
         state["recommendation"] = None
+        self._validate_phase1_analyst_outputs(
+            str(state.get("ticker") or ""),
+            list(state.get("enabled_analysts") or self.workflow_analysts),
+            list(state.get("analyst_signals") or []),
+        )
         return portfolio_agent_futures(state)
 
     def _prefetch_pre_open_reference_prices(self, timings: Dict[str, float]) -> Dict[str, Any]:
@@ -493,7 +688,6 @@ class AgentWorkflow:
             return portfolio
 
         signal_snapshot = recommendation.signal_snapshot or {}
-        pre_open_plan = signal_snapshot.get("pre_open_plan") if isinstance(signal_snapshot, dict) else None
         ticker = recommendation.underlying_code
 
         contract_info = FuturesContractInfoCache.get_contract_info(ticker)
@@ -507,12 +701,23 @@ class AgentWorkflow:
         position.contract_multiplier = contract_info.get("contract_multiplier")
         reference_price = float(getattr(recommendation, "base_price", None) or 0.0)
         target_lots = None
+        current_shares = int(getattr(position, "shares", 0) or 0)
+        source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
 
-        if pre_open_plan:
-            target_lots = int(pre_open_plan.get("target_lots_estimate") or 0)
-            reference_price = float(pre_open_plan.get("reference_price") or reference_price)
+        if source_type == RecommendationSourceType.STRATEGY.value:
+            final_contract = (
+                signal_snapshot.get("final_action_contract")
+                if isinstance(signal_snapshot, dict) and isinstance(signal_snapshot.get("final_action_contract"), dict)
+                else {}
+            )
+            if not final_contract:
+                logger.warning(
+                    f"{ticker}: strategy recommendation without final_action_contract is not "
+                    "applied to the virtual Phase1 planning portfolio"
+                )
+                return portfolio
+            target_lots = int(final_contract.get("target_lots") if final_contract.get("target_lots") is not None else current_shares)
         else:
-            current_shares = int(getattr(position, "shares", 0) or 0)
             action = getattr(recommendation.action, "value", recommendation.action)
             lots = int(recommendation.lots or 0)
             if action == RecommendationAction.CLOSE_LONG.value:
@@ -599,12 +804,32 @@ class AgentWorkflow:
             self._timed_call(timings, "load_analysts", self.load_analysts, ticker)
             morning_price_context = morning_contexts.get(ticker)
             if morning_price_context is None or morning_price_context.base_price is None:
+                analyst_signals = self._build_missing_pre_open_reference_signals(
+                    ticker=ticker,
+                    analysts=self.current_analysts.copy(),
+                    morning_price_context=morning_price_context,
+                )
+                missing_basis_state = {
+                    "ticker": ticker,
+                    "portfolio": portfolio,
+                    "trading_date": self.trading_date,
+                    "full_config": self.config,
+                    "analyst_signals": analyst_signals,
+                    "analyst_outputs": [],
+                    "signal_snapshot": self._build_signal_snapshot_from_signals(analyst_signals),
+                }
+                self._timed_call(
+                    timings,
+                    "save_missing_basis_analyst_outputs",
+                    self._save_prefetched_analyst_outputs,
+                    missing_basis_state,
+                )
                 recommendation = self._coerce_phase1_recommendation(
                     ticker=ticker,
                     portfolio=portfolio,
                     decision=None,
                     morning_price_context=morning_price_context,
-                    final_state={},
+                    final_state=missing_basis_state,
                 )
                 recommendation_id = self.db.save_futures_recommendation(recommendation)
                 if not recommendation_id:
@@ -670,6 +895,7 @@ class AgentWorkflow:
                 self.current_analysts = self.workflow_analysts.copy()
             timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
 
+        self._validate_phase1_signal_persistence(portfolio, self.tickers)
         logger.log_portfolio("Phase1 Intraday Portfolio", portfolio)
         elapsed = perf_counter() - start_time
         if self._phase1_timing_enabled():

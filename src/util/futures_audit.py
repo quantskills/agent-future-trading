@@ -27,7 +27,9 @@ EXPECTED_NO_TRADE_REASONS = {
     "margin_adjustment_to_zero",
     "cooling_period",
     "trade_frequency_control",
+    "trade_churn_cost_control",
     "weak_signal_combo",
+    "opportunity_quality_position_sizing",
     "side_performance_block",
     "market_confirmation_conflict",
     "drawdown_control",
@@ -41,6 +43,7 @@ EXPECTED_NO_TRADE_REASONS = {
     "minimum_new_entry_threshold",
     "minimum_rebalance_threshold",
     "holding_period_control",
+    "winning_template_continuation",
     "fundamental_anchor_rebalance_cap",
     "horizon_consistency_requires_short_timing",
     "reverse_requires_stronger_evidence",
@@ -131,6 +134,8 @@ NO_TRADE_REASON_CATEGORY_MAP = {
     "margin_adjustment_to_zero": "risk",
     "cooling_period": "risk",
     "trade_frequency_control": "risk",
+    "trade_churn_cost_control": "risk",
+    "opportunity_quality_position_sizing": "signal",
     "drawdown_control": "risk",
     "ticker_loss_control": "risk",
     "capital_utilization_guard": "risk",
@@ -162,6 +167,7 @@ NO_TRADE_REASON_CATEGORY_MAP = {
     "hold_or_zero_lots": "business",
     "pending_rollover_required": "business",
     "holding_period_control": "business",
+    "winning_template_continuation": "business",
     "near_expiry_new_entry_block": "business",
     "cold_start_small_cap": "learning",
     "side_performance_block": "learning",
@@ -326,11 +332,6 @@ def _first_signal_value(snapshot: Dict[str, Any], field_names: List[str]) -> Any
                 value = context.get(field_name)
                 if value not in (None, "", "unknown"):
                     return value
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    for field_name in field_names:
-        value = plan.get(field_name)
-        if value not in (None, "", "unknown"):
-            return value
     return None
 
 
@@ -375,9 +376,9 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 def infer_target_lots(recommendation: Dict[str, Any]) -> int:
     snapshot = recommendation.get("signal_snapshot")
     if isinstance(snapshot, dict):
-        pre_open_plan = snapshot.get("pre_open_plan")
-        if isinstance(pre_open_plan, dict) and pre_open_plan.get("target_lots_estimate") is not None:
-            return int(pre_open_plan.get("target_lots_estimate") or 0)
+        contract = snapshot.get("final_action_contract")
+        if isinstance(contract, dict) and contract.get("target_lots") is not None:
+            return int(contract.get("target_lots") or 0)
 
     action_value = enum_value(recommendation.get("action"))
     lots = int(recommendation.get("lots", 0) or 0)
@@ -458,6 +459,8 @@ def set_execution_result(
 ) -> None:
     result = ensure_execution_result(snapshot)
     actual_transactions = actual_transactions or []
+    normalized_reason = normalize_no_trade_reason(no_trade_reason)
+    reason_category = categorize_no_trade_reason(normalized_reason) if normalized_reason else None
     result.update(
         {
             "outcome": outcome,
@@ -466,7 +469,16 @@ def set_execution_result(
             "actual_transactions": actual_transactions,
             "actual_action": _resolve_actual_action(actual_transactions),
             "actual_lots": _resolve_actual_lots(actual_transactions),
-            "no_trade_reason": no_trade_reason,
+            "no_trade_reason": normalized_reason,
+            "no_trade_reason_category": reason_category,
+            "execution_learning_trace": {
+                "outcome": outcome,
+                "status": status,
+                "no_trade_reason": normalized_reason,
+                "no_trade_reason_category": reason_category,
+                "actual_transaction_count": int(transaction_count),
+                "turn_into_memory": bool(normalized_reason and int(transaction_count) == 0),
+            },
             "warning_message": warning_message,
         }
     )
@@ -526,12 +538,6 @@ def infer_no_trade_reason(
             if classify_no_trade_reason(reason) != "unknown":
                 return reason
 
-    pre_open_plan = snapshot.get("pre_open_plan")
-    if isinstance(pre_open_plan, dict):
-        tradable_reason = normalize_no_trade_reason(pre_open_plan.get("tradable_lots_reason"))
-        if tradable_reason:
-            return tradable_reason
-
     lowered = (warning_message or "").lower()
     if "no previous close" in lowered:
         return "missing_previous_close"
@@ -542,11 +548,128 @@ def infer_no_trade_reason(
     return normalize_no_trade_reason(default)
 
 
+def _nested_dict(root: Dict[str, Any], *path: str) -> Dict[str, Any]:
+    current: Any = root
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def _first_dict(*values: Any) -> Dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict) and value:
+            return value
+    return {}
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _compact_action_value_preferences(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+    rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
+    compact: List[Dict[str, Any]] = []
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        compact.append(
+            {
+                "action_name": row.get("action_name"),
+                "action_preference": row.get("action_preference"),
+                "policy_hint": row.get("policy_hint"),
+                "sample_scope": row.get("sample_scope"),
+                "memory_quality": row.get("memory_quality"),
+                "reward_mean": row.get("reward_mean"),
+            }
+        )
+    return compact
+
+
+def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, Any], authority: Dict[str, Any]) -> Dict[str, Any]:
+    phase2_execution = (
+        snapshot.get("phase2_execution")
+        if isinstance(snapshot.get("phase2_execution"), dict)
+        else {}
+    )
+    pm_plan_validation = (
+        phase2_execution.get("pm_plan_validation")
+        if isinstance(phase2_execution.get("pm_plan_validation"), dict)
+        else {}
+    )
+    contract_execution_plan = (
+        contract.get("execution_plan")
+        if isinstance(contract.get("execution_plan"), dict)
+        else {}
+    )
+    authority_consistency = (
+        pm_plan_validation.get("authority_consistency")
+        if isinstance(pm_plan_validation.get("authority_consistency"), dict)
+        else {}
+    )
+    reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else None
+    if reason_codes is None:
+        reason_codes = authority.get("reason_codes") if isinstance(authority.get("reason_codes"), list) else []
+    return {
+        "audit_boundary": (
+            "transaction audit mirror only; final_action_contract and "
+            "final_new_entry_trade_authority remain the executable source of truth"
+        ),
+        "single_source_of_trade_truth": bool(contract.get("single_source_of_trade_truth")),
+        "candidate_sources_do_not_bypass_contract": bool(
+            contract.get("candidate_sources_do_not_bypass_contract")
+        ),
+        "contract_version": contract.get("contract_version"),
+        "final_action": contract.get("final_action"),
+        "authority_type": _first_non_empty(contract.get("authority_type"), authority.get("authority_type")),
+        "can_open_real_position": bool(authority.get("can_open_real_position")),
+        "can_apply_min_real_floor": bool(authority.get("can_apply_min_real_floor")),
+        "current_lots": contract.get("current_lots"),
+        "target_lots": contract.get("target_lots"),
+        "lots_delta": contract.get("lots_delta"),
+        "target_margin_ratio_estimate": contract.get("target_margin_ratio_estimate"),
+        "max_allowed_margin_ratio": _first_non_empty(
+            contract.get("max_allowed_margin_ratio"),
+            authority.get("max_allowed_margin_ratio"),
+        ),
+        "reason_codes": reason_codes,
+        "execution_profile": _first_non_empty(
+            contract.get("execution_profile"),
+            contract_execution_plan.get("execution_profile"),
+        ),
+        "execution_requirement": contract.get("execution_requirement"),
+        "pm_plan_validation_passed": pm_plan_validation.get("passed"),
+        "pm_plan_validation_reason": pm_plan_validation.get("reason"),
+        "authority_consistency_reason": authority_consistency.get("reason"),
+        "business_boundary": _first_non_empty(
+            pm_plan_validation.get("business_boundary"),
+            authority_consistency.get("business_boundary"),
+        ),
+        "selected_action_preferences": _compact_action_value_preferences(contract),
+    }
+
+
 def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
     translation = snapshot.get("execution_translation")
     result = snapshot.get("execution_result")
     phase2_execution = snapshot.get("phase2_execution")
+    contract = _first_dict(snapshot.get("final_action_contract"))
+    authority = _first_dict(
+        snapshot.get("final_new_entry_trade_authority"),
+        _nested_dict(snapshot, "phase2_execution", "pm_plan_validation", "final_new_entry_trade_authority"),
+    )
+    if contract:
+        payload["final_action_contract"] = deepcopy(contract)
+    if authority:
+        payload["final_new_entry_trade_authority"] = deepcopy(authority)
+    if contract or authority:
+        payload["trade_contract_audit"] = _build_trade_contract_audit(snapshot, contract, authority)
     if isinstance(translation, dict):
         payload["execution_translation"] = deepcopy(translation)
     if isinstance(result, dict):

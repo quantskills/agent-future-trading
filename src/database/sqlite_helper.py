@@ -46,6 +46,8 @@ class SQLiteDB(BaseDB):
                     cursor = conn.cursor()
                     self._ensure_strategy_memory_schema(cursor)
                     self._ensure_reviewer_learning_schema(cursor)
+                    if self._table_exists(cursor, "strategy_memory"):
+                        _ensure_columns(cursor, "strategy_memory", {"source_trading_date": "TEXT"})
                     if self._table_exists(cursor, "portfolio"):
                         _ensure_columns(
                             cursor,
@@ -53,6 +55,10 @@ class SQLiteDB(BaseDB):
                             {
                                 "account_equity": "REAL DEFAULT 0",
                                 "cash_available": "REAL DEFAULT 0",
+                                "margin_ratio": "REAL DEFAULT 0",
+                                "risk_status": "TEXT DEFAULT 'NORMAL'",
+                                "last_settle_date": "TEXT",
+                                "is_settled": "INTEGER DEFAULT 0",
                             },
                         )
                     if self._table_exists(cursor, "daily_settlement"):
@@ -187,6 +193,44 @@ class SQLiteDB(BaseDB):
                     **_json_artifact_columns("payload"),
                 },
             )
+        if self._table_exists(cursor, "alpha_setup_profile"):
+            _ensure_columns(
+                cursor,
+                "alpha_setup_profile",
+                {
+                    "payload_json": "TEXT",
+                    "active": "INTEGER DEFAULT 1",
+                    "max_position_impact": "REAL DEFAULT 0",
+                    "last_sample_date": "TEXT",
+                },
+            )
+        if self._table_exists(cursor, "alpha_setup_sample"):
+            _ensure_columns(cursor, "alpha_setup_sample", {"payload_json": "TEXT"})
+        if self._table_exists(cursor, "alpha_setup_action_value"):
+            _ensure_columns(
+                cursor,
+                "alpha_setup_action_value",
+                {
+                    "payload_json": "TEXT",
+                    "active": "INTEGER DEFAULT 1",
+                    "max_position_impact": "REAL DEFAULT 0",
+                    "last_sample_date": "TEXT",
+                },
+            )
+        if self._table_exists(cursor, "adaptive_policy_state"):
+            _ensure_columns(
+                cursor,
+                "adaptive_policy_state",
+                {
+                    "source_trading_date": "TEXT",
+                },
+            )
+        if self._table_exists(cursor, "signal_template_performance"):
+            _ensure_columns(cursor, "signal_template_performance", {"last_sample_date": "TEXT"})
+        if self._table_exists(cursor, "analyst_performance"):
+            _ensure_columns(cursor, "analyst_performance", {"last_sample_date": "TEXT"})
+        if self._table_exists(cursor, "provisional_policy_state"):
+            _ensure_columns(cursor, "provisional_policy_state", {"source_trading_date": "TEXT"})
 
     def _model_to_dict(self, obj: Any) -> Dict[str, Any]:
         """Convert pydantic models / sqlite rows / dict-like objects into plain dicts."""
@@ -261,6 +305,14 @@ class SQLiteDB(BaseDB):
             if "account_equity" in row.keys() and row["account_equity"] not in (None, 0)
             else float(row["cashflow"] or 0.0) + float(margin_used or 0.0)
         )
+        margin_ratio = row["margin_ratio"] if "margin_ratio" in row.keys() and row["margin_ratio"] is not None else 0
+        risk_status = row["risk_status"] if "risk_status" in row.keys() and row["risk_status"] else "NORMAL"
+        last_settle_date = (
+            self._normalize_trading_day_value(row["last_settle_date"])
+            if "last_settle_date" in row.keys()
+            else None
+        )
+        is_settled = bool(row["is_settled"]) if "is_settled" in row.keys() else False
         return {
             "id": row["id"],
             "config_id": row["config_id"] if "config_id" in row.keys() else None,
@@ -275,6 +327,10 @@ class SQLiteDB(BaseDB):
             "available_cash": available_cash,
             "margin_available": available_cash,
             "daily_settlement_pnl": row["daily_settlement_pnl"] if "daily_settlement_pnl" in row.keys() else 0,
+            "margin_ratio": margin_ratio,
+            "risk_status": risk_status,
+            "last_settle_date": last_settle_date,
+            "is_settled": is_settled,
             "leverage": row["leverage"] if "leverage" in row.keys() else 1.0,
         }
 
@@ -295,6 +351,7 @@ class SQLiteDB(BaseDB):
                 confidence_score REAL DEFAULT 0,
                 source TEXT NOT NULL DEFAULT 'attribution_auto',
                 reason TEXT,
+                source_trading_date TEXT,
                 updated_at TEXT NOT NULL,
                 valid_until TEXT,
                 payload_json TEXT,
@@ -310,6 +367,7 @@ class SQLiteDB(BaseDB):
             "CREATE INDEX IF NOT EXISTS idx_strategy_memory_state "
             "ON strategy_memory(config_id, memory_state)"
         )
+        _ensure_columns(cursor, "strategy_memory", {"source_trading_date": "TEXT"})
 
     def _ensure_reviewer_learning_schema(self, cursor: sqlite3.Cursor) -> None:
         _ensure_reviewer_learning_schema(cursor)
@@ -372,6 +430,168 @@ class SQLiteDB(BaseDB):
         win_score = min(0.30, abs(win_rate - 0.50) * 0.75)
         pnl_score = min(0.25, net_pnl / 20000.0)
         return min(1.0, sample_score + win_score + pnl_score)
+
+    def _learning_retention_enabled(self, retention_config: Optional[Dict[str, Any]]) -> bool:
+        return bool(retention_config and retention_config.get("enabled") and retention_config.get("run_after_phase4", True))
+
+    def _table_columns(self, cursor: sqlite3.Cursor, table_name: str) -> set[str]:
+        if not self._table_exists(cursor, table_name):
+            return set()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        return {str(row[1]) for row in cursor.fetchall()}
+
+    def _cleanup_learning_rows_by_date(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        table_name: str,
+        config_id: str,
+        cutoff_date: str,
+        date_columns: list[str],
+    ) -> int:
+        columns = self._table_columns(cursor, table_name)
+        if not columns or "config_id" not in columns:
+            return 0
+        deleted = 0
+        for column in date_columns:
+            if column not in columns:
+                continue
+            cursor.execute(
+                f"DELETE FROM {table_name} WHERE config_id = ? AND substr({column}, 1, 10) < ?",
+                (config_id, cutoff_date),
+            )
+            deleted += max(0, cursor.rowcount or 0)
+            break
+        return deleted
+
+    def _trim_learning_table_rows(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        table_name: str,
+        config_id: str,
+        max_rows: int,
+    ) -> int:
+        if max_rows <= 0:
+            return 0
+        columns = self._table_columns(cursor, table_name)
+        if not columns or "config_id" not in columns:
+            return 0
+        order_column = "trading_date" if "trading_date" in columns else "created_at" if "created_at" in columns else "rowid"
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE config_id = ?", (config_id,))
+        row_count = int(cursor.fetchone()[0] or 0)
+        if row_count <= max_rows:
+            return 0
+        cursor.execute(
+            f"""
+            DELETE FROM {table_name}
+            WHERE rowid IN (
+                SELECT rowid FROM {table_name}
+                WHERE config_id = ?
+                ORDER BY substr({order_column}, 1, 10) DESC, rowid DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (config_id, max_rows),
+        )
+        return max(0, cursor.rowcount or 0)
+
+    def _cleanup_learning_retention_with_cursor(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        config_id: str,
+        trading_date,
+        retention_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        """Clean short-lived learning details after Phase4 without touching trade facts."""
+        if not self._learning_retention_enabled(retention_config):
+            return {}
+        trading_day = self._normalize_trading_day_value(trading_date)
+        try:
+            base_dt = datetime.strptime(str(trading_day), "%Y-%m-%d")
+        except Exception:
+            logger.warning(f"Learning retention skipped: invalid trading_date={trading_date}")
+            return {}
+
+        detail_days = int(retention_config.get("detail_retention_days", 90) or 90)
+        aggregate_days = int(retention_config.get("aggregate_retention_days", 180) or 180)
+        detail_cutoff = (base_dt - timedelta(days=detail_days)).strftime("%Y-%m-%d")
+        aggregate_cutoff = (base_dt - timedelta(days=aggregate_days)).strftime("%Y-%m-%d")
+        max_detail_rows = int(retention_config.get("max_detail_rows_per_config", 50000) or 50000)
+
+        detail_tables = retention_config.get("detail_tables") or [
+            "research_position_feedback",
+            "analyst_learning_digest",
+            "learning_context_budget",
+            "reviewer_llm_notes",
+            "learning_event_log",
+            "config_learning_overlay",
+            "alpha_setup_sample",
+        ]
+        aggregate_tables = retention_config.get("aggregate_tables") or [
+            "alpha_setup_profile",
+            "alpha_setup_action_value",
+            "adaptive_policy_state",
+        ]
+        deleted: Dict[str, int] = {}
+        for table_name in detail_tables:
+            table = str(table_name)
+            date_columns = ["trading_date", "valid_until", "created_at", "updated_at"]
+            if table in {"analyst_learning_digest", "config_learning_overlay"}:
+                date_columns = ["valid_until", "trading_date", "created_at", "updated_at"]
+            count = self._cleanup_learning_rows_by_date(
+                cursor,
+                table_name=table,
+                config_id=config_id,
+                cutoff_date=detail_cutoff,
+                date_columns=date_columns,
+            )
+            count += self._trim_learning_table_rows(
+                cursor,
+                table_name=table,
+                config_id=config_id,
+                max_rows=max_detail_rows,
+            )
+            if count:
+                deleted[table] = count
+
+        for table_name in aggregate_tables:
+            table = str(table_name)
+            columns = self._table_columns(cursor, table)
+            if not columns or "config_id" not in columns:
+                continue
+            if "active" in columns and "valid_until" in columns:
+                cursor.execute(
+                    f"""
+                    UPDATE {table}
+                    SET active = 0
+                    WHERE config_id = ?
+                      AND active = 1
+                      AND valid_until IS NOT NULL
+                      AND substr(valid_until, 1, 10) < ?
+                    """,
+                    (config_id, trading_day),
+                )
+            date_column = "updated_at" if "updated_at" in columns else "created_at" if "created_at" in columns else None
+            if date_column and "active" in columns:
+                cursor.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE config_id = ?
+                      AND active = 0
+                      AND substr({date_column}, 1, 10) < ?
+                    """,
+                    (config_id, aggregate_cutoff),
+                )
+                if cursor.rowcount:
+                    deleted[table] = deleted.get(table, 0) + max(0, cursor.rowcount or 0)
+        if deleted:
+            logger.info(
+                f"Learning retention cleanup for {config_id[:8]} on {trading_day}: "
+                f"detail_cutoff={detail_cutoff}, aggregate_cutoff={aggregate_cutoff}, deleted={deleted}"
+            )
+        return deleted
 
     def _refresh_strategy_memory_with_cursor(
         self,
@@ -510,8 +730,8 @@ class SQLiteDB(BaseDB):
                 INSERT OR REPLACE INTO strategy_memory (
                     id, config_id, ticker, side, signal_combo, memory_state,
                     sample_count, win_rate, net_pnl, avg_pnl, confidence_score,
-                    source, reason, updated_at, valid_until, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, reason, source_trading_date, updated_at, valid_until, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     str(uuid.uuid4()),
@@ -527,6 +747,7 @@ class SQLiteDB(BaseDB):
                     self._strategy_memory_confidence(summary),
                     source,
                     reason,
+                    trading_day_value,
                     updated_at,
                     valid_until,
                     self._serialize_json(payload),
@@ -629,6 +850,10 @@ class SQLiteDB(BaseDB):
                 "signal_template_performance",
                 "analyst_performance",
                 "adaptive_policy_state",
+                "research_position_feedback",
+                "alpha_setup_profile",
+                "alpha_setup_sample",
+                "alpha_setup_action_value",
                 "capital_deployment_state",
                 "config_learning_overlay",
                 "reviewer_llm_notes",
@@ -774,8 +999,12 @@ class SQLiteDB(BaseDB):
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT trading_date FROM portfolio 
+                SELECT p.trading_date FROM portfolio p
                 WHERE config_id = ? AND trading_date IS NOT NULL
+                  AND (
+                    COALESCE(p.is_settled, 0) = 1
+                    OR EXISTS (SELECT 1 FROM daily_settlement ds WHERE ds.portfolio_id = p.id)
+                  )
                 ORDER BY substr(trading_date, 1, 10) DESC, updated_at DESC 
                 LIMIT 1
             ''', (config_id,))
@@ -800,8 +1029,12 @@ class SQLiteDB(BaseDB):
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT * FROM portfolio 
+                SELECT p.* FROM portfolio p
                 WHERE config_id = ? AND trading_date IS NOT NULL
+                  AND (
+                    COALESCE(p.is_settled, 0) = 1
+                    OR EXISTS (SELECT 1 FROM daily_settlement ds WHERE ds.portfolio_id = p.id)
+                  )
                 ORDER BY substr(trading_date, 1, 10) DESC, updated_at DESC 
                 LIMIT 1
             ''', (config_id,))
@@ -837,8 +1070,9 @@ class SQLiteDB(BaseDB):
             cursor.execute('''
                 INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
                                       account_equity, cash_available, total_assets, positions,
-                                      margin_used, available_cash, daily_settlement_pnl, leverage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      margin_used, available_cash, daily_settlement_pnl,
+                                      margin_ratio, risk_status, last_settle_date, is_settled, leverage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
@@ -852,6 +1086,10 @@ class SQLiteDB(BaseDB):
                 0,  # margin_used
                 cashflow,  # available_cash
                 0,  # daily_settlement_pnl
+                0,  # margin_ratio
+                "NORMAL",  # risk_status
+                trading_day_value,  # last_settle_date
+                1,  # is_settled
                 1.0  # leverage
             ))
 
@@ -867,6 +1105,10 @@ class SQLiteDB(BaseDB):
                 'margin_used': 0,
                 'available_cash': cashflow,
                 'daily_settlement_pnl': 0,
+                'margin_ratio': 0,
+                'risk_status': "NORMAL",
+                'last_settle_date': trading_day_value,
+                'is_settled': True,
                 'leverage': 1.0
             }
         except Exception as e:
@@ -899,12 +1141,17 @@ class SQLiteDB(BaseDB):
             account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
             daily_pnl = portfolio.get('daily_settlement_pnl', 0)
             leverage = portfolio.get('leverage', 1.0)
+            margin_ratio = portfolio.get('margin_ratio', (margin_used / account_equity if account_equity else 0.0))
+            risk_status = portfolio.get('risk_status', "NORMAL")
+            last_settle_date = self._normalize_trading_day_value(portfolio.get('last_settle_date') or trading_day_value)
+            is_settled = 1 if portfolio.get('is_settled', False) else 0
 
             cursor.execute('''
                 INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
                                       account_equity, cash_available, total_assets, positions,
-                                      margin_used, available_cash, daily_settlement_pnl, leverage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      margin_used, available_cash, daily_settlement_pnl,
+                                      margin_ratio, risk_status, last_settle_date, is_settled, leverage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
@@ -918,6 +1165,10 @@ class SQLiteDB(BaseDB):
                 margin_used,
                 available_cash,
                 daily_pnl,
+                margin_ratio,
+                risk_status,
+                last_settle_date,
+                is_settled,
                 leverage
             ))
 
@@ -932,6 +1183,10 @@ class SQLiteDB(BaseDB):
                 'margin_used': margin_used,
                 'margin_available': available_cash,
                 'daily_settlement_pnl': daily_pnl,
+                'margin_ratio': margin_ratio,
+                'risk_status': risk_status,
+                'last_settle_date': last_settle_date,
+                'is_settled': bool(is_settled),
                 'leverage': leverage
             }
         except Exception as e:
@@ -973,6 +1228,10 @@ class SQLiteDB(BaseDB):
                     portfolio.get('margin_available', portfolio.get('cashflow', existing_row['cashflow']))
                 )
                 account_equity = portfolio.get('account_equity', portfolio.get('cashflow', existing_row['cashflow']) + margin_used)
+                margin_ratio = portfolio.get('margin_ratio', (margin_used / account_equity if account_equity else 0.0))
+                risk_status = portfolio.get('risk_status', "NORMAL")
+                last_settle_date = self._normalize_trading_day_value(portfolio.get('last_settle_date') or trading_day_value)
+                is_settled = bool(portfolio.get('is_settled', False))
                 return {
                     'id': existing_row['id'],
                     'cashflow': existing_row['cashflow'],
@@ -980,6 +1239,10 @@ class SQLiteDB(BaseDB):
                     'cash_available': available_cash,
                     'margin_used': margin_used,
                     'margin_available': available_cash,
+                    'margin_ratio': margin_ratio,
+                    'risk_status': risk_status,
+                    'last_settle_date': last_settle_date,
+                    'is_settled': is_settled,
                     'positions': json.loads(existing_row['positions']) if existing_row['positions'] else {}
                 }
 
@@ -992,13 +1255,18 @@ class SQLiteDB(BaseDB):
                 portfolio.get('margin_available', portfolio['cashflow'])
             )
             account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
+            margin_ratio = portfolio.get('margin_ratio', (margin_used / account_equity if account_equity else 0.0))
+            risk_status = portfolio.get('risk_status', "NORMAL")
+            last_settle_date = self._normalize_trading_day_value(portfolio.get('last_settle_date') or trading_day_value)
+            is_settled = 1 if portfolio.get('is_settled', False) else 0
             logger.info(f"Creating new portfolio {portfolio_id[:8]}... for trading date {trading_day_value}")
 
             cursor.execute('''
                 INSERT INTO portfolio (id, config_id, updated_at, trading_date, cashflow,
                                       account_equity, cash_available, total_assets, positions,
-                                      margin_used, available_cash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      margin_used, available_cash, margin_ratio, risk_status,
+                                      last_settle_date, is_settled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 portfolio_id,
                 config_id,
@@ -1010,7 +1278,11 @@ class SQLiteDB(BaseDB):
                 total_assets,
                 json.dumps(portfolio['positions']),
                 margin_used,
-                available_cash
+                available_cash,
+                margin_ratio,
+                risk_status,
+                last_settle_date,
+                is_settled
             ))
 
             conn.commit()
@@ -1023,6 +1295,10 @@ class SQLiteDB(BaseDB):
                 'positions': portfolio['positions'],
                 'margin_used': margin_used,
                 'margin_available': available_cash,
+                'margin_ratio': margin_ratio,
+                'risk_status': risk_status,
+                'last_settle_date': last_settle_date,
+                'is_settled': bool(is_settled),
             }
         except Exception as e:
             logger.error(f"Error in get_or_create_portfolio_for_date: {e}")
@@ -1052,12 +1328,17 @@ class SQLiteDB(BaseDB):
             account_equity = portfolio.get('account_equity', portfolio['cashflow'] + margin_used)
             daily_pnl = portfolio.get('daily_settlement_pnl', 0)
             leverage = portfolio.get('leverage', 1.0)
+            margin_ratio = portfolio.get('margin_ratio', (margin_used / account_equity if account_equity else 0.0))
+            risk_status = portfolio.get('risk_status', "NORMAL")
+            last_settle_date = self._normalize_trading_day_value(portfolio.get('last_settle_date') or trading_day_value)
+            is_settled = 1 if portfolio.get('is_settled', False) else 0
 
             cursor.execute('''
                 UPDATE portfolio
                 SET config_id = ?, updated_at = ?, trading_date = ?, cashflow = ?,
                     account_equity = ?, cash_available = ?, total_assets = ?, positions = ?,
-                    margin_used = ?, available_cash = ?, daily_settlement_pnl = ?, leverage = ?
+                    margin_used = ?, available_cash = ?, daily_settlement_pnl = ?,
+                    margin_ratio = ?, risk_status = ?, last_settle_date = ?, is_settled = ?, leverage = ?
                 WHERE id = ?
             ''', (
                 config_id,
@@ -1071,6 +1352,10 @@ class SQLiteDB(BaseDB):
                 margin_used,
                 available_cash,
                 daily_pnl,
+                margin_ratio,
+                risk_status,
+                last_settle_date,
+                is_settled,
                 leverage,
                 portfolio['id']
             ))
@@ -1172,6 +1457,57 @@ class SQLiteDB(BaseDB):
         except Exception as e:
             logger.error(f"Error saving signal: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
+
+    def get_signal_persistence_counts(
+        self,
+        portfolio_id: str,
+        tickers: Optional[List[str]] = None,
+        analysts: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Return signal persistence counts for one Phase1 portfolio snapshot."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            params: List[Any] = [portfolio_id]
+            filters = ["portfolio_id = ?"]
+            if tickers:
+                ticker_values = [str(ticker).upper() for ticker in tickers]
+                filters.append(f"ticker IN ({','.join('?' for _ in ticker_values)})")
+                params.extend(ticker_values)
+            if analysts:
+                analyst_values = [str(analyst) for analyst in analysts]
+                filters.append(f"analyst IN ({','.join('?' for _ in analyst_values)})")
+                params.extend(analyst_values)
+
+            where = " AND ".join(filters)
+            cursor.execute(
+                f"""
+                SELECT ticker, analyst, COUNT(*) AS row_count
+                FROM signal
+                WHERE {where}
+                GROUP BY ticker, analyst
+                ORDER BY ticker, analyst
+                """,
+                tuple(params),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            return {
+                "rows": rows,
+                "distinct_pairs": len(rows),
+                "row_total": sum(int(row.get("row_count") or 0) for row in rows),
+                "duplicate_pairs": [
+                    f"{row.get('ticker')}:{row.get('analyst')}={int(row.get('row_count') or 0)}"
+                    for row in rows
+                    if int(row.get("row_count") or 0) > 1
+                ],
+            }
+        except Exception as exc:
+            logger.error(f"Error reading signal persistence counts: {exc}")
+            return {"rows": [], "distinct_pairs": 0, "row_total": 0, "duplicate_pairs": [], "error": str(exc)}
         finally:
             if conn:
                 conn.close()
@@ -1785,6 +2121,7 @@ class SQLiteDB(BaseDB):
         status: Any,
         message: str = "",
         memory_config: Optional[Dict[str, Any]] = None,
+        retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Complete a trading day phase record."""
         conn = None
@@ -1833,6 +2170,16 @@ class SQLiteDB(BaseDB):
                         )
                     except Exception as memory_exc:
                         logger.warning(f"Strategy memory refresh skipped: {memory_exc}")
+                if self._learning_retention_enabled(retention_config):
+                    try:
+                        self._cleanup_learning_retention_with_cursor(
+                            cursor,
+                            config_id=config_id,
+                            trading_date=trading_date_value,
+                            retention_config=retention_config,
+                        )
+                    except Exception as retention_exc:
+                        logger.warning(f"Learning retention cleanup skipped: {retention_exc}")
 
             conn.commit()
             return True
@@ -1870,21 +2217,33 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
-    def get_futures_transaction_memory(self, config_id: str, ticker: str, limit: int = 20) -> List[str]:
+    def get_futures_transaction_memory(
+        self,
+        config_id: str,
+        ticker: str,
+        limit: int = 20,
+        trading_date=None,
+    ) -> List[str]:
         """Get recent transaction memory for futures PM prompts."""
         conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
+            params: List[Any] = [config_id, ticker]
+            where = ["config_id = ?", "ticker = ?"]
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("substr(trading_date, 1, 10) < ?")
+                params.append(trading_day_value)
             cursor.execute(
-                '''
+                f'''
                 SELECT trading_date, action, lots, COALESCE(execution_price, price) AS execution_price
                 FROM futures_transactions
-                WHERE config_id = ? AND ticker = ?
+                WHERE {' AND '.join(where)}
                 ORDER BY trading_date DESC, created_at DESC
                 LIMIT ?
                 ''',
-                (config_id, ticker, limit),
+                tuple(params + [int(limit)]),
             )
 
             memory = []
@@ -2211,9 +2570,19 @@ class SQLiteDB(BaseDB):
                       AND side = ?
                       AND signal_combo IN ('*', ?)
                       AND (valid_until IS NULL OR valid_until >= ?)
+                      AND source_trading_date IS NOT NULL
+                      AND substr(source_trading_date, 1, 10) < ?
                     ORDER BY CASE WHEN signal_combo = ? THEN 0 ELSE 1 END, updated_at DESC
                     ''',
-                    (config_id, ticker.upper(), side_value, combo_key, trading_day_value, combo_key),
+                    (
+                        config_id,
+                        ticker.upper(),
+                        side_value,
+                        combo_key,
+                        trading_day_value,
+                        trading_day_value,
+                        combo_key,
+                    ),
                 )
             else:
                 cursor.execute(
@@ -2278,7 +2647,19 @@ class SQLiteDB(BaseDB):
             ]
             if trading_day_value:
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                where.append(
+                    """substr(COALESCE(
+                        trading_date,
+                        (
+                            SELECT le.trading_date
+                            FROM learning_event_log le
+                            WHERE le.id = config_learning_overlay.source_event_id
+                              AND le.config_id = config_learning_overlay.config_id
+                            LIMIT 1
+                        )
+                    ), 1, 10) < ?"""
+                )
+                params.extend([trading_day_value, trading_day_value])
             if param_prefix:
                 where.append("param_key LIKE ?")
                 params.append(f"{param_prefix}%")
@@ -2326,8 +2707,10 @@ class SQLiteDB(BaseDB):
                 params.append(str(side).lower())
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
+                where.append("last_sample_date IS NOT NULL")
+                where.append("last_sample_date < ?")
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2388,7 +2771,19 @@ class SQLiteDB(BaseDB):
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                where.append(
+                    """substr(COALESCE(
+                        source_trading_date,
+                        (
+                            SELECT le.trading_date
+                            FROM learning_event_log le
+                            WHERE le.id = adaptive_policy_state.source_event_id
+                              AND le.config_id = adaptive_policy_state.config_id
+                            LIMIT 1
+                        )
+                    ), 1, 10) < ?"""
+                )
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2406,6 +2801,154 @@ class SQLiteDB(BaseDB):
             return rows
         except Exception as e:
             logger.warning(f"Adaptive policy state unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_alpha_setup_profiles(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Read future-usable setup profiles for analyst prompts and PM sizing.
+
+        The rows are Phase4 products from previous days. The query allows exact
+        ticker and same-sector fallback, but never returns inactive or expired
+        profiles and never reaches into future samples.
+        """
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            sector_value = str(sector or "*")
+            params: List[Any] = [config_id]
+            where = ["config_id = ?", "active = 1"]
+            if ticker_value and ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if sector_value and sector_value != "*":
+                where.append("sector IN (?, '*')")
+                params.append(sector_value)
+            if side and str(side) != "*":
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if horizon_class and str(horizon_class) != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime and str(market_regime) != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("last_sample_date IS NOT NULL")
+                where.append("last_sample_date < ?")
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.extend([trading_day_value, trading_day_value])
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM alpha_setup_profile
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN sector = ? THEN 0 WHEN sector = '*' THEN 1 ELSE 2 END,
+                    CASE lifecycle_state
+                        WHEN 'deployable' THEN 0
+                        WHEN 'protected' THEN 1
+                        WHEN 'watchlist' THEN 2
+                        WHEN 'candidate' THEN 3
+                        WHEN 'capped' THEN 4
+                        WHEN 'rejected' THEN 5
+                        ELSE 6
+                    END,
+                    confidence_score DESC,
+                    sample_count DESC,
+                    updated_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", sector_value or "*", int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Alpha setup profiles unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_alpha_setup_action_values(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Read setup action-value hints written after settled future samples."""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            ticker_value = str(ticker or "").upper()
+            params: List[Any] = [config_id]
+            where = ["config_id = ?", "active = 1"]
+            if ticker_value and ticker_value != "*":
+                where.append("ticker IN (?, '*')")
+                params.append(ticker_value)
+            if side and str(side) != "*":
+                where.append("side IN (?, '*')")
+                params.append(str(side).lower())
+            if horizon_class and str(horizon_class) != "*":
+                where.append("horizon_class IN (?, '*')")
+                params.append(str(horizon_class))
+            if market_regime and str(market_regime) != "*":
+                where.append("market_regime IN (?, '*')")
+                params.append(str(market_regime))
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if trading_day_value:
+                where.append("last_sample_date IS NOT NULL")
+                where.append("last_sample_date < ?")
+                where.append("(valid_until IS NULL OR valid_until >= ?)")
+                params.extend([trading_day_value, trading_day_value])
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM alpha_setup_action_value
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    confidence_score DESC,
+                    sample_count DESC,
+                    updated_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", int(limit)]),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                rows.append(item)
+            return rows
+        except Exception as e:
+            logger.warning(f"Alpha setup action values unavailable for {ticker}: {e}")
             return []
         finally:
             if conn:
@@ -2444,7 +2987,9 @@ class SQLiteDB(BaseDB):
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                where.append("source_trading_date IS NOT NULL")
+                where.append("source_trading_date < ?")
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2506,7 +3051,16 @@ class SQLiteDB(BaseDB):
                 params.append(regime_value)
             if trading_day_value:
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                where.append(
+                    """substr((
+                        SELECT le.trading_date
+                        FROM learning_event_log le
+                        WHERE le.id = analyst_learning_digest.source_event_id
+                          AND le.config_id = analyst_learning_digest.config_id
+                        LIMIT 1
+                    ), 1, 10) < ?"""
+                )
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2609,6 +3163,334 @@ class SQLiteDB(BaseDB):
             return rows
         except Exception as e:
             logger.warning(f"Trade episode memory unavailable for {ticker}: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_similar_alpha_setup_action_values(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        trading_date=None,
+        limit: int = 6,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate strictly historical setup samples into action-value-like priors.
+
+        This is a lightweight SQL-RAG layer: it reads settled samples only,
+        never writes, and uses business dates rather than created_at so a
+        backtest day cannot see future samples.
+        """
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            self._ensure_reviewer_learning_schema(cursor)
+            if not self._table_exists(cursor, "alpha_setup_sample"):
+                return []
+            trading_day_value = self._normalize_trading_day_value(trading_date)
+            if not trading_day_value:
+                return []
+
+            ticker_value = str(ticker or "").upper()
+            sector_value = str(sector or "")
+            side_value = str(side or "").lower()
+            horizon_value = str(horizon_class or "")
+            regime_value = str(market_regime or "")
+            setup_value = str(setup_type or "")
+            has_explicit_state_request = bool(
+                ticker_value
+                and side_value
+                and side_value != "*"
+                and horizon_value
+                and horizon_value != "*"
+                and regime_value
+                and regime_value not in {"*", "unknown"}
+                and setup_value
+                and setup_value not in {"*", "unknown", "generic_trade_setup", "direction_only", "tradeable_setup", "deployable_alpha"}
+            )
+
+            params: List[Any] = [config_id, trading_day_value]
+            where = [
+                "config_id = ?",
+                "trading_date < ?",
+            ]
+            if ticker_value:
+                if sector_value:
+                    where.append("(ticker = ? OR sector = ?)")
+                    params.extend([ticker_value, sector_value])
+                else:
+                    where.append("ticker = ?")
+                    params.append(ticker_value)
+            elif sector_value:
+                where.append("sector = ?")
+                params.append(sector_value)
+            if side_value and side_value != "*":
+                where.append("side IN (?, '*')")
+                params.append(side_value)
+            if horizon_value and horizon_value != "*":
+                where.append("horizon_class IN (?, '*', 'unknown')")
+                params.append(horizon_value)
+            if regime_value and regime_value != "*":
+                where.append("market_regime IN (?, '*', 'unknown')")
+                params.append(regime_value)
+            if setup_value and setup_value != "*":
+                where.append("setup_type IN (?, '*', 'unknown', 'generic_trade_setup')")
+                params.append(setup_value)
+
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM alpha_setup_sample
+                WHERE {' AND '.join(where)}
+                ORDER BY
+                    CASE WHEN ticker = ? THEN 0 ELSE 1 END,
+                    CASE WHEN setup_type = ? THEN 0 ELSE 1 END,
+                    CASE WHEN market_regime = ? THEN 0 ELSE 1 END,
+                    trading_date DESC,
+                    created_at DESC
+                LIMIT ?
+                ''',
+                tuple(params + [ticker_value or "*", setup_value or "*", regime_value or "*", max(int(limit) * 8, int(limit))]),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            if not rows:
+                return []
+
+            def _safe_float(value, default: float = 0.0) -> float:
+                try:
+                    if value is None:
+                        return default
+                    return float(value)
+                except Exception:
+                    return default
+
+            def _safe_int(value, default: int = 0) -> int:
+                try:
+                    if value is None:
+                        return default
+                    return int(float(value))
+                except Exception:
+                    return default
+
+            def _classify_action(row: Dict[str, Any]) -> str:
+                text = str(row.get("action_taken") or row.get("pm_action") or "").lower()
+                target_lots = _safe_int(row.get("target_lots"))
+                if "execution" in text or "trigger" in text or "fill" in text:
+                    return "execution"
+                if text in {"open_long", "open_short"}:
+                    return "open"
+                if text in {"close_long", "close_short"}:
+                    return "exit"
+                if text == "hold":
+                    return "hold_position" if target_lots else "observe"
+                if target_lots:
+                    return "open" if _safe_int(row.get("executed_lots")) else "observe"
+                return "observe"
+
+            def _reward_signal_for_row(row: Dict[str, Any]) -> tuple[Optional[float], str]:
+                reward = _safe_float(row.get("net_pnl")) - _safe_float(row.get("commission"))
+                source_type = str(row.get("source_type") or "").strip().lower()
+                if _safe_int(row.get("executed_lots")) > 0 or source_type == "trade":
+                    return reward, "real_trade"
+                if source_type.startswith("shadow_"):
+                    return reward * 0.35, "shadow_prior"
+                return None, "ignored"
+
+            def _is_real_trade_row(row: Dict[str, Any]) -> bool:
+                return _safe_int(row.get("executed_lots")) > 0 or str(row.get("source_type") or "").strip().lower() == "trade"
+
+            def _matches_requested_state(row: Dict[str, Any]) -> bool:
+                if not has_explicit_state_request:
+                    return False
+                if ticker_value and str(row.get("ticker") or "").upper() != ticker_value:
+                    return False
+                if side_value and side_value != "*" and str(row.get("side") or "").lower() != side_value:
+                    return False
+                if horizon_value and horizon_value != "*" and str(row.get("horizon_class") or "") != horizon_value:
+                    return False
+                if regime_value and regime_value != "*" and str(row.get("market_regime") or "") != regime_value:
+                    return False
+                if setup_value and setup_value != "*" and str(row.get("setup_type") or "") != setup_value:
+                    return False
+                return True
+
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for row in rows:
+                grouped.setdefault(_classify_action(row), []).append(row)
+
+            result: List[Dict[str, Any]] = []
+            for action_name, action_rows in grouped.items():
+                reward_values: List[float] = []
+                real_trade_reward_count = 0
+                shadow_reward_count = 0
+                for row in action_rows:
+                    reward, reward_source = _reward_signal_for_row(row)
+                    if reward is None:
+                        continue
+                    reward_values.append(reward)
+                    if reward_source == "real_trade":
+                        real_trade_reward_count += 1
+                    elif reward_source == "shadow_prior":
+                        shadow_reward_count += 1
+                sample_count = len(action_rows)
+                reward_sum = sum(reward_values)
+                reward_mean = reward_sum / len(reward_values) if reward_values else 0.0
+                win_rate = (sum(1 for value in reward_values if value > 0) / len(reward_values)) if reward_values else 0.0
+                confidence_score = min(0.85, 0.12 + min(0.35, sample_count / 12.0) + min(0.25, abs(win_rate - 0.5)) + min(0.13, abs(reward_sum) / 50000.0))
+                if reward_mean > 0 and reward_sum > 0:
+                    policy_hint = "controlled_open_or_add" if action_name in {"open", "add_or_open"} else "controlled_probe_or_hold"
+                elif reward_mean < 0 or reward_sum < 0:
+                    policy_hint = "cap_reduce_or_revalidate"
+                else:
+                    policy_hint = "observe_or_probe"
+                exact_rows = [
+                    row for row in action_rows
+                    if str(row.get("ticker") or "").upper() == ticker_value
+                ]
+                exact_real_rows = [
+                    row for row in exact_rows
+                    if _is_real_trade_row(row)
+                ]
+                exact_state_real_rows = [
+                    row for row in exact_real_rows
+                    if _matches_requested_state(row)
+                ]
+                partial_state_real_rows = [
+                    row for row in exact_real_rows
+                    if row not in exact_state_real_rows
+                ]
+                similar_real_rows = [
+                    row for row in action_rows
+                    if _is_real_trade_row(row) and row not in exact_real_rows
+                ]
+                exact_shadow_rows = [
+                    row for row in exact_rows
+                    if str(row.get("source_type") or "").strip().lower().startswith("shadow_")
+                ]
+                loss_reward_count = sum(1 for value in reward_values if value < 0)
+                tail_loss_count = sum(1 for value in reward_values if value <= -1000.0)
+                worst_reward = min(reward_values) if reward_values else 0.0
+                if exact_state_real_rows:
+                    scope_quality = "exact_real_state"
+                elif partial_state_real_rows:
+                    scope_quality = "partial_real_state"
+                elif similar_real_rows or real_trade_reward_count > 0:
+                    scope_quality = "similar_sql_prior"
+                elif shadow_reward_count > 0:
+                    scope_quality = "shadow_prior"
+                else:
+                    scope_quality = "unqualified"
+                usage_boundary = {
+                    "contract_version": "agentquant.research_action_value.v1",
+                    "lane": action_name,
+                    "usable_by": ["analysis_team", "portfolio_manager", "protocol_governor"],
+                    "allowed_effects": ["similar_setup_prior", "probe_or_revalidation_context"],
+                    "forbidden_effects": [
+                        "direct_trade_authority",
+                        "real_budget_entry",
+                        "scale_position",
+                        "open_amplification",
+                        "change_lots",
+                        "change_direction",
+                        "change_target_lots",
+                        "change_margin_ratio",
+                        "bypass_final_action_contract",
+                        "bypass_auditor",
+                        "bypass_trader",
+                    ],
+                    "source_quality": scope_quality,
+                    "reward_source": "similar_sql_prior",
+                    "must_flow_through_final_action_contract": True,
+                    "does_not_create_trade_authority": True,
+                }
+                signal_calibration = {
+                    "contract_version": "agentquant.analysis_signal_calibration.v1",
+                    "source_action_value_contract": "agentquant.research_action_value.v1",
+                    "source_action_value_lane": action_name,
+                    "source_quality": scope_quality,
+                    "reward_source": "similar_sql_prior",
+                    "usable_by": ["analysis_team"],
+                    "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
+                    "forbidden_effects": [
+                        "trade_authority",
+                        "lots",
+                        "margin_ratio",
+                        "direction_override",
+                        "bypass_pm",
+                        "bypass_auditor",
+                        "bypass_trader",
+                    ],
+                    "current_data_must_dominate": True,
+                }
+                result.append({
+                    "scope_key": (
+                        f"similar_sql_rag|{ticker_value or '*'}|{sector_value or '*'}|"
+                        f"{side_value or '*'}|{horizon_value or '*'}|{regime_value or '*'}|"
+                        f"{setup_value or '*'}|{action_name}"
+                    ),
+                    "ticker": ticker_value if exact_rows else "*",
+                    "side": side_value or "*",
+                    "horizon_class": horizon_value or "*",
+                    "market_regime": regime_value or "*",
+                    "setup_type": setup_value or "*",
+                    "data_combo": "similar_alpha_setup_sql",
+                    "action_name": action_name,
+                    "sample_count": sample_count,
+                    "reward_sum": reward_sum,
+                    "reward_mean": reward_mean,
+                    "win_rate": win_rate,
+                    "confidence_score": confidence_score,
+                    "policy_hint": policy_hint,
+                    "max_position_impact": 0.0,
+                    "valid_until": trading_day_value,
+                    "payload": {
+                        "research_output_contract_version": "agentquant.research_action_value.v1",
+                        "source": "similar_alpha_setup_sql",
+                        "action_value_lane": action_name,
+                        "strict_no_lookahead": True,
+                        "date_filter": "alpha_setup_sample.trading_date < decision_date",
+                        "decision_date": trading_day_value,
+                        "exact_ticker_sample_count": len(exact_real_rows),
+                        "exact_ticker_real_trade_sample_count": len(exact_real_rows),
+                        "exact_state_real_trade_sample_count": len(exact_state_real_rows),
+                        "partial_state_real_trade_sample_count": len(partial_state_real_rows),
+                        "similar_real_trade_sample_count": len(similar_real_rows),
+                        "amplification_scope_quality": scope_quality,
+                        "exact_ticker_shadow_sample_count": len(exact_shadow_rows),
+                        "total_sample_count": sample_count,
+                        "real_trade_reward_count": real_trade_reward_count,
+                        "shadow_reward_count": shadow_reward_count,
+                        "loss_reward_count": loss_reward_count,
+                        "tail_loss_count": tail_loss_count,
+                        "worst_reward": worst_reward,
+                        "shadow_reward_weight": 0.35,
+                        "has_shadow_samples": shadow_reward_count > 0,
+                        "shadow_prior_only": shadow_reward_count > 0 and real_trade_reward_count <= 0,
+                        "episode_dates": sorted({str(row.get("trading_date") or "")[:10] for row in action_rows if row.get("trading_date")})[-6:],
+                        "prior_only_no_direct_authority": True,
+                        "usage_boundary": usage_boundary,
+                        "usable_by": usage_boundary["usable_by"],
+                        "allowed_effects": usage_boundary["allowed_effects"],
+                        "forbidden_effects": usage_boundary["forbidden_effects"],
+                        "signal_calibration": signal_calibration,
+                    },
+                })
+            result.sort(
+                key=lambda row: (
+                    0 if str(row.get("ticker") or "").upper() == ticker_value else 1,
+                    -abs(_safe_float(row.get("reward_sum"))),
+                    -_safe_int(row.get("sample_count")),
+                )
+            )
+            return result[: int(limit)]
+        except Exception as e:
+            logger.warning(f"Similar alpha setup action-value retrieval unavailable for {ticker}: {e}")
             return []
         finally:
             if conn:
@@ -2725,8 +3607,9 @@ class SQLiteDB(BaseDB):
                 params.append(str(market_regime))
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
+                where.append("trading_date < ?")
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2776,8 +3659,10 @@ class SQLiteDB(BaseDB):
                 params.append(str(horizon_class))
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
+                where.append("last_sample_date IS NOT NULL")
+                where.append("last_sample_date < ?")
                 where.append("(valid_until IS NULL OR valid_until >= ?)")
-                params.append(trading_day_value)
+                params.extend([trading_day_value, trading_day_value])
             cursor.execute(
                 f'''
                 SELECT *
@@ -2867,12 +3752,6 @@ class SQLiteDB(BaseDB):
         return (values[0], values[1], values[2])
 
     def _signal_combo_from_snapshot(self, snapshot: Dict[str, Any]) -> tuple[str, str, str]:
-        plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-        combo = plan.get("analyst_signal_combo") if isinstance(plan, dict) else None
-        normalized = self._normalize_signal_combo(combo)
-        if normalized is not None:
-            return normalized
-
         def signal_value(analyst: str) -> str:
             item = snapshot.get(analyst)
             if isinstance(item, dict) and item.get("signal"):
@@ -2888,9 +3767,23 @@ class SQLiteDB(BaseDB):
         )
 
     def _decision_planner_from_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-        planner = (plan.get("trade_auditor") or plan.get("decision_planner")) if isinstance(plan, dict) else None
-        return planner if isinstance(planner, dict) else {}
+        audit = snapshot.get("active_opportunity_audit")
+        if isinstance(audit, dict):
+            decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
+            if decision:
+                return {
+                    "decision": decision.get("audit_decision") or decision.get("decision") or decision.get("authority_type"),
+                    "reasons": audit.get("reason_codes") or decision.get("reason_codes") or [],
+                    "source": "active_opportunity_audit",
+                }
+        contract = snapshot.get("final_action_contract")
+        if isinstance(contract, dict):
+            return {
+                "decision": contract.get("authority_type") or contract.get("final_action"),
+                "reasons": contract.get("reason_codes") or [],
+                "source": "final_action_contract",
+            }
+        return {}
 
     def get_account_drawdown_state(
         self,

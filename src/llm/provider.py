@@ -21,6 +21,7 @@ class Provider(str, Enum):
     """Supported LLM providers"""
     OPENAI = "OpenAI"
     CODEX_OPENAI = "CodexOpenAI"
+    TQXAI = "TQXAI"
     ANTHROPIC = "Anthropic"
     DEEPSEEK = "DeepSeek"
     ALIBABA = "Alibaba"
@@ -42,6 +43,12 @@ class Provider(str, Enum):
                 model_class=ChatOpenAI,
                 base_url="http://47.74.0.65/v1",
                 env_key="CODEX_OPENAI_API_KEY",
+                structured_output_method="json_mode",
+            ),
+            Provider.TQXAI: ModelConfig(
+                model_class=ChatOpenAI,
+                base_url="https://llm.tqx.ai/v1",
+                env_key="TQX_LLM_API_KEY",
                 structured_output_method="json_mode",
             ),
             Provider.ANTHROPIC: ModelConfig(

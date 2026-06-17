@@ -64,6 +64,45 @@ _ALPHA_RELEASE_TIER_ORDER = {
     "max_boost": 4,
 }
 
+_SOFT_LIMITED_PRE_CONTROL_REASONS = {
+    "business_quality_probe_only",
+    "business_quality_observe_or_block",
+    "opportunity_scorecard_probe_seed",
+    "single_high_quality_probe_only",
+    "pm_direction_only_probe_cap",
+    "horizon_consistency_probe_cap",
+    "market_confirmation_quality_gate",
+    "market_confirmation_conflict",
+    "weak_signal_combo_probe_cap",
+    "side_performance_probe_cap",
+    "trade_auditor_soft_probe_floor",
+    "trade_auditor_scale_to_zero",
+    "missing_pretrade_invalidation",
+    "fast_candidate_alpha_probe",
+    "unknown_alpha_probe",
+    "negative_expectancy_cap_or_exit",
+    "soft_block_converted_to_probe_only",
+}
+
+
+def _soft_limited_pre_control_reasons(pre_control_reasons: list[str] | None) -> list[str]:
+    """Return prior soft-risk reasons that must not be enlarged by capital allocation."""
+    matched: list[str] = []
+    for raw in pre_control_reasons or []:
+        reason = str(raw or "").strip()
+        if not reason:
+            continue
+        lower = reason.lower()
+        if (
+            lower in _SOFT_LIMITED_PRE_CONTROL_REASONS
+            or lower.endswith("_probe_cap")
+            or lower.endswith("_probe_only")
+            or lower.endswith("_scale_down")
+            or lower.endswith("_cap_or_exit")
+        ):
+            matched.append(reason)
+    return sorted(set(matched))
+
 
 def _normalize_alpha_release_tier(value, default: str = "normal") -> str:
     text = str(value or default).strip().lower()
@@ -127,7 +166,19 @@ def _resolve_alpha_release_tier(
     sample_count = _int(evidence.get("sample_count"))
     win_rate = _float(evidence.get("win_rate"))
     net_pnl = _float(evidence.get("net_pnl"))
-    combo_specific = _memory_signal_combo_is_specific(evidence, signal_combo) if evidence else False
+    policy_type = str(evidence.get("policy_type") or "").lower()
+    evidence_source = str(evidence.get("evidence_source") or "").lower()
+    policy_scope_specific = (
+        bool(policy_type)
+        and str(evidence.get("ticker") or "*") != "*"
+        and str(evidence.get("side") or "*") != "*"
+        and str(evidence.get("signal_template") or "*") != "*"
+    )
+    combo_specific = (
+        _memory_signal_combo_is_specific(evidence, signal_combo)
+        if evidence and evidence_source != "adaptive_policy_state"
+        else policy_scope_specific
+    )
     require_specific_combo = bool(control.get("require_specific_signal_combo_for_strong_scaling", True))
     boost_min_score = _float(
         control.get("alpha_release_boost_min_confirmation_score"),
@@ -342,6 +393,7 @@ def _apply_capital_utilization_control(
     strategy_memory: dict | None = None,
     adaptive_policy_state: list | None = None,
     analyst_signals: list | None = None,
+    pre_control_reasons: list[str] | None = None,
 ) -> tuple[float, list[str], list[str], dict]:
     reasons: list[str] = []
     notes: list[str] = []
@@ -353,6 +405,7 @@ def _apply_capital_utilization_control(
         return position_ratio, reasons, notes, diagnostics
 
     side = _target_side_from_ratio(position_ratio)
+    soft_limited_reasons = _soft_limited_pre_control_reasons(pre_control_reasons)
     allow_protected_scaling = bool(control.get("allow_memory_protected_scaling", True))
     allow_recovering_scaling = bool(control.get("allow_recovering_template_scaling", False))
     high_quality_memory, learning_diagnostics = high_quality_learning_context(
@@ -475,6 +528,39 @@ def _apply_capital_utilization_control(
         }
     elif not is_new_or_increasing:
         return position_ratio, reasons, notes, diagnostics
+
+    if (
+        soft_limited_reasons
+        and bool(control.get("respect_pre_control_soft_limits", True))
+        and not same_side_matched_add_on
+        and not high_quality_memory
+    ):
+        diagnostics["capital_utilization_skip"] = "pre_control_soft_limit"
+        diagnostics["capital_utilization_pre_control_soft_limit"] = {
+            "reasons": soft_limited_reasons,
+            "kept_ratio": float(position_ratio),
+            "current_ratio": float(current_ratio),
+            "does_not_block_trade": True,
+            "prevents_reinflating_probe_or_cap": True,
+            "release_evidence_present": False,
+        }
+        reasons.append("capital_utilization_soft_limit_respected")
+        notes.append(
+            f"{ticker} capital utilization kept prior soft-limited ratio "
+            f"{position_ratio:.2%}; reasons={soft_limited_reasons}"
+        )
+        return position_ratio, reasons, notes, diagnostics
+    if soft_limited_reasons and high_quality_memory:
+        diagnostics["capital_utilization_soft_risk_arbiter"] = {
+            "reasons": soft_limited_reasons,
+            "release_evidence_present": True,
+            "allowed_to_continue": True,
+            "boundary": (
+                "soft risks do not reinflate weak probes by themselves; "
+                "same-scope high-quality learning may continue to normal alpha-release sizing, "
+                "still bounded by current confirmation, stop protection, final authority, and hard risk"
+            ),
+        }
 
     trade_control = full_config.get("trade_frequency_control", {}) or {}
     weak_combos = [tuple(item) for item in (trade_control.get("weak_signal_combos") or [])]

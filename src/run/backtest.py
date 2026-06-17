@@ -15,6 +15,8 @@ SRC_ROOT = RUN_DIR.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from util.config_normalizer import normalize_config
+
 
 @dataclass
 class ScriptResult:
@@ -71,7 +73,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_yaml_config(config_path: Path) -> dict:
     with config_path.open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return normalize_config(yaml.safe_load(fh), config_path)
 
 
 def parse_day(value: str) -> datetime:
@@ -149,6 +151,68 @@ def run_command(command: List[str], env: dict) -> int:
     return completed.returncode
 
 
+def run_protocol_preflight(config_arg: str, local_db: bool) -> int:
+    command = [
+        sys.executable,
+        str(RUN_DIR / "control" / "protocol_preflight.py"),
+        "--config",
+        config_arg,
+        "--json",
+        "--check-llm-auth",
+    ]
+    if local_db:
+        command.append("--local-db")
+    print("[backtest] Running control/protocol_preflight.py")
+    return run_command(command, os.environ.copy())
+
+
+def run_pre_backtest_acceptance(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
+    command = [
+        sys.executable,
+        str(RUN_DIR / "control" / "pre_backtest_acceptance.py"),
+        "--config",
+        config_arg,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--json",
+        "--check-llm-auth",
+    ]
+    if local_db:
+        command.extend(["--db-path", str(SRC_ROOT / "assets" / "agentquant.db")])
+    print("[backtest] Running control/pre_backtest_acceptance.py")
+    return run_command(command, os.environ.copy())
+
+
+def run_system_invariant_audit(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
+    command = [
+        sys.executable,
+        str(RUN_DIR / "control" / "system_invariant_audit.py"),
+        "--config",
+        config_arg,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--json",
+    ]
+    if local_db:
+        command.append("--local-db")
+    print("[backtest] Running control/system_invariant_audit.py")
+    return run_command(command, os.environ.copy())
+
+
+def run_daily_cumulative_system_invariant_audit(
+    config_arg: str,
+    start_date: str,
+    trading_day: str,
+    local_db: bool,
+) -> int:
+    print(f"[backtest] Running control/system_invariant_audit.py through {trading_day}")
+    return run_system_invariant_audit(config_arg, start_date, trading_day, local_db)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -169,6 +233,16 @@ def main() -> int:
         raise ValueError("backtest.py currently supports china_futures only.")
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
+
+    acceptance_return_code = run_pre_backtest_acceptance(
+        config_arg,
+        args.start_date,
+        args.end_date,
+        args.local_db,
+    )
+    if acceptance_return_code != 0:
+        print(f"[backtest] pre_backtest_acceptance.py failed with exit code {acceptance_return_code}")
+        return acceptance_return_code
 
     trading_days = resolve_trading_days(config, start_date, end_date)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -247,6 +321,19 @@ def main() -> int:
                 )
                 return return_code
 
+        invariant_return_code = run_daily_cumulative_system_invariant_audit(
+            config_arg,
+            trading_days[0],
+            trading_day,
+            args.local_db,
+        )
+        if invariant_return_code != 0:
+            print(
+                "[backtest] Stopped on "
+                f"{trading_day}: system_invariant_audit.py failed with exit code {invariant_return_code}"
+            )
+            return invariant_return_code
+
     if args.run_eval and args.skip_eval:
         raise ValueError("--run-eval and --skip-eval cannot be used together.")
 
@@ -264,6 +351,16 @@ def main() -> int:
         if eval_return_code != 0:
             print(f"[backtest] evaluate_config.py failed with exit code {eval_return_code}")
             return eval_return_code
+
+    invariant_return_code = run_system_invariant_audit(
+        config_arg,
+        trading_days[0],
+        trading_days[-1],
+        args.local_db,
+    )
+    if invariant_return_code != 0:
+        print(f"[backtest] system_invariant_audit.py failed with exit code {invariant_return_code}")
+        return invariant_return_code
 
     if args.plot:
         plot_command = [sys.executable, str(RUN_DIR / "plot_config.py"), "--config", config_arg]

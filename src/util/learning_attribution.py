@@ -47,6 +47,191 @@ def _as_mapping_list(value: Any) -> List[Mapping[str, Any]]:
     return []
 
 
+def _json_text(value: Any) -> str:
+    try:
+        import json
+
+        return json.dumps(value, ensure_ascii=False, sort_keys=True).lower()
+    except Exception:
+        return str(value or "").lower()
+
+
+def _walk_mappings(value: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        yield value
+        for child in value.values():
+            yield from _walk_mappings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_mappings(child)
+
+
+def _technical_calibration_applied(snapshot: Mapping[str, Any] | None) -> bool:
+    for item in _walk_mappings(snapshot or {}):
+        calibration = item.get("technical_parameter_calibration")
+        if isinstance(calibration, Mapping):
+            applied = calibration.get("applied")
+            if isinstance(applied, list) and applied:
+                return True
+    return False
+
+
+def _policy_rows_from_diagnostics(diagnostics: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    rows: List[Mapping[str, Any]] = []
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    for key in (
+        "adaptive_policy_applied",
+        "provisional_policy_applied",
+        "adaptive_policy_state",
+        "policy_state",
+        "tail_loss_sentinel",
+        "alpha_promotion",
+        "loss_template_policy",
+        "technical_parameter_calibration",
+    ):
+        rows.extend(_as_mapping_list(diagnostics.get(key)))
+    learning = diagnostics.get("capital_utilization_learning")
+    if isinstance(learning, Mapping):
+        for key in ("adaptive_protect_record", "tail_loss_record", "protected_memory", "recovering_memory"):
+            rows.extend(_as_mapping_list(learning.get(key)))
+    return rows
+
+
+def _policy_like_rows_from_anywhere(value: Any) -> List[Mapping[str, Any]]:
+    """Collect policy/memory-looking rows from nested PM/Auditor traces.
+
+    Learning attribution is diagnostic, but it must see the same structured
+    evidence that PM and Auditor used. This keeps learned/unlearned and
+    learning_mechanism:* policies from missing effects that are present in
+    learning_to_position_trace rather than only in Auditor diagnostics.
+    """
+
+    rows: List[Mapping[str, Any]] = []
+    for item in _walk_mappings(value):
+        if any(
+            key in item
+            for key in (
+                "policy_type",
+                "policy_action",
+                "memory_type",
+                "memory_state",
+                "position_authority",
+                "technical_parameter_calibration",
+            )
+        ):
+            rows.append(item)
+    return rows
+
+
+def _add_mechanisms_from_policy_row(mechanisms: set[str], row: Mapping[str, Any]) -> None:
+    policy_type = str(row.get("policy_type") or row.get("source") or row.get("memory_type") or "").lower()
+    policy_action = str(row.get("policy_action") or row.get("action") or "").lower()
+    memory_state = str(row.get("memory_state") or "").lower()
+    position_authority = str(row.get("position_authority") or "").lower()
+    combined = " ".join(part for part in (policy_type, policy_action, memory_state, position_authority) if part)
+    if "alpha_promotion" in combined:
+        mechanisms.add("alpha_promotion")
+    if "tail_loss_sentinel" in combined:
+        mechanisms.add("tail_loss_sentinel")
+    if "loss_template" in combined:
+        mechanisms.add("loss_template_policy")
+    if "learned_vs_unlearned" in combined:
+        mechanisms.add("learned_vs_unlearned")
+    if "technical_parameter" in combined:
+        mechanisms.add("technical_parameter_calibration")
+    if "strategy_memory" in combined or memory_state:
+        mechanisms.add("strategy_memory")
+        if memory_state in {"protected", "deployable"} or "protected" in combined or "deployable" in combined:
+            mechanisms.add("strategy_memory_protected")
+        elif memory_state == "recovering" or "recovering" in combined:
+            mechanisms.add("strategy_memory_recovering")
+        elif memory_state == "weak_block" or "weak_block" in combined:
+            mechanisms.add("strategy_memory_weak_block")
+        elif memory_state == "watchlist" or "watchlist" in combined:
+            mechanisms.add("strategy_memory_watchlist")
+
+
+def learning_mechanisms_from_context(
+    reasons: Iterable[Any] | None,
+    diagnostics: Mapping[str, Any] | None,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+) -> List[str]:
+    """Return fine-grained learning mechanism labels for evaluation.
+
+    These labels are diagnostic only. They split the broad learned/unlearned
+    bucket into concrete mechanisms without changing trading behavior.
+    """
+
+    mechanisms: set[str] = set()
+    reason_texts = [str(reason).lower() for reason in reasons or [] if reason]
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    diagnostic_text = _json_text(diagnostics)
+
+    for text in reason_texts:
+        if "alpha_promotion" in text or text in {item.lower() for item in CAPITAL_LEARNING_REASONS}:
+            mechanisms.add("alpha_promotion")
+        if "tail_loss_sentinel" in text:
+            mechanisms.add("tail_loss_sentinel")
+        if "loss_template" in text:
+            mechanisms.add("loss_template_policy")
+        if "learned_underperformance" in text or "learned_vs_unlearned" in text:
+            mechanisms.add("learned_vs_unlearned")
+        if "strategy_memory" in text:
+            mechanisms.add("strategy_memory")
+            if "weak_block" in text:
+                mechanisms.add("strategy_memory_weak_block")
+            elif "watchlist" in text:
+                mechanisms.add("strategy_memory_watchlist")
+            elif any(marker in text for marker in ("protected", "deployable", "recovering")):
+                mechanisms.add("strategy_memory_protected")
+
+    for row in _policy_rows_from_diagnostics(diagnostics):
+        _add_mechanisms_from_policy_row(mechanisms, row)
+    for row in _policy_like_rows_from_anywhere(diagnostics):
+        _add_mechanisms_from_policy_row(mechanisms, row)
+
+    strategy_rule = diagnostics.get("strategy_memory_rule")
+    if isinstance(strategy_rule, Mapping):
+        mechanisms.add("strategy_memory")
+        memory_state = str(strategy_rule.get("memory_state") or "").lower()
+        if memory_state in {"protected", "deployable"}:
+            mechanisms.add("strategy_memory_protected")
+        elif memory_state == "recovering":
+            mechanisms.add("strategy_memory_recovering")
+        elif memory_state == "weak_block":
+            mechanisms.add("strategy_memory_weak_block")
+        elif memory_state == "watchlist":
+            mechanisms.add("strategy_memory_watchlist")
+
+    if _technical_calibration_applied(snapshot):
+        mechanisms.add("technical_parameter_calibration")
+    if "technical_parameter_calibration" in diagnostic_text:
+        mechanisms.add("technical_parameter_calibration")
+    if "loss_template_policy" in diagnostic_text:
+        mechanisms.add("loss_template_policy")
+    if "alpha_promotion" in diagnostic_text:
+        mechanisms.add("alpha_promotion")
+    if "tail_loss_sentinel" in diagnostic_text:
+        mechanisms.add("tail_loss_sentinel")
+    if "learned_vs_unlearned" in diagnostic_text:
+        mechanisms.add("learned_vs_unlearned")
+    has_strategy_memory_text = "strategy_memory" in diagnostic_text
+    if has_strategy_memory_text:
+        mechanisms.add("strategy_memory")
+        if "weak_block" in diagnostic_text:
+            mechanisms.add("strategy_memory_weak_block")
+        if "watchlist" in diagnostic_text:
+            mechanisms.add("strategy_memory_watchlist")
+        if (
+            "protected" in diagnostic_text
+            or "deployable" in diagnostic_text
+        ):
+            mechanisms.add("strategy_memory_protected")
+
+    return sorted(mechanisms)
+
+
 def learning_tags_from_context(
     reasons: Iterable[Any] | None,
     diagnostics: Mapping[str, Any] | None,
@@ -147,6 +332,24 @@ def summarize_pairs_by_learning_effect(pairs: Iterable[Mapping[str, Any]]) -> Di
         for effect in effects or []:
             grouped[str(effect)].append(pair)
     return {effect: _effect_trade_summary(rows) for effect, rows in sorted(grouped.items())}
+
+
+def summarize_pairs_by_learning_mechanism(pairs: Iterable[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for pair in pairs or []:
+        if not isinstance(pair, Mapping):
+            continue
+        for mechanism in pair.get("learning_mechanisms") or []:
+            grouped[str(mechanism)].append(pair)
+    return {mechanism: _effect_trade_summary(rows) for mechanism, rows in sorted(grouped.items())}
+
+
+def learning_mechanism_counts(pairs: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
+    counter: Counter[str] = Counter()
+    for pair in pairs or []:
+        if isinstance(pair, Mapping):
+            counter.update(str(item) for item in pair.get("learning_mechanisms") or [])
+    return dict(sorted(counter.items()))
 
 
 def learning_effect_counts(pairs: Iterable[Mapping[str, Any]]) -> Dict[str, int]:

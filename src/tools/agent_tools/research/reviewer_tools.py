@@ -3,6 +3,7 @@
 """Reviewer tools for Phase4 validation, reporting, and daily transaction logs."""
 
 import json
+import os
 import sqlite3
 import uuid
 from collections import Counter, defaultdict
@@ -29,8 +30,11 @@ from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trad
 from util.learning_attribution import (
     learning_effect_counts,
     learning_effects_from_context,
+    learning_mechanism_counts,
+    learning_mechanisms_from_context,
     learning_tags_from_context,
     summarize_pairs_by_learning_effect,
+    summarize_pairs_by_learning_mechanism,
 )
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
@@ -154,12 +158,6 @@ def _apply_net_exposure_review(
         snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
         if not isinstance(snapshot, dict):
             continue
-        pre_open_plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-        control_diagnostics = (
-            pre_open_plan.get("control_diagnostics")
-            if isinstance(pre_open_plan.get("control_diagnostics"), dict)
-            else {}
-        )
         execution_translation = (
             snapshot.get("execution_translation")
             if isinstance(snapshot.get("execution_translation"), dict)
@@ -168,8 +166,6 @@ def _apply_net_exposure_review(
         candidates = [
             execution_translation.get("dynamic_net_exposure_control"),
             snapshot.get("dynamic_net_exposure_control"),
-            control_diagnostics.get("net_exposure_control"),
-            pre_open_plan.get("dynamic_net_exposure_control"),
         ]
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -280,8 +276,7 @@ def _validate_recommendation_execution_audit(
 
 
 def _market_confirmation_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    confirmation = plan.get("market_confirmation") or snapshot.get("market_confirmation")
+    confirmation = snapshot.get("market_confirmation")
     return confirmation if isinstance(confirmation, dict) else {}
 
 
@@ -379,6 +374,60 @@ def _collect_market_confirmation_quality_summary(recommendations: List[Dict[str,
     return summary
 
 
+def _audit_signal_data_lineage(
+    recommendations: List[Dict[str, Any]],
+    *,
+    expected_analysts: Iterable[str],
+) -> Dict[str, Any]:
+    analysts = tuple(str(analyst) for analyst in expected_analysts if analyst)
+    artifact_missing: List[str] = []
+    snapshot_missing: List[str] = []
+    data_issue_counts: Counter = Counter()
+    data_issue_features: Dict[str, set[str]] = defaultdict(set)
+    dates_by_ticker: Dict[str, set[str]] = defaultdict(set)
+
+    for recommendation in recommendations:
+        ticker = _ticker_label(recommendation.get("underlying_code") or recommendation.get("ticker"))
+        rec_date = _normalize_date(
+            recommendation.get("trading_date")
+            or recommendation.get("effective_trade_date")
+            or ""
+        )[:10]
+        if rec_date:
+            dates_by_ticker[ticker].add(rec_date)
+        if not recommendation.get("signal_snapshot_artifact_path") and not recommendation.get("signal_snapshot"):
+            artifact_missing.append(ticker)
+        snapshot = _recommendation_snapshot(recommendation)
+        payloads = _analyst_payloads(snapshot)
+        for analyst in analysts:
+            if analyst not in payloads:
+                snapshot_missing.append(f"{ticker}:{analyst}")
+
+        confirmation = _market_confirmation(snapshot)
+        for feature, status in (confirmation.get("feature_status") or {}).items():
+            status_text = str(status or "unknown")
+            if status_text == "ok":
+                continue
+            data_issue_counts[status_text] += 1
+            data_issue_features[status_text].add(str(feature))
+
+    return {
+        "recommendation_count": len(recommendations),
+        "artifact_missing": sorted(set(artifact_missing)),
+        "snapshot_missing_pairs": sorted(set(snapshot_missing)),
+        "data_issue_counts": dict(sorted(data_issue_counts.items())),
+        "data_issue_features": {
+            status: sorted(features)
+            for status, features in sorted(data_issue_features.items())
+        },
+        "recommendation_dates_by_ticker": {
+            ticker: sorted(values)
+            for ticker, values in sorted(dates_by_ticker.items())
+        },
+        "verified": not artifact_missing and not snapshot_missing,
+    }
+
+
 def _market_confirmation_quality_warnings(summary: Dict[str, Any]) -> List[str]:
     warnings: List[str] = []
     parameter_tickers = summary.get("tickers_with_parameter_errors") or []
@@ -444,8 +493,8 @@ def _collect_recommendation_quality_warnings(recommendations: List[Dict[str, Any
         if not isinstance(snapshot, dict):
             continue
         ticker = recommendation.get("underlying_code") or recommendation.get("ticker")
-        plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-        reasons = plan.get("control_reasons") or plan.get("reasons") or []
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        reasons = contract.get("reason_codes") or contract.get("risk_flags") or []
         if reasons:
             warnings.append(f"{ticker}: strategy controls recorded: {reasons}")
     return warnings, market_summary
@@ -669,190 +718,6 @@ def _no_trade_reason_category_counts(no_trade_reason_counter: Counter) -> Dict[s
     return _sorted_counter_dict(category_counter)
 
 
-def _control_reasons_from_plan(plan: Dict[str, Any]) -> List[str]:
-    reasons: List[str] = []
-    for key in ("control_reasons", "reasons"):
-        value = plan.get(key)
-        if isinstance(value, list):
-            reasons.extend(str(item) for item in value if item)
-    rebalance = plan.get("rebalance_summary") if isinstance(plan.get("rebalance_summary"), dict) else {}
-    value = rebalance.get("control_reasons")
-    if isinstance(value, list):
-        reasons.extend(str(item) for item in value if item)
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    value = controls.get("reasons")
-    if isinstance(value, list):
-        reasons.extend(str(item) for item in value if item)
-    auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    if isinstance(auditor, dict):
-        value = auditor.get("reasons")
-        if isinstance(value, list):
-            reasons.extend(str(item) for item in value if item)
-    return sorted(set(reasons))
-
-
-def _auditor_decision_from_plan(plan: Dict[str, Any]) -> str:
-    auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    if isinstance(auditor, dict):
-        return str(auditor.get("decision") or "").lower()
-    return ""
-
-
-def _memory_state_from_plan(plan: Dict[str, Any]) -> str:
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    learning = diagnostics.get("capital_utilization_learning") if isinstance(diagnostics.get("capital_utilization_learning"), dict) else {}
-    for key in ("protected_memory", "recovering_memory"):
-        row = learning.get(key)
-        if isinstance(row, dict) and row.get("memory_state"):
-            return str(row.get("memory_state")).lower()
-    auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    auditor_diag = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-    memory = auditor_diag.get("strategy_memory") if isinstance(auditor_diag.get("strategy_memory"), dict) else {}
-    for key in ("combo", "side_memory"):
-        row = memory.get(key)
-        if isinstance(row, dict) and row.get("memory_state"):
-            return str(row.get("memory_state")).lower()
-    for row in memory.get("records") or []:
-        if isinstance(row, dict) and row.get("memory_state"):
-            return str(row.get("memory_state")).lower()
-    return ""
-
-
-def _memory_row_from_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    learning = diagnostics.get("capital_utilization_learning") if isinstance(diagnostics.get("capital_utilization_learning"), dict) else {}
-    for key in ("protected_memory", "adaptive_protect_record", "recovering_memory"):
-        row = learning.get(key)
-        if isinstance(row, dict) and row.get("memory_state"):
-            return row
-    auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    auditor_diag = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-    memory = auditor_diag.get("strategy_memory") if isinstance(auditor_diag.get("strategy_memory"), dict) else {}
-    for key in ("combo", "side_memory"):
-        row = memory.get(key)
-        if isinstance(row, dict) and row.get("memory_state"):
-            return row
-    for row in memory.get("records") or []:
-        if isinstance(row, dict) and row.get("memory_state"):
-            return row
-    return {}
-
-
-def _plan_has_explicit_stop(plan: Dict[str, Any]) -> bool:
-    candidates = [
-        plan,
-        plan.get("signal_lifecycle") if isinstance(plan.get("signal_lifecycle"), dict) else {},
-        plan.get("pretrade_invalidation") if isinstance(plan.get("pretrade_invalidation"), dict) else {},
-    ]
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    pretrade = diagnostics.get("pretrade_invalidation_control")
-    if isinstance(pretrade, dict):
-        candidates.append(pretrade)
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        if item.get("invalidation_level") is not None:
-            return True
-        if item.get("explicit_stop_protection") is True or item.get("stop_protected") is True:
-            return True
-        try:
-            if float(item.get("atr_stop_distance") or 0.0) > 0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
-
-def _plan_has_structured_invalidation(plan: Dict[str, Any]) -> bool:
-    if _plan_has_explicit_stop(plan):
-        return True
-    structured_fields = (
-        "counter_evidence",
-        "would_change_view_if",
-        "do_not_trade_reason",
-        "invalidation_condition",
-        "risk_boundary",
-    )
-    candidates = [
-        plan,
-        plan.get("signal_lifecycle") if isinstance(plan.get("signal_lifecycle"), dict) else {},
-        plan.get("pretrade_invalidation") if isinstance(plan.get("pretrade_invalidation"), dict) else {},
-    ]
-    controls = plan.get("strategy_controls") if isinstance(plan.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    pretrade = diagnostics.get("pretrade_invalidation_control")
-    if isinstance(pretrade, dict):
-        candidates.append(pretrade)
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        if item.get("structured_invalidation") is True:
-            return True
-        for field in structured_fields:
-            value = item.get(field)
-            if isinstance(value, str) and value.strip():
-                return True
-            if isinstance(value, (list, tuple, set)) and any(str(part).strip() for part in value):
-                return True
-    return False
-
-
-def _plan_memory_combo_is_specific(row: Dict[str, Any]) -> bool:
-    raw_combo = (row or {}).get("signal_combo")
-    if isinstance(raw_combo, (list, tuple)):
-        return bool(raw_combo) and "*" not in {str(item).strip() for item in raw_combo}
-    text = str(raw_combo or "").strip()
-    return bool(text) and text != "*"
-
-
-def _recommendation_alpha_release_tier(
-    *,
-    plan: Dict[str, Any],
-    cfg: Dict[str, Any],
-    learned_quality: bool,
-    confirmation_score: float,
-) -> tuple[str, Dict[str, Any]]:
-    control = cfg.get("capital_utilization_control") or {}
-    row = _memory_row_from_plan(plan)
-    combo_specific = _plan_memory_combo_is_specific(row)
-    stop_protected = _plan_has_explicit_stop(plan)
-    structured_invalidation = stop_protected or _plan_has_structured_invalidation(plan)
-    tier = "boost" if learned_quality else "probe"
-    limiting_reasons: List[str] = []
-    min_boost_score = _safe_float(
-        control.get("alpha_release_boost_min_confirmation_score"),
-        _safe_float(control.get("memory_protected_min_confirmation_score"), 0.45),
-    )
-    if confirmation_score < min_boost_score:
-        tier = "normal" if learned_quality else "probe"
-        limiting_reasons.append("confirmation_below_alpha_release_boost_threshold")
-    if not structured_invalidation:
-        tier = "probe"
-        limiting_reasons.append("missing_pretrade_invalidation")
-    if structured_invalidation and not stop_protected:
-        tier = "normal"
-        limiting_reasons.append("missing_explicit_stop_for_alpha_release_boost")
-    if not combo_specific:
-        tier = "normal" if tier in {"boost", "max_boost"} else tier
-        limiting_reasons.append("generic_memory_cannot_trigger_alpha_release_boost")
-    max_score = _safe_float(
-        control.get("alpha_release_max_boost_min_confirmation_score"),
-        _safe_float(control.get("exceptional_validated_min_confirmation_score"), 0.85),
-    )
-    if tier == "boost" and confirmation_score >= max_score:
-        tier = "max_boost"
-    return tier, {
-        "tier": tier,
-        "stop_protected": stop_protected,
-        "structured_invalidation": structured_invalidation,
-        "specific_signal_combo": combo_specific,
-        "limiting_reasons": limiting_reasons,
-    }
-
-
 def _has_hard_capital_reason(reasons: Iterable[str]) -> bool:
     text = " ".join(str(reason).lower() for reason in reasons)
     return any(token in text for token in CAPITAL_HARD_RISK_REASON_TOKENS)
@@ -860,24 +725,57 @@ def _has_hard_capital_reason(reasons: Iterable[str]) -> bool:
 
 def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = _recommendation_snapshot(recommendation)
-    plan = _pre_open_plan(snapshot)
     confirmation = _market_confirmation(snapshot)
-    rebalance = plan.get("rebalance_summary") if isinstance(plan.get("rebalance_summary"), dict) else {}
     execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    authority = (
+        snapshot.get("final_new_entry_trade_authority")
+        if isinstance(snapshot.get("final_new_entry_trade_authority"), dict)
+        else {}
+    )
+    position_budget = snapshot.get("position_budget_policy") if isinstance(snapshot.get("position_budget_policy"), dict) else {}
+    final_trade_authority = (
+        authority
+        if authority
+        else (contract.get("evidence_used") or {}).get("final_new_entry_trade_authority")
+        if isinstance(contract.get("evidence_used"), dict)
+        else {}
+    )
     ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-    target_ratio = _safe_float(plan.get("target_position_ratio") or recommendation.get("target_position_ratio"))
-    current_ratio = _safe_float(plan.get("current_ticker_exposure"))
-    target_side = _target_side_from_ratio(target_ratio)
+    target_lots = _safe_int(contract.get("target_lots"))
+    current_lots = _safe_int(contract.get("current_lots"))
+    target_ratio = _safe_float(contract.get("target_position_ratio") or recommendation.get("target_position_ratio"))
+    current_ratio = 0.0
+    target_side = _target_side_from_ratio(target_lots if target_lots else target_ratio)
     no_trade_reason = (
         execution_result.get("no_trade_reason")
-        or plan.get("tradable_lots_reason")
-        or rebalance.get("reason")
+        or contract.get("tradable_lots_reason")
         or recommendation.get("warning_message")
     )
     no_trade_reason = normalize_no_trade_reason(no_trade_reason) if no_trade_reason else ""
-    control_reasons = _control_reasons_from_plan(plan)
-    auditor_decision = _auditor_decision_from_plan(plan)
-    memory_state = _memory_state_from_plan(plan)
+    control_reasons = [str(item) for item in (contract.get("reason_codes") or []) if item]
+    auditor_decision = str(contract.get("authority_type") or final_trade_authority.get("authority_type") or "")
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+    capital_learning = (
+        learning_used.get("capital_utilization_learning")
+        if isinstance(learning_used.get("capital_utilization_learning"), dict)
+        else {}
+    )
+    capital_target = (
+        learning_used.get("capital_utilization_target")
+        if isinstance(learning_used.get("capital_utilization_target"), dict)
+        else {}
+    )
+    alpha_release = (
+        capital_target.get("alpha_release")
+        if isinstance(capital_target.get("alpha_release"), dict)
+        else {}
+    )
+    memory_state = str(
+        learning_used.get("memory_state")
+        or ((capital_learning.get("protected_memory") or {}).get("memory_state") if isinstance(capital_learning.get("protected_memory"), dict) else "")
+        or ""
+    )
     confirmation_score = _safe_float(confirmation.get("confirmation_score"))
     min_scale_score = _safe_float(
         (cfg.get("capital_utilization_control") or {}).get("min_confirmation_score_for_scaling"),
@@ -890,12 +788,15 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     learned_quality = memory_state in {"protected", "deployable", "recovering"}
     required_score = protected_min_score if learned_quality else min_scale_score
     hard_capital_reason = _has_hard_capital_reason(control_reasons)
-    alpha_release_tier, alpha_release_requirements = _recommendation_alpha_release_tier(
-        plan=plan,
-        cfg=cfg,
-        learned_quality=learned_quality,
-        confirmation_score=confirmation_score,
-    )
+    alpha_release_tier = str(capital_target.get("alpha_release_tier") or ("normal" if learned_quality else "probe"))
+    alpha_release_requirements = {
+        "tier": alpha_release_tier,
+        "source": "final_action_contract",
+        "stop_protected": bool(capital_target.get("stop_protected")),
+        "structured_invalidation": bool(capital_target.get("structured_invalidation")),
+        "specific_signal_combo": bool(alpha_release.get("specific_signal_combo")),
+        "limiting_reasons": alpha_release.get("limiting_reasons") or [],
+    }
     alpha_release_eligible = (
         target_side in {"long", "short"}
         and abs(target_ratio) > 1e-12
@@ -906,18 +807,45 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
         and "weak_block" not in memory_state
         and alpha_release_tier in {"normal", "boost", "max_boost"}
     )
+    capital_utilization_skip = ""
+    position_budget_decision = str(position_budget.get("decision") or "")
+    final_trade_authority_decision = str(final_trade_authority.get("decision") or "")
+    if target_side not in {"long", "short"} or abs(target_ratio) <= 1e-12:
+        capital_path_stage = "no_directional_target"
+    elif hard_capital_reason or auditor_decision in {"block", "reduce_only"}:
+        capital_path_stage = "hard_or_auditor_block"
+    elif final_trade_authority_decision and final_trade_authority_decision != "allow_real_new_entry":
+        capital_path_stage = "final_trade_authority"
+    elif position_budget_decision in {
+        "minimum_margin_not_reachable_watchlist",
+        "no_feasible_lot",
+        "final_entry_authority_not_met",
+    }:
+        capital_path_stage = "position_budget"
+    elif capital_utilization_skip:
+        capital_path_stage = "capital_utilization"
+    elif no_trade_reason in {"intraday_trigger_not_met", "intraday_opening_range_incomplete"}:
+        capital_path_stage = "execution_timing"
+    elif no_trade_reason:
+        capital_path_stage = "pm_or_execution_no_trade"
+    elif alpha_release_eligible:
+        capital_path_stage = "capital_release_candidate"
+    else:
+        capital_path_stage = "directional_target_unclassified"
     return {
         "ticker": ticker,
         "side": target_side,
         "target_position_ratio": target_ratio,
         "current_position_ratio": current_ratio,
-        "target_lots": _safe_int(plan.get("target_lots_estimate")),
-        "current_lots": _safe_int(plan.get("current_lots_before_open")),
-        "tradable_lots": _safe_int(plan.get("tradable_lots_if_executed_now")),
+        "target_margin_ratio_estimate": _safe_float(contract.get("target_margin_ratio_estimate")),
+        "margin_required": 0.0,
+        "target_lots": target_lots,
+        "current_lots": current_lots,
+        "tradable_lots": _safe_int(contract.get("tradable_lots_if_executed_now")),
         "no_trade_reason": no_trade_reason,
-        "rebalance_action_type": str(rebalance.get("action_type") or ""),
+        "rebalance_action_type": str(contract.get("final_action") or ""),
         "confirmation_score": confirmation_score,
-        "signal_confidence": _safe_float(plan.get("signal_confidence")),
+        "signal_confidence": _safe_float(_first_analyst_field(snapshot, "confidence")),
         "auditor_decision": auditor_decision,
         "memory_state": memory_state,
         "control_reasons": control_reasons,
@@ -926,6 +854,16 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
         "alpha_release_tier": alpha_release_tier,
         "alpha_release_requirements": alpha_release_requirements,
         "required_confirmation_score": required_score,
+        "capital_path_stage": capital_path_stage,
+        "capital_utilization_skip": capital_utilization_skip,
+        "capital_target_mode": "",
+        "dynamic_allocation_tier": "",
+        "dynamic_opportunity_margin_ratio_budget": 0.0,
+        "position_budget_decision": position_budget_decision,
+        "position_budget_target_margin_after": _safe_float(position_budget.get("target_margin_after")),
+        "position_budget_min_required_margin": _safe_float(position_budget.get("min_required_margin")),
+        "final_trade_authority_decision": final_trade_authority_decision,
+        "final_trade_authority_requires_authority": bool(final_trade_authority.get("requires_authority")),
     }
 
 
@@ -962,6 +900,53 @@ def _build_capital_deployment_diagnostics(
     recommendation_items = [
         _recommendation_capital_item(recommendation, cfg)
         for recommendation in strategy_recommendations
+    ]
+    capital_path_stage_counts: Counter = Counter(
+        item["capital_path_stage"] for item in recommendation_items
+    )
+    capital_utilization_skip_counts: Counter = Counter(
+        item["capital_utilization_skip"]
+        for item in recommendation_items
+        if item.get("capital_utilization_skip")
+    )
+    position_budget_decision_counts: Counter = Counter(
+        item["position_budget_decision"]
+        for item in recommendation_items
+        if item.get("position_budget_decision")
+    )
+    final_trade_authority_decision_counts: Counter = Counter(
+        item["final_trade_authority_decision"]
+        for item in recommendation_items
+        if item.get("final_trade_authority_decision")
+    )
+    directional_items = [
+        item for item in recommendation_items
+        if item["side"] in {"long", "short"} and abs(item["target_position_ratio"]) > 1e-12
+    ]
+    tradable_items = [
+        item for item in directional_items
+        if item["tradable_lots"] != 0
+    ]
+    blocked_directional_items = [
+        item for item in directional_items
+        if item["tradable_lots"] == 0 or item["no_trade_reason"]
+    ]
+    capital_path_cases = [
+        {
+            "ticker": item["ticker"],
+            "side": item["side"],
+            "capital_path_stage": item["capital_path_stage"],
+            "no_trade_reason": item["no_trade_reason"],
+            "target_position_ratio": item["target_position_ratio"],
+            "target_margin_ratio_estimate": item["target_margin_ratio_estimate"],
+            "confirmation_score": item["confirmation_score"],
+            "capital_utilization_skip": item["capital_utilization_skip"],
+            "position_budget_decision": item["position_budget_decision"],
+            "final_trade_authority_decision": item["final_trade_authority_decision"],
+            "capital_target_mode": item["capital_target_mode"],
+            "dynamic_allocation_tier": item["dynamic_allocation_tier"],
+        }
+        for item in blocked_directional_items[:15]
     ]
     alpha_release_candidates = [
         {
@@ -1117,6 +1102,14 @@ def _build_capital_deployment_diagnostics(
         "category_counts": _sorted_counter_dict(category_counts),
         "action_counts": _sorted_counter_dict(action_counts),
         "reason_profiles": reason_profiles,
+        "capital_path_stage_counts": _sorted_counter_dict(capital_path_stage_counts),
+        "capital_utilization_skip_counts": _sorted_counter_dict(capital_utilization_skip_counts),
+        "position_budget_decision_counts": _sorted_counter_dict(position_budget_decision_counts),
+        "final_trade_authority_decision_counts": _sorted_counter_dict(final_trade_authority_decision_counts),
+        "directional_candidate_count": len(directional_items),
+        "tradable_directional_candidate_count": len(tradable_items),
+        "blocked_directional_candidate_count": len(blocked_directional_items),
+        "capital_path_cases": capital_path_cases,
         "alpha_release_candidate_count": len(alpha_release_candidates),
         "alpha_release_candidates": alpha_release_candidates[:10],
         "recovery_probe_candidate_count": len(recovery_probe_candidates),
@@ -1267,7 +1260,6 @@ def _action_label(action: Any) -> str:
 
 
 def _recommendation_direction(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
-    plan = _pre_open_plan(snapshot)
     side = _recommendation_side(recommendation, snapshot)
     if side in {"long", "short"}:
         return side
@@ -1276,8 +1268,7 @@ def _recommendation_direction(recommendation: Dict[str, Any], snapshot: Dict[str
         return "long"
     if "short" in action:
         return "short"
-    target_ratio = plan.get("target_position_ratio") or recommendation.get("target_position_ratio")
-    return _target_side_from_ratio(target_ratio)
+    return _target_side_from_ratio(recommendation.get("target_position_ratio"))
 
 
 def _analyst_signal_line(snapshot: Dict[str, Any], analyst: str) -> str:
@@ -1595,7 +1586,6 @@ def _build_daily_transaction_report(
     for ticker in sorted(grouped_transactions):
         recommendation = recommendations_by_ticker.get(_ticker_label(ticker)) or {}
         snapshot = snapshots_by_id.get(str(recommendation.get("id") or "")) or _recommendation_snapshot(recommendation)
-        plan = _pre_open_plan(snapshot)
         for tx in grouped_transactions[ticker]:
             lines.append(
                 f"  {ticker} - {_action_label(tx.get('action'))} {int(tx.get('lots') or 0)} lot(s), "
@@ -1606,15 +1596,18 @@ def _build_daily_transaction_report(
                 lines.append("")
                 lines.append("  【融合决策依据】")
                 lines.append(f"  {justification}")
-            control_notes = plan.get("control_notes") or plan.get("control_reasons") or []
+            contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+            control_notes = contract.get("reason_codes") or []
             if control_notes:
                 lines.append(f"  【控制规则】{control_notes}")
             lines.append(
-                "  【盘前目标计划】"
-                f"target_lots={plan.get('target_lots_estimate')}; "
-                f"target_position_ratio={_percent(plan.get('target_position_ratio'))}; "
-                f"tradable_lots_if_executed_now={plan.get('tradable_lots_if_executed_now')} "
-                f"({plan.get('tradable_lots_reason')})"
+                "  【最终交易契约】"
+                f"final_action={contract.get('final_action')}; "
+                f"current_lots={contract.get('current_lots')}; "
+                f"target_lots={contract.get('target_lots')}; "
+                f"lots_delta={contract.get('lots_delta')}; "
+                f"tradable_lots_if_executed_now={contract.get('tradable_lots_if_executed_now')} "
+                f"({contract.get('tradable_lots_reason')})"
             )
             analyst_lines = _analyst_reason_lines(snapshot, limit=420)
             if analyst_lines:
@@ -1644,7 +1637,7 @@ def _build_daily_transaction_report(
         reason_category = categorize_no_trade_reason(reason)
         snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
         combo = _signal_combo_from_snapshot(snapshot) if isinstance(snapshot, dict) else ["Neutral", "Neutral", "Neutral"]
-        plan = _pre_open_plan(snapshot) if isinstance(snapshot, dict) else {}
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot, dict) and isinstance(snapshot.get("final_action_contract"), dict) else {}
         direction = _recommendation_direction(recommendation, snapshot if isinstance(snapshot, dict) else {})
         lines.append(
             f"  {ticker} - 融合方向={direction}; 未交易原因={reason}; "
@@ -1655,11 +1648,13 @@ def _build_daily_transaction_report(
             lines.append("  【融合决策依据】")
             lines.append(f"  {justification}")
         lines.append(
-            "  【盘前目标计划】"
-            f"target_lots={plan.get('target_lots_estimate')}; "
-            f"target_position_ratio={_percent(plan.get('target_position_ratio'))}; "
-            f"tradable_lots_if_executed_now={plan.get('tradable_lots_if_executed_now')} "
-            f"({plan.get('tradable_lots_reason')})"
+            "  【最终交易契约】"
+            f"final_action={contract.get('final_action')}; "
+            f"current_lots={contract.get('current_lots')}; "
+            f"target_lots={contract.get('target_lots')}; "
+            f"lots_delta={contract.get('lots_delta')}; "
+            f"tradable_lots_if_executed_now={contract.get('tradable_lots_if_executed_now')} "
+            f"({contract.get('tradable_lots_reason')})"
         )
         analyst_lines = _analyst_reason_lines(snapshot if isinstance(snapshot, dict) else {}, limit=360)
         if analyst_lines:
@@ -1787,7 +1782,9 @@ def _write_daily_transaction_report(
         phase4_completed_at_override=phase4_completed_at_override,
         phase4_message_override=phase4_message_override,
     )
-    output_path = SRC_ROOT / "logs" / f"{trading_date}_transaction.log"
+    configured_report_dir = os.getenv("AGENTQUANT_TRANSACTION_REPORT_DIR")
+    output_dir = Path(configured_report_dir) if configured_report_dir else SRC_ROOT / "logs"
+    output_path = output_dir / f"{trading_date}_transaction.log"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report_text, encoding="utf-8")
     return output_path
@@ -1829,7 +1826,9 @@ def _write_reviewer_learning_report(
 ) -> Dict[str, str]:
     """Write the Phase4 reviewer learning pack required for audit and replay."""
     run_key = run_id or getattr(logger, "run_id", None) or "manual"
-    report_dir = (output_root or (SRC_ROOT / "logs" / "reviewer")) / str(run_key)
+    configured_log_dir = os.getenv("AGENTQUANT_LOG_DIR")
+    default_report_root = Path(configured_log_dir) / "reviewer" if configured_log_dir else SRC_ROOT / "logs" / "reviewer"
+    report_dir = (output_root or default_report_root) / str(run_key)
     report_dir.mkdir(parents=True, exist_ok=True)
     md_path = report_dir / f"{trading_date}.md"
     json_path = report_dir / f"{trading_date}.json"
@@ -2061,6 +2060,11 @@ def _write_reviewer_learning_report(
     if isinstance(effect_summary, dict):
         for effect, payload in effect_summary.items():
             lines.append(_trade_performance_report_line(f"effect:{effect}", payload))
+    mechanism_summary = learned_vs_unlearned.get("learning_mechanism_summary") or {}
+    lines.append(f"- learning_mechanism_counts: {learned_vs_unlearned.get('learning_mechanism_counts', {})}")
+    if isinstance(mechanism_summary, dict):
+        for mechanism, payload in mechanism_summary.items():
+            lines.append(_trade_performance_report_line(f"mechanism:{mechanism}", payload))
     lines.append(f"- sample_status: {learned_vs_unlearned.get('status', 'unknown')}")
     lines.extend(["", "## Neutral Accountability"])
     lines.extend(
@@ -2172,6 +2176,34 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _compact_text(value: Any, max_chars: int = 160) -> str:
+    text = str(value or "").strip().replace("\n", " ")
+    text = " ".join(text.split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _walk_dicts(value: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _ensure_research_learning_schema(cursor: sqlite3.Cursor) -> None:
+    """Ensure Phase4 research tables exist before writing newer feedback rows."""
+    try:
+        from database.sqlite_setup import _ensure_reviewer_learning_schema
+
+        _ensure_reviewer_learning_schema(cursor)
+    except Exception as exc:
+        logger.warning(f"Reviewer learning schema ensure skipped: {exc}")
+
+
 def _target_side_from_ratio(value: Any) -> str:
     ratio = _safe_float(value)
     if ratio > 0:
@@ -2186,15 +2218,10 @@ def _signal_side(signal: Any) -> str:
 
 
 def _signal_combo_from_snapshot(snapshot: Dict[str, Any]) -> List[str]:
-    plan = snapshot.get("pre_open_plan") if isinstance(snapshot.get("pre_open_plan"), dict) else {}
-    combo = plan.get("analyst_signal_combo") if isinstance(plan, dict) else None
-    if isinstance(combo, list):
-        values = [str(item) for item in combo[:3]]
-    else:
-        values = []
-        for analyst in ANALYSTS:
-            item = snapshot.get(analyst)
-            values.append(str(item.get("signal") if isinstance(item, dict) else "Neutral"))
+    values = []
+    for analyst in ANALYSTS:
+        item = snapshot.get(analyst)
+        values.append(str(item.get("signal") if isinstance(item, dict) else "Neutral"))
     while len(values) < 3:
         values.append("Neutral")
     return values[:3]
@@ -2247,13 +2274,25 @@ def _recommendation_snapshot(recommendation: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _pre_open_plan(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    plan = snapshot.get("pre_open_plan")
-    return plan if isinstance(plan, dict) else {}
+    if not isinstance(snapshot.get("pre_open_plan"), dict):
+        return {}
+    return {
+        "pm_draft_pre_open_plan_not_trade_source": True,
+        "not_learning_source": True,
+        "not_execution_source": True,
+    }
+
+
+def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    safe = dict(snapshot or {})
+    if "pre_open_plan" in safe:
+        safe.pop("pre_open_plan", None)
+        safe["pm_draft_pre_open_plan_removed"] = True
+    return safe
 
 
 def _market_confirmation(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    plan = _pre_open_plan(snapshot)
-    confirmation = plan.get("market_confirmation") or snapshot.get("market_confirmation")
+    confirmation = snapshot.get("market_confirmation")
     return confirmation if isinstance(confirmation, dict) else {}
 
 
@@ -2261,13 +2300,18 @@ def _market_regime(snapshot: Dict[str, Any]) -> str:
     explicit = _first_analyst_field(snapshot, "market_regime")
     if explicit:
         return str(explicit)
+    contract = snapshot.get("final_action_contract")
+    if isinstance(contract, dict) and contract.get("market_regime") not in (None, "", "unknown"):
+        return str(contract.get("market_regime"))
     technical = snapshot.get("technical")
     if isinstance(technical, dict):
         context = ((technical.get("metadata") or {}).get("technical_context") or {})
         if isinstance(context, dict) and context.get("market_regime"):
             return str(context.get("market_regime"))
-    plan = _pre_open_plan(snapshot)
-    return str(plan.get("market_regime") or "unknown")
+    summary = _opportunity_contract_summary(snapshot)
+    if summary.get("market_regime"):
+        return str(summary.get("market_regime"))
+    return "unknown"
 
 
 def _price_stage(snapshot: Dict[str, Any]) -> str:
@@ -2315,11 +2359,6 @@ def _first_structured_signal_value(snapshot: Dict[str, Any], field_names: Iterab
                 value = context.get(field_name) if isinstance(context, dict) else None
                 if value not in (None, "", "unknown"):
                     return value
-    plan = _pre_open_plan(snapshot)
-    for field_name in names:
-        value = plan.get(field_name)
-        if value not in (None, "", "unknown"):
-            return value
     return None
 
 
@@ -2354,10 +2393,6 @@ def _expected_horizon_days(snapshot: Dict[str, Any], side: str) -> int:
     explicit_from_analyst = _safe_int(_first_analyst_field(snapshot, "expected_horizon_days"), 0)
     if explicit_from_analyst > 0:
         return explicit_from_analyst
-    plan = _pre_open_plan(snapshot)
-    explicit = _safe_int(plan.get("expected_horizon_days"), 0)
-    if explicit > 0:
-        return explicit
     combo = _signal_combo_from_snapshot(snapshot)
     if side == "flat":
         return 0
@@ -2374,10 +2409,6 @@ def _horizon_class(days: int, snapshot: Optional[Dict[str, Any]] = None) -> str:
         decision_horizon = scope.get("decision_horizon")
         if decision_horizon and str(decision_horizon) != "unknown":
             return str(decision_horizon)
-        plan = _pre_open_plan(snapshot)
-        explicit = plan.get("decision_horizon") or plan.get("horizon_class")
-        if explicit:
-            return str(explicit)
         # Preserve analyst natural horizons instead of defaulting to the first
         # analyst (usually technical short). This keeps medium fundamental
         # anchors and event_short news windows from being flattened.
@@ -2420,10 +2451,6 @@ def _trigger_type(snapshot: Dict[str, Any], side: str) -> str:
     explicit = _first_analyst_field(snapshot, "trigger_type")
     if explicit:
         return str(explicit)
-    plan = _pre_open_plan(snapshot)
-    trigger = plan.get("trigger_type")
-    if trigger:
-        return str(trigger)
     confirmation = _market_confirmation(snapshot)
     score = _safe_float(confirmation.get("confirmation_score"), 0.0)
     if score >= 0.70:
@@ -2437,9 +2464,6 @@ def _entry_type(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str
     explicit = _first_analyst_field(snapshot, "entry_type")
     if explicit:
         return str(explicit)
-    plan = _pre_open_plan(snapshot)
-    if plan.get("entry_type"):
-        return str(plan.get("entry_type"))
     action = str(recommendation.get("action") or "").lower()
     if "hold" in action:
         return "hold"
@@ -2449,13 +2473,18 @@ def _entry_type(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str
 
 
 def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
-    plan = _pre_open_plan(snapshot)
-    for key in ("target_side", "raw_target_side", "direction"):
-        if plan.get(key):
-            value = str(plan.get(key)).lower()
-            if value in {"long", "short", "flat"}:
-                return value
-    return _target_side_from_ratio(plan.get("target_position_ratio") or recommendation.get("target_position_ratio"))
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    target_lots = contract.get("target_lots") if isinstance(contract, dict) else None
+    if target_lots is not None:
+        side = _target_side_from_ratio(target_lots)
+        if side in {"long", "short", "flat"}:
+            return side
+    action = str(recommendation.get("action") or "").lower()
+    if "long" in action:
+        return "long"
+    if "short" in action:
+        return "short"
+    return _target_side_from_ratio(recommendation.get("target_position_ratio"))
 
 
 def _signal_template(side: str, combo: Iterable[str], snapshot: Dict[str, Any]) -> str:
@@ -2469,6 +2498,103 @@ def _signal_template(side: str, combo: Iterable[str], snapshot: Dict[str, Any]) 
     regime = _market_regime(snapshot).lower().replace(" ", "_")
     normalized_combo = "_".join(str(item).lower() for item in combo)
     return f"{side}_{trigger}_{regime}_{normalized_combo}"[:160]
+
+
+def _data_combo_key(data_usage: Dict[str, Any]) -> str:
+    """Build a compact data-combination key for same-scope research.
+
+    This is descriptive evidence for future comparison, not a new product rule.
+    """
+    if not isinstance(data_usage, dict):
+        return "data_unknown"
+    pieces: List[str] = []
+    analysts = data_usage.get("analysts") if isinstance(data_usage.get("analysts"), dict) else {}
+    for analyst, usage in sorted((analysts or {}).items()):
+        sources = usage.get("sources") if isinstance(usage, dict) else {}
+        for source_name, source in sorted((sources or {}).items()):
+            if not isinstance(source, dict):
+                continue
+            available = "ok" if source.get("available") else "missing"
+            used = "used" if source.get("used_in_signal") else "unused"
+            stale = "stale" if _safe_float(source.get("stale_ratio"), 0.0) > 0 or _safe_int(source.get("stale_indicator_count"), 0) > 0 else "fresh"
+            pieces.append(f"{analyst}.{source_name}:{available}:{used}:{stale}")
+    pm_sources = data_usage.get("pm_sources") if isinstance(data_usage.get("pm_sources"), dict) else {}
+    for source_name, source in sorted((pm_sources or {}).items()):
+        if isinstance(source, dict):
+            available = "ok" if source.get("available") else "missing"
+            used = "used" if source.get("used_in_signal") else "unused"
+            pieces.append(f"pm.{source_name}:{available}:{used}")
+    return "|".join(pieces[:8]) or "data_unknown"
+
+
+def _loss_failure_family(template: str, horizon: str, regime: str, data_combo: str) -> str:
+    text = f"{template} {horizon} {regime} {data_combo}".lower()
+    if "news_event" in text or "event_short" in text or "catalyst" in text:
+        return "news_event_probe_failure"
+    if "trend_continuation" in text and any(marker in text for marker in ("range", "choppy", "sideways", "oscillat")):
+        return "trend_continuation_choppy_failure"
+    if "fundamental_direction_anchor" in text or ("fundamental" in text and "medium" in text):
+        return "medium_fundamental_timing_failure"
+    if "missing" in text or "stale" in text:
+        return "data_gap_signal_failure"
+    return "general_same_scope_loss_failure"
+
+
+def _failure_family_actions(failure_family: str) -> Dict[str, List[str]]:
+    if failure_family == "news_event_probe_failure":
+        return {
+            "analysis": [
+                "News/event setups need catalyst relevance, price reaction, and market confirmation before confidence rises.",
+                "If event evidence is noisy or unconfirmed, describe the trigger that would turn watchlist into probe/open.",
+            ],
+            "trading": [
+                "PM should keep same-scope event probes small unless current price reaction and invalidation are explicit.",
+                "A news memory cannot justify continuing an adverse position without current confirmation.",
+            ],
+        }
+    if failure_family == "trend_continuation_choppy_failure":
+        return {
+            "analysis": [
+                "Trend-continuation setups in range/choppy regimes need breakout, volatility, and volume/open-interest confirmation.",
+                "If the regime is still choppy, analysts should lower trend confidence or name the breakout condition.",
+            ],
+            "trading": [
+                "PM should avoid full trend sizing in same-scope choppy setups without breakout and invalidation evidence.",
+                "Existing adverse positions need current trend repair evidence before position_matched is acceptable.",
+            ],
+        }
+    if failure_family == "medium_fundamental_timing_failure":
+        return {
+            "analysis": [
+                "Medium fundamental anchors must be bridged by short-term timing evidence before short-horizon trades.",
+                "Analysts should state the short-term trigger and the condition that invalidates the medium thesis today.",
+            ],
+            "trading": [
+                "PM should not use a medium thesis alone to open, add, or hold an adverse short-term position.",
+                "Same-scope trades need timing confirmation plus a price/ATR stop or structured invalidation boundary.",
+            ],
+        }
+    if failure_family == "data_gap_signal_failure":
+        return {
+            "analysis": [
+                "When key data are missing/stale, separate missing evidence from directional evidence.",
+                "Analysts should explain what data field would confirm or contradict the setup once available.",
+            ],
+            "trading": [
+                "PM should keep same-scope data-gap setups at observe/probe unless current non-missing evidence is strong.",
+                "Data gaps alone are not bearish/bullish evidence and cannot justify adverse holds.",
+            ],
+        }
+    return {
+        "analysis": [
+            "Compare today's signal combo, data drivers, horizon, and market state with the same-scope loss cases.",
+            "Name the current evidence that confirms or contradicts the remembered loss pattern.",
+        ],
+        "trading": [
+            "PM may demand clearer trigger and invalidation for same-scope repeats.",
+            "Do not convert this observation into a product blacklist or unconditional position cap.",
+        ],
+    }
 
 
 def _dotted_config_value(cfg: Dict[str, Any], key: str, default: Any = None) -> Any:
@@ -2560,6 +2686,7 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     contracts = snapshot.get("trade_research_contracts") if isinstance(snapshot.get("trade_research_contracts"), dict) else {}
     opportunity_types = []
     opportunity_layers = []
+    opportunity_states = []
     factor_focus = []
     conflicts = []
     for contract in contracts.values():
@@ -2569,6 +2696,8 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             opportunity_types.append(str(contract.get("opportunity_type")))
         if contract.get("opportunity_layer"):
             opportunity_layers.append(str(contract.get("opportunity_layer")))
+        if contract.get("opportunity_state"):
+            opportunity_states.append(str(contract.get("opportunity_state")))
         factor_focus.extend(str(item) for item in (contract.get("factor_focus") or []))
         conflicts.extend(str(item) for item in (contract.get("current_evidence_conflict") or []))
     if contracts:
@@ -2576,6 +2705,7 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "contract_version": "agentquant.research.v1",
             "dominant_opportunity_types": sorted(set(opportunity_types)),
             "opportunity_layers": sorted(set(opportunity_layers)),
+            "opportunity_states": sorted(set(opportunity_states)),
             "factor_focus": sorted(set(factor_focus))[:12],
             "current_evidence_conflict": sorted(set(conflicts))[:12],
         }
@@ -2583,12 +2713,32 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "contract_version": "agentquant.research.v1",
         "dominant_opportunity_types": [],
         "opportunity_layers": [],
+        "opportunity_states": [],
         "factor_focus": [],
         "current_evidence_conflict": [],
     }
 
 
-def _primary_opportunity_type(snapshot: Dict[str, Any]) -> str:
+def _scorecard_side_row(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
+    scorecard = (
+        snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+    )
+    if not isinstance(scorecard, dict):
+        return {}
+    normalized_side = str(side or "").lower()
+    if normalized_side in {"long", "short"} and isinstance(scorecard.get(normalized_side), dict):
+        return scorecard[normalized_side]
+    preferred = str(scorecard.get("preferred_side") or "").lower()
+    if preferred in {"long", "short"} and isinstance(scorecard.get(preferred), dict):
+        return scorecard[preferred]
+    return {}
+
+
+def _primary_opportunity_type(snapshot: Dict[str, Any], side: str = "") -> str:
+    scorecard_side = _scorecard_side_row(snapshot, side)
+    scorecard_type = str(scorecard_side.get("dominant_opportunity_type") or scorecard_side.get("opportunity_type") or "")
+    if scorecard_type and scorecard_type not in {"unknown", "no_trade"}:
+        return scorecard_type
     summary = _opportunity_contract_summary(snapshot)
     values = summary.get("dominant_opportunity_types") or []
     for value in values:
@@ -2597,10 +2747,11 @@ def _primary_opportunity_type(snapshot: Dict[str, Any]) -> str:
     return str(values[0]) if values else "unknown"
 
 
-def _primary_opportunity_layer(snapshot: Dict[str, Any]) -> str:
-    plan = _pre_open_plan(snapshot)
-    if plan.get("pm_decision_layer"):
-        return str(plan.get("pm_decision_layer"))
+def _primary_opportunity_layer(snapshot: Dict[str, Any], side: str = "") -> str:
+    scorecard_side = _scorecard_side_row(snapshot, side)
+    scorecard_layer = str(scorecard_side.get("final_layer") or "").lower()
+    if scorecard_layer in {"deployable_alpha", "tradeable_setup", "risk_reduction", "direction_only", "no_trade"}:
+        return scorecard_layer
     summary = _opportunity_contract_summary(snapshot)
     values = summary.get("opportunity_layers") or []
     for preferred in ("deployable_alpha", "tradeable_setup", "risk_reduction", "direction_only", "no_trade"):
@@ -2629,6 +2780,262 @@ def _confidence_from_summary(summary: Dict[str, Any]) -> float:
     win_rate = _safe_float(summary.get("win_rate") or summary.get("hit_rate"), 0.0)
     pnl = abs(_safe_float(summary.get("total_pnl") or summary.get("net_pnl"), 0.0))
     return min(1.0, min(0.45, sample_count / 10.0) + min(0.30, abs(win_rate - 0.50)) + min(0.25, pnl / 20000.0))
+
+
+def _policy_guard_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    guard = ((cfg.get("learning") or {}).get("policy_promotion_guard") or {})
+    return guard if bool(guard.get("enabled", False)) else {}
+
+
+def _pair_distinct_days(rows: Iterable[Dict[str, Any]]) -> int:
+    days = {
+        str(row.get("close_date") or row.get("trading_date") or row.get("open_date") or "")[:10]
+        for row in rows
+        if str(row.get("close_date") or row.get("trading_date") or row.get("open_date") or "").strip()
+    }
+    return len(days)
+
+
+def _pair_calendar_span_days(rows: Iterable[Dict[str, Any]]) -> int:
+    days = sorted(
+        {
+            str(row.get("close_date") or row.get("trading_date") or row.get("open_date") or "")[:10]
+            for row in rows
+            if str(row.get("close_date") or row.get("trading_date") or row.get("open_date") or "").strip()
+        }
+    )
+    if not days:
+        return 0
+    try:
+        first = datetime.strptime(days[0], "%Y-%m-%d")
+        last = datetime.strptime(days[-1], "%Y-%m-%d")
+    except ValueError:
+        return len(days)
+    return (last - first).days + 1
+
+
+def _max_abs_pnl_share(rows: Iterable[Dict[str, Any]]) -> float:
+    values = [abs(_safe_float(row.get("net_pnl"))) for row in rows]
+    total = sum(values)
+    if total <= 1e-9:
+        return 0.0
+    return max(values or [0.0]) / total
+
+
+def _policy_promotion_gate(
+    *,
+    cfg: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+    action: str,
+) -> Dict[str, Any]:
+    """Bound policy promotion so small or concentrated samples stay provisional."""
+    guard = _policy_guard_config(cfg)
+    sample_count = len(rows)
+    distinct_days = _pair_distinct_days(rows)
+    span_days = _pair_calendar_span_days(rows)
+    max_share = _max_abs_pnl_share(rows)
+    if not guard:
+        return {
+            "allowed": True,
+            "enabled": False,
+            "sample_count": sample_count,
+            "distinct_trade_days": distinct_days,
+            "calendar_span_days": span_days,
+            "max_single_trade_pnl_share": max_share,
+            "reasons": [],
+        }
+
+    action_value = str(action or "").lower()
+    is_positive = action_value in {"protect", "allow"}
+    min_days_key = "min_distinct_trade_days_for_protect" if is_positive else "min_distinct_trade_days_for_cap"
+    min_span_key = "min_calendar_span_days_for_protect" if is_positive else "min_calendar_span_days_for_cap"
+    min_days = _safe_int(guard.get(min_days_key), 5 if is_positive else 3)
+    min_span = _safe_int(guard.get(min_span_key), 10 if is_positive else 5)
+    max_allowed_share = _safe_float(guard.get("max_single_trade_pnl_share"), 0.65)
+    reasons: List[str] = []
+    if distinct_days < min_days:
+        reasons.append(f"distinct_trade_days={distinct_days}<{min_days}")
+    if span_days < min_span:
+        reasons.append(f"calendar_span_days={span_days}<{min_span}")
+    if sample_count > 1 and max_allowed_share > 0 and max_share > max_allowed_share:
+        reasons.append(f"single_trade_pnl_share={max_share:.2f}>{max_allowed_share:.2f}")
+    return {
+        "allowed": not reasons,
+        "enabled": True,
+        "sample_count": sample_count,
+        "distinct_trade_days": distinct_days,
+        "calendar_span_days": span_days,
+        "max_single_trade_pnl_share": max_share,
+        "min_distinct_trade_days": min_days,
+        "min_calendar_span_days": min_span,
+        "max_allowed_single_trade_pnl_share": max_allowed_share,
+        "reasons": reasons,
+    }
+
+
+def _scope_is_exact(scope: Dict[str, Any]) -> bool:
+    return all(str(scope.get(key) or "*") not in {"", "*", "unknown"} for key in (
+        "ticker",
+        "side",
+        "signal_template",
+        "horizon_class",
+        "market_regime",
+    ))
+
+
+def _shadow_reversal_stats(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+    scope: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Detect whether a suppressive policy would have repeatedly missed alpha."""
+    guard = _policy_guard_config(cfg)
+    shadow_cfg = guard.get("shadow_reversal") if isinstance(guard.get("shadow_reversal"), dict) else {}
+    if not guard or not bool(shadow_cfg.get("enabled", True)) or not _scope_is_exact(scope):
+        return {"reversal": False, "enabled": bool(guard), "samples": 0, "net_shadow_pnl": 0.0}
+    min_samples = _safe_int(shadow_cfg.get("min_samples"), 2)
+    min_net_pnl = _safe_float(shadow_cfg.get("min_net_pnl"), 3000.0)
+    cursor.execute(
+        """
+        SELECT id, trading_date, shadow_results_json
+        FROM no_trade_opportunity_memory
+        WHERE config_id = ?
+          AND ticker = ?
+          AND side = ?
+          AND signal_template = ?
+          AND horizon_class = ?
+          AND market_regime = ?
+          AND substr(trading_date, 1, 10) <= ?
+          AND shadow_results_json IS NOT NULL
+        """,
+        (
+            config_id,
+            str(scope.get("ticker") or "").upper(),
+            str(scope.get("side") or "").lower(),
+            str(scope.get("signal_template") or ""),
+            str(scope.get("horizon_class") or ""),
+            str(scope.get("market_regime") or ""),
+            trading_date,
+        ),
+    )
+    positive: List[Dict[str, Any]] = []
+    for row in cursor.fetchall():
+        results = _json_loads(row["shadow_results_json"]) or []
+        if not isinstance(results, list):
+            continue
+        latest = None
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if latest is None or str(result.get("evaluation_date") or "") >= str(latest.get("evaluation_date") or ""):
+                latest = result
+        if not latest:
+            continue
+        pnl = _safe_float(latest.get("shadow_pnl"))
+        if pnl > 0:
+            positive.append({"memory_id": row["id"], "trading_date": row["trading_date"], "shadow_pnl": pnl})
+    net_shadow = sum(_safe_float(item.get("shadow_pnl")) for item in positive)
+    return {
+        "reversal": len(positive) >= min_samples and net_shadow >= min_net_pnl,
+        "enabled": True,
+        "samples": len(positive),
+        "net_shadow_pnl": net_shadow,
+        "min_samples": min_samples,
+        "min_net_pnl": min_net_pnl,
+        "examples": positive[:8],
+    }
+
+
+def _deactivate_adaptive_policy_state(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    scope: Dict[str, Any],
+    policy_type: str,
+    reason: str,
+) -> int:
+    if not policy_type:
+        return 0
+    try:
+        cursor.execute(
+            """
+            UPDATE adaptive_policy_state
+            SET active = 0,
+                reason = ?
+            WHERE config_id = ?
+              AND ticker = ?
+              AND side = ?
+              AND signal_template = ?
+              AND horizon_class = ?
+              AND market_regime = ?
+              AND policy_type = ?
+              AND active = 1
+            """,
+            (
+                reason,
+                config_id,
+                str(scope.get("ticker") or "*").upper(),
+                str(scope.get("side") or "*").lower(),
+                str(scope.get("signal_template") or "*"),
+                str(scope.get("horizon_class") or "*"),
+                str(scope.get("market_regime") or "*"),
+                policy_type,
+            ),
+        )
+        return int(cursor.rowcount or 0)
+    except sqlite3.Error:
+        return 0
+
+
+def _deactivate_adaptive_policy_state_from_shadow_reversal(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    scope: Dict[str, Any],
+    policy_type: str,
+    shadow_reversal: Dict[str, Any],
+    reason: str,
+) -> int:
+    changed = _deactivate_adaptive_policy_state(
+        cursor,
+        config_id=config_id,
+        scope=scope,
+        policy_type=policy_type,
+        reason=reason,
+    )
+    examples = shadow_reversal.get("examples") if isinstance(shadow_reversal, dict) else []
+    for item in examples or []:
+        if not isinstance(item, dict):
+            continue
+        memory_id = item.get("memory_id")
+        if not memory_id:
+            continue
+        try:
+            cursor.execute(
+                """
+                SELECT ticker, side, signal_template, horizon_class, market_regime
+                FROM no_trade_opportunity_memory
+                WHERE config_id = ? AND id = ?
+                LIMIT 1
+                """,
+                (config_id, memory_id),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error:
+            row = None
+        if not row:
+            continue
+        changed += _deactivate_adaptive_policy_state(
+            cursor,
+            config_id=config_id,
+            scope=dict(row),
+            policy_type=policy_type,
+            reason=reason,
+        )
+    return changed
 
 
 def _policy_contract_payload(
@@ -2705,6 +3112,80 @@ def _policy_contract_payload(
         ],
         position_authority=position_authority,
         max_position_impact=max_impact,
+        sample_count=sample_count,
+        confidence_score=confidence,
+    )
+
+
+def _loss_template_policy_payload(
+    *,
+    reason: str,
+    scope: Dict[str, Any],
+    evidence: Dict[str, Any],
+    multiplier: float,
+    maturity_state: str = "validated_loss_template_policy",
+) -> Dict[str, Any]:
+    """Create a bounded policy for repeated loss templates.
+
+    This is deliberately narrower than a blacklist: it can only cap/probe the
+    same ticker/side/template/horizon/regime after current-day evidence still
+    looks comparable.
+    """
+    sample_count = _safe_int(evidence.get("sample_count") or evidence.get("total_trades"), 0)
+    confidence = _safe_float(evidence.get("confidence_score"), 0.0) or _confidence_from_summary(evidence)
+    return attach_or_upgrade_next_round_memory_contract(
+        {
+            **dict(evidence or {}),
+            "source": "loss_template_policy",
+            "policy_type": "loss_template_policy",
+            "policy_action": "cap",
+            "reason": reason,
+            "multiplier": multiplier,
+            "evidence": evidence,
+            "strategy_update_goal": "turn repeated attribution into next-round position discipline",
+        },
+        memory_type="loss_template_policy",
+        maturity_state=maturity_state,
+        status="applied",
+        scope=scope,
+        usable_memory=[
+            reason,
+            f"same-scope loss template; sample_count={sample_count}; multiplier={multiplier:.2f}",
+            f"failure_family={evidence.get('failure_family') or 'unknown'}; data_combo={_compact_text(evidence.get('data_combo') or '', 160)}",
+        ],
+        analysis_strategy_updates=[
+            *(
+                (evidence.get("failure_family_actions") or {}).get("analysis", [])
+                if isinstance(evidence.get("failure_family_actions"), dict)
+                else []
+            ),
+            "For the same scope, analysts must explicitly compare today's data drivers against the loss template before raising confidence.",
+            "If the same weak data mix repeats, downgrade conviction or name the new evidence that invalidates the old loss pattern.",
+        ],
+        trading_strategy_updates=[
+            *(
+                (evidence.get("failure_family_actions") or {}).get("trading", [])
+                if isinstance(evidence.get("failure_family_actions"), dict)
+                else []
+            ),
+            "PM/Auditor may cap to probe size when the same-scope loss template repeats without fresh confirmation.",
+            "The cap is not a product ban: if today's trigger, horizon, market state, and invalidation boundary improve, record the contradiction and allow normal review.",
+        ],
+        pm_action_conditions=[
+            "Apply only when ticker, side, template, horizon, and market regime still match.",
+            "Require current-day confirmation and explicit invalidation before any same-scope new/add-on position.",
+            "If an existing same-scope position is adverse and current evidence fails, prefer reduce/exit over position_matched.",
+        ],
+        invalidates_when=[
+            "Future same-scope samples repair expectancy or show positive net PnL.",
+            "Today's data drivers, market regime, or horizon no longer match the loss template.",
+            "A fresh trigger plus explicit stop/invalidation boundary is present and passes PM/Auditor review.",
+        ],
+        validation_plan=[
+            "Track future same-scope trades, no-trade shadows, capped decisions, and realized PnL before extending validity.",
+        ],
+        position_authority="risk_reduction_conditioned",
+        max_position_impact="may_reduce_or_cap_only_through_pm_auditor",
         sample_count=sample_count,
         confidence_score=confidence,
     )
@@ -2915,6 +3396,46 @@ def _completed_pairs_up_to(cursor: sqlite3.Cursor, *, config_id: str, trading_da
     return [pair for pair in pairs if str(pair.get("close_date") or "") <= trading_date]
 
 
+def _completed_pairs_for_scope(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    scope: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    recommendation_lookup = _recommendations_by_id(
+        cursor,
+        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+    )
+    expected = {
+        "ticker": str(scope.get("ticker") or "").upper(),
+        "side": str(scope.get("side") or "").lower(),
+        "signal_template": str(scope.get("signal_template") or ""),
+        "horizon_class": str(scope.get("horizon_class") or ""),
+        "market_regime": str(scope.get("market_regime") or ""),
+    }
+    rows: List[Dict[str, Any]] = []
+    for pair in pairs:
+        ticker = str(pair.get("ticker") or "").upper()
+        side = str(pair.get("side") or "").lower()
+        if ticker != expected["ticker"] or side != expected["side"]:
+            continue
+        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+        snapshot = _recommendation_snapshot(recommendation or {})
+        combo = _signal_combo_from_snapshot(snapshot)
+        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
+        regime = _market_regime(snapshot)
+        template = _signal_template(side, combo, snapshot)
+        if (
+            template == expected["signal_template"]
+            and horizon == expected["horizon_class"]
+            and regime == expected["market_regime"]
+        ):
+            rows.append(pair)
+    return rows
+
+
 def _write_template_and_analyst_learning(
     cursor: sqlite3.Cursor,
     *,
@@ -2975,8 +3496,8 @@ def _write_template_and_analyst_learning(
             INSERT INTO signal_template_performance (
                 id, config_id, ticker, side, signal_template, horizon_class, market_regime,
                 sample_count, win_rate, net_pnl, avg_pnl, profit_factor,
-                confidence_score, last_updated, valid_until, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                confidence_score, last_sample_date, last_updated, valid_until, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime)
             DO UPDATE SET
                 sample_count=excluded.sample_count,
@@ -2985,6 +3506,7 @@ def _write_template_and_analyst_learning(
                 avg_pnl=excluded.avg_pnl,
                 profit_factor=excluded.profit_factor,
                 confidence_score=excluded.confidence_score,
+                last_sample_date=excluded.last_sample_date,
                 last_updated=excluded.last_updated,
                 valid_until=excluded.valid_until,
                 payload_json=excluded.payload_json
@@ -3003,6 +3525,7 @@ def _write_template_and_analyst_learning(
                 _safe_float(summary.get("avg_pnl")),
                 _profit_factor(rows),
                 confidence,
+                trading_date,
                 now,
                 valid_until,
                 _json_dumps({"summary": summary, "cutoff_trading_date": trading_date}),
@@ -3032,8 +3555,8 @@ def _write_template_and_analyst_learning(
             INSERT INTO analyst_performance (
                 id, config_id, analyst, ticker, sector, horizon_class, signal_side,
                 sample_count, hit_rate, avg_pnl, net_pnl, confidence_score,
-                last_updated, valid_until, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_sample_date, last_updated, valid_until, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(config_id, analyst, ticker, sector, horizon_class, signal_side)
             DO UPDATE SET
                 sample_count=excluded.sample_count,
@@ -3041,6 +3564,7 @@ def _write_template_and_analyst_learning(
                 avg_pnl=excluded.avg_pnl,
                 net_pnl=excluded.net_pnl,
                 confidence_score=excluded.confidence_score,
+                last_sample_date=excluded.last_sample_date,
                 last_updated=excluded.last_updated,
                 valid_until=excluded.valid_until,
                 payload_json=excluded.payload_json
@@ -3058,6 +3582,7 @@ def _write_template_and_analyst_learning(
                 avg_pnl,
                 net_pnl,
                 confidence,
+                trading_date,
                 now,
                 valid_until,
                 _json_dumps(summary),
@@ -3171,8 +3696,7 @@ def _episode_lesson_text(
         signal = str(payload.get("signal") or "Neutral")
         confidence = max(_safe_float(payload.get("effective_confidence")), _safe_float(payload.get("confidence")))
         analyst_bits.append(f"{analyst}={signal}:{confidence:.2f}")
-    plan = _pre_open_plan(snapshot)
-    invalidation = plan.get("invalidation_level") or _invalidation_level(snapshot)
+    invalidation = _invalidation_level(snapshot)
     no_trade_reason = (
         ((snapshot.get("execution_result") or {}) if isinstance(snapshot.get("execution_result"), dict) else {})
         .get("no_trade_reason")
@@ -3243,22 +3767,51 @@ def _write_trade_episode_memory(
         )
         data_usage = data_usage_from_snapshot(snapshot)
         data_usage_notes = compact_data_usage_notes(data_usage)
+        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+        position_quality_controls = {}
+        opportunity_scorecard = (
+            snapshot.get("opportunity_scorecard")
+            if isinstance(snapshot.get("opportunity_scorecard"), dict)
+            else {}
+        )
         open_tx = transaction_lookup.get(str(pair.get("open_transaction_id") or "")) or {}
         close_tx = transaction_lookup.get(str(pair.get("close_transaction_id") or "")) or {}
+        safe_snapshot = _learning_safe_snapshot(snapshot)
         payload = {
             "pair": pair,
             "open_transaction": open_tx,
             "close_transaction": close_tx,
             "open_recommendation_id": pair.get("open_recommendation_id"),
-            "signal_snapshot": snapshot,
+            "signal_snapshot": safe_snapshot,
             "trade_research_contract_summary": _opportunity_contract_summary(snapshot),
-            "opportunity_type": _primary_opportunity_type(snapshot),
-            "opportunity_layer": _primary_opportunity_layer(snapshot),
+            "opportunity_type": _primary_opportunity_type(snapshot, side),
+            "opportunity_layer": _primary_opportunity_layer(snapshot, side),
             "lesson_text": lesson,
             "analyst_payloads": _analyst_payloads(snapshot),
             "data_usage_summary": data_usage,
             "data_usage_notes": data_usage_notes,
-            "pre_open_plan": _pre_open_plan(snapshot),
+            "final_action_contract": final_contract,
+            "active_opportunity_audit": active_audit,
+            "pm_draft_pre_open_plan_not_learning_source": True,
+            "opportunity_scorecard": opportunity_scorecard,
+            "position_quality_controls": position_quality_controls,
+            "learning_to_position_trace": (
+                (final_contract.get("learning_used") or {})
+                if isinstance(final_contract.get("learning_used"), dict)
+                else {}
+            ),
+            "position_lifecycle_trace": (
+                {"action_candidates": final_contract.get("action_candidates") or []}
+                if isinstance(final_contract.get("action_candidates"), list)
+                else {}
+            ),
+            "loss_template_research_trace": (
+                {"risk_flags": final_contract.get("risk_flags") or []}
+                if final_contract
+                else {}
+            ),
+            "execution_result": _execution_result_from_snapshot(snapshot),
             "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
             "created_from": "phase4_reviewer",
             "episode_date": episode_date,
@@ -3279,15 +3832,18 @@ def _write_trade_episode_memory(
             usable_memory=[
                 lesson,
                 f"outcome={payload['pair'].get('net_pnl')}; holding_days={payload['pair'].get('holding_days')}",
+                f"opportunity_layer={payload.get('opportunity_layer')}; setup_quality={((opportunity_scorecard or {}).get(side) or {}).get('max_setup_quality') if isinstance((opportunity_scorecard or {}).get(side), dict) else None}",
                 *data_usage_notes[:3],
             ],
             analysis_strategy_updates=[
                 "Use as a comparable case when today's ticker/sector, side, horizon, and signal template are similar.",
                 "Ask whether today's analyst evidence repeats or contradicts the drivers in this episode.",
+                "Recheck setup quality: entry location, trigger, invalidation, market regime, and data quality before repeating the template.",
             ],
             trading_strategy_updates=[
                 "Use the episode to refine entry/exit/hold reasoning, not as a standalone trade command.",
                 "Winning episodes preserve what worked; losing episodes identify what must be rechecked before repeating.",
+                "For winning same-scope templates, PM may consider controlled continuation only with current confirmation; for losing templates, PM must revalidate before new/add-on risk.",
             ],
             validation_plan=[
                 "Accumulate same-scope future episodes before treating this as mature template evidence.",
@@ -3380,6 +3936,353 @@ def _write_trade_episode_memory(
     return inserted
 
 
+def _policy_ref(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    contract = payload.get(CONTRACT_KEY) if isinstance(payload.get(CONTRACT_KEY), dict) else {}
+    return {
+        "policy_type": str(row.get("policy_type") or ""),
+        "policy_action": str(row.get("policy_action") or ""),
+        "ticker": str(row.get("ticker") or "*").upper(),
+        "side": str(row.get("side") or "*").lower(),
+        "signal_template": str(row.get("signal_template") or "*"),
+        "horizon_class": str(row.get("horizon_class") or "*"),
+        "market_regime": str(row.get("market_regime") or "*"),
+        "sample_count": _safe_int(row.get("sample_count")),
+        "confidence_score": _safe_float(row.get("confidence_score")),
+        "position_authority": str(contract.get("position_authority") or ""),
+    }
+
+
+def _feedback_learning_refs(trace: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    source = trace.get("learning_used") if isinstance(trace.get("learning_used"), dict) else trace
+    context = source.get("learning_context") if isinstance(source.get("learning_context"), dict) else {}
+    memory_trace = context.get("memory_trace") if isinstance(context.get("memory_trace"), dict) else {}
+    memory_refs = memory_trace.get("selected_memory_refs")
+    if not isinstance(memory_refs, list):
+        memory_refs = []
+    policies = ((source.get("adaptive_policy_state") or {}).get("policies") or [])
+    if not policies and isinstance(source.get("adaptive_policy_applied"), list):
+        policies = source.get("adaptive_policy_applied")
+    if not isinstance(policies, list):
+        policies = []
+    return (
+        [item for item in memory_refs if isinstance(item, dict)],
+        [_policy_ref(item) for item in policies if isinstance(item, dict)],
+    )
+
+
+def _feedback_label(
+    *,
+    memory_refs: List[Dict[str, Any]],
+    policy_refs: List[Dict[str, Any]],
+    target_lots: int,
+    executed_lots: int,
+    pnl: float,
+    no_trade_reason: str,
+) -> str:
+    if not memory_refs and not policy_refs:
+        return "no_learning_context_observed"
+    if target_lots == 0:
+        return "learning_observed_no_position"
+    if executed_lots <= 0:
+        return f"learning_position_not_executed:{no_trade_reason or 'unknown'}"
+    if pnl > 0:
+        return "learning_position_executed_profit"
+    if pnl < 0:
+        return "learning_position_executed_loss"
+    return "learning_position_executed_flat"
+
+
+def _write_research_position_feedback(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+    strategy_recommendations: List[Dict[str, Any]],
+    transactions_by_recommendation: Dict[str, List[Dict[str, Any]]],
+    settlement_row: Optional[Dict[str, Any]],
+) -> Dict[str, int]:
+    learning_cfg = cfg.get("learning", {}) or {}
+    feedback_cfg = learning_cfg.get("position_feedback_loop", {}) or {}
+    if not bool(feedback_cfg.get("enabled", True)):
+        return {"feedback_rows": 0, "digest_rows": 0}
+    _ensure_research_learning_schema(cursor)
+    valid_days = int(feedback_cfg.get("valid_days", learning_cfg.get("memory_expires_after_days", 30)) or 30)
+    max_digest_rows = int(feedback_cfg.get("max_digest_rows_per_day", 8) or 8)
+    min_digest_confidence = float(feedback_cfg.get("min_digest_confidence", 0.20) or 0.20)
+    now = _utc_now()
+    valid_until = _valid_until(trading_date, valid_days)
+    feedback_rows = 0
+    digest_rows = 0
+    total_settlement_pnl = _safe_float((settlement_row or {}).get("daily_pnl"))
+    for recommendation in strategy_recommendations:
+        snapshot = _recommendation_snapshot(recommendation)
+        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
+        action_candidates = final_contract.get("action_candidates") if isinstance(final_contract.get("action_candidates"), list) else []
+        trace = {
+            "learning_used": learning_used,
+            "action_candidates": action_candidates,
+            "source": "final_action_contract",
+        }
+        memory_refs, policy_refs = _feedback_learning_refs(trace)
+        if not memory_refs and not policy_refs:
+            continue
+        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        side = _recommendation_side(recommendation, snapshot)
+        combo = _signal_combo_from_snapshot(snapshot)
+        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
+        regime = _market_regime(snapshot)
+        template = _signal_template(side, combo, snapshot)
+        rec_id = str(recommendation.get("id") or "")
+        txs = transactions_by_recommendation.get(rec_id, [])
+        executed_lots = sum(abs(_safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
+        tx_pnl = sum(_safe_float(tx.get("realized_pnl")) for tx in txs if isinstance(tx, dict))
+        tx_commission = sum(_safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
+        position_effect = {
+            "current_lots": final_contract.get("current_lots"),
+            "target_lots": final_contract.get("target_lots"),
+            "lots_delta": final_contract.get("lots_delta"),
+            "final_target_position_ratio": final_contract.get("target_position_ratio"),
+            "final_action": final_contract.get("final_action"),
+            "source": "final_action_contract",
+        }
+        opportunity_to_position = {
+            "action_candidates": action_candidates,
+            "source": "final_action_contract",
+        }
+        target_lots = _safe_int(position_effect.get("target_lots"), _safe_int(recommendation.get("lots")))
+        current_lots = _safe_int(position_effect.get("current_lots"), 0)
+        delta_lots = _safe_int(position_effect.get("lots_delta"), target_lots - current_lots)
+        target_ratio = _safe_float(
+            position_effect.get("final_target_position_ratio"),
+            _safe_float(recommendation.get("target_position_ratio")),
+        )
+        execution_result = _execution_result_from_snapshot(snapshot)
+        no_trade_reason = str(execution_result.get("no_trade_reason") or final_contract.get("tradable_lots_reason") or "")
+        label = _feedback_label(
+            memory_refs=memory_refs,
+            policy_refs=policy_refs,
+            target_lots=target_lots,
+            executed_lots=executed_lots,
+            pnl=tx_pnl,
+            no_trade_reason=no_trade_reason,
+        )
+        payload = {
+            "learning_to_position_trace": trace,
+            "recommendation": {
+                "id": rec_id,
+                "action": recommendation.get("action"),
+                "lots": recommendation.get("lots"),
+                "status": recommendation.get("status"),
+                "target_position_ratio": target_ratio,
+            },
+            "memory_refs": memory_refs,
+            "policy_refs": policy_refs,
+            "pm_effect": position_effect,
+            "opportunity_to_position": opportunity_to_position,
+            "auditor_effect": {
+                "decision": final_contract.get("authority_type") or final_contract.get("final_action"),
+                "action": final_contract.get("final_action"),
+                "position_ratio_multiplier": None,
+                "diagnostics": learning_used,
+                "source": "final_action_contract",
+            },
+            "trader_effect": {
+                "transaction_count": len(txs),
+                "executed_lots": executed_lots,
+                "no_trade_reason": no_trade_reason,
+                "execution_result": execution_result,
+            },
+            "outcome": {
+                "transaction_pnl": tx_pnl,
+                "transaction_commission": tx_commission,
+                "daily_settlement_pnl": total_settlement_pnl,
+                "feedback_label": label,
+            },
+            "anti_overfit_boundary": {
+                "same_scope_required_for_policy": True,
+                "not_product_blacklist": True,
+                "future_only": True,
+                "hard_margin_cap_not_overridden": True,
+            },
+        }
+        if opportunity_to_position.get("if_not_targeted_requires_accountability"):
+            payload["missed_high_quality_opportunity"] = {
+                "requires_shadow_followup": True,
+                "likely_blocking_reasons": sorted(set(position_effect.get("control_reasons") or [])),
+                "opportunity_layer_summary": opportunity_to_position.get("opportunity_layer_summary") or {},
+                "mature_alpha_policy_count": opportunity_to_position.get("mature_alpha_policy_count"),
+                "fast_candidate_alpha_count": opportunity_to_position.get("fast_candidate_alpha_count"),
+                "next_step": "track same-scope shadow and relax only if future settled results are positive",
+            }
+        event_id = _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="research_position_feedback",
+            scope_type="ticker_side_template_horizon_regime",
+            scope_key=f"{ticker}:{side}:{template}:{horizon}:{regime}",
+            evidence={
+                "memory_ref_count": len(memory_refs),
+                "policy_ref_count": len(policy_refs),
+                "target_lots": target_lots,
+                "executed_lots": executed_lots,
+                "transaction_pnl": tx_pnl,
+                "feedback_label": label,
+                "opportunity_to_position": opportunity_to_position,
+            },
+            action={
+                "next_step": "feed_back_into_same_scope_future_analysis_and_pm_review",
+                "position_authority": "diagnostic_feedback_only_until_mature_policy",
+            },
+            status="observed",
+        )
+        feedback_id = str(uuid.uuid4())
+        cursor.execute(
+            '''
+            INSERT INTO research_position_feedback (
+                id, config_id, trading_date, ticker, side, signal_template, horizon_class,
+                market_regime, recommendation_id, transaction_count, executed_lots,
+                target_lots, current_lots, position_delta_lots, target_position_ratio,
+                memory_refs_json, policy_refs_json, pm_effect_json, auditor_effect_json,
+                trader_effect_json, outcome_json, feedback_label, created_at, valid_until,
+                payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(config_id, trading_date, ticker, recommendation_id)
+            DO UPDATE SET
+                side=excluded.side,
+                signal_template=excluded.signal_template,
+                horizon_class=excluded.horizon_class,
+                market_regime=excluded.market_regime,
+                transaction_count=excluded.transaction_count,
+                executed_lots=excluded.executed_lots,
+                target_lots=excluded.target_lots,
+                current_lots=excluded.current_lots,
+                position_delta_lots=excluded.position_delta_lots,
+                target_position_ratio=excluded.target_position_ratio,
+                memory_refs_json=excluded.memory_refs_json,
+                policy_refs_json=excluded.policy_refs_json,
+                pm_effect_json=excluded.pm_effect_json,
+                auditor_effect_json=excluded.auditor_effect_json,
+                trader_effect_json=excluded.trader_effect_json,
+                outcome_json=excluded.outcome_json,
+                feedback_label=excluded.feedback_label,
+                created_at=excluded.created_at,
+                valid_until=excluded.valid_until,
+                payload_json=excluded.payload_json
+            ''',
+            (
+                feedback_id,
+                config_id,
+                trading_date,
+                ticker,
+                side,
+                template,
+                horizon,
+                regime,
+                rec_id,
+                len(txs),
+                executed_lots,
+                target_lots,
+                current_lots,
+                delta_lots,
+                target_ratio,
+                _json_dumps(memory_refs),
+                _json_dumps(policy_refs),
+                _json_dumps(payload["pm_effect"]),
+                _json_dumps(payload["auditor_effect"]),
+                _json_dumps(payload["trader_effect"]),
+                _json_dumps(payload["outcome"]),
+                label,
+                now,
+                valid_until,
+                _json_dumps({**payload, "source_event_id": event_id}),
+            ),
+        )
+        feedback_rows += 1
+        if digest_rows < max_digest_rows:
+            confidence = max(min_digest_confidence, min(0.90, 0.20 + 0.05 * len(memory_refs) + 0.08 * len(policy_refs)))
+            digest = (
+                f"{ticker} {horizon} {side}: learning-to-position feedback={label}; "
+                f"target_lots={target_lots}, executed_lots={executed_lots}, pnl={tx_pnl:.0f}. "
+                "Use this only as same-scope feedback; compare today's evidence before changing position."
+            )
+            digest_contract = build_next_round_memory_contract(
+                memory_type="research_position_feedback",
+                maturity_state="feedback_observation",
+                scope={
+                    "analyst": "portfolio_manager",
+                    "ticker": ticker,
+                    "sector": _sector_for_ticker(cfg, ticker),
+                    "side": side,
+                    "signal_template": template,
+                    "horizon_class": horizon,
+                    "market_regime": regime,
+                },
+                usable_memory=digest,
+                analysis_strategy_updates=[
+                    "Treat as feedback on how prior memory affected the position chain, not as a standalone signal.",
+                    "Compare current data drivers, analyst conflict, and market state with this same-scope record.",
+                ],
+                trading_strategy_updates=[
+                    "PM may use repeated same-scope feedback to refine open/add/reduce/exit reasoning.",
+                    "This feedback alone cannot authorize sizing; mature adaptive policy and current evidence are required.",
+                ],
+                validation_plan=[
+                    "Accumulate same-scope feedback rows and compare PnL, no-trade reason, and policy refs before promotion.",
+                ],
+                position_authority="analysis_or_watchlist_only",
+                max_position_impact="no_direct_position_impact_until_promoted_policy",
+                sample_count=1,
+                confidence_score=confidence,
+            )
+            digest_event_id = _insert_learning_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                event_type="research_position_feedback_digest",
+                scope_type="pm_feedback",
+                scope_key=f"portfolio_manager:{ticker}:{horizon}:{side}",
+                evidence=payload["outcome"],
+                action={"digest": digest, CONTRACT_KEY: digest_contract},
+                status="observed",
+            )
+            cursor.execute(
+                '''
+                INSERT INTO analyst_learning_digest (
+                    id, config_id, analyst, ticker, sector, horizon_class, market_regime,
+                    digest_text, confidence_score, sample_count, source_event_id,
+                    created_at, valid_until, accepted, payload_json
+                ) VALUES (?, ?, 'portfolio_manager', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?)
+                ''',
+                (
+                    str(uuid.uuid4()),
+                    config_id,
+                    ticker,
+                    _sector_for_ticker(cfg, ticker),
+                    horizon,
+                    regime,
+                    digest,
+                    confidence,
+                    digest_event_id,
+                    now,
+                    valid_until,
+                    _json_dumps({
+                        "feedback_id": feedback_id,
+                        "feedback_label": label,
+                        "transaction_pnl": tx_pnl,
+                        CONTRACT_KEY: digest_contract,
+                    }),
+                ),
+            )
+            digest_rows += 1
+    return {"feedback_rows": feedback_rows, "digest_rows": digest_rows}
+
+
 def _write_loss_template_observation_research(
     cursor: sqlite3.Cursor,
     *,
@@ -3393,10 +4296,12 @@ def _write_loss_template_observation_research(
     restrictions. It only makes repeated loss patterns visible to analysts and
     PM as next-round questions with clear usage boundaries.
     """
+    setattr(_write_loss_template_observation_research, "last_policy_rows", 0)
     learning_cfg = cfg.get("learning", {}) or {}
     research_cfg = learning_cfg.get("loss_template_observation", {}) or {}
     if not bool(research_cfg.get("enabled", True)):
         return 0
+    _ensure_research_learning_schema(cursor)
 
     pairs = [
         pair
@@ -3411,6 +4316,16 @@ def _write_loss_template_observation_research(
     min_loss_abs = abs(_safe_float(research_cfg.get("min_cumulative_loss_abs"), 1.0))
     max_rows = int(research_cfg.get("max_rows_per_day", 4) or 4)
     valid_days = int(research_cfg.get("valid_days", learning_cfg.get("memory_expires_after_days", 30)) or 30)
+    policy_cfg = research_cfg.get("policy_promotion", {}) or {}
+    policy_enabled = bool(policy_cfg.get("enabled", True))
+    policy_min_samples = int(policy_cfg.get("min_loss_samples", max(3, min_samples)) or max(3, min_samples))
+    policy_min_loss_abs = abs(_safe_float(policy_cfg.get("min_cumulative_loss_abs"), max(min_loss_abs, 20000.0)))
+    policy_multiplier = max(0.0, min(1.0, _safe_float(policy_cfg.get("cap_multiplier"), 0.35)))
+    policy_min_confidence = max(0.0, min(1.0, _safe_float(policy_cfg.get("min_confidence"), 0.55)))
+    policy_valid_days = int(policy_cfg.get("valid_days", min(valid_days, 10)) or min(valid_days, 10))
+    family_cfg = research_cfg.get("failure_family_policy", {}) or {}
+    include_failure_family = bool(family_cfg.get("enabled", True))
+    include_data_combo = bool(family_cfg.get("include_data_combo", True))
     focus_tickers = {
         str(item).upper()
         for item in (research_cfg.get("focus_tickers") or [])
@@ -3461,12 +4376,20 @@ def _write_loss_template_observation_research(
     now = _utc_now()
     valid_until = _valid_until(trading_date, valid_days)
     inserted = 0
+    policy_inserted = 0
     for _, key, rows in candidates[:max_rows]:
         ticker, side, template, horizon, regime = key
         snapshot = representative_snapshot.get(key) or {}
         sector = _sector_for_ticker(cfg, ticker)
         data_usage = data_usage_from_snapshot(snapshot)
         data_notes = compact_data_usage_notes(data_usage)
+        data_combo = _data_combo_key(data_usage) if include_data_combo else "data_combo_disabled"
+        failure_family = (
+            _loss_failure_family(template, horizon, regime, data_combo)
+            if include_failure_family
+            else "same_scope_loss_failure"
+        )
+        failure_actions = _failure_family_actions(failure_family)
         summary = summarize_trade_pairs(rows)
         analyst_payloads = _analyst_payloads(snapshot)
         loss_examples = [
@@ -3484,7 +4407,7 @@ def _write_loss_template_observation_research(
         ]
         hypothesis_text = (
             f"Observation-only loss template: {ticker} {side} {template} "
-            f"horizon={horizon}, regime={regime}, samples={len(rows)}, "
+            f"horizon={horizon}, regime={regime}, failure_family={failure_family}, samples={len(rows)}, "
             f"net_pnl={_safe_float(summary.get('total_pnl')):.0f}. "
             "Next comparable setups should test whether the data mix and market state still justify the trade."
         )
@@ -3503,22 +4426,27 @@ def _write_loss_template_observation_research(
                 "signal_template": template,
                 "horizon_class": horizon,
                 "market_regime": regime,
+                "failure_family": failure_family,
             },
             usable_memory=[
                 hypothesis_text,
                 f"loss_examples={len(rows)}; cumulative_pnl={_safe_float(summary.get('total_pnl')):.0f}",
+                f"data_combo={_compact_text(data_combo, 180)}",
             ],
             data_focus=data_focus,
             analysis_strategy_updates=[
+                *failure_actions["analysis"],
                 "Before issuing the same direction/template, verify which data fields actually confirm it today.",
                 "Treat analyst conflict, stale data, horizon mismatch, and missing invalidation as questions to resolve, not as automatic vetoes.",
                 "Check whether the current market state differs enough to invalidate this loss observation.",
             ],
             trading_strategy_updates=[
+                *failure_actions["trading"],
                 "PM may use this only to demand clearer current evidence, trigger, and invalidation for comparable setups.",
                 "This candidate memory cannot authorize position_match, add-on sizing, or continued losing exposure by itself.",
             ],
             pm_action_conditions=[
+                *failure_actions["trading"][:1],
                 "If today's same-scope setup repeats the weak data mix and lacks a valid trigger/invalidation, PM should prefer probe/observe/reduce logic.",
                 "If today's evidence clearly contradicts the old loss pattern, PM should record the contradiction instead of mechanically suppressing the trade.",
             ],
@@ -3542,6 +4470,22 @@ def _write_loss_template_observation_research(
             "summary": summary,
             "loss_examples": loss_examples,
             "data_usage_summary": data_usage,
+            "data_combo": data_combo,
+            "failure_family": failure_family,
+            "failure_family_actions": failure_actions,
+            "failure_family_policy_config": {
+                "enabled": include_failure_family,
+                "include_data_combo": include_data_combo,
+                "require_news_price_reaction_for_event_probe": bool(
+                    family_cfg.get("require_news_price_reaction_for_event_probe", True)
+                ),
+                "require_choppy_trend_breakout_confirmation": bool(
+                    family_cfg.get("require_choppy_trend_breakout_confirmation", True)
+                ),
+                "require_medium_anchor_short_timing": bool(
+                    family_cfg.get("require_medium_anchor_short_timing", True)
+                ),
+            },
             "analyst_payloads": analyst_payloads,
             "focus_tickers": sorted(focus_tickers),
         }
@@ -3607,7 +4551,7 @@ def _write_loss_template_observation_research(
                 hypothesis_text,
                 (
                     f"samples={len(rows)}, net_pnl={_safe_float(summary.get('total_pnl')):.0f}; "
-                    f"data_focus={'; '.join(data_focus[:3])}"
+                    f"failure_family={failure_family}; data_focus={'; '.join(data_focus[:3])}"
                 )[:500],
                 suggested_use,
                 min(0.75, 0.35 + 0.10 * len(rows)),
@@ -3619,6 +4563,337 @@ def _write_loss_template_observation_research(
                 payload_ext.sha256,
                 payload_ext.size_bytes,
                 payload_ext.summary_json,
+            ),
+        )
+        inserted += 1
+        cumulative_loss_abs = abs(_safe_float(summary.get("total_pnl")))
+        policy_confidence = min(0.85, 0.40 + 0.08 * len(rows) + min(0.25, cumulative_loss_abs / 80000.0))
+        if (
+            policy_enabled
+            and len(rows) >= policy_min_samples
+            and cumulative_loss_abs >= policy_min_loss_abs
+            and policy_confidence >= policy_min_confidence
+        ):
+            policy_scope = {
+                "ticker": ticker,
+                "sector": sector,
+                "side": side,
+                "signal_template": template,
+                "horizon_class": horizon,
+                "market_regime": regime,
+            }
+            promotion_gate = _policy_promotion_gate(cfg=cfg, rows=rows, action="cap")
+            reversal_stats = _shadow_reversal_stats(
+                cursor,
+                cfg=cfg,
+                config_id=config_id,
+                trading_date=trading_date,
+                scope=policy_scope,
+            )
+            if not promotion_gate["allowed"] or reversal_stats.get("reversal"):
+                if reversal_stats.get("reversal"):
+                    _deactivate_adaptive_policy_state(
+                        cursor,
+                        config_id=config_id,
+                        scope=policy_scope,
+                        policy_type="loss_template_policy",
+                        reason="loss template policy deactivated by positive same-scope shadow reversal",
+                    )
+                _insert_learning_event(
+                    cursor,
+                    config_id=config_id,
+                    trading_date=trading_date,
+                    event_type="loss_template_policy_guard",
+                    scope_type="ticker_side_template",
+                    scope_key=f"{ticker}:{side}:{template}:{horizon}:{regime}",
+                    evidence={
+                        "policy_source_hypothesis_id": hypothesis_id,
+                        "summary": summary,
+                        "promotion_gate": promotion_gate,
+                        "shadow_reversal": reversal_stats,
+                    },
+                    action={
+                        "policy_action": "keep_candidate_observation",
+                        "reason": (
+                            "loss template stayed candidate because promotion gate failed"
+                            if not promotion_gate["allowed"]
+                            else "loss template cap was reversed by positive same-scope shadow results"
+                        ),
+                    },
+                    status="rejected",
+                )
+                continue
+            policy_reason = (
+                f"validated repeated loss template: {ticker} {side} {template} "
+                f"horizon={horizon}, regime={regime}, samples={len(rows)}, "
+                f"net_pnl={_safe_float(summary.get('total_pnl')):.0f}"
+            )
+            policy_evidence = {
+                **evidence,
+                "sample_count": len(rows),
+                "confidence_score": policy_confidence,
+                "total_trades": len(rows),
+                "total_pnl": _safe_float(summary.get("total_pnl")),
+                "policy_source_hypothesis_id": hypothesis_id,
+                "policy_promotion_gate": promotion_gate,
+                "shadow_reversal": reversal_stats,
+                "policy_promotion_thresholds": {
+                    "min_loss_samples": policy_min_samples,
+                    "min_cumulative_loss_abs": policy_min_loss_abs,
+                    "min_confidence": policy_min_confidence,
+                    "cap_multiplier": policy_multiplier,
+                },
+                "failure_family": failure_family,
+                "data_combo": data_combo,
+                "failure_family_actions": failure_actions,
+            }
+            policy_payload = _loss_template_policy_payload(
+                reason=policy_reason,
+                scope=policy_scope,
+                evidence=policy_evidence,
+                multiplier=policy_multiplier,
+            )
+            policy_event_id = _insert_learning_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                event_type="loss_template_policy",
+                scope_type="ticker_side_template",
+                scope_key=f"{ticker}:{side}:{template}:{horizon}:{regime}",
+                evidence=policy_evidence,
+                action={
+                    "policy_action": "cap",
+                    "multiplier": policy_multiplier,
+                    "valid_until": _valid_until(trading_date, policy_valid_days),
+                    CONTRACT_KEY: policy_payload[CONTRACT_KEY],
+                },
+                status="applied",
+            )
+            cursor.execute(
+                """
+                INSERT INTO adaptive_policy_state (
+                    id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                    policy_type, policy_action, multiplier, confidence_score, sample_count,
+                    reason, source_event_id, created_at, valid_until, payload_json, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'loss_template_policy', 'cap', ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type)
+                DO UPDATE SET
+                    policy_action=excluded.policy_action,
+                    multiplier=excluded.multiplier,
+                    confidence_score=CASE
+                        WHEN adaptive_policy_state.confidence_score > excluded.confidence_score
+                        THEN adaptive_policy_state.confidence_score
+                        ELSE excluded.confidence_score
+                    END,
+                    sample_count=CASE
+                        WHEN adaptive_policy_state.sample_count > excluded.sample_count
+                        THEN adaptive_policy_state.sample_count
+                        ELSE excluded.sample_count
+                    END,
+                    reason=excluded.reason,
+                    source_event_id=excluded.source_event_id,
+                    created_at=excluded.created_at,
+                    valid_until=excluded.valid_until,
+                    payload_json=excluded.payload_json,
+                    active=1
+                """,
+                (
+                    str(uuid.uuid4()),
+                    config_id,
+                    ticker,
+                    side,
+                    template,
+                    horizon,
+                    regime,
+                    policy_multiplier,
+                    policy_confidence,
+                    len(rows),
+                    policy_reason,
+                    policy_event_id,
+                    now,
+                    _valid_until(trading_date, policy_valid_days),
+                    _json_dumps(policy_payload),
+                ),
+            )
+            policy_inserted += 1
+    setattr(_write_loss_template_observation_research, "last_policy_rows", policy_inserted)
+    return inserted
+
+
+def _write_fast_loss_sentinel_state(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    cfg: Dict[str, Any],
+) -> int:
+    learning_cfg = cfg.get("learning", {}) or {}
+    control = learning_cfg.get("fast_loss_sentinel", {}) or {}
+    if not bool(control.get("enabled", True)):
+        return 0
+    _ensure_research_learning_schema(cursor)
+    lookback_days = int(control.get("lookback_days", 5) or 5)
+    min_loss_samples = int(control.get("min_loss_samples", 1) or 1)
+    min_net_loss = -abs(_safe_float(control.get("min_net_loss_abs"), 3000.0))
+    cap_multiplier = max(0.0, min(1.0, _safe_float(control.get("cap_multiplier"), 0.50)))
+    valid_days = int(control.get("valid_days", 5) or 5)
+    max_rows = int(control.get("max_rows_per_day", 6) or 6)
+    lookback_start = (datetime.strptime(trading_date[:10], "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    pairs = [
+        pair
+        for pair in _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+        if str(pair.get("close_date") or "") >= lookback_start and _safe_float(pair.get("net_pnl")) < 0
+    ]
+    if not pairs:
+        return 0
+    recommendation_lookup = _recommendations_by_id(
+        cursor,
+        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+    )
+    groups: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    snapshots: Dict[Tuple[str, str, str, str, str], Dict[str, Any]] = {}
+    for pair in pairs:
+        ticker = str(pair.get("ticker") or "").upper()
+        side = str(pair.get("side") or "").lower()
+        if not ticker or side not in {"long", "short"}:
+            continue
+        snapshot = _recommendation_snapshot(recommendation_lookup.get(str(pair.get("open_recommendation_id") or "")) or {})
+        combo = _signal_combo_from_snapshot(snapshot)
+        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
+        regime = _market_regime(snapshot)
+        template = _signal_template(side, combo, snapshot)
+        key = (ticker, side, template, horizon, regime)
+        groups[key].append(pair)
+        snapshots.setdefault(key, snapshot)
+
+    candidates: List[Tuple[float, Tuple[str, str, str, str, str], List[Dict[str, Any]]]] = []
+    for key, rows in groups.items():
+        net_pnl = sum(_safe_float(row.get("net_pnl")) for row in rows)
+        if len(rows) >= min_loss_samples and net_pnl <= min_net_loss:
+            candidates.append((abs(net_pnl), key, rows))
+    candidates.sort(reverse=True, key=lambda item: (item[0], len(item[2])))
+    now = _utc_now()
+    valid_until = _valid_until(trading_date, valid_days)
+    inserted = 0
+    for loss_abs, key, rows in candidates[:max_rows]:
+        ticker, side, template, horizon, regime = key
+        snapshot = snapshots.get(key) or {}
+        data_usage = data_usage_from_snapshot(snapshot)
+        data_combo = _data_combo_key(data_usage)
+        failure_family = _loss_failure_family(template, horizon, regime, data_combo)
+        summary = summarize_trade_pairs(rows)
+        confidence = min(0.75, 0.35 + 0.10 * len(rows) + min(0.20, loss_abs / 30000.0))
+        evidence = {
+            "source": "fast_loss_sentinel",
+            "summary": summary,
+            "sample_count": len(rows),
+            "net_pnl": _safe_float(summary.get("total_pnl")),
+            "failure_family": failure_family,
+            "data_combo": data_combo,
+            "lookback_days": lookback_days,
+            "fast_protection_only": True,
+        }
+        contract = build_next_round_memory_contract(
+            memory_type="fast_loss_sentinel",
+            maturity_state="fast_loss_protection",
+            status="candidate",
+            scope={
+                "ticker": ticker,
+                "sector": _sector_for_ticker(cfg, ticker),
+                "side": side,
+                "signal_template": template,
+                "horizon_class": horizon,
+                "market_regime": regime,
+                "failure_family": failure_family,
+            },
+            usable_memory=[
+                f"Recent same-scope loss appeared quickly: samples={len(rows)}, net_pnl={_safe_float(summary.get('total_pnl')):.0f}.",
+                "Use as fast protection: demand current trigger/invalidation; do not blacklist the ticker.",
+            ],
+            analysis_strategy_updates=[
+                "Analysts should verify whether today's data mix still repeats this fast-loss setup.",
+                "If current evidence contradicts the loss pattern, explicitly record the contradiction.",
+            ],
+            trading_strategy_updates=[
+                "PM may cap to probe/reduce-only for same-scope repeated setup until future evidence refutes it.",
+                "Fast protection expires quickly and cannot become permanent without mature loss-template validation.",
+            ],
+            pm_action_conditions=[
+                "Cap only if same side/template/regime repeats and current trigger or invalidation remains weak.",
+            ],
+            invalidates_when=[
+                "Future same-scope shadow or executed trades show positive expectancy.",
+                "Current signal has strong trigger, data confirmation, and explicit invalidation.",
+            ],
+            validation_plan=["Track future same-scope outcomes before promotion or removal."],
+            position_authority="same_scope_probe_cap_or_reduce_only",
+            max_position_impact="short_lived_same_scope_cap",
+            sample_count=len(rows),
+            confidence_score=confidence,
+        )
+        event_id = _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="fast_loss_sentinel",
+            scope_type="ticker_side_template",
+            scope_key=f"{ticker}:{side}:{template}:{horizon}:{regime}",
+            evidence=evidence,
+            action={"policy_action": "cap", "multiplier": cap_multiplier, CONTRACT_KEY: contract},
+            status="applied",
+        )
+        cursor.execute(
+            """
+            INSERT INTO adaptive_policy_state (
+                id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                policy_type, policy_action, multiplier, confidence_score, sample_count,
+                reason, source_event_id, created_at, valid_until, payload_json, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_loss_sentinel', 'cap', ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type)
+            DO UPDATE SET
+                policy_action=excluded.policy_action,
+                multiplier=excluded.multiplier,
+                confidence_score=excluded.confidence_score,
+                sample_count=excluded.sample_count,
+                reason=excluded.reason,
+                source_event_id=excluded.source_event_id,
+                created_at=excluded.created_at,
+                valid_until=excluded.valid_until,
+                payload_json=excluded.payload_json,
+                active=1
+            """,
+            (
+                str(uuid.uuid4()),
+                config_id,
+                ticker,
+                side,
+                template,
+                horizon,
+                regime,
+                cap_multiplier,
+                confidence,
+                len(rows),
+                "fast same-scope loss protection; expires quickly and is not a product blacklist",
+                event_id,
+                now,
+                valid_until,
+                _json_dumps({
+                    "policy_type": "fast_loss_sentinel",
+                    "scope": {
+                        "ticker": ticker,
+                        "side": side,
+                        "signal_template": template,
+                        "horizon_class": horizon,
+                        "market_regime": regime,
+                    },
+                    "evidence": evidence,
+                    CONTRACT_KEY: contract,
+                    "boundary": {
+                        "short_lived": True,
+                        "not_product_blacklist": True,
+                        "requires_current_confirmation_for_trade": True,
+                    },
+                }),
             ),
         )
         inserted += 1
@@ -3642,8 +4917,8 @@ def _candidate_side_from_snapshot(snapshot: Dict[str, Any]) -> str:
         return "long"
     if short_votes > long_votes and short_votes > 0:
         return "short"
-    plan = _pre_open_plan(snapshot)
-    side = str(plan.get("signal_direction") or plan.get("target_side") or "").lower()
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    side = _target_side_from_ratio(contract.get("target_lots"))
     return side if side in {"long", "short"} else "flat"
 
 
@@ -3724,7 +4999,25 @@ def _write_no_trade_opportunity_memory(
             continue
         lots = _safe_int(recommendation.get("lots"), 0)
         action = str(recommendation.get("action") or "").lower()
-        plan = _pre_open_plan(snapshot)
+        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        active_audit = (
+            snapshot.get("active_opportunity_audit")
+            if isinstance(snapshot.get("active_opportunity_audit"), dict)
+            else {}
+        )
+        auditor_reasons: List[str] = []
+        for source in (final_contract, active_audit):
+            if not isinstance(source, dict):
+                continue
+            for key in ("reason_codes", "risk_flags", "reasons"):
+                value = source.get(key)
+                if isinstance(value, list):
+                    auditor_reasons.extend(str(item) for item in value if item)
+        auditor_reasons = sorted(set(auditor_reasons))
+        opportunity_scorecard = (
+            snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        )
+        position_quality_controls = {}
         execution_result = _execution_result_from_snapshot(snapshot)
         execution_no_trade_reason = normalize_no_trade_reason(execution_result.get("no_trade_reason"))
         limit_locked_execution = execution_no_trade_reason == "limit_locked_no_fill"
@@ -3732,14 +5025,13 @@ def _write_no_trade_opportunity_memory(
         reason = str(
             execution_no_trade_reason
             or inferred_no_trade_reason
-            or plan.get("tradable_lots_reason")
-            or ((plan.get("rebalance_summary") or {}) if isinstance(plan.get("rebalance_summary"), dict) else {}).get("reason")
+            or final_contract.get("tradable_lots_reason")
             or recommendation.get("warning_message")
             or ""
         )
         normalized_reason = normalize_no_trade_reason(reason) or "unknown"
         no_trade_category = categorize_no_trade_reason(normalized_reason)
-        if lots > 0 and action not in {"hold", "none"} and not limit_locked_execution:
+        if lots > 0 and action not in {"hold", "none"} and not limit_locked_execution and not execution_no_trade_reason:
             continue
         side = _candidate_side_from_snapshot(snapshot)
         if side not in {"long", "short"} and limit_locked_execution:
@@ -3763,7 +5055,6 @@ def _write_no_trade_opportunity_memory(
             continue
         candidate_lots = max(1, abs(lots))
         shadow_lots = 1
-        auditor_payload = plan.get("trade_auditor") if isinstance(plan.get("trade_auditor"), dict) else {}
         data_usage = data_usage_from_snapshot(snapshot)
         data_usage_notes = compact_data_usage_notes(data_usage)
         market_rule_block = _market_rule_block_from_snapshot(snapshot)
@@ -3794,13 +5085,32 @@ def _write_no_trade_opportunity_memory(
             validation_updates = [
                 "Backfill no-trade shadow windows to test whether the limit-locked skipped trade was a real missed alpha or a correctly avoided unfilled order.",
             ]
+        safe_snapshot = _learning_safe_snapshot(snapshot)
         payload = {
             "recommendation_id": recommendation.get("id"),
-            "signal_snapshot": snapshot,
+            "signal_snapshot": safe_snapshot,
             "trade_research_contract_summary": _opportunity_contract_summary(snapshot),
+            "opportunity_scorecard": opportunity_scorecard,
+            "position_quality_controls": position_quality_controls,
             "data_usage_summary": data_usage,
             "data_usage_notes": data_usage_notes,
-            "pre_open_plan": plan,
+            "final_action_contract": final_contract,
+            "pm_draft_pre_open_plan_not_learning_source": True,
+            "learning_to_position_trace": (
+                final_contract.get("learning_used")
+                if isinstance(final_contract.get("learning_used"), dict)
+                else {}
+            ),
+            "position_lifecycle_trace": (
+                {"action_candidates": final_contract.get("action_candidates") or []}
+                if isinstance(final_contract.get("action_candidates"), list)
+                else {}
+            ),
+            "loss_template_research_trace": (
+                {"risk_flags": final_contract.get("risk_flags") or []}
+                if final_contract
+                else {}
+            ),
             "action": recommendation.get("action"),
             "lots": lots,
             "candidate_side": side,
@@ -3809,6 +5119,15 @@ def _write_no_trade_opportunity_memory(
             "no_trade_reason": normalized_reason,
             "no_trade_reason_category": no_trade_category,
             "execution_no_trade_reason": execution_no_trade_reason,
+            "execution_learning_trace": (
+                execution_result.get("execution_learning_trace")
+                if isinstance(execution_result.get("execution_learning_trace"), dict)
+                else {
+                    "no_trade_reason": normalized_reason,
+                    "no_trade_reason_category": no_trade_category,
+                    "turn_into_memory": True,
+                }
+            ),
             "market_rule_block": market_rule_block,
             "limit_lock_audit": limit_lock_audit,
             "created_from": "phase4_no_trade_opportunity_memory",
@@ -3846,11 +5165,13 @@ def _write_no_trade_opportunity_memory(
                 _no_trade_category_strategy_note(no_trade_category["category"]),
                 *execution_timing_updates,
                 "Treat skipped opportunities as watchlist questions: what evidence would have made them tradable?",
+                "If forward shadow confirms missed alpha, convert this record into conditional setup requirements, not a blanket signal boost.",
                 "Use forward shadow results to distinguish reasonable avoidance from missed opportunity only after settlement.",
             ],
             trading_strategy_updates=[
                 *execution_strategy_updates,
                 "Do not convert a skipped or Neutral opportunity into a trade unless the current trigger, market confirmation, and invalidation are explicit.",
+                "A validated missed-alpha pattern may allow only same-scope probe/open under current confirmation and PM/Auditor approval.",
                 "If future shadow results validate repeated missed opportunities, promote only through same-scope validation.",
             ],
             validation_plan=[
@@ -3909,13 +5230,13 @@ def _write_no_trade_opportunity_memory(
                 _json_dumps(combo),
                 horizon,
                 regime,
-                _primary_opportunity_type(snapshot),
-                _primary_opportunity_layer(snapshot),
+                _primary_opportunity_type(snapshot, side),
+                _primary_opportunity_layer(snapshot, side),
                 candidate_lots,
                 shadow_lots,
                 shadow_entry_price,
                 reason,
-                "; ".join(auditor_payload.get("reasons") or []) if isinstance(auditor_payload, dict) else "",
+                "; ".join(auditor_reasons),
                 str(execution_no_trade_reason or normalized_reason or recommendation.get("warning_message") or ""),
                 (
                     (
@@ -4109,6 +5430,205 @@ def _backfill_no_trade_opportunity_shadow_results(
     return {"updated_rows": updated, "status": "applied" if updated else "no_ready_rows", "horizons": horizons}
 
 
+def _write_missed_alpha_accountability_state(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+) -> Dict[str, Any]:
+    """Promote repeated positive missed-opportunity shadows into fast candidates.
+
+    This is intentionally a future-only, same-scope policy. It never rewrites the
+    original no-trade day and never grants mature alpha authority by itself.
+    """
+    learning_cfg = cfg.get("learning", {}) or {}
+    control = learning_cfg.get("missed_alpha_accountability", {}) or {}
+    if not bool(control.get("enabled", True)):
+        return {"rows": 0, "status": "disabled"}
+    _ensure_research_learning_schema(cursor)
+
+    min_samples = int(control.get("min_shadow_samples", 2) or 2)
+    min_shadow_pnl = _safe_float(control.get("min_net_shadow_pnl"), 1500.0)
+    min_positive_rate = _safe_float(control.get("min_positive_rate"), 0.55)
+    max_rows = int(control.get("max_rows_per_day", 6) or 6)
+    valid_days = int(control.get("valid_days", 8) or 8)
+    probe_multiplier = max(0.0, min(1.0, _safe_float(control.get("probe_multiplier"), 0.75)))
+    allowed_layers = {
+        str(item)
+        for item in (control.get("eligible_opportunity_layers") or ["tradeable_setup", "deployable_alpha"])
+        if str(item or "").strip()
+    }
+    cursor.execute(
+        '''
+        SELECT *
+        FROM no_trade_opportunity_memory
+        WHERE config_id = ?
+          AND classification = 'missed_opportunity'
+          AND shadow_results_json IS NOT NULL
+        ORDER BY trading_date DESC
+        LIMIT 500
+        ''',
+        (config_id,),
+    )
+    groups: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in cursor.fetchall():
+        item = dict(row)
+        layer = str(item.get("opportunity_layer") or "direction_only")
+        if allowed_layers and layer not in allowed_layers:
+            continue
+        results = _json_loads(item.get("shadow_results_json")) or []
+        best_pnl = max(
+            [_safe_float(result.get("shadow_pnl")) for result in results if isinstance(result, dict)]
+            or [0.0]
+        )
+        if best_pnl <= 0:
+            continue
+        item["best_shadow_pnl"] = best_pnl
+        key = (
+            str(item.get("ticker") or "*"),
+            str(item.get("side") or "*"),
+            str(item.get("signal_template") or "*"),
+            str(item.get("horizon_class") or "*"),
+            str(item.get("market_regime") or "*"),
+        )
+        groups[key].append(item)
+
+    now = _utc_now()
+    valid_until = _valid_until(trading_date, valid_days)
+    inserted = 0
+    guarded = 0
+    candidates: List[Tuple[float, Tuple[str, str, str, str, str], List[Dict[str, Any]]]] = []
+    for key, items in groups.items():
+        net_shadow = sum(_safe_float(item.get("best_shadow_pnl")) for item in items)
+        positive_rate = sum(1 for item in items if _safe_float(item.get("best_shadow_pnl")) > 0) / max(1, len(items))
+        if len(items) >= min_samples and net_shadow >= min_shadow_pnl and positive_rate >= min_positive_rate:
+            candidates.append((net_shadow, key, items))
+    candidates.sort(reverse=True, key=lambda item: (item[0], len(item[2])))
+
+    for net_shadow, key, items in candidates[:max_rows]:
+        ticker, side, template, horizon, regime = key
+        scope = {
+            "ticker": ticker,
+            "side": side,
+            "signal_template": template,
+            "horizon_class": horizon,
+            "market_regime": regime,
+        }
+        confidence = min(0.85, 0.35 + 0.08 * len(items) + min(0.25, net_shadow / 50000.0))
+        evidence = {
+            "source": "missed_opportunity_shadow",
+            "sample_count": len(items),
+            "net_shadow_pnl": net_shadow,
+            "positive_rate": sum(1 for item in items if _safe_float(item.get("best_shadow_pnl")) > 0) / max(1, len(items)),
+            "memory_ids": [item.get("id") for item in items[:20]],
+            "opportunity_layers": sorted({str(item.get("opportunity_layer") or "unknown") for item in items}),
+            "shadow_results_are_future_settled": True,
+        }
+        contract = build_next_round_memory_contract(
+            memory_type="missed_alpha_accountability",
+            maturity_state="fast_candidate_alpha",
+            status="candidate",
+            scope={**scope, "sector": _sector_for_ticker(cfg, ticker)},
+            usable_memory=[
+                f"Repeated same-scope missed opportunities showed positive shadow PnL={net_shadow:.0f}.",
+                "Treat as a fast alpha candidate: look for current trigger, invalidation, and execution feasibility.",
+            ],
+            analysis_strategy_updates=[
+                "Analysts should explain whether today's same-scope setup has become a real trade setup or remains only a direction view.",
+                "Technical/news timing must confirm; do not promote solely from shadow history.",
+            ],
+            trading_strategy_updates=[
+                "PM may reduce same-scope soft blocking and allow probe/small setup only when today's evidence confirms.",
+                "This candidate cannot authorize normal sizing or add-on exposure without mature alpha promotion.",
+            ],
+            pm_action_conditions=[
+                "If current opportunity_layer is tradeable_setup/deployable_alpha with invalidation and market confirmation, allow probe or small trade.",
+                "If current setup is direction_only or data quality is weak, keep watchlist/shadow.",
+            ],
+            invalidates_when=[
+                "Future same-scope executed or shadow samples turn negative.",
+                "Current setup lacks trigger, invalidation, or execution basis.",
+            ],
+            validation_plan=[
+                "Track whether future PM/Auditor/Trader actions convert this candidate into profitable executed trades.",
+            ],
+            position_authority="probe_or_small_setup_only_after_current_confirmation",
+            max_position_impact="same_scope_probe_or_small_trade_only",
+            sample_count=len(items),
+            confidence_score=confidence,
+        )
+        event_id = _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="missed_alpha_accountability",
+            scope_type="ticker_side_template",
+            scope_key=f"{ticker}:{side}:{template}:{horizon}:{regime}",
+            evidence=evidence,
+            action={
+                "policy_action": "fast_candidate_alpha",
+                "multiplier": probe_multiplier,
+                CONTRACT_KEY: contract,
+            },
+            status="applied",
+        )
+        cursor.execute(
+            """
+            INSERT INTO adaptive_policy_state (
+                id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                policy_type, policy_action, multiplier, confidence_score, sample_count,
+                reason, source_event_id, created_at, valid_until, payload_json, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_candidate_alpha', 'probe', ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type)
+            DO UPDATE SET
+                policy_action=excluded.policy_action,
+                multiplier=excluded.multiplier,
+                confidence_score=excluded.confidence_score,
+                sample_count=excluded.sample_count,
+                reason=excluded.reason,
+                source_event_id=excluded.source_event_id,
+                created_at=excluded.created_at,
+                valid_until=excluded.valid_until,
+                payload_json=excluded.payload_json,
+                active=1
+            """,
+            (
+                str(uuid.uuid4()),
+                config_id,
+                ticker,
+                side,
+                template,
+                horizon,
+                regime,
+                probe_multiplier,
+                confidence,
+                len(items),
+                "positive same-scope missed-opportunity shadow created fast alpha candidate",
+                event_id,
+                now,
+                valid_until,
+                _json_dumps({
+                    "policy_type": "fast_candidate_alpha",
+                    "scope": scope,
+                    "evidence": evidence,
+                    CONTRACT_KEY: contract,
+                    "boundary": {
+                        "not_mature_alpha": True,
+                        "requires_current_confirmation": True,
+                        "no_future_pollution": True,
+                        "not_product_whitelist": True,
+                    },
+                }),
+            ),
+        )
+        inserted += 1
+
+    if not inserted and candidates:
+        guarded = len(candidates)
+    return {"rows": inserted, "guarded": guarded, "status": "applied" if inserted else "no_ready_candidates"}
+
+
 def _template_groups_from_completed_pairs(
     cursor: sqlite3.Cursor,
     *,
@@ -4204,14 +5724,10 @@ def _causal_candidate_scope(
             sides.add("short")
         else:
             snapshot = item.get("signal_snapshot") if isinstance(item.get("signal_snapshot"), dict) else {}
-            plan = _pre_open_plan(snapshot)
-            side = str(plan.get("target_side") or plan.get("raw_target_side") or "").lower()
+            contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+            side = _target_side_from_ratio(contract.get("target_lots"))
             if side in {"long", "short"}:
                 sides.add(side)
-            else:
-                side = _target_side_from_ratio(plan.get("target_position_ratio"))
-                if side in {"long", "short"}:
-                    sides.add(side)
     return {
         "tickers": sorted(tickers),
         "sides": sorted(sides),
@@ -4552,15 +6068,40 @@ def _trade_pair_performance_summary(pairs: List[Dict[str, Any]]) -> Dict[str, An
     }
 
 
+def _with_policy_performance_columns(payload: Dict[str, Any], summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose performance evidence both in payload and top-level row columns."""
+    result = dict(payload or {})
+    result["sample_count"] = _safe_int(summary.get("total_trades"))
+    result["win_rate"] = _safe_float(summary.get("win_rate"))
+    result["net_pnl"] = _safe_float(summary.get("net_pnl"))
+    result["avg_pnl"] = _safe_float(summary.get("avg_pnl"))
+    return result
+
+
 def _learning_attribution_from_recommendation(recommendation: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     snapshot = _recommendation_snapshot(recommendation or {})
-    plan = _pre_open_plan(snapshot)
-    auditor = plan.get("trade_auditor") or plan.get("decision_planner") or {}
-    diagnostics = auditor.get("diagnostics") if isinstance(auditor, dict) and isinstance(auditor.get("diagnostics"), dict) else {}
-    reasons = _control_reasons_from_plan(plan)
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+    reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
     return (
         learning_tags_from_context(reasons, diagnostics),
         learning_effects_from_context(reasons, diagnostics),
+    )
+
+
+def _learning_mechanisms_from_recommendation(
+    recommendation: Dict[str, Any],
+    *,
+    infer_from_full_trace: bool = True,
+) -> List[str]:
+    snapshot = _recommendation_snapshot(recommendation or {})
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+    reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
+    return learning_mechanisms_from_context(
+        reasons,
+        diagnostics,
+        snapshot=snapshot if infer_from_full_trace else None,
     )
 
 
@@ -4594,9 +6135,11 @@ def _learned_vs_unlearned_trade_performance(
             unlearned_pairs.append(dict(pair))
             continue
         tags, effects = _learning_attribution_from_recommendation(recommendation)
+        mechanisms = _learning_mechanisms_from_recommendation(recommendation)
         item = dict(pair)
         item["learning_tags"] = tags
         item["learning_effects"] = effects
+        item["learning_mechanisms"] = mechanisms
         if tags and effects:
             learned_pairs.append(item)
             reason_counts.update(tags)
@@ -4610,8 +6153,308 @@ def _learned_vs_unlearned_trade_performance(
         "learned_reason_counts": _sorted_counter_dict(reason_counts),
         "learned_effect_counts": learning_effect_counts(learned_pairs),
         "learned_effect_summary": summarize_pairs_by_learning_effect(learned_pairs),
+        "learning_mechanism_counts": learning_mechanism_counts(learned_pairs),
+        "learning_mechanism_summary": summarize_pairs_by_learning_mechanism(learned_pairs),
         "missing_open_recommendations": missing_recommendations,
     }
+
+
+def _learning_mechanism_policy_groups(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+    min_samples: int,
+    min_positive_net_pnl: float,
+    min_positive_win_rate: float,
+    max_negative_net_pnl: float,
+    max_negative_win_rate: float,
+    infer_from_full_trace: bool = True,
+) -> List[Dict[str, Any]]:
+    try:
+        pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    except sqlite3.Error:
+        return []
+    recommendation_lookup = _recommendations_by_id(
+        cursor,
+        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+    )
+    groups: Dict[Tuple[str, str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for pair in pairs:
+        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+        if not recommendation:
+            continue
+        snapshot = _recommendation_snapshot(recommendation or {})
+        mechanisms = _learning_mechanisms_from_recommendation(
+            recommendation,
+            infer_from_full_trace=infer_from_full_trace,
+        )
+        if not mechanisms:
+            continue
+        ticker = str(pair.get("ticker") or "").upper()
+        side = str(pair.get("side") or "").lower()
+        combo = _signal_combo_from_snapshot(snapshot)
+        expected_days = _expected_horizon_days(snapshot, side)
+        horizon = _horizon_class(expected_days, snapshot)
+        regime = _market_regime(snapshot)
+        template = _signal_template(side, combo, snapshot)
+        item = dict(pair)
+        item["signal_template"] = template
+        item["signal_combo"] = combo
+        item["learning_mechanisms"] = mechanisms
+        for mechanism in mechanisms:
+            groups[(ticker, side, template, horizon, regime, str(mechanism))].append(item)
+
+    rows: List[Dict[str, Any]] = []
+    for (ticker, side, template, horizon, regime, mechanism), pairs_for_mechanism in groups.items():
+        summary = _trade_pair_performance_summary(pairs_for_mechanism)
+        total = _safe_int(summary.get("total_trades"))
+        if total < min_samples:
+            continue
+        net_pnl = _safe_float(summary.get("net_pnl"))
+        win_rate = _safe_float(summary.get("win_rate"))
+        if net_pnl >= min_positive_net_pnl and win_rate >= min_positive_win_rate:
+            action = "protect"
+            multiplier = 1.0
+            reason = f"{mechanism} same-scope performance positive"
+            maturity = "mechanism_performance_promoted"
+        elif net_pnl <= max_negative_net_pnl or win_rate <= max_negative_win_rate:
+            action = "cap"
+            multiplier = 0.50
+            reason = f"{mechanism} same-scope performance weak"
+            maturity = "mechanism_performance_demoted"
+        else:
+            continue
+        scope = {
+            "ticker": ticker,
+            "side": side,
+            "signal_template": template,
+            "horizon_class": horizon,
+            "market_regime": regime,
+        }
+        promotion_gate = _policy_promotion_gate(cfg=cfg, rows=pairs_for_mechanism, action=action)
+        shadow_reversal = (
+            _shadow_reversal_stats(
+                cursor,
+                cfg=cfg,
+                config_id=config_id,
+                trading_date=trading_date,
+                scope=scope,
+            )
+            if action == "cap"
+            else {"reversal": False, "enabled": bool(_policy_guard_config(cfg))}
+        )
+        if not promotion_gate["allowed"] or shadow_reversal.get("reversal"):
+            if shadow_reversal.get("reversal"):
+                _deactivate_adaptive_policy_state_from_shadow_reversal(
+                    cursor,
+                    config_id=config_id,
+                    scope=scope,
+                    policy_type=f"learning_mechanism:{mechanism}",
+                    shadow_reversal=shadow_reversal,
+                    reason="learning mechanism cap deactivated by positive same-scope shadow reversal",
+                )
+            rows.append(
+                {
+                    **scope,
+                    "learning_mechanism": mechanism,
+                    "policy_action": "watchlist",
+                    "multiplier": 1.0,
+                    "reason": (
+                        f"{mechanism} stayed watchlist: promotion gate failed"
+                        if not promotion_gate["allowed"]
+                        else f"{mechanism} cap reversed by same-scope shadow results"
+                    ),
+                    "maturity_state": "mechanism_performance_watchlist",
+                    "summary": summary,
+                    "promotion_gate": promotion_gate,
+                    "shadow_reversal": shadow_reversal,
+                    "guarded": True,
+                }
+            )
+            continue
+        rows.append(
+            {
+                **scope,
+                "learning_mechanism": mechanism,
+                "policy_action": action,
+                "multiplier": multiplier,
+                "reason": reason,
+                "maturity_state": maturity,
+                "summary": summary,
+                "promotion_gate": promotion_gate,
+                "shadow_reversal": shadow_reversal,
+                "guarded": False,
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            -abs(_safe_float((item.get("summary") or {}).get("net_pnl"))),
+            -_safe_int((item.get("summary") or {}).get("total_trades")),
+            str(item.get("learning_mechanism") or ""),
+        )
+    )
+    return rows
+
+
+def _write_learning_mechanism_policy_state(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    learning_cfg = cfg.get("learning", {}) or {}
+    control = learning_cfg.get("learning_mechanism_policy", {}) or {}
+    if not bool(control.get("enabled", True)):
+        return {"rows": 0, "status": "disabled"}
+    _ensure_research_learning_schema(cursor)
+
+    min_samples = _safe_int(
+        control.get("min_samples"),
+        _safe_int((learning_cfg.get("anti_overfit") or {}).get("min_samples_for_policy"), 4),
+    )
+    policy_rows = _learning_mechanism_policy_groups(
+        cursor,
+        cfg=cfg,
+        config_id=config_id,
+        trading_date=trading_date,
+        min_samples=min_samples,
+        min_positive_net_pnl=_safe_float(control.get("min_positive_net_pnl"), 1000.0),
+        min_positive_win_rate=_safe_float(control.get("min_positive_win_rate"), 0.58),
+        max_negative_net_pnl=_safe_float(control.get("max_negative_net_pnl"), -1000.0),
+        max_negative_win_rate=_safe_float(control.get("max_negative_win_rate"), 0.42),
+        infer_from_full_trace=bool(control.get("infer_from_full_trace", True)),
+    )
+    if not policy_rows:
+        return {"rows": 0, "status": "no_scoped_mechanism_policy", "min_samples": min_samples}
+
+    valid_until = _valid_until(
+        trading_date,
+        int(control.get("valid_days") or learning_cfg.get("overlay_expires_after_days") or 10),
+    )
+    now = _utc_now()
+    inserted = 0
+    guarded = 0
+    max_rows = max(1, _safe_int(control.get("max_rows_per_day"), 12))
+    cap_multiplier = max(0.0, min(1.0, _safe_float(control.get("cap_multiplier"), 0.50)))
+    for row in policy_rows[:max_rows]:
+        summary = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+        action = str(row.get("policy_action") or "cap")
+        if action == "watchlist" or row.get("guarded"):
+            _insert_learning_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                event_type="learning_mechanism_policy_guard",
+                scope_type="template",
+                scope_key=f"{row.get('ticker')}:{row.get('side')}:{row.get('signal_template')}:{row.get('learning_mechanism')}",
+                evidence={
+                    "learning_mechanism": row.get("learning_mechanism"),
+                    "summary": summary,
+                    "promotion_gate": row.get("promotion_gate"),
+                    "shadow_reversal": row.get("shadow_reversal"),
+                },
+                action={"policy_action": "watchlist_only", "reason": row.get("reason")},
+                status="guarded",
+            )
+            guarded += 1
+            continue
+        multiplier = 1.0 if action == "protect" else cap_multiplier
+        confidence = _confidence_from_summary(
+            {
+                "total_trades": summary.get("total_trades"),
+                "win_rate": summary.get("win_rate"),
+                "total_pnl": summary.get("net_pnl"),
+            }
+        )
+        evidence = _with_policy_performance_columns(
+            {
+                "learning_mechanism": row.get("learning_mechanism"),
+                "summary": summary,
+                "sample_count": summary.get("total_trades"),
+                "confidence_score": confidence,
+                "policy_promotion_gate": row.get("promotion_gate") or {},
+                "shadow_reversal": row.get("shadow_reversal") or {},
+            },
+            summary,
+        )
+        reason = str(row.get("reason") or "learning mechanism same-scope performance")
+        event_id = _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="learning_mechanism_policy",
+            scope_type="template",
+            scope_key=f"{row.get('ticker')}:{row.get('side')}:{row.get('signal_template')}:{row.get('learning_mechanism')}",
+            evidence=evidence,
+            action={
+                "policy_action": action,
+                "multiplier": multiplier,
+                "reason": reason,
+                "learning_mechanism": row.get("learning_mechanism"),
+                "confidence_score": confidence,
+            },
+            status="applied",
+        )
+        policy_payload = _policy_contract_payload(
+            policy_type=f"learning_mechanism:{row.get('learning_mechanism')}",
+            policy_action=action,
+            reason=reason,
+            multiplier=multiplier,
+            maturity_state=str(row.get("maturity_state") or "mechanism_performance_policy"),
+            scope={
+                "ticker": row.get("ticker"),
+                "side": row.get("side"),
+                "signal_template": row.get("signal_template"),
+                "horizon_class": row.get("horizon_class"),
+                "market_regime": row.get("market_regime"),
+            },
+            evidence=evidence,
+        )
+        cursor.execute(
+            """
+            INSERT INTO adaptive_policy_state (
+                id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                policy_type, policy_action, multiplier, confidence_score, sample_count,
+                reason, source_event_id, created_at, valid_until, payload_json, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type)
+            DO UPDATE SET
+                policy_action=excluded.policy_action,
+                multiplier=excluded.multiplier,
+                confidence_score=excluded.confidence_score,
+                sample_count=excluded.sample_count,
+                reason=excluded.reason,
+                source_event_id=excluded.source_event_id,
+                created_at=excluded.created_at,
+                valid_until=excluded.valid_until,
+                payload_json=excluded.payload_json,
+                active=1
+            """,
+            (
+                str(uuid.uuid4()),
+                config_id,
+                row.get("ticker") or "*",
+                row.get("side") or "*",
+                row.get("signal_template") or "*",
+                row.get("horizon_class") or "*",
+                row.get("market_regime") or "*",
+                f"learning_mechanism:{row.get('learning_mechanism')}",
+                action,
+                multiplier,
+                confidence,
+                _safe_int(summary.get("total_trades")),
+                reason,
+                event_id,
+                now,
+                valid_until,
+                _json_dumps(policy_payload),
+            ),
+        )
+        inserted += 1
+    return {"rows": inserted, "guarded_rows": guarded, "status": "applied", "candidate_rows": len(policy_rows)}
 
 
 def _learned_effect_underperformance_groups(
@@ -4994,6 +6837,55 @@ def _write_adaptive_policy_state(
             reason = "weak mature template"
         else:
             continue
+        pair_scope = {
+            "ticker": str(row.get("ticker") or "").upper(),
+            "side": str(row.get("side") or "").lower(),
+            "signal_template": str(row.get("signal_template") or ""),
+            "horizon_class": str(row.get("horizon_class") or ""),
+            "market_regime": str(row.get("market_regime") or ""),
+        }
+        try:
+            pair_rows = _completed_pairs_for_scope(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                scope=pair_scope,
+            )
+        except sqlite3.Error:
+            pair_rows = [{"net_pnl": net_pnl, "close_date": trading_date} for _ in range(sample_count)]
+        promotion_gate = _policy_promotion_gate(cfg=cfg, rows=pair_rows[:sample_count] or [{"net_pnl": net_pnl, "close_date": trading_date} for _ in range(sample_count)], action=action)
+        shadow_reversal = (
+            _shadow_reversal_stats(
+                cursor,
+                cfg=cfg,
+                config_id=config_id,
+                trading_date=trading_date,
+                scope=pair_scope,
+            )
+            if action == "cap"
+            else {"reversal": False, "enabled": bool(_policy_guard_config(cfg))}
+        )
+        if not promotion_gate["allowed"] or shadow_reversal.get("reversal"):
+            if shadow_reversal.get("reversal"):
+                _deactivate_adaptive_policy_state(
+                    cursor,
+                    config_id=config_id,
+                    scope=pair_scope,
+                    policy_type="template_quality",
+                    reason="template quality cap deactivated by positive same-scope shadow reversal",
+                )
+            _insert_learning_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                event_type="adaptive_policy_guard",
+                scope_type="template",
+                scope_key=f"{row.get('ticker')}:{row.get('side')}:{row.get('signal_template')}",
+                evidence={"template_row": dict(row), "promotion_gate": promotion_gate, "shadow_reversal": shadow_reversal},
+                action={"policy_action": "keep_watchlist", "reason": "template policy guard blocked premature policy state"},
+                status="guarded",
+            )
+            continue
         policy_payload = _policy_contract_payload(
             policy_type="template_quality",
             policy_action=action,
@@ -5013,6 +6905,8 @@ def _write_adaptive_policy_state(
                 "win_rate": win_rate,
                 "net_pnl": net_pnl,
                 "confidence_score": confidence,
+                "policy_promotion_gate": promotion_gate,
+                "shadow_reversal": shadow_reversal,
             },
         )
         event_id = _insert_learning_event(
@@ -5260,6 +7154,39 @@ def _write_alpha_promotion_state(
     valid_until = _valid_until(trading_date, valid_days)
     inserted = 0
     for row in rows:
+        scope = {
+            "ticker": row.get("ticker"),
+            "side": row.get("side"),
+            "signal_template": row.get("signal_template"),
+            "horizon_class": row.get("horizon_class"),
+            "market_regime": row.get("market_regime"),
+        }
+        try:
+            scoped_pairs = _completed_pairs_for_scope(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                scope=scope,
+            )
+        except sqlite3.Error:
+            scoped_pairs = [
+                {"net_pnl": _safe_float(row.get("net_pnl")), "close_date": trading_date}
+                for _ in range(_safe_int(row.get("sample_count")))
+            ]
+        promotion_gate = _policy_promotion_gate(cfg=cfg, rows=scoped_pairs, action="protect")
+        if not promotion_gate["allowed"]:
+            _insert_learning_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+                event_type="alpha_promotion_guard",
+                scope_type="ticker_side_template",
+                scope_key=f"{row.get('ticker')}:{row.get('side')}:{row.get('signal_template')}",
+                evidence={"template_row": dict(row), "promotion_gate": promotion_gate},
+                action={"policy_action": "watchlist_only", "reason": "alpha promotion stayed watchlist until samples are less fragile"},
+                status="guarded",
+            )
+            continue
         evidence = {
             "source": "signal_template_performance",
             "sample_count": _safe_int(row.get("sample_count")),
@@ -5267,6 +7194,7 @@ def _write_alpha_promotion_state(
             "net_pnl": _safe_float(row.get("net_pnl")),
             "avg_pnl": _safe_float(row.get("avg_pnl")),
             "confidence_score": _safe_float(row.get("confidence_score")),
+            "policy_promotion_gate": promotion_gate,
         }
         policy_payload = _policy_contract_payload(
             policy_type="alpha_promotion",
@@ -5274,13 +7202,7 @@ def _write_alpha_promotion_state(
             reason="positive alpha promotion from verified template performance",
             multiplier=1.0,
             maturity_state="verified_alpha_memory",
-            scope={
-                "ticker": row.get("ticker"),
-                "side": row.get("side"),
-                "signal_template": row.get("signal_template"),
-                "horizon_class": row.get("horizon_class"),
-                "market_regime": row.get("market_regime"),
-            },
+            scope=scope,
             evidence=evidence,
         )
         event_id = _insert_learning_event(
@@ -5473,8 +7395,8 @@ def _contextual_rule_policy_payload(
     multiplier: float = 1.0,
 ) -> Dict[str, Any]:
     payload = _policy_contract_payload(
-            policy_type=f"contextual_rule_calibration:{rule_group}",
-        policy_action=policy_action,
+        policy_type=f"contextual_rule_calibration:{rule_group}",
+        policy_action="diagnostic" if policy_action == "calibrate" else policy_action,
         reason=reason,
         multiplier=multiplier,
         maturity_state=maturity_state,
@@ -5723,12 +7645,15 @@ def _write_contextual_rule_calibration_state(
         if inserted >= max_rows:
             break
         snapshot = _recommendation_snapshot(recommendation)
-        plan = _pre_open_plan(snapshot)
-        holding = (
-            ((plan.get("strategy_controls") or {}).get("diagnostics") or {}).get("holding_rebalance_control")
-            if isinstance(plan.get("strategy_controls"), dict)
-            else {}
-        )
+        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        action_candidates = final_contract.get("action_candidates") if isinstance(final_contract.get("action_candidates"), list) else []
+        holding = {}
+        for candidate in action_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("source") == "position_lifecycle":
+                holding = candidate
+                break
         holding = holding if isinstance(holding, dict) else {}
         decision = str(holding.get("decision") or "")
         if decision not in {
@@ -6683,13 +8608,16 @@ def _write_provisional_policy_state(
     cursor.execute(
         """
         SELECT ticker, side, signal_template, horizon_class, market_regime,
-               sample_count, win_rate, net_pnl, avg_pnl, profit_factor, payload_json
+               sample_count, win_rate, net_pnl, avg_pnl, profit_factor,
+               last_sample_date, payload_json
         FROM signal_template_performance
         WHERE config_id = ?
           AND sample_count >= ?
+          AND last_sample_date IS NOT NULL
+          AND last_sample_date <= ?
           AND (net_pnl <= ? OR win_rate <= 0.25)
         """,
-        (config_id, consecutive_threshold, loss_cap),
+        (config_id, consecutive_threshold, trading_date, loss_cap),
     )
     rows = [dict(row) for row in cursor.fetchall()]
     inserted = 0
@@ -6712,6 +8640,7 @@ def _write_provisional_policy_state(
             continue
         payload = {
             "trading_date": trading_date,
+            "source_trading_date": str(row.get("last_sample_date") or "")[:10],
             "ticker": ticker,
             "side": side,
             "signal_template": template,
@@ -6746,9 +8675,9 @@ def _write_provisional_policy_state(
             INSERT INTO provisional_policy_state (
                 id, config_id, ticker, side, signal_template, horizon_class,
                 policy_action, multiplier, confidence_score, trigger_type,
-                sample_count, reason, rollback_value_json, created_at,
+                sample_count, reason, source_trading_date, rollback_value_json, created_at,
                 valid_until, active, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, policy_action)
             DO UPDATE SET
                 multiplier=excluded.multiplier,
@@ -6756,6 +8685,7 @@ def _write_provisional_policy_state(
                 trigger_type=excluded.trigger_type,
                 sample_count=excluded.sample_count,
                 reason=excluded.reason,
+                source_trading_date=excluded.source_trading_date,
                 rollback_value_json=excluded.rollback_value_json,
                 created_at=excluded.created_at,
                 valid_until=excluded.valid_until,
@@ -6775,6 +8705,7 @@ def _write_provisional_policy_state(
                 trigger_type,
                 int(row.get("sample_count") or 0),
                 f"early risk sentinel: {trigger_type}, net_pnl={net_pnl:.0f}, win_rate={win_rate:.2%}",
+                str(row.get("last_sample_date") or "")[:10],
                 _json_dumps(payload["rollback_value"]),
                 _utc_now(),
                 valid_until,
@@ -6950,6 +8881,7 @@ def apply_reviewer_learning(
     recommendations: List[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
+    transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Backward-compatible wrapper; Phase4 learning now belongs to Researcher."""
     return apply_researcher_learning(
@@ -6962,6 +8894,7 @@ def apply_reviewer_learning(
         recommendations=recommendations,
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
+        transactions_by_recommendation=transactions_by_recommendation or {},
     )
 
 
@@ -7054,6 +8987,20 @@ def run_phase4_review(
             errors=errors,
             warnings=warnings,
         )
+        data_lineage_audit = _audit_signal_data_lineage(
+            strategy_recommendations,
+            expected_analysts=cfg.get("workflow_analysts") or ANALYSTS,
+        )
+        if data_lineage_audit.get("artifact_missing"):
+            errors.append(
+                "recommendation signal artifacts missing: "
+                f"{data_lineage_audit.get('artifact_missing')[:12]}"
+            )
+        if data_lineage_audit.get("snapshot_missing_pairs"):
+            errors.append(
+                "recommendation signal snapshots missing analyst payloads: "
+                f"{data_lineage_audit.get('snapshot_missing_pairs')[:12]}"
+            )
 
         if phase1_transactions:
             errors.append(f"phase1 should not write real transactions, but found {len(phase1_transactions)} rows")
@@ -7260,6 +9207,7 @@ def run_phase4_review(
                 neutral_accountability=neutral_accountability_preview,
                 extra_audit={
                     "signal_persistence": signal_persistence_audit,
+                    "signal_data_lineage": data_lineage_audit,
                 },
             ),
         )
@@ -7298,6 +9246,7 @@ def run_phase4_review(
             recommendations=recommendations,
             strategy_recommendations=strategy_recommendations,
             no_trade_reason_counter=no_trade_reason_counter,
+            transactions_by_recommendation=transactions_by_recommendation,
         )
         reviewer_report_paths = _write_reviewer_learning_report(
             cursor=cursor,
@@ -7318,6 +9267,7 @@ def run_phase4_review(
             "completed",
             "reviewer validation and researcher learning passed",
             memory_config=cfg.get("strategy_memory", {}),
+            retention_config=cfg.get("learning_retention", {}),
         )
         phase4_completed_at = datetime.now(timezone.utc).isoformat()
         try:

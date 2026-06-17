@@ -192,7 +192,12 @@ class Router():
     def resolve_morning_execution_base_price(self, underlying_code, trading_date, contract_code=None):
         """
         Resolve phase2 execution basis strictly as:
-        T-day open -> previous trading day's close -> skip.
+        T-day open -> skip.
+
+        Phase2 execution must not use the previous close to fabricate an
+        executable intraday price. The T-1 close is valid for Phase1 planning,
+        but a missing T-day open is a data problem that Trader must record and
+        skip instead of hiding behind a fallback price.
         """
         from graph.schema import MorningExecutionBasis, BasePriceSource
 
@@ -228,33 +233,12 @@ class Router():
         missing_open_message = f"{underlying_code} missing T-day open price on {normalized_date.strftime('%Y-%m-%d')}"
         logger.warning(missing_open_message)
         warning_messages.append(missing_open_message)
-
-        prev_quote, previous_trading_day = self._resolve_previous_close_quote(
-            underlying_code=underlying_code,
-            trading_date=normalized_date,
-            contract_code=contract_code,
-            warning_messages=warning_messages,
-        )
-        if prev_quote is None or prev_quote.close_price is None or prev_quote.close_price <= 0:
-            return self._build_missing_previous_close_basis(
-                underlying_code=underlying_code,
-                normalized_date=normalized_date,
-                open_price=open_price,
-                warning_messages=warning_messages,
-            )
-
-        fallback_message = (
-            f"{underlying_code} uses previous close fallback from "
-            f"{previous_trading_day.strftime('%Y-%m-%d')}"
-        )
-        logger.warning(fallback_message)
-        warning_messages.append(fallback_message)
         return MorningExecutionBasis(
-            base_price=prev_quote.close_price,
-            base_price_source=BasePriceSource.T_MINUS_1_CLOSE_FALLBACK,
-            base_price_date=previous_trading_day.strftime("%Y-%m-%d"),
+            base_price=None,
+            base_price_source=None,
+            base_price_date=None,
             open_price=open_price,
-            prev_close_price=prev_quote.close_price,
+            prev_close_price=today_quote.pre_close_price if today_quote is not None else None,
             warning_message="; ".join(warning_messages),
         )
 
@@ -281,7 +265,7 @@ class Router():
                 base_price_date=previous_trading_day.strftime("%Y-%m-%d"),
                 open_price=None,
                 prev_close_price=prev_quote.close_price,
-                warning_message=None,
+                warning_message="; ".join(warning_messages) if warning_messages else None,
             )
 
         return self._build_missing_previous_close_basis(
@@ -808,6 +792,10 @@ class Router():
             "near_stale_ratio": 0.0,
             "low_confidence_indicator_count": 0,
             "low_confidence_indicators": [],
+            "excluded_stale_indicator_count": 0,
+            "excluded_stale_indicators": [],
+            "undated_indicator_count": 0,
+            "undated_indicators": [],
             "indicator_role_counts": {},
             "indicator_frequency_counts": {},
         }
@@ -847,8 +835,20 @@ class Router():
                     df[date_col] = pd.to_datetime(df[date_col])
                     df_filtered = df[df[date_col] < trading_dt].copy()
                 else:
-                    df_filtered = df.copy()
-                    logger.warning(f"{ticker} - {name_cn}: No date column found, using all data")
+                    logger.error(
+                        f"{ticker} - {name_cn}: No date column found; skipping indicator to avoid "
+                        "using undated or future fundamental evidence"
+                    )
+                    self.last_fundamentals_metadata["undated_indicator_count"] += 1
+                    self.last_fundamentals_metadata["undated_indicators"].append(
+                        {
+                            "ticker": ticker,
+                            "indicator": filename,
+                            "display_name": name_cn,
+                            "evidence_policy": "excluded_missing_date_column",
+                        }
+                    )
+                    continue
 
                 if df_filtered.empty:
                     logger.warning(f"{ticker} - {name_cn}: No data available before {trading_date}")
@@ -910,6 +910,8 @@ class Router():
                 trend_str = f"{trend:.2%}" if math.isfinite(trend) else 'N/A'
                 logger.info(f"{ticker} - {name_cn}: latest={value:.2f}, trend={trend_str}, date={date_str}")
 
+                is_stale = False
+                stale_detail = None
                 if date_str != 'Unknown':
                     try:
                         data_date = pd.to_datetime(str(date_str))
@@ -932,9 +934,22 @@ class Router():
                             if days_diff > max_days:
                                 logger.warning(
                                     f"{ticker} - {name_cn}: Data is {days_diff} days old "
-                                    f"(date: {data_date}, max: {max_days} days) - STALE"
+                                    f"(date: {data_date}, max: {max_days} days) - STALE; excluded from directional evidence"
                                 )
                                 self.last_fundamentals_metadata["stale_indicator_count"] += 1
+                                is_stale = True
+                                stale_detail = {
+                                    "ticker": ticker,
+                                    "indicator": filename,
+                                    "display_name": name_cn,
+                                    "data_date": data_date.strftime("%Y-%m-%d"),
+                                    "trading_date": trading_dt.strftime("%Y-%m-%d"),
+                                    "age_days": int(days_diff),
+                                    "max_age_days": int(max_days),
+                                    "role": indicator_role,
+                                    "frequency": indicator_frequency,
+                                    "evidence_policy": "excluded_from_directional_prompt",
+                                }
                             elif days_diff > max_days * 0.7:
                                 logger.warning(
                                     f"{ticker} - {name_cn}: Data is {days_diff} days old "
@@ -945,6 +960,12 @@ class Router():
                         logger.error(f"{ticker} - {name_cn}: Error checking data freshness: {exc}")
                 else:
                     logger.warning(f"{ticker} - {name_cn}: Missing date, skipping freshness check")
+
+                if is_stale:
+                    self.last_fundamentals_metadata["excluded_stale_indicator_count"] += 1
+                    if stale_detail:
+                        self.last_fundamentals_metadata["excluded_stale_indicators"].append(stale_detail)
+                    continue
 
                 low_confidence_note = low_confidence_indicators.get(filename)
                 fundamental_data[name_cn] = {
@@ -1005,11 +1026,26 @@ class Router():
                 spot_price_data = fundamental_data.get('spot_price')
                 if spot_price_data and spot_price_data['latest'] > 0:
                     spot_price = spot_price_data['latest']
-                    futures_quotes = self.api.get_continuous_candles(
-                        underlying_code=ticker,
-                        start_date=trading_dt - timedelta(days=30),
-                        end_date=trading_dt
-                    )
+                    try:
+                        basis_reference_date = get_previous_trading_day(
+                            router=self,
+                            trading_date=trading_dt,
+                            underlying_code=ticker,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"{ticker}: Unable to resolve pre-open basis futures cutoff before "
+                            f"{trading_dt:%Y-%m-%d}; skipping basis calculation: {exc}"
+                        )
+                        basis_reference_date = None
+                    if basis_reference_date is None:
+                        futures_quotes = []
+                    else:
+                        futures_quotes = self.api.get_continuous_candles(
+                            underlying_code=ticker,
+                            start_date=basis_reference_date - timedelta(days=30),
+                            end_date=basis_reference_date,
+                        )
 
                     if futures_quotes:
                         futures_price = futures_quotes[-1].close
@@ -1067,6 +1103,9 @@ class Router():
                             'implication': basis_implication,
                             'spot_price': float(spot_price),
                             'futures_price': float(futures_price),
+                            'pre_open_reference_date': basis_reference_date.strftime("%Y-%m-%d")
+                            if basis_reference_date is not None
+                            else None,
                         }
                         self.last_fundamentals_metadata["basis"] = dict(fundamental_data["basis"])
 
@@ -1091,19 +1130,21 @@ class Router():
                 build_factor_attribution_payload,
                 build_factor_catalog,
                 build_factor_snapshot,
+                build_local_finoview_availability_audit,
                 map_factor_snapshot_to_judgment,
             )
 
             if finoview_enabled:
+                local_catalog = build_factor_catalog(
+                    data_dir=data_dir,
+                    limit_to_tickers=[ticker],
+                    catalog_config_path=catalog_path,
+                )
                 factor_snapshot = build_factor_snapshot(
                     ticker,
                     trading_date,
                     data_dir=data_dir,
-                    catalog=build_factor_catalog(
-                        data_dir=data_dir,
-                        limit_to_tickers=[ticker],
-                        catalog_config_path=catalog_path,
-                    ),
+                    catalog=local_catalog,
                 )
                 factor_judgment = map_factor_snapshot_to_judgment(factor_snapshot)
                 factor_attribution = build_factor_attribution_payload(
@@ -1118,11 +1159,21 @@ class Router():
                 self.last_fundamentals_metadata["factor_coverage_score"] = factor_judgment.get("coverage_score", 0.0)
                 self.last_fundamentals_metadata["factor_freshness_score"] = factor_judgment.get("freshness_score", 0.0)
                 self.last_fundamentals_metadata["no_lookahead_status"] = factor_judgment.get("no_lookahead_status", "unchecked")
+                self.last_fundamentals_metadata["local_finoview_availability_audit"] = (
+                    build_local_finoview_availability_audit(
+                        ticker,
+                        trading_date,
+                        data_dir=data_dir,
+                        catalog_config_path=catalog_path,
+                        catalog=local_catalog,
+                    )
+                )
         except Exception as exc:
             logger.warning(f"{ticker}: Finoview factor snapshot build skipped: {exc}")
 
         result = f"=== Fundamental Analysis for {ticker} ===\n\n"
         factor_judgment = self.last_fundamentals_metadata.get("finoview_factor_judgment") or {}
+        availability_audit = self.last_fundamentals_metadata.get("local_finoview_availability_audit") or {}
         if factor_judgment:
             result += "=== Finoview No-Lookahead Factor Snapshot ===\n"
             result += f"No-lookahead status: {factor_judgment.get('no_lookahead_status')}\n"
@@ -1130,6 +1181,14 @@ class Router():
             result += f"Freshness score: {float(factor_judgment.get('freshness_score') or 0.0):.2f}\n"
             result += f"Covered groups: {', '.join(factor_judgment.get('covered_required_groups') or []) or 'none'}\n"
             result += f"Tradable coverage: {factor_judgment.get('tradable_coverage')}\n\n"
+        if availability_audit:
+            result += "=== Local Finoview Availability Audit ===\n"
+            result += f"Runtime boundary: {availability_audit.get('runtime_data_boundary')}\n"
+            result += f"Coverage status: {availability_audit.get('coverage_status')}\n"
+            result += f"Supports fundamental trade setup: {availability_audit.get('supports_fundamental_trade_setup')}\n"
+            result += f"Local feather/index-map ratio: {float(availability_audit.get('local_vs_index_ratio') or 0.0):.2f}\n"
+            result += f"Known catalog ratio: {float(availability_audit.get('known_catalog_ratio') or 0.0):.2f}\n"
+            result += f"Missing required groups: {', '.join(availability_audit.get('missing_required_groups') or []) or 'none'}\n\n"
         for name_cn, data in fundamental_data.items():
             if name_cn == 'basis':
                 result += "\n=== Basis Analysis ===\n"

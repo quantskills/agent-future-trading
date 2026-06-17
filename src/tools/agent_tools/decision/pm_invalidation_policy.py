@@ -23,6 +23,43 @@ def _signal_metadata(signal: Any) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _specific_invalidation_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or text in {"unknown", "none", "n/a", "null"}:
+        return False
+    generic = {
+        "exit/reduce if current confirmation fails",
+        "requires_current_confirmation",
+        "primary driver and secondary confirmation align with acceptable reward/risk",
+    }
+    if text in generic:
+        return False
+    return any(
+        token in text
+        for token in (
+            "invalid",
+            "fails",
+            "failure",
+            "breaks",
+            "below",
+            "above",
+            "close",
+            "stop",
+            "exit",
+            "reduce",
+            "contradict",
+            "conflict",
+            "reverses",
+            "loses",
+            "price fails",
+            "volume fails",
+            "regime flips",
+            "basis",
+            "inventory",
+        )
+    )
+
+
 def _has_explicit_stop_protection(signals: list) -> bool:
     for signal in signals or []:
         if getattr(signal, "invalidation_level", None) is not None:
@@ -52,16 +89,16 @@ def _has_structured_invalidation_condition(signals: list) -> bool:
             pass
         for field in structured_fields:
             value = getattr(signal, field, None)
-            if isinstance(value, str) and value.strip():
+            if isinstance(value, str) and _specific_invalidation_text(value):
                 return True
-            if isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value):
+            if isinstance(value, (list, tuple, set)) and any(_specific_invalidation_text(item) for item in value):
                 return True
         metadata = _signal_metadata(signal)
         for key in ("invalidation_condition", "risk_boundary", "counter_evidence"):
             value = metadata.get(key)
-            if isinstance(value, str) and value.strip():
+            if isinstance(value, str) and _specific_invalidation_text(value):
                 return True
-            if isinstance(value, (list, tuple, set)) and any(str(item).strip() for item in value):
+            if isinstance(value, (list, tuple, set)) and any(_specific_invalidation_text(item) for item in value):
                 return True
     return False
 

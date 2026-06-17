@@ -16,6 +16,7 @@ from tools.agent_tools.decision.audit_explainer import build_audit_payload, buil
 from tools.agent_tools.decision.contextual_rule_calibration import apply_auditor_contextual_calibration
 from tools.agent_tools.decision.hard_risk_rules import has_hard_block_reason
 from tools.agent_tools.decision.memory_policy_rules import strategy_memory_record as _memory_strategy_record
+from tools.agent_tools.decision.reason_effects import reason_effect_summary
 from tools.agent_tools.decision.soft_risk_rules import fallback_business_quality_score
 
 
@@ -782,6 +783,7 @@ class TradeAuditor:
             else:
                 decision = "allow"
 
+        diagnostics["reason_effects"] = reason_effect_summary(reasons)
         return self._output(
             decision=decision,
             target_side=target_side,
@@ -1005,19 +1007,52 @@ class TradeAuditor:
             default=0.0,
         )
         diagnostics["target_support"]["best_business_quality_score"] = best_business_support
+        allow_single_high_quality_probe = bool(self.quality_config.get("allow_single_high_quality_probe", True))
+        single_high_quality_multiplier = max(
+            0.0,
+            _safe_float(self.quality_config.get("single_high_quality_multiplier"), 0.35),
+        )
+        single_min_business_quality = _safe_float(
+            self.quality_config.get("single_high_quality_min_business_quality"),
+            0.60,
+        )
+        single_min_confidence = _safe_float(
+            self.quality_config.get("single_high_quality_min_confidence"),
+            0.55,
+        )
+        single_min_confirmation = _safe_float(
+            self.quality_config.get("single_high_quality_min_confirmation_score"),
+            0.45,
+        )
+        single_support_confidence = max(
+            (
+                _safe_float(analyst_quality.get(agent, {}).get("confidence"), 0.0)
+                for agent in supporters
+            ),
+            default=0.0,
+        )
+        single_high_quality_probe_allowed = (
+            allow_single_high_quality_probe
+            and len(supporters) == 1
+            and not low_quality_supporters
+            and best_business_support >= single_min_business_quality
+            and single_support_confidence >= single_min_confidence
+            and confirmation_score >= single_min_confirmation
+        )
+        diagnostics["target_support"]["single_high_quality_probe_allowed"] = single_high_quality_probe_allowed
 
         if low_tradeability_count >= block_low_count:
-            block = True
+            multiplier = min(multiplier, max(0.0, _safe_float(self.quality_config.get("low_tradeability_cap_multiplier"), 0.35)))
             reasons.append("analyst_quality_low_tradeability")
             notes.append(
-                f"blocked {target_side}: {low_tradeability_count} analyst signals have low tradeability"
+                f"probe-capped {target_side}: {low_tradeability_count} analyst signals have low tradeability"
             )
 
         if business_gate_enabled and supporters and best_business_support < min_business_probe:
-            block = True
+            multiplier = min(multiplier, probe_multiplier)
             reasons.append("business_quality_below_probe")
             notes.append(
-                f"blocked {target_side}: best business_quality_score={best_business_support:.2f} "
+                f"probe-capped {target_side}: best business_quality_score={best_business_support:.2f} "
                 f"is below probe threshold {min_business_probe:.2f}"
             )
         elif business_gate_enabled and supporters and best_business_support < min_business_deploy:
@@ -1031,9 +1066,9 @@ class TradeAuditor:
         if not supporters:
             reasons.append("no_analyst_support_for_target")
             if confirmation_score < _safe_float(self.quality_config.get("no_support_block_confirmation_below"), 0.70):
-                block = True
+                multiplier = min(multiplier, medium_multiplier)
                 notes.append(
-                    f"blocked {target_side}: no analyst supports target and confirmation_score={confirmation_score:.2f}"
+                    f"reduced {target_side}: no analyst supports target and confirmation_score={confirmation_score:.2f}"
                 )
             else:
                 multiplier = min(multiplier, medium_multiplier)
@@ -1042,15 +1077,23 @@ class TradeAuditor:
                 )
         elif len(supporters) < min_supporters:
             reasons.append("insufficient_quality_support")
-            if low_quality_supporters:
-                block = True
+            if single_high_quality_probe_allowed:
+                multiplier = min(multiplier, single_high_quality_multiplier)
+                reasons.append("single_high_quality_probe_only")
                 notes.append(
-                    f"blocked {target_side}: only {supporters} support target and low-quality supporters={low_quality_supporters}"
+                    f"probe-only {target_side}: one high-quality supporter={supporters}, "
+                    f"business_quality={best_business_support:.2f}, confidence={single_support_confidence:.2f}, "
+                    f"confirmation_score={confirmation_score:.2f}; multiplier={single_high_quality_multiplier:.2f}"
+                )
+            elif low_quality_supporters:
+                multiplier = min(multiplier, single_high_quality_multiplier)
+                notes.append(
+                    f"probe-capped {target_side}: only {supporters} support target and low-quality supporters={low_quality_supporters}"
                 )
             elif opposers and confirmation_score < conflict_score:
-                block = True
+                multiplier = min(multiplier, medium_multiplier)
                 notes.append(
-                    f"blocked {target_side}: single-sided support={supporters}, opposers={opposers}, "
+                    f"reduced {target_side}: single-sided support={supporters}, opposers={opposers}, "
                     f"confirmation_score={confirmation_score:.2f}<{conflict_score:.2f}"
                 )
             else:
@@ -1074,10 +1117,10 @@ class TradeAuditor:
             and "technical" in opposers + [name for name in ("technical", "fundamental") if name not in supporters]
             and "fundamental" in opposers + [name for name in ("technical", "fundamental") if name not in supporters]
         ):
-            block = True
+            multiplier = min(multiplier, max(0.0, _safe_float(self.quality_config.get("low_quality_news_cap_multiplier"), 0.35)))
             reasons.append("low_quality_news_driven_trade")
             notes.append(
-                f"blocked {target_side}: commodity_news supports target with tradeability={news_quality.get('tradeability')} "
+                f"probe-capped {target_side}: commodity_news supports target with tradeability={news_quality.get('tradeability')} "
                 "while technical/fundamental do not confirm"
             )
 
@@ -1195,9 +1238,9 @@ class TradeAuditor:
             if confirmation_score < min_confirmation:
                 hard_failures.append(f"confirmation_score={confirmation_score:.2f}<{min_confirmation:.2f}")
             if hard_failures:
-                block = True
+                multiplier = min(multiplier, cap_multiplier)
                 notes.append(
-                    f"blocked {target_side}: commodity_news is the only directional supporter; "
+                    f"probe-capped {target_side}: commodity_news is the only directional supporter; "
                     + ", ".join(hard_failures)
                 )
             else:

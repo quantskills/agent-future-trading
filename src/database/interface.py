@@ -160,6 +160,7 @@ class BaseDB(ABC):
         status: str,
         message: str = "",
         memory_config: Optional[Dict[str, Any]] = None,
+        retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Complete a trading day phase record."""
         raise NotImplementedError
@@ -177,7 +178,8 @@ class BaseDB(ABC):
         self,
         config_id: str,
         ticker: str,
-        limit: int
+        limit: int,
+        trading_date=None,
     ) -> List[str]:
         """Get recent futures transaction memory for prompts."""
         raise NotImplementedError
@@ -227,6 +229,21 @@ class BaseDB(ABC):
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
         """Get completed trade episodes as non-authoritative learning context."""
+        raise NotImplementedError
+
+    def get_similar_alpha_setup_action_values(
+        self,
+        config_id: str,
+        ticker: str,
+        sector: Optional[str] = None,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        trading_date=None,
+        limit: int = 6,
+    ) -> List[Dict[str, Any]]:
+        """Get strictly historical, compact action preferences from similar setup samples."""
         raise NotImplementedError
 
     def get_exploratory_hypotheses(

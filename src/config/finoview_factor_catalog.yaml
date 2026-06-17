@@ -43,6 +43,14 @@ ticker_overrides:
   eps_operate_rate: EB
   eps_profit: EB
   eps_yield: EB
+  eg_c_profit: EB
+  eg_naphtha_profit: EB
+  eg_operate_rate: EB
+  eg_port_stock_end_hd: EB
+  eg_port_stock_hd: EB
+  eg_social_stock: EB
+  eg_spot_price: EB
+  eg_yield: EB
   pe_operate_rate: EB
   ps_factory_stock: EB
   ps_operate_rate: EB
@@ -85,6 +93,57 @@ ticker_overrides:
   px_yield: TA
   weather_indianocean_index: P
   "weather_ON 3.4": P
+
+context_ticker_overrides:
+  HC:
+    - iron_yield
+    - iron_operate_rate
+    - iron_factory_profit_rate
+    - iron_factory_operate_rate
+    - land_trade_volume
+    - house_trade_volume
+  RB:
+    - iron_yield
+    - iron_operate_rate
+    - iron_factory_profit_rate
+    - iron_factory_operate_rate
+  TA:
+    - pe_operate_rate
+  M:
+    - lh_b_stock
+    - lh_sow_monthly_stock
+    - lh_sow_stock
+    - lh_spot_price
+    - lh_stock
+  ALL:
+    - macro_cn_finance
+    - macro_cn_industrial_value_added
+    - macro_cn_jk_agri
+    - macro_cn_jk_copper_ore
+    - macro_cn_jk_crude
+    - macro_cn_jk_iron_ore
+    - macro_cn_m1
+    - macro_cn_m2
+    - macro_cn_new_loans
+    - macro_cn_new_loans_enterprise
+    - macro_cn_pmi
+    - macro_cn_real_estate_investment
+    - macro_dollar_index
+    - macro_us10y
+    - macro_us10y_breakeven
+    - macro_us2y
+    - macro_usa_core_cpi
+    - macro_usa_core_pce
+    - macro_usa_cpi
+    - macro_usa_employment
+    - macro_usa_fed_funds_rate
+    - macro_usa_ism
+    - macro_usa_ism_orders
+    - macro_usa_pce
+    - macro_usa_unemployment_rate
+    - macro_usdcnh
+    - macro_usdcny
+    - macro_vix
 
 # 字段名 -> 业务因子组。无法确定含义的字段不要写入这里，
 # 运行时会保留为 unknown_factor，不能参与 protected 升级和大仓位方向锚。
@@ -146,6 +205,14 @@ factor_group_overrides:
   eb_equipment_profit_unit: cost_profit
   eb_equipment_profit_nonunit: cost_profit
   eb_bz_spread: cost_profit
+  eg_spot_price: price_basis
+  eg_port_stock_hd: inventory
+  eg_port_stock_end_hd: inventory
+  eg_social_stock: inventory
+  eg_operate_rate: supply
+  eg_yield: supply
+  eg_c_profit: cost_profit
+  eg_naphtha_profit: cost_profit
 
   j_factory_stock: inventory
   j_port_stock: inventory
@@ -327,6 +394,11 @@ factor_group_overrides:
   y_trade_volume: demand
   y_usa_stock_end: inventory
   y_yield: supply
+  lh_spot_price: price_basis
+  lh_stock: inventory
+  lh_b_stock: inventory
+  lh_sow_stock: supply
+  lh_sow_monthly_stock: supply
   oi_spot_price: price_basis
   oi_factory_stock: inventory
   oi_stock: inventory
@@ -500,6 +572,36 @@ factor_group_overrides:
   zn_refine_yield: supply
   zn_alloy_yield: supply
   zn_jk_volume: import_export
+
+  # 宏观字段只作为 macro_policy 背景证据，不能单独触发交易。
+  macro_cn_finance: macro_policy
+  macro_cn_industrial_value_added: macro_policy
+  macro_cn_jk_agri: macro_policy
+  macro_cn_jk_copper_ore: macro_policy
+  macro_cn_jk_crude: macro_policy
+  macro_cn_jk_iron_ore: macro_policy
+  macro_cn_m1: macro_policy
+  macro_cn_m2: macro_policy
+  macro_cn_new_loans: macro_policy
+  macro_cn_new_loans_enterprise: macro_policy
+  macro_cn_pmi: macro_policy
+  macro_cn_real_estate_investment: macro_policy
+  macro_dollar_index: macro_policy
+  macro_us10y: macro_policy
+  macro_us10y_breakeven: macro_policy
+  macro_us2y: macro_policy
+  macro_usa_core_cpi: macro_policy
+  macro_usa_core_pce: macro_policy
+  macro_usa_cpi: macro_policy
+  macro_usa_employment: macro_policy
+  macro_usa_fed_funds_rate: macro_policy
+  macro_usa_ism: macro_policy
+  macro_usa_ism_orders: macro_policy
+  macro_usa_pce: macro_policy
+  macro_usa_unemployment_rate: macro_policy
+  macro_usdcnh: macro_policy
+  macro_usdcny: macro_policy
+  macro_vix: macro_policy
 
 # 默认按 T+1 可见，防止当天发布数据在盘前被提前使用。
 release_lag_days:

@@ -75,9 +75,6 @@ def validate_check_db_consistency(source_db: str | Path = DB_PATH, check_db: str
             ("ticker_daily_pnl", "check_ticker_daily_pnl"),
             ("futures_transactions", "check_transactions"),
             ("futures_recommendation", "check_recommendations"),
-            ("strategy_memory", "check_strategy_memory"),
-            ("adaptive_policy_state", "check_adaptive_policy_state"),
-            ("capital_deployment_state", "check_capital_deployment_state"),
             ("trading_day_phase", "check_trading_day_phase"),
         ]
         mismatches = []
@@ -251,98 +248,25 @@ def rebuild_check_db(source_db: str | Path = DB_PATH, check_db: str | Path = DEF
             def rec_col(column: str) -> str:
                 return column if column in recommendation_columns else f"NULL AS {column}"
 
-            justification_expr = (
-                "substr(justification, 1, 800) AS justification_summary"
-                if "justification" in recommendation_columns
-                else "NULL AS justification_summary"
-            )
             cursor.execute("DROP TABLE IF EXISTS check_recommendations")
             cursor.execute(
                 f"""
                 CREATE TABLE check_recommendations AS
                 SELECT
-                    {rec_col("id")}, {rec_col("config_id")}, {rec_col("reference_portfolio_id")},
-                    {rec_col("trading_date")}, {rec_col("effective_trade_date")},
-                    {rec_col("source_type")}, {rec_col("underlying_code")},
-                    {rec_col("contract_code")}, {rec_col("action")}, {rec_col("lots")},
-                    {rec_col("base_price")}, {rec_col("execution_price")},
-                    {rec_col("status")}, {rec_col("warning_message")},
-                    {justification_expr},
-                    {rec_col("signal_snapshot_artifact_path")},
-                    {rec_col("signal_snapshot_sha256")},
-                    {rec_col("signal_snapshot_size")},
-                    {rec_col("signal_snapshot_summary_json")},
-                    {rec_col("audit_payload_artifact_path")},
-                    {rec_col("audit_payload_sha256")},
-                    {rec_col("audit_payload_size")},
-                    {rec_col("audit_payload_summary_json")},
+                    {rec_col("id")},
+                    {rec_col("config_id")},
+                    {rec_col("trading_date")},
+                    {rec_col("underlying_code")},
+                    {rec_col("action")},
+                    {rec_col("lots")},
+                    {rec_col("status")},
+                    {rec_col("warning_message")},
+                    {rec_col("base_price")},
+                    {rec_col("execution_price")},
                     {rec_col("created_at")}
                 FROM src.futures_recommendation
                 """
             )
-        _create_from_source(
-            cursor,
-            "check_strategy_memory",
-            "strategy_memory",
-            [
-                "config_id",
-                "ticker",
-                "side",
-                "signal_combo",
-                "memory_state",
-                "sample_count",
-                "win_rate",
-                "net_pnl",
-                "avg_pnl",
-                "confidence_score",
-                "source",
-                "reason",
-                "updated_at",
-                "valid_until",
-            ],
-        )
-        _create_from_source(
-            cursor,
-            "check_adaptive_policy_state",
-            "adaptive_policy_state",
-            [
-                "config_id",
-                "ticker",
-                "side",
-                "signal_template",
-                "horizon_class",
-                "market_regime",
-                "policy_type",
-                "policy_action",
-                "multiplier",
-                "confidence_score",
-                "sample_count",
-                "reason",
-                "created_at",
-                "valid_until",
-                "active",
-            ],
-        )
-        _create_from_source(
-            cursor,
-            "check_capital_deployment_state",
-            "capital_deployment_state",
-            [
-                "config_id",
-                "trading_date",
-                "capital_base",
-                "current_margin",
-                "current_margin_ratio",
-                "target_margin_ratio_min",
-                "target_margin_ratio_max",
-                "underutilization_breach",
-                "overutilization_breach",
-                "margin_gap_to_min",
-                "capital_allocation_tier",
-                "reason_bucket",
-                "created_at",
-            ],
-        )
         _create_from_source(
             cursor,
             "check_trading_day_phase",

@@ -183,13 +183,14 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
                 "loader_reclassified": reclassify_on_load and state != original_state,
                 "payload": item.get("payload") or {},
             }
+            source_trading_date = str(payload.get("exported_at_trading_date") or trading_day_value)[:10]
             cursor.execute(
                 '''
                 INSERT OR REPLACE INTO strategy_memory (
                     id, config_id, ticker, side, signal_combo, memory_state,
                     sample_count, win_rate, net_pnl, avg_pnl, confidence_score,
-                    source, reason, updated_at, valid_until, payload_json
-                ) VALUES (?, ?, ?, ?, '*', ?, ?, ?, ?, ?, ?, 'template_prior', ?, ?, ?, ?)
+                    source, reason, source_trading_date, updated_at, valid_until, payload_json
+                ) VALUES (?, ?, ?, ?, '*', ?, ?, ?, ?, ?, ?, 'template_prior', ?, ?, ?, ?, ?)
                 ''',
                 (
                     str(uuid.uuid4()),
@@ -203,6 +204,7 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
                     avg_pnl,
                     confidence,
                     f"template_prior:{template_name}:{horizon_class}",
+                    source_trading_date,
                     now,
                     valid_until,
                     json.dumps(row_payload, ensure_ascii=False),

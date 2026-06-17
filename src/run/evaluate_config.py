@@ -246,6 +246,14 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
                 f"胜率={payload.get('win_rate', 0):.2%}, "
                 f"净PnL={payload.get('net_pnl', 0):>12,.2f}"
             )
+    if metrics.get('learning_mechanism_counts'):
+        print(f"  学习机制分项:             {metrics.get('learning_mechanism_counts', {})}")
+        for mechanism, payload in metrics.get('learning_mechanism_summary', {}).items():
+            print(
+                f"    - {mechanism}: {payload.get('total_trades', 0)}笔, "
+                f"胜率={payload.get('win_rate', 0):.2%}, "
+                f"净PnL={payload.get('net_pnl', 0):>12,.2f}"
+            )
     print(f"  Neutral信号比例:           {metrics.get('neutral_signal_ratio', 0):.2%} ({metrics.get('neutral_signal_count', 0)}个)")
     print(f"  Neutral责任完整率:         {metrics.get('neutral_accountability_complete_rate', 1):.2%}")
     if metrics.get('neutral_category_counts'):

@@ -1,7 +1,12 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pandas as pd
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +16,17 @@ if str(SRC_ROOT) not in sys.path:
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.analysis.quality import apply_trade_research_contract
+from tools.agent_tools.analysis.quality import build_technical_context
+from tools.agent_tools.analysis.quality import parse_fundamental_factors
+from tools.agent_tools.analysis.quality import summarize_news_events
+from agents.analysis_team.technical import (
+    _validate_pre_open_price_window,
+    get_adx_signal,
+    get_mean_reversion_signal,
+)
+from apis.router import Router
+from tools.agent_tools.analysis.signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
 from tools.agent_tools.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
@@ -57,6 +73,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertTrue(required_agents.issubset(seen_agents))
         self.assertTrue(required_artifact_types.issubset(seen_artifact_types))
 
+
     def test_internal_message_contract_and_trade_research_contract_are_valid(self):
         message = build_internal_message_contract(
             agent="technical",
@@ -68,6 +85,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         research = build_trade_research_contract(
             opportunity_type="trend_continuation",
             opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout confirmation",
             exit_hint="close below invalidation",
             holding_period_hint="short:2 trading day(s)",
@@ -85,6 +103,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             signal=Signal.BULLISH,
             confidence=0.72,
             trigger_type="breakout_continuation",
+            entry_trigger="open only after breakout confirmation with volume expansion",
             invalidation_level=3200,
             business_quality_score=0.68,
             factor_alignment_score=0.70,
@@ -106,10 +125,726 @@ class AgentContractFixtureTest(unittest.TestCase):
 
         self.assertEqual(result.opportunity_type, "trend_continuation")
         self.assertEqual(result.opportunity_layer, "tradeable_setup")
+        self.assertEqual(result.opportunity_state, "tradeable_candidate")
         self.assertIn("trade_research_contract", result.metadata)
+        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "tradeable_candidate")
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "tradeable_candidate")
         self.assertIn("internal_message_contract", result.metadata)
         self.assertIn("trend", result.factor_focus)
         self.assertIn("high_volatility", result.current_evidence_conflict)
+
+    def test_current_trigger_and_invalidation_cannot_be_hidden_as_no_opportunity(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.68,
+            trigger_type="breakout_continuation",
+            entry_trigger="open only after breakout above opening range with volume expansion",
+            exit_hint="exit if price closes back below opening range",
+            invalidation_level=3310.0,
+            business_quality_score=0.72,
+            data_coverage_score=0.85,
+            template_name="trend_breakout",
+            holding_period_hint="1-3 trading days while breakout remains valid",
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "market_regime": "trend",
+                "dominant_direction": "bullish",
+                "current_trade_setup": {
+                    "setup_family": "trend_breakout",
+                    "sector_setup_alignment": "preferred",
+                    "required_confirmation": "breakout with volume",
+                    "invalidation_template": "price closes back below opening range",
+                },
+                "indicator_votes": {"details": {"trend": "Bullish", "macd": "Bullish", "adx": "Bullish"}},
+                "risk_flags": [],
+            },
+            analyst="technical",
+            trading_date="2025-03-03",
+            ticker="RB",
+        )
+
+        self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
+        self.assertNotIn(result.opportunity_state, {"no_opportunity", "watch_for_trigger"})
+        self.assertIn(result.opportunity_layer, {"tradeable_setup", "deployable_alpha"})
+        self.assertTrue(result.trigger_valid)
+        self.assertTrue(result.invalidation_present)
+
+    def test_generic_trigger_does_not_become_tradeable_setup(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.62,
+            trigger_type="technical_price_trigger",
+            entry_trigger="technical_price_trigger",
+            business_quality_score=0.65,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "medium",
+                "market_regime": "range",
+                "dominant_direction": "bullish",
+                "indicator_votes": {"details": {"trend": "Bullish", "macd": "Neutral", "rsi": "Bullish"}},
+                "risk_flags": ["trend_continuation_requires_breakout_confirmation"],
+            },
+            analyst="technical",
+            trading_date="2025-03-03",
+            ticker="BU",
+        )
+
+        self.assertEqual(result.opportunity_layer, "direction_only")
+        self.assertEqual(result.opportunity_state, "probe_candidate")
+        self.assertNotEqual(result.entry_trigger, "technical_price_trigger")
+        self.assertIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
+
+    def test_neutral_watchlist_signal_keeps_opportunity_state(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.NEUTRAL,
+            confidence=0.42,
+            neutral_opportunity_bucket="watchlist_trigger",
+            neutral_trigger_condition="break above 3350 with volume expansion",
+            neutral_shadow_side="long",
+            neutral_watchlist_priority="high",
+            business_quality_score=0.50,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "medium",
+                "market_regime": "trend",
+                "risk_flags": [],
+            },
+            analyst="technical",
+            trading_date="2025-03-03",
+            ticker="RB",
+        )
+
+        self.assertEqual(result.opportunity_layer, "no_trade")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
+
+    def test_trade_research_contract_syncs_learning_impact_opportunity_state(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.62,
+            business_quality_score=0.72,
+            factor_alignment_score=0.68,
+            entry_trigger="break above opening range with volume",
+            exit_hint="exit if price closes back below breakout range",
+            invalidation_level=3310.0,
+            learning_impact_summary={
+                "contract_version": "agentquant.analyst_learning_impact.v1",
+                "historical_support": ["RB:long:trend_breakout_setup:trend:open"],
+                "historical_contradiction": [],
+                "current_evidence_confirmed": ["breakout confirmation"],
+                "current_evidence_missing": [],
+            },
+        )
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "market_regime": "trend",
+                "current_trade_setup": {
+                    "setup_family": "trend_breakout",
+                    "sector_setup_alignment": "aligned",
+                    "required_confirmation": "breakout with volume",
+                    "invalidation_template": "price closes back below breakout range",
+                },
+            },
+            analyst="technical",
+            ticker="RB",
+        )
+
+        summary = result.learning_impact_summary
+        self.assertEqual(summary["opportunity_state"], result.opportunity_state)
+        self.assertIn("opportunity_state_reason", summary)
+        self.assertIn("no_trade_authority", summary["authority_boundary"])
+        self.assertEqual(result.metadata["learning_impact_summary"], summary)
+
+    def test_analyst_structured_summaries_reject_free_text(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.NEUTRAL,
+            learning_impact_summary="learned something",
+            factor_calibration_summary="factor text",
+            event_calibration_summary="event text",
+        )
+
+        self.assertEqual(signal.learning_impact_summary, {})
+        self.assertEqual(signal.factor_calibration_summary, {})
+        self.assertEqual(signal.event_calibration_summary, {})
+
+    def test_technical_context_derives_specific_entry_and_invalidation(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.68,
+            trigger_type="technical_price_trigger",
+            entry_trigger="technical_price_trigger",
+            business_quality_score=0.70,
+        )
+
+        context = build_technical_context(
+            "BU",
+            {
+                "trend": Signal.BULLISH,
+                "macd": Signal.BULLISH,
+                "adx": Signal.BULLISH,
+                "open_interest": Signal.BULLISH,
+            },
+            {"trend_strength": 28.0, "volatility": 0.12, "volume_ratio": 1.1},
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            context,
+            analyst="technical",
+            trading_date="2025-03-03",
+            ticker="BU",
+        )
+
+        self.assertNotEqual(result.entry_trigger, "technical_price_trigger")
+        self.assertIn("volume_ratio", result.entry_trigger)
+        self.assertIn("trend_breakout", result.entry_trigger)
+        self.assertTrue(_has_structured_invalidation_condition([result]))
+        self.assertIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
+        contract = result.metadata["action_evidence_contract"]
+        self.assertEqual(contract["analyst"], "technical")
+        self.assertEqual(contract["learning_scope"]["setup_family"], "trend_breakout")
+        self.assertEqual(contract["learning_scope"]["sector_setup_alignment"], "preferred")
+        self.assertIn("primary_confirmation", contract["open"])
+
+    def test_technical_context_derives_range_reversal_setup_fields(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.66,
+            trigger_type="technical_price_trigger",
+            entry_trigger="technical_price_trigger",
+            business_quality_score=0.68,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "medium",
+                "market_regime": "range",
+                "dominant_direction": "bearish",
+                "current_trade_setup": {
+                    "setup_family": "range_reversal",
+                    "required_confirmation": "RSI/Stochastic/mean-reversion signal aligns with resistance",
+                    "invalidation_template": "price breaks above resistance with volume",
+                },
+                "features": {"trend_strength": 19.0, "volume_ratio": 0.95},
+                "indicator_votes": {"details": {"rsi": "Bearish", "stochastic": "Bearish", "mean_reversion": "Bearish"}},
+                "risk_flags": [],
+            },
+            analyst="technical",
+            trading_date="2025-03-03",
+            ticker="SR",
+        )
+
+        self.assertIn("range_reversal", result.entry_trigger)
+        self.assertIn("mean-reversion", result.entry_trigger)
+        self.assertIn("price breaks above resistance", result.exit_hint)
+
+    def test_fundamental_context_builds_sector_factor_tree_contract(self):
+        fundamentals = "\n".join(
+            [
+                "RB社会库存: value [role: inventory; frequency: weekly; last 5 obs trend: down]",
+                "RB表观需求: value [role: demand; frequency: weekly; last 5 obs trend: up]",
+                "RB利润: value [role: cost_profit; frequency: weekly; last 5 obs trend: up]",
+            ]
+        )
+        context = parse_fundamental_factors(
+            fundamentals,
+            {
+                "configured_indicator_count": 3,
+                "loaded_indicator_count": 3,
+                "finoview_factor_judgment": {"tradable_coverage": True, "coverage_score": 1.0},
+                "local_finoview_availability_audit": {"supports_fundamental_trade_setup": True},
+            },
+            "RB",
+        )
+
+        self.assertEqual(context["sector"], "ferrous")
+        roles = context["fundamental_driver_roles"]
+        self.assertIn("inventory", roles["primary_driver_groups"])
+        self.assertIn("demand", roles["primary_driver_groups"])
+        self.assertFalse(context["action_evidence_contract"]["open"]["can_create_trade_authority_alone"])
+
+    def test_news_context_classifies_sector_tradable_catalyst(self):
+        news_item = type(
+            "News",
+            (),
+            {
+                "title": "巴西降雨导致装运受阻，进口供应大幅收紧",
+                "content": "豆粕进口到港减少，市场担忧短缺。",
+                "publish_time": "2025-03-03 08:30:00",
+            },
+        )()
+        context = summarize_news_events([news_item], "M", trading_date="2025-03-03")
+
+        self.assertEqual(context["sector"], "agricultural")
+        self.assertTrue(context["catalyst_classification"]["tradable_catalyst"])
+        self.assertGreaterEqual(context["catalyst_classification"]["sector_tradable_event_count"], 1)
+        self.assertTrue(context["action_evidence_contract"]["open"]["price_reaction_required"])
+
+    def test_adx_signal_uses_di_for_direction_not_strength_alone(self):
+        up = pd.DataFrame(
+            {
+                "high": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25],
+                "low": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
+                "close": [9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5],
+            }
+        )
+        down = pd.DataFrame(
+            {
+                "high": list(reversed(up["high"].tolist())),
+                "low": list(reversed(up["low"].tolist())),
+                "close": list(reversed(up["close"].tolist())),
+            }
+        )
+
+        self.assertEqual(get_adx_signal(up, {"period": 3}), Signal.BULLISH)
+        self.assertEqual(get_adx_signal(down, {"period": 3}), Signal.BEARISH)
+
+    def test_mean_reversion_uses_negative_zscore_for_bullish_reversal(self):
+        params = {
+            "bollinger_window": 5,
+            "rolling_window": 5,
+            "z_score_extreme": 1.0,
+            "bb_position_threshold": 0.2,
+        }
+        sold_off = pd.DataFrame(
+            {
+                "close": [100, 101, 100, 102, 101, 100, 99, 98, 97, 80],
+            }
+        )
+        stretched_up = pd.DataFrame(
+            {
+                "close": [100, 99, 100, 98, 99, 100, 101, 102, 103, 120],
+            }
+        )
+
+        self.assertEqual(get_mean_reversion_signal(sold_off, params), Signal.BULLISH)
+        self.assertEqual(get_mean_reversion_signal(stretched_up, params), Signal.BEARISH)
+
+    def test_fundamental_anchor_needs_short_trigger_but_can_derive_auditable_condition(self):
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.66,
+            horizon_class="medium",
+            trigger_type="fundamental_anchor",
+            entry_trigger="fundamental_anchor",
+            business_quality_score=0.72,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "factor_group_counts": {"inventory": {"down": 2}, "demand": {"up": 1}, "basis": {"up": 1}},
+                "data_quality": {"supports_fundamental_trade_setup": True, "coverage_ratio": 0.82},
+                "risk_flags": [],
+            },
+            analyst="fundamental",
+            trading_date="2025-03-03",
+            ticker="BU",
+        )
+
+        self.assertIn("short-term technical/price confirmation", result.entry_trigger)
+        self.assertTrue(_has_structured_invalidation_condition([result]))
+        self.assertIn("fundamental_derived_specific_entry_condition", result.setup_quality_notes)
+
+    def test_news_catalyst_requires_price_volume_confirmation_not_fake_tradeable(self):
+        signal = AnalystSignal(
+            agent_name="commodity_news",
+            signal=Signal.BULLISH,
+            confidence=0.64,
+            trigger_type="news_event_trigger",
+            entry_trigger="news_event_trigger",
+            business_quality_score=0.66,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "medium",
+                "tradable_event": True,
+                "price_reaction_required": True,
+                "price_reaction_confirmed": False,
+                "direction_counts": {"bullish": 3, "bearish": 0},
+                "event_type_counts": {"supply": 2, "policy": 1},
+                "risk_flags": [],
+            },
+            analyst="commodity_news",
+            trading_date="2025-03-03",
+            ticker="BU",
+        )
+
+        self.assertEqual(result.opportunity_layer, "direction_only")
+        self.assertIn("price/volume", result.entry_trigger)
+        self.assertIn("news_event_requires_price_or_intraday_confirmation", result.current_evidence_conflict)
+
+    def test_pm_invalidation_ignores_generic_would_change_view_text(self):
+        weak = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            would_change_view_if="requires_current_confirmation",
+        )
+        strong = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            would_change_view_if="long technical idea invalid if price closes below trigger area",
+        )
+
+        self.assertFalse(_has_structured_invalidation_condition([weak]))
+        self.assertTrue(_has_structured_invalidation_condition([strong]))
+
+    def test_scorecard_does_not_count_generic_invalidation_as_boundary(self):
+        weak = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.72,
+            opportunity_layer="tradeable_setup",
+            setup_quality_score=0.72,
+            business_quality_score=0.70,
+            entry_trigger="open only after price breakout confirms with volume expansion",
+            would_change_view_if="requires_current_confirmation",
+        )
+        strong = weak.model_copy(
+            update={
+                "would_change_view_if": "long setup invalid if price closes below breakout area",
+            }
+        )
+
+        weak_card = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[weak],
+            market_confirmation={"confirmation_score": 0.65},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+        strong_card = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[strong],
+            market_confirmation={"confirmation_score": 0.65},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+
+        self.assertEqual(weak_card["long"]["invalidation_count"], 0)
+        self.assertIn("missing_invalidation_boundary", weak_card["long"]["gating_failures"])
+        self.assertEqual(strong_card["long"]["invalidation_count"], 1)
+        self.assertNotIn("missing_invalidation_boundary", strong_card["long"]["gating_failures"])
+
+    def test_single_complete_fundamental_setup_with_strong_market_confirmation_is_tradeable(self):
+        """Regression for PM over-blocking a complete setup as direction_only."""
+        technical = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.NEUTRAL,
+            confidence=0.35,
+            opportunity_layer="no_trade",
+            setup_quality_score=0.30,
+            business_quality_score=0.31,
+            entry_trigger="bullish reversal would require price trigger confirmation",
+            would_change_view_if="wait for price trigger confirmation",
+        )
+        fundamental = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.46,
+            opportunity_layer="tradeable_setup",
+            setup_quality_score=0.75,
+            business_quality_score=0.72,
+            entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
+            would_change_view_if="long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
+            horizon_class="medium",
+        )
+        news = AnalystSignal(
+            agent_name="commodity_news",
+            signal=Signal.NEUTRAL,
+            confidence=0.30,
+            opportunity_layer="no_trade",
+        )
+
+        card = build_opportunity_scorecard(
+            ticker="ZN",
+            analyst_signals=[technical, fundamental, news],
+            market_confirmation={"confirmation_score": 0.75},
+            data_quality_summary={"critical_gap": False, "fundamental_trade_setup_gap": False},
+            config={
+                "weak_confirmation_threshold": 0.45,
+                "tradeable_threshold": 0.58,
+                "min_tradeable_setup_quality": 0.55,
+                "single_tradeable_setup_confirmation_score": 0.68,
+            },
+        )
+
+        self.assertEqual(card["long"]["final_layer"], "tradeable_setup")
+        self.assertTrue(card["long"]["single_tradeable_setup_confirmed"])
+        self.assertIn(
+            "single_tradeable_setup_with_strong_market_confirmation",
+            card["long"]["scorecard_promotion_reasons"],
+        )
+        self.assertNotIn("missing_entry_setup", card["long"]["gating_failures"])
+        self.assertNotIn("missing_invalidation_boundary", card["long"]["gating_failures"])
+
+    def test_single_setup_with_technical_opposition_is_not_promoted(self):
+        technical = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.55,
+            opportunity_layer="tradeable_setup",
+            setup_quality_score=0.70,
+            business_quality_score=0.65,
+            entry_trigger="short if breakdown confirms with volume",
+            would_change_view_if="short invalid if price closes back above breakdown area",
+        )
+        fundamental = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.46,
+            opportunity_layer="tradeable_setup",
+            setup_quality_score=0.75,
+            business_quality_score=0.72,
+            entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
+            would_change_view_if="long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
+            horizon_class="medium",
+        )
+
+        card = build_opportunity_scorecard(
+            ticker="ZN",
+            analyst_signals=[technical, fundamental],
+            market_confirmation={"confirmation_score": 0.78},
+            data_quality_summary={"critical_gap": False, "fundamental_trade_setup_gap": False},
+            config={
+                "tradeable_threshold": 0.58,
+                "min_tradeable_setup_quality": 0.55,
+                "single_tradeable_setup_confirmation_score": 0.68,
+                "technical_opposition_min_confidence": 0.45,
+            },
+        )
+
+        self.assertFalse(card["long"]["single_tradeable_setup_confirmed"])
+        self.assertTrue(card["long"]["technical_opposes_side"])
+
+
+class TechnicalPreOpenDataBoundaryTest(unittest.TestCase):
+    def test_pre_open_technical_window_accepts_completed_t_minus_one_bar(self):
+        prices = pd.DataFrame(
+            {"close": [100.0, 101.0]},
+            index=pd.to_datetime(["2025-03-03", "2025-03-04"]),
+        )
+
+        latest = _validate_pre_open_price_window(
+            ticker="M",
+            trading_date="2025-03-05",
+            prices_df=prices,
+            pre_open_only=True,
+        )
+
+        self.assertEqual(latest, "2025-03-04")
+
+    def test_pre_open_technical_window_rejects_t_day_bar(self):
+        prices = pd.DataFrame(
+            {"close": [100.0, 101.0]},
+            index=pd.to_datetime(["2025-03-04", "2025-03-05"]),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "expected latest price date < trading_date"):
+            _validate_pre_open_price_window(
+                ticker="M",
+                trading_date="2025-03-05",
+                prices_df=prices,
+                pre_open_only=True,
+            )
+
+
+class FundamentalDataBoundaryTest(unittest.TestCase):
+    def _build_router(self):
+        router = Router.__new__(Router)
+        router.market_type = "china_futures"
+        router.config = {}
+        router.api = SimpleNamespace(
+            get_trade_dates=lambda start_date, end_date, underlying_code=None: [],
+            get_continuous_candles=lambda underlying_code, start_date, end_date: [],
+        )
+        router.last_fundamentals_metadata = None
+        router.last_news_metadata = None
+        return router
+
+    def test_fundamental_loader_skips_undated_indicator_instead_of_using_all_rows(self):
+        router = self._build_router()
+        df = pd.DataFrame({"bu_future_close_price": [100.0, 999.0]})
+
+        with patch("apis.router.Path.exists", return_value=True), patch(
+            "apis.router.read_finoview_feather_cached",
+            return_value=df,
+        ):
+            result = router.get_china_futures_fundamentals("BU", "2025-03-05")
+
+        self.assertIsNone(result)
+        metadata = router.last_fundamentals_metadata
+        self.assertEqual(metadata["undated_indicator_count"], metadata["configured_indicator_count"])
+        self.assertEqual(metadata["loaded_indicator_count"], 0)
+
+    def test_fundamental_basis_uses_previous_trading_day_price_not_t_day_close(self):
+        router = self._build_router()
+
+        def fake_read(path):
+            filename = path.stem
+            if filename == "bu_future_close_price":
+                return pd.DataFrame(
+                    {
+                        "tradeDate": pd.to_datetime(["2025-03-03", "2025-03-04"]),
+                        filename: [3300.0, 3400.0],
+                    }
+                )
+            if filename == "bu_spot_price":
+                return pd.DataFrame(
+                    {
+                        "tradeDate": pd.to_datetime(["2025-03-04"]),
+                        filename: [3500.0],
+                    }
+                )
+            return pd.DataFrame(
+                {
+                    "tradeDate": pd.to_datetime(["2025-03-04"]),
+                    filename: [1.0],
+                }
+            )
+
+        router.api = SimpleNamespace(
+            get_trade_dates=lambda start_date, end_date, underlying_code=None: [
+                SimpleNamespace(trade_date="2025-03-03"),
+                SimpleNamespace(trade_date="2025-03-04"),
+                SimpleNamespace(trade_date="2025-03-05"),
+            ],
+            get_continuous_candles=lambda underlying_code, start_date, end_date: [
+                SimpleNamespace(close=3300.0, trade_date="2025-03-03"),
+                SimpleNamespace(close=3400.0, trade_date="2025-03-04"),
+            ],
+        )
+
+        with patch("apis.router.Path.exists", return_value=True), patch(
+            "apis.router.read_finoview_feather_cached",
+            side_effect=fake_read,
+        ), patch(
+            "apis.router.get_previous_trading_day",
+            return_value=pd.Timestamp("2025-03-04"),
+        ):
+            result = router.get_china_futures_fundamentals("BU", "2025-03-05")
+
+        self.assertIsNotNone(result)
+        basis = router.last_fundamentals_metadata["basis"]
+        self.assertEqual(basis["date"], "2025-03-04")
+        self.assertEqual(basis["pre_open_reference_date"], "2025-03-04")
+        self.assertEqual(basis["futures_price"], 3400.0)
+
+
+class NewsDataBoundaryTest(unittest.TestCase):
+    def _build_router(self, news_dir: Path):
+        router = Router.__new__(Router)
+        router.market_type = "china_futures"
+        router.config = {"factor_data": {"news": {"data_dir": str(news_dir)}}}
+        router.last_fundamentals_metadata = None
+        router.last_news_metadata = None
+        return router
+
+    def test_news_loader_pre_open_excludes_t_day_and_future_news(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            news_dir = Path(tmpdir)
+            (news_dir / "BU.txt").write_text(
+                "\n".join(
+                    [
+                        "2025-03-04",
+                        "T minus one catalyst",
+                        "库存下降，现货成交改善。",
+                        "inventory",
+                        "local",
+                        "",
+                        "2025-03-05",
+                        "T day catalyst",
+                        "盘中新增政策消息。",
+                        "policy",
+                        "local",
+                        "",
+                        "2025-03-06",
+                        "Future catalyst",
+                        "未来新闻不应进入当前分析。",
+                        "policy",
+                        "local",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            router = self._build_router(news_dir)
+
+            pre_open_news = router.get_china_futures_news(
+                "BU",
+                "2025-03-05",
+                news_count=10,
+                pre_open_only=True,
+            )
+
+            self.assertEqual([item.title for item in pre_open_news], ["T minus one catalyst"])
+            self.assertEqual(router.last_news_metadata["news_cutoff"], "<2025-03-05")
+            self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-04")
+
+    def test_news_loader_non_pre_open_includes_t_day_but_excludes_future_news(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            news_dir = Path(tmpdir)
+            (news_dir / "BU.txt").write_text(
+                "\n".join(
+                    [
+                        "2025-03-04",
+                        "T minus one catalyst",
+                        "库存下降，现货成交改善。",
+                        "inventory",
+                        "local",
+                        "",
+                        "2025-03-05",
+                        "T day catalyst",
+                        "盘中新增政策消息。",
+                        "policy",
+                        "local",
+                        "",
+                        "2025-03-06",
+                        "Future catalyst",
+                        "未来新闻不应进入当前分析。",
+                        "policy",
+                        "local",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            router = self._build_router(news_dir)
+
+            intraday_news = router.get_china_futures_news(
+                "BU",
+                "2025-03-05",
+                news_count=10,
+                pre_open_only=False,
+            )
+
+            self.assertEqual(
+                [item.title for item in intraday_news],
+                ["T day catalyst", "T minus one catalyst"],
+            )
+            self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-03-05")
+            self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-05")
 
 
 if __name__ == "__main__":

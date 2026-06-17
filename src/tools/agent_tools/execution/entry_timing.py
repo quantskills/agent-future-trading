@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Entry timing state labels for deterministic Phase2 execution."""
 
-from typing import Any, Mapping
+from typing import Any
 
 
 def opening_range_status(price_context: Any) -> dict[str, Any]:
@@ -31,9 +31,9 @@ def entry_action_family(target_lots: int, current_lots: int) -> str:
     return "reverse"
 
 
-def phase2_entry_audit(*, target_lots: int, current_lots: int, price_context: Any, pre_open_plan: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def phase2_entry_audit(*, target_lots: int, current_lots: int, price_context: Any) -> dict[str, Any]:
     return {
         "entry_action_family": entry_action_family(target_lots, current_lots),
         "opening_range": opening_range_status(price_context),
-        "phase1_target_lots_estimate": (pre_open_plan or {}).get("target_lots_estimate") if isinstance(pre_open_plan, Mapping) else None,
+        "target_lots_source": "final_action_contract",
     }

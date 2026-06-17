@@ -1,9 +1,39 @@
 # AgentQuant 期货回测、模拟盘与实盘复刻配置。
 # 本文件只保留可运行参数；机制说明见 docs/mechanism_*.md。
-# 硬约束、交易宇宙、数据源和 LLM 路由由本文件人工控制；
-# 日度弱参由 Researcher 写入数据库 overlay，不自动改本文件。
-# 组合总保证金目标可向 16%-20% 靠近，但 20% 上限是硬闸。
+# 硬约束、交易宇宙、数据源和 LLM 路由由本文件人工控制。
+# 日度弱参和学习结果由 Researcher 写入数据库 overlay/state，不自动改写本文件。
+# 最新业务主线：分析师定义品种化 state 与当前证据，Researcher 写带 usage_boundary 的
+# open/hold/exit/execution action-value；分析师只读 signal_calibration，PM 只读开仓/持仓/退出
+# 动作偏好，Trader 只读 execution profile。最终交易事实仍只认 PM 汇总出的
+# final_action_contract，Trader 只执行该最终契约。
+# 资金参数保护区：
+#   - position_budget_policy
+#   - risk_control
+#   - net_exposure_control
+#   - drawdown_control
+#   - capital_utilization_control
+# 未经明确要求，不要借配置整理、学习机制或门控优化修改这些参数值。
+# 组合总保证金硬上限为 20%；真实新开仓最低保证金由 position_budget_policy 控制。
 # 干净删库重跑前，建议先在 src 目录初始化主库和评估库。
+
+# ---------------------------------------------------------------------------
+# 0. Catalog 索引
+# ---------------------------------------------------------------------------
+
+config_catalogs:
+  # 辅助 YAML 目录。运行时由 config_normalizer.py 展开成业务代码读取的配置形状。
+  # 这里索引事实表、数据源、冷启动先验和策略边界；学习结果写数据库，不回写 YAML。
+  execution_commission: execution_commission_catalog.yaml
+  execution_slippage: execution_slippage_catalog.yaml
+  execution_exit_policy: execution_exit_policy_catalog.yaml
+  analyst_prior_profiles: analyst_prior_profiles.yaml
+  portfolio_policy: portfolio_policy_catalog.yaml
+  learning_policy: learning_policy_catalog.yaml
+  data_factor_policy: data_factor_policy_catalog.yaml
+
+# ---------------------------------------------------------------------------
+# 1. 运行加速与数据预取
+# ---------------------------------------------------------------------------
 
 runtime:
   # 只加速工程流程，不改变交易策略、账务、学习写回或四阶段顺序。
@@ -29,7 +59,44 @@ runtime:
     output_dir: src/logs/data_quality
 
 # ---------------------------------------------------------------------------
-# 1. 实验与账户
+# 2. 控制组协议治理
+# ---------------------------------------------------------------------------
+
+control_governance:
+  # 控制组只做多智能体协议、工具权限、成本与回测前健康审计。
+  # 它不是 PM、Auditor、Trader 或 Researcher，也不是新的交易门控。
+  # 任何 control_governance 输出都不能创建/否决交易权限，不能改 lots/margin_ratio。
+  enabled: true
+  protocol_governor:
+    enabled: true
+    role: audit_sidecar_only
+    llm_enabled: false
+    may_create_trade_authority: false
+    may_modify_lots_or_margin: false
+    may_execute_orders: false
+    may_write_settlement: false
+    final_trade_truth: final_action_contract
+  preflight:
+    enabled: true
+    deterministic_only: true
+    call_external_apis: false
+    required_python_env: deepfund
+    check_assets_writable: true
+    check_local_sqlite: true
+  cost_budget_audit:
+    enabled: true
+    role: resource_observation_only
+    can_change_strategy: false
+    can_emit_trade_action_fields: false
+    allowed_outputs: [cost_report, cost_warning, retry_suggestion, investigation_priority]
+  tool_access_policy:
+    enabled: true
+    role: agent_tool_namespace_audit
+    violation_effect: protocol_error_only
+    protocol_governor_allowed_namespaces: [control, database]
+
+# ---------------------------------------------------------------------------
+# 3. 实验、账户与资金硬边界
 # ---------------------------------------------------------------------------
 
 exp_name: "agentquant-futures-trading-2025"
@@ -40,7 +107,48 @@ market_type: "china_futures"
 # 资金目标由 capital_utilization_control 管理，但不得突破此硬闸。
 max_total_margin_ratio: 0.20
 
+position_budget_policy:
+  # 用户已调资金参数，属于核心保护区。
+  # 所有学习、软门控和 alpha release 只能决定进入哪一层，不能自动改这些数值。
+  # 仓位预算按“保证金占用”管理，而不是只看名义仓位比例。
+  enabled: true
+  basis: margin
+  capital_base: account_equity
+  hard_max_total_margin_ratio: 0.20
+  # 500万本金下，真实开仓最低 0.8%=4万；与 probe 0.8%-1.5% 口径一致。
+  min_real_trade_margin_ratio: 0.008
+  min_real_trade_margin_abs: 40000
+  apply_min_to_new_entries_only: true
+  require_final_trade_authority: true
+  block_below_min_when_cannot_scale: true
+  # 以下是冷启动资金分层。学习机制只校准进入哪一层，不突破 20% 硬上限。
+  probe_margin_ratio: 0.008
+  probe_margin_max_ratio: 0.015
+  normal_trade_margin_ratio: 0.030
+  normal_trade_margin_max_ratio: 0.060
+  deployable_margin_ratio: 0.060
+  deployable_margin_max_ratio: 0.120
+  exceptional_margin_ratio: 0.075
+  exceptional_margin_max_ratio: 0.130
+  max_single_ticker_margin_ratio: 0.130
+
+analyst_weight_policy:
+  # 历史兼容字段名仍叫 weight_policy，但业务语义是“分析师冷启动先验”。
+  # 它只辅助中期背景、冷启动排序和适用性解释；最终开仓/加仓权限必须来自
+  # PM 的 action evidence router，不能由静态权重直接生成。
+  enabled: true
+  mode: evidence_router
+  static_weights_mode: prior_only
+  static_weights_can_create_trade_authority: false
+  allow_static_weights_to_open: false
+  strategic_profile: sector_strategic_view
+  trade_timing_profile: daily_trade_timing
+  dynamic_overlay: database_only
+  strategic_view_cannot_open_position: true
+  direction_only_cannot_open_position: true
+
 risk_control:
+  # 用户已调资金参数，属于核心保护区。
   # 按账户权益 / 初始资金划分风险状态。
   warning_ratio: 0.70
   danger_ratio: 0.50
@@ -54,11 +162,12 @@ risk_control:
 
   # 单机会初始敞口锚，不是单品种硬上限。
   max_single_position_ratio:
-    safe: 0.12
+    safe: 0.15
     warning: 0.08
     danger: 0.05
 
 net_exposure_control:
+  # 用户已调资金参数，属于核心保护区。
   # 限制组合多空净方向暴露。
   max_net_exposure: 0.50
   # 仅已验证强机会可临时使用更高净敞口。
@@ -66,457 +175,64 @@ net_exposure_control:
   symmetric_scaling: true
 
 # ---------------------------------------------------------------------------
-# 2. 数据质量与市场确认
+# 4. 数据配置索引
 # ---------------------------------------------------------------------------
 
-fundamental_quality_control:
-  # Finoview 覆盖、陈旧或缺失较差时下调基本面权重。
-  enabled: true
-  min_coverage_ratio: 0.65
-  stale_ratio_warn: 0.20
-  stale_ratio_severe: 0.35
-  missing_ratio_warn: 0.20
-  missing_ratio_severe: 0.40
-  low_coverage_multiplier: 0.70
-  stale_warn_multiplier: 0.85
-  stale_severe_multiplier: 0.65
-  missing_warn_multiplier: 0.85
-  missing_severe_multiplier: 0.65
-  min_multiplier: 0.25
-
-pandaai_extra_data:
-  # PandaAI 扩展数据用于因子上下文、盘前确认和仓位缩放，不单独生成信号。
-  enabled: true
-  mode: confirm_and_factor_context
-  reference_lag_days: 1
-  lookback_days: 5
-  fail_policy: soft_skip
-  use_in_fundamental_analyst: true
-  features:
-    # 默认启用：已实测可用，且适合做盘前确认。
-    basis: true
-    warehouse_receipt: true
-    net_flow: true
-    variety_position_rank: true
-    symbol_position_rank: true
-    ls_ratio: true
-    broker_net_margin_change: true
-    broker_variety_profit: true
-    netposi_rank: true
-    net_cap_change: true
-    contract_daily_indicators: true
-    contract_rank: true
-
-    # 默认关闭：接口可用但耗时更长，避免大规模回测被拖慢。
-    broker_net_margin: false
-  fundamental_features:
-    # fundamental 分析师读取的 PandaAI 因子集合。
-    basis: true
-    warehouse_receipt: true
-    net_flow: true
-    variety_position_rank: true
-    symbol_position_rank: true
-    ls_ratio: true
-    broker_net_margin_change: true
-    broker_variety_profit: true
-    netposi_rank: true
-    contract_daily_indicators: true
-    contract_rank: true
-    broker_net_margin: false
-    net_cap_change: true
-
-market_confirmation:
-  # 用 PandaAI 扩展数据确认、缩放或阻断 Phase1 目标方向。
-  enabled: true
-  min_confirmations_for_new_entry: 2
-  min_confirmation_score_for_new_entry: 0.55
-  min_confirmation_score_for_weak_combo: 0.60
-  max_conflicts_for_new_entry: 4
-  quality_gate_enabled: true
-  quality_gate_cap_multiplier: 0.50
-  quality_gate_block_weak_signal: true
-  weak_signal_strength: 0.25
-  conflict_cap_multiplier: 0.50
-  block_weak_conflicting_signal: true
-  allow_conflicted_probe_with_strong_confirmation: true
-  conflicted_probe_min_confirmation_score: 0.65
-  conflicted_probe_min_confirmations: 3
-  # 辅助证据可缺；关键缺口过多时降级，不把缺口当方向证据。
-  missing_data_degradation_enabled: true
-  max_actionable_missing_for_normal_entry: 2
-  min_usable_features_after_data_gap: 1
-  data_gap_cap_multiplier: 0.50
-  data_gap_block_when_no_features: true
-  data_gap_block_weak_signal: false
+# 数据入口与质量策略由 data_factor_policy_catalog.yaml 展开：
+#   fundamental_quality_control / pandaai_extra_data / factor_data。
+# 市场确认策略由 portfolio_policy_catalog.yaml 展开：
+#   market_confirmation。
 
 # ---------------------------------------------------------------------------
-# 3. 审计、反馈与学习频率控制
+# 5. 审计、回撤与学习频率控制
 # ---------------------------------------------------------------------------
 
-trade_auditor:
-  # 交易计划审核智能体：不调用 LLM，不下单，只做质量审核。
-  enabled: true
-  mode: deterministic
-  use_llm: false
-  learning_mode: audit_only
-  policy_version: deterministic_v1
 
-  quality_gate:
-    # 三分析师质量门槛：限制新开仓和加仓，不阻断必要退出。
-    enabled: true
-    min_supporting_analysts: 2
-    block_low_tradeability_count: 2
-    conflict_block_confirmation_below: 0.50
-    no_support_block_confirmation_below: 0.70
-    medium_quality_multiplier: 0.50
-    # 不在配置中固化品种方向名单，强弱模板从学习状态读取。
-    qualified_support_min_confidence: 0.45
-    news_driver_control:
-      enabled: true
-      min_news_confidence: 0.60
-      min_market_confirmation_score: 0.60
-      min_freshness_score: 0.70
-      min_relevance_score: 0.70
-      block_when_core_opposes: true
-      cap_without_fundamental_confirmation: true
-      cap_multiplier: 0.50
-
-  attribution_feedback:
-    # 已平仓交易反馈：只审计和降权，不训练模型。
-    enabled: true
-    lookback_trades: 30
-    min_samples_soft: 3
-    min_samples_hard: 6
-    weak_win_rate_below: 0.40
-    severe_win_rate_below: 0.30
-    weak_total_pnl_below: -1500
-    severe_total_pnl_below: -5000
-    weak_combo_requires_confirmation_score: 0.60
-    block_severe_negative_combo: true
-
-  cold_start:
-    # 冷启动样本不足时先小仓试探，保留“先验证、后放大”。
-    policy: small_cap
-    # 冷启动仓位乘数。
-    max_position_ratio_multiplier: 0.65
-    block_weak_combo_new_entries: true
-    # 仅在 PandaAI 确认明显偏弱时拦截冲突冷启动。
-    block_conflict_confirmation_below: 0.60
-
-  audit:
-    # 写入推荐快照的 trade_auditor 节点。
-    write_to_signal_snapshot: true
-    log_decision_reasons: true
-
-trade_frequency_control:
-  # 通用历史样本保护；日度弱参来自 Researcher 写入的学习状态。
-  enabled: true
-  lookback_trades: 20
-  min_completed_trades: 6
-  weak_win_rate_below: 0.38
-  severe_win_rate_below: 0.30
-  weak_total_pnl_below: -1500
-  severe_total_pnl_below: -5000
-  weak_cap_multiplier: 0.50
-  severe_block_new_entries: true
-
-ticker_performance_control:
-  # 品种近期表现保护：调低基础 sizing anchor，不是单品种硬上限。
-  enabled: true
-  lookback_days: 20
-  min_trade_days: 3
-  soft_avg_pnl_below: -300
-  soft_cap_multiplier: 0.50
-  severe_avg_pnl_below: -800
-  severe_win_rate_below: 0.35
-  severe_anchor_ratio: 0.03
-  recovery_avg_pnl_above: 200
-  recovery_cap_multiplier: 1.10
+# 审计、交易频率、品种表现和短期亏损控制由 portfolio_policy_catalog.yaml 展开：
+#   trade_auditor / trade_frequency_control / ticker_performance_control / ticker_loss_control。
 
 drawdown_control:
+  # 用户已调资金参数，属于核心保护区。
   # 账户回撤分层控制：警戒压缩风险，硬保护进入冷静与恢复试探。
   enabled: true
-  warning_drawdown: 0.04
-  hard_drawdown: 0.05
+  # 账户级最大回撤预算：7% 警戒压缩，10% 硬保护；不改变 20% 总保证金上限。
+  warning_drawdown: 0.07
+  hard_drawdown: 0.10
   warning_cap_multiplier: 0.60
   warning_target_margin_ratio_max: 0.04
   initial_hard_cooldown_days: 1
   first_probe_loss_cooldown_days: 2
   second_probe_loss_cooldown_days: 3
   cooldown_increment_days: 1
-  recovery_probe_margin_ratio_min: 0.01
-  recovery_probe_margin_ratio_max: 0.02
+  recovery_probe_margin_ratio_min: 0.008
+  recovery_probe_margin_ratio_max: 0.015
   recovery_restore_step_margin_ratios: [0.02, 0.04, 0.06, 0.08]
   recovery_probe_min_confirmation_score: 0.65
   recovery_probe_min_confirmations: 3
   recovery_probe_require_stop_protection: true
   recovery_probe_block_weak_memory: true
 
-ticker_loss_control:
-  # 防止某个品种在短窗口内连续拖累组合。
-  enabled: true
-  lookback_days: 5
-  loss_threshold: -3000
-  cap_multiplier: 0.50
-  block_new_entries_after_consecutive_losses: 2
+# ---------------------------------------------------------------------------
+# 6. 资金利用与 PM 运行策略
+# ---------------------------------------------------------------------------
 
-strategy_memory:
-  # 数据库驱动的策略记忆，Phase4 写入，下一交易日读取。
-  enabled: true
-  # 写入后只影响未来交易日。
-  update_on_phase4: true
-  source: attribution_auto
-  lookback_trades: 30
-  expires_after_days: 30
-  min_samples_watchlist: 2
-  min_samples_weak_block: 4
-  min_samples_protected: 3
-  protected_win_rate: 0.60
-  protected_total_pnl: 1000
-  watchlist_win_rate_below: 0.45
-  watchlist_total_pnl_below: -500
-  weak_block_win_rate_below: 0.30
-  weak_block_total_pnl_below: -2500
-  audit:
-    # protected 必须满足样本、胜率和净收益门槛。
-    protected_min_sample_count: 5
-    protected_min_win_rate: 0.60
-    protected_min_net_pnl: 1000
-    protected_min_confirmation_score: 0.45
-    protected_multiplier: 0.65
-    # watchlist 偏弱模板压仓。
-    watchlist_min_confirmation_score: 0.55
-    watchlist_cap_multiplier: 0.50
-    # weak_block 严格压制，但允许强确认边缘模板。
-    weak_block_min_confirmation_score: 0.60
-    weak_block_cap_multiplier: 0.35
-    # 暂时保持 2，不全局放松到 1，避免弱模板同时放宽过头。
-    min_qualified_supporters: 2
-
-learning:
-  # 学习层只调整弱参、模板权重、摘要和软风控，不突破硬约束。
-  enabled: true
-  memory_expires_after_days: 30
-  overlay_expires_after_days: 10
-  anti_overfit:
-    min_samples_for_template: 3
-    min_samples_for_policy: 4
-  config_overlay:
-    # Researcher 写入 overlay，PM 下一交易日按 allowlist 读取。
-    enabled: true
-  adaptive_policy:
-    # 由成熟模板表现生成 protect/cap 等软策略，供 auditor 读取。
-    enabled: true
-    min_policy_confidence: 0.35
-  contextual_rule_calibration:
-    # 按品种/方向/周期/市场状态校准软阈值，不突破硬约束。
-    enabled: true
-    min_confidence: 0.35
-    valid_days: 10
-    max_rows_per_day: 10
-    min_shadow_pnl_for_relaxation: 1200
-    min_shadow_loss_for_tightening: 1200
-    # 盘中触发只允许同作用域成熟记忆小幅校准。
-    relaxed_opening_range_miss: 0.003
-    tightened_opening_range_miss: 0.001
-    relaxed_intraday_confirmation_score: 0.65
-    tightened_intraday_confirmation_score: 0.72
-    # 新仓亏损与 horizon 失败只做短期情境校准。
-    horizon_confirm_score_after_failure: 0.58
-    short_timing_confidence_after_failure: 0.48
-    losing_hold_reduction_after_failure: 0.45
-    new_loss_confirm_score_after_failure: 0.58
-    new_loss_signal_strength_after_failure: 0.28
-    new_loss_reduction_after_failure: 0.45
-    pm_observation_confidence: 0.45
-    min_analyst_samples: 3
-    min_analyst_confidence: 0.35
-    analyst_positive_hit_rate: 0.60
-    analyst_weak_hit_rate: 0.40
-    positive_medium_short_timing_confidence: 0.42
-    positive_medium_confirm_score: 0.52
-    weak_medium_short_timing_confidence: 0.50
-    weak_medium_confirm_score: 0.60
-    positive_probe_confirm_score: 0.50
-    weak_probe_confirm_score: 0.58
-    # 技术参数校准只影响 technical 分析师的 EMA/RSI/Bollinger 小幅微调。
-    # 它必须来自同品种 technical 短周期表现，不能突破硬风控，也不能直接放仓。
-    technical_min_confidence: 0.35
-    technical_positive_hit_rate: 0.60
-    technical_weak_hit_rate: 0.40
-    technical_valid_days: 10
-    # Auditor 仅允许软化以下历史表现类拦截。
-    auditor_softenable_reasons:
-      - strategy_memory_weak_block
-      - side_performance_block
-      - conditional_performance_block
-      - weak_ticker_side_quality_gate
-      - strict_ticker_side_quality_gate
-    softenable_hard_block_reasons:
-      - strategy_memory_weak_block
-      - side_performance_block
-      - conditional_performance_block
-      - weak_ticker_side_quality_gate
-      - strict_ticker_side_quality_gate
-  learned_vs_unlearned_policy:
-    # learned 跑输基准时写入降权策略，不写品种黑名单。
-    enabled: true
-    min_learned_samples: 3
-    min_net_pnl_underperformance: 1.0
-    demote_multiplier: 0.50
-    # 同作用域样本足够且真实亏损时可先行降权。
-    min_scoped_alpha_samples: 3
-    allow_self_loss_demote_without_benchmark: true
-    min_self_loss_net_pnl: -2500
-  template_prior:
-    enabled: true
-    load_on_backtest_start: true
-    export_on_backtest_end: true
-    path: src/logs/attribution/template_prior.json
-  provisional_policy_state:
-    enabled: true
-    anomaly_loss_cap_enabled: true
-    anomaly_loss_threshold: -8000
-    anomaly_loss_cap_multiplier: 0.25
-    consecutive_loss_probe_only_threshold: 2
-    consecutive_loss_multiplier: 0.35
-    valid_days: 10
-  trade_episode_memory:
-    # 完整交易片段记忆，只作 prompt 先验，不越过硬风控。
-    enabled: true
-  no_trade_opportunity_memory:
-    # no-trade 影子结果只在未来已结算后进入学习。
-    enabled: true
-    shadow_forward_days: [3, 5, 10]
-    max_rows_per_day: 30
-  tail_loss_sentinel:
-    # 新仓异常亏损写短期哨兵；不是品种黑名单。
-    enabled: true
-    min_abs_loss: 25000
-    min_equity_loss_ratio: 0.005
-    cap_multiplier: 0.35
-    policy_action: cap
-    confidence_score: 0.70
-    valid_days: 5
-  alpha_promotion:
-    # 正向 alpha 达标后晋升，仍需当日证据和硬约束通过。
-    enabled: true
-    min_sample_count: 5
-    min_win_rate: 0.60
-    min_net_pnl: 1000
-    min_shadow_pnl: 1000
-    valid_days: 10
-  exploratory_research:
-    # Researcher 在 Phase4 后生成作用域假设；验证前只作候选先验。
-    enabled: true
-    use_llm: true
-    min_episode_samples: 2
-    max_episode_samples: 24
-    max_hypotheses_per_day: 5
-    valid_days: 30
-  loss_template_observation:
-    # 亏损模板只做观察性研究；不写品种黑名单，也不直接影响仓位。
-    enabled: true
-    lookback_days: 30
-    min_loss_samples: 1
-    min_cumulative_loss_abs: 1
-    max_rows_per_day: 4
-    valid_days: 30
-  reviewer_causal_review:
-    enabled: true
-    use_llm: true
-    run_after_phase4_settlement: true
-    evidence_pack_no_lookahead: true
-    separate_pre_trade_evidence_and_post_trade_outcome: true
-    write_raw_llm_to_notes_only: true
-    rule_engine_required_for_apply: true
-    prohibit_direct_llm_trade_authority: true
-
-analyst_business_quality:
-  enabled: true
-  min_score_for_probe: 0.45
-  min_score_for_deployable: 0.60
-  min_score_for_protected: 0.75
-  confidence_capped_by_business_quality: true
-  require_primary_driver: true
-  require_counter_evidence: true
-  require_reward_risk_ratio: true
-  require_horizon_match: true
-  low_quality_action: observe_or_block
-  probe_multiplier: 0.25
-  low_quality_multiplier: 0.0
-
-llm_signal_quality:
-  # Neutral 合法，但必须说明原因、缺口、冲突和转向条件。
-  neutral_accountability:
-    enabled: true
-    allow_neutral_signal: true
-    require_neutral_reason: true
-    required_neutral_fields:
-      - neutral_reason
-      - missing_evidence
-      - conflicting_factors
-      - would_change_view_if
-    allowed_neutral_reasons:
-      - insufficient_evidence
-      - factor_conflict
-      - data_missing
-      - range_bound
-      - horizon_conflict
-      - reward_risk_insufficient
-    reviewer_must_attribute_missed_opportunity: true
-    # Neutral 追责进入结构化学习。
-    write_structured_learning: true
-    # 后续窗口只在未来已结算后回填。
-    shadow_forward_days: 3
-
-factor_data:
-  # 本地数据源入口；字段映射放在 finoview_factor_catalog.yaml。
-  finoview_enabled: true
-  data_dir: data/Fundamental_data/Finoview_data
-  catalog_path: src/config/finoview_factor_catalog.yaml
-  no_lookahead_snapshot: true
-  freshness_gate: true
-  unknown_factor_trade_weight: 0.0
-  coverage_audit_tickers: [BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN]
-  news:
-    enabled: true
-    data_dir: data/News_data/Future_news
-    pre_open_only: true
-    require_fundamental_or_pandaai_confirmation_for_large_position: true
-
-learning_context:
-  # 分析师 prompt 只注入 top-k 成熟摘要，避免无限膨胀。
-  enabled: true
-  # 缓存键含交易日，避免 Phase4 学习污染当日 Phase1。
-  cache:
-    enabled: true
-  max_items_per_prompt: 5
-  max_chars_per_prompt: 1200
-  # 优先同品种；只允许同板块回退，不默认全局回退。
-  allow_cross_ticker_sector_fallback: true
-  allow_global_fallback: false
-  allow_wildcard_sector_cross_ticker: false
-  exploratory_memory:
-    # 注入相似交易和假设，并控制数量防止过拟合与 prompt 膨胀。
-    enabled: true
-    max_episode_items: 3
-    max_episode_chars: 600
-    max_no_trade_items: 3
-    max_no_trade_chars: 500
-    max_hypothesis_items: 3
-    max_hypothesis_chars: 600
+# 学习、记忆、Neutral 追责和保留周期由 learning_policy_catalog.yaml 展开：
+#   strategy_memory / learning / analyst_business_quality / llm_signal_quality / learning_context / learning_retention。
 
 capital_utilization_control:
+  # 用户已调资金参数，属于核心保护区。
   # 资金目标按保证金比例计算；只向高质量机会释放，不用弱信号硬凑仓位。
   enabled: true
-  target_margin_ratio_min: 0.06
-  target_margin_ratio_max: 0.08
-  target_margin_ratio_confirmed: 0.07
+  target_margin_ratio_min: 0.08
+  target_margin_ratio_max: 0.12
+  target_margin_ratio_confirmed: 0.10
   strong_opportunity_target_margin_ratio_min: 0.16
   strong_opportunity_target_margin_ratio_max: 0.20
   strong_opportunity_target_margin_ratio_confirmed: 0.18
   max_margin_ratio_after_scaling: 0.20
+  # 前置软风险标签先进入 PM 统一仲裁：弱证据不能被资金利用率硬凑仓位；
+  # 但同作用域高质量学习证据 + 当日确认 + 止损/失效边界达标时，仍可继续 alpha release。
+  respect_pre_control_soft_limits: true
   # 资金补足只释放给确认度合格的方向；0.60 与市场确认弱模板门槛保持一致。
   min_confirmation_score_for_scaling: 0.60
   lookback_trades_for_scaling: 12
@@ -564,158 +280,15 @@ capital_utilization_control:
   allow_confirmed_same_side_add_on: true
   same_side_add_on_match_tolerance: 0.0005
 
-directional_override_control:
-  enabled: true
-  allow_high_quality_short: true
-  min_short_score: 0.45
-  min_short_confidence: 0.55
-  min_short_strength: 0.30
-  min_short_edge: 0.08
-  short_probe_max_ratio: 0.03
+# PM 主策略、方向覆盖策略和动态先验边界由 portfolio_policy_catalog.yaml 展开：
+#   directional_override_control / portfolio_manager / dynamic_weights。
 
 # ---------------------------------------------------------------------------
-# 4. 投资组合经理与持仓再平衡
-# ---------------------------------------------------------------------------
-
-portfolio_manager:
-  # PM 默认继承主模型；自适应能力来自融合、审计和持仓控制。
-  llm_mode: cloud_only
-  # null 表示继承 llm.model；仅在 PM 需要单独模型时覆盖。
-  # cloud_model: "claude-opus-4-6-1"
-  # cloud_model: "g5.4"
-  cloud_model: null
-
-  holding_rebalance_control:
-    # 持仓周期与再平衡：技术看短线，基本面做中期锚，新闻处理事件冲击。
-    enabled: true
-    min_rebalance_ratio: 0.008
-    min_new_entry_ratio: 0.004
-    max_daily_reduction_ratio: 0.40
-    reverse_min_signal_strength: 0.55
-    reverse_min_confirmation_score: 0.65
-    exit_min_signal_strength: 0.35
-    exit_min_confirmation_score: 0.45
-    min_fundamental_anchor_confidence: 0.40
-    min_fundamental_anchor_business_quality: 0.55
-    min_signal_support_confidence: 0.35
-    fundamental_anchor_tradeability: [high, medium]
-    news_override_tradeability: high
-    news_override_min_confidence: 0.60
-    news_override_min_freshness: 0.70
-    news_override_min_relevance: 0.70
-    position_lifecycle:
-      enabled: true
-      trend_min_profit_ratio: 0.03
-      trend_min_confirmation_score: 0.60
-      trend_min_signal_strength: 0.30
-      failed_loss_ratio: -0.05
-      failed_max_confirmation_score: 0.45
-      # 亏损后继续持有必须有当日确认，历史记忆只能作先验。
-      loss_revalidation_min_hold_days: 1
-      loss_revalidation_ratio: -0.02
-      loss_revalidation_min_confirmation_score: 0.55
-      loss_revalidation_min_signal_strength: 0.25
-      loss_revalidation_anchor_min_confirmation_score: 0.50
-      loss_revalidation_anchor_min_signal_strength: 0.20
-      loss_revalidation_reduction_multiplier: 0.50
-      loss_revalidation_exit_ratio: -0.04
-      loss_revalidation_exit_confirmation_score: 0.45
-      # 新仓快速亏损需当日再验证，不能只靠候选假设或历史记忆。
-      new_loss_revalidation_enabled: true
-      new_loss_revalidation_max_hold_days: 2
-      new_loss_revalidation_ratio: -0.005
-      new_loss_revalidation_exit_ratio: -0.02
-      new_loss_revalidation_min_confirmation_score: 0.55
-      new_loss_revalidation_min_signal_strength: 0.25
-      new_loss_revalidation_reduction_multiplier: 0.50
-      probe_max_hold_days: 2
-      probe_min_profit_ratio: 0.01
-      probe_min_confirmation_score: 0.55
-      # 新开/加仓必须有失效边界；缺失时只允许小仓试探。
-      require_pretrade_invalidation_for_new_entry: true
-      missing_invalidation_cap_multiplier: 0.35
-      missing_invalidation_probe_max_ratio: 0.02
-    horizon_consistency:
-      # 中期观点不能单独触发短线交易或亏损持有。
-      enabled: true
-      apply_to_new_entries: true
-      apply_to_losing_holds: true
-      medium_requires_short_timing: true
-      medium_requires_invalidation: true
-      min_short_timing_confidence: 0.45
-      min_confirmation_score: 0.55
-      losing_hold_exit_ratio: -0.02
-      losing_hold_reduction_multiplier: 0.50
-    min_hold_days_by_sector:
-      energy: 3
-      chemical: 5
-      ferrous: 5
-      nonferrous: 4
-      agricultural: 7
-      generic: 4
-
-  adaptive_fusion:
-    enabled: true
-    sector_weight: 0.40
-
-  quality_aware_fusion:
-    enabled: true
-    tradeability_multipliers:
-      high: 1.00
-      medium: 0.65
-      low: 0.15
-      unknown: 0.75
-    confidence_caps:
-      high: 1.00
-      medium: 0.65
-      low: 0.35
-      unknown: 0.55
-    severe_risk_flag_multiplier: 0.80
-    min_quality_multiplier: 0.05
-
-  sector_weights:
-    # 不同板块采用不同分析侧重。
-    energy: {technical: 0.40, fundamental: 0.40, commodity_news: 0.20}
-    chemical: {technical: 0.30, fundamental: 0.50, commodity_news: 0.20}
-    ferrous: {technical: 0.30, fundamental: 0.50, commodity_news: 0.20}
-    nonferrous: {technical: 0.35, fundamental: 0.35, commodity_news: 0.30}
-    agricultural: {technical: 0.20, fundamental: 0.45, commodity_news: 0.35}
-
-dynamic_weights:
-  # 根据市场确认、历史表现和分析师绩效动态调整权重。
-  enabled: true
-  min_weight: 0.05
-  max_weight: 0.70
-
-analyst_applicability_profile:
-  # 分析师适用场景边界，不是手工交易规则。
-  enabled: true
-  technical:
-    default_horizon: short
-    horizon_multipliers: {short: 1.15, medium: 0.90, long: 0.75, event_short: 1.00}
-    sector_multipliers: {energy: 1.00, chemical: 1.00, ferrous: 1.00, nonferrous: 1.00, agricultural: 0.95}
-    market_regime_multipliers: {trending: 1.15, ranging: 0.90, reversal: 1.05}
-  fundamental:
-    default_horizon: medium
-    horizon_multipliers: {short: 0.85, medium: 1.20, long: 1.10, event_short: 0.80}
-    sector_multipliers: {energy: 1.00, chemical: 1.10, ferrous: 1.10, nonferrous: 1.00, agricultural: 1.05}
-    market_regime_multipliers: {trending: 1.05, ranging: 1.10, reversal: 0.95}
-  commodity_news:
-    default_horizon: event_short
-    event_window_days: 3
-    outside_event_window_multiplier: 0.60
-    horizon_multipliers: {short: 1.00, medium: 0.75, long: 0.60, event_short: 1.25}
-    sector_multipliers: {energy: 1.05, chemical: 1.00, ferrous: 1.00, nonferrous: 1.05, agricultural: 1.15}
-    market_regime_multipliers: {event_driven: 1.20, trending: 0.95, ranging: 0.90, reversal: 1.05}
-
-# ---------------------------------------------------------------------------
-# 5. 执行、结算与审计
+# 7. 执行与结算
 # ---------------------------------------------------------------------------
 
 execution:
-  # Phase2 成交价：执行基准价 +/- 滑点。
-  slippage_model: tick
-  default_slippage_ticks: 1
+  # 手续费、滑点和退场冷启动策略由 execution_*_catalog.yaml 展开。
 
   limit_lock:
     # 只用已知涨跌停字段做成交保护，避免未来信息污染。
@@ -758,73 +331,6 @@ execution:
     loop_check_interval_seconds: 300
     time_zone: null
 
-  exit_policy:
-    enabled: true
-    # 时间止损只处理失效或无支持的陈旧仓位。
-    defaults:
-      atr_multiplier: 1.8
-      probe_time_stop_days: 2
-      trend_time_stop_days: 5
-    sector_overrides:
-      ferrous: {atr_multiplier: 2.2, probe_time_stop_days: 2, trend_time_stop_days: 7}
-      agricultural: {atr_multiplier: 1.7, probe_time_stop_days: 2, trend_time_stop_days: 5}
-      chemical: {atr_multiplier: 1.9, probe_time_stop_days: 2, trend_time_stop_days: 6}
-      nonferrous: {atr_multiplier: 2.0, probe_time_stop_days: 2, trend_time_stop_days: 5}
-    template_overrides:
-      breakout_continuation: {atr_multiplier: 2.4, trend_time_stop_days: 8}
-      low_position_reversal_confirmed: {atr_multiplier: 2.0, trend_time_stop_days: 6}
-      news_event_probe: {atr_multiplier: 1.4, probe_time_stop_days: 1}
-
-  slippage_ticks_by_underlying:
-    AL: 1
-    AU: 1
-    BU: 1
-    C: 1
-    CF: 2
-    CU: 1
-    EB: 2
-    HC: 1
-    I: 1
-    J: 1
-    JM: 2
-    M: 1
-    MA: 1
-    P: 1
-    PB: 1
-    RB: 1
-    SC: 2
-    SR: 1
-    TA: 2
-    ZN: 1
-
-  commission:
-    # by_value 按成交额比例；by_lot 按每手固定金额。
-    enabled: true
-    basis: execution_price
-    rounding: 0.01
-    require_explicit_rule_for_all_tickers: true
-    by_underlying:
-      AL: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
-      AU: {mode: by_lot,   open: 10.0,    close: 10.0,    close_today: 10.0}
-      BU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      C:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      CF: {mode: by_lot,   open: 4.3,     close: 4.3,     close_today: 4.3}
-      CU: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      EB: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      HC: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
-      I:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      J:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      JM: {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      M:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      MA: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
-      P:  {mode: by_value, open: 0.00005, close: 0.00005, close_today: 0.00005}
-      PB: {mode: by_value, open: 0.00004, close: 0.00004, close_today: 0.00004}
-      RB: {mode: by_value, open: 0.00010, close: 0.00010, close_today: 0.00010}
-      SC: {mode: by_lot,   open: 40.0,    close: 40.0,    close_today: 240.0}
-      SR: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
-      TA: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
-      ZN: {mode: by_lot,   open: 3.0,     close: 3.0,     close_today: 3.0}
-
 rollover:
   # 换月策略：同日策略目标与换月目标合并处理。
   mode: reconcile_with_strategy
@@ -834,7 +340,7 @@ audit:
   log_technical_price_window: true
 
 # ---------------------------------------------------------------------------
-# 6. 交易宇宙、智能体与 LLM 路由
+# 8. 交易宇宙、智能体与 LLM 路由
 # ---------------------------------------------------------------------------
 
 tickers:
@@ -867,12 +373,11 @@ analyst_llm:
   mode: cloud_only
   # null 表示继承 llm.model。
   # cloud_model: "claude-opus-4-6-1"
-  # cloud_model: "g5.4"
   cloud_model: null
   write_decision_reports: true
-  force_neutral_low_tradeability: true
-  cap_medium_tradeability_confidence: 0.65
-  cap_low_tradeability_confidence: 0.35
+  force_neutral_low_tradeability: false
+  cap_medium_tradeability_confidence: 0.75
+  cap_low_tradeability_confidence: 0.45
   # 基本面严重陈旧时只能中性追责，不包装成方向锚。
   force_neutral_stale_fundamental: true
   stale_fundamental_stale_ratio: 0.35
@@ -880,12 +385,19 @@ analyst_llm:
   cap_stale_fundamental_confidence: 0.30
 
 llm:
-  # 主 LLM 路由。模型测试详情见 D:\research\LLM\api_test_report.md。
-  # 当前使用 TQX 网关的 claude-opus-4-6-1；切回 g5.4 时 reasoning_effort 可设 high。
-  # 旧 Codex GPT-5.5 备选网关为 http://47.74.0.65，需同时改 model、base_url 和 api_key_env。
+  # 主 LLM 路由。只通过注释/取消注释 provider/model 两行切换网关与模型。
   # 不要把 API key 写入配置文件。
+  #
+  # ===== 当前启用：CodexOpenAI 网关 / GPT-5.5 / medium reasoning =====
   provider: "CodexOpenAI"
-  model: "claude-opus-4-6-1"
+  model: "gpt-5.5"
+  #
+  # ===== 备用停用：TQXAI 网关 / claude-opus-4-6-1 =====
+  # TQXAI 调用说明见 D:\research\LLM\api_test_report.md、D:\research\LLM\api_test.py、D:\research\LLM\API.txt。
+  # 如需切回 TQXAI，只注释上面两行，并取消注释下面两行：
+  # provider: "TQXAI"
+  # model: "claude-opus-4-6-1"
+
   temperature: null
   # 控制 LLM 并发数；不跳过、不降级、不改变 prompt。
   max_concurrent_calls: 4
@@ -896,16 +408,24 @@ llm:
     auth_error: "raise"
     invalid_request: "raise"
     server_error: "retry_then_default"
+
+  # ===== CodexOpenAI 网关配置块：当前启用 =====
+  # API key 在 D:\research\AgentQuant\.env 的 CODEX_OPENAI_API_KEY。
+  # 网关地址来自当前 AgentQuant .env 与配置共识：不要改成 D:\research\Codex 旧示例里的地址。
   codex_openai:
-    base_url: "https://llm.tqx.ai"
-    # Claude Opus 不接受 reasoning_effort；g5.4 可设 high。
-    reasoning_effort: null
-    # 当前 TQX 主模型使用 AgentQuant .env 中的 TQX_LLM_API_KEY。
-    api_key_env: "TQX_LLM_API_KEY"
+    base_url: "http://47.74.0.65"
+    reasoning_effort: "medium"
+    api_key_env: "CODEX_OPENAI_API_KEY"
     api_key_env_fallbacks: []
-  deepseek:
-    thinking:
-      enabled: false
-    reasoning_effort: null
+
+  # ===== TQXAI 网关配置块：完整保留，当前停用 =====
+  # API key 在 D:\research\AgentQuant\.env 的 TQX_LLM_API_KEY。
+  # claude-opus-4-6-1 支持 TQXAI OpenAI-compatible chat，但不接受 OpenAI reasoning_effort。
+  # 如需切回 TQXAI，取消注释 provider/model 两行和下面整个 tqxai 配置块。
+  # tqxai:
+  #   base_url: "https://llm.tqx.ai"
+  #   reasoning_effort: null
+  #   api_key_env: "TQX_LLM_API_KEY"
+  #   api_key_env_fallbacks: []
 
 
