@@ -3344,11 +3344,11 @@ class SQLiteDB(BaseDB):
                 win_rate = (sum(1 for value in reward_values if value > 0) / len(reward_values)) if reward_values else 0.0
                 confidence_score = min(0.85, 0.12 + min(0.35, sample_count / 12.0) + min(0.25, abs(win_rate - 0.5)) + min(0.13, abs(reward_sum) / 50000.0))
                 if reward_mean > 0 and reward_sum > 0:
-                    policy_hint = "controlled_open_or_add" if action_name in {"open", "add_or_open"} else "controlled_probe_or_hold"
+                    deprecated_policy_hint_mirror = "controlled_open_or_add" if action_name in {"open", "add_or_open"} else "controlled_probe_or_hold"
                 elif reward_mean < 0 or reward_sum < 0:
-                    policy_hint = "cap_reduce_or_revalidate"
+                    deprecated_policy_hint_mirror = "cap_reduce_or_revalidate"
                 else:
-                    policy_hint = "observe_or_probe"
+                    deprecated_policy_hint_mirror = "observe_or_probe"
                 exact_rows = [
                     row for row in action_rows
                     if str(row.get("ticker") or "").upper() == ticker_value
@@ -3446,7 +3446,7 @@ class SQLiteDB(BaseDB):
                     "reward_mean": reward_mean,
                     "win_rate": win_rate,
                     "confidence_score": confidence_score,
-                    "policy_hint": policy_hint,
+                    "policy_hint": "no_action_preference",
                     "max_position_impact": 0.0,
                     "valid_until": trading_day_value,
                     "payload": {
@@ -3474,6 +3474,10 @@ class SQLiteDB(BaseDB):
                         "shadow_prior_only": shadow_reward_count > 0 and real_trade_reward_count <= 0,
                         "episode_dates": sorted({str(row.get("trading_date") or "")[:10] for row in action_rows if row.get("trading_date")})[-6:],
                         "prior_only_no_direct_authority": True,
+                        "prior_role": "weak_prior_not_action_preference",
+                        "action_preference": "",
+                        "canonical_action_preference_source": "none_for_similar_sql_prior",
+                        "deprecated_policy_hint_mirror": deprecated_policy_hint_mirror,
                         "usage_boundary": usage_boundary,
                         "usable_by": usage_boundary["usable_by"],
                         "allowed_effects": usage_boundary["allowed_effects"],

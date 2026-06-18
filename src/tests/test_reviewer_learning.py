@@ -3531,6 +3531,79 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_research_position_feedback_uses_final_contract_not_legacy_recommendation_fields(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_feedback_recommendation_table(cursor)
+            snapshot = {
+                "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+                "fundamental": {"signal": "Neutral"},
+                "commodity_news": {"signal": "Neutral"},
+                "horizon_scope": {"decision_horizon": "short"},
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "BU",
+                    "final_action": "hold",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                    "target_position_ratio": 0.0,
+                    "tradable_lots_reason": "position_matched",
+                    "learning_used": {
+                        "learning_context": {
+                            "enabled": True,
+                            "memory_trace": {
+                                "selected_memory_refs": [
+                                    {
+                                        "memory_type": "trade_episode_memory",
+                                        "id": "episode-flat",
+                                        "ticker": "BU",
+                                        "side": "long",
+                                    }
+                                ]
+                            },
+                        }
+                    },
+                },
+            }
+            result = _write_research_position_feedback(
+                cursor,
+                cfg={"learning": {"position_feedback_loop": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-02-28",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-legacy-leak",
+                        "config_id": "cfg",
+                        "underlying_code": "BU",
+                        "ticker": "BU",
+                        "action": "open_long",
+                        "lots": 5,
+                        "status": "pending",
+                        "source_type": "strategy",
+                        "target_position_ratio": 0.08,
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+                transactions_by_recommendation={},
+                settlement_row={"daily_pnl": 0.0},
+            )
+
+            self.assertEqual(result["feedback_rows"], 1)
+            row = cursor.execute("SELECT * FROM research_position_feedback").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["side"], "flat")
+            self.assertEqual(row["target_lots"], 0)
+            self.assertEqual(row["position_delta_lots"], 0)
+            self.assertEqual(row["target_position_ratio"], 0.0)
+            payload = json.loads(row["payload_json"])
+            self.assertEqual(payload["pm_effect"]["target_lots"], 0)
+            self.assertEqual(payload["recommendation"]["target_position_ratio"], 0.0)
+            self.assertEqual(payload["outcome"]["feedback_label"], "learning_observed_no_position")
+        finally:
+            conn.close()
+
     def test_learned_underperformance_writes_scoped_risk_suppression_demote_policy(self):
         conn = self._connection()
         try:
@@ -4532,6 +4605,218 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_researcher_alpha_setup_profiles_require_final_action_contract(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+            cursor.execute(
+                """
+                CREATE TABLE portfolio (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio(id, config_id) VALUES ('pf1', 'cfg')")
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL,
+                    commission REAL,
+                    holding_pnl REAL,
+                    new_position_pnl REAL,
+                    close_pnl REAL,
+                    lots INTEGER
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO ticker_daily_pnl (
+                    portfolio_id, trading_date, ticker, daily_pnl, commission,
+                    holding_pnl, new_position_pnl, close_pnl, lots
+                ) VALUES ('pf1', '2025-03-20', 'ZN', 1800, 10, 0, 1800, 0, 1)
+                """
+            )
+            snapshot = {
+                "technical": {
+                    "signal": "Bearish",
+                    "metadata": {
+                        "action_evidence_contract": {
+                            "learning_scope": {"setup_family": "trend_breakout"}
+                        }
+                    },
+                },
+                "pre_open_plan": {
+                    "target_lots_estimate": -1,
+                    "target_position_ratio": -0.01,
+                    "execution_plan": {"execution_profile": "breakout"},
+                },
+                "execution_result": {"status": "executed", "outcome": "filled"},
+            }
+
+            summary = write_alpha_setup_profiles(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-20",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-legacy-zN",
+                        "underlying_code": "ZN",
+                        "action": "open_short",
+                        "lots": 1,
+                        "status": "executed",
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+                transactions_by_recommendation={"rec-legacy-zN": [{"lots": 1, "daily_pnl": 1800, "commission": 10}]},
+            )
+
+            self.assertEqual(summary["rows"], 0)
+            self.assertEqual(summary["status"], "no_samples")
+            self.assertIsNone(
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM alpha_setup_sample
+                    WHERE config_id='cfg'
+                    """
+                ).fetchone()
+            )
+            self.assertIsNone(
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM alpha_setup_action_value
+                    WHERE config_id='cfg'
+                    """
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+
+    def test_researcher_alpha_setup_action_comes_from_final_contract_lots(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+            cursor.execute(
+                """
+                CREATE TABLE portfolio (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT
+                )
+                """
+            )
+            cursor.execute("INSERT INTO portfolio(id, config_id) VALUES ('pf1', 'cfg')")
+            cursor.execute(
+                """
+                CREATE TABLE ticker_daily_pnl (
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    ticker TEXT,
+                    daily_pnl REAL,
+                    commission REAL,
+                    holding_pnl REAL,
+                    new_position_pnl REAL,
+                    close_pnl REAL,
+                    lots INTEGER
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO ticker_daily_pnl (
+                    portfolio_id, trading_date, ticker, daily_pnl, commission,
+                    holding_pnl, new_position_pnl, close_pnl, lots
+                ) VALUES ('pf1', '2025-03-21', 'BU', 800, 8, 800, 0, 0, 1)
+                """
+            )
+            snapshot = {
+                "technical": {
+                    "signal": "Bearish",
+                    "metadata": {
+                        "action_evidence_contract": {
+                            "learning_scope": {
+                                "setup_family": "fundamental_timing",
+                                "market_regime": "range",
+                            }
+                        }
+                    },
+                },
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "BU",
+                    "contract_type": "strategy",
+                    "final_action": "hold",
+                    "current_lots": -1,
+                    "target_lots": -1,
+                    "lots_delta": 0,
+                    "horizon_class": "short",
+                    "market_regime": "range",
+                    "setup_type": "fundamental_timing_setup",
+                    "opportunity_layer": "tradeable_setup",
+                },
+                "execution_result": {"status": "held", "outcome": "not_filled"},
+            }
+
+            summary = write_alpha_setup_profiles(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-21",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-bu-hold",
+                        "underlying_code": "BU",
+                        "action": "open_short",
+                        "lots": 99,
+                        "status": "held",
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+                transactions_by_recommendation={"rec-bu-hold": []},
+            )
+
+            self.assertGreaterEqual(summary["rows"], 1)
+            sample = cursor.execute(
+                """
+                SELECT action_taken, target_lots, payload_json
+                FROM alpha_setup_sample
+                WHERE config_id='cfg'
+                  AND recommendation_id='rec-bu-hold'
+                  AND source_type != 'execution'
+                """
+            ).fetchone()
+            self.assertEqual(sample["action_taken"], "hold")
+            self.assertEqual(sample["target_lots"], -1)
+            payload = load_externalized_json(sample["payload_json"])
+            self.assertEqual(payload["pm_action"], "hold")
+            action_values = cursor.execute(
+                """
+                SELECT action_name, payload_json
+                FROM alpha_setup_action_value
+                WHERE config_id='cfg'
+                """
+            ).fetchall()
+            self.assertNotIn(
+                "open",
+                {row["action_name"] for row in action_values},
+            )
+            self.assertIn(
+                "observe",
+                {row["action_name"] for row in action_values},
+            )
+        finally:
+            conn.close()
+
     def test_researcher_execution_learning_does_not_use_pre_open_plan_execution_profile(self):
         snapshot = {
             "pre_open_plan": {
@@ -4805,6 +5090,19 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "trigger_checked": True,
                         "trigger_passed": True,
                     },
+                },
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "P",
+                    "contract_type": "strategy",
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "horizon_class": "short",
+                    "market_regime": "range",
+                    "setup_type": "trend_breakout_setup",
+                    "opportunity_layer": "tradeable_setup",
                 },
                 "execution_result": {"status": "executed", "outcome": "filled"},
             }
@@ -5120,6 +5418,19 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         }
                     },
                     "execution_plan": {"execution_profile": "breakout"},
+                },
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "P",
+                    "contract_type": "strategy",
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "horizon_class": "short",
+                    "market_regime": "range",
+                    "setup_type": "trend_breakout_setup",
+                    "opportunity_layer": "tradeable_setup",
                 },
                 "execution_result": {"status": "executed", "outcome": "filled"},
             }

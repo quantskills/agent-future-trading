@@ -61,6 +61,8 @@ def _fetch_rows(db_path: str, query: str, params: tuple = ()) -> List[Dict[str, 
 
 
 def _deserialize_json(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
     return load_externalized_json(value)
 
 
@@ -129,8 +131,24 @@ def _rebalance_summary_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]
     contract = snapshot.get("final_action_contract")
     if not isinstance(contract, dict):
         return {}
-    current_lots = int(contract.get("current_lots") or 0)
-    target_lots = int(contract.get("target_lots") or 0)
+    current_lots = _safe_int(contract.get("current_lots"))
+    target_lots = _safe_int(contract.get("target_lots"))
+    lots_delta_present = "lots_delta" in contract and contract.get("lots_delta") is not None
+    lots_delta = _safe_int(contract.get("lots_delta")) if lots_delta_present else None
+    expected_lots_delta = (
+        target_lots - current_lots
+        if current_lots is not None and target_lots is not None
+        else None
+    )
+    contract_field_issues: List[str] = []
+    if current_lots is None:
+        contract_field_issues.append("missing_current_lots")
+    if target_lots is None:
+        contract_field_issues.append("missing_target_lots")
+    if lots_delta is None:
+        contract_field_issues.append("missing_lots_delta")
+    elif expected_lots_delta is not None and lots_delta != expected_lots_delta:
+        contract_field_issues.append("lots_delta_mismatch")
     return {
         "action_type": contract.get("final_action") or "unknown",
         "reason": ",".join(str(item) for item in (contract.get("reason_codes") or []) if item) or "none",
@@ -139,9 +157,21 @@ def _rebalance_summary_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]
         "turnover_notional_estimate": 0.0,
         "current_lots": current_lots,
         "target_lots": target_lots,
-        "lots_delta": int(contract.get("lots_delta") or (target_lots - current_lots)),
+        "lots_delta": lots_delta,
+        "expected_lots_delta": expected_lots_delta,
+        "contract_field_issues": contract_field_issues,
         "source": "final_action_contract",
+        "single_source_of_trade_truth": bool(contract.get("single_source_of_trade_truth")),
     }
+
+
+def _safe_int(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -212,6 +242,7 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
     rebalance_action_counts: Counter = Counter()
     rebalance_reason_counts: Counter = Counter()
     rebalance_control_reason_counts: Counter = Counter()
+    rebalance_contract_field_issue_counts: Counter = Counter()
     rebalance_holding_days: List[float] = []
     rebalance_turnover_notional: List[float] = []
     finoview_group_counts: Counter = Counter()
@@ -269,6 +300,8 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
             rebalance_reason_counts[str(rebalance_summary.get("reason") or "none")] += 1
             for reason in rebalance_summary.get("control_reasons") or []:
                 rebalance_control_reason_counts[str(reason)] += 1
+            for issue in rebalance_summary.get("contract_field_issues") or []:
+                rebalance_contract_field_issue_counts[str(issue)] += 1
             if rebalance_summary.get("holding_days") is not None:
                 rebalance_holding_days.append(_safe_float(rebalance_summary.get("holding_days")))
             rebalance_turnover_notional.append(
@@ -312,6 +345,7 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
         "rebalance_action_counts": dict(rebalance_action_counts.most_common()),
         "rebalance_reason_counts": dict(rebalance_reason_counts.most_common()),
         "rebalance_control_reason_counts": dict(rebalance_control_reason_counts.most_common()),
+        "rebalance_contract_field_issue_counts": dict(rebalance_contract_field_issue_counts.most_common()),
         "finoview_factor_group_counts": dict(finoview_group_counts.most_common()),
         "finoview_factor_attribution_count": finoview_attribution_count,
         "finoview_factor_missing_attribution_count": finoview_missing_attribution_count,
@@ -389,17 +423,19 @@ def _readable_weak_suggestion(row: Dict[str, Any], scope: str) -> str:
     total_pnl = _safe_float(row.get("total_pnl"))
     if scope == "combo":
         return (
-            f"Treat {ticker} {side} / {combo} as a weak setup: require stronger "
-            "PandaAI confirmation or block new entries until attribution improves."
+            f"Review {ticker} {side} / {combo} as a weak setup candidate; Researcher should verify "
+            "whether future PM evidence needs stronger current confirmation."
         )
     if win_rate < 0.30 or total_pnl <= -2500:
         return (
-            f"Block or hard-cap new {ticker} {side} entries; recent attribution shows "
-            f"win_rate={win_rate:.2%}, net_pnl={total_pnl:.2f}."
+            f"Review {ticker} {side} as a severe weak-side candidate; do not convert this report into "
+            f"a trading rule without Researcher action-value evidence. Recent win_rate={win_rate:.2%}, "
+            f"net_pnl={total_pnl:.2f}."
         )
     return (
-        f"Soft-cap {ticker} {side} and require higher confirmation before new entries; "
-        f"recent win_rate={win_rate:.2%}, net_pnl={total_pnl:.2f}."
+        f"Review {ticker} {side} as a soft weak-side candidate; PM may use only structured "
+        f"action-value evidence and current confirmation, not this text. Recent win_rate={win_rate:.2%}, "
+        f"net_pnl={total_pnl:.2f}."
     )
 
 
@@ -433,6 +469,128 @@ def _append_weak_suggestion(
             "suggestion": _readable_weak_suggestion(row, scope),
         }
     )
+
+
+def _release_block_summary_from_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    primary_reason_counts: Counter = Counter()
+    category_counts: Counter = Counter()
+    next_evidence_counts: Counter = Counter()
+    evidence_counts: Counter = Counter()
+    observation_only_violations = 0
+    total = 0
+    samples: List[Dict[str, Any]] = []
+
+    for recommendation in recommendations:
+        if _source_type(recommendation.get("source_type")) != "strategy":
+            continue
+        snapshot = _deserialize_json(recommendation.get("signal_snapshot")) or {}
+        if not isinstance(snapshot, dict):
+            continue
+        diagnostics = snapshot.get("release_block_diagnostics")
+        if not isinstance(diagnostics, dict) or not diagnostics:
+            continue
+        total += 1
+        if not diagnostics.get("observation_only") or not diagnostics.get("does_not_modify_trade_authority"):
+            observation_only_violations += 1
+        primary_reason = str(diagnostics.get("primary_block_reason") or "none")
+        category = str(diagnostics.get("blocking_category") or "unknown")
+        primary_reason_counts[primary_reason] += 1
+        category_counts[category] += 1
+        for item in diagnostics.get("next_evidence_needed") or []:
+            next_evidence_counts[str(item)] += 1
+        evidence = diagnostics.get("evidence_snapshot") if isinstance(diagnostics.get("evidence_snapshot"), dict) else {}
+        if evidence.get("current_evidence_present"):
+            evidence_counts["current_evidence_present"] += 1
+        if evidence.get("invalidation_present"):
+            evidence_counts["invalidation_present"] += 1
+        if evidence.get("direction_only_block"):
+            evidence_counts["direction_only_block"] += 1
+        if len(samples) < 12:
+            samples.append({
+                "trading_date": _normalize_date(recommendation.get("trading_date")),
+                "ticker": diagnostics.get("ticker"),
+                "primary_block_reason": primary_reason,
+                "blocking_category": category,
+                "preferred_side": evidence.get("preferred_side"),
+                "preferred_side_layer": evidence.get("preferred_side_layer"),
+                "current_evidence_present": bool(evidence.get("current_evidence_present")),
+                "invalidation_present": bool(evidence.get("invalidation_present")),
+            })
+
+    return {
+        "total": total,
+        "observation_only_violations": observation_only_violations,
+        "primary_reason_counts": dict(primary_reason_counts.most_common()),
+        "category_counts": dict(category_counts.most_common()),
+        "next_evidence_needed_counts": dict(next_evidence_counts.most_common()),
+        "evidence_counts": dict(evidence_counts.most_common()),
+        "samples": samples,
+        "audit_boundary": "read_only_attribution; does_not_create_trade_authority_or_modify_lots",
+    }
+
+
+def _action_value_summary_from_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    lane_counts: Counter = Counter()
+    preference_counts: Counter = Counter()
+    scope_quality_counts: Counter = Counter()
+    reward_source_counts: Counter = Counter()
+    source_counts: Counter = Counter()
+    missing_preference_count = 0
+    total = 0
+    samples: List[Dict[str, Any]] = []
+
+    for recommendation in recommendations:
+        if _source_type(recommendation.get("source_type")) != "strategy":
+            continue
+        snapshot = _deserialize_json(recommendation.get("signal_snapshot")) or {}
+        if not isinstance(snapshot, dict):
+            continue
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
+        action_values = learning_used.get("alpha_setup_action_values") if isinstance(learning_used, dict) else []
+        if not isinstance(action_values, list):
+            continue
+        for item in action_values:
+            if not isinstance(item, dict):
+                continue
+            total += 1
+            lane = str(item.get("action_name") or "unknown")
+            preference = str(item.get("action_preference") or "").strip()
+            scope_quality = str(item.get("amplification_scope_quality") or "unknown")
+            reward_source = str(item.get("reward_source") or item.get("source") or "unknown")
+            source = str(item.get("source") or "unknown")
+            lane_counts[lane] += 1
+            scope_quality_counts[scope_quality] += 1
+            reward_source_counts[reward_source] += 1
+            source_counts[source] += 1
+            if preference:
+                preference_counts[preference] += 1
+            else:
+                missing_preference_count += 1
+            if len(samples) < 12:
+                samples.append({
+                    "trading_date": _normalize_date(recommendation.get("trading_date")),
+                    "ticker": item.get("ticker"),
+                    "side": item.get("side"),
+                    "action_name": lane,
+                    "action_preference": preference or "none",
+                    "scope_quality": scope_quality,
+                    "reward_source": reward_source,
+                    "sample_count": item.get("sample_count"),
+                    "reward_mean": item.get("reward_mean"),
+                })
+
+    return {
+        "total": total,
+        "lane_counts": dict(lane_counts.most_common()),
+        "action_preference_counts": dict(preference_counts.most_common()),
+        "scope_quality_counts": dict(scope_quality_counts.most_common()),
+        "reward_source_counts": dict(reward_source_counts.most_common()),
+        "source_counts": dict(source_counts.most_common()),
+        "missing_action_preference_count": missing_preference_count,
+        "samples": samples,
+        "audit_boundary": "read_only_attribution; action_values_are_diagnostic_not_trade_authority",
+    }
 
 
 def _rebalance_pair_summary(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -842,6 +1000,8 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
     overall = payload["overall"]
     strategy_overall = payload["strategy_only_overall"]
     rebalance_pairs = payload.get("rebalance_pair_summary", {})
+    release_summary = payload.get("release_block_summary", {})
+    action_value_summary = payload.get("action_value_summary", {})
 
     lines = [
         f"# Strategy Attribution Report - {payload['exp_name']}",
@@ -901,6 +1061,58 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "### Control Reasons",
         "",
         _format_table(["Control Reason", "Count"], _top_counter_rows(diagnostics.get("rebalance_control_reason_counts", {}))),
+        "",
+        "### Final Contract Field Issues",
+        "",
+        _format_table(["Issue", "Count"], _top_counter_rows(diagnostics.get("rebalance_contract_field_issue_counts", {}))),
+        "",
+        "## Release Block Diagnostics",
+        "",
+        _format_table(
+            ["Metric", "Value"],
+            [
+                ["Diagnostics rows", release_summary.get("total", 0)],
+                ["Observation-only violations", release_summary.get("observation_only_violations", 0)],
+            ],
+        ),
+        "",
+        "### Release Block Categories",
+        "",
+        _format_table(["Category", "Count"], _top_counter_rows(release_summary.get("category_counts", {}))),
+        "",
+        "### Release Primary Reasons",
+        "",
+        _format_table(["Reason", "Count"], _top_counter_rows(release_summary.get("primary_reason_counts", {}))),
+        "",
+        "### Next Evidence Needed",
+        "",
+        _format_table(["Evidence", "Count"], _top_counter_rows(release_summary.get("next_evidence_needed_counts", {}))),
+        "",
+        "## Action-Value Usage",
+        "",
+        _format_table(
+            ["Metric", "Value"],
+            [
+                ["Action-value rows seen by final contracts", action_value_summary.get("total", 0)],
+                ["Missing action_preference rows", action_value_summary.get("missing_action_preference_count", 0)],
+            ],
+        ),
+        "",
+        "### Action-Value Lanes",
+        "",
+        _format_table(["Lane", "Count"], _top_counter_rows(action_value_summary.get("lane_counts", {}))),
+        "",
+        "### Action Preferences",
+        "",
+        _format_table(["Preference", "Count"], _top_counter_rows(action_value_summary.get("action_preference_counts", {}))),
+        "",
+        "### Scope Quality",
+        "",
+        _format_table(["Scope", "Count"], _top_counter_rows(action_value_summary.get("scope_quality_counts", {}))),
+        "",
+        "### Reward Sources",
+        "",
+        _format_table(["Reward Source", "Count"], _top_counter_rows(action_value_summary.get("reward_source_counts", {}))),
         "",
         "## Control And Audit",
         "",
@@ -972,6 +1184,8 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         ),
         "",
         "## Weak Side Suggestions",
+        "",
+        "These are review candidates only; they are not PM rules, risk blocks, or trade authority.",
         "",
         _format_table(
             ["Scope", "Ticker", "Side", "Signal Combo", "Trade Pairs", "Win Rate", "Net PnL", "Suggestion"],
@@ -1056,6 +1270,8 @@ def build_attribution_report(
     by_rebalance_action_type = _group_summary(strategy_only_pairs, ["rebalance_action_type"])
     by_rebalance_reason = _group_summary(strategy_only_pairs, ["rebalance_reason"])
     rebalance_pair_summary = _rebalance_pair_summary(strategy_only_pairs)
+    release_block_summary = _release_block_summary_from_recommendations(recommendations)
+    action_value_summary = _action_value_summary_from_recommendations(recommendations)
 
     weak_side_suggestions = []
     for row in by_ticker_side:
@@ -1106,6 +1322,8 @@ def build_attribution_report(
         "by_rebalance_action_type": by_rebalance_action_type,
         "by_rebalance_reason": by_rebalance_reason,
         "rebalance_pair_summary": rebalance_pair_summary,
+        "release_block_summary": release_block_summary,
+        "action_value_summary": action_value_summary,
         "weak_side_suggestions": weak_side_suggestions,
         "recommendation_diagnostics": _recommendation_diagnostics(recommendations),
         "rollover_summary": _rollover_summary(transactions),

@@ -44,6 +44,7 @@ from agents.decision_team.portfolio_manager import (
     _is_lifecycle_exit_required_reason,
     _minimum_real_probe_candidate_ratio,
     _positive_open_action_value_seed,
+    _qualified_analyst_tradeable_probe_candidate,
     _qualified_real_probe_release,
     _negative_hold_or_positive_exit_action_value,
     _should_attempt_minimum_real_probe,
@@ -53,6 +54,7 @@ from agents.decision_team.portfolio_manager import (
     _build_phase1_recommendation,
     _build_pre_open_plan_snapshot,
     _build_final_action_contract,
+    _build_release_block_diagnostics,
     _validate_required_analyst_signals,
     _pm_new_entry_semantic_block_reason,
     _scorecard_probe_seed,
@@ -857,6 +859,130 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             sorted(recommendation.signal_snapshot["horizon_scope"]["analyst_horizons"]),
             ["fundamental", "technical"],
         )
+
+    def test_release_block_diagnostics_are_observation_only_and_do_not_mutate_contract(self):
+        contract = _build_final_action_contract(
+            ticker="RB",
+            current_lots=0,
+            target_lots=0,
+            position_ratio=0.0,
+            margin_required=0.0,
+            account_equity=1_000_000.0,
+            lots_to_trade=0,
+            lots_to_trade_reason="market_confirmation_below_release_threshold",
+            recommendation_intent=recommendation_intent_from_lots(0, 0),
+            final_entry_authority={
+                "authority_type": "watchlist_only",
+                "can_open_real_position": False,
+                "direction_only_block": False,
+            },
+            control_reasons=["market_confirmation_below_release_threshold"],
+            control_diagnostics={},
+            opportunity_scorecard={
+                "preferred_side": "short",
+                "short": {"final_layer": "tradeable_setup", "score": 0.71},
+            },
+            market_confirmation={"confirmation_score": 0.54, "status": "weak"},
+            alpha_setup_action_values=[],
+            execution_plan={},
+        )
+        before = json.loads(json.dumps(contract, sort_keys=True))
+
+        diagnostics = _build_release_block_diagnostics(
+            ticker="RB",
+            final_action_contract=contract,
+            final_entry_authority={
+                "authority_type": "watchlist_only",
+                "can_open_real_position": False,
+                "direction_only_block": False,
+            },
+            control_reasons=["market_confirmation_below_release_threshold"],
+            lots_to_trade_reason="market_confirmation_below_release_threshold",
+            control_diagnostics={},
+            opportunity_scorecard={
+                "preferred_side": "short",
+                "short": {"final_layer": "tradeable_setup", "score": 0.71},
+            },
+            market_confirmation={"confirmation_score": 0.54, "status": "weak"},
+            full_config={
+                "position_budget_policy": {
+                    "probe_margin_ratio": 0.008,
+                    "probe_margin_max_ratio": 0.015,
+                    "min_real_trade_margin_ratio": 0.02,
+                },
+                "portfolio": {
+                    "alpha_setup_ev_fusion": {
+                        "min_confirmation_score": 0.70,
+                        "require_tradeable_support_for_release": True,
+                        "require_invalidation_for_release": True,
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(contract, before)
+        self.assertTrue(diagnostics["observation_only"])
+        self.assertTrue(diagnostics["does_not_modify_trade_authority"])
+        self.assertEqual(diagnostics["single_source_of_trade_truth_remains"], "final_action_contract")
+        serialized = json.dumps(diagnostics, sort_keys=True)
+        for forbidden in (
+            "authority_type",
+            "target_lots",
+            "lots_delta",
+            "target_position_ratio",
+            "can_open_real_position",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_phase1_recommendation_carries_release_diagnostics_outside_final_contract(self):
+        portfolio = Portfolio(id="portfolio-1", cashflow=1_000_000, positions={})
+        decision = FuturesDecision(ticker="BU", action=FuturesAction.HOLD, lots=0, justification="hold")
+        diagnostics = {
+            "contract_version": "agentquant.release_block_diagnostics.v1",
+            "observation_only": True,
+            "does_not_modify_trade_authority": True,
+            "single_source_of_trade_truth_remains": "final_action_contract",
+            "primary_block_reason": "market_confirmation_below_release_threshold",
+        }
+        final_contract = _build_final_action_contract(
+            ticker="BU",
+            current_lots=0,
+            target_lots=0,
+            position_ratio=0.0,
+            margin_required=0.0,
+            account_equity=1_000_000.0,
+            lots_to_trade=0,
+            lots_to_trade_reason="market_confirmation_below_release_threshold",
+            recommendation_intent=recommendation_intent_from_lots(0, 0),
+            final_entry_authority={"authority_type": "watchlist_only"},
+            control_reasons=["market_confirmation_below_release_threshold"],
+            control_diagnostics={},
+            opportunity_scorecard={},
+            market_confirmation={},
+            alpha_setup_action_values=[],
+            execution_plan={},
+        )
+
+        recommendation = _build_phase1_recommendation(
+            config_id="cfg",
+            portfolio=portfolio,
+            ticker="BU",
+            trading_date="2025-01-02",
+            contract_code="BU2506.SHF",
+            decision=decision,
+            morning_price_context=None,
+            analyst_signals=[AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.5)],
+            plan_snapshot={
+                "decision_horizon": "short",
+                "validation_horizon": "short",
+                "release_block_diagnostics": diagnostics,
+            },
+            final_action_contract=final_contract,
+        )
+
+        snapshot = recommendation.signal_snapshot
+        self.assertEqual(snapshot["release_block_diagnostics"], diagnostics)
+        self.assertNotIn("release_block_diagnostics", snapshot["final_action_contract"])
 
     def test_phase1_recommendation_final_contract_is_explicit_not_pm_draft(self):
         portfolio = Portfolio(id="portfolio-1", cashflow=1_000_000, positions={})
@@ -4173,6 +4299,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(open_value["payload"]["amplification_scope_quality"], "exact_real_state")
         self.assertEqual(open_value["payload"]["exact_state_real_trade_sample_count"], 2)
         self.assertEqual(open_value["payload"]["partial_state_real_trade_sample_count"], 0)
+        self.assertEqual(open_value["policy_hint"], "no_action_preference")
+        self.assertEqual(open_value["payload"]["prior_role"], "weak_prior_not_action_preference")
+        self.assertEqual(open_value["payload"]["canonical_action_preference_source"], "none_for_similar_sql_prior")
+        self.assertEqual(open_value["payload"]["action_preference"], "")
+        self.assertEqual(open_value["payload"]["deprecated_policy_hint_mirror"], "controlled_open_or_add")
 
     def test_sql_similar_setup_retrieval_counts_shadow_as_prior_not_exact_trade(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4222,6 +4353,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(open_value["payload"]["exact_ticker_shadow_sample_count"], 1)
         self.assertEqual(open_value["payload"]["amplification_scope_quality"], "shadow_prior")
         self.assertTrue(open_value["payload"]["shadow_prior_only"])
+        self.assertEqual(open_value["policy_hint"], "no_action_preference")
+        self.assertEqual(open_value["payload"]["prior_role"], "weak_prior_not_action_preference")
+        self.assertEqual(open_value["payload"]["action_preference"], "")
 
     def test_direct_alpha_setup_action_value_uses_only_past_sample_dates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4952,6 +5086,183 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(release)
         self.assertIn("alpha_setup_open_action_value_missing", detail["soft_blocks"])
         self.assertFalse(detail["direction_semantic_block"])
+
+    def test_tradeable_analyst_candidate_soft_gates_to_controlled_probe_not_wait(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.66,
+            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
+            trigger_valid=True,
+            invalidation_present=True,
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                }
+            },
+        )
+        reasons = [
+            "alpha_setup_ev_fusion",
+            "opportunity_scorecard_probe_seed",
+            "market_confirmation_conflict",
+            "single_high_quality_probe_only",
+            "unknown_alpha_probe",
+        ]
+        diagnostics = {
+            "alpha_setup_ev_fusion": {
+                "scorecard_layer": "tradeable_setup",
+                "has_tradeable_support": True,
+                "has_invalidation_or_stop": True,
+                "current_confirmation_score": 0.58,
+                "independent_support_count": 1,
+                "negative_action_value": False,
+                "negative_profile": False,
+                "repeat_loss_without_new_evidence": False,
+            }
+        }
+
+        candidate, candidate_detail = _qualified_analyst_tradeable_probe_candidate(
+            analyst_signals=[signal],
+            target_side="long",
+            control_reasons=reasons,
+            control_diagnostics=diagnostics,
+            account_equity=5_000_000.0,
+            current_price=5500.0,
+            multiplier=10.0,
+            margin_rate=0.10,
+            margin_available=1_000_000.0,
+        )
+        candidate_ratio = _minimum_real_probe_candidate_ratio(
+            current_ratio=0.0,
+            pre_control_ratio=0.008,
+            probe_release=False,
+            analyst_tradeable_probe=candidate,
+        )
+        should_attempt = _should_attempt_minimum_real_probe(
+            current_lots=0,
+            target_lots=0,
+            target_ratio=candidate_ratio,
+            control_reasons=[*reasons, "analyst_tradeable_probe_candidate"],
+            probe_release=False,
+            alpha_ev_blocks_real_probe=False,
+            analyst_tradeable_probe=candidate,
+        )
+        allowed, authority = _final_new_entry_trade_authority(
+            control_reasons=[*reasons, "analyst_tradeable_probe_candidate"],
+            control_diagnostics={
+                **diagnostics,
+                "analyst_tradeable_probe_candidate": candidate_detail,
+            },
+        )
+
+        self.assertTrue(candidate)
+        self.assertEqual(candidate_detail["decision"], "allow_controlled_probe_candidate")
+        self.assertGreater(candidate_ratio, 0.0)
+        self.assertTrue(should_attempt)
+        self.assertTrue(allowed)
+        self.assertEqual(authority["authority_type"], "exploration_probe")
+        self.assertIn("analyst_tradeable_probe_candidate", authority["reason_codes"])
+
+    def test_direction_only_analyst_candidate_does_not_use_controlled_probe_channel(self):
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.66,
+            opportunity_layer="direction_only",
+            opportunity_state="watch_for_trigger",
+            trigger_valid=True,
+            invalidation_present=True,
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_layer": "direction_only",
+                    "opportunity_state": "watch_for_trigger",
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                }
+            },
+        )
+        reasons = [
+            "alpha_setup_ev_fusion",
+            "opportunity_scorecard_probe_seed",
+            "pm_direction_only_probe_cap",
+            "unknown_alpha_probe",
+        ]
+        diagnostics = {
+            "alpha_setup_ev_fusion": {
+                "scorecard_layer": "direction_only",
+                "has_tradeable_support": False,
+                "has_invalidation_or_stop": True,
+                "current_confirmation_score": 0.70,
+                "independent_support_count": 1,
+            }
+        }
+
+        candidate, candidate_detail = _qualified_analyst_tradeable_probe_candidate(
+            analyst_signals=[signal],
+            target_side="long",
+            control_reasons=reasons,
+            control_diagnostics=diagnostics,
+            account_equity=5_000_000.0,
+            current_price=5500.0,
+            multiplier=10.0,
+            margin_rate=0.10,
+            margin_available=1_000_000.0,
+        )
+        candidate_ratio = _minimum_real_probe_candidate_ratio(
+            current_ratio=0.0,
+            pre_control_ratio=0.008,
+            probe_release=False,
+            analyst_tradeable_probe=candidate,
+        )
+        should_attempt = _should_attempt_minimum_real_probe(
+            current_lots=0,
+            target_lots=0,
+            target_ratio=candidate_ratio,
+            control_reasons=reasons,
+            probe_release=False,
+            alpha_ev_blocks_real_probe=False,
+            analyst_tradeable_probe=candidate,
+        )
+
+        self.assertFalse(candidate)
+        self.assertIn("no_same_side_tradeable_triggered_analyst", candidate_detail["blocked_reasons"])
+        self.assertEqual(candidate_ratio, 0.0)
+        self.assertFalse(should_attempt)
+
+    def test_negative_learning_blocks_tradeable_analyst_controlled_probe_candidate(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.70,
+            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
+            trigger_valid=True,
+            invalidation_present=True,
+        )
+        candidate, detail = _qualified_analyst_tradeable_probe_candidate(
+            analyst_signals=[signal],
+            target_side="short",
+            control_reasons=["alpha_setup_ev_fusion", "negative_expectancy_cap_or_exit"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_layer": "tradeable_setup",
+                    "negative_action_value": True,
+                }
+            },
+            account_equity=5_000_000.0,
+            current_price=5500.0,
+            multiplier=10.0,
+            margin_rate=0.10,
+            margin_available=1_000_000.0,
+        )
+
+        self.assertFalse(candidate)
+        self.assertIn("negative_or_tail_loss_present", detail["blocked_reasons"])
+        self.assertIn("negative_learning_profile_present", detail["blocked_reasons"])
 
     def test_direction_only_release_cannot_enter_minimum_one_lot_path(self):
         should_attempt = _should_attempt_minimum_real_probe(

@@ -744,7 +744,7 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
     target_lots = _safe_int(contract.get("target_lots"))
     current_lots = _safe_int(contract.get("current_lots"))
-    target_ratio = _safe_float(contract.get("target_position_ratio") or recommendation.get("target_position_ratio"))
+    target_ratio = _safe_float(contract.get("target_position_ratio"))
     current_ratio = 0.0
     target_side = _target_side_from_ratio(target_lots if target_lots else target_ratio)
     no_trade_reason = (
@@ -1263,12 +1263,7 @@ def _recommendation_direction(recommendation: Dict[str, Any], snapshot: Dict[str
     side = _recommendation_side(recommendation, snapshot)
     if side in {"long", "short"}:
         return side
-    action = str(recommendation.get("action") or "").lower()
-    if "long" in action:
-        return "long"
-    if "short" in action:
-        return "short"
-    return _target_side_from_ratio(recommendation.get("target_position_ratio"))
+    return side if side == "flat" else "unknown"
 
 
 def _analyst_signal_line(snapshot: Dict[str, Any], analyst: str) -> str:
@@ -2479,12 +2474,7 @@ def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any
         side = _target_side_from_ratio(target_lots)
         if side in {"long", "short", "flat"}:
             return side
-    action = str(recommendation.get("action") or "").lower()
-    if "long" in action:
-        return "long"
-    if "short" in action:
-        return "short"
-    return _target_side_from_ratio(recommendation.get("target_position_ratio"))
+    return "unknown"
 
 
 def _signal_template(side: str, combo: Iterable[str], snapshot: Dict[str, Any]) -> str:
@@ -4054,13 +4044,10 @@ def _write_research_position_feedback(
             "action_candidates": action_candidates,
             "source": "final_action_contract",
         }
-        target_lots = _safe_int(position_effect.get("target_lots"), _safe_int(recommendation.get("lots")))
+        target_lots = _safe_int(position_effect.get("target_lots"), 0)
         current_lots = _safe_int(position_effect.get("current_lots"), 0)
         delta_lots = _safe_int(position_effect.get("lots_delta"), target_lots - current_lots)
-        target_ratio = _safe_float(
-            position_effect.get("final_target_position_ratio"),
-            _safe_float(recommendation.get("target_position_ratio")),
-        )
+        target_ratio = _safe_float(position_effect.get("final_target_position_ratio"), 0.0)
         execution_result = _execution_result_from_snapshot(snapshot)
         no_trade_reason = str(execution_result.get("no_trade_reason") or final_contract.get("tradable_lots_reason") or "")
         label = _feedback_label(

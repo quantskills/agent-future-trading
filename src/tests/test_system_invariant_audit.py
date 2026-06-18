@@ -214,6 +214,117 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.counts["open_transactions"], 1)
 
+    def test_system_invariant_audit_accepts_observation_only_release_block_diagnostics(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_real",
+                    "authority_type": "real_budget_entry",
+                    "can_open_real_position": True,
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "execution_requirement": "intraday_trigger_required",
+                    "reason_codes": ["positive_candidate_open"],
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                },
+                "final_new_entry_trade_authority": {
+                    "authority_type": "real_budget_entry",
+                    "can_open_real_position": True,
+                    "reason_codes": ["positive_candidate_open"],
+                },
+                "release_block_diagnostics": {
+                    "contract_version": "agentquant.release_block_diagnostics.v1",
+                    "observation_only": True,
+                    "does_not_modify_trade_authority": True,
+                    "single_source_of_trade_truth_remains": "final_action_contract",
+                    "primary_block_reason": "market_confirmation_below_release_threshold",
+                    "blocking_category": "current_confirmation_missing",
+                    "evidence_snapshot": {
+                        "preferred_side": "short",
+                        "preferred_side_layer": "tradeable_setup",
+                        "market_confirmation_score": 0.54,
+                    },
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+                "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_fails_release_diagnostics_with_trade_action_fields(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_real",
+                    "authority_type": "real_budget_entry",
+                    "can_open_real_position": True,
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "execution_requirement": "intraday_trigger_required",
+                    "reason_codes": ["positive_candidate_open"],
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                },
+                "final_new_entry_trade_authority": {
+                    "authority_type": "real_budget_entry",
+                    "can_open_real_position": True,
+                    "reason_codes": ["positive_candidate_open"],
+                },
+                "release_block_diagnostics": {
+                    "contract_version": "agentquant.release_block_diagnostics.v1",
+                    "observation_only": True,
+                    "does_not_modify_trade_authority": True,
+                    "single_source_of_trade_truth_remains": "final_action_contract",
+                    "target_lots": -2,
+                    "evidence_snapshot": {"authority_type": "real_budget_entry"},
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+                "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("release_block_diagnostics_contains_trade_action_fields") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_fails_open_without_authority(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -665,6 +776,76 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertIn(
             "positive_open_action_value_not_open_preference:RB:short:trend_breakout:open:2025-03-03:missing_action_preference",
             report.errors,
+        )
+
+    def test_system_invariant_audit_fails_legacy_policy_hint_without_canonical_preference(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE alpha_setup_action_value
+                SET policy_hint=?, payload_json=?
+                WHERE id='av1'
+                """,
+                (
+                    "positive_candidate_open",
+                    _dumps(
+                        {
+                            "amplification_scope_quality": "exact_real_state",
+                            "reward_source": "trade_episode",
+                        }
+                    ),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("legacy_policy_hint_without_canonical_action_preference") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_fails_policy_hint_canonical_preference_drift(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE alpha_setup_action_value
+                SET policy_hint=?, payload_json=?
+                WHERE id='av1'
+                """,
+                (
+                    "negative_revalidate",
+                    _dumps(
+                        {
+                            "action_preference": "positive_candidate_open",
+                            "deprecated_policy_hint_mirror": "tail_loss_protect",
+                            "amplification_scope_quality": "exact_real_state",
+                            "reward_source": "trade_episode",
+                        }
+                    ),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("legacy_policy_hint_canonical_action_preference_mismatch") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(
+            any(error.startswith("deprecated_policy_hint_mirror_mismatch") for error in report.errors),
+            report.to_dict(),
         )
 
     def test_system_invariant_audit_warns_unlanded_preference_without_final_contract(self):

@@ -552,7 +552,12 @@ def build_opportunity_scorecard(
                 "scope_key": best_alpha_profile.get("scope_key"),
                 "setup_type": best_alpha_profile.get("setup_type"),
                 "lifecycle_state": best_alpha_profile.get("lifecycle_state"),
-                "action_bias": best_alpha_profile.get("action_bias"),
+                "profile_state_hint": (
+                    best_alpha_profile.get("profile_state_hint")
+                    or best_alpha_profile.get("deprecated_action_bias_mirror")
+                    or best_alpha_profile.get("action_bias")
+                ),
+                "deprecated_action_bias_mirror": best_alpha_profile.get("action_bias"),
                 "sample_count": best_alpha_profile.get("sample_count"),
                 "win_rate": best_alpha_profile.get("win_rate"),
                 "profit_factor": best_alpha_profile.get("profit_factor"),

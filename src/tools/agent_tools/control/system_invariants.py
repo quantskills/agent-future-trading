@@ -77,6 +77,22 @@ EXECUTION_INTENT_MUTATION_EFFECTS = {
     "real_budget_entry",
     "scale_position",
 }
+RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
+    "authority_type",
+    "can_apply_min_real_floor",
+    "can_open_real_position",
+    "execution_plan",
+    "execution_profile",
+    "final_action",
+    "lots",
+    "lots_delta",
+    "margin_ratio",
+    "max_allowed_margin_ratio",
+    "target_lots",
+    "target_margin_ratio_estimate",
+    "target_position_ratio",
+    "tradable_lots_if_executed_now",
+}
 
 
 @dataclass
@@ -441,6 +457,45 @@ def _audit_recommendation_final_contract_consistency(
             )
 
 
+def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
+    found: List[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key) in RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS:
+                found.append(path)
+            found.extend(_find_forbidden_diagnostic_fields(item, prefix=path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_find_forbidden_diagnostic_fields(item, prefix=f"{prefix}[{index}]"))
+    return found
+
+
+def _audit_release_block_diagnostics(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    for recommendation_id, recommendation in recommendations.items():
+        snapshot = _dict(recommendation.get("signal_snapshot"))
+        diagnostics = _dict(snapshot.get("release_block_diagnostics"))
+        if not diagnostics:
+            continue
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        if diagnostics.get("observation_only") is not True:
+            errors.append(f"release_block_diagnostics_not_observation_only:{label}")
+        if diagnostics.get("does_not_modify_trade_authority") is not True:
+            errors.append(f"release_block_diagnostics_can_modify_trade_authority:{label}")
+        if diagnostics.get("single_source_of_trade_truth_remains") != "final_action_contract":
+            errors.append(f"release_block_diagnostics_contract_source_drift:{label}")
+        forbidden = _find_forbidden_diagnostic_fields(diagnostics)
+        if forbidden:
+            errors.append(
+                "release_block_diagnostics_contains_trade_action_fields:"
+                f"{label}:{sorted(set(forbidden))}"
+            )
+
+
 def _contract_mentions_preference(contract: Dict[str, Any], preference_names: Iterable[str]) -> bool:
     haystack = json.dumps(contract, ensure_ascii=False, sort_keys=True, default=str).lower()
     return any(name and name.lower() in haystack for name in preference_names)
@@ -666,6 +721,8 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
         reward_sum = float(row.get("reward_sum") or 0.0)
         sample_count = _int(row.get("sample_count"))
         action_preference = _lower(payload.get("action_preference"))
+        deprecated_policy_hint_mirror = _lower(payload.get("deprecated_policy_hint_mirror"))
+        row_policy_hint = _lower(row.get("policy_hint"))
         scope_quality = _lower(payload.get("amplification_scope_quality") or payload.get("sample_scope"))
         reward_source = _effective_reward_source(payload)
         has_real_reward_facts = _has_real_reward_facts(payload, reward_source)
@@ -677,6 +734,27 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
 
         if sample_count <= 0:
             continue
+        if row_policy_hint and row_policy_hint not in {"observe", "no_action_preference"} and not weak_prior_context:
+            if not action_preference:
+                errors.append(
+                    "legacy_policy_hint_without_canonical_action_preference:"
+                    f"{label}:{row_policy_hint}"
+                )
+            elif row_policy_hint != action_preference:
+                errors.append(
+                    "legacy_policy_hint_canonical_action_preference_mismatch:"
+                    f"{label}:policy_hint={row_policy_hint}:action_preference={action_preference}"
+                )
+        if (
+            deprecated_policy_hint_mirror
+            and action_preference
+            and deprecated_policy_hint_mirror != action_preference
+        ):
+            errors.append(
+                "deprecated_policy_hint_mirror_mismatch:"
+                f"{label}:deprecated_policy_hint_mirror={deprecated_policy_hint_mirror}:"
+                f"action_preference={action_preference}"
+            )
         if action_name in {"open", "hold", "exit", "execution"} and reward_sum != 0:
             if not action_preference and not weak_prior_context:
                 errors.append(f"action_value_missing_action_preference:{label}:missing_action_preference")
@@ -817,6 +895,7 @@ def audit_system_invariants(
         conn.close()
 
     _audit_recommendation_final_contract_consistency(recommendations, errors)
+    _audit_release_block_diagnostics(recommendations, errors)
     _audit_transaction_final_contract_consistency(transactions, recommendations, errors, warnings)
     _audit_open_transactions(transactions, recommendations, errors, warnings)
     _audit_intraday_triggers(transactions, intraday_decisions, errors)

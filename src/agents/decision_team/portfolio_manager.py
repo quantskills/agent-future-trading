@@ -1056,6 +1056,194 @@ def _build_final_action_contract(
     }
 
 
+def _release_block_category(primary_reason: str, reason_summary: dict) -> str:
+    reason = str(primary_reason or "").lower()
+    if reason_summary.get("hard_blocks"):
+        return "hard_risk_or_authority"
+    if requires_watchlist_reason(reason):
+        return "watchlist_or_direction_only"
+    if "confirmation" in reason or "trigger" in reason:
+        return "current_confirmation_missing"
+    if "invalidation" in reason or "stop" in reason:
+        return "invalidation_missing"
+    if "margin" in reason or "budget" in reason or "capital" in reason or "lot" in reason:
+        return "capital_capacity"
+    if "alpha_setup" in reason or "learning" in reason or "memory" in reason or "expectancy" in reason:
+        return "learning_evidence_insufficient"
+    if reason_summary.get("soft_limits"):
+        return "soft_limit"
+    if reason_summary.get("release_signals"):
+        return "release_signal_present"
+    return "no_release_block_recorded"
+
+
+def _diagnostic_config_value(config: dict, path: tuple[str, ...], default=None):
+    current = config if isinstance(config, dict) else {}
+    for key in path:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+    return default if current is None else current
+
+
+def _build_release_ladder_diagnostics(full_config: dict | None) -> dict:
+    config = full_config if isinstance(full_config, dict) else {}
+    return {
+        "probe": {
+            "source": "config_snapshot",
+            "configured_budget_band": {
+                "min": _diagnostic_config_value(config, ("position_budget_policy", "probe_margin_ratio")),
+                "max": _diagnostic_config_value(config, ("position_budget_policy", "probe_margin_max_ratio")),
+            },
+            "current_confirmation_floor": _diagnostic_config_value(
+                config,
+                ("portfolio", "direction_only_new_entry", "scorecard_tradeable_setup_probe_min_confirmation_score"),
+            ),
+            "purpose": "small_real_trade_for_current_tradeable_probe",
+        },
+        "real_budget_entry": {
+            "source": "config_snapshot",
+            "configured_minimum_budget": _diagnostic_config_value(
+                config,
+                ("position_budget_policy", "min_real_trade_margin_ratio"),
+            ),
+            "current_confirmation_floor": _diagnostic_config_value(
+                config,
+                ("portfolio", "alpha_setup_ev_fusion", "min_confirmation_score"),
+            ),
+            "requires_current_tradeable_evidence": _diagnostic_config_value(
+                config,
+                ("portfolio", "alpha_setup_ev_fusion", "require_tradeable_support_for_release"),
+                True,
+            ),
+            "requires_invalidation_boundary": _diagnostic_config_value(
+                config,
+                ("portfolio", "alpha_setup_ev_fusion", "require_invalidation_for_release"),
+                True,
+            ),
+            "purpose": "qualified_positive_alpha_release",
+        },
+        "scale": {
+            "source": "config_snapshot",
+            "configured_budget_band": {
+                "min": _diagnostic_config_value(
+                    config,
+                    ("capital_utilization_control", "strong_opportunity_target_margin_ratio_min"),
+                ),
+                "max": _diagnostic_config_value(
+                    config,
+                    ("capital_utilization_control", "strong_opportunity_target_margin_ratio_max"),
+                ),
+            },
+            "current_confirmation_floor": _diagnostic_config_value(
+                config,
+                ("portfolio", "mature_alpha_release", "min_confirmation_score"),
+            ),
+            "purpose": "validated_alpha_add_or_scale",
+        },
+    }
+
+
+def _build_release_block_diagnostics(
+    *,
+    ticker: str,
+    final_action_contract: dict | None,
+    final_entry_authority: dict | None,
+    control_reasons: list[str] | None,
+    lots_to_trade_reason: str | None,
+    control_diagnostics: dict | None,
+    opportunity_scorecard: dict | None,
+    market_confirmation: dict | None,
+    full_config: dict | None,
+) -> dict:
+    """Explain why release did or did not happen without creating trade authority."""
+    contract = dict(final_action_contract) if isinstance(final_action_contract, dict) else {}
+    contract_reasons = contract.get("reason_codes")
+    if isinstance(contract_reasons, (list, tuple, set)):
+        contract_reason_items = list(contract_reasons)
+    elif contract_reasons:
+        contract_reason_items = [contract_reasons]
+    else:
+        contract_reason_items = []
+    reasons = sorted(
+        {
+            str(item)
+            for item in [
+                *(control_reasons or []),
+                lots_to_trade_reason,
+                *contract_reason_items,
+            ]
+            if item
+        }
+    )
+    reason_summary = reason_effect_summary(reasons)
+    primary_reason = (
+        (reason_summary.get("hard_blocks") or [])
+        or [item for item in reasons if requires_watchlist_reason(item)]
+        or ([lots_to_trade_reason] if lots_to_trade_reason else [])
+        or (reason_summary.get("soft_limits") or [])
+        or reasons
+        or ["none"]
+    )[0]
+    scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
+    preferred_side = str(scorecard.get("preferred_side") or "").lower()
+    preferred_side_card = scorecard.get(preferred_side) if preferred_side in {"long", "short"} else {}
+    if not isinstance(preferred_side_card, dict):
+        preferred_side_card = {}
+    authority = final_entry_authority if isinstance(final_entry_authority, dict) else {}
+    diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
+    confirmation = market_confirmation if isinstance(market_confirmation, dict) else {}
+    category = _release_block_category(str(primary_reason), reason_summary)
+    return {
+        "contract_version": "agentquant.release_block_diagnostics.v1",
+        "ticker": ticker,
+        "observation_only": True,
+        "does_not_modify_trade_authority": True,
+        "cannot_create_or_change_lots": True,
+        "single_source_of_trade_truth_remains": "final_action_contract",
+        "primary_block_reason": str(primary_reason),
+        "blocking_category": category,
+        "reason_effect_summary": reason_summary,
+        "evidence_snapshot": {
+            "preferred_side": preferred_side or "flat",
+            "preferred_side_layer": preferred_side_card.get("final_layer"),
+            "preferred_side_score": preferred_side_card.get("score"),
+            "market_confirmation_score": confirmation.get("confirmation_score"),
+            "market_confirmation_status": confirmation.get("status") or confirmation.get("confirmation_label"),
+            "has_release_signal": bool(reason_summary.get("release_signals")),
+            "has_hard_block": bool(reason_summary.get("hard_blocks")),
+            "has_watchlist_required_reason": any(requires_watchlist_reason(item) for item in reasons),
+            "direction_only_block": bool(authority.get("direction_only_block")),
+            "current_evidence_present": bool(
+                authority.get("current_evidence")
+                or authority.get("strong_current_evidence")
+                or preferred_side_card.get("trigger_valid")
+            ),
+            "invalidation_present": bool(
+                authority.get("invalidation_present")
+                or preferred_side_card.get("invalidation_present")
+                or diagnostics.get("pretrade_invalidation_present")
+            ),
+        },
+        "release_ladder_diagnostics": _build_release_ladder_diagnostics(full_config),
+        "next_evidence_needed": {
+            "hard_risk_or_authority": ["remove_hard_block_or_wait_for_auditor_clearance"],
+            "watchlist_or_direction_only": ["current_tradeable_setup_evidence"],
+            "current_confirmation_missing": ["current_price_or_volume_confirmation"],
+            "invalidation_missing": ["explicit_invalidation_or_stop_boundary"],
+            "capital_capacity": ["feasible_budget_and_lot_capacity"],
+            "learning_evidence_insufficient": ["exact_state_episode_reward_or_current_confirmation"],
+            "soft_limit": ["stronger_current_evidence_or_probe_qualification"],
+            "release_signal_present": ["downstream_contract_landing_check"],
+            "no_release_block_recorded": ["no_additional_release_evidence_needed"],
+        }.get(category, ["review_release_block_reason"]),
+        "audit_boundary": (
+            "diagnostic_only; not consumed by Trader; does not alter final_action_contract, "
+            "final_new_entry_trade_authority, lots, budget, or execution"
+        ),
+    }
+
+
 def _build_minimal_final_action_contract(
     *,
     ticker: str,
@@ -1429,6 +1617,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         or alpha_ev.get("positive_action_value")
         or alpha_ev.get("positive_profile")
     )
+    analyst_tradeable_probe = bool(alpha_ev.get("analyst_tradeable_probe_candidate"))
     confirmation_score = _safe_float(alpha_ev.get("current_confirmation_score"), 0.0)
     independent_support_count = int(alpha_ev.get("independent_support_count") or 0)
 
@@ -1476,6 +1665,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         or event_catalyst_confirmation
         or current_setup_confirmation
         or market_confirmation
+        or analyst_tradeable_probe
     )
     current_trade_authority = bool(
         open_action_evidence
@@ -1484,6 +1674,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
     return {
         "scorecard_layer": scorecard_layer,
         "qualified_positive": qualified_positive,
+        "analyst_tradeable_probe_candidate": analyst_tradeable_probe,
         "strong_realtime_evidence": strong_realtime,
         "strong_market_confirmation": strong_market,
         "technical_supports_side": technical_support,
@@ -1510,6 +1701,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
                 "event_catalyst": event_catalyst_confirmation,
                 "current_setup_confirmation": current_setup_confirmation,
                 "market_confirmation": market_confirmation,
+                "analyst_tradeable_probe_candidate": analyst_tradeable_probe,
                 "positive_open_action_value": qualified_positive,
                 "static_weights_role": "prior_only",
                 "static_weights_can_create_trade_authority": False,
@@ -1620,6 +1812,7 @@ def _should_attempt_minimum_real_probe(
     control_reasons: list[str],
     probe_release: bool,
     alpha_ev_blocks_real_probe: bool,
+    analyst_tradeable_probe: bool = False,
 ) -> bool:
     reasons = [str(reason or "") for reason in control_reasons or []]
     direction_or_watchlist_semantics = {
@@ -1635,10 +1828,12 @@ def _should_attempt_minimum_real_probe(
         and (
             any(reason in _MINIMUM_REAL_PROBE_SOFT_REASONS for reason in reasons)
             or probe_release
+            or analyst_tradeable_probe
         )
         and (
             not any(reason in _MINIMUM_REAL_PROBE_DISQUALIFIED_REASONS for reason in reasons)
             or probe_release
+            or analyst_tradeable_probe
         )
         and not alpha_ev_blocks_real_probe
         and not any(_hard_zero_reason(reason) for reason in reasons)
@@ -1650,16 +1845,121 @@ def _minimum_real_probe_candidate_ratio(
     current_ratio: float,
     pre_control_ratio: float,
     probe_release: bool,
+    analyst_tradeable_probe: bool = False,
 ) -> float:
     """Keep released probe direction available after soft gates shrink ratio to zero."""
     current = float(current_ratio or 0.0)
     if abs(current) > 1e-12:
         return current
-    if probe_release:
+    if probe_release or analyst_tradeable_probe:
         previous = float(pre_control_ratio or 0.0)
         if abs(previous) > 1e-12:
             return previous
     return current
+
+
+def _qualified_analyst_tradeable_probe_candidate(
+    *,
+    analyst_signals: list,
+    target_side: str,
+    control_reasons: list[str],
+    control_diagnostics: dict,
+    account_equity: float,
+    current_price: float,
+    multiplier: float,
+    margin_rate: float,
+    margin_available: float,
+) -> tuple[bool, dict]:
+    """Preserve a current tradeable analyst candidate from being soft-gated to zero.
+
+    This is not a trading authority and does not bypass final_action_contract.
+    It only lets an already structured current setup remain eligible for the
+    existing one-lot probe path after soft controls shrink the ratio to zero.
+    """
+    reasons = {str(reason or "") for reason in (control_reasons or [])}
+    hard_blocks = set(reason_effect_summary(list(reasons)).get("hard_blocks") or [])
+    negative_reasons = {
+        "repeat_loss_watchlist_only",
+        "negative_expectancy_cap_or_exit",
+        "negative_expectancy_new_entry_watchlist_only",
+        "tail_loss_protect",
+        "negative_revalidate",
+        "negative_hold_revalidate",
+    }
+    detail = {
+        "enabled": True,
+        "target_side": target_side,
+        "matched_analysts": [],
+        "blocked_reasons": [],
+        "does_not_create_trade_authority": True,
+        "requires_final_new_entry_trade_authority": True,
+        "keeps_direction_only_boundary": True,
+    }
+    if target_side not in {"long", "short"}:
+        detail["blocked_reasons"].append("missing_target_side")
+        return False, detail
+    if hard_blocks or any(_hard_zero_reason(reason) for reason in reasons):
+        detail["blocked_reasons"].append("hard_block_present")
+    if reasons & negative_reasons:
+        detail["blocked_reasons"].append("negative_or_tail_loss_present")
+    alpha_ev = control_diagnostics.get("alpha_setup_ev_fusion") if isinstance(control_diagnostics, dict) else {}
+    if isinstance(alpha_ev, dict) and (
+        alpha_ev.get("negative_action_value")
+        or alpha_ev.get("negative_profile")
+        or alpha_ev.get("repeat_loss_without_new_evidence")
+        or alpha_ev.get("tail_loss_blocks_real_amplification")
+    ):
+        detail["blocked_reasons"].append("negative_learning_profile_present")
+    one_lot_margin = float(current_price or 0.0) * abs(float(multiplier or 0.0)) * float(margin_rate or 0.0)
+    if one_lot_margin <= 0 or one_lot_margin > float(margin_available or 0.0) + 1e-12:
+        detail["blocked_reasons"].append("one_lot_margin_not_feasible")
+    if float(account_equity or 0.0) <= 0:
+        detail["blocked_reasons"].append("account_equity_invalid")
+
+    for signal in analyst_signals or []:
+        signal_side = _signal_side_text(getattr(signal, "signal", None))
+        if signal_side != target_side:
+            continue
+        layer = _signal_opportunity_layer(signal)
+        state = str(getattr(signal, "opportunity_state", "") or "").strip().lower()
+        trigger_valid = bool(getattr(signal, "trigger_valid", False))
+        invalidation_present = bool(getattr(signal, "invalidation_present", False))
+        metadata = getattr(signal, "metadata", {}) or {}
+        action_contract = (
+            metadata.get("action_evidence_contract")
+            if isinstance(metadata, dict) and isinstance(metadata.get("action_evidence_contract"), dict)
+            else {}
+        )
+        if action_contract:
+            layer = str(action_contract.get("opportunity_layer") or layer or "").strip().lower()
+            state = str(action_contract.get("opportunity_state") or state or "").strip().lower()
+            trigger_valid = bool(action_contract.get("trigger_valid") or trigger_valid)
+            invalidation_present = bool(
+                action_contract.get("has_invalidation")
+                or action_contract.get("invalidation_present")
+                or invalidation_present
+            )
+        tradeable_candidate = bool(
+            layer in {"tradeable_setup", "deployable_alpha"}
+            or state == "tradeable_candidate"
+        )
+        if tradeable_candidate and trigger_valid and invalidation_present:
+            detail["matched_analysts"].append(
+                {
+                    "analyst": _normalize_agent_name(str(getattr(signal, "agent_name", "") or "unknown")),
+                    "layer": layer,
+                    "opportunity_state": state,
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                    "side": signal_side,
+                }
+            )
+
+    if not detail["matched_analysts"]:
+        detail["blocked_reasons"].append("no_same_side_tradeable_triggered_analyst")
+    allowed = not detail["blocked_reasons"]
+    detail["decision"] = "allow_controlled_probe_candidate" if allowed else "watchlist_only"
+    return allowed, detail
 
 
 _FINAL_NEW_ENTRY_WEAK_REASONS = {
@@ -1709,6 +2009,23 @@ def _final_new_entry_trade_authority(
     alpha_ev = control_diagnostics.get("alpha_setup_ev_fusion") if isinstance(control_diagnostics, dict) else {}
     if not isinstance(alpha_ev, dict):
         alpha_ev = {}
+    analyst_probe_detail = (
+        control_diagnostics.get("analyst_tradeable_probe_candidate")
+        if isinstance(control_diagnostics, dict)
+        else {}
+    )
+    analyst_tradeable_probe_candidate = bool(
+        isinstance(analyst_probe_detail, dict)
+        and analyst_probe_detail.get("decision") == "allow_controlled_probe_candidate"
+        and analyst_probe_detail.get("matched_analysts")
+    )
+    if analyst_tradeable_probe_candidate:
+        alpha_ev = dict(alpha_ev)
+        alpha_ev["analyst_tradeable_probe_candidate"] = True
+        alpha_ev["has_tradeable_support"] = True
+        alpha_ev["has_invalidation_or_stop"] = True
+        if not alpha_ev.get("scorecard_layer"):
+            alpha_ev["scorecard_layer"] = "tradeable_setup"
     reason_effects = reason_effect_summary(reasons)
     weak_markers = sorted(reason_set & _FINAL_NEW_ENTRY_WEAK_REASONS)
     hard_blocks = sorted(set(reason_set & _FINAL_NEW_ENTRY_HARD_BLOCK_REASONS) | set(reason_effects.get("hard_blocks") or []))
@@ -1816,6 +2133,7 @@ def _final_new_entry_trade_authority(
         and (
             (release_qualified and open_action_evidence)
             or strong_current_evidence
+            or analyst_tradeable_probe_candidate
         )
     )
     if prior_only_mode and not static_weights_can_open and not open_action_evidence:
@@ -1875,6 +2193,7 @@ def _final_new_entry_trade_authority(
             + (["weak_conflict_probe_requires_stronger_confirmation"] if weak_conflict_probe else [])
             + (["negative_expectancy"] if negative_profile else [])
             + (["hard_zero"] if hard_zero else [])
+            + (["analyst_tradeable_probe_candidate"] if analyst_tradeable_probe_candidate else [])
         )
     )
     return has_authority, {
@@ -1936,6 +2255,7 @@ def _final_new_entry_trade_authority(
         "release": release,
         "release_qualified": release_qualified,
         "qualified_positive": qualified_positive,
+        "analyst_tradeable_probe_candidate": analyst_tradeable_probe_candidate,
         "strong_realtime_evidence": strong_realtime,
         "strong_market_confirmation": strong_market,
         "strong_current_evidence": strong_current_evidence,
@@ -2614,6 +2934,8 @@ def _build_phase1_recommendation(
                 )
             if isinstance(diagnostics.get("position_budget_policy"), dict):
                 signal_snapshot["position_budget_policy"] = diagnostics["position_budget_policy"]
+        if isinstance(plan_snapshot.get("release_block_diagnostics"), dict):
+            signal_snapshot["release_block_diagnostics"] = plan_snapshot["release_block_diagnostics"]
     if isinstance(final_action_contract, dict):
         signal_snapshot["final_action_contract"] = final_action_contract
     if market_confirmation:
@@ -3269,13 +3591,18 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "reward_mean": row.get("reward_mean"),
         "win_rate": row.get("win_rate"),
         "confidence_score": row.get("confidence_score"),
-        "policy_hint": row.get("policy_hint"),
         "action_preference": _action_value_preference(row),
+        "canonical_action_preference_source": (
+            payload.get("canonical_action_preference_source") or "payload.action_preference"
+        ),
+        "deprecated_policy_hint_mirror": (
+            payload.get("deprecated_policy_hint_mirror") or row.get("policy_hint")
+        ),
         "max_position_impact": row.get("max_position_impact"),
         "valid_until": row.get("valid_until"),
         "source": payload.get("source") or row.get("source"),
+        "reward_source": payload.get("reward_source"),
         "strict_no_lookahead": payload.get("strict_no_lookahead"),
-        "action_preference": payload.get("action_preference"),
         "amplification_scope_quality": payload.get("amplification_scope_quality"),
         "exact_state_real_trade_sample_count": payload.get("exact_state_real_trade_sample_count"),
         "partial_state_real_trade_sample_count": payload.get("partial_state_real_trade_sample_count"),
@@ -3928,10 +4255,13 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
         if isinstance(row, dict)
     ]
     rows = [row for row in rows if row]
-    hint_counts: dict[str, int] = {}
+    preference_counts: dict[str, int] = {}
+    deprecated_policy_hint_mirror_counts: dict[str, int] = {}
     for row in rows:
-        key = str(row.get("policy_hint") or "unknown")
-        hint_counts[key] = hint_counts.get(key, 0) + 1
+        key = str(row.get("action_preference") or "none")
+        preference_counts[key] = preference_counts.get(key, 0) + 1
+        mirror = str(row.get("deprecated_policy_hint_mirror") or "none")
+        deprecated_policy_hint_mirror_counts[mirror] = deprecated_policy_hint_mirror_counts.get(mirror, 0) + 1
     action_groups = {
         "open_action_value": [],
         "hold_action_value": [],
@@ -3950,7 +4280,9 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
             action_groups["execution_action_value"].append(row)
     return {
         "action_value_count": len(rows),
-        "policy_hint_counts": hint_counts,
+        "action_preference_counts": preference_counts,
+        "canonical_action_preference_source": "payload.action_preference",
+        "deprecated_policy_hint_mirror_counts": deprecated_policy_hint_mirror_counts,
         "action_values": rows[:8],
         "open_action_value": action_groups["open_action_value"][:4],
         "hold_action_value": action_groups["hold_action_value"][:4],
@@ -4330,7 +4662,8 @@ def _build_pm_landing_consistency_audit(
             "alpha_setup_profile_count": setup_profile_trace.get("profile_count", 0),
             "alpha_setup_lifecycle_counts": setup_profile_trace.get("lifecycle_counts", {}),
             "alpha_setup_action_value_count": action_value_trace.get("action_value_count", 0),
-            "alpha_setup_action_policy_hint_counts": action_value_trace.get("policy_hint_counts", {}),
+            "alpha_setup_action_preference_counts": action_value_trace.get("action_preference_counts", {}),
+            "deprecated_policy_hint_mirror_counts": action_value_trace.get("deprecated_policy_hint_mirror_counts", {}),
             "money_decision_trace_required": True,
         },
         "auditor_alignment": auditor_payload or {},
@@ -5431,7 +5764,6 @@ def _apply_alpha_setup_ev_position_control(
     open_like_intent = intended_action in {"open", "add", "reverse"}
     open_action_value_missing = bool(open_like_intent and action_values and not intent_matched_action_values)
     best_action_value = max(intent_matched_action_values, key=_action_rank) if intent_matched_action_values else {}
-    action_hint = str(best_action_value.get("policy_hint") or "").lower()
     action_name = str(best_action_value.get("action_name") or "").lower()
     action_reward_mean = _safe_float(best_action_value.get("reward_mean"), 0.0)
     action_reward_sum = _safe_float(best_action_value.get("reward_sum"), 0.0)
@@ -5688,8 +6020,11 @@ def _apply_alpha_setup_ev_position_control(
             "reward_sum": action_reward_sum,
             "win_rate": action_win_rate,
             "confidence_score": action_confidence,
-            "policy_hint": action_hint,
             "action_preference": action_preference,
+            "canonical_action_preference_source": "payload.action_preference",
+            "deprecated_policy_hint_mirror": _action_value_payload(best_action_value).get(
+                "deprecated_policy_hint_mirror"
+            ) or best_action_value.get("policy_hint"),
             "exact_ticker_support": action_exact_ticker_support,
             "scope_quality": action_scope_quality,
             "real_amplification_support": action_real_amplification_support,
@@ -9409,6 +9744,25 @@ def portfolio_agent_futures(state: FundState):
             f"qualified_positive={probe_release_detail.get('qualified_positive_expectancy')}, "
             f"strong_realtime={probe_release_detail.get('strong_realtime_evidence')}"
         )
+    analyst_tradeable_probe, analyst_tradeable_probe_detail = _qualified_analyst_tradeable_probe_candidate(
+        analyst_signals=analyst_signals,
+        target_side=_target_side_from_ratio(pre_control_ratio),
+        control_reasons=control_reasons,
+        control_diagnostics=control_diagnostics,
+        account_equity=account_equity,
+        current_price=float(current_price),
+        multiplier=float(multiplier),
+        margin_rate=float(margin_rate),
+        margin_available=float(margin_available),
+    )
+    control_diagnostics["analyst_tradeable_probe_candidate"] = analyst_tradeable_probe_detail
+    if analyst_tradeable_probe:
+        control_reasons.append("analyst_tradeable_probe_candidate")
+        control_notes.append(
+            f"{ticker} same-side analyst tradeable candidate preserved for controlled probe: "
+            f"side={analyst_tradeable_probe_detail.get('target_side')}, "
+            f"analysts={[item.get('analyst') for item in analyst_tradeable_probe_detail.get('matched_analysts', [])]}"
+        )
     alpha_ev = control_diagnostics.get("alpha_setup_ev_fusion")
     alpha_ev_blocks_real_probe = bool(
         isinstance(alpha_ev, dict)
@@ -9419,6 +9773,7 @@ def portfolio_agent_futures(state: FundState):
         current_ratio=position_risk.optimal_position_ratio,
         pre_control_ratio=pre_control_ratio,
         probe_release=probe_release,
+        analyst_tradeable_probe=analyst_tradeable_probe,
     )
     if (
         _should_attempt_minimum_real_probe(
@@ -9427,6 +9782,7 @@ def portfolio_agent_futures(state: FundState):
             target_ratio=minimum_probe_candidate_ratio,
             control_reasons=control_reasons,
             probe_release=probe_release,
+            analyst_tradeable_probe=analyst_tradeable_probe,
             alpha_ev_blocks_real_probe=alpha_ev_blocks_real_probe,
         )
     ):
@@ -9831,6 +10187,17 @@ def portfolio_agent_futures(state: FundState):
         market_confirmation=market_confirmation,
         alpha_setup_action_values=alpha_setup_action_values,
         execution_plan=plan_snapshot.get("execution_plan"),
+    )
+    plan_snapshot["release_block_diagnostics"] = _build_release_block_diagnostics(
+        ticker=ticker,
+        final_action_contract=final_action_contract,
+        final_entry_authority=final_entry_authority,
+        control_reasons=control_reasons,
+        lots_to_trade_reason=lots_to_trade_reason,
+        control_diagnostics=control_diagnostics,
+        opportunity_scorecard=opportunity_scorecard,
+        market_confirmation=market_confirmation,
+        full_config=full_config,
     )
     plan_snapshot["final_effective_action"] = final_action_contract.get("final_action")
     holding_diagnostics = {}

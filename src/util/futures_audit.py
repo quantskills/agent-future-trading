@@ -582,7 +582,10 @@ def _compact_action_value_preferences(contract: Dict[str, Any]) -> List[Dict[str
             {
                 "action_name": row.get("action_name"),
                 "action_preference": row.get("action_preference"),
-                "policy_hint": row.get("policy_hint"),
+                "canonical_action_preference_source": (
+                    row.get("canonical_action_preference_source") or "payload.action_preference"
+                ),
+                "deprecated_policy_hint_mirror": row.get("deprecated_policy_hint_mirror") or row.get("policy_hint"),
                 "sample_scope": row.get("sample_scope"),
                 "memory_quality": row.get("memory_quality"),
                 "reward_mean": row.get("reward_mean"),

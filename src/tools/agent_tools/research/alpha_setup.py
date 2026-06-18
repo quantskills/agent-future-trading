@@ -590,7 +590,7 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
         + min(0.24, abs(win_rate - 0.5))
         + min(0.24, abs(net_pnl) / 50000.0)
     )
-    action_bias = {
+    profile_state_hint = {
         "deployable": "profile_deployable",
         "protected": "profile_protected",
         "watchlist": "profile_watchlist",
@@ -609,7 +609,10 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
     return {
         "lifecycle_state": state,
         "reason": reason,
-        "action_bias": action_bias,
+        "profile_state_hint": profile_state_hint,
+        "action_bias": profile_state_hint,
+        "deprecated_action_bias_mirror": profile_state_hint,
+        "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "confidence_score": confidence,
         "max_position_impact": max_position_impact,
     }
@@ -764,7 +767,7 @@ def upsert_alpha_setup_sample_and_profile(
             "data_combo": data_combo,
         },
         usable_memory=[
-            f"setup={setup_type}; state={lifecycle['lifecycle_state']}; action_bias={lifecycle['action_bias']}",
+            f"setup={setup_type}; state={lifecycle['lifecycle_state']}; profile_state_hint={lifecycle['profile_state_hint']}",
             f"n={stats['sample_count']}; trades={stats['trade_count']}; win_rate={stats['win_rate']:.2f}; pf={stats['profit_factor']:.2f}; net_pnl={stats['net_pnl']:.0f}",
         ],
         analysis_strategy_updates=[
@@ -798,6 +801,9 @@ def upsert_alpha_setup_sample_and_profile(
     profile_payload = {
         "stats": stats,
         "classification": lifecycle,
+        "profile_state_hint": lifecycle["profile_state_hint"],
+        "deprecated_action_bias_mirror": lifecycle["action_bias"],
+        "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "last_sample": payload,
         "lookback_days": lookback_days,
         "not_product_blacklist": True,
@@ -905,7 +911,9 @@ def upsert_alpha_setup_sample_and_profile(
         "status": "applied",
         "scope_key": scope_key,
         "lifecycle_state": lifecycle["lifecycle_state"],
+        "profile_state_hint": lifecycle["profile_state_hint"],
         "action_bias": lifecycle["action_bias"],
+        "deprecated_action_bias_mirror": lifecycle["action_bias"],
         "confidence_score": lifecycle["confidence_score"],
         "stats": stats,
     }
@@ -1002,6 +1010,7 @@ def _upsert_action_values(
             worst_reward=worst_reward,
         )
         policy_hint = action_preference or "no_action_preference"
+        deprecated_policy_hint_mirror = policy_hint
         action_value_lane = _action_value_lane(action_name)
         usage_boundary = _action_value_usage_boundary(
             action_name=action_name,
@@ -1028,6 +1037,8 @@ def _upsert_action_values(
             "profile_lifecycle": dict(profile_lifecycle),
             "source": "alpha_setup_profile_action_value",
             "action_preference": action_preference,
+            "canonical_action_preference_source": "payload.action_preference",
+            "deprecated_policy_hint_mirror": deprecated_policy_hint_mirror,
             "prior_role": "" if action_preference else "weak_prior_not_action_preference",
             "action_preference_boundary": (
                 "candidate preferences guide PM action arbitration; they do not create "
@@ -1112,20 +1123,27 @@ def _upsert_action_values(
 
 def profile_prompt_line(profile: Mapping[str, Any]) -> str:
     state = str(profile.get("lifecycle_state") or "candidate")
-    bias = str(profile.get("action_bias") or "observe")
+    hint = str(
+        profile.get("profile_state_hint")
+        or profile.get("deprecated_action_bias_mirror")
+        or profile.get("action_bias")
+        or "profile_observe"
+    )
     return (
         f"{profile.get('ticker')}/{profile.get('side')}/{profile.get('horizon_class')}/"
         f"{profile.get('market_regime')}: setup={profile.get('setup_type')}, "
-        f"state={state}, bias={bias}, n={_safe_int(profile.get('sample_count'))}, "
+        f"state={state}, profile_state_hint={hint}, n={_safe_int(profile.get('sample_count'))}, "
         f"wr={_safe_float(profile.get('win_rate')):.2f}, pf={_safe_float(profile.get('profit_factor')):.2f}, "
         f"pnl={_safe_float(profile.get('net_pnl')):.0f}, max_impact={_safe_float(profile.get('max_position_impact')):.3f}. "
-        "Use as rebuttable prior only; current evidence and invalidation are required."
+        "Use as rebuttable profile-state prior only; it is not an action preference or trade command; "
+        "current evidence and invalidation are required."
     )
 
 
 def action_value_prompt_line(action_value: Mapping[str, Any]) -> str:
-    hint = str(action_value.get("policy_hint") or "observe")
     payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
+    preference = str(payload.get("action_preference") or "").strip()
+    deprecated_hint = str(payload.get("deprecated_policy_hint_mirror") or action_value.get("policy_hint") or "").strip()
     signal_calibration = payload.get("signal_calibration") if isinstance(payload.get("signal_calibration"), Mapping) else {}
     lane = str(payload.get("action_value_lane") or action_value.get("action_name") or "unknown")
     analysis_boundary = ""
@@ -1138,7 +1156,8 @@ def action_value_prompt_line(action_value: Mapping[str, Any]) -> str:
         f"{action_value.get('ticker')}/{action_value.get('side')}/"
         f"{action_value.get('horizon_class')}/{action_value.get('market_regime')}: "
         f"setup={action_value.get('setup_type')}, action={action_value.get('action_name')}, lane={lane}, "
-        f"hint={hint}, n={_safe_int(action_value.get('sample_count'))}, "
+        f"action_preference={preference or 'none'}, deprecated_policy_hint_mirror={deprecated_hint or 'none'}, "
+        f"n={_safe_int(action_value.get('sample_count'))}, "
         f"reward_mean={_safe_float(action_value.get('reward_mean')):.0f}, "
         f"reward_sum={_safe_float(action_value.get('reward_sum')):.0f}, "
         f"wr={_safe_float(action_value.get('win_rate')):.2f}, "
@@ -1205,6 +1224,11 @@ def _analyst_signal_calibration_view(signal_calibration: Mapping[str, Any]) -> D
 
 
 def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    profile_state_hint = (
+        profile.get("profile_state_hint")
+        or profile.get("deprecated_action_bias_mirror")
+        or profile.get("action_bias")
+    )
     return {
         "scope_key": profile.get("scope_key"),
         "ticker": profile.get("ticker"),
@@ -1214,7 +1238,9 @@ def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
         "setup_type": profile.get("setup_type"),
         "data_combo": _compact_text(profile.get("data_combo"), 90),
         "lifecycle_state": profile.get("lifecycle_state"),
-        "action_bias": profile.get("action_bias"),
+        "profile_state_hint": profile_state_hint,
+        "deprecated_action_bias_mirror": profile.get("action_bias"),
+        "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "sample_count": profile.get("sample_count"),
         "trade_count": profile.get("trade_count"),
         "win_rate": profile.get("win_rate"),
@@ -1228,6 +1254,7 @@ def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
 
 def compact_action_value_for_trace(action_value: Mapping[str, Any]) -> Dict[str, Any]:
     payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
+    action_preference = payload.get("action_preference")
     return {
         "scope_key": action_value.get("scope_key"),
         "ticker": action_value.get("ticker"),
@@ -1242,11 +1269,14 @@ def compact_action_value_for_trace(action_value: Mapping[str, Any]) -> Dict[str,
         "reward_mean": action_value.get("reward_mean"),
         "win_rate": action_value.get("win_rate"),
         "confidence_score": action_value.get("confidence_score"),
-        "policy_hint": action_value.get("policy_hint"),
+        "action_preference": action_preference,
+        "canonical_action_preference_source": payload.get("canonical_action_preference_source") or "payload.action_preference",
+        "deprecated_policy_hint_mirror": payload.get("deprecated_policy_hint_mirror") or action_value.get("policy_hint"),
         "max_position_impact": action_value.get("max_position_impact"),
         "valid_until": action_value.get("valid_until"),
         "research_output_contract_version": payload.get("research_output_contract_version"),
         "action_value_lane": payload.get("action_value_lane"),
+        "prior_role": payload.get("prior_role"),
         "usable_by": payload.get("usable_by"),
         "allowed_effects": payload.get("allowed_effects"),
         "forbidden_effects": payload.get("forbidden_effects"),

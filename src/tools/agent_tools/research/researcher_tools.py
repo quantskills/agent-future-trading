@@ -27,6 +27,7 @@ from tools.agent_tools.research.alpha_setup import (
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
+from tools.agent_tools.execution.order_semantics import recommendation_intent_from_lots
 from util.futures_audit import categorize_no_trade_reason
 from util.logger import logger
 
@@ -487,6 +488,8 @@ def write_alpha_setup_profiles(
     for recommendation in strategy_recommendations:
         snapshot = reviewer._recommendation_snapshot(recommendation)
         final_contract = _dict_or_empty(snapshot.get("final_action_contract"))
+        if not final_contract:
+            continue
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
         if not ticker:
             continue
@@ -495,12 +498,6 @@ def write_alpha_setup_profiles(
             target_lots_for_side = reviewer._safe_int(final_contract.get("target_lots"))
             preferred = "long" if target_lots_for_side > 0 else "short" if target_lots_for_side < 0 else "flat"
             side = preferred if preferred in {"long", "short"} else "flat"
-        if side not in {"long", "short"}:
-            action_text = str(recommendation.get("action") or "").lower()
-            if "long" in action_text:
-                side = "long"
-            elif "short" in action_text:
-                side = "short"
         if side not in {"long", "short"}:
             continue
         rec_id = str(recommendation.get("id") or "")
@@ -552,8 +549,13 @@ def write_alpha_setup_profiles(
             opportunity_layer=opportunity_layer,
         )
         sector = reviewer._sector_for_ticker(cfg, ticker)
-        target_lots = reviewer._safe_int(final_contract.get("target_lots"), reviewer._safe_int(recommendation.get("lots")))
+        target_lots = reviewer._safe_int(final_contract.get("target_lots"))
         current_lots = reviewer._safe_int(final_contract.get("current_lots"), 0)
+        contract_intent = recommendation_intent_from_lots(
+            current_lots=current_lots,
+            target_lots=target_lots,
+        )
+        contract_action_taken = str(contract_intent.get("action") or "hold")
         executed_lots = sum(abs(reviewer._safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
         tx_daily_pnl = sum(reviewer._safe_float(tx.get("daily_pnl")) for tx in txs if isinstance(tx, dict))
         tx_commission = sum(reviewer._safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
@@ -607,8 +609,8 @@ def write_alpha_setup_profiles(
             "scope_key": scope_key,
             "source_type": "trade_episode" if episode_sample and source_type == "trade" else source_type,
             "recommendation_id": rec_id,
-            "action_taken": recommendation.get("action"),
-            "pm_action": final_contract.get("final_action") or recommendation.get("action"),
+            "action_taken": contract_action_taken,
+            "pm_action": final_contract.get("final_action") or contract_action_taken,
             "auditor_decision": (
                 str(final_contract.get("audit_verdict") or final_contract.get("auditor_decision") or "")
             ),
