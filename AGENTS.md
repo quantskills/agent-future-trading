@@ -51,7 +51,7 @@ AgentQuant 的业务线是一个闭环：
 - Accountant 只按实际成交和结算价核算，并把 PnL 绑定回对应契约。
 - Reviewer/Researcher 只研究这张契约导致的完整 episode 结果，不从草稿或旁路学习。
 
-`pre_open_plan` 只能是 PM 内部草稿或 artifact，不是交易真相，不是 Trader 成交来源，不是 Researcher 学习来源，不是审计推导目标手数的来源。
+PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落入运行时 artifact；它不是交易真相，不是 Trader 成交来源，不是 Researcher 学习来源，不是审计推导目标手数的来源。
 
 策略单必须是 `contract_type=strategy` 的 `final_action_contract`。换月、强平、风控处置等非策略动作必须走运营或风险事件路径，例如 `source_type=rollover`，独立核算，不得污染 alpha 学习。
 
@@ -89,12 +89,12 @@ PM 是策略交易意图的唯一生成者。PM 输入分析师证据、当前�
 PM 必须输出：
 
 - `final_action_contract`：唯一交易契约；
-- `final_new_entry_trade_authority`：新开仓权限解释，只是契约内开仓权限的审计说明，不是第二套交易命令；
+- `authority_type`、`authority_decision`、`open_action_evidence`、`strong_current_evidence`：只能作为 `final_action_contract` 内部权限字段存在，不得另建第二张权限合约；
 - `reason_codes`：机器可审计原因码；
 - `learning_used`：本次决策使用的学习证据；
 - `capital_boundary` / `margin_boundary`：资金边界说明。
 
-PM 不得让静态分析师权重、旧字段、pre_open_plan、minimum lot、watchlist、direction_only 或相似历史记忆绕过最终契约。
+PM 不得让静态分析师权重、旧字段、草稿计划、minimum lot、watchlist、direction_only 或相似历史记忆绕过最终契约。
 
 ### 5.3 Auditor
 
@@ -121,7 +121,7 @@ Trader 是执行器，不是策略生成器。
 Trader 输入：
 
 - PM 最终推荐记录里的 `final_action_contract`；
-- 契约内的 `execution_plan` / `execution_profile`；
+- 契约内的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation` 等执行字段；
 - 当日盘中行情、触发条件、滑点和合约交易规则。
 
 Trader 输出：
@@ -228,6 +228,8 @@ Researcher 输出必须使用固定 `action_preference` 集合：
 - 是否会改变交易权限、手数、资金、学习或执行；
 - 是否可能压死交易、过拟合或引入旁路；
 - 需要哪些失败测试或回归测试证明。
+
+涉及新增或调整字段时，必须先查 `docs/unified_field_semantics.md`。如果已有字段能表达同一语义或功能，必须复用已有字段，不得重复起名；如果确认确实需要新字段，必须在代码、配置、测试或 schema 变更的同一轮同步写入该字段表，明确放置位置和含义，然后才能让新字段进入运行时链路。
 
 修改时必须遵守：
 

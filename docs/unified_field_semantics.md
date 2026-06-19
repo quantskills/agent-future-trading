@@ -1,0 +1,512 @@
+﻿# AgentQuant 统一字段语义表
+
+本文是 AgentQuant 的唯一字段语义表。系统从分析、决策、审计、执行、结算、复盘、研究、学习到评估，只允许使用本文定义的字段语义。
+
+核心规则：
+
+- 分析师只输出结构化证据，不输出仓位、保证金、交易授权。
+- PM 只输出一张可执行策略合约：`final_action_contract`。
+- Auditor 只输出审计结论：`audit_verdict`。
+- Trader 只执行审计通过后的 `final_action_contract`，只写执行结果：`execution_result`。
+- Accountant 只按成交和结算价写结算结果：`settlement_result`。
+- Reviewer 写复盘归因。
+- Researcher 写分动作 action-value 学习。
+- 换月、强平、回放、反事实观察不是策略交易，必须用 `order_source != strategy` 分账，不能污染策略 action-value。
+- `payload`、`payload_json`、`artifact_json`、`signal_snapshot`、`evidence_json`、`result_json`、`features_json` 等只允许作为结构化容器；容器里的业务字段必须属于本文字段，不能形成第二套语义。
+
+## 1. 通用消息与 artifact 字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `id` | 所有持久化记录 | 记录或 artifact 的稳定 ID。 |
+| `contract_version` | 所有合约 / artifact | 合约版本。 |
+| `message_type` | 智能体内部消息 | 消息类型。 |
+| `artifact_type` | artifact 外层 | artifact 类型。 |
+| `source_agent` | 所有智能体输出 | 生成该记录的智能体；运行时统一使用它表达来源。 |
+| `agent_name` | artifact header / 展示字段 | 人类可读的智能体名称；不能作为交易决策字段。 |
+| `analyst` | 分析师记录 / 学习预算 | 分析师名称，如 technical、fundamental、commodity_news。 |
+| `config_id` | 所有运行记录 | 本次回测 / 配置实例 ID。 |
+| `exp_name` | config | 实验名称。 |
+| `trading_date` | 所有交易日记录 | 记录所属交易日。 |
+| `effective_trade_date` | 推荐 / 执行 | 推荐实际可执行日期。 |
+| `ticker` | 行情 / 信号 / 研究 | 品种代码。 |
+| `sector` | 分析师 / 研究 / 绩效 | 品种所属板块或行业分组。 |
+| `underlying_code` | 合约 / 换月 / 推荐 | 标的品种代码。 |
+| `contract_code` | 合约 / 成交 / 结算 | 具体期货合约。 |
+| `portfolio_id` | 组合 / 成交 / 结算 | 组合 ID。 |
+| `reference_portfolio_id` | PM 推荐 | PM 决策使用的参考组合 ID。 |
+| `recommendation_id` | 推荐 / 执行 / 研究 | 关联 PM 推荐记录。 |
+| `evidence_pack_id` | 复盘 / artifact | 复盘证据包 ID。 |
+| `created_at` | 所有持久化记录 | 创建时间。 |
+| `updated_at` | 可变学习 / 组合记录 | 更新时间。 |
+| `last_updated` | 绩效 / 模板记录 | 最后更新时间。 |
+| `snapshot_at` | memory history / 快照记录 | 快照生成时间。 |
+| `valid_until` | 记忆 / 策略 / 学习 | 有效截止日期。 |
+| `active` | 记忆 / 策略 / 学习 | 是否启用。 |
+| `status` | 生命周期记录 | pending、executed、skipped、failed、open、candidate、applied 等状态。 |
+| `phase` | `trading_day_phase` / workflow | 当前阶段。 |
+| `started_at` | `trading_day_phase` | 阶段开始时间。 |
+| `completed_at` | `trading_day_phase` | 阶段完成时间。 |
+| `message` | `trading_day_phase` | 阶段说明。 |
+| `payload` | artifact 外层 | 结构化载荷容器；不能引入未登记语义。 |
+| `payload_json` | 数据库存储 | `payload` 序列化结果；不能被当成另一套字段表。 |
+| `artifact_json` | signal 表 | 分析师 artifact 序列化容器。 |
+| `artifact_path` | artifact 元数据 | 外部 artifact 路径。 |
+| `sha256` | artifact 元数据 | artifact 内容哈希。 |
+| `size` | artifact 元数据 | artifact 大小。 |
+| `summary_json` | artifact 元数据 | artifact 摘要。 |
+| `audit_payload_artifact_path` | audit payload artifact 元数据 | `audit_payload` 外部 artifact 路径。 |
+| `audit_payload_sha256` | audit payload artifact 元数据 | `audit_payload` 内容哈希。 |
+| `audit_payload_size` | audit payload artifact 元数据 | `audit_payload` 大小。 |
+| `audit_payload_summary_json` | audit payload artifact 元数据 | `audit_payload` 摘要。 |
+| `llm_prompt_artifact_path` | LLM prompt artifact 元数据 | `llm_prompt` 外部 artifact 路径。 |
+| `llm_prompt_sha256` | LLM prompt artifact 元数据 | `llm_prompt` 内容哈希。 |
+| `llm_prompt_size` | LLM prompt artifact 元数据 | `llm_prompt` 大小。 |
+| `llm_prompt_summary_json` | LLM prompt artifact 元数据 | `llm_prompt` 摘要。 |
+| `llm_provider` | LLM 输出 / config | LLM 提供方。 |
+| `llm_model` | LLM 输出 / config | LLM 模型。 |
+| `determinism_mode` | LLM / 确定性输出 | 生成模式。 |
+| `llm_prompt` | LLM 审计字段 | 发送给 LLM 的提示词记录；不能参与交易决策。 |
+| `raw_prompt` | Reviewer LLM notes | 复盘 LLM 原始 prompt。 |
+| `raw_response` | Reviewer LLM notes | 复盘 LLM 原始 response。 |
+| `data_cutoff` | 分析师 / PM / artifact | 数据截止点，用于防未来函数。 |
+| `data_usage_summary` | 分析师证据 / 复盘 / 研究 | 本次分析使用的数据来源、日期范围、缺失情况、新鲜度。 |
+| `no_lookahead_status` | 数据派生 artifact | 未来函数检查状态。 |
+| `source_artifacts` | 所有 artifact | 上游 artifact ID 或来源说明。 |
+| `validation_errors` | 所有合约 / artifact | 结构或语义校验错误。 |
+| `source_artifacts_not_list` | 校验错误码 | `source_artifacts` 类型错误的校验说明，不是业务字段。 |
+| `validation_errors_not_list` | 校验错误码 | `validation_errors` 类型错误的校验说明，不是业务字段。 |
+| `artifact_header_missing` | 校验错误码 | artifact header 缺失说明，不是业务字段。 |
+| `artifact_contract` | artifact 校验 | artifact 合约名。 |
+| `artifact_validation_errors` | artifact 校验 | artifact 校验错误集合。 |
+| `internal_message_contract` | 内部消息校验 | 内部消息合约名。 |
+| `internal_message_contract_missing` | 校验错误码 | 内部消息合约缺失说明，不是业务字段。 |
+| `internal_message_validation_errors` | 校验错误码 | 内部消息校验错误集合。 |
+| `trade_research_contract_missing` | 校验错误码 | 研究合约缺失说明，不是业务字段。 |
+| `invalid_no_lookahead_status` | 校验错误码 | `no_lookahead_status` 非法说明，不是业务字段。 |
+| `invalid_message_no_lookahead_status` | 校验错误码 | 内部消息 `no_lookahead_status` 非法说明，不是业务字段。 |
+| `message_source_artifacts_not_list` | 校验错误码 | 内部消息 `source_artifacts` 类型错误说明，不是业务字段。 |
+| `message_validation_errors_not_list` | 校验错误码 | 内部消息 `validation_errors` 类型错误说明，不是业务字段。 |
+| `research_factor_focus_not_list` | 校验错误码 | 研究合约 `factor_focus` 类型错误说明，不是业务字段。 |
+| `research_conflicts_not_list` | 校验错误码 | 研究合约 `current_evidence_conflict` 类型错误说明，不是业务字段。 |
+
+## 2. 数据边界与运行上下文字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `tickers` | config | 本次运行启用品种列表。 |
+| `enabled_analysts` | workflow state | 启用的分析师列表。 |
+| `market_type` | workflow state | 市场类型。 |
+| `llm_config` | workflow state | LLM 配置对象。 |
+| `config` | workflow state | 当前节点配置。 |
+| `full_config` | workflow state | 完整配置。 |
+| `router` | workflow state | 内部路由器对象；不是业务字段。 |
+| `num_tickers` | workflow state | 启用品种数量。 |
+| `pre_open_only` | workflow state | 是否仅运行盘前。 |
+| `info_cutoff` | workflow state | 信息截止点。 |
+| `morning_price_context` | workflow state | 早盘执行价格上下文。 |
+| `portfolio` | workflow state | 当前组合对象。 |
+| `analyst_signals` | workflow state | 分析师输出列表。 |
+| `recommendation` | workflow state | PM 推荐记录。 |
+| `futures_recommendation` | 数据库表名 | PM 推荐表名，不是字段语义。 |
+| `ticker_daily_pnl` | 数据库表名 | 品种日盈亏表名，不是字段语义。 |
+| `daily_settlement` | 数据库表名 | 日结算表名，不是字段语义。 |
+| `signal_context_history` | 数据库表名 | 信号上下文历史表名，不是字段语义。 |
+| `strategy_memory` | 数据库表名 | 策略记忆表名，不是字段语义。 |
+| `setup_type_performance` | 数据库表名 | setup 类型绩效表名，不是字段语义。 |
+| `analyst_performance` | 数据库表名 | 分析师绩效表名，不是字段语义。 |
+| `adaptive_policy_state` | 数据库表名 | 自适应策略状态表名，不是字段语义。 |
+| `capital_deployment_state` | 数据库表名 | 资金部署状态表名，不是字段语义。 |
+| `config_learning_overlay` | 数据库表名 | 配置学习覆盖表名，不是字段语义。 |
+| `research_position_feedback` | 数据库表名 | 研究持仓反馈表名，不是字段语义。 |
+| `alpha_setup_profile` | 数据库表名 | alpha setup profile 表名，不是字段语义。 |
+| `alpha_setup_sample` | 数据库表名 | alpha setup sample 表名，不是字段语义。 |
+| `alpha_setup_action_value` | 数据库表名 | alpha setup action-value 表名，不是字段语义。 |
+| `reviewer_llm_notes` | 数据库表名 | 复盘 LLM notes 表名，不是字段语义。 |
+| `provisional_policy_state` | 数据库表名 | 临时策略状态表名，不是字段语义。 |
+| `learning_context_budget` | 数据库表名 | 学习上下文预算表名，不是字段语义。 |
+| `trade_episode_memory` | 数据库表名 | 交易 episode 记忆表名，不是字段语义。 |
+| `no_trade_opportunity_memory` | 数据库表名 | 无交易机会记忆表名，不是字段语义。 |
+| `exploratory_hypothesis` | 数据库表名 | 探索假设表名，不是字段语义。 |
+
+## 3. 分析师结构化证据字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `action_evidence_contract` | 分析师 `metadata` / PM 输入 | 分析师给 PM 的唯一证据契约。 |
+| `signal` | `action_evidence_contract` / signal 表 | bullish、bearish、neutral；只表示方向，不是交易授权。 |
+| `side` | `action_evidence_contract` / 研究状态 | long、short、flat。 |
+| `confidence` | 分析师证据 / 学习输出 | 置信度。 |
+| `confidence_score` | 数据库存储 | 数值置信度；运行时统一归一为 `confidence`。 |
+| `justification` | 分析师 / 推荐 / 成交 | 可读理由；不能替代结构化字段。 |
+| `horizon_class` | 分析师 / PM / 研究 | 期限类别。 |
+| `analyst_horizon` | 分析师证据 | 分析师原始信号期限。 |
+| `decision_horizon` | PM 证据融合 | PM 决策期限。 |
+| `execution_horizon` | Trader 执行 | 执行期限。 |
+| `validation_horizon` | Reviewer 复盘 | 验证期限。 |
+| `expected_horizon_days` | 分析师 / 研究 | 预期期限天数。 |
+| `market_regime` | 分析师 / state_key | 市场状态，如趋势、震荡、高波动。 |
+| `trend_stage` | 技术证据 | 趋势阶段。 |
+| `trend_direction` | 技术证据 | 技术趋势方向背景。 |
+| `direction_context` | 分析师证据 | 方向背景说明；不能作为交易授权。 |
+| `price_location` | 分析师证据 | 当前价格位置。 |
+| `price_percentile` | 分析师证据 | 当前价格分位。 |
+| `direction_anchor` | 分析师证据 | 中期方向锚。 |
+| `setup_type` | 分析师 / 研究 state | 交易逻辑类型。 |
+| `setup_quality_ok` | 分析师证据 | 形态值得关注；不代表当前已触发。 |
+| `setup_quality_score` | 分析师 / 研究样本 | setup 质量评分。 |
+| `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
+| `entry_quality` | 分析师证据 | 入场质量。 |
+| `entry_trigger` | 分析师证据 | 当前触发事实或等待条件。 |
+| `entry_timing_signal` | 技术证据 | 技术入场时机分类。 |
+| `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
+| `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
+| `exit_hint` | 分析师证据 | 退出 / 减仓提示。 |
+| `holding_period_hint` | 分析师证据 | 持仓周期提示。 |
+| `invalidation_present` | 分析师证据 | 是否有明确失效边界。 |
+| `invalidation_condition` | 分析师 / 复盘 | 失效条件。 |
+| `invalidation_level` | 分析师 / 执行风控 | 数值失效价位。 |
+| `atr_stop_distance` | 分析师 / 执行风控 | ATR 止损距离。 |
+| `add_allowed` | 分析师证据 | 证据是否允许加仓讨论；最终仍由 PM 决定。 |
+| `evidence_role` | 分析师证据 | 证据角色，如方向、入场、事件、风险、执行。 |
+| `evidence_quality` | 分析师证据 | 证据质量。 |
+| `business_quality_score` | 分析师证据 | 业务质量评分。 |
+| `tradeability_reason` | 分析师证据 | 为什么可交易或不可交易。 |
+| `reward_risk_ratio` | 分析师证据 | 预期收益风险比。 |
+| `target_return` | 信号上下文 | 目标收益。 |
+| `factor_focus` | 分析师证据 | 主要因子关注点。 |
+| `current_evidence_conflict` | 分析师证据 | 当前冲突证据。 |
+| `missing_evidence` | 分析师证据 | 缺失证据。 |
+| `conflicting_factors` | 分析师证据 | 冲突因子。 |
+| `counter_evidence` | 分析师证据 | 反向证据。 |
+| `opportunity_type` | 分析师 / no-trade 记忆 | 机会类型。 |
+| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`。 |
+| `learning_impact_summary` | 分析师证据 | 历史学习如何影响本次判断。 |
+| `factor_calibration_summary` | 基本面证据 | 基本面因子校准摘要。 |
+| `event_calibration_summary` | 新闻证据 | 新闻事件校准摘要。 |
+| `research_contract_version` | 分析师证据 | 研究契约版本。 |
+| `message_contract_version` | 分析师证据 | 内部消息契约版本。 |
+| `metadata` | 分析师 artifact | 元数据容器；不能引入未登记交易语义。 |
+| `sample_state` | trade research contract | 研究样本状态，只用于研究分层。 |
+| `maturity` | trade research contract | 研究成熟度。 |
+| `product_context` | trade research contract | 品种业务上下文。 |
+
+## 4. 基本面分析师字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `primary_business_driver` | 基本面证据 | 主驱动。 |
+| `secondary_confirmation` | 基本面证据 | 次级确认链。 |
+| `supply_demand_state` | 基本面证据 | 供需状态。 |
+| `basis_state` | 基本面证据 | 基差状态。 |
+| `inventory_state` | 基本面证据 | 库存状态。 |
+| `warehouse_receipt_state` | 基本面证据 | 仓单状态。 |
+| `position_flow_state` | 基本面证据 | 持仓 / 资金流状态。 |
+| `data_freshness` | 基本面证据 | 数据新鲜度。 |
+| `factor_alignment_score` | 基本面证据 | 因子一致性评分。 |
+| `data_coverage_score` | 基本面证据 | 数据覆盖度评分。 |
+| `requires_fundamental_confirmation` | 跨分析师证据 | 是否需要基本面确认。 |
+
+## 5. 新闻分析师字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `event_type` | 新闻证据 | 事件类型。 |
+| `impact_window_days` | 新闻证据 | 影响窗口。 |
+| `event_freshness` | 新闻证据 | 事件新鲜度。 |
+| `event_relevance` | 新闻证据 | 与品种相关性。 |
+| `price_reaction_required` | 新闻证据 | 是否需要价格 / 成交量确认。 |
+
+## 6. 中性、观察、反事实字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `neutral_reason` | 中性证据 | 中性原因。 |
+| `neutral_trigger_condition` | 中性证据 | 中性转为可交易所需条件。 |
+| `neutral_opportunity_bucket` | 中性证据 | 中性机会分类。 |
+| `neutral_watchlist_priority` | 中性证据 | 观察优先级。 |
+| `counterfactual_side` | 反事实记录 | 观察方向。 |
+| `counterfactual_lots` | 反事实记录 | 假设手数。 |
+| `counterfactual_entry_price` | 反事实记录 | 假设入场价。 |
+| `counterfactual_results` | 反事实记录 | 反事实结果。 |
+| `counterfactual_pnl` | 反事实记录 | 反事实盈亏。 |
+| `opportunity_cost_risk` | 中性证据 | 错过机会风险。 |
+| `recommended_observation_window` | 中性证据 | 推荐观察窗口。 |
+| `accountability_tag` | 中性 / 复盘 | 责任标签。 |
+| `similar_past_cases` | 分析师 / 复盘 | 相似历史案例。 |
+| `would_change_view_if` | 分析师证据 | 什么条件会改变观点。 |
+| `do_not_trade_reason` | 分析师 / 复盘 | 不交易原因。 |
+
+## 7. PM 唯一策略合约字段：`final_action_contract`
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `final_action_contract` | PM 输出 / 推荐 snapshot | 唯一策略交易合约。 |
+| `optimal_position_ratio` | 风险评估 / PM 输入 | 风险评估建议仓位比例；不能绕过 PM，最终必须进入 `final_action_contract.target_position_ratio`。 |
+| `final_action` | `final_action_contract` | wait、hold、open、open_probe、open_real、add、scale、reduce、exit。 |
+| `current_lots` | `final_action_contract` | 动作前当前手数。 |
+| `target_lots` | `final_action_contract` | 动作后目标手数。 |
+| `lots_delta` | `final_action_contract` | `target_lots - current_lots`。 |
+| `target_position_ratio` | `final_action_contract` | 目标仓位比例。 |
+| `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
+| `execution_profile` | `final_action_contract` | breakout、pullback、vwap、event_immediate、exit_immediate、none。 |
+| `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
+| `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
+| `risk_controls` | `final_action_contract` | 风险控制项。 |
+| `capital_controls` | `final_action_contract` | 资金控制项。 |
+| `margin_ratio` | `final_action_contract` / 组合 / 结算 | 目标或当前保证金比例。 |
+| `max_allowed_margin_ratio` | `final_action_contract` | 当前动作允许的最高保证金比例。 |
+| `contract_hash` | 审计 / 执行 | 被审计的合约哈希。 |
+| `single_source_of_trade_truth_remains` | PM 诊断 | 必须等于 `final_action_contract`；只用于审计说明。 |
+| `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |
+| `tradeable_opportunity_state_count` | PM scorecard | `tradeable_candidate` 与 `probe_candidate` 的证据数量。 |
+| `preferred_state` | PM 主机会审计 | PM 选中的首要机会状态。 |
+| `watch_for_trigger_semantic_block` | PM 诊断 | `watch_for_trigger` 语义阻止真实开仓。 |
+| `watch_for_trigger_semantic_release_block` | PM 诊断 | 释放路径被 `watch_for_trigger` 语义阻止。 |
+
+## 8. Auditor 字段：`audit_verdict`
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `audit_verdict` | Auditor 输出 / final contract 附属审计 | 审计结论对象。 |
+| `approved` | `audit_verdict` | 合约是否通过审计。 |
+| `decision` | `audit_verdict` | approve、block、reduce_only、probe_only。 |
+| `hard_blocks` | `audit_verdict` | 硬阻断原因。 |
+| `soft_controls` | `audit_verdict` | 软控制原因。 |
+| `audit_reason_codes` | `audit_verdict` | 审计原因代码。 |
+| `warning_message` | 审计 / 执行 | 警告信息。 |
+| `audit_payload` | 数据库存储 | 审计 payload 容器；不能替代 `audit_verdict`。 |
+| `intraday_audit` | 早盘执行上下文 | 盘中执行审计 payload。 |
+
+## 9. Trader 执行字段：`execution_result`
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `execution_result` | Trader 输出 / snapshot | 执行结果对象。 |
+| `execution_phase` | 执行 / 成交 | 执行阶段。 |
+| `slot_datetime` | 盘中决策 | 盘中判断时间。 |
+| `cutoff_datetime` | 盘中决策 | 盘中数据截止时间。 |
+| `mode` | 盘中决策 | 执行模式。 |
+| `trigger_fired` | `execution_result` | 盘中触发是否发生。 |
+| `trigger_reason` | 盘中决策 / 执行结果 | 触发或未触发原因。 |
+| `executed_action` | `execution_result` | 实际执行动作。 |
+| `executed_lots` | `execution_result` / 研究反馈 | 实际成交手数。 |
+| `execution_price` | `execution_result` / 成交 | 实际执行价。 |
+| `execution_price_candidate` | 盘中决策 | 候选执行价。 |
+| `execution_price_basis` | 成交 / 执行 | 执行价格依据。 |
+| `base_price` | 推荐 / 成交 | 基准价。 |
+| `base_price_source` | 推荐 / 成交 | 基准价来源。 |
+| `base_price_date` | 推荐 / 成交 | 基准价日期。 |
+| `open_price` | 推荐 / 成交 | 当日开盘价。 |
+| `prev_close_price` | 推荐 / 成交 | 前收盘价。 |
+| `settle_price` | 成交 / 结算 / 持仓 | 结算价。 |
+| `current_settle_price` | 持仓 | 当前结算价。 |
+| `contract_multiplier` | 成交 / 持仓 / 结算 | 合约乘数。 |
+| `slippage_model` | 推荐 / 成交 | 滑点模型。 |
+| `slippage_ticks` | 推荐 / 成交 | 滑点跳数。 |
+| `slippage_amount` | 推荐 / 成交 | 滑点金额。 |
+| `features` | 盘中决策 | 盘中特征。 |
+| `not_executed_reason` | `execution_result` | 合约未执行原因。 |
+| `execution_learning_trace` | `execution_result` | 执行学习轨迹，供 Researcher 使用。 |
+
+## 10. 成交、持仓、结算、账户字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `value` | 持仓 | 持仓名义价值。 |
+| `shares` | 持仓 | 股票股数或期货有符号手数。 |
+| `entry_price` | 持仓 / ticker daily pnl | 入场均价。 |
+| `entry_date` | 持仓 | 入场日期。 |
+| `position_type` | ticker daily pnl | 持仓类型。 |
+| `cashflow` | 组合 | 现金流。 |
+| `total_assets` | 组合 | 总资产。 |
+| `account_equity` | 组合 / 结算 | 账户权益。 |
+| `previous_account_equity` | 日结算 | 前一日账户权益。 |
+| `current_account_equity` | 日结算 | 当前账户权益。 |
+| `cash_available` | 组合 / 日结算 | 可用现金。 |
+| `positions` | 组合 | 持仓快照对象。 |
+| `positions_snapshot` | 日结算 | 日结算持仓快照。 |
+| `margin_used` | 成交 / 组合 | 已用保证金。 |
+| `previous_margin` | 日结算 | 前一日保证金。 |
+| `current_margin` | 日结算 / 资金部署 | 当前保证金。 |
+| `reserved_margin` | 日结算 | 预留保证金。 |
+| `margin_as_asset_prev` | 日结算 | 前一日保证金资产口径。 |
+| `margin_as_asset_curr` | 日结算 | 当前保证金资产口径。 |
+| `margin_rate` | 成交 / final contract / 持仓 | 保证金率。 |
+| `margin_delta` | 成交 / 结算 | 保证金变化。 |
+| `released_margin` | 成交 / 结算 | 平仓 / 减仓释放保证金。 |
+| `post_trade_margin_used` | 成交 / 结算 | 交易后保证金。 |
+| `leverage` | 组合 | 杠杆。 |
+| `daily_settlement_pnl` | 组合 | 当日日结盈亏。 |
+| `daily_pnl` | 日结算 / ticker daily pnl / 成交缓存 | 当日盈亏。 |
+| `holding_pnl` | ticker daily pnl | 持仓盈亏。 |
+| `new_position_pnl` | ticker daily pnl | 新仓盈亏。 |
+| `close_pnl` | ticker daily pnl | 平仓 / 减仓盈亏。 |
+| `realized_pnl` | 持仓 / 复盘 / 强平 | 已实现盈亏。 |
+| `unrealized_pnl` | 持仓 / 复盘 | 未实现盈亏。 |
+| `commission` | 成交 / 日结 / ticker pnl | 手续费。 |
+| `deposit` | 日结算 | 入金。 |
+| `withdraw` | 日结算 | 出金。 |
+| `is_warning` | 日结算 | 风险警告标记。 |
+| `is_liquidation` | 日结算 | 是否触发强平。 |
+| `booked_in_settlement` | 成交 | 是否已入日结算。 |
+| `risk_status` | 组合 | NORMAL、WARNING、LIQUIDATION。 |
+| `last_settle_date` | 组合 | 最近结算日期。 |
+| `is_settled` | 组合 | 当日是否已结算。 |
+| `previous_balance` | 日结算 | 前一日余额。 |
+| `current_balance` | 日结算 | 当前余额。 |
+
+## 11. 非策略订单、换月、强平字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `order_source` | 推荐 / 成交 / 研究 | strategy、rollover、forced_risk、counterfactual。 |
+| `from_contract` | 换月订单 | 换出合约。 |
+| `to_contract` | 换月订单 | 换入合约。 |
+| `operation_reason` | 非策略订单 | 换月 / 风控动作原因。 |
+| `original_portfolio_id` | 强平记录 | 原组合 ID。 |
+| `new_portfolio_id` | 强平记录 | 强平后新组合 ID。 |
+| `previous_portfolio_id` | 组合 | 前序组合 ID。 |
+| `is_recovery_portfolio` | 组合 | 是否恢复组合。 |
+| `settlement_event_id` | 组合 | 关联强平 / 结算事件 ID。 |
+| `settlement_date` | 强平记录 | 强平结算日期。 |
+| `settlement_reason` | 强平记录 | 强平 / 特殊结算原因。 |
+| `pre_settlement_cashflow` | 强平记录 | 强平前现金流。 |
+| `pre_settlement_positions` | 强平记录 | 强平前持仓。 |
+| `forced_liquidation_details` | 强平记录 | 强平明细。 |
+| `post_settlement_cashflow` | 强平记录 | 强平后现金流。 |
+| `total_realized_pnl` | 强平记录 | 强平总已实现盈亏。 |
+| `total_commission` | 强平 / setup profile | 总手续费。 |
+| `remaining_capital` | 强平记录 | 剩余资金。 |
+| `is_forced_settlement` | 强平记录 | 是否强制结算。 |
+
+## 12. 复盘归因字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `primary_cause` | 复盘归因 | 主要原因。 |
+| `direction_error` | 复盘归因 | 方向错误。 |
+| `horizon_error` | 复盘归因 | 期限错误。 |
+| `entry_error` | 复盘归因 | 入场错误。 |
+| `exit_error` | 复盘归因 | 出场错误。 |
+| `position_sizing_error` | 复盘归因 | 仓位大小错误。 |
+| `pm_error` | 复盘归因 | PM 决策错误。 |
+| `auditor_error` | 复盘归因 | 审计错误。 |
+| `trader_error` | 复盘归因 | 执行错误。 |
+| `accounting_error` | 复盘归因 | 会计错误。 |
+| `missed_factors` | 复盘归因 | 遗漏因子。 |
+| `analyst_lessons` | 复盘归因 | 给分析师的教训。 |
+| `next_analyst_checks` | 复盘输出 | 下次分析师应检查项。 |
+| `promotion_or_demotion_rule` | 复盘 / 研究输出 | setup/action 升降级规则。 |
+| `expected_trade_behavior_change` | 复盘 / 研究输出 | 预期交易行为改变。 |
+| `feedback_label` | 研究反馈 | 反馈标签。 |
+| `outcome_status` | 信号上下文 | 结果状态。 |
+| `outcome_label` | 研究样本 / episode | 盈利、亏损、持平、观察等标签。 |
+| `evidence_summary` | no-trade / hypothesis / review | 证据摘要。 |
+| `pm_reason` | no-trade 记忆 | PM 未释放原因。 |
+| `auditor_reason` | no-trade 记忆 | Auditor 阻断原因。 |
+| `execution_reason` | no-trade 记忆 | Trader 未执行原因。 |
+| `classification` | no-trade 记忆 | 复盘分类。 |
+| `candidate_type` | causal review | 候选归因类型。 |
+| `rule_validation_status` | causal review | 规则验证状态。 |
+
+## 13. 研究与学习字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `state_key` | action-value / 学习 | 统一状态 key。 |
+| `scope_type` | 学习记录 | 学习作用范围类型。 |
+| `evidence_signature` | action-value / 学习 | 统一证据组合签名。 |
+| `policy_type` | adaptive policy / provisional policy | 策略学习类型；不能作为交易动作。 |
+| `policy_multiplier` | adaptive policy / provisional policy | 策略学习倍率；只能影响策略参数，不能覆盖 PM 合约。 |
+| `action_name` | action-value | open、hold、exit、reduce、execution。 |
+| `action_preference` | action-value payload | 唯一动作偏好。 |
+| `reward_source` | action-value payload | 奖励来源。 |
+| `evidence_scope` | action-value payload | exact、partial、similar、counterfactual。 |
+| `counterfactual_reward_weight` | action-value payload | 反事实样本在学习奖励中的权重。 |
+| `counterfactual_source_types` | action-value payload | 参与该 action-value 的反事实来源类型。 |
+| `sample_count` | 学习记录 | 样本数。 |
+| `trade_count` | setup profile | 真实交易样本数。 |
+| `no_trade_count` | setup profile | 无交易 / 反事实样本数。 |
+| `win_count` | setup profile | 盈利样本数。 |
+| `loss_count` | setup profile | 亏损样本数。 |
+| `win_rate` | 学习记录 | 胜率。 |
+| `hit_rate` | analyst performance | 命中率。 |
+| `reward_sum` | action-value | 奖励总和。 |
+| `reward_mean` | action-value | 平均奖励。 |
+| `gross_profit` | setup profile | 总盈利。 |
+| `gross_loss` | setup profile | 总亏损。 |
+| `net_pnl` | 学习 / 复盘 / 评估 | 净盈亏。 |
+| `avg_pnl` | 记忆 / 绩效 | 平均盈亏。 |
+| `profit_factor` | 绩效 / profile | 盈亏比。 |
+| `max_loss` | setup profile | 最大亏损。 |
+| `avg_holding_days` | setup profile | 平均持仓天数。 |
+| `holding_days` | 样本 / episode | 实际持仓天数。 |
+| `max_position_impact` | action-value / profile | 学习结果允许影响仓位的上限。 |
+| `last_sample_date` | 学习记录 | 最近样本日期。 |
+| `source_event_id` | 学习记录 | 来源事件 ID。 |
+| `source_trading_date` | 学习记录 | 来源交易日。 |
+| `digest_text` | 分析师学习摘要 | 学习摘要文本。 |
+| `accepted` | 学习摘要 | 摘要是否被接受。 |
+| `hypothesis_text` | 探索假设 | 假设文本。 |
+| `suggested_use` | 探索假设 | 建议用途。 |
+| `validation_plan` | hypothesis / research | 验证计划。 |
+| `param_key` | 配置学习 | 参数 key。 |
+| `learned_value` | 配置学习 | 学到的新值。 |
+| `previous_value` | 配置学习 | 修改前值。 |
+| `rollback_value` | 配置学习 | 回滚值。 |
+| `memory_refs` | research feedback | 使用到的记忆引用。 |
+| `policy_refs` | research feedback | 使用到的策略引用。 |
+| `pm_effect` | research feedback | PM 影响。 |
+| `auditor_effect` | research feedback | Auditor 影响。 |
+| `trader_effect` | research feedback | Trader 影响。 |
+| `outcome` | research feedback / execution | 结果对象。 |
+| `trader_status` | alpha setup sample | Trader 执行状态。 |
+| `transaction_count` | research feedback | 成交笔数。 |
+| `position_delta_lots` | research feedback | 持仓变化手数。 |
+| `result` | alpha setup sample | 结果对象。 |
+| `episode_date` | trade episode memory | episode 日期。 |
+| `first_seen_at` | trade episode memory | 首次观察时间。 |
+| `last_reviewed_at` | 研究 / no-trade 记忆 | 最近复盘时间。 |
+| `open_date` | trade episode memory | 开仓日期。 |
+| `close_date` | trade episode memory | 平仓日期。 |
+| `return_on_notional` | trade episode memory | 名义本金收益率。 |
+| `lesson_text` | trade episode memory | 教训文本。 |
+| `selected_digest_ids` | learning context budget | 选中的学习摘要 ID。 |
+| `selected_chars` | learning context budget | 已选摘要字符数。 |
+| `digest_count` | learning context budget | 摘要数量。 |
+| `trade_episode_count` | learning context budget | 交易 episode 数。 |
+| `hypothesis_count` | learning context budget | 假设数量。 |
+| `total_context_chars` | learning context budget | 总上下文字符数。 |
+| `dropped_count` | learning context budget | 被丢弃条数。 |
+| `max_items` | learning context budget | 最大条数。 |
+| `max_chars` | learning context budget | 最大字符数。 |
+| `verifier` | learning event log | 验证者。 |
+| `event_type` | learning event log | 学习事件类型。 |
+
+## 14. 资金部署字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `capital_base` | 资金部署 | 资金基数。 |
+| `current_margin_ratio` | 资金部署 | 当前保证金比例。 |
+| `target_margin_ratio_min` | 资金部署 | 目标最低保证金比例。 |
+| `target_margin_ratio_max` | 资金部署 | 目标最高保证金比例。 |
+| `target_margin_abs_min` | 资金部署 | 目标最低保证金金额。 |
+| `target_margin_abs_max` | 资金部署 | 目标最高保证金金额。 |
+| `underutilization_breach` | 资金部署 | 资金利用不足标记。 |
+| `overutilization_breach` | 资金部署 | 资金使用过高标记。 |
+| `margin_gap_to_min` | 资金部署 | 距最低目标的保证金缺口。 |
+| `capital_allocation_tier` | 资金部署 | 资金分配层级。 |
+| `reason_bucket` | 资金部署 | 资金状态原因分桶。 |
+| `deployment_plan` | 资金部署 | 资金部署计划。 |
+
+## 15. 静态验证要求
+
+必须保留静态测试：
+
+- 扫描生产代码、schema、配置、评估脚本。
+- 运行时业务字段必须属于本文字段表。
+- PM、Auditor、Trader、Accountant、Reviewer、Researcher、评估脚本不得读取未登记字段来推导交易、结算、复盘或学习结果。
+
+任何新增字段必须先写入本文，再进入代码；否则视为语义漂移。

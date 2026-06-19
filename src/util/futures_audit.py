@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
@@ -339,7 +339,7 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Return execution-relevant lifecycle fields emitted by analysts or Phase1 planning."""
     if not isinstance(snapshot, dict):
         return {}
-    expected_days = _optional_int(_first_signal_value(snapshot, ["expected_horizon_days", "horizon_days"]))
+    expected_days = _optional_int(_first_signal_value(snapshot, ["expected_horizon_days"]))
     horizon_class = _first_signal_value(snapshot, ["horizon_class"])
     if not horizon_class and expected_days is not None:
         if expected_days <= 0:
@@ -356,8 +356,8 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "price_percentile": _optional_float(
             _first_signal_value(snapshot, ["price_percentile", "price_percentile_lookback", "current_price_percentile"])
         ),
-        "trigger_type": _first_signal_value(snapshot, ["trigger_type"]),
-        "entry_type": _first_signal_value(snapshot, ["entry_type"]),
+        "entry_trigger": _first_signal_value(snapshot, ["entry_trigger"]),
+        "action_name": _first_signal_value(snapshot, ["action_name"]),
         "invalidation_level": _optional_float(
             _first_signal_value(snapshot, ["invalidation_level", "stop_level", "stop_loss_level", "invalid_price"])
         ),
@@ -367,7 +367,7 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "atr_stop_distance": _optional_float(
             _first_signal_value(snapshot, ["atr_stop_distance", "atr_stop", "atr_distance"])
         ),
-        "template_name": _first_signal_value(snapshot, ["template_name"]),
+        "setup_type": _first_signal_value(snapshot, ["setup_type"]),
         "business_quality_score": _optional_float(_first_signal_value(snapshot, ["business_quality_score"])),
     }
     return {key: value for key, value in lifecycle.items() if value is not None}
@@ -585,7 +585,7 @@ def _compact_action_value_preferences(contract: Dict[str, Any]) -> List[Dict[str
                 "canonical_action_preference_source": (
                     row.get("canonical_action_preference_source") or "payload.action_preference"
                 ),
-                "deprecated_policy_hint_mirror": row.get("deprecated_policy_hint_mirror") or row.get("policy_hint"),
+                "action_preference": row.get("action_preference"),
                 "sample_scope": row.get("sample_scope"),
                 "memory_quality": row.get("memory_quality"),
                 "reward_mean": row.get("reward_mean"),
@@ -605,11 +605,6 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
         if isinstance(phase2_execution.get("pm_plan_validation"), dict)
         else {}
     )
-    contract_execution_plan = (
-        contract.get("execution_plan")
-        if isinstance(contract.get("execution_plan"), dict)
-        else {}
-    )
     authority_consistency = (
         pm_plan_validation.get("authority_consistency")
         if isinstance(pm_plan_validation.get("authority_consistency"), dict)
@@ -620,8 +615,7 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
         reason_codes = authority.get("reason_codes") if isinstance(authority.get("reason_codes"), list) else []
     return {
         "audit_boundary": (
-            "transaction audit mirror only; final_action_contract and "
-            "final_new_entry_trade_authority remain the executable source of truth"
+            "transaction audit mirror only; final_action_contract remains the executable source of truth"
         ),
         "single_source_of_trade_truth": bool(contract.get("single_source_of_trade_truth")),
         "candidate_sources_do_not_bypass_contract": bool(
@@ -629,9 +623,10 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
         ),
         "contract_version": contract.get("contract_version"),
         "final_action": contract.get("final_action"),
-        "authority_type": _first_non_empty(contract.get("authority_type"), authority.get("authority_type")),
-        "can_open_real_position": bool(authority.get("can_open_real_position")),
-        "can_apply_min_real_floor": bool(authority.get("can_apply_min_real_floor")),
+        "authority_type": contract.get("authority_type"),
+        "authority_decision": contract.get("authority_decision"),
+        "open_action_evidence": bool(contract.get("open_action_evidence")),
+        "strong_current_evidence": bool(contract.get("strong_current_evidence")),
         "current_lots": contract.get("current_lots"),
         "target_lots": contract.get("target_lots"),
         "lots_delta": contract.get("lots_delta"),
@@ -641,10 +636,7 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
             authority.get("max_allowed_margin_ratio"),
         ),
         "reason_codes": reason_codes,
-        "execution_profile": _first_non_empty(
-            contract.get("execution_profile"),
-            contract_execution_plan.get("execution_profile"),
-        ),
+        "execution_profile": contract.get("execution_profile"),
         "execution_requirement": contract.get("execution_requirement"),
         "pm_plan_validation_passed": pm_plan_validation.get("passed"),
         "pm_plan_validation_reason": pm_plan_validation.get("reason"),
@@ -663,15 +655,10 @@ def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     result = snapshot.get("execution_result")
     phase2_execution = snapshot.get("phase2_execution")
     contract = _first_dict(snapshot.get("final_action_contract"))
-    authority = _first_dict(
-        snapshot.get("final_new_entry_trade_authority"),
-        _nested_dict(snapshot, "phase2_execution", "pm_plan_validation", "final_new_entry_trade_authority"),
-    )
+    authority = contract
     if contract:
         payload["final_action_contract"] = deepcopy(contract)
-    if authority:
-        payload["final_new_entry_trade_authority"] = deepcopy(authority)
-    if contract or authority:
+    if contract:
         payload["trade_contract_audit"] = _build_trade_contract_audit(snapshot, contract, authority)
     if isinstance(translation, dict):
         payload["execution_translation"] = deepcopy(translation)
@@ -786,3 +773,4 @@ def _release_margin(current_margin_used: float, closed_lots: int, previous_lots:
     if previous_lots <= 0:
         return current_margin_used
     return current_margin_used * (closed_lots / previous_lots)
+

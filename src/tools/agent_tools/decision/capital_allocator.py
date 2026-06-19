@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Capital deployment helpers for template-aware futures allocation."""
 
@@ -21,7 +21,7 @@ def _is_specific_policy_scope(row: Mapping[str, Any], policy_type: str) -> bool:
         return True
     return all(
         str(row.get(key) or "*") not in {"*", "", "unknown"}
-        for key in ("ticker", "side", "signal_template")
+        for key in ("ticker", "side", "setup_type")
     )
 
 
@@ -198,3 +198,4 @@ def high_quality_learning_context(
         "adaptive_protect_record": adaptive_protect_record,
     }
     return high_quality_memory, diagnostics
+

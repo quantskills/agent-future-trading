@@ -277,23 +277,36 @@ def _record_execution_translation_context(
     lifecycle = extract_signal_lifecycle(snapshot)
     if lifecycle:
         translation["signal_lifecycle"] = lifecycle
-    execution_plan = _execution_plan_from_snapshot(snapshot)
-    if execution_plan:
-        translation["execution_plan"] = execution_plan
+    execution_contract = _execution_contract_from_snapshot(snapshot)
+    if execution_contract:
+        translation["execution_contract"] = execution_contract
     if getattr(morning_price_context, "intraday_audit", None):
         translation["intraday_execution"] = morning_price_context.intraday_audit
 
 
-def _execution_plan_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _execution_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
     final_contract = _final_action_contract_from_snapshot(snapshot)
-    contract_plan = (
-        final_contract.get("execution_plan")
-        if isinstance(final_contract, dict) and isinstance(final_contract.get("execution_plan"), dict)
-        else {}
-    )
-    return dict(contract_plan) if contract_plan else {}
+    if not isinstance(final_contract, dict) or not final_contract:
+        return {}
+    plan_keys = {
+        "execution_profile",
+        "trigger_source",
+        "entry_trigger",
+        "invalidation",
+        "valid_until",
+        "requires_intraday_confirmation",
+        "can_execute_without_intraday_trigger",
+        "allow_confirmed_memory_vwap_fallback",
+        "fallback_authority_boundary",
+        "authority_type",
+        "max_allowed_margin_ratio",
+        "reason_codes",
+        "execution_action_value_preference",
+        "analyst_execution_roles",
+    }
+    return {key: final_contract.get(key) for key in plan_keys if key in final_contract}
 
 
 def _recommendation_source_type(recommendation: Dict[str, Any]) -> str:
@@ -307,10 +320,22 @@ def _is_strategy_recommendation(recommendation: Dict[str, Any]) -> bool:
 def _final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
-    direct = snapshot.get("final_new_entry_trade_authority")
-    if isinstance(direct, dict):
-        return direct
-    return {}
+    contract = _final_action_contract_from_snapshot(snapshot)
+    if not isinstance(contract, dict) or not contract:
+        return {}
+    reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else []
+    return {
+        "authority_type": contract.get("authority_type") or "not_applicable",
+        "authority_decision": contract.get("authority_decision") or "not_applicable",
+        "max_allowed_margin_ratio": contract.get("max_allowed_margin_ratio"),
+        "reason_codes": list(reason_codes),
+        "open_action_evidence": bool(contract.get("open_action_evidence")),
+        "strong_current_evidence": bool(contract.get("strong_current_evidence")),
+        "watch_for_trigger_block": bool(contract.get("watch_for_trigger_block")),
+        "negative_profile": bool(contract.get("negative_profile")),
+        "tradeable_state": bool(contract.get("tradeable_state")),
+        "weak_conflict_probe": bool(contract.get("weak_conflict_probe")),
+    }
 
 
 def _authority_signature(authority: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -322,24 +347,22 @@ def _authority_signature(authority: Dict[str, Any]) -> Tuple[Any, ...]:
         max_allowed = None
     return (
         authority.get("authority_type"),
-        bool(authority.get("can_open_real_position")),
-        bool(authority.get("can_apply_min_real_floor")),
+        authority.get("authority_decision"),
+        bool(authority.get("open_action_evidence")),
+        bool(authority.get("strong_current_evidence")),
         max_allowed,
     )
 
 
 def _final_entry_authority_consistency(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate mirrored PM final-authority fields before Trader opens exposure."""
+    """Validate final contract authority fields before Trader opens exposure."""
     if not isinstance(snapshot, dict):
         return {"passed": False, "reason": "missing_signal_snapshot", "selected_authority": {}}
 
-    sources: List[Dict[str, Any]] = []
-    direct = snapshot.get("final_new_entry_trade_authority")
-    if isinstance(direct, dict):
-        sources.append({"source": "signal_snapshot.final_new_entry_trade_authority", "authority": direct})
-
-    if not sources:
-        return {"passed": False, "reason": "missing_final_new_entry_trade_authority", "selected_authority": {}}
+    contract = _final_action_contract_from_snapshot(snapshot)
+    if not isinstance(contract, dict) or not contract:
+        return {"passed": False, "reason": "missing_final_action_contract", "selected_authority": {}}
+    sources: List[Dict[str, Any]] = [{"source": "final_action_contract", "authority": _final_entry_authority_from_snapshot(snapshot)}]
 
     signatures = {_authority_signature(item["authority"]) for item in sources}
     selected = dict(sources[0]["authority"])
@@ -347,8 +370,9 @@ def _final_entry_authority_consistency(snapshot: Dict[str, Any]) -> Dict[str, An
         {
             "source": item["source"],
             "authority_type": item["authority"].get("authority_type"),
-            "can_open_real_position": bool(item["authority"].get("can_open_real_position")),
-            "can_apply_min_real_floor": bool(item["authority"].get("can_apply_min_real_floor")),
+            "authority_decision": item["authority"].get("authority_decision"),
+            "open_action_evidence": bool(item["authority"].get("open_action_evidence")),
+            "strong_current_evidence": bool(item["authority"].get("strong_current_evidence")),
             "max_allowed_margin_ratio": item["authority"].get("max_allowed_margin_ratio"),
         }
         for item in sources
@@ -356,14 +380,14 @@ def _final_entry_authority_consistency(snapshot: Dict[str, Any]) -> Dict[str, An
     if len(signatures) > 1:
         return {
             "passed": False,
-            "reason": "final_new_entry_trade_authority_source_mismatch",
+            "reason": "final_contract_authority_mismatch",
             "selected_authority": selected,
             "sources": audit_sources,
             "business_boundary": "Trader must not choose among conflicting PM authority mirrors",
         }
     return {
         "passed": True,
-        "reason": "final_new_entry_trade_authority_sources_consistent",
+        "reason": "final_contract_authority_consistent",
         "selected_authority": selected,
         "sources": audit_sources,
     }
@@ -384,16 +408,16 @@ def _requires_entry_authority(current_lots: int, target_lots: int) -> bool:
 def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
     authority_type = str((authority or {}).get("authority_type") or "")
     if authority_type == "real_budget_entry":
-        return bool(authority.get("can_open_real_position"))
+        return bool(authority.get("open_action_evidence") and authority.get("strong_current_evidence"))
     if authority_type == "exploration_probe":
-        if bool(authority.get("direction_only_block")):
+        if bool(authority.get("watch_for_trigger_block")):
             return False
         reason_codes = {str(item or "") for item in (authority.get("reason_codes") or [])}
         hard_watchlist_codes = {
             "pm_text_no_trade_blocks_new_entry",
             "pm_text_no_entry_trigger_blocks_new_entry",
             "pm_text_watchlist_only_blocks_new_entry",
-            "direction_only_cannot_open_position",
+            "watch_for_trigger_cannot_open_position",
             "daily_tradeability_watchlist_only",
             "real_probe_qualification_not_met",
         }
@@ -431,13 +455,13 @@ def _ensure_phase2_execution(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    execution_plan = _execution_plan_from_snapshot(snapshot)
+    execution_contract = _execution_contract_from_snapshot(snapshot)
     final_contract = _final_action_contract_from_snapshot(snapshot)
     target_lots = _safe_int(final_contract.get("target_lots"), 0)
     preferred_side = "long" if target_lots > 0 else "short" if target_lots < 0 else "flat"
     analyst_roles = (
-        execution_plan.get("analyst_execution_roles")
-        if isinstance(execution_plan.get("analyst_execution_roles"), dict)
+        execution_contract.get("analyst_execution_roles")
+        if isinstance(execution_contract.get("analyst_execution_roles"), dict)
         else {}
     )
     action_contracts = {
@@ -453,30 +477,30 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
     return {
         "setup_type": (
             final_contract.get("setup_type")
-            or execution_plan.get("setup_type")
-            or execution_plan.get("execution_profile")
+            or execution_contract.get("setup_type")
+            or execution_contract.get("execution_profile")
             or "unknown"
         ),
-        "opportunity_layer": final_contract.get("opportunity_layer") or final_contract.get("final_action") or "unknown",
+        "opportunity_state": final_contract.get("opportunity_state") or "unknown",
         "preferred_side": preferred_side or "flat",
-        "execution_plan": execution_plan,
+        "execution_contract": execution_contract,
         "final_action_contract": final_contract,
         "analyst_action_evidence_contracts": action_contracts,
         "analyst_learning_scopes": learning_scopes,
         "execution_contract": {
-            "profile": execution_plan.get("execution_profile"),
-            "trigger_source": execution_plan.get("trigger_source"),
-            "entry_trigger": execution_plan.get("entry_trigger"),
-            "invalidation": execution_plan.get("invalidation"),
-            "requires_intraday_confirmation": execution_plan.get("requires_intraday_confirmation"),
-            "can_execute_without_intraday_trigger": execution_plan.get("can_execute_without_intraday_trigger"),
-            "authority_type": execution_plan.get("authority_type"),
+            "profile": execution_contract.get("execution_profile"),
+            "trigger_source": execution_contract.get("trigger_source"),
+            "entry_trigger": execution_contract.get("entry_trigger"),
+            "invalidation": execution_contract.get("invalidation"),
+            "requires_intraday_confirmation": execution_contract.get("requires_intraday_confirmation"),
+            "can_execute_without_intraday_trigger": execution_contract.get("can_execute_without_intraday_trigger"),
+            "authority_type": execution_contract.get("authority_type"),
         },
         "learning_boundary": {
             "trader_executes_only": True,
             "execution_feedback_future_only": True,
             "not_strategy_creation": True,
-            "pm_draft_pre_open_plan_not_learning_source": True,
+            "learning_source": "final_action_contract",
         },
     }
 
@@ -546,9 +570,9 @@ def _record_phase2_state(
             "reason": reason,
         }
     )
-    execution_plan = _execution_plan_from_snapshot(snapshot)
-    if execution_plan:
-        audit["execution_plan"] = execution_plan
+    execution_contract = _execution_contract_from_snapshot(snapshot)
+    if execution_contract:
+        audit["execution_contract"] = execution_contract
     if current_lots_before is not None:
         audit["current_lots_before"] = int(current_lots_before)
     if decision is not None:
@@ -608,7 +632,7 @@ def _record_phase2_order_plan(
         "max_single_margin_ratio": round(float(max_single_margin_ratio or 0.0), 6),
         "remaining_margin": round(float(remaining_margin or 0.0), 2),
         "signal_lifecycle": lifecycle,
-        "execution_plan": _execution_plan_from_snapshot(snapshot),
+        "execution_contract": _execution_contract_from_snapshot(snapshot),
         "consistency_diagnostics": consistency_diagnostics,
     }
 
@@ -661,18 +685,18 @@ def _resolve_phase2_execution_basis(
     if action_value == FuturesAction.HOLD.value or int(decision.lots or 0) <= 0:
         return morning_price_context, None
     decision_context = _decision_context_from_recommendation(recommendation, cfg)
-    execution_plan = (
-        decision_context.get("execution_plan")
-        if isinstance(decision_context.get("execution_plan"), dict)
+    execution_contract = (
+        decision_context.get("execution_contract")
+        if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
-    execution_profile = str(execution_plan.get("execution_profile") or decision_context.get("execution_profile") or "")
+    execution_profile = str(execution_contract.get("execution_profile") or decision_context.get("execution_profile") or "")
     force_immediate = bool(
         action_value in {FuturesAction.CLOSE_LONG.value, FuturesAction.CLOSE_SHORT.value}
         or execution_profile == "exit_immediate"
         or (
             execution_profile == "event_immediate"
-            and execution_plan.get("can_execute_without_intraday_trigger")
+            and execution_contract.get("can_execute_without_intraday_trigger")
         )
     )
     basis, selection = resolve_intraday_execution_basis(
@@ -717,19 +741,19 @@ def _adaptive_policy_state_from_recommendation(recommendation: Dict[str, Any]) -
 
 def _decision_context_from_recommendation(recommendation: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot = recommendation.get("signal_snapshot") or {}
-    execution_plan = _execution_plan_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
+    execution_contract = _execution_contract_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
     final_contract = _final_action_contract_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
     return {
         "ticker": recommendation.get("underlying_code"),
         "underlying_code": recommendation.get("underlying_code"),
-        "horizon_class": final_contract.get("horizon_class") or execution_plan.get("horizon_class"),
-        "decision_horizon": final_contract.get("decision_horizon") or execution_plan.get("decision_horizon"),
-        "market_regime": final_contract.get("market_regime") or execution_plan.get("market_regime"),
-        "execution_plan": execution_plan,
-        "execution_profile": execution_plan.get("execution_profile"),
-        "entry_trigger": execution_plan.get("entry_trigger"),
-        "invalidation": execution_plan.get("invalidation"),
-        "trigger_source": execution_plan.get("trigger_source"),
+        "horizon_class": final_contract.get("horizon_class") or execution_contract.get("horizon_class"),
+        "decision_horizon": final_contract.get("decision_horizon") or execution_contract.get("decision_horizon"),
+        "market_regime": final_contract.get("market_regime") or execution_contract.get("market_regime"),
+        "execution_contract": execution_contract,
+        "execution_profile": execution_contract.get("execution_profile"),
+        "entry_trigger": execution_contract.get("entry_trigger"),
+        "invalidation": execution_contract.get("invalidation"),
+        "trigger_source": execution_contract.get("trigger_source"),
         "contextual_min_confidence": (((cfg or {}).get("learning") or {}).get("contextual_rule_calibration") or {}).get("min_confidence"),
     }
 
@@ -1010,9 +1034,6 @@ def _translate_pre_open_recommendation_to_order(
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
     if isinstance(signal_snapshot, dict):
-        final_authority = signal_snapshot.get("final_new_entry_trade_authority")
-        if isinstance(final_authority, dict) and not isinstance(snapshot.get("final_new_entry_trade_authority"), dict):
-            snapshot["final_new_entry_trade_authority"] = dict(final_authority)
         final_contract = signal_snapshot.get("final_action_contract")
         if isinstance(final_contract, dict) and not isinstance(snapshot.get("final_action_contract"), dict):
             snapshot["final_action_contract"] = dict(final_contract)
@@ -1202,9 +1223,9 @@ def _translate_pre_open_recommendation_to_order(
                 original_target_lots = int(target_lots or 0)
                 target_lots = int(current_lots)
                 block_reason = (
-                    str(authority_consistency.get("reason") or "final_new_entry_trade_authority_missing_or_not_met")
+                    str(authority_consistency.get("reason") or "final_contract_authority_not_met")
                     if not authority_consistency.get("passed")
-                    else "final_new_entry_trade_authority_missing_or_not_met"
+                    else "final_contract_authority_not_met"
                 )
                 add_rewrite_reason(snapshot, block_reason)
                 _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
@@ -1214,7 +1235,7 @@ def _translate_pre_open_recommendation_to_order(
                     "current_lots": int(current_lots),
                     "original_target_lots": int(original_target_lots),
                     "target_lots_after_validation": int(target_lots),
-                    "final_new_entry_trade_authority": final_authority,
+                    "contract_authority_audit": final_authority,
                     "authority_consistency": authority_consistency,
                     "business_boundary": (
                         "invalid final_action_contract authority cannot be partially "
@@ -1255,7 +1276,8 @@ def _translate_pre_open_recommendation_to_order(
             justification_prefix="Final-action-contract translation",
         )
         if decision.action == FuturesAction.HOLD and decision.lots == 0:
-            add_rewrite_reason(snapshot, normalize_no_trade_reason(final_action_contract.get("tradable_lots_reason")) or "position_matched")
+            reason_codes = final_action_contract.get("reason_codes") if isinstance(final_action_contract.get("reason_codes"), list) else []
+            add_rewrite_reason(snapshot, normalize_no_trade_reason(reason_codes[-1] if reason_codes else "") or "position_matched")
 
         _record_phase2_order_plan(
             snapshot,
@@ -1355,7 +1377,7 @@ def _translate_pre_open_recommendation_to_order(
         if not authority_consistency.get("passed"):
             original_target_lots = int(target_lots or 0)
             target_lots = _target_lots_without_new_entry(current_lots, target_lots)
-            block_reason = str(authority_consistency.get("reason") or "final_new_entry_trade_authority_missing_or_not_met")
+            block_reason = str(authority_consistency.get("reason") or "final_contract_authority_not_met")
             add_rewrite_reason(snapshot, block_reason)
             _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
                 "passed": False,
@@ -1364,22 +1386,22 @@ def _translate_pre_open_recommendation_to_order(
                 "current_lots": int(current_lots),
                 "original_target_lots": int(original_target_lots),
                 "target_lots_after_validation": int(target_lots),
-                "final_new_entry_trade_authority": final_authority,
+                "contract_authority_audit": final_authority,
                 "authority_consistency": authority_consistency,
                 "business_boundary": "strategy_new_entry_requires_pm_final_trade_authority",
             }
         elif not _authority_allows_entry(final_authority):
             original_target_lots = int(target_lots or 0)
             target_lots = _target_lots_without_new_entry(current_lots, target_lots)
-            add_rewrite_reason(snapshot, "final_new_entry_trade_authority_missing_or_not_met")
+            add_rewrite_reason(snapshot, "final_contract_authority_not_met")
             _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
                 "passed": False,
-                "reason": "final_new_entry_trade_authority_missing_or_not_met",
+                "reason": "final_contract_authority_not_met",
                 "source_type": _recommendation_source_type(recommendation),
                 "current_lots": int(current_lots),
                 "original_target_lots": int(original_target_lots),
                 "target_lots_after_validation": int(target_lots),
-                "final_new_entry_trade_authority": final_authority,
+                "contract_authority_audit": final_authority,
                 "authority_consistency": authority_consistency,
                 "business_boundary": "strategy_new_entry_requires_pm_final_trade_authority",
             }
@@ -1390,7 +1412,7 @@ def _translate_pre_open_recommendation_to_order(
                 "source_type": _recommendation_source_type(recommendation),
                 "current_lots": int(current_lots),
                 "target_lots": int(target_lots),
-                "final_new_entry_trade_authority": final_authority,
+                "contract_authority_audit": final_authority,
                 "authority_consistency": authority_consistency,
             }
     phase2_execution = _ensure_phase2_execution(snapshot)
@@ -2057,3 +2079,4 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import sys
 from pathlib import Path
 
@@ -61,10 +61,10 @@ class StrategyAttributionReportRegressionTest(unittest.TestCase):
                         "next_evidence_needed": ["current_price_or_volume_confirmation"],
                         "evidence_snapshot": {
                             "preferred_side": "long",
-                            "preferred_side_layer": "tradeable_setup",
+                            "preferred_side_state": "tradeable_candidate",
                             "current_evidence_present": True,
                             "invalidation_present": True,
-                            "direction_only_block": False,
+                            "watch_for_trigger_block": False,
                         },
                     },
                     "final_action_contract": {
@@ -106,3 +106,5 @@ class StrategyAttributionReportRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

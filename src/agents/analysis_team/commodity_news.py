@@ -51,11 +51,9 @@ def _build_no_news_signal(
         horizon_class="event_short",
         analyst_horizon="event_short",
         expected_horizon_days=0,
-        horizon_days=0,
         market_regime="no_event",
         trend_stage="no_event",
-        trigger_type="none",
-        entry_type="hold",
+        setup_type="data_unavailable_no_trade",
         data_freshness="missing",
         event_type="none",
         impact_window_days=0,
@@ -65,7 +63,7 @@ def _build_no_news_signal(
         data_coverage_score=0.0,
         tradeability_reason="no local futures news catalyst available",
         opportunity_type="no_trade",
-        opportunity_layer="no_trade",
+        opportunity_state="no_opportunity",
         setup_quality_score=0.0,
         entry_quality="poor",
         setup_quality_notes=["news_data_unavailable"],
@@ -77,7 +75,7 @@ def _build_no_news_signal(
         would_change_view_if="fresh relevant catalyst news appears before the decision cutoff",
         neutral_opportunity_bucket="evidence_gap",
         neutral_trigger_condition="fresh catalyst plus price or volume confirmation",
-        neutral_shadow_side="flat",
+        counterfactual_side="flat",
         neutral_watchlist_priority="none",
         do_not_trade_reason="news_data_unavailable",
         metadata={
@@ -237,8 +235,8 @@ def commodity_news_agent(state: FundState):
     signal.expected_horizon_days = signal.expected_horizon_days or 2
     signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(news_context.get("event_regime") or "event_driven")
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(news_context.get("tradeability") or "event_window")
-    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "news_event_trigger"
-    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "event_probe"
+    signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else "news_event_setup"
+    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_news_data_usage(
         ticker=ticker,
         trading_date=trading_date,
@@ -292,7 +290,7 @@ def commodity_news_agent(state: FundState):
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
         f"news_cutoff={'<' if pre_open_only else '<='}{trading_date_value}; "
         f"llm_path={llm_path}; tradeability={news_context.get('tradeability')}; "
-        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
+        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
     )
     signal.justification = sanitize_visible_text(signal.justification)
 

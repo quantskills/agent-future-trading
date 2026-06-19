@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Runtime system-invariant audits for backtest/simulation acceptance.
 
@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.schemas import ProtocolCheckResult
+from tools.agent_tools.control.unified_field_audit import find_forbidden_artifact_field_keys
 from tools.agent_tools.execution.order_semantics import phase2_order_intent_from_lots
 
 
@@ -79,9 +80,6 @@ EXECUTION_INTENT_MUTATION_EFFECTS = {
 }
 RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
     "authority_type",
-    "can_apply_min_real_floor",
-    "can_open_real_position",
-    "execution_plan",
     "execution_profile",
     "final_action",
     "lots",
@@ -91,7 +89,6 @@ RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
     "target_lots",
     "target_margin_ratio_estimate",
     "target_position_ratio",
-    "tradable_lots_if_executed_now",
 }
 
 
@@ -357,13 +354,8 @@ def _contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, A
 
 
 def _authority_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
-    snapshot = _dict(recommendation.get("signal_snapshot"))
-    audit_payload = _dict(recommendation.get("audit_payload"))
-    for source in (snapshot, audit_payload):
-        authority = _dict(source.get("final_new_entry_trade_authority"))
-        if authority:
-            return authority
-    return {}
+    contract = _contract_from_recommendation(recommendation)
+    return contract if contract else {}
 
 
 def _audit_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -383,11 +375,8 @@ def _transaction_contract(transaction: Dict[str, Any], recommendation: Optional[
 
 
 def _transaction_authority(transaction: Dict[str, Any], recommendation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    payload = _dict(transaction.get("audit_payload"))
-    authority = _dict(payload.get("final_new_entry_trade_authority"))
-    if authority:
-        return authority
-    return _authority_from_recommendation(recommendation or {})
+    contract = _transaction_contract(transaction, recommendation)
+    return contract if contract else {}
 
 
 def _transaction_trade_contract_audit(transaction: Dict[str, Any]) -> Dict[str, Any]:
@@ -496,6 +485,23 @@ def _audit_release_block_diagnostics(
             )
 
 
+def _audit_unified_field_artifacts(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    for recommendation_id, recommendation in recommendations.items():
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        for artifact_name in ("signal_snapshot", "audit_payload"):
+            artifact = recommendation.get(artifact_name)
+            forbidden = find_forbidden_artifact_field_keys(artifact)
+            if forbidden:
+                errors.append(
+                    "unified_field_artifact_forbidden_field:"
+                    f"{label}:{artifact_name}:{sorted(set(forbidden))}"
+                )
+
+
 def _contract_mentions_preference(contract: Dict[str, Any], preference_names: Iterable[str]) -> bool:
     haystack = json.dumps(contract, ensure_ascii=False, sort_keys=True, default=str).lower()
     return any(name and name.lower() in haystack for name in preference_names)
@@ -512,8 +518,8 @@ def _effective_reward_source(payload: Dict[str, Any]) -> str:
         or _int(payload.get("exact_state_real_trade_sample_count")) > 0
     ):
         return "real_trade"
-    if _int(payload.get("shadow_reward_count")) > 0 or bool(payload.get("shadow_prior_only")):
-        return "shadow_prior"
+    if _int(payload.get("counterfactual_reward_count")) > 0 or bool(payload.get("counterfactual_prior_only")):
+        return "counterfactual_prior"
     return ""
 
 
@@ -605,18 +611,20 @@ def _audit_open_transactions(
             errors.append(f"open_transaction_without_open_final_action:{tx_label}:{final_action or 'missing'}")
         if authority_type not in OPEN_AUTHORITY_TYPES:
             errors.append(f"open_transaction_without_open_authority:{tx_label}:{authority_type or 'missing'}")
-        if authority_type == "real_budget_entry" and not bool(authority.get("can_open_real_position", contract.get("can_open_real_position"))):
-            errors.append(f"real_open_without_can_open_real_position:{tx_label}")
+        if authority_type == "real_budget_entry" and not bool(
+            contract.get("open_action_evidence") and contract.get("strong_current_evidence")
+        ):
+            errors.append(f"real_open_without_current_contract_evidence:{tx_label}")
         if authority_type == "exploration_probe":
             blocking = {
-                "pm_direction_only_probe_cap",
-                "direction_only_cannot_open_position",
-                "final_new_entry_trade_authority_direction_only_probe_block",
+                "pm_watch_for_trigger_probe_cap",
+                "watch_for_trigger_cannot_open_position",
+                "final_action_contract_watch_for_trigger_probe_block",
                 "daily_tradeability_watchlist_only",
                 "pm_text_watchlist_only_blocks_new_entry",
                 "pm_text_no_trade_blocks_new_entry",
             }
-            if reason_codes & blocking or bool(authority.get("direction_only_block")):
+            if reason_codes & blocking or bool(authority.get("watch_for_trigger_block")):
                 errors.append(f"direction_or_watchlist_probe_opened:{tx_label}:{sorted(reason_codes & blocking)}")
         if audit and (
             audit.get("single_source_of_trade_truth") is False
@@ -720,41 +728,26 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
         action_name = _lower(row.get("action_name"))
         reward_sum = float(row.get("reward_sum") or 0.0)
         sample_count = _int(row.get("sample_count"))
-        action_preference = _lower(payload.get("action_preference"))
-        deprecated_policy_hint_mirror = _lower(payload.get("deprecated_policy_hint_mirror"))
-        row_policy_hint = _lower(row.get("policy_hint"))
+        row_action_preference = _lower(row.get("action_preference"))
+        payload_action_preference = _lower(payload.get("action_preference"))
+        if row_action_preference and payload_action_preference and row_action_preference != payload_action_preference:
+            errors.append(
+                "action_preference_column_payload_mismatch:"
+                f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:"
+                f"{row.get('last_sample_date')}:{row_action_preference}!={payload_action_preference}"
+            )
+        action_preference = payload_action_preference
         scope_quality = _lower(payload.get("amplification_scope_quality") or payload.get("sample_scope"))
         reward_source = _effective_reward_source(payload)
         has_real_reward_facts = _has_real_reward_facts(payload, reward_source)
         weak_prior_context = bool(not has_real_reward_facts and (
             _lower(payload.get("prior_role")) == "weak_prior_not_action_preference"
-            or reward_source in {"shadow_prior", "similar_sql_prior", "unqualified", ""}
+            or reward_source in {"counterfactual_prior", "similar_sql_prior", "unqualified", ""}
         ))
         label = f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:{row.get('last_sample_date')}"
 
         if sample_count <= 0:
             continue
-        if row_policy_hint and row_policy_hint not in {"observe", "no_action_preference"} and not weak_prior_context:
-            if not action_preference:
-                errors.append(
-                    "legacy_policy_hint_without_canonical_action_preference:"
-                    f"{label}:{row_policy_hint}"
-                )
-            elif row_policy_hint != action_preference:
-                errors.append(
-                    "legacy_policy_hint_canonical_action_preference_mismatch:"
-                    f"{label}:policy_hint={row_policy_hint}:action_preference={action_preference}"
-                )
-        if (
-            deprecated_policy_hint_mirror
-            and action_preference
-            and deprecated_policy_hint_mirror != action_preference
-        ):
-            errors.append(
-                "deprecated_policy_hint_mirror_mismatch:"
-                f"{label}:deprecated_policy_hint_mirror={deprecated_policy_hint_mirror}:"
-                f"action_preference={action_preference}"
-            )
         if action_name in {"open", "hold", "exit", "execution"} and reward_sum != 0:
             if not action_preference and not weak_prior_context:
                 errors.append(f"action_value_missing_action_preference:{label}:missing_action_preference")
@@ -895,6 +888,7 @@ def audit_system_invariants(
         conn.close()
 
     _audit_recommendation_final_contract_consistency(recommendations, errors)
+    _audit_unified_field_artifacts(recommendations, errors)
     _audit_release_block_diagnostics(recommendations, errors)
     _audit_transaction_final_contract_consistency(transactions, recommendations, errors, warnings)
     _audit_open_transactions(transactions, recommendations, errors, warnings)
@@ -914,3 +908,6 @@ def audit_system_invariants(
         "does_not_create_trade_authority_or_modify_lots"
     )
     return InvariantAuditReport(ok=not errors, errors=errors, warnings=warnings, counts=counts, metadata=metadata)
+
+
+

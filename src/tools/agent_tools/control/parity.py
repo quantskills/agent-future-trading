@@ -13,7 +13,7 @@ PARITY_FIELDS = [
     "current_lots",
     "target_lots",
     "lots_delta",
-    "trigger_type",
+    "entry_trigger",
 ]
 
 

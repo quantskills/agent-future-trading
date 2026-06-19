@@ -29,7 +29,7 @@ def _specific_invalidation_text(value: Any) -> bool:
         return False
     generic = {
         "exit/reduce if current confirmation fails",
-        "requires_current_confirmation",
+        "wait_for_trigger",
         "primary driver and secondary confirmation align with acceptable reward/risk",
     }
     if text in generic:

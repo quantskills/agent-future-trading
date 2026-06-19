@@ -1,4 +1,4 @@
-from typing import Any, Mapping, Optional
+﻿from typing import Any, Mapping, Optional
 
 
 ANALYST_OUTPUT_FORMAT = """
@@ -10,10 +10,10 @@ Output format:
 - expected_horizon_days: integer trading-day horizon
 - market_regime: concise regime label
 - trend_stage: concise trend or event-stage label
-- template_name: one of breakout_continuation/range_filter/low_position_reversal_confirmed/high_position_breakdown/failed_rebound_short/pullback_recovery_long/late_chase_long/low_position_chase_short/fundamental_direction_anchor/news_event_probe/unknown
+- setup_type: one of trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / fundamental_timing_setup / news_event_setup / data_unavailable_no_trade / unknown
 - price_percentile: 0.0-1.0 when inferable, otherwise null
-- trigger_type: concise trigger label
-- entry_type: initial / add / reduce / hold / event / unknown
+- entry_trigger: concrete current trigger fact or pending trigger condition
+- action_name: open / hold / exit / reduce / execution / unknown; this is research/action-value semantics only and not trade authority
 - invalidation_level: price level when inferable, otherwise null
 - atr_stop_distance: ATR stop distance when inferable, otherwise null
 - add_allowed: true only when this is a verified add-on signal
@@ -37,15 +37,19 @@ Output format:
 - evidence_role: entry_timing / direction_context / event_catalyst / risk_context / execution_context.
   risk_context is an evidence role, not a separate agent and not trade authority; PM and Auditor decide permission, while Trader only checks intraday trigger and executes final_action_contract after audit_verdict/trade_contract_audit approval.
 - direction_context: directional background, separated from entry timing
-- trade_trigger: current executable trigger; do not put future or pending conditions here
-- position_horizon: short / medium / long / event_short / flat / unknown
 - trend_direction: technical trend direction when applicable
 - entry_timing_signal: technical or event timing classification when applicable
 - price_location: price zone or percentile used for timing
 - trigger_valid: true only when the current trigger is already present in available evidence
+- If entry_trigger is phrased as a pending condition such as "if", "only if",
+  "only after", "wait for", "requires", "should confirm", "becomes actionable",
+  "becomes tradeable", "tradeable only if", "convert to a tradeable",
+  "needs post-open", "require post-open", "must break", "must hold",
+  "确认后", or "等待", then set trigger_valid=false and
+  opportunity_state="watch_for_trigger". Do not label pending future triggers
+  as tradeable_candidate.
 - invalidation_present: true only when price, ATR, or structured invalidation boundary is present
 - opportunity_type: trend_continuation / reversal / range_breakout / event_driven / medium_fundamental / short_timing / probe / no_trade / unknown
-- opportunity_layer: direction_only / tradeable_setup / deployable_alpha / risk_reduction / no_trade
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
 - learning_impact_summary: object with historical_support, historical_contradiction, current_evidence_confirmed, current_evidence_missing, opportunity_state_reason, authority_boundary
 - factor_calibration_summary: object for fundamental analyst only; include effective_factors, stale_or_conflicting_factors, factors_requiring_price_confirmation, factor_calibration_reason
@@ -69,11 +73,12 @@ Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
 - recommended_observation_window
 - neutral_opportunity_bucket: watchlist_trigger / evidence_gap / conflict_avoidance / low_tradeability / horizon_mismatch / accountable_observation
 - neutral_trigger_condition: concrete price/data/timing condition that would make the setup tradeable
-- neutral_shadow_side: long / short / flat, only if there is a directional opportunity worth tracking
+- counterfactual_side: long / short / flat, only if there is a directional opportunity worth tracking
 - neutral_watchlist_priority: none / low / medium / high
 - accountability_tag
 - opportunity_state must still distinguish no_opportunity from watch_for_trigger; do not use Neutral to hide a trackable setup.
 - learning_impact_summary must explain how past-only learning changed evidence confidence or opportunity_state. It must not contain lots, margin, final_action, target_lots, or trade authority.
+- Do not output undeclared legacy aliases or duplicate trigger/setup/action fields.
 
 Provide well-reasoned analysis considering all aspects.
 """
@@ -105,13 +110,13 @@ usage_boundary:
   revalidation bias only; it must not be used as open amplification.
 - execution action-value may inform PM's execution_profile and trigger-method
   preference before PM writes final_action_contract with audit_verdict/trade_contract_audit. Trader may read
-  only final_action_contract.execution_plan / execution_profile plus
+  only final_action_contract execution fields / execution_profile plus
   intraday data; execution action-value must not directly change direction,
   lots, target_lots, margin_ratio, or authority.
 - Analysts may read only signal_calibration from action-value payloads to judge
   evidence quality and setup reliability. Analysts must not convert action-value
   into trade authority, lots, margin, direction override, or Trader instructions.
-- Similar SQL/RAG and shadow memories are weak priors unless their usage_boundary
+- Similar SQL/RAG and counterfactual memories are weak priors unless their usage_boundary
   explicitly proves exact real state and real episode/reward support.
 """
 
@@ -153,8 +158,8 @@ Focus on factors that impact futures prices:
 - Cost drivers (raw materials, energy, transportation)
 
 For commodity_news, use horizon_class="event_short", expected_horizon_days=1-3,
-trigger_type based on the event class, and entry_type="event_probe" unless the
-news explicitly supports hold/reduce.
+setup_type="news_event_setup" when the event is meaningful, and action_name="open"
+only as research semantics when the current event trigger is already confirmed.
 
 """ + ANALYST_OUTPUT_FORMAT
 
@@ -205,7 +210,7 @@ Important:
 Current position and target:
 - Current lots: {current_lots}
 - Tradable lots: {tradable_lots}
-- Tradable lots reason: {tradable_lots_reason}
+- Final contract reason codes: {final_contract_reason_codes}
 - Target lots: {target_lots}
 
 Account state:
@@ -425,7 +430,7 @@ SINGLE_ANALYST_LOGIC = """
 
 Only ONE analyst is enabled. Treat that analyst as a structured evidence producer,
 not as final trade authority. Your output is a signed sizing prior for PM review;
-PM final_new_entry_trade_authority and Auditor still decide whether any position
+PM final_action_contract authority and Auditor still decide whether any position
 can be opened, added, reduced, exited, or held; Trader only executes the audited
 final_action_contract when the approved intraday trigger is met.
 
@@ -468,7 +473,7 @@ MULTI_ANALYST_LOGIC = """
 Multiple analysts are enabled. Do not use static weighted voting to create trade
 authority. Build a signed sizing prior from action evidence while preserving
 analyst roles: technical = daily timing, fundamental = background/support/conflict,
-news = catalyst/risk event. PM final_new_entry_trade_authority and Auditor decide
+news = catalyst/risk event. PM final_action_contract authority and Auditor decide
 whether the plan is executable; Trader only executes final_action_contract after audit_verdict/trade_contract_audit approval
 when the approved intraday trigger is met.
 
@@ -488,7 +493,7 @@ Evidence routing:
    automatic real-budget entry.
 4. Same-scope action-value may affect only the matching action lane and only
    when today's evidence confirms the same ticker/side/setup/regime/action state.
-   Similar SQL or shadow memory is prior-only and cannot create real sizing.
+   Similar SQL or counterfactual memory is prior-only and cannot create real sizing.
 5. Existing profitable positions may receive hold/protect support when trend or
    background remains valid; weakened confirmation, lost tradeable support, or
    adverse hold/exit action-value should bias toward reduce/exit.
@@ -610,8 +615,9 @@ Return these explicit fields in addition to signal/confidence/justification:
 - market_regime: supply_demand_tight / supply_demand_loose / mixed / unknown
 - trend_stage: improving_fundamental_anchor / weakening_fundamental_anchor / mixed / unknown
 - price_percentile: null unless the supplied data can support it
-- trigger_type: fundamental_anchor / inventory_shift / basis_confirmation / demand_supply_change
-- entry_type: direction_anchor / hold / reduce / unknown
+- setup_type: fundamental_timing_setup / data_unavailable_no_trade / unknown
+- action_name: open / hold / exit / reduce / unknown; research semantics only
+- entry_trigger: short-timing condition needed to make the fundamental thesis tradable
 - invalidation_level: null unless an explicit price invalidation level is inferable
 
 === DECISION GUIDANCE ===
@@ -687,13 +693,13 @@ GAP_DETAIL: {gap_analysis}
 - Volume ratio: {_fmt_optional_float(features.get('volume_ratio'))}
 
 === Decision guidance ===
-- First classify the setup family using the commodity/sector context supplied in the summary: trend_breakout, trend_pullback, range_reversal, volatility_breakout, failed_rebound, or no_trade.
+- First classify setup_type using the commodity/sector context supplied in the summary: trend_breakout_setup, trend_pullback_setup, range_reversal_setup, volatility_breakout_setup, failed_rebound_setup, or data_unavailable_no_trade.
 - Do not apply the same indicator interpretation to every futures category. Energy/chemicals often need volatility and cost-chain confirmation; ferrous needs trend plus inventory/demand chain confirmation; nonferrous needs trend plus macro/stock confirmation; agricultural contracts need season/weather/event awareness.
 - In trending markets, trend_breakout or trend_pullback requires ADX strength, directional trend/MACD alignment, and volume/open-interest or settlement confirmation.
 - In ranging/choppy/weak-trend markets, do not label ordinary trend continuation as tradable. Use range_reversal only when RSI/Stochastic/mean-reversion and support/resistance location align.
-- In high volatility, require extra confirmation and a concrete invalidation boundary before any tradeable_setup label.
+- In high volatility, require extra confirmation and a concrete invalidation boundary before any tradeable_candidate label.
 - ADX is trend strength, not a standalone direction. Direction must come from trend/MACD/DI/price action alignment.
-- If volume ratio is elevated, treat aligned signals as more reliable; if volume is weak, downgrade to direction_only/watchlist unless other confirmations are strong.
+- If volume ratio is elevated, treat aligned signals as more reliable; if volume is weak, downgrade to watch_for_trigger unless other confirmations are strong.
 """
 
     prompt += """
@@ -701,11 +707,11 @@ Signal priority: market regime context > primary trend signals > filter signals
 
 Quality discipline:
 - Your first objective is to identify real tradable setups, not merely explain why to avoid trading.
-- Low or medium tradeability should usually downgrade sizing/layer, not automatically erase a directional opportunity.
+- Low or medium tradeability should usually downgrade opportunity_state, not automatically erase a directional opportunity.
 - High confidence requires aligned trend, momentum, volume/open-interest or settlement evidence.
 - For high-caution tickers, require stronger confirmation before issuing directional signals.
 - Use Neutral only when there is no actionable trigger, no invalidation boundary, or the reward/risk is clearly not tradable.
-- If directional evidence exists but timing is incomplete, classify it as direction_only/watch_for_trigger observation and state the exact current trigger that would make it tradable.
+- If directional evidence exists but timing is incomplete, classify it as watch_for_trigger observation and state the exact current trigger that would make it tradable.
 
 Learning explanation:
 - Fill learning_impact_summary using only past reviewer-learning context and today's technical evidence.
@@ -724,12 +730,11 @@ Output format:
 - market_regime: current technical regime
 - trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
 - price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
-- template_name: trend_breakout / trend_pullback / range_reversal / volatility_breakout / no_trade
-- trigger_type: breakout_continuation / reversal_confirmed / pullback_repair / range_filter / technical_price_trigger
-- entry_type: initial / add / reduce / hold / initial_or_rebalance
+- setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / data_unavailable_no_trade
+- action_name: open / hold / exit / reduce / execution / unknown; research semantics only
 - invalidation_level: nearest concrete invalidation price if inferable, otherwise null
 - opportunity_type: trend_continuation / reversal / range_breakout / short_timing / probe / no_trade
-- opportunity_layer: direction_only / tradeable_setup / risk_reduction / no_trade
+- opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
 - entry_trigger: concrete current technical timing condition required before trading; include regime and confirmation, not just "technical trigger"
 - exit_hint: concrete current evidence or price condition that would require reduce/exit
 - holding_period_hint: expected short-term holding style/window
@@ -764,7 +769,8 @@ def build_futures_fundamental_prompt(
         "ferrous emphasizes raw material, steel demand, inventory and margins; nonferrous emphasizes inventory, treatment charge, macro and downstream demand; "
         "agricultural contracts emphasize crop progress, weather, import/export, inventory and crush/feed demand.\n"
         "- opportunity_type: medium_fundamental / trend_continuation / event_driven / probe / no_trade\n"
-        "- opportunity_layer: direction_only / tradeable_setup / risk_reduction / no_trade\n"
+        "- opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate\n"
+        "- setup_type: fundamental_timing_setup when factors form a setup, otherwise data_unavailable_no_trade or unknown\n"
         "- entry_trigger: short-timing evidence needed before the medium thesis is tradable\n"
         "- exit_hint: fundamental or price evidence that invalidates or weakens the thesis\n"
         "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
@@ -785,7 +791,7 @@ def build_futures_fundamental_prompt(
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
         "invalidation boundary, keep it as Neutral/watchlist and specify the condition that would "
         "convert it to probe/open. If the short trigger and invalidation boundary are present, mark it "
-        "as a tradeable setup instead of hiding it behind Neutral. Candidate memories cannot authorize sizing, add-ons, or holding "
+        "as tradeable_candidate instead of hiding it behind Neutral. Candidate memories cannot authorize sizing, add-ons, or holding "
         "a losing position.\n"
     )
     return prompt
@@ -813,7 +819,7 @@ def build_futures_commodity_news_prompt(
         "Do not force a directional signal when tradeability is low, but do not hide a real catalyst behind Neutral either.\n"
         "Classify commodity news by sector-specific catalyst value: supply disruption, policy shock, inventory shock, weather/agro risk, import/export disruption, cost-chain shock, demand shock, or noise. "
         "A direction article without event window, price reaction, or execution trigger is context only.\n"
-        "Also fill trade research fields when possible: opportunity_type, opportunity_layer, "
+        "Also fill trade research fields when possible: opportunity_type, opportunity_state, setup_type, "
         "entry_trigger, exit_hint, holding_period_hint, factor_focus, and current_evidence_conflict. "
         "News can identify an event opportunity, but it must say what current confirmation is needed "
         "before PM can treat it as tradeable.\n"
@@ -830,7 +836,7 @@ def build_futures_commodity_news_prompt(
         "Classify today's news as catalyst, noise, or no-trade value, and state whether it confirms "
         "or contradicts similar past cases. If Neutral, specify the concrete event/price/volume "
         "condition that would convert it to probe/open. If a catalyst has current price/volume confirmation "
-        "and an invalidation boundary, mark it as a probe or tradeable event setup. Candidate memories cannot authorize sizing, "
+        "and an invalidation boundary, mark it as probe_candidate or tradeable_candidate. Candidate memories cannot authorize sizing, "
         "add-ons, or holding a losing position.\n"
     )
     return prompt
@@ -860,7 +866,7 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "exit/reduce rewards evaluate whether profit was protected or exits were too early; "
         "execution rewards evaluate trigger method, slippage, chase failure, or missed execution. "
         "Each lesson must state who may use it: analysts only via signal_calibration, "
-        "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract.execution_plan after audit_verdict/trade_contract_audit approval, "
+        "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract execution fields after audit_verdict/trade_contract_audit approval, "
         "and protocol-governor only for audit. "
         "Control-governance metadata can support chain-health audit only; it cannot become market alpha, "
         "an action-preference reward, or a direct PM/Trader instruction. "
@@ -891,4 +897,6 @@ def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str
         "do not convert them into alpha, hard trade bans, or unconditional sizing rules.\n"
         + episodes_json
     )
+
+
 

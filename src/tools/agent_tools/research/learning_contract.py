@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Shared contract for turning reviewer attribution into usable future memory.
 
@@ -20,7 +20,7 @@ def _normalize_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "ticker": str(raw.get("ticker") or "*").upper(),
         "sector": str(raw.get("sector") or "*"),
         "side": str(raw.get("side") or "*").lower(),
-        "signal_template": str(raw.get("signal_template") or raw.get("template") or "*"),
+        "setup_type": str(raw.get("setup_type") or raw.get("template") or "*"),
         "horizon_class": str(raw.get("horizon_class") or raw.get("horizon") or "*"),
         "market_regime": str(raw.get("market_regime") or raw.get("regime") or "*"),
     }
@@ -33,7 +33,7 @@ def _normalize_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 def _scope_priority(scope: Mapping[str, Any]) -> str:
     ticker = str(scope.get("ticker") or "*")
     sector = str(scope.get("sector") or "*")
-    template = str(scope.get("signal_template") or "*")
+    template = str(scope.get("setup_type") or "*")
     side = str(scope.get("side") or "*")
     if ticker != "*" and side != "*" and template != "*":
         return "ticker_side_template"
@@ -84,7 +84,7 @@ def _is_candidate_like(memory_type: str, maturity_state: str, status: str = "") 
             "hypothesis",
             "no_trade",
             "neutral",
-            "shadow",
+            "Counterfactual",
             "diagnostic",
             "pending",
             "episode_case",
@@ -148,7 +148,7 @@ def _default_usage_boundary(memory_type: str, maturity_state: str, status: str =
     ]
     if _is_candidate_like(memory_type, maturity_state, status):
         boundaries.append(
-            "Candidate, shadow, neutral, and single-episode memories can guide analysis/watchlist/probe only; they cannot by themselves authorize sizing, add-ons, position_matched, or losing-position holds."
+            "Candidate, Counterfactual, neutral, and single-episode memories can guide analysis/watchlist/probe only; they cannot by themselves authorize sizing, add-ons, position_matched, or losing-position holds."
         )
     elif _is_policy_like(memory_type, maturity_state):
         boundaries.append(
@@ -249,11 +249,12 @@ def build_next_round_memory_contract(
         "position_impact_conditions": position_conditions,
         "position_authority": authority,
         "max_position_impact": max_impact,
-        "requires_current_confirmation": True,
+        "trigger_valid": False,
+        "opportunity_state": "watch_for_trigger",
         "requires_invalidation_boundary": True,
         "anti_overfit_guardrails": [
             "ticker scope before sector scope before global scope",
-            "candidate and shadow memories cannot directly increase size",
+            "candidate and Counterfactual memories cannot directly increase size",
             "no permanent product blacklist or unconditional product boost",
             "future results are used only after settlement/backfill",
         ],
@@ -394,3 +395,5 @@ def contract_prompt_line(contract: Any, *, max_chars: int = 320) -> str:
     if not parts:
         return ""
     return _compact_text("Next-round strategy update: " + " | ".join(parts), max_chars)
+
+

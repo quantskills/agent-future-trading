@@ -241,7 +241,7 @@ def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
         "sector": str(item.get("sector") or "*"),
         "horizon_class": str(item.get("horizon_class") or "*"),
         "market_regime": str(item.get("market_regime") or "*"),
-        "signal_template": str(item.get("signal_template") or "*"),
+        "setup_type": str(item.get("setup_type") or "*"),
         "status": str(item.get("status") or contract.get("maturity_state") or ""),
         "sample_count": int(item.get("sample_count") or contract.get("sample_count") or 0),
         "confidence_score": float(item.get("confidence_score") or 0.0),
@@ -612,7 +612,7 @@ def build_learning_context(
                 f"{item.get('ticker')}/{item.get('side')}/{item.get('horizon_class')}/"
                 f"{item.get('market_regime')}: pnl={float(item.get('net_pnl') or 0.0):.0f}, "
                 f"hold={int(item.get('holding_days') or 0)}d, "
-                f"template={item.get('signal_template')}; "
+                f"template={item.get('setup_type')}; "
                 f"{item.get('lesson_text') or ''}{contract_suffix}"
             )
         episode_lines, episode_dropped = _budget_plain_lines(
@@ -653,7 +653,7 @@ def build_learning_context(
             no_trade_items = []
         raw_no_trade_lines = []
         for item in no_trade_items:
-            shadow_results = item.get("shadow_results") if isinstance(item.get("shadow_results"), list) else []
+            counterfactual_results = item.get("counterfactual_results") if isinstance(item.get("counterfactual_results"), list) else []
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
             contract_text = contract_prompt_line(payload.get(CONTRACT_KEY), max_chars=150)
             contract_text = contract_text.replace("Next-round strategy update: ", "strategy_update: ") if contract_text else ""
@@ -667,16 +667,16 @@ def build_learning_context(
                     f"/{first_neutral.get('watchlist_priority')}"
                     f" trigger={_compact_inline_text(first_neutral.get('trigger_condition') or '', 60)}"
                 )
-            shadow_text = "; ".join(
-                f"{int(result.get('horizon_days') or 0)}d={float(result.get('shadow_pnl') or 0.0):.0f}"
-                for result in shadow_results[:3]
+            counterfactual_text = "; ".join(
+                f"{int(result.get('horizon_days') or 0)}d={float(result.get('counterfactual_pnl') or 0.0):.0f}"
+                for result in counterfactual_results[:3]
                 if isinstance(result, dict)
             )
             raw_no_trade_lines.append(
                 "- "
                 f"{item.get('ticker')}/{item.get('side')}/{item.get('horizon_class')}: "
                 f"class={item.get('classification')}; {contract_suffix} "
-                f"{neutral_text}; shadow=[{shadow_text or 'pending'}]; "
+                f"{neutral_text}; counterfactual=[{counterfactual_text or 'pending'}]; "
                 f"reason={_compact_inline_text(item.get('pm_reason') or item.get('execution_reason') or '', 50)}"
             )
         no_trade_lines, no_trade_dropped = _budget_plain_lines(
@@ -972,7 +972,7 @@ def build_learning_context(
         text_parts.append("Similar completed trade episodes:")
         text_parts.extend(episode_lines)
     if no_trade_lines:
-        text_parts.append("No-trade opportunity memories with forward shadow results:")
+        text_parts.append("No-trade opportunity memories with forward counterfactual results:")
         text_parts.append(
             "These show opportunities the system skipped. Use them to question timing and evidence, "
             "not to force a trade without today's confirmation."
@@ -1121,3 +1121,7 @@ def apply_config_learning_overlay(
         )
 
     return config
+
+
+
+

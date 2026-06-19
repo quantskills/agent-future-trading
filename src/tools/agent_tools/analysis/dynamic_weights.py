@@ -22,9 +22,9 @@ def _bounded_float(value: Any, default: float = 0.0, lower: float = 0.0, upper: 
     return max(lower, min(upper, number))
 
 
-def _horizon_weight_owner(horizon_class: Any, signal_template: Any = None) -> Optional[str]:
+def _horizon_weight_owner(horizon_class: Any, setup_type: Any = None) -> Optional[str]:
     horizon = str(horizon_class or "").lower()
-    template = str(signal_template or "").lower()
+    template = str(setup_type or "").lower()
     if horizon in {"short", "intraday"}:
         return "technical"
     if horizon in {"event_short", "event"} or "event" in template:
@@ -469,9 +469,9 @@ def calibrate_weights_by_signal_history(
                     f"hit_rate={hit_rate:.0%}, samples={sample_count}, pnl={net_pnl:.0f}"
                 )
 
-    if hasattr(db, "get_signal_template_performance"):
+    if hasattr(db, "get_setup_type_performance"):
         try:
-            template_rows = db.get_signal_template_performance(
+            template_rows = db.get_setup_type_performance(
                 config_id=config_id,
                 ticker=ticker,
                 trading_date=trading_date,
@@ -482,7 +482,7 @@ def calibrate_weights_by_signal_history(
             template_rows = []
 
         for row in template_rows:
-            owner = _horizon_weight_owner(row.get("horizon_class"), row.get("signal_template"))
+            owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))
             if owner not in adjusted:
                 continue
             sample_count = int(row.get("sample_count") or 0)
@@ -521,7 +521,7 @@ def calibrate_weights_by_signal_history(
             policy_rows = []
 
         for row in policy_rows:
-            owner = _horizon_weight_owner(row.get("horizon_class"), row.get("signal_template"))
+            owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))
             if owner not in adjusted:
                 continue
             confidence = _bounded_float(row.get("confidence_score"), default=0.0)
@@ -546,3 +546,4 @@ def calibrate_weights_by_signal_history(
     if total <= 0:
         return current_weights
     return {key: value / total for key, value in adjusted.items()}
+

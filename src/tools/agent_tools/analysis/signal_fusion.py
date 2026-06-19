@@ -65,7 +65,7 @@ def build_horizon_scope(
         analyst_horizons[agent_name] = {
             "analyst_horizon": str(getattr(signal, "analyst_horizon", "") or getattr(signal, "horizon_class", "") or "unknown"),
             "horizon_class": str(getattr(signal, "horizon_class", "") or "unknown"),
-            "expected_horizon_days": int(getattr(signal, "expected_horizon_days", 0) or getattr(signal, "horizon_days", 0) or 0),
+            "expected_horizon_days": int(getattr(signal, "expected_horizon_days", 0) or 0),
         }
     return {
         "analyst_horizons": analyst_horizons,
@@ -125,13 +125,13 @@ def _contract_value(signal: Any, key: str, default: Any = None) -> Any:
     return default
 
 
-def _opportunity_layer(signal: Any) -> str:
-    layer = (
-        getattr(signal, "opportunity_layer", None)
-        or _contract_value(signal, "opportunity_layer")
-        or "direction_only"
+def _opportunity_state(signal: Any) -> str:
+    state = (
+        getattr(signal, "opportunity_state", None)
+        or _contract_value(signal, "opportunity_state")
+        or "watch_for_trigger"
     )
-    return str(layer or "direction_only").strip().lower() or "direction_only"
+    return str(state or "watch_for_trigger").strip().lower() or "watch_for_trigger"
 
 
 def _has_invalidation(signal: Any) -> bool:
@@ -147,7 +147,7 @@ def _has_invalidation(signal: Any) -> bool:
     if not text:
         return False
     generic_terms = {
-        "requires_current_confirmation",
+        "wait_for_trigger",
         "technical_price_trigger",
         "fundamental_anchor",
         "news_event_trigger",
@@ -210,7 +210,7 @@ def _has_entry_setup(signal: Any) -> bool:
         "wait",
         "observe only",
         "tracking only",
-        "requires_current_confirmation",
+        "wait_for_trigger",
         "technical_price_trigger",
         "fundamental_anchor",
         "news_event_trigger",
@@ -314,7 +314,7 @@ def build_opportunity_scorecard(
 
     It is not a trading rule or product preference. It is an auditable summary of
     current-day evidence, learning support, execution/data penalties, and the
-    resulting opportunity layer per side.
+    resulting opportunity state per side.
     """
     signals = list(analyst_signals or [])
     cfg = config or {}
@@ -322,17 +322,17 @@ def build_opportunity_scorecard(
     tradeable_threshold = _safe_float(cfg.get("tradeable_threshold"), 0.58)
     weak_confirmation_threshold = _safe_float(cfg.get("weak_confirmation_threshold"), 0.45)
     min_deployable_setup_quality = _safe_float(cfg.get("min_deployable_setup_quality"), 0.72)
-    min_tradeable_setup_quality = _safe_float(cfg.get("min_tradeable_setup_quality"), 0.55)
-    single_tradeable_setup_confirmation_score = _safe_float(
-        cfg.get("single_tradeable_setup_confirmation_score"),
+    min_tradeable_candidate_setup_quality = _safe_float(cfg.get("min_tradeable_candidate_setup_quality"), 0.55)
+    single_tradeable_candidate_setup_confirmation_score = _safe_float(
+        cfg.get("single_tradeable_candidate_setup_confirmation_score"),
         0.68,
     )
-    single_tradeable_setup_min_business_quality = _safe_float(
-        cfg.get("single_tradeable_setup_min_business_quality"),
+    single_tradeable_candidate_setup_min_business_quality = _safe_float(
+        cfg.get("single_tradeable_candidate_setup_min_business_quality"),
         0.60,
     )
-    single_tradeable_setup_min_confidence = _safe_float(
-        cfg.get("single_tradeable_setup_min_confidence"),
+    single_tradeable_candidate_setup_min_confidence = _safe_float(
+        cfg.get("single_tradeable_candidate_setup_min_confidence"),
         0.42,
     )
     technical_opposition_min_confidence = _safe_float(
@@ -378,7 +378,7 @@ def build_opportunity_scorecard(
     side_rows: dict[str, dict[str, Any]] = {}
     for side in ("long", "short"):
         supporting = [signal for signal in signals if _signal_side(signal) == side]
-        layer_counts: dict[str, int] = {}
+        opportunity_state_counts: dict[str, int] = {}
         invalidation_count = 0
         setup_count = 0
         quality_scores: list[float] = []
@@ -387,8 +387,8 @@ def build_opportunity_scorecard(
         confidence_scores: list[float] = []
         analyst_names: list[str] = []
         for signal in supporting:
-            layer = _opportunity_layer(signal)
-            layer_counts[layer] = layer_counts.get(layer, 0) + 1
+            state = _opportunity_state(signal)
+            opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
             if _has_invalidation(signal):
                 invalidation_count += 1
             if _has_entry_setup(signal):
@@ -400,7 +400,10 @@ def build_opportunity_scorecard(
             analyst_names.append(normalize_analyst_name(getattr(signal, "agent_name", "")))
 
         support_count = len(supporting)
-        tradeable_layers = layer_counts.get("deployable_alpha", 0) + layer_counts.get("tradeable_setup", 0)
+        tradeable_states = (
+            opportunity_state_counts.get("tradeable_candidate", 0)
+            + opportunity_state_counts.get("probe_candidate", 0)
+        )
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
         max_quality = max(quality_scores, default=0.0)
         avg_setup_quality = sum(setup_quality_scores) / len(setup_quality_scores) if setup_quality_scores else 0.0
@@ -408,7 +411,7 @@ def build_opportunity_scorecard(
         avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
         score = 0.0
         score += min(0.28, 0.10 * support_count)
-        score += min(0.24, 0.12 * tradeable_layers)
+        score += min(0.24, 0.12 * tradeable_states)
         score += 0.14 * max_quality
         score += 0.16 * max_setup_quality
         score += 0.12 * avg_confidence
@@ -447,13 +450,13 @@ def build_opportunity_scorecard(
         gating_failures: list[str] = []
         if support_count <= 0:
             gating_failures.append("no_directional_support")
-        if tradeable_layers <= 0:
-            gating_failures.append("no_tradeable_setup_layer")
+        if tradeable_states <= 0:
+            gating_failures.append("no_tradeable_opportunity_state")
         if setup_count <= 0:
             gating_failures.append("missing_entry_setup")
         if invalidation_count <= 0:
             gating_failures.append("missing_invalidation_boundary")
-        if max_setup_quality < min_tradeable_setup_quality and support_count > 0:
+        if max_setup_quality < min_tradeable_candidate_setup_quality and support_count > 0:
             gating_failures.append("weak_entry_setup_quality")
         if side == "long" and "late_long_entry_price_near_upper_range" in setup_quality_notes:
             gating_failures.append("late_long_entry_price_location")
@@ -479,14 +482,14 @@ def build_opportunity_scorecard(
             "late_short_entry_price_location",
             "same_scope_alpha_setup_capped_or_rejected",
         }
-        single_tradeable_setup_confirmed = bool(
-            tradeable_layers > 0
+        single_tradeable_candidate_setup_confirmed = bool(
+            tradeable_states > 0
             and setup_count > 0
             and invalidation_count > 0
-            and max_setup_quality >= min_tradeable_setup_quality
-            and max_quality >= single_tradeable_setup_min_business_quality
-            and avg_confidence >= single_tradeable_setup_min_confidence
-            and confirmation_score >= single_tradeable_setup_confirmation_score
+            and max_setup_quality >= min_tradeable_candidate_setup_quality
+            and max_quality >= single_tradeable_candidate_setup_min_business_quality
+            and avg_confidence >= single_tradeable_candidate_setup_min_confidence
+            and confirmation_score >= single_tradeable_candidate_setup_confirmation_score
             and not single_tradeable_blocking_failures.intersection(gating_failures)
             and (
                 not block_single_setup_on_technical_opposition
@@ -494,36 +497,36 @@ def build_opportunity_scorecard(
             )
         )
         scorecard_promotion_reasons: list[str] = []
-        if single_tradeable_setup_confirmed:
-            scorecard_promotion_reasons.append("single_tradeable_setup_with_strong_market_confirmation")
+        if single_tradeable_candidate_setup_confirmed:
+            scorecard_promotion_reasons.append("single_tradeable_candidate_with_strong_market_confirmation")
             score = max(score, tradeable_threshold)
 
         if score >= deployable_threshold and max_setup_quality >= min_deployable_setup_quality and not gating_failures:
-            final_layer = "deployable_alpha"
+            final_state = "tradeable_candidate"
         elif (
             (
                 score >= tradeable_threshold
-                and max_setup_quality >= min_tradeable_setup_quality
+                and max_setup_quality >= min_tradeable_candidate_setup_quality
                 and "critical_data_gap" not in gating_failures
-                and tradeable_layers > 0
+                and tradeable_states > 0
                 and setup_count > 0
             )
-            or single_tradeable_setup_confirmed
+            or single_tradeable_candidate_setup_confirmed
         ):
-            final_layer = "tradeable_setup"
+            final_state = "probe_candidate"
         elif support_count > 0:
-            final_layer = "direction_only"
+            final_state = "watch_for_trigger"
         else:
-            final_layer = "no_trade"
+            final_state = "no_opportunity"
 
         side_rows[side] = {
             "side": side,
             "score": round(score, 4),
-            "final_layer": final_layer,
+            "final_state": final_state,
             "supporting_signal_count": support_count,
             "supporting_analysts": sorted(set(name for name in analyst_names if name)),
-            "tradeable_layer_count": tradeable_layers,
-            "layer_counts": layer_counts,
+            "tradeable_opportunity_state_count": tradeable_states,
+            "opportunity_state_counts": opportunity_state_counts,
             "entry_setup_count": setup_count,
             "invalidation_count": invalidation_count,
             "avg_business_quality": round(avg_quality, 4),
@@ -537,7 +540,7 @@ def build_opportunity_scorecard(
             "market_confirmation_conflicts": [str(item) for item in confirmation_conflicts[:8]],
             "data_missing_count": len(data_missing),
             "critical_data_gap": critical_gap,
-            "single_tradeable_setup_confirmed": single_tradeable_setup_confirmed,
+            "single_tradeable_candidate_setup_confirmed": single_tradeable_candidate_setup_confirmed,
             "technical_opposes_side": technical_opposes,
             "scorecard_promotion_reasons": scorecard_promotion_reasons,
             "learning_positive_count": policy_counts.get("positive", 0),
@@ -554,10 +557,8 @@ def build_opportunity_scorecard(
                 "lifecycle_state": best_alpha_profile.get("lifecycle_state"),
                 "profile_state_hint": (
                     best_alpha_profile.get("profile_state_hint")
-                    or best_alpha_profile.get("deprecated_action_bias_mirror")
-                    or best_alpha_profile.get("action_bias")
+                    or "profile_observe"
                 ),
-                "deprecated_action_bias_mirror": best_alpha_profile.get("action_bias"),
                 "sample_count": best_alpha_profile.get("sample_count"),
                 "win_rate": best_alpha_profile.get("win_rate"),
                 "profit_factor": best_alpha_profile.get("profit_factor"),
@@ -587,10 +588,10 @@ def build_opportunity_scorecard(
             "tradeable_threshold": tradeable_threshold,
             "weak_confirmation_threshold": weak_confirmation_threshold,
             "min_deployable_setup_quality": min_deployable_setup_quality,
-            "min_tradeable_setup_quality": min_tradeable_setup_quality,
-            "single_tradeable_setup_confirmation_score": single_tradeable_setup_confirmation_score,
-            "single_tradeable_setup_min_business_quality": single_tradeable_setup_min_business_quality,
-            "single_tradeable_setup_min_confidence": single_tradeable_setup_min_confidence,
+            "min_tradeable_candidate_setup_quality": min_tradeable_candidate_setup_quality,
+            "single_tradeable_candidate_setup_confirmation_score": single_tradeable_candidate_setup_confirmation_score,
+            "single_tradeable_candidate_setup_min_business_quality": single_tradeable_candidate_setup_min_business_quality,
+            "single_tradeable_candidate_setup_min_confidence": single_tradeable_candidate_setup_min_confidence,
             "technical_opposition_min_confidence": technical_opposition_min_confidence,
         },
         "alpha_setup_profiles_enabled": True,

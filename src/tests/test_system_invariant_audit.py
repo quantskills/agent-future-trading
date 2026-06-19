@@ -1,4 +1,4 @@
-import json
+﻿import json
 import sqlite3
 import subprocess
 import sys
@@ -103,7 +103,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     reward_mean REAL DEFAULT 0,
                     win_rate REAL DEFAULT 0,
                     confidence_score REAL DEFAULT 0,
-                    policy_hint TEXT DEFAULT 'observe',
+                    action_preference TEXT DEFAULT '',
                     max_position_impact REAL DEFAULT 0,
                     last_sample_date TEXT,
                     created_at TEXT NOT NULL,
@@ -125,9 +125,15 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
 
     def _insert_good_open(self, db_path: Path):
         contract = {
+            "contract_type": "strategy",
             "final_action": "open_real",
             "authority_type": "real_budget_entry",
-            "can_open_real_position": True,
+            "authority_decision": "allow_real_new_entry",
+            "open_action_evidence": True,
+            "strong_current_evidence": True,
+            "tradeable_state": True,
+            "watch_for_trigger_block": False,
+            "negative_profile": False,
             "current_lots": 0,
             "target_lots": -2,
             "lots_delta": -2,
@@ -135,14 +141,8 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "reason_codes": ["positive_candidate_open"],
             "learning_used": {"alpha_setup_action_values": [{"action_preference": "positive_candidate_open"}]},
         }
-        authority = {
-            "authority_type": "real_budget_entry",
-            "can_open_real_position": True,
-            "reason_codes": ["positive_candidate_open"],
-        }
         payload = {
             "final_action_contract": contract,
-            "final_new_entry_trade_authority": authority,
             "trade_contract_audit": {
                 "single_source_of_trade_truth": True,
                 "candidate_sources_do_not_bypass_contract": True,
@@ -182,7 +182,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 INSERT INTO alpha_setup_action_value(
                     id, config_id, scope_key, ticker, side, setup_type, action_name, sample_count,
-                    reward_sum, policy_hint, last_sample_date, created_at, updated_at, active, payload_json
+                    reward_sum, action_preference, last_sample_date, created_at, updated_at, active, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -214,6 +214,33 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.counts["open_transactions"], 1)
 
+    def test_system_invariant_audit_fails_forbidden_old_field_keys_in_recommendation_artifact(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()
+            payload = json.loads(row[0])
+            payload["action_evidence_contract"] = {
+                "opportunity_layer": "tradeable_setup",
+                "trigger_valid": True,
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=? WHERE id='rec1'",
+                (_dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("unified_field_artifact_forbidden_field:2025-03-03:RB:rec1:signal_snapshot") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(any("action_evidence_contract.opportunity_layer" in error for error in report.errors))
+
     def test_system_invariant_audit_accepts_observation_only_release_block_diagnostics(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -224,7 +251,12 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "contract_type": "strategy",
                     "final_action": "open_real",
                     "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
+                    "authority_decision": "allow_real_new_entry",
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": False,
+                    "negative_profile": False,
                     "current_lots": 0,
                     "target_lots": -2,
                     "lots_delta": -2,
@@ -232,11 +264,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "reason_codes": ["positive_candidate_open"],
                     "single_source_of_trade_truth": True,
                     "candidate_sources_do_not_bypass_contract": True,
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
-                    "reason_codes": ["positive_candidate_open"],
                 },
                 "release_block_diagnostics": {
                     "contract_version": "agentquant.release_block_diagnostics.v1",
@@ -247,7 +274,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "blocking_category": "current_confirmation_missing",
                     "evidence_snapshot": {
                         "preferred_side": "short",
-                        "preferred_side_layer": "tradeable_setup",
+                        "preferred_side_layer": "tradeable_candidate",
                         "market_confirmation_score": 0.54,
                     },
                 },
@@ -280,7 +307,12 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "contract_type": "strategy",
                     "final_action": "open_real",
                     "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
+                    "authority_decision": "allow_real_new_entry",
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": False,
+                    "negative_profile": False,
                     "current_lots": 0,
                     "target_lots": -2,
                     "lots_delta": -2,
@@ -288,11 +320,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "reason_codes": ["positive_candidate_open"],
                     "single_source_of_trade_truth": True,
                     "candidate_sources_do_not_bypass_contract": True,
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
-                    "reason_codes": ["positive_candidate_open"],
                 },
                 "release_block_diagnostics": {
                     "contract_version": "agentquant.release_block_diagnostics.v1",
@@ -332,7 +359,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             bad_payload = {
                 "final_action_contract": {"final_action": "wait", "authority_type": "watchlist_only"},
-                "final_new_entry_trade_authority": {"authority_type": "watchlist_only", "can_open_real_position": False},
                 "trade_contract_audit": {"single_source_of_trade_truth": True, "candidate_sources_do_not_bypass_contract": True},
             }
             conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(bad_payload),))
@@ -344,29 +370,12 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertTrue(any(error.startswith("open_transaction_without_open_final_action") for error in report.errors))
         self.assertTrue(any(error.startswith("open_transaction_without_open_authority") for error in report.errors))
 
-    def test_system_invariant_audit_does_not_use_pre_open_plan_as_contract_or_authority(self):
+    def test_system_invariant_audit_requires_top_level_final_action_contract(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
         try:
             stale_snapshot = {
-                "pre_open_plan": {
-                    "final_action_contract": {
-                        "final_action": "open_real",
-                        "current_lots": 0,
-                        "target_lots": -2,
-                        "lots_delta": -2,
-                        "authority_type": "real_budget_entry",
-                    },
-                    "strategy_controls": {
-                        "diagnostics": {
-                            "final_new_entry_trade_authority": {
-                                "authority_type": "real_budget_entry",
-                                "can_open_real_position": True,
-                            }
-                        }
-                    },
-                },
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
             conn.execute(
@@ -384,23 +393,25 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertTrue(any(error.startswith("open_transaction_without_open_final_action") for error in report.errors))
         self.assertTrue(any(error.startswith("open_transaction_without_open_authority") for error in report.errors))
 
-    def test_system_invariant_audit_fails_direction_only_probe_opened(self):
+    def test_system_invariant_audit_fails_watch_for_trigger_probe_opened(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
         try:
             bad_payload = {
                 "final_action_contract": {
+                    "contract_type": "strategy",
                     "final_action": "open_probe",
                     "authority_type": "exploration_probe",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": True,
                     "execution_requirement": "intraday_trigger_required",
-                    "reason_codes": ["pm_direction_only_probe_cap", "real_probe_positive_or_strong_confirmation_release"],
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "exploration_probe",
-                    "can_open_real_position": False,
-                    "direction_only_block": True,
-                    "reason_codes": ["pm_direction_only_probe_cap"],
+                    "reason_codes": ["pm_watch_for_trigger_probe_cap", "real_probe_positive_or_strong_confirmation_release"],
                 },
                 "trade_contract_audit": {
                     "single_source_of_trade_truth": True,
@@ -426,17 +437,17 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             payload = {
                 "final_action_contract": {
+                    "contract_type": "strategy",
                     "final_action": "open_real",
                     "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": False,
+                    "current_lots": 0,
                     "target_lots": -2,
                     "lots_delta": -2,
                     "execution_requirement": "intraday_trigger_required",
-                    "reason_codes": ["positive_candidate_open"],
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
                     "reason_codes": ["positive_candidate_open"],
                 },
                 "trade_contract_audit": {
@@ -463,15 +474,17 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             payload = {
                 "final_action_contract": {
+                    "contract_type": "strategy",
                     "final_action": "open_real",
                     "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": False,
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
                     "execution_requirement": "intraday_trigger_required",
-                    "reason_codes": ["positive_candidate_open"],
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
                     "reason_codes": ["positive_candidate_open"],
                 },
                 "trade_contract_audit": {
@@ -732,10 +745,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         }
         payload = {
             "final_action_contract": contract,
-            "final_new_entry_trade_authority": {
-                "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-            },
         }
         conn = sqlite3.connect(db_path)
         try:
@@ -761,7 +770,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
-                "UPDATE alpha_setup_action_value SET policy_hint=?, payload_json=? WHERE id='av1'",
+                "UPDATE alpha_setup_action_value SET action_preference=?, payload_json=? WHERE id='av1'",
                 ("observe_or_probe", _dumps({"amplification_scope_quality": "exact_real_state", "reward_source": "trade_episode"})),
             )
             conn.commit()
@@ -778,7 +787,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.errors,
         )
 
-    def test_system_invariant_audit_fails_legacy_policy_hint_without_canonical_preference(self):
+    def test_system_invariant_audit_fails_missing_payload_action_preference(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
@@ -786,11 +795,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET policy_hint=?, payload_json=?
+                SET action_preference=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
-                    "positive_candidate_open",
+                    "",
                     _dumps(
                         {
                             "amplification_scope_quality": "exact_real_state",
@@ -806,11 +815,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertTrue(
-            any(error.startswith("legacy_policy_hint_without_canonical_action_preference") for error in report.errors),
+            any(error.startswith("action_value_missing_action_preference") for error in report.errors),
             report.to_dict(),
         )
 
-    def test_system_invariant_audit_fails_policy_hint_canonical_preference_drift(self):
+    def test_system_invariant_audit_fails_action_preference_column_payload_drift(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
@@ -818,7 +827,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET policy_hint=?, payload_json=?
+                SET action_preference=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -826,7 +835,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     _dumps(
                         {
                             "action_preference": "positive_candidate_open",
-                            "deprecated_policy_hint_mirror": "tail_loss_protect",
                             "amplification_scope_quality": "exact_real_state",
                             "reward_source": "trade_episode",
                         }
@@ -840,11 +848,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertTrue(
-            any(error.startswith("legacy_policy_hint_canonical_action_preference_mismatch") for error in report.errors),
-            report.to_dict(),
-        )
-        self.assertTrue(
-            any(error.startswith("deprecated_policy_hint_mirror_mismatch") for error in report.errors),
+            any(error.startswith("action_preference_column_payload_mismatch") for error in report.errors),
             report.to_dict(),
         )
 
@@ -857,7 +861,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 INSERT INTO alpha_setup_action_value(
                     id, config_id, scope_key, ticker, side, setup_type, action_name, sample_count,
-                    reward_sum, policy_hint, last_sample_date, created_at, updated_at, active, payload_json
+                    reward_sum, action_preference, last_sample_date, created_at, updated_at, active, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -902,19 +906,20 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             payload = {
                 "final_action_contract": {
+                    "contract_type": "strategy",
                     "final_action": "open_real",
                     "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
+                    "authority_decision": "allow_real_new_entry",
+                    "open_action_evidence": True,
+                    "strong_current_evidence": True,
+                    "tradeable_state": True,
+                    "watch_for_trigger_block": False,
+                    "negative_profile": False,
                     "current_lots": 0,
                     "target_lots": -2,
                     "lots_delta": -2,
                     "execution_requirement": "intraday_trigger_required",
-                    "reason_codes": ["tradeable_setup"],
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "real_budget_entry",
-                    "can_open_real_position": True,
-                    "reason_codes": ["tradeable_setup"],
+                    "reason_codes": ["tradeable_candidate"],
                 },
                 "trade_contract_audit": {
                     "single_source_of_trade_truth": True,
@@ -931,7 +936,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET action_name=?, reward_sum=?, policy_hint=?, last_sample_date=?, payload_json=?
+                SET action_name=?, reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -967,7 +972,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET reward_sum=?, policy_hint=?, payload_json=?
+                SET reward_sum=?, action_preference=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -998,7 +1003,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, policy_hint=?, last_sample_date=?, payload_json=?
+                    reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -1050,7 +1055,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET action_name=?, reward_sum=?, policy_hint=?, last_sample_date=?, payload_json=?
+                SET action_name=?, reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -1114,7 +1119,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         {
                             "action_preference": "positive_candidate_open",
                             "amplification_scope_quality": "exact_real_state",
-                            "reward_source": "shadow_prior",
+                            "reward_source": "counterfactual_prior",
                         }
                     ),
                 ),
@@ -1126,7 +1131,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertIn(
-            "positive_open_from_non_real_reward_source:RB:short:trend_breakout:open:2025-03-03:shadow_prior",
+            "positive_open_from_non_real_reward_source:RB:short:trend_breakout:open:2025-03-03:counterfactual_prior",
             report.errors,
         )
 
@@ -1164,7 +1169,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, policy_hint=?, last_sample_date=?, payload_json=?
+                    reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -1212,7 +1217,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, policy_hint=?,
+                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -1262,7 +1267,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, policy_hint=?,
+                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -1308,7 +1313,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, policy_hint=?,
+                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -1357,7 +1362,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, policy_hint=?,
+                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -1429,3 +1434,8 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+

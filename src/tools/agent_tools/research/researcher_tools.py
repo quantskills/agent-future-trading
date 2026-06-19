@@ -91,11 +91,7 @@ def _reviewer_helpers():
 
 
 def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    safe = dict(snapshot or {})
-    if "pre_open_plan" in safe:
-        safe.pop("pre_open_plan", None)
-        safe["pm_draft_pre_open_plan_removed"] = True
-    return safe
+    return dict(snapshot or {})
 
 
 def _build_causal_evidence_pack(
@@ -222,11 +218,26 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         or _dict_or_empty(setup_learning.get("intraday_selection"))
         or _dict_or_empty(translation.get("intraday_selection"))
     )
-    execution_plan = (
-        _dict_or_empty(final_contract.get("execution_plan"))
-        or _dict_or_empty(phase2.get("execution_plan"))
-        or _dict_or_empty(setup_learning.get("execution_plan"))
-        or _dict_or_empty(translation.get("execution_plan"))
+    execution_contract = (
+        _dict_or_empty(phase2.get("execution_contract"))
+        or _dict_or_empty(setup_learning.get("execution_contract"))
+        or _dict_or_empty(translation.get("execution_contract"))
+        or {
+            key: final_contract.get(key)
+            for key in (
+                "execution_profile",
+                "trigger_source",
+                "entry_trigger",
+                "invalidation",
+                "valid_until",
+                "requires_intraday_confirmation",
+                "can_execute_without_intraday_trigger",
+                "allow_confirmed_memory_vwap_fallback",
+                "fallback_authority_boundary",
+                "execution_action_value_preference",
+            )
+            if final_contract.get(key) not in (None, "", [])
+        }
     )
 
     has_trader_feedback = bool(phase2 or setup_learning or intraday_selection or execution_result)
@@ -249,7 +260,7 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         or ""
     )
     profile = (
-        execution_plan.get("execution_profile")
+        execution_contract.get("execution_profile")
         or _dict_or_empty(intraday_selection.get("features")).get("execution_profile")
         or "unknown"
     )
@@ -264,7 +275,7 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         "execution_profile": str(profile or "unknown"),
         "phase2_status": str(status or "unknown"),
         "reason": str(reason or ""),
-        "execution_plan": execution_plan,
+        "execution_contract": execution_contract,
         "setup_execution_learning": setup_learning,
         "intraday_selection": intraday_selection,
         "execution_result": execution_result,
@@ -276,17 +287,17 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
     }
 
 
-def _shadow_result_value(item: Any) -> float:
+def _counterfactual_result_value(item: Any) -> float:
     if not isinstance(item, dict):
         return 0.0
     reviewer = _reviewer_helpers()
     return reviewer._safe_float(
-        item.get("shadow_pnl"),
+        item.get("counterfactual_pnl"),
         reviewer._safe_float(item.get("pnl"), reviewer._safe_float(item.get("reward"))),
     )
 
 
-def _latest_shadow_result(results: Any) -> Dict[str, Any]:
+def _latest_counterfactual_result(results: Any) -> Dict[str, Any]:
     if not isinstance(results, list):
         return {}
     candidates = [item for item in results if isinstance(item, dict)]
@@ -295,18 +306,18 @@ def _latest_shadow_result(results: Any) -> Dict[str, Any]:
     return max(candidates, key=lambda item: int(float(item.get("horizon_days") or 0)))
 
 
-def _write_shadow_no_trade_alpha_setup_samples(
+def _write_counterfactual_no_trade_alpha_setup_samples(
     cursor: sqlite3.Cursor,
     *,
     cfg: Dict[str, Any],
     config_id: str,
     trading_date: str,
 ) -> Dict[str, Any]:
-    """Bridge settled no-trade shadow outcomes into setup action-value samples.
+    """Bridge settled no-trade counterfactual outcomes into setup action-value samples.
 
     The sample date is the review/backfill date, not the original no-trade date,
     so future PM SQL-RAG queries cannot see the counterfactual outcome before it
-    was known.  These samples are marked as shadow prior only; they can sharpen
+    was known.  These samples are marked as counterfactual prior only; they can sharpen
     future action preference but cannot grant direct real-budget authority.
     """
 
@@ -317,7 +328,7 @@ def _write_shadow_no_trade_alpha_setup_samples(
         return {"rows": 0, "status": "disabled"}
 
     trading_day = str(trading_date)[:10]
-    max_rows = max(1, reviewer._safe_int(profile_cfg.get("max_shadow_no_trade_samples_per_day"), 40))
+    max_rows = max(1, reviewer._safe_int(profile_cfg.get("max_counterfactual_no_trade_samples_per_day"), 40))
     try:
         cursor.execute(
             """
@@ -326,14 +337,14 @@ def _write_shadow_no_trade_alpha_setup_samples(
             WHERE config_id = ?
               AND status = 'closed'
               AND classification IN ('missed_opportunity', 'correct_avoidance')
-              AND shadow_results_json IS NOT NULL
+              AND counterfactual_results_json IS NOT NULL
               AND trading_date < ?
               AND NOT EXISTS (
                   SELECT 1
                   FROM alpha_setup_sample s
                   WHERE s.config_id = nt.config_id
-                    AND s.recommendation_id = ('shadow:' || nt.id)
-                    AND s.source_type LIKE 'shadow_%'
+                    AND s.recommendation_id = ('counterfactual:' || nt.id)
+                    AND s.source_type LIKE 'counterfactual_%'
               )
             ORDER BY trading_date DESC, ticker
             LIMIT ?
@@ -352,16 +363,16 @@ def _write_shadow_no_trade_alpha_setup_samples(
         side = str(row.get("side") or "").lower()
         if not ticker or side not in {"long", "short"}:
             continue
-        results = reviewer._json_loads(row.get("shadow_results_json")) or []
-        selected_result = _latest_shadow_result(results)
+        results = reviewer._json_loads(row.get("counterfactual_results_json")) or []
+        selected_result = _latest_counterfactual_result(results)
         if not selected_result:
             continue
-        shadow_pnl = _shadow_result_value(selected_result)
+        counterfactual_pnl = _counterfactual_result_value(selected_result)
         classification = str(row.get("classification") or "")
-        source_type = "shadow_missed_alpha" if classification == "missed_opportunity" else "shadow_reasonable_avoidance"
+        source_type = "counterfactual_missed_alpha" if classification == "missed_opportunity" else "counterfactual_reasonable_avoidance"
         horizon = str(row.get("horizon_class") or "unknown")
         regime = str(row.get("market_regime") or "unknown")
-        signal_template = str(row.get("signal_template") or "")
+        setup_type = str(row.get("setup_type") or "")
         signal_combo = row.get("signal_combo")
         if isinstance(signal_combo, str):
             parsed_combo = reviewer._json_loads(signal_combo)
@@ -371,12 +382,12 @@ def _write_shadow_no_trade_alpha_setup_samples(
         else:
             combo_items = []
         setup_type = infer_setup_type(
-            signal_template=signal_template,
+            setup_type=setup_type,
             opportunity_type=row.get("opportunity_type"),
-            opportunity_layer=row.get("opportunity_layer"),
+            opportunity_state=row.get("opportunity_state"),
         )
         combo_key = "_".join(str(item).lower() for item in combo_items[:4]) or "unknown_combo"
-        data_combo = f"shadow_no_trade_{classification}_{combo_key}"[:160]
+        data_combo = f"counterfactual_no_trade_{classification}_{combo_key}"[:160]
         scope_key = build_alpha_setup_scope_key(
             ticker=ticker,
             side=side,
@@ -392,27 +403,27 @@ def _write_shadow_no_trade_alpha_setup_samples(
             "sector": row.get("sector") or reviewer._sector_for_ticker(cfg, ticker),
             "horizon_class": horizon,
             "market_regime": regime,
-            "signal_template": signal_template,
+            "setup_type": setup_type,
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
             "source_type": source_type,
-            "recommendation_id": f"shadow:{row.get('id')}",
+            "recommendation_id": f"counterfactual:{row.get('id')}",
             "action_taken": action_taken,
-            "pm_action": "shadow_counterfactual_open",
-            "auditor_decision": "not_executed_shadow",
-            "trader_status": "shadow_not_executed",
-            "target_lots": reviewer._safe_int(row.get("shadow_lots"), reviewer._safe_int(row.get("candidate_lots"), 1)),
+            "pm_action": "counterfactual_counterfactual_open",
+            "auditor_decision": "not_executed_counterfactual",
+            "trader_status": "counterfactual_not_executed",
+            "target_lots": reviewer._safe_int(row.get("counterfactual_lots"), reviewer._safe_int(row.get("candidate_lots"), 1)),
             "current_lots": 0,
             "executed_lots": 0,
-            "net_pnl": shadow_pnl,
+            "net_pnl": counterfactual_pnl,
             "commission": 0.0,
             "holding_days": reviewer._safe_int(selected_result.get("horizon_days")),
-            "outcome_label": "profit" if shadow_pnl > 0 else "loss" if shadow_pnl < 0 else "flat_or_no_trade",
+            "outcome_label": "profit" if counterfactual_pnl > 0 else "loss" if counterfactual_pnl < 0 else "flat_or_no_trade",
             "setup_quality_score": 0.0,
-            "opportunity_layer": row.get("opportunity_layer") or "unknown",
+            "opportunity_state": row.get("opportunity_state") or "watch_for_trigger",
             "evidence": {
-                "source": "no_trade_opportunity_memory_shadow",
+                "source": "no_trade_opportunity_memory_counterfactual",
                 "memory_id": row.get("id"),
                 "original_opportunity_date": str(row.get("trading_date") or "")[:10],
                 "classification": classification,
@@ -420,14 +431,14 @@ def _write_shadow_no_trade_alpha_setup_samples(
                 "auditor_reason": row.get("auditor_reason"),
                 "execution_reason": row.get("execution_reason"),
                 "evidence_summary": row.get("evidence_summary"),
-                "shadow_entry_price": row.get("shadow_entry_price"),
+                "counterfactual_entry_price": row.get("counterfactual_entry_price"),
                 "counterfactual_boundary": "prior_only_no_direct_authority",
             },
             "result": {
-                "shadow_results": results,
-                "selected_shadow_result": selected_result,
-                "shadow_pnl": shadow_pnl,
-                "shadow_reward_source": "counterfactual_no_trade_memory",
+                "counterfactual_results": results,
+                "selected_counterfactual_result": selected_result,
+                "counterfactual_pnl": counterfactual_pnl,
+                "counterfactual_reward_source": "counterfactual_no_trade_memory",
                 "sample_date_policy": "review_date_not_original_opportunity_date",
                 "no_future_leakage": True,
             },
@@ -449,13 +460,13 @@ def _write_shadow_no_trade_alpha_setup_samples(
                     "setup_type": setup_type,
                     "source_type": source_type,
                     "original_opportunity_date": str(row.get("trading_date") or "")[:10],
-                    "shadow_pnl": shadow_pnl,
+                    "counterfactual_pnl": counterfactual_pnl,
                     "lifecycle_state": result.get("lifecycle_state"),
                 }
             )
     return {
         "rows": inserted,
-        "status": "applied" if inserted else "no_ready_shadow_samples",
+        "status": "applied" if inserted else "no_ready_counterfactual_samples",
         "lifecycle_counts": dict(lifecycle_counts),
         "sample_preview": samples[:10],
     }
@@ -505,7 +516,7 @@ def write_alpha_setup_profiles(
         combo = reviewer._signal_combo_from_snapshot(snapshot)
         horizon = reviewer._horizon_class(reviewer._expected_horizon_days(snapshot, side), snapshot)
         regime = reviewer._market_regime(snapshot)
-        template = reviewer._signal_template(side, combo, snapshot)
+        template = reviewer._setup_type(side, combo, snapshot)
         data_usage = reviewer.data_usage_from_snapshot(snapshot)
         data_combo = reviewer._data_combo_key(data_usage)
         analyst_payloads = reviewer._analyst_payloads(snapshot)
@@ -540,13 +551,13 @@ def write_alpha_setup_profiles(
         if scope_tags:
             data_combo = f"{data_combo}|evidence:{'|'.join(sorted(set(scope_tags))[:8])}"
         opportunity_type = reviewer._primary_opportunity_type(snapshot, side)
-        opportunity_layer = reviewer._primary_opportunity_layer(snapshot, side)
+        opportunity_state = reviewer._primary_opportunity_state(snapshot, side)
         opportunity_contract_summary = reviewer._opportunity_contract_summary(snapshot)
         setup_type = infer_setup_type(
             snapshot=snapshot,
-            signal_template=template,
+            setup_type=template,
             opportunity_type=opportunity_type,
-            opportunity_layer=opportunity_layer,
+            opportunity_state=opportunity_state,
         )
         sector = reviewer._sector_for_ticker(cfg, ticker)
         target_lots = reviewer._safe_int(final_contract.get("target_lots"))
@@ -603,7 +614,7 @@ def write_alpha_setup_profiles(
             "sector": sector,
             "horizon_class": horizon,
             "market_regime": regime,
-            "signal_template": template,
+            "setup_type": template,
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
@@ -631,7 +642,7 @@ def write_alpha_setup_profiles(
             ),
             "outcome_label": outcome_label,
             "setup_quality_score": reviewer._safe_float(side_scorecard.get("max_setup_quality")),
-            "opportunity_layer": opportunity_layer,
+            "opportunity_state": opportunity_state,
             "evidence": {
                 "analyst_payloads": analyst_payloads,
                 "analyst_action_evidence_contracts": action_contracts,
@@ -645,7 +656,7 @@ def write_alpha_setup_profiles(
                 "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
                 "final_action_contract": final_contract,
                 "learning_boundary": {
-                    "pm_draft_pre_open_plan_not_learning_source": True,
+                    "learning_source": "final_action_contract",
                     "strategy_outcome_bound_to_final_action_contract": bool(final_contract),
                 },
             },
@@ -679,7 +690,7 @@ def write_alpha_setup_profiles(
                 "setup_type": setup_type,
                 "scope_key": scope_key,
                 "lifecycle_state": result.get("lifecycle_state"),
-                "action_bias": result.get("action_bias"),
+                "profile_state_hint": result.get("profile_state_hint"),
             })
         execution_learning = _execution_learning_from_snapshot(snapshot)
         if execution_learning:
@@ -714,7 +725,7 @@ def write_alpha_setup_profiles(
                     if part
                 ),
                 "evidence": {
-                    "execution_plan": execution_learning.get("execution_plan") or {},
+                    "execution_contract": execution_learning.get("execution_contract") or {},
                     "setup_execution_learning": execution_learning.get("setup_execution_learning") or {},
                     "analyst_action_evidence_contracts": (
                         execution_learning.get("setup_execution_learning", {}).get("analyst_action_evidence_contracts")
@@ -730,7 +741,7 @@ def write_alpha_setup_profiles(
                     "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
                     "final_action_contract": final_contract,
                     "learning_boundary": {
-                        "pm_draft_pre_open_plan_not_learning_source": True,
+                        "learning_source": "final_action_contract",
                         "execution_outcome_bound_to_final_action_contract": bool(final_contract),
                     },
                 },
@@ -770,25 +781,25 @@ def write_alpha_setup_profiles(
                     "scope_key": execution_scope_key,
                     "source_type": "execution",
                     "lifecycle_state": execution_result.get("lifecycle_state"),
-                    "action_bias": execution_result.get("action_bias"),
+                    "profile_state_hint": execution_result.get("profile_state_hint"),
                 })
-    shadow_summary = _write_shadow_no_trade_alpha_setup_samples(
+    counterfactual_summary = _write_counterfactual_no_trade_alpha_setup_samples(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    if shadow_summary.get("rows"):
-        rows += reviewer._safe_int(shadow_summary.get("rows"))
-        for key, value in (shadow_summary.get("lifecycle_counts") or {}).items():
+    if counterfactual_summary.get("rows"):
+        rows += reviewer._safe_int(counterfactual_summary.get("rows"))
+        for key, value in (counterfactual_summary.get("lifecycle_counts") or {}).items():
             lifecycle_counts[str(key)] += reviewer._safe_int(value)
-        samples.extend(shadow_summary.get("sample_preview") or [])
+        samples.extend(counterfactual_summary.get("sample_preview") or [])
     return {
         "rows": rows,
         "status": "applied" if rows else "no_samples",
         "lifecycle_counts": dict(lifecycle_counts),
         "sample_preview": samples[:10],
-        "shadow_no_trade_alpha_setup": shadow_summary,
+        "counterfactual_no_trade_alpha_setup": counterfactual_summary,
     }
 
 
@@ -853,12 +864,12 @@ def _episode_alpha_setup_samples(
             continue
         signal_snapshot = payload.get("signal_snapshot") if isinstance(payload.get("signal_snapshot"), dict) else {}
         opportunity_type = str(payload.get("opportunity_type") or "")
-        opportunity_layer = str(payload.get("opportunity_layer") or "")
+        opportunity_state = str(payload.get("opportunity_state") or "")
         setup_type = infer_setup_type(
             snapshot=signal_snapshot,
-            signal_template=row.get("signal_template"),
+            setup_type=row.get("setup_type"),
             opportunity_type=opportunity_type,
-            opportunity_layer=opportunity_layer,
+            opportunity_state=opportunity_state,
         )
         data_usage = payload.get("data_usage_summary") if isinstance(payload.get("data_usage_summary"), dict) else {}
         data_combo = _episode_data_combo(data_usage, payload)
@@ -877,7 +888,7 @@ def _episode_alpha_setup_samples(
             "sector": row.get("sector") or "unknown",
             "horizon_class": row.get("horizon_class") or "unknown",
             "market_regime": row.get("market_regime") or "unknown",
-            "signal_template": row.get("signal_template") or "*",
+            "setup_type": row.get("setup_type") or "*",
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
@@ -891,7 +902,7 @@ def _episode_alpha_setup_samples(
             "commission": 0.0,
             "holding_days": int(float(row.get("holding_days") or 0)),
             "outcome_label": "profit" if net_pnl > 0 else "loss" if net_pnl < 0 else "flat_or_no_trade",
-            "opportunity_layer": opportunity_layer or "unknown",
+            "opportunity_state": opportunity_state or "watch_for_trigger",
             "evidence": {
                 "trade_episode_memory_id": row.get("id"),
                 "open_date": row.get("open_date"),
@@ -899,7 +910,7 @@ def _episode_alpha_setup_samples(
                 "episode_date": row.get("episode_date"),
                 "lesson_text": row.get("lesson_text"),
                 "opportunity_type": opportunity_type,
-                "opportunity_layer": opportunity_layer,
+                "opportunity_state": opportunity_state,
             },
             "result": {
                 "episode_net_pnl": net_pnl,
@@ -1024,7 +1035,7 @@ def _write_alpha_setup_policy_state(
         scope = {
             "ticker": ticker,
             "side": side,
-            "signal_template": "*",
+            "setup_type": "*",
             "horizon_class": str(profile.get("horizon_class") or "*"),
             "market_regime": str(profile.get("market_regime") or "*"),
         }
@@ -1034,7 +1045,7 @@ def _write_alpha_setup_policy_state(
             "setup_type": profile.get("setup_type"),
             "data_combo": profile.get("data_combo"),
             "lifecycle_state": state,
-            "action_bias": profile.get("action_bias"),
+            "profile_state_hint": profile.get("profile_state_hint"),
             "sample_count": sample_count,
             "trade_count": trade_count,
             "win_rate": win_rate,
@@ -1119,11 +1130,11 @@ def _write_alpha_setup_policy_state(
         cursor.execute(
             """
             INSERT INTO adaptive_policy_state (
-                id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                id, config_id, ticker, side, setup_type, horizon_class, market_regime,
                 policy_type, policy_action, multiplier, confidence_score, sample_count,
                 reason, source_event_id, created_at, valid_until, payload_json, active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type)
+            ON CONFLICT(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type)
             DO UPDATE SET
                 policy_action=excluded.policy_action,
                 multiplier=excluded.multiplier,
@@ -1459,7 +1470,7 @@ def _recent_trade_episodes_for_research(
 ) -> List[Dict[str, Any]]:
     cursor.execute(
         """
-        SELECT id, ticker, side, sector, signal_template, horizon_class,
+        SELECT id, ticker, side, sector, setup_type, horizon_class,
                market_regime, open_date, close_date, holding_days, net_pnl,
                return_on_notional, outcome_label, lesson_text
         FROM trade_episode_memory
@@ -1758,7 +1769,7 @@ def apply_researcher_learning(
         trading_date=trading_date,
         strategy_recommendations=strategy_recommendations,
     )
-    no_trade_shadow_backfill = reviewer._backfill_no_trade_opportunity_shadow_results(
+    no_trade_counterfactual_backfill = reviewer._backfill_no_trade_opportunity_counterfactual_results(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -1866,7 +1877,7 @@ def apply_researcher_learning(
         trading_date=trading_date,
         strategy_recommendations=strategy_recommendations,
     )
-    neutral_forward_shadow_backfill = reviewer._backfill_neutral_forward_shadow_tracking(
+    neutral_forward_counterfactual_backfill = reviewer._backfill_neutral_forward_counterfactual_tracking(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -1915,7 +1926,7 @@ def apply_researcher_learning(
         **perf_counts,
         "trade_episode_rows": episode_rows,
         "no_trade_opportunity_rows": no_trade_memory_rows,
-        "no_trade_shadow_backfill": no_trade_shadow_backfill,
+        "no_trade_counterfactual_backfill": no_trade_counterfactual_backfill,
         "missed_alpha_accountability": missed_alpha_accountability,
         "research_position_feedback": position_feedback,
         "adaptive_policy_rows": adaptive_rows,
@@ -1936,7 +1947,7 @@ def apply_researcher_learning(
             "accountability_complete_rate": neutral_accountability.get("accountability_complete_rate", 1.0),
             "category_counts": neutral_accountability.get("category_counts", {}),
             "structured_learning_rows": neutral_accountability.get("structured_learning_rows", 0),
-            "forward_shadow_backfill": neutral_forward_shadow_backfill,
+            "forward_counterfactual_backfill": neutral_forward_counterfactual_backfill,
         },
         "capital_deployment_state": capital_state,
         "template_prior_path": template_prior_path,
@@ -1945,3 +1956,7 @@ def apply_researcher_learning(
         "causal_rule_validation_status_counts": causal_rule_validation.get("status_counts", {}),
         "exploratory_hypotheses": exploratory_hypotheses,
     }
+
+
+
+

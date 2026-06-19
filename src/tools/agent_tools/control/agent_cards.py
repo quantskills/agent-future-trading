@@ -21,7 +21,7 @@ def build_default_agent_cards() -> Dict[str, AgentCapabilityCard]:
             outputs=["action_evidence_contract", "trade_research_contract"],
             may_call_llm=True,
             required_contract_versions=["agentquant.message.v1", "agentquant.research.v1"],
-            failure_mode="degrade_to_direction_only_or_neutral",
+            failure_mode="degrade_to_watch_for_trigger_or_neutral",
         ),
         AgentCapabilityCard(
             agent_name="fundamental",
@@ -48,7 +48,7 @@ def build_default_agent_cards() -> Dict[str, AgentCapabilityCard]:
             team="decision_team",
             reads=["analyst_artifacts", "portfolio_state", "action_value", "memory_quality"],
             writes=["PMDecisionArtifact"],
-            outputs=["final_action_contract", "final_new_entry_trade_authority"],
+            outputs=["final_action_contract"],
             may_call_llm=True,
             may_create_trade_authority=True,
             may_modify_lots_or_margin=True,
@@ -68,7 +68,7 @@ def build_default_agent_cards() -> Dict[str, AgentCapabilityCard]:
         AgentCapabilityCard(
             agent_name="trader",
             team="execution_team",
-            reads=["final_action_contract.execution_plan", "audit_verdict", "intraday_market_data"],
+            reads=["final_action_contract", "audit_verdict", "intraday_market_data"],
             writes=["ExecutionArtifact"],
             outputs=["orders", "execution_learning_event"],
             may_execute_orders=True,

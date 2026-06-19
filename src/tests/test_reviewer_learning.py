@@ -58,15 +58,15 @@ from tools.agent_tools.research.reviewer_tools import (
     _export_template_prior,
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
-    _backfill_neutral_forward_shadow_tracking,
-    _neutral_shadow_tracking_summary,
+    _backfill_neutral_forward_counterfactual_tracking,
+    _neutral_counterfactual_tracking_summary,
     _write_trade_episode_memory,
     _write_learning_mechanism_policy_state,
     _write_research_position_feedback,
     _write_learned_vs_unlearned_policy_state,
     _write_validated_causal_policy_rules,
     _write_config_overlay,
-    _backfill_no_trade_opportunity_shadow_results,
+    _backfill_no_trade_opportunity_counterfactual_results,
     _write_reviewer_learning_report,
     _write_alpha_promotion_state,
     _write_contextual_rule_calibration_state,
@@ -117,7 +117,7 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                 "side": "long",
                 "horizon_class": "short",
                 "market_regime": "trend",
-                "signal_template": "long_breakout_short",
+                "setup_type": "long_breakout_short",
                 "holding_days": 2,
                 "net_pnl": 1250.0,
                 "lesson_text": "breakout held while inventory and price trend agreed",
@@ -139,11 +139,11 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                 "side": "long",
                 "horizon_class": "short",
                 "market_regime": "trend",
-                "signal_template": "long_breakout_short",
+                "setup_type": "long_breakout_short",
                 "opportunity_type": "trend_continuation",
                 "classification": "missed_opportunity",
                 "pm_reason": "intraday trigger not met",
-                "shadow_results": [{"horizon_days": 3, "shadow_pnl": 1800.0}],
+                "counterfactual_results": [{"horizon_days": 3, "counterfactual_pnl": 1800.0}],
                 "payload": {
                     "neutral_opportunity_observations": [
                         {
@@ -151,7 +151,7 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                             "bucket": "watchlist_trigger",
                             "watchlist_priority": "medium",
                             "trigger_condition": "breakout confirms with volume",
-                            "shadow_side": "long",
+                            "counterfactual_side": "long",
                         }
                     ],
                     CONTRACT_KEY: {
@@ -218,7 +218,7 @@ class _ActionValueLearningDB(_FakeLearningDB):
                 "reward_mean": 235.0,
                 "win_rate": 1.0,
                 "confidence_score": 0.3,
-                "policy_hint": "positive_candidate_exit",
+                "action_preference": "positive_candidate_exit",
                 "max_position_impact": 0.0,
                 "payload": {
                     "research_output_contract_version": "agentquant.research_action_value.v1",
@@ -537,7 +537,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(trace_item["action_value_lane"], "exit")
         self.assertIn("analysis_team", trace_item["signal_calibration"]["usable_by"])
         self.assertIn("trade_authority", trace_item["signal_calibration"]["forbidden_effects"])
-        self.assertNotIn("policy_hint", trace_item)
+        self.assertNotIn("action_preference", trace_item)
         self.assertNotIn("reward_sum", trace_item)
         self.assertNotIn("reward_mean", trace_item)
         self.assertNotIn("source_action_preference", trace_item["signal_calibration"])
@@ -633,9 +633,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
             "technical": {
                 "signal": "Bullish",
                 "confidence": 0.72,
-                "template_name": "breakout",
+                "setup_type": "breakout",
                 "horizon_class": "short",
-                "opportunity_layer": "direction_only",
+                "opportunity_state": "watch_for_trigger",
                 "opportunity_type": "unknown",
             },
             "fundamental": {"signal": "Neutral", "confidence": 0.40, "horizon_class": "medium"},
@@ -644,7 +644,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             "opportunity_scorecard": {
                 "preferred_side": "long",
                 "long": {
-                    "final_layer": "tradeable_setup",
+                    "final_state": "tradeable_candidate",
                     "dominant_opportunity_type": "trend_continuation",
                     "max_setup_quality": 0.72,
                 },
@@ -652,7 +652,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             "pm_research_contract_summary": {
                 "contract_version": "agentquant.research.v1",
                 "dominant_opportunity_types": ["trend_continuation"],
-                "opportunity_layers": ["tradeable_setup"],
+                "opportunity_states": ["tradeable_candidate"],
                 "opportunity_states": ["probe_candidate"],
                 "factor_focus": ["trend"],
                 "current_evidence_conflict": [],
@@ -728,9 +728,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(contract["max_position_impact"], "no_direct_position_impact")
         self.assertIn("position_impact_conditions", contract)
         self.assertIn("current-day data", " ".join(contract["usage_boundary"]))
-        self.assertEqual(payload["opportunity_layer"], "tradeable_setup")
+        self.assertEqual(payload["opportunity_state"], "tradeable_candidate")
         self.assertEqual(payload["opportunity_type"], "trend_continuation")
-        self.assertIn("opportunity_layer=tradeable_setup", " ".join(contract["usable_memory"]))
+        self.assertIn("opportunity_state=tradeable_candidate", " ".join(contract["usable_memory"]))
         event = cursor.execute(
             "SELECT action_json FROM learning_event_log WHERE event_type='trade_episode_memory'"
         ).fetchone()
@@ -799,7 +799,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 justification, signal_snapshot, status, created_at
             ) VALUES ('rec-open', 'cfg', 'pf', '2025-03-10', '2025-03-10',
                 'strategy', 'BU', 'bu2506', 'open_long', 1, 3200,
-                'open long', '{"pre_open_plan":{"market_regime":"trend"}}', 'pending',
+                'open long', '{"pm_internal_draft":{"market_regime":"trend"}}', 'pending',
                 '2025-03-10T09:00:00')
             """
         )
@@ -921,7 +921,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             "technical": {
                 "signal": "Bearish",
                 "confidence": 0.62,
-                "template_name": "breakdown",
+                "setup_type": "breakdown",
                 "horizon_class": "short",
                 "metadata": {
                     "data_usage_summary": {
@@ -931,7 +931,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             },
             "fundamental": {"signal": "Neutral", "confidence": 0.45, "horizon_class": "medium"},
             "commodity_news": {"signal": "Bearish", "confidence": 0.58, "horizon_class": "event_short"},
-            "pre_open_plan": {"market_regime": "range"},
+            "pm_internal_draft": {"market_regime": "range"},
         }
         cursor.execute(
             """
@@ -1063,10 +1063,10 @@ class ReviewerLearningContextTest(unittest.TestCase):
         )
         _ensure_reviewer_learning_schema(cursor)
         snapshot = {
-            "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+            "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
             "fundamental": {"signal": "Neutral", "horizon_class": "medium"},
             "commodity_news": {"signal": "Neutral", "horizon_class": "event_short"},
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "analyst_signal_combo": ["Bullish", "Neutral", "Neutral"],
                 "decision_horizon": "short",
                 "market_regime": "trend",
@@ -1140,7 +1140,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
         contract = payload[CONTRACT_KEY]
         self.assertEqual(contract["position_authority"], "risk_reduction_conditioned")
         self.assertEqual(contract["max_position_impact"], "may_reduce_or_cap_only_through_pm_auditor")
-        self.assertTrue(contract["requires_current_confirmation"])
+        self.assertFalse(contract["trigger_valid"])
+        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
         event = cursor.execute(
             "SELECT action_json FROM learning_event_log WHERE event_type='loss_template_policy'"
         ).fetchone()
@@ -1210,10 +1211,10 @@ class ReviewerLearningContextTest(unittest.TestCase):
         )
         _ensure_reviewer_learning_schema(cursor)
         snapshot = {
-            "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+            "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
             "fundamental": {"signal": "Neutral", "horizon_class": "medium"},
             "commodity_news": {"signal": "Neutral", "horizon_class": "event_short"},
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "analyst_signal_combo": ["Bullish", "Neutral", "Neutral"],
                 "decision_horizon": "short",
                 "market_regime": "trend",
@@ -1299,7 +1300,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
         cursor.execute(
             """
             INSERT INTO trade_episode_memory (
-                id, config_id, trading_date, ticker, side, sector, signal_template,
+                id, config_id, trading_date, ticker, side, sector, setup_type,
                 signal_combo, horizon_class, market_regime, open_date, close_date,
                 holding_days, net_pnl, return_on_notional, outcome_label,
                 lesson_text, payload_json, created_at
@@ -1428,7 +1429,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                         "lots": 1,
                         "signal_snapshot": json.dumps(
                             {
-                                "pre_open_plan": {
+                                "pm_internal_draft": {
                                     "target_position_ratio": 0.04,
                                     "market_confirmation": {"confirmation_score": 0.58},
                                 }
@@ -2224,14 +2225,14 @@ class StrictCompletionRegressionTest(unittest.TestCase):
             market_regime="trending",
             trend_stage="early_trend",
             price_percentile=0.25,
-            trigger_type="reversal_confirmed",
-            entry_type="initial",
+            entry_trigger="reversal_confirmed",
+            action_name="initial",
             invalidation_level=3200.0,
         )
 
         self.assertEqual(signal.horizon_class, "short")
         self.assertEqual(signal.expected_horizon_days, 2)
-        self.assertEqual(signal.trigger_type, "reversal_confirmed")
+        self.assertEqual(signal.entry_trigger, "reversal_confirmed")
 
     def test_analyst_applicability_profile_changes_weights(self):
         signals = [
@@ -2329,7 +2330,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(enriched.neutral_opportunity_bucket, "conflict_avoidance")
         self.assertEqual(enriched.neutral_watchlist_priority, "low")
 
-    def test_neutral_conditional_watchlist_is_structured_not_trade_permission(self):
+    def test_neutral_conditional_watchlist_is_structured_as_watch_for_trigger(self):
         snapshot = {
             "technical": {
                 "signal": "Neutral",
@@ -2339,16 +2340,18 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                 "would_change_view_if": "price breaks above 3200 with volume",
                 "neutral_opportunity_bucket": "watchlist_trigger",
                 "neutral_trigger_condition": "price breaks above 3200 with volume",
-                "neutral_shadow_side": "long",
+                "counterfactual_side": "long",
                 "neutral_watchlist_priority": "medium",
                 "metadata": {
                     "neutral_opportunity_contract": {
                         "bucket": "watchlist_trigger",
                         "trigger_condition": "price breaks above 3200 with volume",
-                        "shadow_side": "long",
+                        "counterfactual_side": "long",
                         "watchlist_priority": "medium",
                         "tracking_only": True,
-                        "trade_permission": "none_without_current_confirmation",
+                        "opportunity_state": "watch_for_trigger",
+                        "trigger_valid": False,
+                        "action_preference": "watch_for_trigger",
                     }
                 },
             },
@@ -2370,7 +2373,9 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(item["category"], "conditional_watchlist")
         contract = item["neutral_opportunity_contract"]
         self.assertTrue(contract["tracking_only"])
-        self.assertEqual(contract["trade_permission"], "none_without_current_confirmation")
+        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertFalse(contract["trigger_valid"])
+        self.assertEqual(contract["action_preference"], "watch_for_trigger")
         self.assertEqual(summary["category_counts"]["conditional_watchlist"], 1)
         self.assertEqual(summary["by_analyst"]["technical"]["conditional_watchlist_count"], 1)
 
@@ -2462,7 +2467,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         snapshot = attach_snapshot_contract(
             {
                 "technical": {"signal": "Bullish"},
-                "pre_open_plan": {"target_position_ratio": 0.05},
+                "pm_internal_draft": {"target_position_ratio": 0.05},
             },
             trading_date="2025-02-10",
             ticker="BU",
@@ -2483,7 +2488,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                     "commodity_news": {"analyst_horizon": "event_short"},
                 },
             },
-            "pre_open_plan": {"expected_horizon_days": 2},
+            "pm_internal_draft": {"expected_horizon_days": 2},
         }
 
         self.assertEqual(_horizon_class(2, snapshot), "medium")
@@ -2499,7 +2504,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                             {
                                 "ticker": "I",
                                 "side": "long",
-                                "signal_template": "long_breakout_continuation_medium",
+                                "setup_type": "long_breakout_continuation_medium",
                                 "horizon_class": "medium",
                                 "prior_state": "protected",
                                 "sample_count": 4,
@@ -2691,8 +2696,8 @@ class StrictCompletionRegressionTest(unittest.TestCase):
             _ensure_reviewer_learning_schema(cursor)
             cursor.execute(
                 """
-                INSERT INTO signal_template_performance (
-                    id, config_id, ticker, side, signal_template, horizon_class,
+                INSERT INTO setup_type_performance (
+                    id, config_id, ticker, side, setup_type, horizon_class,
                     market_regime, sample_count, win_rate, net_pnl, avg_pnl,
                     profit_factor, confidence_score, last_updated, payload_json
                 ) VALUES (
@@ -2731,23 +2736,23 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
 
-    def test_infer_setup_type_ignores_pm_draft_pre_open_plan(self):
+    def test_infer_setup_type_ignores_pm_draft_pm_internal_draft(self):
         setup_type = infer_setup_type(
             snapshot={
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "opportunity_type": "fundamental_inventory_anchor",
-                    "pm_decision_layer": "tradeable_setup",
+                    "pm_decision_layer": "tradeable_candidate",
                     "opportunity_scorecard": {"preferred_side": "short"},
                 },
                 "technical": {
                     "signal": "Bullish",
-                    "template_name": "trend_breakout",
+                    "setup_type": "trend_breakout",
                     "entry_trigger": "breakout confirmed",
                 },
             },
-            signal_template="",
+            setup_type="",
             opportunity_type="",
-            opportunity_layer="",
+            opportunity_state="",
         )
 
         self.assertEqual(setup_type, "trend_breakout_setup")
@@ -2810,7 +2815,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         return {
             "technical": {
                 "signal": "Bullish",
-                "template_name": "reversal_confirmed",
+                "setup_type": "reversal_confirmed",
                 "horizon_class": "short",
             },
             "fundamental": {"signal": "Bullish"},
@@ -3040,7 +3045,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row["ticker"], "ZZ")
             self.assertEqual(row["side"], "long")
-            self.assertEqual(row["signal_template"], "long_reversal_confirmed_short")
+            self.assertEqual(row["setup_type"], "long_reversal_confirmed_short")
             self.assertEqual(row["policy_action"], "demote")
             self.assertEqual(result["status"], "scoped_demote_applied")
         finally:
@@ -3263,7 +3268,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_learning_mechanism_policy_shadow_reversal_deactivates_existing_cap(self):
+    def test_learning_mechanism_policy_counterfactual_reversal_deactivates_existing_cap(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -3271,7 +3276,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute(
                 """
                 INSERT INTO adaptive_policy_state (
-                    id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                    id, config_id, ticker, side, setup_type, horizon_class, market_regime,
                     policy_type, policy_action, multiplier, confidence_score, sample_count,
                     reason, source_event_id, created_at, valid_until, payload_json, active
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -3299,13 +3304,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.executemany(
                 """
                 INSERT INTO no_trade_opportunity_memory (
-                    id, config_id, trading_date, ticker, side, signal_template,
-                    horizon_class, market_regime, shadow_results_json, created_at
+                    id, config_id, trading_date, ticker, side, setup_type,
+                    horizon_class, market_regime, counterfactual_results_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    ("nt-rev-1", "cfg", "2025-02-20", "ZZ", "long", "long_reversal_confirmed_short", "short", "trend", json.dumps([{"evaluation_date": "2025-02-25", "shadow_pnl": 2200.0}]), "now"),
-                    ("nt-rev-2", "cfg", "2025-02-21", "ZZ", "long", "long_reversal_confirmed_short", "short", "trend", json.dumps([{"evaluation_date": "2025-02-26", "shadow_pnl": 2100.0}]), "now"),
+                    ("nt-rev-1", "cfg", "2025-02-20", "ZZ", "long", "long_reversal_confirmed_short", "short", "trend", json.dumps([{"evaluation_date": "2025-02-25", "counterfactual_pnl": 2200.0}]), "now"),
+                    ("nt-rev-2", "cfg", "2025-02-21", "ZZ", "long", "long_reversal_confirmed_short", "short", "trend", json.dumps([{"evaluation_date": "2025-02-26", "counterfactual_pnl": 2100.0}]), "now"),
                 ],
             )
             recommendations = []
@@ -3349,7 +3354,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                             "enabled": True,
                             "min_distinct_trade_days_for_cap": 3,
                             "min_calendar_span_days_for_cap": 5,
-                            "shadow_reversal": {"enabled": True, "min_samples": 2, "min_net_pnl": 3000},
+                            "counterfactual_reversal": {"enabled": True, "min_samples": 2, "min_net_pnl": 3000},
                         },
                         "learning_mechanism_policy": {
                             "enabled": True,
@@ -3367,7 +3372,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "SELECT active, reason FROM adaptive_policy_state WHERE id='old-cap'"
             ).fetchone()
             self.assertEqual(old_cap["active"], 0)
-            self.assertIn("shadow reversal", old_cap["reason"])
+            self.assertIn("counterfactual reversal", old_cap["reason"])
         finally:
             conn.close()
 
@@ -3401,7 +3406,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor = conn.cursor()
             self._create_feedback_recommendation_table(cursor)
             snapshot = {
-                "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+                "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
                 "fundamental": {"signal": "Neutral"},
                 "commodity_news": {"signal": "Neutral"},
                 "horizon_scope": {"decision_horizon": "short"},
@@ -3413,7 +3418,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": 2,
                     "lots_delta": 2,
                     "target_position_ratio": 0.08,
-                    "tradable_lots_reason": "target_plan",
+                    "reason_codes": "target_plan",
                     "reason_codes": ["learning_mechanism:alpha_promotion"],
                     "learning_used": {
                         "learning_context": {
@@ -3427,7 +3432,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                         "side": "long",
                                         "horizon_class": "short",
                                         "market_regime": "trend",
-                                        "signal_template": "long_breakout_short",
+                                        "setup_type": "long_breakout_short",
                                     }
                                 ]
                             },
@@ -3439,7 +3444,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                     "policy_action": "protect",
                                     "ticker": "BU",
                                     "side": "long",
-                                    "signal_template": "long_breakout_short",
+                                    "setup_type": "long_breakout_short",
                                     "horizon_class": "short",
                                     "market_regime": "trend",
                                     "sample_count": 4,
@@ -3537,7 +3542,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor = conn.cursor()
             self._create_feedback_recommendation_table(cursor)
             snapshot = {
-                "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
+                "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
                 "fundamental": {"signal": "Neutral"},
                 "commodity_news": {"signal": "Neutral"},
                 "horizon_scope": {"decision_horizon": "short"},
@@ -3549,7 +3554,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "target_lots": 0,
                     "lots_delta": 0,
                     "target_position_ratio": 0.0,
-                    "tradable_lots_reason": "position_matched",
+                    "reason_codes": "position_matched",
                     "learning_used": {
                         "learning_context": {
                             "enabled": True,
@@ -3786,7 +3791,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_neutral_shadow_tracking_records_missed_opportunity_without_policy_action(self):
+    def test_neutral_counterfactual_tracking_records_missed_opportunity_without_policy_action(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -3811,7 +3816,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
             cursor.execute("INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)", ("p1", "2025-02-10", "ZZ", 1200.0))
 
-            summary = _neutral_shadow_tracking_summary(
+            summary = _neutral_counterfactual_tracking_summary(
                 cursor,
                 config_id="cfg",
                 trading_date="2025-02-10",
@@ -3836,16 +3841,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             self.assertEqual(summary["observation_count"], 1)
             self.assertEqual(summary["missed_opportunity_count"], 1)
-            self.assertGreater(summary["total_shadow_pnl"], 0)
+            self.assertGreater(summary["total_counterfactual_pnl"], 0)
             event = cursor.execute(
                 "SELECT action_json FROM learning_event_log WHERE event_type = ?",
-                ("neutral_shadow_tracking",),
+                ("neutral_counterfactual_tracking",),
             ).fetchone()
             self.assertTrue(json.loads(event["action_json"])["tracking_only"])
         finally:
             conn.close()
 
-    def test_neutral_shadow_tracking_uses_only_settled_forward_window(self):
+    def test_neutral_counterfactual_tracking_uses_only_settled_forward_window(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -3888,9 +3893,9 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ],
             )
 
-            summary = _neutral_shadow_tracking_summary(
+            summary = _neutral_counterfactual_tracking_summary(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-10",
                 recommendations=[
@@ -3910,12 +3915,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(summary["forward_status"], "applied")
             self.assertEqual(summary["forward_window_dates"], ["2025-02-11", "2025-02-12", "2025-02-13"])
             self.assertEqual(summary["forward_observation_count"], 1)
-            self.assertEqual(summary["forward_total_shadow_pnl"], 600.0)
+            self.assertEqual(summary["forward_total_counterfactual_pnl"], 600.0)
             self.assertEqual(summary["forward_missed_opportunity_count"], 1)
         finally:
             conn.close()
 
-    def test_neutral_forward_shadow_backfill_waits_for_future_settlements(self):
+    def test_neutral_forward_counterfactual_backfill_waits_for_future_settlements(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -3985,15 +3990,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ),
             )
 
-            pending = _backfill_neutral_forward_shadow_tracking(
+            pending = _backfill_neutral_forward_counterfactual_tracking(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-12",
             )
-            applied = _backfill_neutral_forward_shadow_tracking(
+            applied = _backfill_neutral_forward_counterfactual_tracking(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"shadow_forward_days": 3}}},
+                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-13",
             )
@@ -4002,15 +4007,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(applied["rows"], 1)
             row = cursor.execute(
                 "SELECT evidence_json FROM learning_event_log WHERE event_type = ?",
-                ("neutral_forward_shadow_tracking",),
+                ("neutral_forward_counterfactual_tracking",),
             ).fetchone()
             evidence = json.loads(row["evidence_json"])
             self.assertEqual(evidence["forward_window_dates"], ["2025-02-11", "2025-02-12", "2025-02-13"])
-            self.assertEqual(evidence["forward_total_shadow_pnl"], 600.0)
+            self.assertEqual(evidence["forward_total_counterfactual_pnl"], 600.0)
         finally:
             conn.close()
 
-    def test_no_trade_opportunity_memory_backfills_shadow_only_after_settlement(self):
+    def test_no_trade_opportunity_memory_backfills_counterfactual_only_after_settlement(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -4046,10 +4051,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "technical": {
                     "signal": "Bullish",
                     "confidence": 0.7,
-                    "template_name": "breakout",
+                    "setup_type": "breakout",
                     "horizon_class": "short",
                     "opportunity_type": "trend_continuation",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "factor_focus": ["trend"],
                     "current_evidence_conflict": [],
                 },
@@ -4063,16 +4068,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "would_change_view_if": "price confirms upside event follow-through",
                     "neutral_opportunity_bucket": "watchlist_trigger",
                     "neutral_trigger_condition": "price confirms upside event follow-through",
-                    "neutral_shadow_side": "long",
+                    "counterfactual_side": "long",
                     "neutral_watchlist_priority": "medium",
                     "metadata": {
                         "neutral_opportunity_contract": {
                             "bucket": "watchlist_trigger",
                             "trigger_condition": "price confirms upside event follow-through",
-                            "shadow_side": "long",
+                            "counterfactual_side": "long",
                             "watchlist_priority": "medium",
                             "tracking_only": True,
-                            "trade_permission": "none_without_current_confirmation",
+                            "opportunity_state": "watch_for_trigger",
+                            "trigger_valid": False,
+                            "action_preference": "watch_for_trigger",
                         }
                     },
                 },
@@ -4083,7 +4090,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "current_lots": 0,
                     "target_lots": 0,
                     "lots_delta": 0,
-                    "tradable_lots_reason": "intraday_trigger_not_met",
+                    "reason_codes": "intraday_trigger_not_met",
                     "reason_codes": ["intraday_trigger_not_met"],
                     "learning_used": {},
                 },
@@ -4092,7 +4099,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "trade_research_contracts": {
                     "technical": {
                         "opportunity_type": "trend_continuation",
-                        "opportunity_layer": "tradeable_setup",
+                        "opportunity_state": "tradeable_candidate",
                         "factor_focus": ["trend"],
                         "current_evidence_conflict": [],
                     }
@@ -4132,15 +4139,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     }
                 ],
             )
-            pending = _backfill_no_trade_opportunity_shadow_results(
+            pending = _backfill_no_trade_opportunity_counterfactual_results(
                 cursor,
-                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "shadow_forward_days": [3]}}},
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "counterfactual_forward_days": [3]}}},
                 config_id="cfg",
                 trading_date="2025-03-05",
             )
-            applied = _backfill_no_trade_opportunity_shadow_results(
+            applied = _backfill_no_trade_opportunity_counterfactual_results(
                 cursor,
-                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "shadow_forward_days": [3]}}},
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True, "counterfactual_forward_days": [3]}}},
                 config_id="cfg",
                 trading_date="2025-03-06",
             )
@@ -4149,7 +4156,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(pending["status"], "no_ready_rows")
             self.assertEqual(applied["updated_rows"], 1)
             item = cursor.execute("SELECT * FROM no_trade_opportunity_memory").fetchone()
-            results = json.loads(item["shadow_results_json"])
+            results = json.loads(item["counterfactual_results_json"])
             payload = load_externalized_json(item["payload_json"])
             self.assertEqual(results[0]["horizon_days"], 3)
             self.assertEqual(item["classification"], "missed_opportunity")
@@ -4178,12 +4185,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             snapshot = {
                 "technical": {
                     "signal": "Bullish",
-                    "template_name": "breakout_continuation",
+                    "setup_type": "breakout_continuation",
                     "horizon_class": "short",
                 },
                 "fundamental": {"signal": "Bullish"},
                 "commodity_news": {"signal": "Neutral"},
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "analyst_signal_combo": ["Bullish", "Bullish", "Neutral"],
                     "signal_direction": "long",
                     "decision_horizon": "short",
@@ -4234,7 +4241,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             contract = payload[CONTRACT_KEY]
             self.assertEqual(item["execution_reason"], "limit_locked_no_fill")
             self.assertEqual(item["candidate_lots"], 2)
-            self.assertEqual(item["shadow_lots"], 1)
+            self.assertEqual(item["counterfactual_lots"], 1)
             self.assertEqual(payload["execution_no_trade_reason"], "limit_locked_no_fill")
             self.assertEqual(payload["no_trade_reason_category"]["category"], "execution")
             self.assertEqual(payload["no_trade_reason_category"]["category_label"], "执行")
@@ -4298,8 +4305,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute("INSERT INTO daily_settlement VALUES (?, ?, ?, ?, ?)", ("p1", "2025-03-07", 5000000.0, 4850000.0, "now"))
             cursor.execute("INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?, ?, ?)", ("p1", "2025-03-07", "TA", -36000.0, -36000.0, "long"))
             snapshot = {
-                "technical": {"signal": "Bullish", "template_name": "breakout", "horizon_class": "short"},
-                "pre_open_plan": {"analyst_signal_combo": ["Bullish", "Neutral", "Neutral"], "decision_horizon": "short", "market_regime": "trend"},
+                "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
+                "pm_internal_draft": {"analyst_signal_combo": ["Bullish", "Neutral", "Neutral"], "decision_horizon": "short", "market_regime": "trend"},
             }
             cursor.execute(
                 "INSERT INTO futures_recommendation VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4307,8 +4314,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             )
             cursor.execute(
                 """
-                INSERT INTO signal_template_performance (
-                    id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                INSERT INTO setup_type_performance (
+                    id, config_id, ticker, side, setup_type, horizon_class, market_regime,
                     sample_count, win_rate, net_pnl, avg_pnl, profit_factor,
                     confidence_score, last_updated, valid_until, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -4348,7 +4355,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             profile_sql = """
                 INSERT INTO alpha_setup_profile (
                     id, config_id, ticker, side, sector, horizon_class, market_regime,
-                    setup_type, data_combo, scope_key, lifecycle_state, action_bias,
+                    setup_type, data_combo, scope_key, lifecycle_state, profile_state_hint,
                     sample_count, trade_count, no_trade_count, win_count, loss_count,
                     gross_profit, gross_loss, net_pnl, total_commission, profit_factor,
                     win_rate, max_loss, avg_holding_days, confidence_score,
@@ -4457,7 +4464,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "signal": "Bearish",
                     "confidence": 0.68,
                     "evidence_role": "entry_timing",
-                    "trade_trigger": "opening range breakdown",
+                    "entry_trigger": "opening range breakdown",
                     "invalidation": "recover above VWAP",
                     "metadata": {
                         "technical_context": {"market_regime": "trend"},
@@ -4478,18 +4485,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
                 "fundamental": {"signal": "Bullish", "evidence_role": "background"},
                 "commodity_news": {"signal": "Bullish", "evidence_role": "catalyst"},
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "decision_horizon": "short",
                     "market_regime": "trend",
                     "pm_decision_layer": "exploration_probe",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "opportunity_scorecard": {
                         "short": {
-                            "final_layer": "tradeable_setup",
+                            "final_state": "tradeable_candidate",
                             "max_setup_quality": 0.62,
                         }
                     },
-                    "execution_plan": {
+                    "execution_contract": {
                         "execution_profile": "breakout",
                         "trigger_source": "technical_breakout",
                         "entry_trigger": "opening range breakdown",
@@ -4498,7 +4505,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
                 "pm_research_contract_summary": {
                     "contract_version": "agentquant.research.v1",
-                    "opportunity_layers": ["tradeable_setup"],
+                    "opportunity_states": ["tradeable_candidate"],
                     "opportunity_states": ["probe_candidate"],
                 },
                 "final_action_contract": {
@@ -4512,15 +4519,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "horizon_class": "short",
                     "market_regime": "trend",
                     "setup_type": "trend_breakout_setup",
-                    "opportunity_layer": "tradeable_setup",
-                    "execution_plan": {
+                    "opportunity_state": "tradeable_candidate",
+                    "execution_contract": {
                         "execution_profile": "breakout",
                         "trigger_source": "technical_breakout",
                     },
                 },
                 "phase2_execution": {
                     "status": "translated_with_intraday_basis",
-                    "execution_plan": {
+                    "execution_contract": {
                         "execution_profile": "breakout",
                         "trigger_source": "technical_breakout",
                     },
@@ -4573,7 +4580,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             trade_sample = next(row for row in samples if row["source_type"] == "trade")
             trade_payload = load_externalized_json(trade_sample["payload_json"])
             self.assertIn("probe_candidate", trade_payload["evidence"].get("opportunity_states") or [])
-            self.assertNotIn("pre_open_plan", trade_payload["evidence"])
+            self.assertNotIn("pm_internal_draft", trade_payload["evidence"])
             self.assertEqual(trade_payload["evidence"]["final_action_contract"]["target_lots"], -1)
             execution_sample = next(row for row in samples if row["source_type"] == "execution")
             self.assertEqual(execution_sample["action_taken"], "execution_intraday_trigger_confirmed")
@@ -4585,7 +4592,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(feedback["price_chase_check"], "within_limit")
             self.assertIn("technical:setup_family:trend_breakout", payload["data_combo"])
             self.assertIn("analyst_action_evidence_contracts", payload["evidence"])
-            self.assertNotIn("pre_open_plan", payload["evidence"])
+            self.assertNotIn("pm_internal_draft", payload["evidence"])
             self.assertEqual(payload["evidence"]["final_action_contract"]["target_lots"], -1)
 
             action_values = cursor.execute(
@@ -4652,10 +4659,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         }
                     },
                 },
-                "pre_open_plan": {
-                    "target_lots_estimate": -1,
+                "pm_internal_draft": {
+                    "target_lots": -1,
                     "target_position_ratio": -0.01,
-                    "execution_plan": {"execution_profile": "breakout"},
+                    "execution_contract": {"execution_profile": "breakout"},
                 },
                 "execution_result": {"status": "executed", "outcome": "filled"},
             }
@@ -4762,7 +4769,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "horizon_class": "short",
                     "market_regime": "range",
                     "setup_type": "fundamental_timing_setup",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                 },
                 "execution_result": {"status": "held", "outcome": "not_filled"},
             }
@@ -4817,12 +4824,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_researcher_execution_learning_does_not_use_pre_open_plan_execution_profile(self):
+    def test_researcher_execution_learning_does_not_use_pm_internal_draft_execution_profile(self):
         snapshot = {
-            "pre_open_plan": {
-                "execution_plan": {
+            "pm_internal_draft": {
+                "execution_contract": {
                     "execution_profile": "breakout",
-                    "trigger_source": "stale_pre_open_plan",
+                    "trigger_source": "stale_pm_internal_draft",
                 }
             },
             "phase2_execution": {
@@ -4841,13 +4848,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
         self.assertEqual(feedback["action_taken"], "execution_intraday_trigger_confirmed")
         self.assertEqual(feedback["execution_profile"], "unknown")
-        self.assertEqual(feedback["execution_plan"], {})
+        self.assertEqual(feedback["execution_contract"], {})
 
     def test_researcher_execution_learning_does_not_fallback_to_pre_open_final_contract(self):
         snapshot = {
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "final_action_contract": {
-                    "execution_plan": {
+                    "execution_contract": {
                         "execution_profile": "vwap_confirmed",
                         "trigger_source": "stale_pm_draft",
                     }
@@ -4868,25 +4875,25 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         feedback = _execution_learning_from_snapshot(snapshot)
 
         self.assertEqual(feedback["execution_profile"], "unknown")
-        self.assertEqual(feedback["execution_plan"], {})
+        self.assertEqual(feedback["execution_contract"], {})
 
-    def test_shadow_no_trade_results_feed_alpha_setup_as_prior_only(self):
+    def test_counterfactual_no_trade_results_feed_alpha_setup_as_prior_only(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO no_trade_opportunity_memory (
-                    id, config_id, trading_date, ticker, side, sector, signal_template,
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
                     signal_combo, horizon_class, market_regime, opportunity_type,
-                    opportunity_layer, candidate_lots, shadow_lots, shadow_entry_price,
+                    opportunity_state, candidate_lots, counterfactual_lots, counterfactual_entry_price,
                     pm_reason, auditor_reason, execution_reason, evidence_summary,
-                    status, classification, shadow_results_json, payload_json,
+                    status, classification, counterfactual_results_json, payload_json,
                     created_at, last_reviewed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "shadow-bu-1",
+                    "counterfactual-bu-1",
                     "cfg",
                     "2025-03-03",
                     "BU",
@@ -4897,7 +4904,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "short",
                     "trend",
                     "probe",
-                    "tradeable_setup",
+                    "tradeable_candidate",
                     1,
                     1,
                     3500.0,
@@ -4907,7 +4914,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "missed BU breakout probe",
                     "closed",
                     "missed_opportunity",
-                    json.dumps([{"horizon_days": 3, "shadow_pnl": 2100.0}]),
+                    json.dumps([{"horizon_days": 3, "counterfactual_pnl": 2100.0}]),
                     json.dumps({"source": "test"}),
                     "now",
                     "now",
@@ -4916,16 +4923,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute(
                 """
                 INSERT INTO no_trade_opportunity_memory (
-                    id, config_id, trading_date, ticker, side, sector, signal_template,
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
                     signal_combo, horizon_class, market_regime, opportunity_type,
-                    opportunity_layer, candidate_lots, shadow_lots, shadow_entry_price,
+                    opportunity_state, candidate_lots, counterfactual_lots, counterfactual_entry_price,
                     pm_reason, auditor_reason, execution_reason, evidence_summary,
-                    status, classification, shadow_results_json, payload_json,
+                    status, classification, counterfactual_results_json, payload_json,
                     created_at, last_reviewed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "shadow-bu-same-day",
+                    "counterfactual-bu-same-day",
                     "cfg",
                     "2025-03-10",
                     "BU",
@@ -4936,7 +4943,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "short",
                     "trend",
                     "probe",
-                    "tradeable_setup",
+                    "tradeable_candidate",
                     1,
                     1,
                     3500.0,
@@ -4946,7 +4953,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "future boundary",
                     "closed",
                     "missed_opportunity",
-                    json.dumps([{"horizon_days": 3, "shadow_pnl": 9999.0}]),
+                    json.dumps([{"horizon_days": 3, "counterfactual_pnl": 9999.0}]),
                     json.dumps({}),
                     "now",
                     "now",
@@ -4961,7 +4968,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 strategy_recommendations=[],
             )
 
-            self.assertEqual(summary["shadow_no_trade_alpha_setup"]["rows"], 1)
+            self.assertEqual(summary["counterfactual_no_trade_alpha_setup"]["rows"], 1)
             sample = cursor.execute(
                 """
                 SELECT trading_date, source_type, action_taken, net_pnl, payload_json
@@ -4970,7 +4977,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 """
             ).fetchone()
             self.assertEqual(sample["trading_date"], "2025-03-10")
-            self.assertEqual(sample["source_type"], "shadow_missed_alpha")
+            self.assertEqual(sample["source_type"], "counterfactual_missed_alpha")
             self.assertEqual(sample["action_taken"], "open_long")
             self.assertEqual(sample["net_pnl"], 2100.0)
             payload = load_externalized_json(sample["payload_json"])
@@ -4987,8 +4994,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(action_value["action_name"], "open")
             self.assertAlmostEqual(action_value["reward_sum"], 735.0)
             av_payload = load_externalized_json(action_value["payload_json"])
-            self.assertTrue(av_payload["shadow_prior_only"])
-            self.assertEqual(av_payload["shadow_reward_count"], 1)
+            self.assertTrue(av_payload["counterfactual_prior_only"])
+            self.assertEqual(av_payload["counterfactual_reward_count"], 1)
             self.assertEqual(av_payload["real_trade_reward_count"], 0)
 
             second_summary = write_alpha_setup_profiles(
@@ -4998,9 +5005,9 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 trading_date="2025-03-10",
                 strategy_recommendations=[],
             )
-            self.assertEqual(second_summary["shadow_no_trade_alpha_setup"]["rows"], 0)
+            self.assertEqual(second_summary["counterfactual_no_trade_alpha_setup"]["rows"], 0)
             sample_count = cursor.execute(
-                "SELECT COUNT(*) AS cnt FROM alpha_setup_sample WHERE source_type LIKE 'shadow_%'"
+                "SELECT COUNT(*) AS cnt FROM alpha_setup_sample WHERE source_type LIKE 'counterfactual_%'"
             ).fetchone()["cnt"]
             self.assertEqual(sample_count, 1)
         finally:
@@ -5049,7 +5056,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "signal": "Bullish",
                     "confidence": 0.62,
                     "evidence_role": "entry_timing",
-                    "trade_trigger": "opening range breakout",
+                    "entry_trigger": "opening range breakout",
                     "invalidation": "break below VWAP",
                     "metadata": {
                         "technical_context": {"market_regime": "range"},
@@ -5066,18 +5073,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
                 "fundamental": {"signal": "Bullish", "evidence_role": "background"},
                 "commodity_news": {"signal": "Neutral", "evidence_role": "risk"},
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "decision_horizon": "short",
                     "market_regime": "range",
                     "pm_decision_layer": "exploration_probe",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "opportunity_scorecard": {
                         "long": {
-                            "final_layer": "tradeable_setup",
+                            "final_state": "tradeable_candidate",
                             "max_setup_quality": 0.62,
                         }
                     },
-                    "execution_plan": {
+                    "execution_contract": {
                         "execution_profile": "breakout",
                         "trigger_source": "technical_breakout",
                     },
@@ -5102,7 +5109,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "horizon_class": "short",
                     "market_regime": "range",
                     "setup_type": "trend_breakout_setup",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                 },
                 "execution_result": {"status": "executed", "outcome": "filled"},
             }
@@ -5127,12 +5134,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             row = cursor.execute(
                 """
-                SELECT policy_hint, payload_json
+                SELECT action_preference, payload_json
                 FROM alpha_setup_action_value
                 WHERE config_id='cfg' AND action_name='open'
                 """
             ).fetchone()
-            self.assertEqual(row["policy_hint"], "positive_candidate_open")
+            self.assertEqual(row["action_preference"], "positive_candidate_open")
             payload = load_externalized_json(row["payload_json"])
             self.assertEqual(payload["action_preference"], "positive_candidate_open")
             self.assertEqual(payload["amplification_scope_quality"], "exact_real_state")
@@ -5226,7 +5233,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "holding_days": 1,
                 "outcome_label": "win",
                 "setup_quality_score": 0.7,
-                "opportunity_layer": "tradeable_setup",
+                "opportunity_state": "tradeable_candidate",
                 "evidence": {"reason_codes": ["profit_protection_exit"]},
                 "result": {"reward_source": "real_trade"},
             }
@@ -5257,7 +5264,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             rows = cursor.execute(
                 """
-                SELECT setup_type, action_name, policy_hint, payload_json
+                SELECT setup_type, action_name, action_preference, payload_json
                 FROM alpha_setup_action_value
                 WHERE config_id='cfg' AND ticker='SR'
                 ORDER BY action_name
@@ -5267,7 +5274,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             observed = {}
             for row in rows:
                 payload = load_externalized_json(row["payload_json"])
-                observed[row["action_name"]] = (row["policy_hint"], payload)
+                observed[row["action_name"]] = (row["action_preference"], payload)
 
             exit_hint, exit_payload = observed["exit"]
             self.assertEqual(exit_hint, "positive_candidate_exit")
@@ -5317,7 +5324,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "source_type": "trade",
                     "recommendation_id": "rec-bu-exit",
                     "action_taken": "close_short",
-                    "pm_action": "no_trade",
+                    "pm_action": "no_opportunity",
                     "auditor_decision": "allow",
                     "trader_status": "executed",
                     "current_lots": -10,
@@ -5328,7 +5335,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "holding_days": 0,
                     "outcome_label": "loss",
                     "setup_quality_score": 0.6596,
-                    "opportunity_layer": "direction_only",
+                    "opportunity_state": "watch_for_trigger",
                     "evidence": {"reason_codes": ["exploration_probe_reconfirm_failed"]},
                     "result": {"reward_source": "real_trade"},
                 },
@@ -5336,7 +5343,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             row = cursor.execute(
                 """
-                SELECT policy_hint, payload_json
+                SELECT action_preference, payload_json
                 FROM alpha_setup_action_value
                 WHERE config_id='cfg' AND ticker='BU' AND action_name='exit'
                 """
@@ -5344,7 +5351,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertIsNotNone(row)
             payload = load_externalized_json(row["payload_json"])
             self.assertEqual(payload["action_preference"], "tail_loss_protect")
-            self.assertEqual(row["policy_hint"], payload["action_preference"])
+            self.assertEqual(row["action_preference"], payload["action_preference"])
             self.assertEqual(payload["amplification_scope_quality"], "partial_real_state")
             self.assertEqual(payload["real_trade_reward_count"], 1)
         finally:
@@ -5406,18 +5413,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
                 "fundamental": {"signal": "Bullish", "evidence_role": "background"},
                 "commodity_news": {"signal": "Neutral", "evidence_role": "risk"},
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "decision_horizon": "short",
                     "market_regime": "range",
                     "pm_decision_layer": "exploration_probe",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "opportunity_scorecard": {
                         "long": {
-                            "final_layer": "tradeable_setup",
+                            "final_state": "tradeable_candidate",
                             "max_setup_quality": 0.64,
                         }
                     },
-                    "execution_plan": {"execution_profile": "breakout"},
+                    "execution_contract": {"execution_profile": "breakout"},
                 },
                 "final_action_contract": {
                     "contract_version": "agentquant.final_action.v1",
@@ -5430,14 +5437,14 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "horizon_class": "short",
                     "market_regime": "range",
                     "setup_type": "trend_breakout_setup",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                 },
                 "execution_result": {"status": "executed", "outcome": "filled"},
             }
             cursor.execute(
                 """
                 INSERT INTO trade_episode_memory (
-                    id, config_id, trading_date, ticker, side, sector, signal_template,
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
                     signal_combo, horizon_class, market_regime, episode_date, open_date,
                     close_date, holding_days, net_pnl, return_on_notional, outcome_label,
                     lesson_text, payload_json, created_at
@@ -5467,7 +5474,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                             "open_recommendation_id": "rec-p-episode",
                             "signal_snapshot": snapshot,
                             "opportunity_type": "trend_continuation",
-                            "opportunity_layer": "tradeable_setup",
+                            "opportunity_state": "tradeable_candidate",
                             "data_usage_summary": {"pandaai": {"freshness": "current"}},
                         }
                     ),
@@ -5514,12 +5521,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             row = cursor.execute(
                 """
-                SELECT policy_hint, reward_sum, reward_mean, payload_json
+                SELECT action_preference, reward_sum, reward_mean, payload_json
                 FROM alpha_setup_action_value
                 WHERE config_id='cfg' AND action_name='open'
                 """
             ).fetchone()
-            self.assertEqual(row["policy_hint"], "positive_candidate_open")
+            self.assertEqual(row["action_preference"], "positive_candidate_open")
             self.assertEqual(row["reward_sum"], 14640.0)
             payload = load_externalized_json(row["payload_json"])
             self.assertEqual(payload["action_preference"], "positive_candidate_open")
@@ -5547,12 +5554,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         },
                     },
                 },
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "decision_horizon": "short",
                     "market_regime": "range",
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "opportunity_scorecard": {
-                        "long": {"final_layer": "tradeable_setup", "max_setup_quality": 0.7}
+                        "long": {"final_state": "tradeable_candidate", "max_setup_quality": 0.7}
                     },
                 },
             }
@@ -5573,8 +5580,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "net_pnl": -866.59,
                 "commission": 0.0,
                 "source_type": "trade",
-                "opportunity_layer": "tradeable_setup",
-                "evidence": {"pre_open_plan": snapshot["pre_open_plan"]},
+                "opportunity_state": "tradeable_candidate",
+                "evidence": {"pm_internal_draft": snapshot["pm_internal_draft"]},
                 "result": {"pnl_source": "daily_open_sample"},
             }
             episode_sample = {
@@ -5612,7 +5619,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_contextual_rule_calibration_writes_intraday_policy_from_missed_timing_shadow(self):
+    def test_contextual_rule_calibration_writes_intraday_policy_from_missed_timing_counterfactual(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -5620,11 +5627,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute(
                 """
                 INSERT INTO no_trade_opportunity_memory (
-                    id, config_id, trading_date, ticker, side, sector, signal_template,
+                    id, config_id, trading_date, ticker, side, sector, setup_type,
                     signal_combo, horizon_class, market_regime, opportunity_type,
-                    opportunity_layer, candidate_lots, shadow_lots, shadow_entry_price,
+                    opportunity_state, candidate_lots, counterfactual_lots, counterfactual_entry_price,
                     pm_reason, auditor_reason, execution_reason, evidence_summary,
-                    status, classification, shadow_results_json, payload_json,
+                    status, classification, counterfactual_results_json, payload_json,
                     created_at, last_reviewed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -5640,7 +5647,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "short",
                     "trend",
                     "probe",
-                    "tradeable_setup",
+                    "tradeable_candidate",
                     1,
                     1,
                     3500.0,
@@ -5650,7 +5657,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "timing miss",
                     "closed",
                     "missed_opportunity",
-                    json.dumps([{"horizon_days": 3, "shadow_pnl": 2500.0}]),
+                    json.dumps([{"horizon_days": 3, "counterfactual_pnl": 2500.0}]),
                     json.dumps(payload),
                     "now",
                     "now",
@@ -5666,7 +5673,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "contextual_rule_calibration": {
                             "enabled": True,
                             "valid_days": 5,
-                            "min_shadow_pnl_for_relaxation": 1000,
+                            "min_counterfactual_pnl_for_relaxation": 1000,
                             "relaxed_opening_range_miss": 0.003,
                             "relaxed_intraday_confirmation_score": 0.65,
                         }
@@ -5892,8 +5899,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                 "expected_horizon_days": 2,
                                 "trend_stage": "low_position_reversal",
                                 "price_percentile": 0.24,
-                                "trigger_type": "reversal_confirmed",
-                                "entry_type": "initial",
+                                "entry_trigger": "reversal_confirmed",
+                                "action_name": "initial",
                                 "invalidation_level": 3220.0,
                                 "target_return": 0.035,
                             },
@@ -5963,8 +5970,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO signal_template_performance (
-                    id, config_id, ticker, side, signal_template, horizon_class, market_regime,
+                INSERT INTO setup_type_performance (
+                    id, config_id, ticker, side, setup_type, horizon_class, market_regime,
                     sample_count, win_rate, net_pnl, avg_pnl, profit_factor,
                     confidence_score, last_updated, valid_until, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -6061,7 +6068,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 markdown_text = markdown.read_text(encoding="utf-8")
                 self.assertIn("Positive Templates", markdown_text)
                 self.assertIn("Neutral Accountability", markdown_text)
-                self.assertEqual(payload["positive_templates"][0]["signal_template"], "long_reversal_confirmed_trend")
+                self.assertEqual(payload["positive_templates"][0]["setup_type"], "long_reversal_confirmed_trend")
                 self.assertEqual(payload["neutral_accountability"]["neutral_count"], 1)
         finally:
             conn.close()
@@ -6074,11 +6081,11 @@ class _FakeReviewerWeightDB:
     def get_analyst_performance(self, **kwargs):
         return []
 
-    def get_signal_template_performance(self, **kwargs):
+    def get_setup_type_performance(self, **kwargs):
         return [
             {
                 "horizon_class": "short",
-                "signal_template": "long_reversal_confirmed_trend",
+                "setup_type": "long_reversal_confirmed_trend",
                 "sample_count": 4,
                 "win_rate": 0.75,
                 "net_pnl": 1800.0,
@@ -6090,7 +6097,7 @@ class _FakeReviewerWeightDB:
         return [
             {
                 "horizon_class": "medium",
-                "signal_template": "long_late_chase_range",
+                "setup_type": "long_late_chase_range",
                 "policy_action": "cap",
                 "multiplier": 0.5,
                 "confidence_score": 0.8,
@@ -6115,3 +6122,11 @@ class ReviewerDynamicWeightsRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+
+
+

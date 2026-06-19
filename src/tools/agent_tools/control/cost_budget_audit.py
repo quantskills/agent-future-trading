@@ -12,8 +12,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 TRADE_ACTION_KEYS = {
     "authority_type",
-    "can_open_real_position",
-    "can_apply_min_real_floor",
+    "open_action_evidence",
+    "strong_current_evidence",
     "lots",
     "target_lots",
     "margin_ratio",

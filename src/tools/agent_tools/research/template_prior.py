@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -164,14 +164,14 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
             net_pnl = float(item.get("net_pnl") or 0.0)
             avg_pnl = float(item.get("avg_pnl") or 0.0)
             confidence = float(item.get("confidence_score") or min(1.0, sample_count / 10.0 + abs(net_pnl) / 50000.0))
-            template_name = str(item.get("signal_template") or item.get("template_name") or "unknown")
+            setup_type = str(item.get("setup_type") or item.get("setup_type") or "unknown")
             horizon_class = str(item.get("horizon_class") or "unknown")
             row_payload = {
                 "source_file": str(prior_path),
                 "loaded_at_trading_date": trading_day_value,
                 "ticker": ticker,
                 "side": side,
-                "signal_template": template_name,
+                "setup_type": setup_type,
                 "horizon_class": horizon_class,
                 "prior_state": state,
                 "original_prior_state": original_state,
@@ -203,7 +203,7 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
                     net_pnl,
                     avg_pnl,
                     confidence,
-                    f"template_prior:{template_name}:{horizon_class}",
+                    f"template_prior:{setup_type}:{horizon_class}",
                     source_trading_date,
                     now,
                     valid_until,
@@ -221,3 +221,4 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
     finally:
         if conn:
             conn.close()
+

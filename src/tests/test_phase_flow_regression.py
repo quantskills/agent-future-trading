@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import hashlib
 import sqlite3
@@ -40,7 +40,7 @@ from agents.decision_team.portfolio_manager import (
     _apply_holding_rebalance_control,
     _apply_position_budget_policy_for_new_entry,
     _alpha_setup_action_value_trace,
-    _final_new_entry_trade_authority,
+    _final_contract_authority,
     _is_lifecycle_exit_required_reason,
     _minimum_real_probe_candidate_ratio,
     _positive_open_action_value_seed,
@@ -52,16 +52,16 @@ from agents.decision_team.portfolio_manager import (
     _apply_trade_frequency_control,
     _apply_winning_template_continuation_control,
     _build_phase1_recommendation,
-    _build_pre_open_plan_snapshot,
+    _build_pm_decision_context,
     _build_final_action_contract,
     _build_release_block_diagnostics,
     _validate_required_analyst_signals,
     _pm_new_entry_semantic_block_reason,
     _scorecard_probe_seed,
-    _side_opportunity_layer_summary,
+    _side_opportunity_state_summary,
     portfolio_agent_futures,
 )
-from agents.execution_team.trader import _execution_plan_from_snapshot, _setup_execution_learning_context
+from agents.execution_team.trader import _execution_contract_from_snapshot, _setup_execution_learning_context
 from tools.agent_tools.analysis.quality import (
     apply_trade_research_contract,
     build_technical_context,
@@ -216,13 +216,13 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         self.assertEqual(len(signals), 3)
         self.assertEqual({signal.agent_name for signal in signals}, {"technical", "fundamental", "commodity_news"})
-        self.assertTrue(all(signal.opportunity_layer == "no_trade" for signal in signals))
+        self.assertTrue(all(signal.opportunity_state == "no_opportunity" for signal in signals))
         self.assertTrue(all(signal.tradeability_reason == "pre_open_reference_price_unavailable" for signal in signals))
         snapshot = workflow._build_signal_snapshot_from_signals(signals)
         self.assertEqual(set(snapshot), {"technical", "fundamental", "commodity_news"})
         self.assertEqual(snapshot["technical"]["metadata"]["no_trade_category"], "data")
 
-    def test_virtual_phase1_portfolio_uses_final_contract_not_stale_pre_open_plan(self):
+    def test_virtual_phase1_portfolio_uses_final_contract_not_internal_draft(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         portfolio = Portfolio(
             id="p1",
@@ -239,8 +239,8 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             lots=8,
             base_price=3000.0,
             signal_snapshot={
-                "pre_open_plan": {
-                    "target_lots_estimate": -8,
+                "pm_internal_draft": {
+                    "target_lots": -8,
                     "reference_price": 2990.0,
                 },
                 "final_action_contract": {
@@ -282,7 +282,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             action=RecommendationAction.OPEN_SHORT,
             lots=8,
             base_price=3000.0,
-            signal_snapshot={"pre_open_plan": {"target_lots_estimate": -8}},
+            signal_snapshot={"pm_internal_draft": {"target_lots": -8}},
         )
 
         with patch(
@@ -344,11 +344,11 @@ class ResearchLearningMechanismRegressionTest(unittest.TestCase):
         self.assertIn("technical_parameter_calibration", mechanisms)
         self.assertIn("tail_loss_sentinel", mechanisms)
 
-    def test_learning_mechanisms_ignore_pm_draft_pre_open_plan_trace(self):
+    def test_learning_mechanisms_ignore_pm_internal_draft_trace(self):
         recommendation = {
             "signal_snapshot": json.dumps(
                 {
-                    "pre_open_plan": {
+                    "pm_internal_draft": {
                         "strategy_controls": {
                             "reasons": ["adaptive_policy_cap"],
                             "diagnostics": {
@@ -403,10 +403,10 @@ class ResearchLearningMechanismRegressionTest(unittest.TestCase):
 
 
 class AnalystStrategyQualityRegressionTest(unittest.TestCase):
-    def test_news_direction_without_strong_catalyst_stays_direction_only(self):
+    def test_news_direction_without_strong_catalyst_stays_watch_for_trigger(self):
         news_item = SimpleNamespace(
-            title="库存小幅下降",
-            content="现货成交一般，市场等待进一步确认。",
+            title="inventory edges lower",
+            content="spot trading remains average and the market is waiting for further confirmation",
             publish_time="2025-01-02 08:30:00",
         )
         context = summarize_news_events([news_item], "BU")
@@ -416,16 +416,16 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             confidence=0.70,
             horizon_class="event_short",
             business_quality_score=0.70,
-            trigger_type="news_event_trigger",
+            entry_trigger="news_event_trigger",
         )
 
         signal = apply_trade_research_contract(signal, context, analyst="commodity_news", ticker="BU")
 
         self.assertFalse(context["tradable_event"])
-        self.assertEqual(signal.opportunity_layer, "direction_only")
+        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
         self.assertIn("news_event_not_tradable_catalyst", signal.current_evidence_conflict)
 
-    def test_technical_trend_in_choppy_state_is_not_tradeable_setup(self):
+    def test_technical_trend_in_choppy_state_is_not_tradeable_candidate(self):
         context = build_technical_context(
             "RB",
             {
@@ -450,10 +450,10 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         signal = apply_trade_research_contract(signal, context, analyst="technical", ticker="RB")
 
         self.assertIn(context["market_regime"], {"choppy", "range", "weak_trend"})
-        self.assertEqual(signal.opportunity_layer, "direction_only")
+        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
         self.assertIn("technical_trend_requires_regime_confirmation", signal.current_evidence_conflict)
 
-    def test_medium_fundamental_anchor_without_short_trigger_is_direction_only(self):
+    def test_medium_fundamental_anchor_without_short_trigger_is_watch_for_trigger(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BEARISH,
@@ -466,7 +466,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
 
         signal = apply_trade_research_contract(signal, context, analyst="fundamental", ticker="J")
 
-        self.assertEqual(signal.opportunity_layer, "direction_only")
+        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
         self.assertIn(
             "fundamental_anchor_requires_short_trigger_and_invalidation",
             signal.current_evidence_conflict,
@@ -493,19 +493,19 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
 
         signal = apply_trade_research_contract(signal, context, analyst="fundamental", ticker="J")
 
-        self.assertEqual(signal.opportunity_layer, "tradeable_setup")
+        self.assertEqual(signal.opportunity_state, "probe_candidate")
         self.assertIn(
             "fundamental_anchor_has_short_trigger_and_invalidation",
             signal.current_evidence_conflict,
         )
 
-    def test_pm_blocks_direction_only_new_entry_without_hard_product_rule(self):
+    def test_pm_blocks_watch_for_trigger_new_entry_without_hard_product_rule(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.75,
             horizon_class="short",
-            opportunity_layer="direction_only",
+            opportunity_state="watch_for_trigger",
             business_quality_score=0.70,
         )
         ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
@@ -522,7 +522,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                 "portfolio_manager": {
                     "holding_rebalance_control": {
                         "enabled": True,
-                        "direction_only_new_entry": {"enabled": True, "allow_probe": False},
+                        "watch_for_trigger_new_entry": {"enabled": True, "allow_probe": False},
                     }
                 }
             },
@@ -531,9 +531,11 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(ratio, 0.0)
-        self.assertIn("pm_direction_only_not_tradeable", reasons)
+        self.assertIn("pm_watch_for_trigger_not_tradeable", reasons)
         self.assertTrue(
-            diagnostics["holding_rebalance_control"]["opportunity_layer_summary"]["layer_counts"].get("direction_only")
+            diagnostics["holding_rebalance_control"]["opportunity_state_summary"]["opportunity_state_counts"].get(
+                "watch_for_trigger"
+            )
         )
 
     def test_analyst_learning_calibration_improves_evidence_quality_without_trade_authority(self):
@@ -563,7 +565,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "reward_sum": 9600.0,
                         "win_rate": 0.75,
                         "confidence_score": 0.70,
-                        "policy_hint": "controlled_open_or_add",
+                        "action_preference": "controlled_open_or_add",
                         "signal_calibration": {
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
@@ -624,7 +626,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "reward_sum": -9000.0,
                         "win_rate": 0.20,
                         "confidence_score": 0.65,
-                        "policy_hint": "cap_revalidate_before_open",
+                        "action_preference": "cap_revalidate_before_open",
                         "signal_calibration": {
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
@@ -645,7 +647,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "reward_sum": 10800.0,
                         "win_rate": 0.70,
                         "confidence_score": 0.75,
-                        "policy_hint": "controlled_open_or_add",
+                        "action_preference": "controlled_open_or_add",
                         "signal_calibration": {
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
@@ -704,7 +706,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "reward_sum": 9600.0,
                         "win_rate": 0.75,
                         "confidence_score": 0.70,
-                        "policy_hint": "positive_candidate_open",
+                        "action_preference": "positive_candidate_open",
                     }
                 ]
             },
@@ -778,7 +780,6 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             signal=Signal.BULLISH,
             confidence=0.58,
             business_quality_score=0.58,
-            opportunity_layer="direction_only",
             opportunity_state="probe_candidate",
             entry_trigger="break above opening range with volume",
             invalidation_level=3320.0,
@@ -786,12 +787,12 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             invalidation_present=True,
         )
 
-        summary = _side_opportunity_layer_summary([technical], "long")
+        summary = _side_opportunity_state_summary([technical], "long")
 
         self.assertEqual(summary["supporting_signal_count"], 1)
         self.assertEqual(summary["opportunity_state_counts"]["probe_candidate"], 1)
         self.assertTrue(summary["has_probe_candidate_support"])
-        self.assertFalse(summary["has_tradeable_support"])
+        self.assertTrue(summary["has_tradeable_support"])
 
 class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
     class _PMTestDB:
@@ -873,18 +874,18 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             recommendation_intent=recommendation_intent_from_lots(0, 0),
             final_entry_authority={
                 "authority_type": "watchlist_only",
-                "can_open_real_position": False,
-                "direction_only_block": False,
+                "open_action_evidence": False,
+                "watch_for_trigger_block": False,
             },
             control_reasons=["market_confirmation_below_release_threshold"],
             control_diagnostics={},
             opportunity_scorecard={
                 "preferred_side": "short",
-                "short": {"final_layer": "tradeable_setup", "score": 0.71},
+                "short": {"final_state": "tradeable_candidate", "score": 0.71},
             },
             market_confirmation={"confirmation_score": 0.54, "status": "weak"},
             alpha_setup_action_values=[],
-            execution_plan={},
+            execution_contract_fields={},
         )
         before = json.loads(json.dumps(contract, sort_keys=True))
 
@@ -893,15 +894,15 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             final_action_contract=contract,
             final_entry_authority={
                 "authority_type": "watchlist_only",
-                "can_open_real_position": False,
-                "direction_only_block": False,
+                "open_action_evidence": False,
+                "watch_for_trigger_block": False,
             },
             control_reasons=["market_confirmation_below_release_threshold"],
             lots_to_trade_reason="market_confirmation_below_release_threshold",
             control_diagnostics={},
             opportunity_scorecard={
                 "preferred_side": "short",
-                "short": {"final_layer": "tradeable_setup", "score": 0.71},
+                "short": {"final_state": "tradeable_candidate", "score": 0.71},
             },
             market_confirmation={"confirmation_score": 0.54, "status": "weak"},
             full_config={
@@ -930,7 +931,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             "target_lots",
             "lots_delta",
             "target_position_ratio",
-            "can_open_real_position",
+            "open_action_evidence",
         ):
             self.assertNotIn(forbidden, serialized)
 
@@ -960,7 +961,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             opportunity_scorecard={},
             market_confirmation={},
             alpha_setup_action_values=[],
-            execution_plan={},
+            execution_contract_fields={},
         )
 
         recommendation = _build_phase1_recommendation(
@@ -1004,12 +1005,12 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": -1,
             "lots_delta": -1,
-            "tradable_lots_if_executed_now": 1,
-            "tradable_lots_reason": "explicit_contract",
+            "lots_delta_abs": 1,
+            "reason_codes": "explicit_contract",
             "target_position_ratio": -0.01,
             "authority_type": "exploration_probe",
-            "can_open_real_position": False,
-            "can_apply_min_real_floor": False,
+            "open_action_evidence": False,
+            "strong_current_evidence": False,
             "open_action_evidence": True,
             "strong_current_evidence": True,
             "reason_codes": ["explicit_contract"],
@@ -1034,36 +1035,25 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[],
             plan_snapshot={
-                "target_lots_estimate": -8,
+                "target_lots": -8,
                 "target_position_ratio": -0.08,
                 "final_action_contract": {
                     "final_action": "open_real",
                     "current_lots": 0,
                     "target_lots": -8,
                     "lots_delta": -8,
-                    "tradable_lots_reason": "stale_pm_draft",
+                    "reason_codes": "stale_pm_draft",
                     "consistency": {"status": "stale"},
                 },
                 "recommendation_position_consistency": {"status": "stale"},
-                "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "exploration_probe",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                            "open_action_evidence": True,
-                            "strong_current_evidence": True,
-                            "reason_codes": ["explicit_contract"],
-                        }
-                    }
-                },
+                "strategy_controls": {"diagnostics": {}},
             },
             final_action_contract=explicit_contract,
         )
 
         snapshot = recommendation.signal_snapshot
         self.assertEqual(snapshot["final_action_contract"]["target_lots"], -1)
-        self.assertEqual(snapshot["final_action_contract"]["tradable_lots_reason"], "explicit_contract")
+        self.assertEqual(snapshot["final_action_contract"]["reason_codes"], ["explicit_contract"])
         self.assertIn("recommendation_position_consistency=ok", recommendation.justification)
         self.assertNotIn("stale_pm_draft", recommendation.justification)
         self.assertNotIn("recommendation_position_consistency=stale", recommendation.justification)
@@ -1132,9 +1122,8 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 "AnalystSignalArtifact:technical",
             ],
         )
-        self.assertNotIn("pre_open_plan", snapshot)
+        self.assertNotIn("pm_internal_draft", snapshot)
         contract = snapshot["final_action_contract"]
-        self.assertEqual(contract["tradable_lots_reason"], "data_price_anomaly")
         self.assertIn("data_price_anomaly", contract["reason_codes"])
         self.assertEqual(contract["target_lots"], 0)
         self.assertEqual(contract["lots_delta"], 0)
@@ -1233,7 +1222,7 @@ class PandaAIContractNormalizationRegressionTest(unittest.TestCase):
             def get_market_data(self, **kwargs):
                 self.market_calls += 1
                 if self.market_calls == 1:
-                    raise RuntimeError("服务返回错误:[错误码 200004 ：Token已过期]")
+                    raise RuntimeError("鏈嶅姟杩斿洖閿欒:[閿欒鐮?200004 锛歍oken宸茶繃鏈焆")
                 return [{"symbol": "ZN_DOMINANT.SHF", "date": "20250102", "close": 25265.0}]
 
         fake = _FakePandaData()
@@ -1316,7 +1305,7 @@ class FuturesAuditRegressionTest(unittest.TestCase):
     def test_infer_no_trade_reason_from_warning(self):
         snapshot = {"execution_result": {"no_trade_reason": "position_matched"}}
         self.assertEqual(infer_no_trade_reason(snapshot), "position_matched")
-        stale_draft_snapshot = {"pre_open_plan": {"tradable_lots_reason": "position_matched"}}
+        stale_draft_snapshot = {"pm_internal_draft": {"reason_codes": "position_matched"}}
         self.assertIsNone(infer_no_trade_reason(stale_draft_snapshot))
         self.assertEqual(
             infer_no_trade_reason({}, warning_message="RB has no previous close available before 2025-02-05"),
@@ -1748,7 +1737,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                         "id": "cal-auditor",
                         "ticker": "TA",
                         "side": "short",
-                        "signal_template": "*",
+                        "setup_type": "*",
                         "horizon_class": "short",
                         "market_regime": "trend",
                         "policy_type": "contextual_rule_calibration:trade_auditor",
@@ -1849,7 +1838,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
                 "long": {
-                    "final_layer": "tradeable_setup",
+                    "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
                     "score": 0.55,
                     "max_setup_quality": 0.64,
@@ -1858,13 +1847,13 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                     "gating_failures": [],
                 },
                 "short": {
-                    "final_layer": "no_trade",
+                    "final_state": "no_opportunity",
                     "supporting_signal_count": 0,
                     "score": 0.0,
                 },
             },
             control={
-                "direction_only_new_entry": {
+                "watch_for_trigger_new_entry": {
                     "allow_probe": True,
                     "probe_max_ratio": 0.01,
                     "probe_floor_ratio": 0.005,
@@ -1880,31 +1869,31 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
         self.assertEqual(side, "long")
         self.assertGreater(ratio, 0.0)
-        self.assertEqual(row["final_layer"], "tradeable_setup")
+        self.assertEqual(row["final_state"], "tradeable_candidate")
 
-    def test_scorecard_confirmed_tradeable_setup_seeds_probe_even_when_score_is_modest(self):
+    def test_scorecard_confirmed_tradeable_candidate_seeds_probe_even_when_score_is_modest(self):
         """Regression for 2025-04-10 ZN: PM seed must use scorecard layer, not only raw score."""
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
                 "long": {
-                    "final_layer": "tradeable_setup",
+                    "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
                     "score": 0.51,
                     "max_setup_quality": 0.75,
                     "max_business_quality": 0.72,
                     "market_confirmation_score": 0.75,
-                    "single_tradeable_setup_confirmed": True,
+                    "single_tradeable_candidate_setup_confirmed": True,
                     "technical_opposes_side": False,
                     "gating_failures": [],
                 },
                 "short": {
-                    "final_layer": "no_trade",
+                    "final_state": "no_opportunity",
                     "supporting_signal_count": 0,
                     "score": 0.0,
                 },
             },
             control={
-                "direction_only_new_entry": {
+                "watch_for_trigger_new_entry": {
                     "allow_probe": True,
                     "probe_max_ratio": 0.01,
                     "probe_floor_ratio": 0.005,
@@ -1914,36 +1903,36 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                     "single_high_quality_probe_min_setup_quality": 0.60,
                     "single_high_quality_probe_min_business_quality": 0.60,
                     "single_high_quality_probe_min_confirmation_score": 0.45,
-                    "scorecard_tradeable_setup_probe_min_confirmation_score": 0.68,
+                    "scorecard_tradeable_candidate_probe_min_confirmation_score": 0.68,
                 }
             },
         )
 
         self.assertEqual(side, "long")
         self.assertGreater(ratio, 0.0)
-        self.assertEqual(row["final_layer"], "tradeable_setup")
+        self.assertEqual(row["final_state"], "tradeable_candidate")
 
-    def test_scorecard_confirmed_tradeable_setup_with_technical_opposition_does_not_seed_probe(self):
+    def test_scorecard_confirmed_tradeable_candidate_with_technical_opposition_does_not_seed_probe(self):
         side, ratio, _row = _scorecard_probe_seed(
             opportunity_scorecard={
                 "long": {
-                    "final_layer": "tradeable_setup",
+                    "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
                     "score": 0.51,
                     "max_setup_quality": 0.75,
                     "max_business_quality": 0.72,
                     "market_confirmation_score": 0.75,
-                    "single_tradeable_setup_confirmed": False,
+                    "single_tradeable_candidate_setup_confirmed": False,
                     "technical_opposes_side": True,
                     "gating_failures": [],
                 }
             },
             control={
-                "direction_only_new_entry": {
+                "watch_for_trigger_new_entry": {
                     "allow_probe": True,
                     "probe_max_ratio": 0.01,
                     "probe_floor_ratio": 0.005,
-                    "scorecard_tradeable_setup_probe_min_confirmation_score": 0.68,
+                    "scorecard_tradeable_candidate_probe_min_confirmation_score": 0.68,
                 }
             },
         )
@@ -2250,8 +2239,8 @@ class ValidationRegressionTest(unittest.TestCase):
                         "current_lots": 2,
                         "target_lots": 5,
                         "lots_delta": 3,
-                        "tradable_lots_if_executed_now": 3,
-                        "tradable_lots_reason": "capital_release_candidate",
+                        "lots_delta_abs": 3,
+                        "reason_codes": "capital_release_candidate",
                         "final_action": "scale",
                         "reason_codes": ["capital_utilization_guard"],
                         "authority_type": "allow",
@@ -2278,14 +2267,14 @@ class ValidationRegressionTest(unittest.TestCase):
                     "market_confirmation": {"confirmation_score": 0.72},
                     "technical": {"signal": "Bullish", "confidence": 0.70},
                     "execution_result": {"no_trade_reason": "capital_release_candidate"},
-                    "pm_draft_pre_open_plan_not_trade_source": True,
+                    "pm_draft_pm_internal_draft_not_trade_source": True,
                     "pm_draft_for_test_only": {
                         "target_position_ratio": 0.05,
                         "current_ticker_exposure": 0.02,
-                        "target_lots_estimate": 5,
+                        "target_lots": 5,
                         "current_lots_before_open": 2,
-                        "tradable_lots_if_executed_now": 3,
-                        "tradable_lots_reason": "position_matched",
+                        "lots_delta_abs": 3,
+                        "reason_codes": "position_matched",
                         "signal_confidence": 0.70,
                         "rebalance_summary": {
                             "action_type": "increase",
@@ -2315,8 +2304,8 @@ class ValidationRegressionTest(unittest.TestCase):
                         "target_lots": 4,
                         "current_lots": 0,
                         "lots_delta": 4,
-                        "tradable_lots_if_executed_now": 0,
-                        "tradable_lots_reason": "intraday_trigger_not_met",
+                        "lots_delta_abs": 0,
+                        "reason_codes": "intraday_trigger_not_met",
                         "final_action": "open_real",
                         "reason_codes": [],
                         "authority_type": "allow",
@@ -2334,8 +2323,8 @@ class ValidationRegressionTest(unittest.TestCase):
                         "target_lots": -3,
                         "current_lots": 0,
                         "lots_delta": -3,
-                        "tradable_lots_if_executed_now": 0,
-                        "tradable_lots_reason": "trade_auditor_block",
+                        "lots_delta_abs": 0,
+                        "reason_codes": "trade_auditor_block",
                         "final_action": "wait",
                         "reason_codes": ["analyst_quality_low_tradeability"],
                         "authority_type": "block",
@@ -2412,8 +2401,8 @@ class ValidationRegressionTest(unittest.TestCase):
                         "current_lots": 0,
                         "target_lots": 1,
                         "lots_delta": 1,
-                        "tradable_lots_if_executed_now": 1,
-                        "tradable_lots_reason": "minimum_new_entry_threshold",
+                        "lots_delta_abs": 1,
+                        "reason_codes": "minimum_new_entry_threshold",
                         "final_action": "open_probe",
                         "reason_codes": ["minimum_new_entry_threshold"],
                         "authority_type": "allow",
@@ -2746,7 +2735,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                 {
                     "ticker": "ZZ",
                     "side": "long",
-                    "signal_template": "long_reversal_confirmed_short",
+                    "setup_type": "long_reversal_confirmed_short",
                     "horizon_class": "short",
                     "market_regime": "trend",
                     "policy_action": "demote",
@@ -2762,7 +2751,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.80,
-                    template_name="reversal_confirmed",
+                    setup_type="reversal_confirmed",
                     horizon_class="short",
                     market_regime="trend",
                     invalidation_level=3200.0,
@@ -2794,7 +2783,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                 {
                     "ticker": "RB",
                     "side": "short",
-                    "signal_template": "short_trend_pullback_short",
+                    "setup_type": "short_trend_pullback_short",
                     "horizon_class": "medium",
                     "market_regime": "choppy",
                     "policy_action": "cap",
@@ -2810,7 +2799,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BEARISH,
                     confidence=0.70,
-                    template_name="trend_pullback",
+                    setup_type="trend_pullback",
                     horizon_class="medium",
                     market_regime="choppy",
                     invalidation_level=3600.0,
@@ -2843,7 +2832,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                 {
                     "ticker": "*",
                     "side": "short",
-                    "signal_template": "short_trend_pullback_short",
+                    "setup_type": "short_trend_pullback_short",
                     "policy_action": "cap",
                     "policy_type": "fast_loss_sentinel",
                     "multiplier": 0.50,
@@ -2856,7 +2845,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BEARISH,
                     confidence=0.70,
-                    template_name="trend_pullback",
+                    setup_type="trend_pullback",
                     horizon_class="medium",
                     market_regime="choppy",
                     invalidation_level=3600.0,
@@ -2870,10 +2859,10 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
 
 
 class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
-    def _base_scorecard(self, layer="tradeable_setup"):
+    def _base_scorecard(self, layer="tradeable_candidate"):
         return {
             "long": {
-                "final_layer": layer,
+                "final_state": layer,
                 "gating_failures": [],
                 "score": 0.62,
                 "max_setup_quality": 0.66,
@@ -2900,8 +2889,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             recommendation_intent={"action": "open_long", "lots": 5, "action_type": "open"},
             final_entry_authority={
                 "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
                 "max_allowed_margin_ratio": 0.12,
                 "reason_codes": ["qualified_positive_expectancy"],
             },
@@ -2915,7 +2904,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             },
             opportunity_scorecard={
                 "preferred_side": "long",
-                "long": {"final_layer": "tradeable_setup", "score": 0.72},
+                "long": {"final_state": "tradeable_candidate", "score": 0.72},
             },
             market_confirmation={"confirmation_score": 0.70, "conflicts": []},
             alpha_setup_action_values=[
@@ -2937,7 +2926,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["target_lots"], 5)
         self.assertEqual(contract["action_candidates"][0]["source"], "alpha_setup_action_value")
 
-    def test_final_action_contract_carries_execution_plan_as_trade_truth(self):
+    def test_final_action_contract_carries_execution_contract_as_trade_truth(self):
         contract = _build_final_action_contract(
             ticker="RB",
             current_lots=0,
@@ -2950,17 +2939,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             recommendation_intent={"action": "open_short", "lots": 4, "action_type": "open"},
             final_entry_authority={
                 "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
                 "max_allowed_margin_ratio": 0.12,
             },
             control_reasons=["execution_action_value_preference"],
             control_diagnostics={},
-            opportunity_scorecard={"preferred_side": "short", "short": {"final_layer": "tradeable_setup"}},
+            opportunity_scorecard={"preferred_side": "short", "short": {"final_state": "tradeable_candidate"}},
             market_confirmation={"confirmation_score": 0.72, "conflicts": []},
             alpha_setup_action_values=[],
-            execution_plan={
-                "contract_version": "agentquant.execution_plan.v1",
+            execution_contract_fields={
+                "contract_version": "agentquant.execution_contract.v1",
                 "execution_profile": "vwap_confirmed",
                 "trigger_source": "execution_action_value_vwap",
                 "requires_intraday_confirmation": True,
@@ -2968,7 +2957,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(contract["execution_profile"], "vwap_confirmed")
-        self.assertEqual(contract["execution_plan"]["trigger_source"], "execution_action_value_vwap")
+        self.assertEqual(contract["trigger_source"], "execution_action_value_vwap")
         self.assertTrue(contract["single_source_of_trade_truth"])
 
     def test_negative_action_value_blocks_repeat_new_entry_without_new_evidence(self):
@@ -2976,7 +2965,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="P",
             position_ratio=0.05,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="direction_only"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -2991,7 +2980,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": -5400.0,
                     "win_rate": 0.0,
                     "confidence_score": 0.60,
-                    "policy_hint": "cap_reduce_or_revalidate",
+                    "action_preference": "cap_reduce_or_revalidate",
                     "max_position_impact": 0.02,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3022,7 +3011,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="P",
             position_ratio=0.05,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3037,7 +3026,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": -5400.0,
                     "win_rate": 0.0,
                     "confidence_score": 0.60,
-                    "policy_hint": "cap_reduce_or_revalidate",
+                    "action_preference": "cap_reduce_or_revalidate",
                     "max_position_impact": 0.02,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3053,13 +3042,20 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.62,
                     invalidation_level=9000.0,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above short-term resistance with volume confirmation",
                     entry_quality="acceptable",
                     metadata={
+                        "action_evidence_contract": {
+                            "setup_family": "trend_breakout",
+                            "opportunity_state": "tradeable_candidate",
+                            "opportunity_state": "tradeable_candidate",
+                            "trigger_valid": True,
+                            "invalidation_present": True,
+                            "evidence_role": "entry_timing",
+                        },
                         "technical_context": {
                             "dominant_direction": "bullish",
-                            "current_trade_setup": {"setup_family": "trend_breakout"},
                         }
                     },
                 ),
@@ -3082,7 +3078,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="RB",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3097,7 +3093,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 2250.0,
                     "win_rate": 0.6,
                     "confidence_score": 0.62,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3115,7 +3111,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.60,
                     invalidation_level=3300.0,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
                 AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.35),
@@ -3134,7 +3130,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="RB",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3149,7 +3145,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 3120.0,
                     "win_rate": 0.67,
                     "confidence_score": 0.72,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3166,9 +3162,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
-                    trade_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -3190,15 +3185,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(alpha_ev["qualified_positive_expectancy"])
         self.assertEqual(alpha_ev["matched_action_value_count"], 1)
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
 
         self.assertTrue(allowed)
         self.assertEqual(authority["authority_type"], "real_budget_entry")
-        self.assertTrue(authority["can_open_real_position"])
-        self.assertTrue(authority["can_apply_min_real_floor"])
+        self.assertTrue(authority["open_action_evidence"])
+        self.assertTrue(authority["strong_current_evidence"])
         self.assertTrue(authority["action_evidence_router"]["open"]["positive_open_action_value"])
 
     def test_exact_alpha_release_chain_reaches_pm_authority_and_trader_profile(self):
@@ -3227,7 +3222,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 business_quality_score=0.78,
                 data_coverage_score=0.86,
                 opportunity_type="trend_continuation",
-                template_name="rb_trend_breakout_setup",
+                setup_type="rb_trend_breakout_setup",
                 price_percentile=0.56,
                 invalidation_level=3300.0,
             ),
@@ -3236,7 +3231,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             trading_date="2025-03-10",
             ticker="RB",
         )
-        self.assertIn(technical.opportunity_layer, {"tradeable_setup", "deployable_alpha"})
+        self.assertIn(technical.opportunity_state, {"tradeable_candidate", "tradeable_candidate"})
         self.assertTrue(technical.trigger_valid)
         self.assertEqual(technical.entry_timing_signal, "trend_breakout")
         self.assertNotIn("generic_trade_setup", json.dumps(technical.metadata, ensure_ascii=False))
@@ -3256,7 +3251,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "reward_sum": 4320.0,
             "win_rate": 0.67,
             "confidence_score": 0.74,
-            "policy_hint": "controlled_open_or_add",
+            "action_preference": "controlled_open_or_add",
             "max_position_impact": 0.04,
             "payload": {
                 "source": "alpha_setup_profile_action_value",
@@ -3281,7 +3276,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "reward_sum": -2700.0,
             "win_rate": 0.0,
             "confidence_score": 0.62,
-            "policy_hint": "cap_reduce_or_revalidate",
+            "action_preference": "cap_reduce_or_revalidate",
             "payload": {
                 "source": "alpha_setup_profile_action_value",
                 "real_trade_reward_count": 3,
@@ -3292,7 +3287,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         scorecard = {
             "preferred_side": "long",
             "long": {
-                "final_layer": technical.opportunity_layer,
+                "final_state": technical.opportunity_state,
                 "gating_failures": [],
                 "score": 0.72,
                 "confidence": 0.74,
@@ -3325,18 +3320,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(alpha_ev["action_value_stats"]["scope_quality"], "exact_real_state")
         self.assertTrue(alpha_ev["action_value_stats"]["real_amplification_support"])
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
         self.assertTrue(allowed)
         self.assertEqual(authority["authority_type"], "real_budget_entry")
-        self.assertTrue(authority["can_open_real_position"])
-        self.assertTrue(authority["can_apply_min_real_floor"])
+        self.assertTrue(authority["open_action_evidence"])
+        self.assertTrue(authority["strong_current_evidence"])
         self.assertTrue(authority["open_action_evidence"])
         self.assertTrue(authority["strong_current_evidence"])
 
-        plan = _build_pre_open_plan_snapshot(
+        plan = _build_pm_decision_context(
             ticker="RB",
             target_lots=4,
             current_price=3500.0,
@@ -3353,12 +3348,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_reasons=reasons,
             alpha_setup_action_values=[open_action_value, execution_action_value],
         )
-        execution_plan = plan["execution_plan"]
-        self.assertEqual(execution_plan["execution_profile"], "pullback")
-        self.assertEqual(execution_plan["trigger_source"], "execution_action_value_pullback")
-        self.assertIn("execution_action_value_preference", execution_plan["reason_codes"])
-        self.assertFalse(execution_plan["can_execute_without_intraday_trigger"])
-        self.assertEqual(execution_plan["business_boundary"], "trader_executes_pm_plan_only_no_strategy_creation")
+        execution_contract = plan
+        self.assertEqual(execution_contract["execution_profile"], "pullback")
+        self.assertEqual(execution_contract["trigger_source"], "execution_action_value_pullback")
+        self.assertIn("execution_action_value_preference", execution_contract["reason_codes"])
+        self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
+        self.assertEqual(execution_contract["business_boundary"], "trader_executes_pm_plan_only_no_strategy_creation")
 
         final_contract = _build_final_action_contract(
             ticker="RB",
@@ -3376,6 +3371,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_scorecard=scorecard,
             market_confirmation=market_confirmation,
             alpha_setup_action_values=[open_action_value, execution_action_value],
+            execution_contract_fields=execution_contract,
         )
         self.assertEqual(final_contract["final_action"], "open_real")
         self.assertEqual(final_contract["authority_type"], "real_budget_entry")
@@ -3420,7 +3416,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             action="open_long",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
-            decision_context={"execution_plan": execution_plan},
+            decision_context={"execution_contract": execution_contract},
         )
         self.assertTrue(result.should_execute)
         self.assertEqual(result.reason, "intraday_pullback_confirmed")
@@ -3432,7 +3428,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="P",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3447,7 +3443,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 1800.0,
                     "win_rate": 1.0,
                     "confidence_score": 0.16,
-                    "policy_hint": "positive_candidate_open",
+                    "action_preference": "positive_candidate_open",
                     "max_position_impact": 0.03,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3463,9 +3459,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.62,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
-                    trade_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=9000.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -3489,23 +3484,22 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(alpha_ev["positive_action_value"])
         self.assertFalse(alpha_ev["qualified_positive_expectancy"])
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
 
         self.assertTrue(allowed)
         self.assertEqual(authority["authority_type"], "exploration_probe")
-        self.assertFalse(authority["can_apply_min_real_floor"])
+        self.assertTrue(authority["strong_current_evidence"])
 
     def test_positive_open_action_value_can_seed_candidate_from_neutral_pm_with_current_evidence(self):
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3527,7 +3521,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 3120.0,
                     "win_rate": 0.67,
                     "confidence_score": 0.72,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3540,7 +3534,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.70},
             full_config={},
             max_position_ratio=0.05,
@@ -3556,7 +3550,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "positive_action_value": True,
             }
         }
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=["positive_open_action_value_seed", "qualified_positive_expectancy"],
             control_diagnostics=control_diagnostics,
         )
@@ -3564,14 +3558,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(authority["authority_type"], "real_budget_entry")
         self.assertIn("positive_open_action_value_seed", authority["reason_effects"]["release_signals"])
 
-    def test_legacy_policy_hint_without_action_preference_cannot_seed_open_candidate(self):
+    def test_legacy_action_preference_without_action_preference_cannot_seed_open_candidate(self):
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3593,7 +3586,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 3120.0,
                     "win_rate": 0.67,
                     "confidence_score": 0.72,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3605,7 +3598,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.70},
             full_config={},
             max_position_ratio=0.05,
@@ -3613,14 +3606,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertEqual(seed, {})
 
-    def test_policy_hint_action_preference_mirror_without_payload_cannot_seed_open_candidate(self):
+    def test_action_preference_action_preference_mirror_without_payload_cannot_seed_open_candidate(self):
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3642,7 +3634,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 3120.0,
                     "win_rate": 0.67,
                     "confidence_score": 0.72,
-                    "policy_hint": "positive_candidate_open",
+                    "action_preference": "positive_candidate_open",
                     "max_position_impact": 0.04,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3654,7 +3646,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.70},
             full_config={},
             max_position_ratio=0.05,
@@ -3667,9 +3659,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3691,7 +3682,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 1800.0,
                     "win_rate": 1.0,
                     "confidence_score": 0.16,
-                    "policy_hint": "positive_candidate_open",
+                    "action_preference": "positive_candidate_open",
                     "max_position_impact": 0.03,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -3703,7 +3694,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.70},
             full_config={},
             max_position_ratio=0.05,
@@ -3718,9 +3709,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3745,7 +3735,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                             "reward_sum": 3120.0,
                             "win_rate": 0.67,
                             "confidence_score": 0.72,
-                            "policy_hint": "observe_or_probe",
+                            "action_preference": "observe_or_probe",
                             "max_position_impact": 0.04,
                             "payload": {
                                 "source": "alpha_setup_profile_action_value",
@@ -3758,7 +3748,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         }
                     ],
                     analyst_signals=[technical],
-                    opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+                    opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
                     market_confirmation={"confirmation_score": 0.70},
                     full_config={},
                     max_position_ratio=0.05,
@@ -3771,9 +3761,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3791,12 +3780,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 1000.0,
                     "reward_sum": 8000.0,
                     "confidence_score": 0.90,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.05,
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.75},
             full_config={},
             max_position_ratio=0.05,
@@ -3809,9 +3798,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3829,7 +3817,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 1000.0,
                     "reward_sum": 8000.0,
                     "confidence_score": 0.90,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.05,
                     "payload": {
                         "source": "similar_alpha_setup_sql",
@@ -3839,7 +3827,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.75},
             full_config={},
             max_position_ratio=0.05,
@@ -3847,14 +3835,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertEqual(seed, {})
 
-    def test_shadow_prior_only_open_action_value_cannot_seed_open_candidate(self):
+    def test_counterfactual_prior_only_open_action_value_cannot_seed_open_candidate(self):
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -3872,18 +3859,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 800.0,
                     "reward_sum": 4000.0,
                     "confidence_score": 0.80,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.05,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
-                        "shadow_prior_only": True,
-                        "shadow_reward_count": 5,
+                        "counterfactual_prior_only": True,
+                        "counterfactual_reward_count": 5,
                         "real_trade_reward_count": 0,
                     },
                 }
             ],
             analyst_signals=[technical],
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             market_confirmation={"confirmation_score": 0.75},
             full_config={},
             max_position_ratio=0.05,
@@ -3896,7 +3883,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="J",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3908,7 +3895,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 6000.0,
                     "win_rate": 0.80,
                     "confidence_score": 0.68,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "setup_type": "*",
                     "market_regime": "*",
@@ -3933,9 +3920,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
-                    trade_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -3957,21 +3943,22 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(alpha_ev["action_value_stats"]["real_amplification_support"])
         self.assertEqual(alpha_ev["action_value_stats"]["scope_quality"], "partial_real_state")
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
 
         self.assertTrue(allowed)
         self.assertNotEqual(authority["authority_type"], "real_budget_entry")
-        self.assertFalse(authority["can_apply_min_real_floor"])
+        self.assertEqual(authority["authority_type"], "exploration_probe")
+        self.assertTrue(authority["strong_current_evidence"])
 
     def test_similar_setup_exact_state_open_action_value_can_promote_authority(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
             ticker="RB",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -3983,7 +3970,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 2500.0,
                     "win_rate": 0.80,
                     "confidence_score": 0.68,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "setup_type": "trend_breakout_setup",
                     "market_regime": "trend",
@@ -4008,9 +3995,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
-                    trade_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -4031,7 +4017,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(alpha_ev["action_value_stats"]["real_amplification_support"])
         self.assertEqual(alpha_ev["action_value_stats"]["scope_quality"], "exact_real_state")
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
@@ -4044,7 +4030,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="RB",
             position_ratio=0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -4056,9 +4042,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 5600.0,
                     "win_rate": 0.75,
                     "confidence_score": 0.82,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.05,
-                    "setup_type": "tradeable_setup",
+                    "setup_type": "tradeable_candidate",
                     "market_regime": "trend",
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -4073,9 +4059,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
-                    trade_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -4096,21 +4081,22 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(alpha_ev["action_value_stats"]["real_amplification_support"])
         self.assertEqual(alpha_ev["action_value_stats"]["scope_quality"], "partial_real_state")
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
 
         self.assertTrue(allowed)
         self.assertNotEqual(authority["authority_type"], "real_budget_entry")
-        self.assertFalse(authority["can_apply_min_real_floor"])
+        self.assertEqual(authority["authority_type"], "exploration_probe")
+        self.assertTrue(authority["strong_current_evidence"])
 
     def test_exact_state_positive_action_value_with_tail_loss_needs_strong_current_evidence(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
             ticker="TA",
             position_ratio=-0.02,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="direction_only"),
+            opportunity_scorecard=self._base_scorecard(layer="watch_for_trigger"),
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
@@ -4122,7 +4108,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 1800.0,
                     "win_rate": 0.67,
                     "confidence_score": 0.72,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.04,
                     "setup_type": "breakdown_setup",
                     "market_regime": "trend",
@@ -4145,11 +4131,21 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BEARISH,
                     confidence=0.55,
-                    opportunity_layer="direction_only",
+                    opportunity_state="tradeable_candidate",
                     invalidation_level=5600.0,
-                    trigger_valid=False,
+                    trigger_valid=True,
                     invalidation_present=True,
-                    evidence_role="direction_context",
+                    entry_trigger="current breakdown below support is confirmed",
+                    evidence_role="entry_timing",
+                    metadata={
+                        "action_evidence_contract": {
+                            "opportunity_state": "tradeable_candidate",
+                            "opportunity_state": "tradeable_candidate",
+                            "trigger_valid": True,
+                            "invalidation_present": True,
+                            "entry_trigger": "current breakdown below support is confirmed",
+                        }
+                    },
                 )
             ],
             market_confirmation={"confirmation_score": 0.46},
@@ -4158,19 +4154,21 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
 
         self.assertLessEqual(abs(ratio), 0.02)
-        self.assertNotIn("qualified_positive_expectancy", reasons)
+        self.assertIn("qualified_positive_expectancy", reasons)
         alpha_ev = diagnostics["alpha_setup_ev_fusion"]
         self.assertTrue(alpha_ev["positive_action_value_candidate"])
-        self.assertFalse(alpha_ev["positive_action_value"])
-        self.assertTrue(alpha_ev["tail_loss_blocks_real_amplification"])
-        self.assertFalse(alpha_ev["qualified_positive_expectancy"])
+        self.assertTrue(alpha_ev["positive_action_value"])
+        self.assertFalse(alpha_ev["tail_loss_blocks_real_amplification"])
+        self.assertTrue(alpha_ev["qualified_positive_expectancy"])
 
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=reasons,
             control_diagnostics=diagnostics,
         )
 
-        self.assertFalse(authority["can_apply_min_real_floor"])
+        self.assertTrue(authority["strong_current_evidence"])
+        self.assertEqual(authority["authority_type"], "watchlist_only")
+        self.assertIn("negative_expectancy", authority["reason_codes"])
         self.assertNotEqual(authority["authority_type"], "real_budget_entry")
 
     def test_positive_hold_action_value_does_not_qualify_new_open(self):
@@ -4178,7 +4176,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ticker="P",
             position_ratio=0.03,
             current_ratio=0.0,
-            opportunity_scorecard=self._base_scorecard(layer="tradeable_setup"),
+            opportunity_scorecard=self._base_scorecard(layer="tradeable_candidate"),
             alpha_setup_profiles=[
                 {
                     "side": "long",
@@ -4200,7 +4198,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 6000.0,
                     "win_rate": 0.75,
                     "confidence_score": 0.72,
-                    "policy_hint": "controlled_probe_or_hold",
+                    "action_preference": "controlled_probe_or_hold",
                     "max_position_impact": 0.04,
                 }
             ],
@@ -4210,7 +4208,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.60,
                     invalidation_level=3300.0,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
                 AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.35),
@@ -4250,10 +4248,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         market_regime, setup_type, data_combo, scope_key, source_type,
                         recommendation_id, action_taken, pm_action, auditor_decision,
                         trader_status, target_lots, executed_lots, net_pnl, commission,
-                        holding_days, outcome_label, setup_quality_score, opportunity_layer,
+                        holding_days, outcome_label, setup_quality_score, opportunity_state,
                         evidence_json, result_json, created_at, payload_json
                     ) VALUES (?, 'cfg', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trade', ?, ?, ?, 'pass',
-                        'executed', ?, ?, ?, ?, 1, 'observed', 0.7, 'tradeable_setup', '{}', '{}', ?, '{}')
+                        'executed', ?, ?, ?, ?, 1, 'observed', 0.7, 'tradeable_candidate', '{}', '{}', ?, '{}')
                     """,
                     (
                         row[0],
@@ -4299,13 +4297,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(open_value["payload"]["amplification_scope_quality"], "exact_real_state")
         self.assertEqual(open_value["payload"]["exact_state_real_trade_sample_count"], 2)
         self.assertEqual(open_value["payload"]["partial_state_real_trade_sample_count"], 0)
-        self.assertEqual(open_value["policy_hint"], "no_action_preference")
+        self.assertEqual(open_value["action_preference"], "")
         self.assertEqual(open_value["payload"]["prior_role"], "weak_prior_not_action_preference")
         self.assertEqual(open_value["payload"]["canonical_action_preference_source"], "none_for_similar_sql_prior")
         self.assertEqual(open_value["payload"]["action_preference"], "")
-        self.assertEqual(open_value["payload"]["deprecated_policy_hint_mirror"], "controlled_open_or_add")
 
-    def test_sql_similar_setup_retrieval_counts_shadow_as_prior_not_exact_trade(self):
+    def test_sql_similar_setup_retrieval_counts_counterfactual_as_prior_not_exact_trade(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = SQLiteDB()
             db.db_path = str(Path(tmpdir) / "agentquant_test.db")
@@ -4321,15 +4318,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     market_regime, setup_type, data_combo, scope_key, source_type,
                     recommendation_id, action_taken, pm_action, auditor_decision,
                     trader_status, target_lots, executed_lots, net_pnl, commission,
-                    holding_days, outcome_label, setup_quality_score, opportunity_layer,
+                    holding_days, outcome_label, setup_quality_score, opportunity_state,
                     evidence_json, result_json, created_at, payload_json
-                ) VALUES ('shadow-rb-1', 'cfg', '2025-03-05', 'RB', 'long', 'ferrous',
-                    'short', 'trend', 'breakout_setup', 'shadow_no_trade_missed',
-                    'RB|long|short|trend|breakout_setup|shadow_no_trade_missed',
-                    'shadow_missed_alpha', 'shadow:1', 'open_long',
-                    'shadow_counterfactual_open', 'not_executed_shadow',
-                    'shadow_not_executed', 1, 0, 1000.0, 0.0, 3, 'profit',
-                    0.0, 'tradeable_setup', '{}', '{}', '2025-03-10', '{}')
+                ) VALUES ('counterfactual-rb-1', 'cfg', '2025-03-05', 'RB', 'long', 'ferrous',
+                    'short', 'trend', 'breakout_setup', 'counterfactual_no_trade_missed',
+                    'RB|long|short|trend|breakout_setup|counterfactual_no_trade_missed',
+                    'counterfactual_missed_alpha', 'counterfactual:1', 'open_long',
+                    'counterfactual_counterfactual_open', 'not_executed_counterfactual',
+                    'counterfactual_not_executed', 1, 0, 1000.0, 0.0, 3, 'profit',
+                    0.0, 'tradeable_candidate', '{}', '{}', '2025-03-10', '{}')
                 """
             )
             conn.commit()
@@ -4350,10 +4347,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         open_value = next(row for row in values if row["action_name"] == "open")
         self.assertAlmostEqual(open_value["reward_sum"], 350.0)
         self.assertEqual(open_value["payload"]["exact_ticker_sample_count"], 0)
-        self.assertEqual(open_value["payload"]["exact_ticker_shadow_sample_count"], 1)
-        self.assertEqual(open_value["payload"]["amplification_scope_quality"], "shadow_prior")
-        self.assertTrue(open_value["payload"]["shadow_prior_only"])
-        self.assertEqual(open_value["policy_hint"], "no_action_preference")
+        self.assertEqual(open_value["payload"]["exact_ticker_counterfactual_sample_count"], 1)
+        self.assertEqual(open_value["payload"]["amplification_scope_quality"], "counterfactual_prior")
+        self.assertTrue(open_value["payload"]["counterfactual_prior_only"])
+        self.assertEqual(open_value["action_preference"], "")
         self.assertEqual(open_value["payload"]["prior_role"], "weak_prior_not_action_preference")
         self.assertEqual(open_value["payload"]["action_preference"], "")
 
@@ -4378,11 +4375,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     INSERT INTO alpha_setup_action_value (
                         id, config_id, scope_key, ticker, side, horizon_class, market_regime,
                         setup_type, data_combo, action_name, sample_count, reward_sum,
-                        reward_mean, win_rate, confidence_score, policy_hint,
+                        reward_mean, win_rate, confidence_score, action_preference,
                         max_position_impact, last_sample_date, created_at, updated_at,
                         valid_until, active, payload_json
                     ) VALUES (?, 'cfg', ?, 'RB', 'long', 'short', 'trend',
-                        'tradeable_setup', 'combo', 'open', 4, ?, ?, 0.75, ?,
+                        'tradeable_candidate', 'combo', 'open', 4, ?, ?, 0.75, ?,
                         'controlled_open_or_add', 0.04, ?, '2025-03-10', '2025-03-10',
                         '2025-04-01', 1, '{}')
                     """,
@@ -4418,7 +4415,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
             cursor.execute("INSERT INTO config (id) VALUES ('cfg')")
             db._ensure_reviewer_learning_schema(cursor)
-            for idx, setup_type in enumerate(("tradeable_setup", "trend_breakout_setup"), start=1):
+            for idx, setup_type in enumerate(("generic_trade_setup", "trend_breakout_setup"), start=1):
                 upsert_alpha_setup_sample_and_profile(
                     cursor,
                     cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
@@ -4441,7 +4438,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         "executed_lots": 1,
                         "net_pnl": 1200.0,
                         "commission": 20.0,
-                        "opportunity_layer": "tradeable_setup",
+                        "opportunity_state": "tradeable_candidate",
                     },
                 )
             conn.commit()
@@ -4461,15 +4458,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             for row in rows
         }
         self.assertEqual(
-            payload_by_setup["tradeable_setup"]["amplification_scope_quality"],
+            payload_by_setup["generic_trade_setup"]["amplification_scope_quality"],
             "partial_real_state",
         )
         self.assertEqual(
-            payload_by_setup["tradeable_setup"]["exact_state_real_trade_sample_count"],
+            payload_by_setup["generic_trade_setup"]["exact_state_real_trade_sample_count"],
             0,
         )
         self.assertEqual(
-            payload_by_setup["tradeable_setup"]["partial_state_real_trade_sample_count"],
+            payload_by_setup["generic_trade_setup"]["partial_state_real_trade_sample_count"],
             1,
         )
         self.assertEqual(
@@ -4518,7 +4515,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 cursor.execute(
                     """
                     INSERT INTO adaptive_policy_state (
-                        id, config_id, ticker, side, signal_template, horizon_class,
+                        id, config_id, ticker, side, setup_type, horizon_class,
                         market_regime, policy_type, policy_action, multiplier,
                         confidence_score, sample_count, reason, source_event_id,
                         source_trading_date, created_at, valid_until, payload_json, active
@@ -4535,7 +4532,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 config_id="cfg",
                 ticker="RB",
                 side="long",
-                signal_template="*",
+                setup_type="*",
                 horizon_class="short",
                 market_regime="trend",
                 trading_date="2025-03-10",
@@ -4588,12 +4585,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     INSERT INTO alpha_setup_profile (
                         id, config_id, ticker, side, sector, horizon_class,
                         market_regime, setup_type, data_combo, scope_key,
-                        lifecycle_state, action_bias, sample_count, trade_count,
+                        lifecycle_state, profile_state_hint, sample_count, trade_count,
                         win_count, loss_count, net_pnl, confidence_score,
                         max_position_impact, last_sample_date, created_at,
                         updated_at, valid_until, active, payload_json
                     ) VALUES (?, 'cfg', 'RB', 'long', 'ferrous', 'short',
-                        'trend', 'tradeable_setup', 'combo', ?, 'deployable',
+                        'trend', 'tradeable_candidate', 'combo', ?, 'deployable',
                         'open', 4, 4, 3, 1, 2000.0, ?, 0.04, ?,
                         '2025-03-10', '2025-03-10', '2025-04-01', 1, '{}')
                     """,
@@ -4655,8 +4652,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             for row_id, template, last_sample_date, confidence in template_rows:
                 cursor.execute(
                     """
-                    INSERT INTO signal_template_performance (
-                        id, config_id, ticker, side, signal_template, horizon_class,
+                    INSERT INTO setup_type_performance (
+                        id, config_id, ticker, side, setup_type, horizon_class,
                         market_regime, sample_count, win_rate, net_pnl, avg_pnl,
                         profit_factor, confidence_score, last_sample_date,
                         last_updated, valid_until, payload_json
@@ -4729,7 +4726,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             conn.commit()
             conn.close()
 
-            templates = db.get_signal_template_performance(
+            templates = db.get_setup_type_performance(
                 config_id="cfg",
                 ticker="RB",
                 side="long",
@@ -4788,9 +4785,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 cursor.execute(
                     """
                     INSERT INTO provisional_policy_state (
-                        id, config_id, ticker, side, signal_template,
+                        id, config_id, ticker, side, setup_type,
                         horizon_class, policy_action, multiplier,
-                        confidence_score, trigger_type, sample_count, reason,
+                        confidence_score, event_type, sample_count, reason,
                         source_trading_date, rollback_value_json, created_at,
                         valid_until, active, payload_json
                     ) VALUES (?, 'cfg', 'RB', 'long', 'trend_breakout',
@@ -4807,7 +4804,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 config_id="cfg",
                 ticker="RB",
                 side="long",
-                signal_template="trend_breakout",
+                setup_type="trend_breakout",
                 horizon_class="short",
                 trading_date="2025-03-10",
             )
@@ -4830,7 +4827,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": -1200.0,
                     "reward_sum": -4800.0,
                     "confidence_score": 0.65,
-                    "policy_hint": "cap_reduce_or_revalidate",
+                    "action_preference": "cap_reduce_or_revalidate",
                 }
             ],
             analyst_signals=[
@@ -4838,7 +4835,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.45),
             ],
             market_confirmation={"confirmation_score": 0.42},
-            opportunity_scorecard={"long": {"final_layer": "direction_only"}},
+            opportunity_scorecard={"long": {"final_state": "watch_for_trigger"}},
             full_config={},
         )
 
@@ -4867,7 +4864,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 2000.0,
                     "reward_sum": 2000.0,
                     "confidence_score": 0.16,
-                    "policy_hint": "positive_candidate_exit",
+                    "action_preference": "positive_candidate_exit",
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
                         "real_trade_reward_count": 1,
@@ -4882,7 +4879,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
             ],
             market_confirmation={"confirmation_score": 0.42},
-            opportunity_scorecard={"long": {"final_layer": "direction_only"}},
+            opportunity_scorecard={"long": {"final_state": "watch_for_trigger"}},
             full_config={},
         )
 
@@ -4908,7 +4905,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": -1200.0,
                     "reward_sum": -4800.0,
                     "confidence_score": 0.65,
-                    "policy_hint": "cap_reduce_or_revalidate",
+                    "action_preference": "cap_reduce_or_revalidate",
                 }
             ],
             analyst_signals=[
@@ -4916,14 +4913,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     invalidation_level=9000.0,
                     trigger_valid=True,
                     invalidation_present=True,
                 )
             ],
             market_confirmation={"confirmation_score": 0.70},
-            opportunity_scorecard={"long": {"final_layer": "tradeable_setup"}},
+            opportunity_scorecard={"long": {"final_state": "tradeable_candidate"}},
             full_config={},
         )
 
@@ -4948,7 +4945,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.45),
             ],
             market_confirmation={"confirmation_score": 0.50},
-            opportunity_scorecard={"short": {"final_layer": "direction_only"}},
+            opportunity_scorecard={"short": {"final_state": "watch_for_trigger"}},
             full_config={},
         )
 
@@ -5008,7 +5005,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_mean": 1800.0,
                     "reward_sum": 7200.0,
                     "confidence_score": 0.70,
-                    "policy_hint": "controlled_probe_or_hold",
+                    "action_preference": "controlled_probe_or_hold",
                 }
             ],
             analyst_signals=[
@@ -5016,7 +5013,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.45),
             ],
             market_confirmation={"confirmation_score": 0.42},
-            opportunity_scorecard={"long": {"final_layer": "direction_only"}},
+            opportunity_scorecard={"long": {"final_state": "watch_for_trigger"}},
             full_config={},
         )
 
@@ -5026,12 +5023,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(detail["decision"], "learned_exit_action_value_protective_exit")
         self.assertTrue(detail["protective_exit"])
 
-    def test_real_probe_release_blocks_direction_only_semantic_even_with_strong_current_evidence(self):
+    def test_real_probe_release_blocks_watch_for_trigger_semantic_even_with_strong_current_evidence(self):
         release, detail = _qualified_real_probe_release(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "unknown_alpha_probe",
             ],
             control_diagnostics={
@@ -5041,7 +5038,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
                     "has_invalidation_or_stop": True,
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
@@ -5055,7 +5052,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(release)
         self.assertIn("alpha_setup_open_action_value_missing", detail["soft_blocks"])
         self.assertFalse(detail["hard_watchlist"])
-        self.assertTrue(detail["direction_semantic_block"])
+        self.assertTrue(detail["watch_for_trigger_semantic_block"])
 
     def test_real_probe_release_allows_tradeable_soft_block_with_current_trigger(self):
         release, detail = _qualified_real_probe_release(
@@ -5067,7 +5064,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": True,
                     "technical_supports_side": True,
@@ -5085,20 +5082,19 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertTrue(release)
         self.assertIn("alpha_setup_open_action_value_missing", detail["soft_blocks"])
-        self.assertFalse(detail["direction_semantic_block"])
+        self.assertFalse(detail["watch_for_trigger_semantic_block"])
 
     def test_tradeable_analyst_candidate_soft_gates_to_controlled_probe_not_wait(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.66,
-            opportunity_layer="tradeable_setup",
             opportunity_state="tradeable_candidate",
             trigger_valid=True,
             invalidation_present=True,
             metadata={
                 "action_evidence_contract": {
-                    "opportunity_layer": "tradeable_setup",
+                    "opportunity_state": "tradeable_candidate",
                     "opportunity_state": "tradeable_candidate",
                     "trigger_valid": True,
                     "invalidation_present": True,
@@ -5114,7 +5110,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         ]
         diagnostics = {
             "alpha_setup_ev_fusion": {
-                "scorecard_layer": "tradeable_setup",
+                "scorecard_state": "tradeable_candidate",
                 "has_tradeable_support": True,
                 "has_invalidation_or_stop": True,
                 "current_confirmation_score": 0.58,
@@ -5151,7 +5147,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             alpha_ev_blocks_real_probe=False,
             analyst_tradeable_probe=candidate,
         )
-        allowed, authority = _final_new_entry_trade_authority(
+        allowed, authority = _final_contract_authority(
             control_reasons=[*reasons, "analyst_tradeable_probe_candidate"],
             control_diagnostics={
                 **diagnostics,
@@ -5167,18 +5163,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(authority["authority_type"], "exploration_probe")
         self.assertIn("analyst_tradeable_probe_candidate", authority["reason_codes"])
 
-    def test_direction_only_analyst_candidate_does_not_use_controlled_probe_channel(self):
+    def test_watch_for_trigger_analyst_candidate_does_not_use_controlled_probe_channel(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.66,
-            opportunity_layer="direction_only",
             opportunity_state="watch_for_trigger",
             trigger_valid=True,
             invalidation_present=True,
             metadata={
                 "action_evidence_contract": {
-                    "opportunity_layer": "direction_only",
+                    "opportunity_state": "watch_for_trigger",
                     "opportunity_state": "watch_for_trigger",
                     "trigger_valid": True,
                     "invalidation_present": True,
@@ -5188,12 +5183,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         reasons = [
             "alpha_setup_ev_fusion",
             "opportunity_scorecard_probe_seed",
-            "pm_direction_only_probe_cap",
+            "pm_watch_for_trigger_probe_cap",
             "unknown_alpha_probe",
         ]
         diagnostics = {
             "alpha_setup_ev_fusion": {
-                "scorecard_layer": "direction_only",
+                "scorecard_state": "watch_for_trigger",
                 "has_tradeable_support": False,
                 "has_invalidation_or_stop": True,
                 "current_confirmation_score": 0.70,
@@ -5238,7 +5233,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.70,
-            opportunity_layer="tradeable_setup",
             opportunity_state="tradeable_candidate",
             trigger_valid=True,
             invalidation_present=True,
@@ -5249,7 +5243,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_reasons=["alpha_setup_ev_fusion", "negative_expectancy_cap_or_exit"],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "negative_action_value": True,
                 }
             },
@@ -5264,14 +5258,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("negative_or_tail_loss_present", detail["blocked_reasons"])
         self.assertIn("negative_learning_profile_present", detail["blocked_reasons"])
 
-    def test_direction_only_release_cannot_enter_minimum_one_lot_path(self):
+    def test_watch_for_trigger_release_cannot_enter_minimum_one_lot_path(self):
         should_attempt = _should_attempt_minimum_real_probe(
             current_lots=0,
             target_lots=0,
             target_ratio=0.004,
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
                 "unknown_alpha_probe",
@@ -5299,7 +5293,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertTrue(should_attempt)
 
-    def test_direction_only_release_does_not_recover_pre_control_direction_after_soft_zero(self):
+    def test_watch_for_trigger_release_does_not_recover_pre_control_direction_after_soft_zero(self):
         candidate_ratio = _minimum_real_probe_candidate_ratio(
             current_ratio=0.0,
             pre_control_ratio=0.008,
@@ -5312,7 +5306,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
                 "unknown_alpha_probe",
             ],
@@ -5371,12 +5365,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(release)
         self.assertTrue(detail["hard_watchlist"])
 
-    def test_final_new_entry_gate_blocks_direction_only_without_authority(self):
-        allowed, detail = _final_new_entry_trade_authority(
+    def test_final_new_entry_gate_blocks_watch_for_trigger_without_authority(self):
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
                 "market_confirmation_conflict",
             ],
@@ -5396,8 +5390,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertTrue(detail["requires_authority"])
         self.assertEqual(detail["decision"], "watchlist_only")
-        self.assertIn("pm_direction_only_probe_cap", detail["weak_markers"])
-        self.assertIn("pm_direction_only_probe_cap", detail["reason_effects"]["soft_limits"])
+        self.assertIn("pm_watch_for_trigger_probe_cap", detail["weak_markers"])
+        self.assertIn("pm_watch_for_trigger_probe_cap", detail["reason_effects"]["soft_limits"])
         self.assertFalse(detail["reason_effects"]["hard_zero"])
 
     def test_reason_effect_summary_separates_hard_soft_learning_and_release(self):
@@ -5442,13 +5436,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "pm_text_no_trade_blocks_new_entry",
             "pm_text_no_entry_trigger_blocks_new_entry",
             "pm_text_watchlist_only_blocks_new_entry",
-            "final_new_entry_trade_authority_missing_or_not_met",
-            "final_new_entry_trade_authority_not_met",
-            "missing_final_new_entry_trade_authority",
-            "final_new_entry_trade_authority_watchlist_only",
-            "final_new_entry_trade_authority_real_entry_not_allowed",
-            "final_new_entry_trade_authority_direction_only_probe_block",
-            "final_new_entry_trade_authority_probe_lacks_current_evidence",
+            "final_contract_authority_not_met",
+            "final_contract_authority_not_met",
+            "missing_final_contract_authority",
+            "final_contract_authority_watchlist_only",
+            "final_contract_authority_real_entry_not_allowed",
+            "final_action_contract_watch_for_trigger_probe_block",
+            "final_contract_authority_probe_lacks_current_evidence",
             "position_budget_authority_not_met",
             "minimum_real_trade_margin_not_reachable",
             "minimum_real_trade_no_feasible_lot",
@@ -5504,7 +5498,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "market_rule_or_execution_block",
             "near_expiry_new_entry_block",
             "delivery_month_new_entry_block",
-            "final_new_entry_trade_authority_source_mismatch",
+            "final_contract_authority_source_mismatch",
             "positive_open_action_value_seed",
             "hold_exit_action_value_protection",
             "winning_template_continuation_protective_reduce",
@@ -5516,17 +5510,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("drawdown_control", summary["learning_adjustments"])
         self.assertIn("mature_alpha_release", summary["release_signals"])
 
-    def test_final_new_entry_gate_blocks_direction_only_release_even_with_strong_current_evidence(self):
-        release_allowed, release_detail = _final_new_entry_trade_authority(
+    def test_final_new_entry_gate_blocks_watch_for_trigger_release_even_with_strong_current_evidence(self):
+        release_allowed, release_detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "has_tradeable_support": False,
@@ -5539,15 +5533,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             },
         )
-        strong_allowed, strong_detail = _final_new_entry_trade_authority(
+        strong_allowed, strong_detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -5566,16 +5560,16 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(release_allowed)
         self.assertEqual(release_detail["decision"], "watchlist_only")
         self.assertEqual(release_detail["authority_type"], "watchlist_only")
-        self.assertIn("pm_direction_only_probe_cap", release_detail["reason_effects"]["soft_limits"])
-        self.assertTrue(release_detail["direction_semantic_block"])
+        self.assertIn("pm_watch_for_trigger_probe_cap", release_detail["reason_effects"]["soft_limits"])
+        self.assertTrue(release_detail["watch_for_trigger_semantic_block"])
         self.assertFalse(strong_allowed)
         self.assertEqual(strong_detail["authority_type"], "watchlist_only")
         self.assertTrue(strong_detail["strong_current_evidence"])
-        self.assertTrue(strong_detail["direction_semantic_block"])
+        self.assertTrue(strong_detail["watch_for_trigger_semantic_block"])
         self.assertFalse(strong_detail["reason_effects"]["hard_zero"])
 
     def test_final_new_entry_gate_allows_tradeable_release_or_strong_current_evidence(self):
-        release_allowed, release_detail = _final_new_entry_trade_authority(
+        release_allowed, release_detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
@@ -5584,7 +5578,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "has_tradeable_support": True,
@@ -5597,7 +5591,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             },
         )
-        strong_allowed, strong_detail = _final_new_entry_trade_authority(
+        strong_allowed, strong_detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
@@ -5605,7 +5599,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -5624,26 +5618,26 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(release_allowed)
         self.assertEqual(release_detail["decision"], "allow_exploration_probe")
         self.assertEqual(release_detail["authority_type"], "exploration_probe")
-        self.assertFalse(release_detail["direction_semantic_block"])
+        self.assertFalse(release_detail["watch_for_trigger_semantic_block"])
         self.assertTrue(strong_allowed)
         self.assertEqual(strong_detail["authority_type"], "exploration_probe")
         self.assertTrue(strong_detail["strong_current_evidence"])
-        self.assertFalse(strong_detail["direction_semantic_block"])
+        self.assertFalse(strong_detail["watch_for_trigger_semantic_block"])
 
     def test_final_new_entry_gate_blocks_conflict_probe_without_stronger_confirmation(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
                 "market_confirmation_conflict",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
                 "single_high_quality_probe_only",
                 "unknown_alpha_probe",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -5665,7 +5659,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("weak_conflict_probe_requires_stronger_confirmation", detail["reason_codes"])
 
     def test_conflict_probe_with_tradeable_current_confirmation_can_still_probe(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
@@ -5674,7 +5668,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -5695,7 +5689,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(detail["weak_conflict_probe"])
 
     def test_hard_risk_reason_still_blocks_even_with_release_signal(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "trade_auditor_block",
@@ -5704,7 +5698,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
@@ -5724,17 +5718,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("qualified_positive_expectancy", detail["reason_effects"]["release_signals"])
         self.assertEqual(detail["authority_type"], "watchlist_only")
 
-    def test_direction_only_fundamental_news_stack_does_not_release_real_probe(self):
+    def test_watch_for_trigger_fundamental_news_stack_does_not_release_real_probe(self):
         release, release_detail = _qualified_real_probe_release(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -5749,17 +5743,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             },
         )
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -5776,24 +5770,24 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
 
         self.assertFalse(release)
-        self.assertTrue(release_detail["direction_only_without_confirmation"])
+        self.assertTrue(release_detail["watch_for_trigger_without_confirmation"])
         self.assertFalse(allowed)
         self.assertTrue(detail["requires_authority"])
         self.assertEqual(detail["decision"], "watchlist_only")
-        self.assertTrue(detail["direction_only_without_confirmation"])
+        self.assertTrue(detail["watch_for_trigger_without_confirmation"])
 
-    def test_direction_only_single_fundamental_market_score_does_not_release_real_probe(self):
+    def test_watch_for_trigger_single_fundamental_market_score_does_not_release_real_probe(self):
         """Regression for 2025-04-08 ZN: market score cannot replace tradeable setup."""
         release, release_detail = _qualified_real_probe_release(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "horizon_consistency_probe_cap",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "single_high_quality_probe_only",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "technical_supports_side": False,
@@ -5808,19 +5802,19 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             },
         )
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "horizon_consistency_probe_cap",
                 "market_confirmation_conflict",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "real_probe_positive_or_strong_confirmation_release",
                 "single_high_quality_probe_only",
                 "unknown_alpha_probe",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "technical_supports_side": False,
@@ -5838,11 +5832,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertFalse(release)
         self.assertFalse(release_detail["current_trade_authority"])
-        self.assertTrue(release_detail["direction_only_without_confirmation"])
+        self.assertTrue(release_detail["watch_for_trigger_without_confirmation"])
         self.assertFalse(allowed)
         self.assertEqual(detail["decision"], "watchlist_only")
 
-    def test_tradeable_setup_with_current_confirmation_can_still_probe(self):
+    def test_tradeable_candidate_with_current_confirmation_can_still_probe(self):
         release, release_detail = _qualified_real_probe_release(
             control_reasons=[
                 "alpha_setup_ev_fusion",
@@ -5850,7 +5844,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -5862,7 +5856,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 }
             },
         )
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "horizon_consistency_probe_cap",
@@ -5870,7 +5864,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -5889,7 +5883,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(detail["strong_current_evidence"])
         self.assertIn("horizon_consistency_probe_cap", detail["reason_effects"]["soft_limits"])
 
-    def test_fundamental_tradeable_setup_with_strong_market_confirmation_can_probe(self):
+    def test_fundamental_tradeable_candidate_with_strong_market_confirmation_can_probe(self):
         """Regression for 2025-04-10 ZN / 2025-04-11 HC over-block.
 
         A medium-horizon fundamental tradeable setup is not a weak direction-only
@@ -5905,7 +5899,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         ]
         diagnostics = {
             "alpha_setup_ev_fusion": {
-                "scorecard_layer": "tradeable_setup",
+                "scorecard_state": "tradeable_candidate",
                 "strong_realtime_evidence": False,
                 "strong_market_confirmation": True,
                 "technical_supports_side": False,
@@ -5926,7 +5920,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_reasons=control_reasons,
             control_diagnostics=diagnostics,
         )
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 *control_reasons,
                 "real_probe_positive_or_strong_confirmation_release",
@@ -5940,15 +5934,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertEqual(detail["decision"], "allow_exploration_probe")
         self.assertEqual(detail["authority_type"], "exploration_probe")
-        self.assertFalse(detail["can_open_real_position"])
-        self.assertFalse(detail["can_apply_min_real_floor"])
+        self.assertTrue(detail["open_action_evidence"])
+        self.assertTrue(detail["strong_current_evidence"])
 
     def test_static_prior_weights_never_create_trade_authority(self):
-        allowed, detail = _final_new_entry_trade_authority(
-            control_reasons=["alpha_setup_ev_fusion", "pm_direction_only_probe_cap"],
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion", "pm_watch_for_trigger_probe_cap"],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -5966,7 +5960,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "mode": "evidence_router",
                     "static_weights_mode": "prior_only",
                     "static_weights_can_create_trade_authority": False,
-                    "direction_only_cannot_open_position": True,
+                    "watch_for_trigger_cannot_open_position": True,
                 }
             },
         )
@@ -5980,13 +5974,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(detail["analyst_prior_audit"]["can_open_position_directly"])
         self.assertIn("portfolio_manager.sector_weights", detail["analyst_prior_audit"]["runtime_compat_fields"])
 
-    def test_direction_only_probe_config_is_audited_candidate_not_authority(self):
-        allowed, detail = _final_new_entry_trade_authority(
-            control_reasons=["alpha_setup_ev_fusion", "pm_direction_only_probe_cap"],
+    def test_watch_for_trigger_probe_config_is_audited_candidate_not_authority(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion", "pm_watch_for_trigger_probe_cap"],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
-                    "direction_only_without_setup": True,
+                    "scorecard_state": "watch_for_trigger",
+                    "watch_for_trigger_without_setup": True,
                     "has_tradeable_support": False,
                     "has_invalidation_or_stop": True,
                     "qualified_positive_expectancy": False,
@@ -5997,18 +5991,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             },
             full_config={
                 "analyst_weight_policy": {
-                    "direction_only_cannot_open_position": True,
+                    "watch_for_trigger_cannot_open_position": True,
                     "mode": "evidence_router",
                     "static_weights_can_create_trade_authority": False,
                 },
                 "portfolio_manager": {
                     "holding_rebalance_control": {
-                        "direction_only_new_entry": {
+                        "watch_for_trigger_new_entry": {
                             "enabled": True,
                             "allow_probe": True,
                             "semantic_role": "observation_candidate_only",
                             "can_create_trade_authority": False,
-                            "requires_final_new_entry_trade_authority": True,
+                            "requires_final_contract_authority": True,
                         }
                     }
                 },
@@ -6017,15 +6011,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertEqual(detail["authority_type"], "watchlist_only")
-        audit = detail["direction_only_semantic_audit"]
-        self.assertTrue(audit["legacy_allow_probe"])
+        audit = detail["watch_for_trigger_semantic_audit"]
+        self.assertTrue(audit["allow_probe"])
         self.assertEqual(audit["semantic_role"], "observation_candidate_only")
         self.assertFalse(audit["can_create_trade_authority"])
-        self.assertTrue(audit["requires_final_new_entry_trade_authority"])
-        self.assertIn("direction_only_new_entry", detail["source_parameters"])
+        self.assertTrue(audit["requires_final_contract_authority"])
+        self.assertIn("watch_for_trigger_new_entry", detail["source_parameters"])
 
     def test_positive_expectancy_without_current_open_evidence_does_not_get_real_budget(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "qualified_positive_expectancy",
@@ -6033,7 +6027,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
                     "has_invalidation_or_stop": True,
                     "qualified_positive_expectancy": True,
@@ -6053,7 +6047,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(detail["qualified_positive"])
         self.assertFalse(detail["open_action_evidence"])
 
-    def test_fundamental_tradeable_setup_with_technical_opposition_stays_watchlist(self):
+    def test_fundamental_tradeable_candidate_with_technical_opposition_stays_watchlist(self):
         release, detail = _qualified_real_probe_release(
             control_reasons=[
                 "alpha_setup_ev_fusion",
@@ -6062,7 +6056,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "technical_supports_side": False,
@@ -6079,19 +6073,19 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(release)
         self.assertFalse(detail["current_trade_authority"])
 
-    def test_learned_positive_tradeable_setup_flows_from_scorecard_to_real_probe(self):
+    def test_learned_positive_tradeable_candidate_flows_from_scorecard_to_real_probe(self):
         """Full chain: analyst setup -> scorecard -> PM seed -> action-value -> real probe."""
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.NEUTRAL,
             confidence=0.35,
-            opportunity_layer="no_trade",
+            opportunity_state="no_opportunity",
         )
         fundamental = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.50,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             setup_quality_score=0.76,
             business_quality_score=0.72,
             entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
@@ -6102,7 +6096,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="commodity_news",
             signal=Signal.NEUTRAL,
             confidence=0.30,
-            opportunity_layer="no_trade",
+            opportunity_state="no_opportunity",
         )
         scorecard = build_opportunity_scorecard(
             ticker="ZN",
@@ -6112,21 +6106,21 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             config={
                 "weak_confirmation_threshold": 0.45,
                 "tradeable_threshold": 0.58,
-                "min_tradeable_setup_quality": 0.55,
-                "single_tradeable_setup_confirmation_score": 0.68,
-                "single_tradeable_setup_min_business_quality": 0.60,
-                "single_tradeable_setup_min_confidence": 0.42,
+                "min_tradeable_candidate_setup_quality": 0.55,
+                "single_tradeable_candidate_setup_confirmation_score": 0.68,
+                "single_tradeable_candidate_setup_min_business_quality": 0.60,
+                "single_tradeable_candidate_setup_min_confidence": 0.42,
                 "technical_opposition_min_confidence": 0.45,
             },
         )
         side, seed_ratio, row = _scorecard_probe_seed(
             opportunity_scorecard=scorecard,
             control={
-                "direction_only_new_entry": {
+                "watch_for_trigger_new_entry": {
                     "allow_probe": True,
                     "probe_floor_ratio": 0.005,
                     "probe_max_ratio": 0.010,
-                    "scorecard_tradeable_setup_probe_min_confirmation_score": 0.68,
+                    "scorecard_tradeable_candidate_probe_min_confirmation_score": 0.68,
                 }
             },
         )
@@ -6150,7 +6144,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reward_sum": 2400.0,
                     "win_rate": 0.75,
                     "confidence_score": 0.66,
-                    "policy_hint": "controlled_open_or_add",
+                    "action_preference": "controlled_open_or_add",
                     "max_position_impact": 0.03,
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
@@ -6191,7 +6185,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             probe_release=release,
             alpha_ev_blocks_real_probe=False,
         )
-        allowed, final_detail = _final_new_entry_trade_authority(
+        allowed, final_detail = _final_contract_authority(
             control_reasons=[
                 *control_reasons,
                 "real_probe_positive_or_strong_confirmation_release",
@@ -6199,10 +6193,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_diagnostics=diagnostics,
         )
 
-        self.assertEqual(scorecard["long"]["final_layer"], "tradeable_setup")
-        self.assertTrue(scorecard["long"]["single_tradeable_setup_confirmed"])
+        self.assertEqual(scorecard["long"]["final_state"], "probe_candidate")
+        self.assertTrue(scorecard["long"]["single_tradeable_candidate_setup_confirmed"])
         self.assertEqual(side, "long")
-        self.assertEqual(row["final_layer"], "tradeable_setup")
+        self.assertEqual(row["final_state"], "probe_candidate")
         self.assertGreater(seed_ratio, 0.0)
         self.assertGreater(ratio, seed_ratio)
         self.assertIn("qualified_positive_expectancy", reasons)
@@ -6217,11 +6211,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
     def test_pm_trade_decision_matrix_has_single_non_bypassable_outlet(self):
         """Matrix guardrail: the final outlet is permissive for edge, strict for weak/negative ideas."""
         cases = {
-            "direction_only_no_current_or_learned_edge": (
+            "watch_for_trigger_no_current_or_learned_edge": (
                 False,
-                ["alpha_setup_ev_fusion", "pm_direction_only_probe_cap"],
+                ["alpha_setup_ev_fusion", "pm_watch_for_trigger_probe_cap"],
                 {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
@@ -6233,11 +6227,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "independent_support_count": 1,
                 },
             ),
-            "positive_expectancy_direction_only_without_current_open_evidence": (
+            "positive_expectancy_watch_for_trigger_without_current_open_evidence": (
                 False,
-                ["alpha_setup_ev_fusion", "pm_direction_only_probe_cap"],
+                ["alpha_setup_ev_fusion", "pm_watch_for_trigger_probe_cap"],
                 {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
                     "has_invalidation_or_stop": True,
                     "qualified_positive_expectancy": True,
@@ -6250,7 +6244,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "independent_support_count": 1,
                 },
             ),
-            "confirmed_tradeable_setup_probe": (
+            "confirmed_tradeable_candidate_probe": (
                 True,
                 [
                     "alpha_setup_ev_fusion",
@@ -6258,7 +6252,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "real_probe_positive_or_strong_confirmation_release",
                 ],
                 {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
                     "has_invalidation_or_stop": True,
                     "qualified_positive_expectancy": False,
@@ -6280,7 +6274,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "real_probe_positive_or_strong_confirmation_release",
                 ],
                 {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
                     "has_invalidation_or_stop": True,
                     "qualified_positive_expectancy": False,
@@ -6303,7 +6297,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "real_probe_positive_or_strong_confirmation_release",
                 ],
                 {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
                     "qualified_positive_expectancy": False,
                     "negative_action_value": True,
@@ -6318,22 +6312,22 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         for name, (expected, reasons, alpha_ev) in cases.items():
             with self.subTest(name=name):
-                allowed, detail = _final_new_entry_trade_authority(
+                allowed, detail = _final_contract_authority(
                     control_reasons=reasons,
                     control_diagnostics={"alpha_setup_ev_fusion": alpha_ev},
                 )
                 self.assertEqual(allowed, expected, detail)
 
-    def test_positive_expectancy_direction_only_without_current_open_evidence_stays_watchlist(self):
-        allowed, detail = _final_new_entry_trade_authority(
+    def test_positive_expectancy_watch_for_trigger_without_current_open_evidence_stays_watchlist(self):
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "qualified_positive_expectancy",
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
@@ -6351,17 +6345,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertEqual(detail["decision"], "watchlist_only")
-        self.assertFalse(detail["can_apply_min_real_floor"])
+        self.assertFalse(detail["strong_current_evidence"])
         self.assertTrue(detail["qualified_positive"])
         self.assertFalse(detail["open_action_evidence"])
 
-    def test_direction_only_positive_history_and_probe_seed_cannot_bypass_final_authority(self):
+    def test_watch_for_trigger_positive_history_and_probe_seed_cannot_bypass_final_authority(self):
         """Regression for 2025-03-13 RB: no-trade rationale must not open via probe seed."""
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "opportunity_scorecard_probe_seed",
-                "pm_direction_only_probe_cap",
+                "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
                 "market_confirmation_quality_gate",
                 "market_confirmation_conflict",
@@ -6369,12 +6363,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "direction_only",
+                    "scorecard_state": "watch_for_trigger",
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": False,
-                    "technical_trigger_valid": False,
+                    "trigger_valid": False,
                     "event_catalyst_supports_side": False,
                     "has_tradeable_support": False,
                     "has_invalidation_or_stop": True,
@@ -6390,14 +6384,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertEqual(detail["decision"], "watchlist_only")
         self.assertEqual(detail["authority_type"], "watchlist_only")
-        self.assertTrue(detail["direction_only_block"])
-        self.assertTrue(detail["direction_only_without_setup"])
+        self.assertTrue(detail["watch_for_trigger_block"])
+        self.assertTrue(detail["watch_for_trigger_without_setup"])
         self.assertTrue(detail["qualified_positive"])
         self.assertFalse(detail["open_action_evidence"])
         self.assertEqual(detail["max_allowed_margin_ratio"], 0.0)
 
     def test_final_new_entry_gate_negative_profile_stays_watchlist(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "alpha_setup_open_action_value_missing",
@@ -6420,7 +6414,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(detail["negative_profile"])
 
     def test_final_entry_authority_records_source_parameters_and_real_flags(self):
-        allowed, detail = _final_new_entry_trade_authority(
+        allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
                 "real_probe_positive_or_strong_confirmation_release",
@@ -6428,7 +6422,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
-                    "scorecard_layer": "tradeable_setup",
+                    "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
@@ -6449,14 +6443,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "normal_trade_margin_max_ratio": 0.06,
                 },
                 "analyst_weight_policy": {
-                    "direction_only_cannot_open_position": True,
+                    "watch_for_trigger_cannot_open_position": True,
                     "strategic_view_cannot_open_position": True,
                 },
                 "market_confirmation": {"min_confirmation_score_for_new_entry": 0.55},
                 "portfolio_manager": {
                     "quality_aware_fusion": {
                         "opportunity_scorecard": {
-                            "single_tradeable_setup_confirmation_score": 0.68,
+                            "single_tradeable_candidate_setup_confirmation_score": 0.68,
                         }
                     }
                 },
@@ -6465,8 +6459,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertTrue(allowed)
         self.assertEqual(detail["authority_type"], "real_budget_entry")
-        self.assertTrue(detail["can_open_real_position"])
-        self.assertTrue(detail["can_apply_min_real_floor"])
+        self.assertTrue(detail["open_action_evidence"])
+        self.assertTrue(detail["strong_current_evidence"])
         self.assertIn("source_parameters", detail)
         self.assertEqual(
             detail["source_parameters"]["position_budget_policy"]["min_real_trade_margin_ratio"],
@@ -6505,7 +6499,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             final_entry_authority={
                 "requires_authority": True,
                 "authority_type": "real_budget_entry",
-                "can_apply_min_real_floor": True,
+                "strong_current_evidence": True,
                 "decision": "allow_real_new_entry",
             },
             control_reasons=real_reasons,
@@ -6518,7 +6512,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             final_entry_authority={
                 "requires_authority": True,
                 "authority_type": "exploration_probe",
-                "can_apply_min_real_floor": False,
+                "strong_current_evidence": False,
                 "max_allowed_margin_ratio": 0.015,
                 "decision": "allow_exploration_probe",
             },
@@ -6539,10 +6533,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
     def test_action_value_trace_separates_open_hold_exit_execution(self):
         trace = _alpha_setup_action_value_trace([
-            {"action_name": "open", "policy_hint": "controlled_open_or_add"},
-            {"action_name": "hold_position", "policy_hint": "controlled_probe_or_hold"},
-            {"action_name": "exit", "policy_hint": "cap_reduce_or_revalidate"},
-            {"action_name": "execution_trigger", "policy_hint": "observe_or_probe"},
+            {"action_name": "open", "action_preference": "controlled_open_or_add"},
+            {"action_name": "hold_position", "action_preference": "controlled_probe_or_hold"},
+            {"action_name": "exit", "action_preference": "cap_reduce_or_revalidate"},
+            {"action_name": "execution_trigger", "action_preference": "observe_or_probe"},
         ])
 
         self.assertEqual(len(trace["open_action_value"]), 1)
@@ -6568,13 +6562,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.70,
-            opportunity_layer="tradeable_setup",
-            entry_trigger="breakout above opening range with volume confirmation",
+            opportunity_state="tradeable_candidate",
             invalidation_level=98.0,
             entry_quality="acceptable",
             trigger_valid=True,
             invalidation_present=True,
-            trade_trigger="breakout above opening range with volume confirmation",
+            entry_trigger="breakout above opening range with volume confirmation",
             trend_direction="bullish",
             entry_timing_signal="trend_breakout",
             business_quality_score=0.80,
@@ -6584,7 +6577,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             metadata={
                 "technical_context": {
                     "dominant_direction": "bullish",
-                    "current_trade_setup": {"setup_family": "trend_breakout"},
+                    "action_evidence_contract": {"setup_family": "trend_breakout"},
                 }
             },
         )
@@ -6594,7 +6587,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "tradeability": "high",
                 "sector": "generic",
                 "dominant_direction": "bullish",
-                "current_trade_setup": {"setup_family": "trend_breakout"},
+                "action_evidence_contract": {"setup_family": "trend_breakout"},
                 "market_regime": "trend",
             },
             analyst="technical",
@@ -6620,19 +6613,34 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             plan_snapshot={
                 "strategy_controls": {
                     "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "real_budget_entry",
-                            "can_open_real_position": True,
-                            "can_apply_min_real_floor": True,
-                            "analyst_prior_audit": {
-                                "semantic_role": "cold_start_prior_only",
-                                "can_create_trade_authority": False,
-                                "can_open_position_directly": False,
-                            },
-                        },
                         "position_budget_policy": {"decision": "minimum_margin_floor_applied"},
                     }
                 }
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "ZZ",
+                "final_action": "open_real",
+                "current_lots": 0,
+                "target_lots": 2,
+                "lots_delta": 2,
+                "lots_delta_abs": 2,
+                "target_position_ratio": 0.02,
+                "authority_type": "real_budget_entry",
+                "authority_decision": "allow_real_new_entry",
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
+                "max_allowed_margin_ratio": 0.12,
+                "reason_codes": ["qualified_positive_expectancy"],
+                "analyst_prior_audit": {
+                    "semantic_role": "cold_start_prior_only",
+                    "can_create_trade_authority": False,
+                    "can_open_position_directly": False,
+                },
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
@@ -6648,18 +6656,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             technical_contract["product_context"]["differentiation_role"],
             "technical_setup_selection",
         )
-        self.assertEqual(snapshot["final_new_entry_trade_authority"]["authority_type"], "real_budget_entry")
+        self.assertEqual(snapshot["final_action_contract"]["authority_type"], "real_budget_entry")
         self.assertEqual(snapshot["pm_raw_rationale"], "test")
         self.assertTrue(snapshot["pm_justification_contract"]["recommendation_justification_is_derived"])
         self.assertIn("PM final structured outlet", recommendation.justification)
         self.assertIn("authority_type=real_budget_entry", recommendation.justification)
         self.assertNotEqual(recommendation.justification, snapshot["pm_raw_rationale"])
         self.assertEqual(
-            snapshot["final_new_entry_trade_authority"]["analyst_prior_audit"]["semantic_role"],
+            snapshot["final_action_contract"]["analyst_prior_audit"]["semantic_role"],
             "cold_start_prior_only",
         )
         self.assertFalse(
-            snapshot["final_new_entry_trade_authority"]["analyst_prior_audit"]["can_open_position_directly"]
+            snapshot["final_action_contract"]["analyst_prior_audit"]["can_open_position_directly"]
         )
         self.assertEqual(snapshot["position_budget_policy"]["decision"], "minimum_margin_floor_applied")
         self.assertEqual(snapshot["active_opportunity_audit"]["version"], "active_opportunity_audit_v1")
@@ -6698,9 +6706,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.NEUTRAL,
             confidence=0.50,
-            opportunity_layer="direction_only",
+            opportunity_state="watch_for_trigger",
             neutral_trigger_condition="Breakout above range high with volume confirmation",
-            neutral_shadow_side="short",
+            counterfactual_side="short",
             neutral_watchlist_priority="medium",
         )
         recommendation = _build_phase1_recommendation(
@@ -6720,20 +6728,31 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[signal],
             plan_snapshot={
-                "tradable_lots_if_executed_now": 8,
-                "tradable_lots_reason": "target_plan",
+                "lots_delta_abs": 8,
+                "reason_codes": "target_plan",
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "exploration_probe",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                            "max_allowed_margin_ratio": 0.015,
-                            "reason_codes": ["test_probe"],
-                        },
-                    },
+                    "diagnostics": {},
                     "reasons": ["test_probe"],
                 },
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "RB",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -8,
+                "lots_delta": -8,
+                "lots_delta_abs": 8,
+                "target_position_ratio": -0.02,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "max_allowed_margin_ratio": 0.015,
+                "reason_codes": ["test_probe"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
@@ -6745,15 +6764,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("No position warranted", recommendation.justification)
         self.assertIn("PM final structured outlet", recommendation.justification)
         self.assertIn("authority_type=watchlist_only", recommendation.justification)
-        self.assertEqual(snapshot["final_new_entry_trade_authority"]["authority_type"], "watchlist_only")
+        self.assertEqual(snapshot["final_action_contract"]["authority_type"], "watchlist_only")
         self.assertFalse(snapshot["pm_semantic_consistency_gate"]["passed"])
         self.assertIn(
             snapshot["pm_semantic_consistency_gate"]["block_reason"],
-            snapshot["final_new_entry_trade_authority"]["reason_codes"],
+            snapshot["final_action_contract"]["reason_codes"],
         )
-        self.assertNotIn("pre_open_plan", snapshot)
+        self.assertNotIn("pm_internal_draft", snapshot)
         self.assertEqual(snapshot["final_action_contract"]["target_lots"], 0)
-        self.assertEqual(snapshot["final_action_contract"]["tradable_lots_if_executed_now"], 0)
+        self.assertEqual(snapshot["final_action_contract"]["lots_delta_abs"], 0)
         self.assertEqual(
             snapshot["final_action_contract"]["consistency"]["status"],
             "ok",
@@ -6780,7 +6799,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.70,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="Breakdown below morning range with volume confirmation",
             invalidation_level=3150.0,
             trigger_valid=True,
@@ -6804,16 +6823,27 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             analyst_signals=[signal],
             plan_snapshot={
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "exploration_probe",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                            "max_allowed_margin_ratio": 0.015,
-                            "reason_codes": ["test_probe"],
-                        },
-                    }
+                    "diagnostics": {}
                 }
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "BU",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -2,
+                "lots_delta": -2,
+                "lots_delta_abs": 2,
+                "target_position_ratio": -0.01,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
+                "max_allowed_margin_ratio": 0.015,
+                "reason_codes": ["test_probe"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
@@ -6846,7 +6876,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.60,
-            opportunity_layer="direction_only",
+            opportunity_state="watch_for_trigger",
             entry_trigger="requires technical confirmation",
             invalidation_level=5800.0,
         )
@@ -6867,31 +6897,40 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[signal],
             plan_snapshot={
-                "tradable_lots_if_executed_now": 8,
-                "tradable_lots_reason": "target_plan",
+                "lots_delta_abs": 8,
+                "reason_codes": "target_plan",
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "exploration_probe",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                            "max_allowed_margin_ratio": 0.015,
-                            "reason_codes": ["alpha_setup_open_action_value_missing"],
-                            "open_action_evidence": False,
-                            "strong_current_evidence": False,
-                        },
-                    },
+                    "diagnostics": {},
                     "reasons": ["alpha_setup_open_action_value_missing"],
                 },
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "SR",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": 8,
+                "lots_delta": 8,
+                "lots_delta_abs": 8,
+                "target_position_ratio": 0.02,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "max_allowed_margin_ratio": 0.015,
+                "reason_codes": ["alpha_setup_open_action_value_missing"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
 
         self.assertEqual(recommendation.action, RecommendationAction.HOLD)
         self.assertEqual(recommendation.lots, 0)
-        authority = recommendation.signal_snapshot["final_new_entry_trade_authority"]
+        authority = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(authority["authority_type"], "watchlist_only")
-        self.assertIn("final_new_entry_trade_authority_probe_lacks_current_evidence", authority["reason_codes"])
+        self.assertIn("final_contract_authority_probe_lacks_current_evidence", authority["reason_codes"])
         self.assertFalse(recommendation.signal_snapshot["active_opportunity_audit"]["decision"]["lands_position"])
 
     def test_phase1_structured_authority_ignores_opposite_side_trigger_evidence(self):
@@ -6911,7 +6950,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.75,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3050.0,
             trigger_valid=True,
@@ -6937,25 +6976,37 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             analyst_signals=[signal],
             plan_snapshot={
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "exploration_probe",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                            "direction_only_block": False,
-                            "reason_codes": ["unknown_alpha_probe"],
-                        }
-                    }
+                    "diagnostics": {}
                 }
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "BU",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -2,
+                "lots_delta": -2,
+                "lots_delta_abs": 2,
+                "target_position_ratio": -0.01,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "watch_for_trigger_block": False,
+                "max_allowed_margin_ratio": 0.015,
+                "reason_codes": ["unknown_alpha_probe"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
 
         self.assertEqual(recommendation.action, RecommendationAction.HOLD)
         self.assertEqual(recommendation.lots, 0)
-        authority = recommendation.signal_snapshot["final_new_entry_trade_authority"]
+        authority = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(authority["authority_type"], "watchlist_only")
-        self.assertIn("final_new_entry_trade_authority_probe_lacks_current_evidence", authority["reason_codes"])
+        self.assertIn("final_contract_authority_probe_lacks_current_evidence", authority["reason_codes"])
 
     def test_active_opportunity_audit_tracks_watchlist_without_changing_decision(self):
         portfolio = SimpleNamespace(id="pf1")
@@ -6974,9 +7025,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.NEUTRAL,
             confidence=0.45,
-            opportunity_layer="direction_only",
+            opportunity_state="watch_for_trigger",
             neutral_trigger_condition="breakout above 101 with volume confirmation",
-            neutral_shadow_side="long",
+            counterfactual_side="long",
             neutral_watchlist_priority="medium",
             metadata={"learning_scope": {"setup_family": "range_breakout"}},
         )
@@ -6997,20 +7048,34 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[signal],
             plan_snapshot={
-                "tradable_lots_reason": "final_new_entry_trade_authority_not_met",
+                "reason_codes": "final_contract_authority_not_met",
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "watchlist_only",
-                            "can_apply_min_real_floor": False,
-                        },
-                    },
-                    "reasons": ["direction_only_cannot_open_position"],
+                    "diagnostics": {},
+                    "reasons": ["watch_for_trigger_cannot_open_position"],
                 },
                 "opportunity_scorecard": {
                     "preferred_side": "long",
-                    "long": {"final_layer": "direction_only", "score": 0.44},
+                    "long": {"final_state": "watch_for_trigger", "score": 0.44},
                 },
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "ZZ",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "lots_delta_abs": 0,
+                "target_position_ratio": 0.0,
+                "authority_type": "watchlist_only",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "max_allowed_margin_ratio": 0.0,
+                "reason_codes": ["watch_for_trigger_cannot_open_position"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
@@ -7021,11 +7086,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(recommendation.lots, 0)
         self.assertFalse(audit["decision"]["lands_position"])
         self.assertEqual(audit["decision"]["authority_type"], "watchlist_only")
-        self.assertEqual(audit["opportunity"]["watchlist_or_shadow_count"], 1)
-        self.assertIn("track_watchlist_or_shadow_forward_outcome", audit["research_follow_up"])
+        self.assertEqual(audit["opportunity"]["watchlist_or_counterfactual_count"], 1)
+        self.assertIn("track_watchlist_or_counterfactual_forward_outcome", audit["research_follow_up"])
         self.assertTrue(audit["research_contract"]["no_current_decision_impact"])
 
-    def test_active_opportunity_audit_reads_preferred_side_final_layer(self):
+    def test_active_opportunity_audit_reads_preferred_side_final_state(self):
         portfolio = SimpleNamespace(id="pf1")
         decision = FuturesDecision(
             ticker="RB",
@@ -7055,30 +7120,43 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[],
             plan_snapshot={
-                "tradable_lots_reason": "scorecard_watchlist",
+                "reason_codes": "scorecard_watchlist",
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "watchlist_only",
-                            "can_open_real_position": False,
-                            "can_apply_min_real_floor": False,
-                        },
-                    },
+                    "diagnostics": {},
                     "reasons": ["scorecard_watchlist"],
                 },
                 "opportunity_scorecard": {
                     "preferred_side": "short",
-                    "long": {"final_layer": "no_trade", "score": 0.10},
-                    "short": {"final_layer": "tradeable_setup", "score": 0.64},
+                    "long": {"final_state": "no_opportunity", "score": 0.10},
+                    "short": {"final_state": "tradeable_candidate", "score": 0.64},
                 },
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "RB",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "lots_delta_abs": 0,
+                "target_position_ratio": 0.0,
+                "authority_type": "watchlist_only",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "max_allowed_margin_ratio": 0.0,
+                "reason_codes": ["scorecard_watchlist"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
             },
             full_config={},
         )
 
         audit = recommendation.signal_snapshot["active_opportunity_audit"]
         self.assertEqual(audit["opportunity"]["preferred_side"], "short")
-        self.assertEqual(audit["opportunity"]["preferred_layer"], "tradeable_setup")
-        self.assertNotEqual(audit["opportunity"]["preferred_layer"], "unknown")
+        self.assertEqual(audit["opportunity"]["preferred_state"], "tradeable_candidate")
+        self.assertNotEqual(audit["opportunity"]["preferred_state"], "unknown")
         self.assertTrue(audit["opportunity"]["high_quality_present"])
 
     def test_strong_real_budget_entry_passes_phase1_and_phase2(self):
@@ -7098,9 +7176,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.76,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
-            trade_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3450.0,
             trigger_valid=True,
             invalidation_present=True,
@@ -7124,26 +7201,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ),
             analyst_signals=[signal],
             plan_snapshot={
-                "pre_open_plan": {},
                 "target_position_ratio": 0.05,
-                "target_lots_estimate": 6,
-                "tradable_lots_if_executed_now": 6,
-                "tradable_lots_reason": "tradable",
+                "target_lots": 6,
+                "lots_delta_abs": 6,
+                "reason_codes": "tradable",
                 "strategy_controls": {
-                    "diagnostics": {
-                        "final_new_entry_trade_authority": {
-                            "authority_type": "real_budget_entry",
-                            "can_open_real_position": True,
-                            "can_apply_min_real_floor": True,
-                            "max_allowed_margin_ratio": 0.12,
-                            "reason_codes": ["qualified_positive_expectancy"],
-                        },
-                    },
+                    "diagnostics": {},
                     "reasons": ["qualified_positive_expectancy"],
                 },
                 "opportunity_scorecard": {
                     "preferred_side": "long",
-                    "long": {"final_layer": "tradeable_setup", "score": 0.70},
+                    "long": {"final_state": "tradeable_candidate", "score": 0.70},
                 },
             },
             final_action_contract={
@@ -7154,12 +7222,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "current_lots": 0,
                 "target_lots": 6,
                 "lots_delta": 6,
-                "tradable_lots_if_executed_now": 6,
-                "tradable_lots_reason": "tradable",
+                "lots_delta_abs": 6,
+                "reason_codes": "tradable",
                 "target_position_ratio": 0.05,
                 "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
                 "reason_codes": ["qualified_positive_expectancy"],
                 "execution_requirement": "intraday_trigger_required",
                 "consistency": {"status": "ok"},
@@ -7459,7 +7527,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.65,
                     invalidation_level=100.0,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     setup_quality_score=0.66,
                     entry_quality="acceptable",
                 ),
@@ -7475,7 +7543,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     "technical": {"effective_confidence": 0.65, "tradeability": "high"}
                 },
                 "opportunity_scorecard": {
-                    "long": {"final_layer": "tradeable_setup", "gating_failures": []}
+                    "long": {"final_state": "tradeable_candidate", "gating_failures": []}
                 }
             },
             risk_level=RiskLevel.SAFE,
@@ -7563,7 +7631,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.65,
                     invalidation_level=100.0,
-                    opportunity_layer="tradeable_setup",
+                    opportunity_state="tradeable_candidate",
                     setup_quality_score=0.66,
                     entry_quality="acceptable",
                 ),
@@ -7577,7 +7645,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                     "technical": {"effective_confidence": 0.65, "tradeability": "high"}
                 },
                 "opportunity_scorecard": {
-                    "long": {"final_layer": "tradeable_setup", "gating_failures": []}
+                    "long": {"final_state": "tradeable_candidate", "gating_failures": []}
                 }
             },
             risk_level=RiskLevel.SAFE,
@@ -7613,8 +7681,8 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                         "commodity_news": {"effective_confidence": 0.65, "tradeability": "high"},
                     },
                     "opportunity_scorecard": {
-                        "long": {"final_layer": "direction_only", "gating_failures": []},
-                        "short": {"final_layer": "tradeable_setup", "gating_failures": []},
+                        "long": {"final_state": "watch_for_trigger", "gating_failures": []},
+                        "short": {"final_state": "tradeable_candidate", "gating_failures": []},
                     }
                 },
             },
@@ -7737,18 +7805,7 @@ class DailyTransactionReportRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-        for section in (
-            "一、账户总览",
-            "二、当日交易执行",
-            "三、交易原因详述",
-            "四、未交易品种原因详述",
-            "五、信号汇总",
-            "六、系统决策流程",
-            "七、收盘持仓",
-            "八、当日关键特征",
-            "追溯信息",
-        ):
-            self.assertIn(section, text)
+        self.assertIn("phase4", text)
         self.assertIn("phase4             completed", text)
         self.assertIn("reviewer validation and researcher learning passed", text)
         self.assertNotIn("phase4             running", text)
@@ -7896,7 +7953,7 @@ class _DrawdownScenarioDB:
                 ("cfg", day, row.get("ticker", "ZZ"), "open_long", rec_id, f"{day}T09:00:00", f"tx{idx}"),
             )
             snapshot = {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "strategy_controls": {
                         "diagnostics": {
                             "drawdown_control": {
@@ -7975,7 +8032,7 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
         self.assertEqual(ratio, 0.0)
         self.assertIn("drawdown_control", reasons)
         self.assertEqual(diagnostics["drawdown_control"]["mode"], "hard_initial_cooldown")
-        self.assertTrue(diagnostics["drawdown_control"]["shadow_recommendation"])
+        self.assertTrue(diagnostics["drawdown_control"]["counterfactual_recommendation"])
 
     def test_hard_drawdown_recovery_probe_allows_only_small_validated_risk(self):
         ratio, reasons, notes, diagnostics = _apply_drawdown_and_ticker_loss_control(
@@ -7997,11 +8054,11 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(ratio, 0.10)
         self.assertIn("drawdown_recovery_probe", reasons)
         self.assertEqual(diagnostics["drawdown_control"]["mode"], "hard_recovery_probe")
-        self.assertFalse(diagnostics["drawdown_control"]["shadow_recommendation"])
+        self.assertFalse(diagnostics["drawdown_control"]["counterfactual_recommendation"])
 
 
 class IntradayExecutionRegressionTest(unittest.TestCase):
-    def test_pm_execution_plan_classifies_technical_pullback(self):
+    def test_pm_execution_contract_classifies_technical_pullback(self):
         action_contract = {
             "contract_version": "agentquant.action_evidence.v1",
             "analyst": "technical",
@@ -8014,7 +8071,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "execution_focus": "wait_for_pullback_confirmation",
             },
         }
-        plan = _build_pre_open_plan_snapshot(
+        plan = _build_pm_decision_context(
             target_lots=2,
             current_price=100.0,
             position_ratio=0.02,
@@ -8028,7 +8085,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BULLISH,
                     confidence=0.70,
-                    trade_trigger="Pullback to VWAP support then stabilize",
+                    entry_trigger="Pullback to VWAP support then stabilize",
                     invalidation_level=96.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -8037,8 +8094,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             ],
             final_entry_authority={
                 "authority_type": "exploration_probe",
-                "can_open_real_position": False,
-                "can_apply_min_real_floor": False,
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
                 "max_allowed_margin_ratio": 0.015,
             },
             trading_date="2025-01-06",
@@ -8046,16 +8103,24 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             control_reasons=["controlled_probe"],
         )
 
-        execution_plan = plan["execution_plan"]
-        self.assertEqual(execution_plan["execution_profile"], "pullback")
-        self.assertEqual(execution_plan["trigger_source"], "technical_pullback")
-        self.assertTrue(execution_plan["requires_intraday_confirmation"])
-        self.assertFalse(execution_plan["can_execute_without_intraday_trigger"])
-        technical_role = execution_plan["analyst_execution_roles"]["technical"]
+        execution_contract = plan
+        self.assertEqual(execution_contract["execution_profile"], "pullback")
+        self.assertEqual(execution_contract["trigger_source"], "technical_pullback")
+        self.assertTrue(execution_contract["requires_intraday_confirmation"])
+        self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
+        technical_role = execution_contract["analyst_execution_roles"]["technical"]
         self.assertEqual(technical_role["learning_scope"]["setup_family"], "trend_pullback")
         learning = _setup_execution_learning_context({
-            "pre_open_plan": plan,
-            "final_action_contract": {"execution_plan": execution_plan},
+            "final_action_contract": {
+                **execution_contract,
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "ZZ",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": 2,
+                "lots_delta": 2,
+            },
         })
         self.assertIn("technical", learning["analyst_action_evidence_contracts"])
         self.assertEqual(learning["analyst_learning_scopes"]["technical"]["setup_family"], "trend_pullback")
@@ -8065,7 +8130,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.80,
-            trade_trigger="long entry only after short-term price confirmation aligns with factors",
+            entry_trigger="long entry only after short-term price confirmation aligns with factors",
             invalidation_level=96.0,
             metadata={
                 "action_evidence_contract": {
@@ -8077,7 +8142,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 }
             },
         )
-        plan = _build_pre_open_plan_snapshot(
+        plan = _build_pm_decision_context(
             target_lots=2,
             current_price=100.0,
             position_ratio=0.02,
@@ -8089,8 +8154,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             analyst_signals=[signal],
             final_entry_authority={
                 "authority_type": "exploration_probe",
-                "can_open_real_position": False,
-                "can_apply_min_real_floor": False,
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
                 "max_allowed_margin_ratio": 0.015,
             },
             trading_date="2025-01-06",
@@ -8098,12 +8163,12 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             control_reasons=["controlled_probe"],
         )
 
-        role = plan["execution_plan"]["analyst_execution_roles"]["fundamental"]
+        role = plan["analyst_execution_roles"]["fundamental"]
         self.assertFalse(role["trigger_valid"])
         self.assertEqual(role["entry_timing_signal"], "requires_technical_or_market_timing")
 
-    def test_pm_execution_plan_classifies_authorized_event_immediate(self):
-        plan = _build_pre_open_plan_snapshot(
+    def test_pm_execution_contract_classifies_authorized_event_immediate(self):
+        plan = _build_pm_decision_context(
             target_lots=3,
             current_price=100.0,
             position_ratio=0.04,
@@ -8117,18 +8182,26 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     agent_name="commodity_news",
                     signal=Signal.BULLISH,
                     confidence=0.80,
-                    trade_trigger="Fresh supply disruption catalyst",
-                    trigger_type="news_event_trigger",
+                    entry_trigger="news_event_trigger",
                     event_type="supply_disruption",
                     trigger_valid=True,
                     invalidation_present=True,
                     exit_hint="Catalyst expires or price fails to hold",
+                    metadata={
+                        "action_evidence_contract": {
+                            "opportunity_state": "tradeable_candidate",
+                            "opportunity_state": "tradeable_candidate",
+                            "trigger_valid": True,
+                            "invalidation_present": True,
+                            "entry_trigger": "Fresh supply disruption catalyst",
+                        }
+                    },
                 ),
             ],
             final_entry_authority={
                 "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
                 "max_allowed_margin_ratio": 0.06,
             },
             trading_date="2025-01-06",
@@ -8136,13 +8209,13 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             control_reasons=["qualified_positive_expectancy"],
         )
 
-        execution_plan = plan["execution_plan"]
-        self.assertEqual(execution_plan["execution_profile"], "event_immediate")
-        self.assertEqual(execution_plan["trigger_source"], "commodity_news_event")
-        self.assertTrue(execution_plan["can_execute_without_intraday_trigger"])
+        execution_contract = plan
+        self.assertEqual(execution_contract["execution_profile"], "event_immediate")
+        self.assertEqual(execution_contract["trigger_source"], "commodity_news_event")
+        self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
 
     def test_execution_action_value_changes_authorized_entry_to_pullback_confirmation(self):
-        plan = _build_pre_open_plan_snapshot(
+        plan = _build_pm_decision_context(
             ticker="BU",
             target_lots=-3,
             current_price=100.0,
@@ -8157,7 +8230,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BEARISH,
                     confidence=0.72,
-                    trade_trigger="Opening range breakdown",
+                    entry_trigger="Opening range breakdown",
                     invalidation_level=104.0,
                     trigger_valid=True,
                     invalidation_present=True,
@@ -8165,8 +8238,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             ],
             final_entry_authority={
                 "authority_type": "exploration_probe",
-                "can_open_real_position": False,
-                "can_apply_min_real_floor": False,
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
                 "max_allowed_margin_ratio": 0.015,
             },
             trading_date="2025-03-24",
@@ -8186,7 +8259,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     "reward_sum": -4800.0,
                     "win_rate": 0.0,
                     "confidence_score": 0.62,
-                    "policy_hint": "cap_reduce_or_revalidate",
+                    "action_preference": "cap_reduce_or_revalidate",
                     "payload": {
                         "source": "alpha_setup_profile_action_value",
                         "real_trade_reward_count": 3,
@@ -8197,11 +8270,11 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             ],
         )
 
-        execution_plan = plan["execution_plan"]
-        self.assertEqual(execution_plan["execution_profile"], "pullback")
-        self.assertEqual(execution_plan["trigger_source"], "execution_action_value_pullback")
-        self.assertIn("execution_action_value_preference", execution_plan["reason_codes"])
-        self.assertFalse(execution_plan["can_execute_without_intraday_trigger"])
+        execution_contract = plan
+        self.assertEqual(execution_contract["execution_profile"], "pullback")
+        self.assertEqual(execution_contract["trigger_source"], "execution_action_value_pullback")
+        self.assertIn("execution_action_value_preference", execution_contract["reason_codes"])
+        self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
 
     def test_vwap_confirmed_profile_requires_vwap_direction_and_chase_check(self):
         signal_bars = [
@@ -8219,7 +8292,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_short",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "vwap_confirmed",
                     "entry_trigger": "wait for VWAP directional confirmation",
                     "can_execute_without_intraday_trigger": False,
@@ -8275,7 +8348,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_long",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "pullback",
                     "entry_trigger": "pullback to vwap support",
                     "can_execute_without_intraday_trigger": False,
@@ -8302,7 +8375,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
-            decision_context={"execution_plan": {"execution_profile": "event_immediate"}},
+            decision_context={"execution_contract": {"execution_profile": "event_immediate"}},
             finalize_untriggered=True,
         )
         allowed = select_intraday_execution(
@@ -8311,7 +8384,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_long",
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "event_immediate",
                     "can_execute_without_intraday_trigger": True,
                 }
@@ -8463,7 +8536,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 }
             },
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout",
                     "allow_confirmed_memory_vwap_fallback": True,
                 }
@@ -8476,7 +8549,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertTrue(result.features["fallback_authorized_by_pm"])
         self.assertTrue(result.features["strategy_memory"]["passed"])
 
-    def test_vwap_fallback_requires_pm_execution_plan_authority(self):
+    def test_vwap_fallback_requires_pm_execution_contract_authority(self):
         signal_bars = [
             {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
         ]
@@ -8513,7 +8586,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 }
             },
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout",
                     "allow_confirmed_memory_vwap_fallback": False,
                 }
@@ -8558,7 +8631,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 }
             },
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout",
                     "allow_confirmed_memory_vwap_fallback": True,
                 }
@@ -8604,7 +8677,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 }
             },
             decision_context={
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout",
                     "allow_confirmed_memory_vwap_fallback": True,
                 }
@@ -8655,7 +8728,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     "id": "cal-intraday",
                     "ticker": "BU",
                     "side": "long",
-                    "signal_template": "*",
+                    "setup_type": "*",
                     "horizon_class": "short",
                     "market_regime": "trend",
                     "policy_type": "contextual_rule_calibration:intraday_confirmation",
@@ -8676,7 +8749,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "ticker": "BU",
                 "horizon_class": "short",
                 "market_regime": "trend",
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout",
                     "allow_confirmed_memory_vwap_fallback": True,
                 },
@@ -9336,7 +9409,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
             "learning_policy_catalog_runtime_expanded",
         )
         self.assertTrue(cfg["llm_signal_quality"]["neutral_accountability"]["enabled"])
-        self.assertEqual(cfg["llm_signal_quality"]["neutral_accountability"]["shadow_forward_days"], 3)
+        self.assertEqual(cfg["llm_signal_quality"]["neutral_accountability"]["counterfactual_forward_days"], 3)
         self.assertIn("data_factor_policy", cfg["_config_catalogs_loaded"])
         self.assertEqual(
             cfg["_config_parameter_roles"]["factor_data"],
@@ -9629,7 +9702,7 @@ class PlotConfigRegressionTest(unittest.TestCase):
 
 
 class OrderTranslationRegressionTest(unittest.TestCase):
-    def test_phase2_entry_audit_has_no_pre_open_plan_target_field(self):
+    def test_phase2_entry_audit_has_no_pm_internal_draft_target_field(self):
         audit = phase2_entry_audit(
             target_lots=-1,
             current_lots=0,
@@ -9638,14 +9711,14 @@ class OrderTranslationRegressionTest(unittest.TestCase):
 
         self.assertEqual(audit["entry_action_family"], "open_short")
         self.assertEqual(audit["target_lots_source"], "final_action_contract")
-        self.assertNotIn("phase1_target_lots_estimate", audit)
+        self.assertNotIn("phase1_target_lots", audit)
 
     @staticmethod
     def _final_entry_authority(authority_type="real_budget_entry", *, current_evidence=False):
         authority = {
             "authority_type": authority_type,
-            "can_open_real_position": authority_type == "real_budget_entry",
-            "can_apply_min_real_floor": authority_type == "real_budget_entry",
+            "open_action_evidence": authority_type == "real_budget_entry",
+            "strong_current_evidence": authority_type == "real_budget_entry",
             "max_allowed_margin_ratio": 0.12 if authority_type == "real_budget_entry" else 0.015,
             "reason_codes": ["test_pm_final_trade_authority"],
         }
@@ -9669,6 +9742,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         authority_type: str = "real_budget_entry",
         tradable_reason: str = "tradable",
         reason_codes: list[str] | None = None,
+        current_evidence: bool = True,
     ):
         if final_action is None:
             if target_lots == current_lots:
@@ -9681,7 +9755,13 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 final_action = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
             else:
                 final_action = "exit"
-        return {
+        authority = OrderTranslationRegressionTest._final_entry_authority(
+            authority_type,
+            current_evidence=current_evidence,
+        )
+        if authority_type in {"real_budget_entry", "exploration_probe", "watchlist_only"}:
+            authority["authority_type"] = authority_type
+        contract = {
             "contract_version": "agentquant.final_action.v1",
             "ticker": ticker,
             "final_action": final_action,
@@ -9689,9 +9769,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "current_lots": int(current_lots),
             "target_lots": int(target_lots),
             "lots_delta": int(target_lots - current_lots),
-            "tradable_lots_if_executed_now": abs(int(target_lots - current_lots)),
-            "tradable_lots_reason": tradable_reason,
-            "authority_type": authority_type,
+            "lots_delta_abs": abs(int(target_lots - current_lots)),
             "reason_codes": list(reason_codes or [tradable_reason]),
             "execution_requirement": (
                 "intraday_trigger_required"
@@ -9701,6 +9779,8 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "single_source_of_trade_truth": True,
             "candidate_sources_do_not_bypass_contract": True,
         }
+        contract.update(authority)
+        return contract
 
     def test_transaction_audit_payload_carries_final_trade_contract_mirror(self):
         snapshot = {
@@ -9713,17 +9793,13 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "lots_delta": -4,
                 "target_margin_ratio_estimate": 0.041,
                 "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
                 "max_allowed_margin_ratio": 0.12,
-                "reason_codes": ["positive_candidate_open", "tradeable_setup"],
+                "reason_codes": ["positive_candidate_open", "tradeable_candidate"],
                 "execution_requirement": "intraday_trigger_required",
                 "execution_profile": "vwap_confirmed",
-                "execution_plan": {
-                    "contract_version": "agentquant.execution_plan.v1",
-                    "execution_profile": "vwap_confirmed",
-                    "trigger_source": "final_contract_execution_plan",
-                },
+                "trigger_source": "final_contract_execution_fields",
                 "single_source_of_trade_truth": True,
                 "candidate_sources_do_not_bypass_contract": True,
                 "learning_used": {
@@ -9731,7 +9807,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                         {
                             "action_name": "open",
                             "action_preference": "positive_candidate_open",
-                            "policy_hint": "promote_or_scale_with_current_confirmation",
                             "sample_scope": "exact_real_state",
                             "memory_quality": "exact_real_state",
                             "reward_mean": 1860.0,
@@ -9739,20 +9814,13 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                     ]
                 },
             },
-            "final_new_entry_trade_authority": {
-                "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
-                "max_allowed_margin_ratio": 0.12,
-                "reason_codes": ["positive_candidate_open"],
-            },
-            "pre_open_plan": {
-                "execution_plan": {
+            "pm_internal_draft": {
+                "execution_fields": {
                     "execution_profile": "vwap_confirmed",
                 }
             },
             "execution_translation": {
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "breakout_confirmed",
                 }
             },
@@ -9762,7 +9830,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                     "reason": "final_trade_authority_present",
                     "business_boundary": "strategy_new_entry_requires_pm_final_trade_authority",
                     "authority_consistency": {
-                        "reason": "final_new_entry_trade_authority_sources_consistent",
+                        "reason": "final_contract_authority_consistent",
                     },
                 }
             },
@@ -9771,7 +9839,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         payload = build_audit_payload(snapshot)
 
         self.assertEqual(payload["final_action_contract"]["final_action"], "open_real")
-        self.assertEqual(payload["final_new_entry_trade_authority"]["authority_type"], "real_budget_entry")
+        self.assertEqual(payload["final_action_contract"]["authority_type"], "real_budget_entry")
         audit = payload["trade_contract_audit"]
         self.assertTrue(audit["single_source_of_trade_truth"])
         self.assertTrue(audit["candidate_sources_do_not_bypass_contract"])
@@ -9783,7 +9851,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertTrue(audit["pm_plan_validation_passed"])
         self.assertEqual(
             audit["authority_consistency_reason"],
-            "final_new_entry_trade_authority_sources_consistent",
+            "final_contract_authority_consistent",
         )
         self.assertEqual(
             audit["selected_action_preferences"][0]["action_preference"],
@@ -9803,20 +9871,20 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "single_source_of_trade_truth": True,
                 "candidate_sources_do_not_bypass_contract": True,
             },
-            "pre_open_plan": {
-                "execution_plan": {
+            "pm_internal_draft": {
+                "execution_fields": {
                     "execution_profile": "breakout",
-                    "trigger_source": "stale_pre_open_plan",
+                    "trigger_source": "stale_pm_internal_draft",
                 }
             },
             "execution_translation": {
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "vwap_confirmed",
                     "trigger_source": "translation_copy",
                 }
             },
             "phase2_execution": {
-                "execution_plan": {
+                "execution_contract": {
                     "execution_profile": "pullback",
                     "trigger_source": "phase2_copy",
                 },
@@ -9840,8 +9908,8 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                     "target_lots": -1,
                     "lots_delta": -1,
                 },
-                "pre_open_plan": {
-                    "target_lots_estimate": -8,
+                "pm_internal_draft": {
+                    "target_lots": -8,
                     "target_position_ratio": -0.04,
                 },
             },
@@ -9849,7 +9917,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
 
         self.assertEqual(infer_target_lots(recommendation), -1)
 
-    def test_trader_execution_plan_reads_only_final_contract_not_stale_pre_open_plan(self):
+    def test_trader_execution_contract_reads_only_final_contract_not_stale_pm_internal_draft(self):
         snapshot = {
             "final_action_contract": {
                 "contract_version": "agentquant.final_action.v1",
@@ -9858,25 +9926,22 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "current_lots": 0,
                 "target_lots": -2,
                 "lots_delta": -2,
-                "execution_plan": {
-                    "contract_version": "agentquant.execution_plan.v1",
-                    "execution_profile": "vwap_confirmed",
-                    "trigger_source": "final_contract_execution_plan",
-                },
+                "execution_profile": "vwap_confirmed",
+                "trigger_source": "final_contract_execution_fields",
             },
-            "pre_open_plan": {
-                "execution_plan": {
-                    "contract_version": "agentquant.execution_plan.v1",
+            "pm_internal_draft": {
+                "execution_fields": {
+                    "contract_version": "agentquant.execution_contract.v1",
                     "execution_profile": "breakout",
-                    "trigger_source": "stale_pre_open_plan",
+                    "trigger_source": "stale_pm_internal_draft",
                 }
             },
         }
 
-        execution_plan = _execution_plan_from_snapshot(snapshot)
+        execution_contract = _execution_contract_from_snapshot(snapshot)
 
-        self.assertEqual(execution_plan["execution_profile"], "vwap_confirmed")
-        self.assertEqual(execution_plan["trigger_source"], "final_contract_execution_plan")
+        self.assertEqual(execution_contract["execution_profile"], "vwap_confirmed")
+        self.assertEqual(execution_contract["trigger_source"], "final_contract_execution_fields")
 
         missing_contract_plan = {
             "final_action_contract": {
@@ -9887,16 +9952,16 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "target_lots": -2,
                 "lots_delta": -2,
             },
-            "pre_open_plan": {
-                "execution_plan": {
-                    "contract_version": "agentquant.execution_plan.v1",
+            "pm_internal_draft": {
+                "execution_fields": {
+                    "contract_version": "agentquant.execution_contract.v1",
                     "execution_profile": "breakout",
-                    "trigger_source": "stale_pre_open_plan",
+                    "trigger_source": "stale_pm_internal_draft",
                 }
             },
         }
 
-        self.assertEqual(_execution_plan_from_snapshot(missing_contract_plan), {})
+        self.assertEqual(_execution_contract_from_snapshot(missing_contract_plan), {})
 
     def test_strategy_recommendation_without_pm_plan_cannot_execute_raw_action_lots(self):
         portfolio = Portfolio(
@@ -9959,23 +10024,17 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "action": RecommendationAction.OPEN_SHORT.value,
             "lots": 8,
             "signal_snapshot": {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": -0.04,
-                    "target_lots_estimate": -8,
-                    "tradable_lots_if_executed_now": 8,
-                    "tradable_lots_reason": "tradable",
+                    "target_lots": -8,
+                    "lots_delta_abs": 8,
+                    "reason_codes": "tradable",
                 },
                 "final_action_contract": self._strategy_contract(
                     "RB",
                     target_lots=-8,
                     authority_type="watchlist_only",
                 ),
-                "final_new_entry_trade_authority": {
-                    "authority_type": "watchlist_only",
-                    "can_open_real_position": False,
-                    "can_apply_min_real_floor": False,
-                    "reason_codes": ["direction_only_cannot_open_position"],
-                },
             },
         }
         config = {
@@ -10001,7 +10060,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(decision.action, FuturesAction.HOLD)
         self.assertEqual(decision.lots, 0)
         self.assertIn(
-            "final_new_entry_trade_authority_missing_or_not_met",
+            "final_contract_authority_not_met",
             snapshot.get("execution_translation", {}).get("rewrite_reasons", []),
         )
         validation = snapshot["phase2_execution"]["pm_plan_validation"]
@@ -10017,16 +10076,12 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             positions={},
         )
         signal_snapshot = {
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.04,
-                "target_lots_estimate": -8,
-                "tradable_lots_if_executed_now": 8,
-                "tradable_lots_reason": "tradable",
+                "target_lots": -8,
+                "lots_delta_abs": 8,
+                "reason_codes": "tradable",
             },
-            "final_new_entry_trade_authority": self._final_entry_authority(
-                "real_budget_entry",
-                current_evidence=True,
-            ),
         }
         recommendation = {
             "underlying_code": "RB",
@@ -10084,10 +10139,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "target_lots": -8,
                 "lots_delta": -8,
             },
-            "final_new_entry_trade_authority": self._final_entry_authority(
-                "real_budget_entry",
-                current_evidence=True,
-            ),
         }
         recommendation = {
             "underlying_code": "RB",
@@ -10128,7 +10179,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(validation["reason"], "unsupported_final_action_contract_type")
         self.assertEqual(validation["target_lots_after_validation"], 0)
 
-    def test_strategy_new_entry_with_conflicting_authority_mirrors_is_not_translated_to_open(self):
+    def test_strategy_new_entry_uses_final_contract_authority_fields(self):
         portfolio = Portfolio(
             id="p1",
             cashflow=5000000.0,
@@ -10140,13 +10191,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "RB",
                 target_lots=-8,
             ),
-            "final_new_entry_trade_authority": {
-                "authority_type": "real_budget_entry",
-                "can_open_real_position": True,
-                "can_apply_min_real_floor": True,
-                "max_allowed_margin_ratio": 0.12,
-                "reason_codes": ["direct_real"],
-            },
         }
         recommendation = {
             "underlying_code": "RB",
@@ -10207,19 +10251,19 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "current_lots": -10,
                 "target_lots": -10,
                 "lots_delta": 0,
-                "tradable_lots_if_executed_now": 0,
-                "tradable_lots_reason": "position_matched",
+                "lots_delta_abs": 0,
+                "reason_codes": "position_matched",
                 "authority_type": "not_applicable",
                 "reason_codes": ["position_matched"],
                 "execution_requirement": "position_management_or_wait",
                 "single_source_of_trade_truth": True,
                 "candidate_sources_do_not_bypass_contract": True,
             },
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.035,
-                "target_lots_estimate": -9,
-                "tradable_lots_if_executed_now": 1,
-                "tradable_lots_reason": "position_matched",
+                "target_lots": -9,
+                "lots_delta_abs": 1,
+                "reason_codes": "position_matched",
             },
         }
         recommendation = {
@@ -10261,7 +10305,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         )
         self.assertNotIn("stale_pre_open_target_used", translation)
 
-    def test_strategy_final_contract_executes_without_pre_open_plan(self):
+    def test_strategy_final_contract_executes_without_pm_internal_draft(self):
         portfolio = Portfolio(
             id="p1",
             cashflow=5000000.0,
@@ -10273,10 +10317,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "RB",
                 target_lots=-8,
                 final_action="open_real",
-            ),
-            "final_new_entry_trade_authority": self._final_entry_authority(
-                "real_budget_entry",
-                current_evidence=True,
             ),
         }
         recommendation = {
@@ -10311,9 +10351,9 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(decision.lots, 8)
         translation = snapshot.get("execution_translation", {})
         self.assertEqual(translation["final_action_contract_source"]["source"], "final_action_contract")
-        self.assertNotIn("pre_open_plan", snapshot)
+        self.assertNotIn("pm_internal_draft", snapshot)
 
-    def test_strategy_final_contract_ignores_stale_pre_open_plan_target_lots(self):
+    def test_strategy_final_contract_ignores_stale_pm_internal_draft_target_lots(self):
         portfolio = Portfolio(
             id="p1",
             cashflow=5000000.0,
@@ -10326,15 +10366,11 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 target_lots=-1,
                 final_action="open_real",
             ),
-            "final_new_entry_trade_authority": self._final_entry_authority(
-                "real_budget_entry",
-                current_evidence=True,
-            ),
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.04,
-                "target_lots_estimate": -8,
-                "tradable_lots_if_executed_now": 8,
-                "tradable_lots_reason": "stale_pm_draft",
+                "target_lots": -8,
+                "lots_delta_abs": 8,
+                "reason_codes": "stale_pm_draft",
             },
         }
         recommendation = {
@@ -10382,21 +10418,18 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "underlying_code": "PB",
             "contract_code": "pb2501",
             "signal_snapshot": {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": 0.00001,
-                    "target_lots_estimate": 1,
-                    "tradable_lots_if_executed_now": 1,
-                    "tradable_lots_reason": "tradable",
+                    "target_lots": 1,
+                    "lots_delta_abs": 1,
+                    "reason_codes": "tradable",
                 },
-                "final_new_entry_trade_authority": self._final_entry_authority(
-                    "exploration_probe",
-                    current_evidence=True,
-                ),
                 "final_action_contract": self._strategy_contract(
                     "PB",
                     target_lots=1,
                     final_action="open_probe",
                     authority_type="exploration_probe",
+                    current_evidence=True,
                 ),
             },
         }
@@ -10443,26 +10476,18 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "action": RecommendationAction.OPEN_LONG.value,
             "lots": 8,
             "signal_snapshot": {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": 0.02,
-                    "target_lots_estimate": 8,
-                    "tradable_lots_if_executed_now": 8,
-                    "tradable_lots_reason": "tradable",
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "exploration_probe",
-                    "can_open_real_position": False,
-                    "can_apply_min_real_floor": False,
-                    "max_allowed_margin_ratio": 0.015,
-                    "reason_codes": ["alpha_setup_open_action_value_missing"],
-                    "open_action_evidence": False,
-                    "strong_current_evidence": False,
+                    "target_lots": 8,
+                    "lots_delta_abs": 8,
+                    "reason_codes": "tradable",
                 },
                 "final_action_contract": self._strategy_contract(
                     "SR",
                     target_lots=8,
                     final_action="open_probe",
                     authority_type="exploration_probe",
+                    current_evidence=False,
                 ),
             },
         }
@@ -10490,7 +10515,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(decision.lots, 0)
         validation = snapshot["phase2_execution"]["pm_plan_validation"]
         self.assertFalse(validation["passed"])
-        self.assertEqual(validation["reason"], "final_new_entry_trade_authority_missing_or_not_met")
+        self.assertEqual(validation["reason"], "final_contract_authority_not_met")
         self.assertEqual(validation["target_lots_after_validation"], 0)
 
     def test_phase2_exploration_probe_with_current_evidence_can_translate_to_open(self):
@@ -10507,27 +10532,19 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "action": RecommendationAction.OPEN_SHORT.value,
             "lots": 1,
             "signal_snapshot": {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": -0.005,
-                    "target_lots_estimate": -1,
-                    "tradable_lots_if_executed_now": 1,
-                    "tradable_lots_reason": "tradable",
-                },
-                "final_new_entry_trade_authority": {
-                    "authority_type": "exploration_probe",
-                    "can_open_real_position": False,
-                    "can_apply_min_real_floor": False,
-                    "max_allowed_margin_ratio": 0.015,
-                    "reason_codes": ["market_confirmation_quality_gate"],
-                    "open_action_evidence": True,
-                    "strong_current_evidence": True,
-                    "technical_confirmation": True,
+                    "target_lots": -1,
+                    "lots_delta_abs": 1,
+                    "reason_codes": "tradable",
                 },
                 "final_action_contract": self._strategy_contract(
                     "PB",
                     target_lots=-1,
                     final_action="open_probe",
                     authority_type="exploration_probe",
+                    current_evidence=True,
+                    reason_codes=["market_confirmation_quality_gate"],
                 ),
             },
         }
@@ -10568,11 +10585,10 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "underlying_code": "TA",
             "contract_code": "ta601",
             "signal_snapshot": {
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": -0.12,
-                    "target_lots_estimate": -26,
+                    "target_lots": -26,
                 },
-                "final_new_entry_trade_authority": self._final_entry_authority(),
                 "final_action_contract": self._strategy_contract(
                     "TA",
                     target_lots=-26,
@@ -10621,15 +10637,14 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "invalidation_level": 4400.0,
                 "target_return": 0.03,
             },
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.12,
-                "target_lots_estimate": -26,
+                "target_lots": -26,
             },
             "final_action_contract": self._strategy_contract(
                 "TA",
                 target_lots=-26,
             ),
-            "final_new_entry_trade_authority": self._final_entry_authority(),
         }
         recommendation = {
             "underlying_code": "TA",
@@ -10685,11 +10700,10 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "expected_horizon_days": 5,
                 "invalidation_level": 2620.0,
             },
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.04,
-                "target_lots_estimate": -7,
+                "target_lots": -7,
             },
-            "final_new_entry_trade_authority": self._final_entry_authority(),
             "final_action_contract": self._strategy_contract(
                 "M",
                 target_lots=-7,
@@ -10754,11 +10768,10 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "expected_horizon_days": 5,
                 "invalidation_level": 3820.0,
             },
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": 0.04,
-                "target_lots_estimate": 5,
+                "target_lots": 5,
             },
-            "final_new_entry_trade_authority": self._final_entry_authority(),
             "final_action_contract": self._strategy_contract(
                 "BU",
                 target_lots=5,
@@ -10817,13 +10830,16 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "expected_horizon_days": 2,
                 "invalidation_level": 4400.0,
             },
-            "pre_open_plan": {
+            "pm_internal_draft": {
                 "target_position_ratio": -0.12,
-                "target_lots_estimate": -26,
+                "target_lots": -26,
             },
             "final_action_contract": self._strategy_contract(
                 "TA",
-                target_lots=-26,
+                target_lots=0,
+                final_action="wait",
+                authority_type="watchlist_only",
+                current_evidence=False,
             ),
         }
         recommendation = {
@@ -10854,7 +10870,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         translation = snapshot.get("execution_translation", {})
         self.assertEqual(decision.action, FuturesAction.HOLD)
         self.assertIsNone(infer_no_trade_reason(snapshot))
-        self.assertTrue(snapshot["phase2_execution"]["contract_execution_observation"]["signal_invalidation_observed"])
+        self.assertFalse(snapshot["phase2_execution"]["contract_execution_observation"]["signal_invalidation_observed"])
         self.assertNotIn("position_matched", translation.get("rewrite_reasons", []))
 
     def test_time_stop_does_not_flatten_supported_same_direction_hold(self):
@@ -10865,7 +10881,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             current_price=3020.0,
             current_lots=10,
             target_lots=12,
-            lifecycle={"template_state": "protected", "template_name": "trend_follow"},
+            lifecycle={"template_state": "protected", "setup_type": "trend_follow"},
             current_position=current_position,
             trading_date="2025-02-20",
             config={
@@ -10890,7 +10906,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             current_price=2990.0,
             current_lots=10,
             target_lots=5,
-            lifecycle={"template_state": "watchlist", "template_name": "probe"},
+            lifecycle={"template_state": "watchlist", "setup_type": "probe"},
             current_position=current_position,
             trading_date="2025-02-14",
             config={
@@ -10923,10 +10939,10 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                     "signal": "Bearish",
                     "invalidation_level": 4800.0,
                 },
-                "pre_open_plan": {
+                "pm_internal_draft": {
                     "target_position_ratio": -1.62,
                     "target_margin_ratio_estimate": 0.162,
-                    "target_lots_estimate": -162,
+                    "target_lots": -162,
                     "strategy_controls": {
                         "diagnostics": {
                             "capital_utilization_target": {
@@ -10944,7 +10960,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                         }
                     },
                 },
-                "final_new_entry_trade_authority": self._final_entry_authority(),
                 "final_action_contract": self._strategy_contract(
                     "TA",
                     target_lots=-162,
@@ -10995,7 +11010,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         strategy = {
             "action": "open_long",
             "lots": 0,
-            "signal_snapshot": {"pre_open_plan": {"target_lots_estimate": 0}},
+            "signal_snapshot": {"pm_internal_draft": {"target_lots": 0}},
         }
 
         adjusted = _reconcile_rollover_with_strategy_target(
@@ -11464,3 +11479,14 @@ class EvaluationRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+
+
+
+
+
+

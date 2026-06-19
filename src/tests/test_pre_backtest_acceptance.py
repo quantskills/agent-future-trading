@@ -93,7 +93,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     action_name TEXT,
                     sample_count INTEGER,
                     reward_sum REAL,
-                    policy_hint TEXT,
+                    action_preference TEXT,
                     last_sample_date TEXT,
                     created_at TEXT,
                     updated_at TEXT,
@@ -109,7 +109,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     """
                     INSERT INTO alpha_setup_action_value(
                         id, config_id, scope_key, ticker, side, setup_type, action_name,
-                        sample_count, reward_sum, policy_hint, last_sample_date,
+                        sample_count, reward_sum, action_preference, last_sample_date,
                         created_at, updated_at, active, payload_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -163,7 +163,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         )
 
     def test_acceptance_maps_trade_exit_invariants_to_single_trade_exit(self):
-        self.assertEqual(INVARIANT_TO_CHECK["real_open_without_can_open_real_position"], "single_trade_exit")
+        self.assertEqual(INVARIANT_TO_CHECK["real_open_without_current_contract_evidence"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["direction_or_watchlist_probe_opened"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["trade_contract_source_of_truth_failed"], "single_trade_exit")
 
@@ -213,6 +213,28 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertEqual(report.failed_checks, [])
             self.assertIn("environment_api", report.checks)
             self.assertIn("learning_landing", report.checks)
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_structured_io_runs_unified_field_static_scan(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    check_llm_auth=False,
+                )
+            structured_io = report.checks["structured_io"]
+            self.assertTrue(structured_io.ok, report.to_dict())
+            scan = structured_io.metadata["unified_field_runtime_scan"]
+            self.assertGreater(scan["checked_files"], 0)
+            self.assertGreater(scan["forbidden_token_count"], 0)
+            self.assertEqual(scan["offender_count"], 0)
         finally:
             Path(db_path).unlink(missing_ok=True)
 

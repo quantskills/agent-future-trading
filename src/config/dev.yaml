@@ -1,4 +1,4 @@
-# AgentQuant 期货回测、模拟盘与实盘复刻配置。
+﻿# AgentQuant 期货回测、模拟盘与实盘复刻配置。
 # 本文件只保留可运行参数；机制说明见 docs/mechanism_*.md。
 # 硬约束、交易宇宙、数据源和 LLM 路由由本文件人工控制。
 # 日度弱参和学习结果由 Researcher 写入数据库 overlay/state，不自动改写本文件。
@@ -6,6 +6,9 @@
 # open/hold/exit/execution action-value；分析师只读 signal_calibration，PM 只读开仓/持仓/退出
 # 动作偏好，Trader 只读 execution profile。最终交易事实仍只认 PM 汇总出的
 # final_action_contract，Trader 只执行该最终契约。
+# 分析师输出里的“如果/等待/确认后才交易”属于 pending 条件，必须结构化为
+# watch_for_trigger + trigger_valid=false；只有当前触发已经成立且有失效边界时，才可进入
+# tradeable_candidate，再由 PM、Auditor、Trader 继续处理。
 # 资金参数保护区：
 #   - position_budget_policy
 #   - risk_control
@@ -144,8 +147,10 @@ analyst_weight_policy:
   strategic_profile: sector_strategic_view
   trade_timing_profile: daily_trade_timing
   dynamic_overlay: database_only
+  # 方向观点、等待触发、未来条件触发都不能开仓；只有当前触发成立的结构化证据
+  # 才能进入 PM 的可交易候选链路。
   strategic_view_cannot_open_position: true
-  direction_only_cannot_open_position: true
+  watch_for_trigger_cannot_open_position: true
 
 risk_control:
   # 用户已调资金参数，属于核心保护区。
@@ -427,5 +432,6 @@ llm:
   #   reasoning_effort: null
   #   api_key_env: "TQX_LLM_API_KEY"
   #   api_key_env_fallbacks: []
+
 
 

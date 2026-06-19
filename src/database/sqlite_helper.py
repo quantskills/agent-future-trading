@@ -80,7 +80,7 @@ class SQLiteDB(BaseDB):
                                 "artifact_json": "TEXT",
                                 "business_quality_score": "REAL DEFAULT 0",
                                 "horizon_class": "TEXT DEFAULT 'unknown'",
-                                "template_name": "TEXT DEFAULT 'unknown'",
+                                "setup_type": "TEXT DEFAULT 'unknown'",
                             },
                         )
                     self._ensure_artifact_runtime_schema(cursor)
@@ -142,7 +142,7 @@ class SQLiteDB(BaseDB):
                 {
                     **_json_artifact_columns("analyst_signals"),
                     **_json_artifact_columns("market_confirmation"),
-                    **_json_artifact_columns("pre_open_plan"),
+                    **_json_artifact_columns("final_action_contract"),
                 },
             )
         if self._table_exists(cursor, "reviewer_llm_notes"):
@@ -202,6 +202,7 @@ class SQLiteDB(BaseDB):
                     "active": "INTEGER DEFAULT 1",
                     "max_position_impact": "REAL DEFAULT 0",
                     "last_sample_date": "TEXT",
+                    "profile_state_hint": "TEXT DEFAULT 'profile_watchlist'",
                 },
             )
         if self._table_exists(cursor, "alpha_setup_sample"):
@@ -215,6 +216,7 @@ class SQLiteDB(BaseDB):
                     "active": "INTEGER DEFAULT 1",
                     "max_position_impact": "REAL DEFAULT 0",
                     "last_sample_date": "TEXT",
+                    "action_preference": "TEXT DEFAULT ''",
                 },
             )
         if self._table_exists(cursor, "adaptive_policy_state"):
@@ -225,8 +227,8 @@ class SQLiteDB(BaseDB):
                     "source_trading_date": "TEXT",
                 },
             )
-        if self._table_exists(cursor, "signal_template_performance"):
-            _ensure_columns(cursor, "signal_template_performance", {"last_sample_date": "TEXT"})
+        if self._table_exists(cursor, "setup_type_performance"):
+            _ensure_columns(cursor, "setup_type_performance", {"last_sample_date": "TEXT"})
         if self._table_exists(cursor, "analyst_performance"):
             _ensure_columns(cursor, "analyst_performance", {"last_sample_date": "TEXT"})
         if self._table_exists(cursor, "provisional_policy_state"):
@@ -699,7 +701,7 @@ class SQLiteDB(BaseDB):
                 scope={
                     "ticker": ticker,
                     "side": side,
-                    "signal_template": "*",
+                    "setup_type": "*",
                     "horizon_class": "*",
                     "market_regime": "*",
                 },
@@ -847,7 +849,7 @@ class SQLiteDB(BaseDB):
             for table_name in (
                 "strategy_memory_history",
                 "signal_context_history",
-                "signal_template_performance",
+                "setup_type_performance",
                 "analyst_performance",
                 "adaptive_policy_state",
                 "research_position_feedback",
@@ -1423,7 +1425,7 @@ class SQLiteDB(BaseDB):
             cursor.execute('''
                 INSERT INTO signal (id, portfolio_id, updated_at, ticker, llm_prompt,
                                   analyst, signal, justification, artifact_json,
-                                  business_quality_score, horizon_class, template_name,
+                                  business_quality_score, horizon_class, setup_type,
                                   llm_prompt_artifact_path, llm_prompt_sha256,
                                   llm_prompt_size, llm_prompt_summary_json,
                                   artifact_json_artifact_path, artifact_json_sha256,
@@ -1441,7 +1443,7 @@ class SQLiteDB(BaseDB):
                 artifact_ext.inline_value,
                 float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 str(getattr(signal, "horizon_class", "unknown") or "unknown"),
-                str(getattr(signal, "template_name", "unknown") or "unknown"),
+                str(getattr(signal, "setup_type", "unknown") or "unknown"),
                 prompt_ext.artifact_path,
                 prompt_ext.sha256,
                 prompt_ext.size_bytes,
@@ -2686,7 +2688,7 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
-    def get_signal_template_performance(
+    def get_setup_type_performance(
         self,
         config_id: str,
         ticker: str,
@@ -2714,7 +2716,7 @@ class SQLiteDB(BaseDB):
             cursor.execute(
                 f'''
                 SELECT *
-                FROM signal_template_performance
+                FROM setup_type_performance
                 WHERE {' AND '.join(where)}
                 ORDER BY confidence_score DESC, sample_count DESC, last_updated DESC
                 LIMIT ?
@@ -2739,7 +2741,7 @@ class SQLiteDB(BaseDB):
         config_id: str,
         ticker: str,
         side: Optional[str] = None,
-        signal_template: Optional[str] = None,
+        setup_type: Optional[str] = None,
         horizon_class: Optional[str] = None,
         market_regime: Optional[str] = None,
         trading_date=None,
@@ -2759,9 +2761,9 @@ class SQLiteDB(BaseDB):
             if side:
                 where.append("side IN (?, '*')")
                 params.append(str(side).lower())
-            if signal_template:
-                where.append("signal_template IN (?, '*')")
-                params.append(str(signal_template))
+            if setup_type:
+                where.append("setup_type IN (?, '*')")
+                params.append(str(setup_type))
             if horizon_class:
                 where.append("horizon_class IN (?, '*')")
                 params.append(str(horizon_class))
@@ -2959,7 +2961,7 @@ class SQLiteDB(BaseDB):
         config_id: str,
         ticker: str,
         side: Optional[str] = None,
-        signal_template: Optional[str] = None,
+        setup_type: Optional[str] = None,
         horizon_class: Optional[str] = None,
         trading_date=None,
     ) -> List[Dict[str, Any]]:
@@ -2978,9 +2980,9 @@ class SQLiteDB(BaseDB):
             if side:
                 where.append("side IN (?, '*')")
                 params.append(str(side).lower())
-            if signal_template:
-                where.append("signal_template IN (?, '*')")
-                params.append(str(signal_template))
+            if setup_type:
+                where.append("setup_type IN (?, '*')")
+                params.append(str(setup_type))
             if horizon_class:
                 where.append("horizon_class IN (?, '*')")
                 params.append(str(horizon_class))
@@ -3212,7 +3214,7 @@ class SQLiteDB(BaseDB):
                 and regime_value
                 and regime_value not in {"*", "unknown"}
                 and setup_value
-                and setup_value not in {"*", "unknown", "generic_trade_setup", "direction_only", "tradeable_setup", "deployable_alpha"}
+                and setup_value not in {"*", "unknown", "generic_trade_setup"}
             )
 
             params: List[Any] = [config_id, trading_day_value]
@@ -3298,8 +3300,8 @@ class SQLiteDB(BaseDB):
                 source_type = str(row.get("source_type") or "").strip().lower()
                 if _safe_int(row.get("executed_lots")) > 0 or source_type == "trade":
                     return reward, "real_trade"
-                if source_type.startswith("shadow_"):
-                    return reward * 0.35, "shadow_prior"
+                if source_type.startswith("counterfactual_"):
+                    return reward * 0.35, "counterfactual_prior"
                 return None, "ignored"
 
             def _is_real_trade_row(row: Dict[str, Any]) -> bool:
@@ -3328,7 +3330,7 @@ class SQLiteDB(BaseDB):
             for action_name, action_rows in grouped.items():
                 reward_values: List[float] = []
                 real_trade_reward_count = 0
-                shadow_reward_count = 0
+                counterfactual_reward_count = 0
                 for row in action_rows:
                     reward, reward_source = _reward_signal_for_row(row)
                     if reward is None:
@@ -3336,19 +3338,21 @@ class SQLiteDB(BaseDB):
                     reward_values.append(reward)
                     if reward_source == "real_trade":
                         real_trade_reward_count += 1
-                    elif reward_source == "shadow_prior":
-                        shadow_reward_count += 1
+                    elif reward_source == "counterfactual_prior":
+                        counterfactual_reward_count += 1
                 sample_count = len(action_rows)
                 reward_sum = sum(reward_values)
                 reward_mean = reward_sum / len(reward_values) if reward_values else 0.0
                 win_rate = (sum(1 for value in reward_values if value > 0) / len(reward_values)) if reward_values else 0.0
                 confidence_score = min(0.85, 0.12 + min(0.35, sample_count / 12.0) + min(0.25, abs(win_rate - 0.5)) + min(0.13, abs(reward_sum) / 50000.0))
-                if reward_mean > 0 and reward_sum > 0:
-                    deprecated_policy_hint_mirror = "controlled_open_or_add" if action_name in {"open", "add_or_open"} else "controlled_probe_or_hold"
-                elif reward_mean < 0 or reward_sum < 0:
-                    deprecated_policy_hint_mirror = "cap_reduce_or_revalidate"
-                else:
-                    deprecated_policy_hint_mirror = "observe_or_probe"
+                prior_direction_hint = (
+                    "positive"
+                    if reward_mean > 0 and reward_sum > 0
+                    else "negative"
+                    if reward_mean < 0 or reward_sum < 0
+                    else "neutral"
+                )
+                action_preference = ""
                 exact_rows = [
                     row for row in action_rows
                     if str(row.get("ticker") or "").upper() == ticker_value
@@ -3369,9 +3373,9 @@ class SQLiteDB(BaseDB):
                     row for row in action_rows
                     if _is_real_trade_row(row) and row not in exact_real_rows
                 ]
-                exact_shadow_rows = [
+                exact_counterfactual_rows = [
                     row for row in exact_rows
-                    if str(row.get("source_type") or "").strip().lower().startswith("shadow_")
+                    if str(row.get("source_type") or "").strip().lower().startswith("counterfactual_")
                 ]
                 loss_reward_count = sum(1 for value in reward_values if value < 0)
                 tail_loss_count = sum(1 for value in reward_values if value <= -1000.0)
@@ -3382,8 +3386,8 @@ class SQLiteDB(BaseDB):
                     scope_quality = "partial_real_state"
                 elif similar_real_rows or real_trade_reward_count > 0:
                     scope_quality = "similar_sql_prior"
-                elif shadow_reward_count > 0:
-                    scope_quality = "shadow_prior"
+                elif counterfactual_reward_count > 0:
+                    scope_quality = "counterfactual_prior"
                 else:
                     scope_quality = "unqualified"
                 usage_boundary = {
@@ -3446,7 +3450,7 @@ class SQLiteDB(BaseDB):
                     "reward_mean": reward_mean,
                     "win_rate": win_rate,
                     "confidence_score": confidence_score,
-                    "policy_hint": "no_action_preference",
+                    "action_preference": action_preference,
                     "max_position_impact": 0.0,
                     "valid_until": trading_day_value,
                     "payload": {
@@ -3462,22 +3466,22 @@ class SQLiteDB(BaseDB):
                         "partial_state_real_trade_sample_count": len(partial_state_real_rows),
                         "similar_real_trade_sample_count": len(similar_real_rows),
                         "amplification_scope_quality": scope_quality,
-                        "exact_ticker_shadow_sample_count": len(exact_shadow_rows),
+                        "exact_ticker_counterfactual_sample_count": len(exact_counterfactual_rows),
                         "total_sample_count": sample_count,
                         "real_trade_reward_count": real_trade_reward_count,
-                        "shadow_reward_count": shadow_reward_count,
+                        "counterfactual_reward_count": counterfactual_reward_count,
                         "loss_reward_count": loss_reward_count,
                         "tail_loss_count": tail_loss_count,
                         "worst_reward": worst_reward,
-                        "shadow_reward_weight": 0.35,
-                        "has_shadow_samples": shadow_reward_count > 0,
-                        "shadow_prior_only": shadow_reward_count > 0 and real_trade_reward_count <= 0,
+                        "counterfactual_reward_weight": 0.35,
+                        "has_counterfactual_samples": counterfactual_reward_count > 0,
+                        "counterfactual_prior_only": counterfactual_reward_count > 0 and real_trade_reward_count <= 0,
                         "episode_dates": sorted({str(row.get("trading_date") or "")[:10] for row in action_rows if row.get("trading_date")})[-6:],
                         "prior_only_no_direct_authority": True,
                         "prior_role": "weak_prior_not_action_preference",
+                        "prior_direction_hint": prior_direction_hint,
                         "action_preference": "",
                         "canonical_action_preference_source": "none_for_similar_sql_prior",
-                        "deprecated_policy_hint_mirror": deprecated_policy_hint_mirror,
                         "usage_boundary": usage_boundary,
                         "usable_by": usage_boundary["usable_by"],
                         "allowed_effects": usage_boundary["allowed_effects"],
@@ -3511,7 +3515,7 @@ class SQLiteDB(BaseDB):
         trading_date=None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Retrieve no-trade candidate memories with forward shadow results."""
+        """Retrieve no-trade candidate memories with forward counterfactual results."""
         conn = None
         try:
             conn = self._get_connection()
@@ -3562,7 +3566,7 @@ class SQLiteDB(BaseDB):
             rows = []
             for row in cursor.fetchall():
                 item = dict(row)
-                item["shadow_results"] = self._deserialize_json(item.get("shadow_results_json")) or []
+                item["counterfactual_results"] = self._deserialize_json(item.get("counterfactual_results_json")) or []
                 item["payload"] = self._deserialize_external_json(item, "payload")
                 rows.append(item)
             return rows
@@ -4344,5 +4348,10 @@ class SQLiteDB(BaseDB):
 
 ## init global instance
 # sqlite_db = SQLiteDB()
+
+
+
+
+
 
 

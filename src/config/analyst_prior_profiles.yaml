@@ -1,4 +1,4 @@
-# 分析师冷启动先验目录。
+﻿# 分析师冷启动先验目录。
 # 本文件不是“静态加权开仓规则”，也不是收益调参捷径。
 # 它只在学习样本不足时提供默认业务常识：技术面偏日频触发，
 # 基本面偏中期背景，新闻偏事件催化/风险。
@@ -23,7 +23,7 @@ usage_rules:
   strategic_view_only_for: [direction_context, holding_background, medium_term_bias]
   trade_timing_only_for: [cold_start_ordering, quality_context, analyst_prior]
   strategic_view_cannot_open_position: true
-  direction_only_cannot_open_position: true
+  watch_for_trigger_cannot_open_position: true
   missing_fundamental_or_news_can_still_trade_if_market_data_setup_confirmed: true
 
 applicability_profile:
@@ -71,3 +71,4 @@ profiles:
       nonferrous: {technical: 0.50, fundamental: 0.25, commodity_news: 0.25}
       agricultural: {technical: 0.45, fundamental: 0.30, commodity_news: 0.25}
       generic: {technical: 0.50, fundamental: 0.30, commodity_news: 0.20}
+

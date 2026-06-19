@@ -391,8 +391,8 @@ def technical_agent(state: FundState):
     signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(technical_context.get("market_regime") or "unknown")
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(technical_context.get("market_regime") or technical_context.get("tradeability") or "unknown")
     signal.price_percentile = signal.price_percentile if signal.price_percentile is not None else price_percentile
-    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "technical_price_trigger"
-    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "initial_or_rebalance"
+    signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else str(technical_context.get("setup_type") or "technical_price_setup")
+    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_technical_data_usage(
         ticker=ticker,
         trading_date=trading_date,
@@ -447,7 +447,7 @@ def technical_agent(state: FundState):
         f"latest_price_data_date={latest_price_data_date}; "
         f"gap_analysis={'disabled_pre_open' if pre_open_only else 'standard'}; "
         f"llm_path={llm_path}; tradeability={technical_context.get('tradeability')}; "
-        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
+        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
     )
     signal.justification = sanitize_visible_text(signal.justification)
 

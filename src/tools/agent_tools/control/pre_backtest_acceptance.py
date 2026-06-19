@@ -26,6 +26,10 @@ from tools.agent_tools.control.tool_access_policy import (
     build_default_tool_access_policy,
     validate_tool_policy_against_capabilities,
 )
+from tools.agent_tools.control.unified_field_audit import (
+    FORBIDDEN_RUNTIME_FIELD_TOKENS,
+    scan_runtime_field_usage,
+)
 from util.config_normalizer import normalize_config
 
 
@@ -46,7 +50,7 @@ INVARIANT_TO_CHECK = {
     "open_transaction_without_open_final_action": "single_trade_exit",
     "open_transaction_without_open_authority": "single_trade_exit",
     "open_transaction_with_blocking_authority": "single_trade_exit",
-    "real_open_without_can_open_real_position": "single_trade_exit",
+    "real_open_without_current_contract_evidence": "single_trade_exit",
     "direction_or_watchlist_probe_opened": "single_trade_exit",
     "trade_contract_source_of_truth_failed": "single_trade_exit",
     "open_transaction_without_trigger": "trader_trigger_parity",
@@ -61,6 +65,7 @@ INVARIANT_TO_CHECK = {
     "positive_open_from_non_exact_scope": "learning_landing",
     "positive_open_from_non_real_reward_source": "learning_landing",
     "action_preferences_exist_but_no_final_action_contract_mentions_them": "learning_landing",
+    "unified_field_artifact_forbidden_field": "structured_io",
 }
 
 
@@ -137,6 +142,23 @@ def _pass_check(name: str, *, warnings: Iterable[str] = (), metadata: Optional[D
 
 def _fail_check(name: str, errors: Iterable[str], *, warnings: Iterable[str] = (), metadata: Optional[Dict[str, Any]] = None) -> AcceptanceCheck:
     return AcceptanceCheck(name=name, ok=False, errors=list(errors), warnings=list(warnings), metadata=dict(metadata or {}))
+
+
+def _merge_acceptance_checks(name: str, *checks: AcceptanceCheck) -> AcceptanceCheck:
+    errors: List[str] = []
+    warnings: List[str] = []
+    metadata: Dict[str, Any] = {}
+    for check in checks:
+        errors.extend(check.errors)
+        warnings.extend(check.warnings)
+        metadata.update(check.metadata)
+    return AcceptanceCheck(
+        name=name,
+        ok=not errors,
+        errors=errors,
+        warnings=warnings,
+        metadata=metadata,
+    )
 
 
 def _config_consistency_check(cfg: Dict[str, Any]) -> AcceptanceCheck:
@@ -218,6 +240,30 @@ def _capability_checks() -> tuple[AcceptanceCheck, AcceptanceCheck]:
         metadata={"boundary": "artifact_contracts_and_capability_cards_present"},
     )
     return agent_boundaries, structured_io
+
+
+def _runtime_field_unification_check(repo_root: Path) -> AcceptanceCheck:
+    offenders, checked_files = scan_runtime_field_usage(repo_root / "src")
+    metadata = {
+        "unified_field_runtime_scan": {
+            "checked_files": checked_files,
+            "forbidden_token_count": len(FORBIDDEN_RUNTIME_FIELD_TOKENS),
+            "offender_count": len(offenders),
+            "allowed_legacy_locations": [
+                "src/database/sqlite_setup.py",
+                "src/tools/agent_tools/control/unified_field_audit.py",
+                "src/tests/test_unified_field_migration.py",
+            ],
+            "boundary": "production_runtime_must_not_read_or_write_deprecated_semantic_fields",
+        }
+    }
+    if offenders:
+        return _fail_check(
+            "structured_io",
+            [f"runtime_forbidden_field_token:{item}" for item in offenders],
+            metadata=metadata,
+        )
+    return _pass_check("structured_io", metadata=metadata)
 
 
 def _parse_window_date(value: str, field_name: str, errors: List[str]) -> Optional[datetime]:
@@ -405,7 +451,11 @@ def run_pre_backtest_acceptance(
     checks["config_consistency"] = _config_consistency_check(cfg)
     agent_boundaries, structured_io = _capability_checks()
     checks["agent_boundaries"] = agent_boundaries
-    checks["structured_io"] = structured_io
+    checks["structured_io"] = _merge_acceptance_checks(
+        "structured_io",
+        structured_io,
+        _runtime_field_unification_check(repo_root),
+    )
 
     if db_path.exists():
         checks.update(

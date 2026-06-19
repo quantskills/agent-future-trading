@@ -1,4 +1,4 @@
-import json
+﻿import json
 import sys
 import tempfile
 import unittest
@@ -39,7 +39,7 @@ from tools.agent_tools.contracts import (
 class AgentContractFixtureTest(unittest.TestCase):
     def test_all_required_agent_contract_fixtures_are_valid(self):
         fixture_path = SRC_ROOT / "tests" / "fixtures" / "agent_contracts" / "contract_fixtures.json"
-        fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
+        fixtures = json.loads(fixture_path.read_text(encoding="utf-8-sig"))
         required_agents = {
             "technical",
             "fundamental",
@@ -84,7 +84,6 @@ class AgentContractFixtureTest(unittest.TestCase):
         )
         research = build_trade_research_contract(
             opportunity_type="trend_continuation",
-            opportunity_layer="tradeable_setup",
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout confirmation",
             exit_hint="close below invalidation",
@@ -97,13 +96,13 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(validate_internal_message_contract(message), [])
         self.assertEqual(validate_trade_research_contract(research), [])
 
-    def test_analyst_signal_gets_trade_research_contract(self):
+    def test_conditional_entry_trigger_stays_watch_for_trigger(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            trigger_type="breakout_continuation",
             entry_trigger="open only after breakout confirmation with volume expansion",
+            exit_hint="exit if price closes back below breakout area",
             invalidation_level=3200,
             business_quality_score=0.68,
             factor_alignment_score=0.70,
@@ -123,28 +122,64 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertEqual(result.opportunity_type, "trend_continuation")
-        self.assertEqual(result.opportunity_layer, "tradeable_setup")
-        self.assertEqual(result.opportunity_state, "tradeable_candidate")
+        self.assertEqual(result.opportunity_type, "range_breakout")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
         self.assertIn("trade_research_contract", result.metadata)
-        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "tradeable_candidate")
-        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "tradeable_candidate")
+        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
+        self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
         self.assertIn("internal_message_contract", result.metadata)
         self.assertIn("trend", result.factor_focus)
         self.assertIn("high_volatility", result.current_evidence_conflict)
+        self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
+
+    def test_tradeable_only_if_trigger_stays_watch_for_trigger(self):
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            entry_trigger=(
+                "Short setup becomes tradeable only if price breaks lower or basis weakens "
+                "further while inventories continue rising"
+            ),
+            exit_hint="exit if inventories start drawing and basis strengthens",
+            business_quality_score=0.72,
+            factor_alignment_score=0.70,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "market_regime": "range",
+                "sector": "agricultural",
+                "risk_flags": [],
+            },
+            analyst="fundamental",
+            trading_date="2025-03-20",
+            ticker="C",
+        )
+
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
 
     def test_current_trigger_and_invalidation_cannot_be_hidden_as_no_opportunity(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.68,
-            trigger_type="breakout_continuation",
-            entry_trigger="open only after breakout above opening range with volume expansion",
+            entry_trigger="current breakout above opening range is confirmed by volume expansion",
             exit_hint="exit if price closes back below opening range",
             invalidation_level=3310.0,
             business_quality_score=0.72,
             data_coverage_score=0.85,
-            template_name="trend_breakout",
+            setup_type="trend_breakout",
             holding_period_hint="1-3 trading days while breakout remains valid",
         )
 
@@ -154,11 +189,23 @@ class AgentContractFixtureTest(unittest.TestCase):
                 "tradeability": "high",
                 "market_regime": "trend",
                 "dominant_direction": "bullish",
-                "current_trade_setup": {
-                    "setup_family": "trend_breakout",
-                    "sector_setup_alignment": "preferred",
-                    "required_confirmation": "breakout with volume",
-                    "invalidation_template": "price closes back below opening range",
+                "setup_type": "trend_breakout",
+                "setup_quality_ok": True,
+                "sector_setup_alignment": "preferred",
+                "required_confirmation": "breakout with volume",
+                "invalidation_condition": "price closes back below opening range",
+                "current_trigger_confirmed": True,
+                "action_evidence_contract": {
+                    "setup_type": "trend_breakout",
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                    "entry_trigger": "current breakout above opening range is confirmed by volume expansion",
+                    "invalidation_condition": "price closes back below opening range",
+                    "learning_scope": {
+                        "setup_family": "trend_breakout",
+                        "sector_setup_alignment": "preferred",
+                    },
                 },
                 "indicator_votes": {"details": {"trend": "Bullish", "macd": "Bullish", "adx": "Bullish"}},
                 "risk_flags": [],
@@ -170,16 +217,15 @@ class AgentContractFixtureTest(unittest.TestCase):
 
         self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
         self.assertNotIn(result.opportunity_state, {"no_opportunity", "watch_for_trigger"})
-        self.assertIn(result.opportunity_layer, {"tradeable_setup", "deployable_alpha"})
+        self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
         self.assertTrue(result.trigger_valid)
         self.assertTrue(result.invalidation_present)
 
-    def test_generic_trigger_does_not_become_tradeable_setup(self):
+    def test_generic_trigger_does_not_become_tradeable_candidate(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.62,
-            trigger_type="technical_price_trigger",
             entry_trigger="technical_price_trigger",
             business_quality_score=0.65,
         )
@@ -198,8 +244,9 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertEqual(result.opportunity_layer, "direction_only")
-        self.assertEqual(result.opportunity_state, "probe_candidate")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
         self.assertNotEqual(result.entry_trigger, "technical_price_trigger")
         self.assertIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
 
@@ -210,7 +257,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             confidence=0.42,
             neutral_opportunity_bucket="watchlist_trigger",
             neutral_trigger_condition="break above 3350 with volume expansion",
-            neutral_shadow_side="long",
+            counterfactual_side="long",
             neutral_watchlist_priority="high",
             business_quality_score=0.50,
         )
@@ -227,7 +274,6 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="RB",
         )
 
-        self.assertEqual(result.opportunity_layer, "no_trade")
         self.assertEqual(result.opportunity_state, "watch_for_trigger")
         self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "watch_for_trigger")
         self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
@@ -255,11 +301,23 @@ class AgentContractFixtureTest(unittest.TestCase):
             {
                 "tradeability": "high",
                 "market_regime": "trend",
-                "current_trade_setup": {
-                    "setup_family": "trend_breakout",
-                    "sector_setup_alignment": "aligned",
-                    "required_confirmation": "breakout with volume",
-                    "invalidation_template": "price closes back below breakout range",
+                "setup_type": "trend_breakout",
+                "setup_quality_ok": True,
+                "sector_setup_alignment": "aligned",
+                "required_confirmation": "breakout with volume",
+                "invalidation_condition": "price closes back below breakout range",
+                "current_trigger_confirmed": True,
+                "action_evidence_contract": {
+                    "setup_type": "trend_breakout",
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                    "entry_trigger": "break above opening range with volume",
+                    "invalidation_condition": "price closes back below breakout range",
+                    "learning_scope": {
+                        "setup_family": "trend_breakout",
+                        "sector_setup_alignment": "aligned",
+                    },
                 },
             },
             analyst="technical",
@@ -290,7 +348,6 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.68,
-            trigger_type="technical_price_trigger",
             entry_trigger="technical_price_trigger",
             business_quality_score=0.70,
         )
@@ -330,7 +387,6 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.66,
-            trigger_type="technical_price_trigger",
             entry_trigger="technical_price_trigger",
             business_quality_score=0.68,
         )
@@ -341,10 +397,20 @@ class AgentContractFixtureTest(unittest.TestCase):
                 "tradeability": "medium",
                 "market_regime": "range",
                 "dominant_direction": "bearish",
-                "current_trade_setup": {
-                    "setup_family": "range_reversal",
-                    "required_confirmation": "RSI/Stochastic/mean-reversion signal aligns with resistance",
-                    "invalidation_template": "price breaks above resistance with volume",
+                "setup_type": "range_reversal",
+                "setup_quality_ok": True,
+                "required_confirmation": "RSI/Stochastic/mean-reversion signal aligns with resistance",
+                "invalidation_condition": "price breaks above resistance with volume",
+                "action_evidence_contract": {
+                    "setup_type": "range_reversal",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "RSI/Stochastic/mean-reversion signal aligns with resistance",
+                    "invalidation_condition": "price breaks above resistance with volume",
+                    "learning_scope": {
+                        "setup_family": "range_reversal",
+                    },
                 },
                 "features": {"trend_strength": 19.0, "volume_ratio": 0.95},
                 "indicator_votes": {"details": {"rsi": "Bearish", "stochastic": "Bearish", "mean_reversion": "Bearish"}},
@@ -447,7 +513,6 @@ class AgentContractFixtureTest(unittest.TestCase):
             signal=Signal.BULLISH,
             confidence=0.66,
             horizon_class="medium",
-            trigger_type="fundamental_anchor",
             entry_trigger="fundamental_anchor",
             business_quality_score=0.72,
         )
@@ -474,7 +539,6 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="commodity_news",
             signal=Signal.BULLISH,
             confidence=0.64,
-            trigger_type="news_event_trigger",
             entry_trigger="news_event_trigger",
             business_quality_score=0.66,
         )
@@ -495,7 +559,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertEqual(result.opportunity_layer, "direction_only")
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
         self.assertIn("price/volume", result.entry_trigger)
         self.assertIn("news_event_requires_price_or_intraday_confirmation", result.current_evidence_conflict)
 
@@ -503,7 +567,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         weak = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
-            would_change_view_if="requires_current_confirmation",
+            would_change_view_if="wait_for_trigger",
         )
         strong = AnalystSignal(
             agent_name="technical",
@@ -519,11 +583,11 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             setup_quality_score=0.72,
             business_quality_score=0.70,
             entry_trigger="open only after price breakout confirms with volume expansion",
-            would_change_view_if="requires_current_confirmation",
+            would_change_view_if="wait_for_trigger",
         )
         strong = weak.model_copy(
             update={
@@ -550,12 +614,12 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertNotIn("missing_invalidation_boundary", strong_card["long"]["gating_failures"])
 
     def test_single_complete_fundamental_setup_with_strong_market_confirmation_is_tradeable(self):
-        """Regression for PM over-blocking a complete setup as direction_only."""
+        """Regression for PM over-blocking a complete setup as watch_for_trigger."""
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.NEUTRAL,
             confidence=0.35,
-            opportunity_layer="no_trade",
+            opportunity_state="no_opportunity",
             setup_quality_score=0.30,
             business_quality_score=0.31,
             entry_trigger="bullish reversal would require price trigger confirmation",
@@ -565,7 +629,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.46,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             setup_quality_score=0.75,
             business_quality_score=0.72,
             entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
@@ -576,7 +640,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="commodity_news",
             signal=Signal.NEUTRAL,
             confidence=0.30,
-            opportunity_layer="no_trade",
+            opportunity_state="no_opportunity",
         )
 
         card = build_opportunity_scorecard(
@@ -587,15 +651,15 @@ class AgentContractFixtureTest(unittest.TestCase):
             config={
                 "weak_confirmation_threshold": 0.45,
                 "tradeable_threshold": 0.58,
-                "min_tradeable_setup_quality": 0.55,
-                "single_tradeable_setup_confirmation_score": 0.68,
+                "min_tradeable_candidate_setup_quality": 0.55,
+                "single_tradeable_candidate_setup_confirmation_score": 0.68,
             },
         )
 
-        self.assertEqual(card["long"]["final_layer"], "tradeable_setup")
-        self.assertTrue(card["long"]["single_tradeable_setup_confirmed"])
+        self.assertEqual(card["long"]["final_state"], "probe_candidate")
+        self.assertTrue(card["long"]["single_tradeable_candidate_setup_confirmed"])
         self.assertIn(
-            "single_tradeable_setup_with_strong_market_confirmation",
+            "single_tradeable_candidate_with_strong_market_confirmation",
             card["long"]["scorecard_promotion_reasons"],
         )
         self.assertNotIn("missing_entry_setup", card["long"]["gating_failures"])
@@ -606,7 +670,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.55,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             setup_quality_score=0.70,
             business_quality_score=0.65,
             entry_trigger="short if breakdown confirms with volume",
@@ -616,7 +680,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.46,
-            opportunity_layer="tradeable_setup",
+            opportunity_state="tradeable_candidate",
             setup_quality_score=0.75,
             business_quality_score=0.72,
             entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
@@ -631,13 +695,13 @@ class AgentContractFixtureTest(unittest.TestCase):
             data_quality_summary={"critical_gap": False, "fundamental_trade_setup_gap": False},
             config={
                 "tradeable_threshold": 0.58,
-                "min_tradeable_setup_quality": 0.55,
-                "single_tradeable_setup_confirmation_score": 0.68,
+                "min_tradeable_candidate_setup_quality": 0.55,
+                "single_tradeable_candidate_setup_confirmation_score": 0.68,
                 "technical_opposition_min_confidence": 0.45,
             },
         )
 
-        self.assertFalse(card["long"]["single_tradeable_setup_confirmed"])
+        self.assertFalse(card["long"]["single_tradeable_candidate_setup_confirmed"])
         self.assertTrue(card["long"]["technical_opposes_side"])
 
 
@@ -849,3 +913,6 @@ class NewsDataBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

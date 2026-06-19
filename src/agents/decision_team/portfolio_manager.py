@@ -1,4 +1,4 @@
-import json
+﻿import json
 import re
 import math
 from datetime import datetime
@@ -309,12 +309,12 @@ DEFAULT_QUALITY_MULTIPLIERS = {
     "unknown": 0.75,
 }
 
-DEFAULT_OPPORTUNITY_LAYER_MULTIPLIERS = {
-    "deployable_alpha": 1.10,
-    "tradeable_setup": 1.00,
-    "risk_reduction": 0.90,
-    "direction_only": 0.60,
-    "no_trade": 0.0,
+DEFAULT_OPPORTUNITY_STATE_MULTIPLIERS = {
+    "tradeable_candidate": 1.10,
+    "probe_candidate": 0.90,
+    "risk_reduction_candidate": 0.80,
+    "watch_for_trigger": 0.30,
+    "no_opportunity": 0.05,
     "unknown": 0.50,
 }
 
@@ -370,7 +370,7 @@ DEFAULT_HOLDING_REBALANCE_CONTROL = {
         "probe_min_confirmation_score": 0.55,
         "exploration_reconfirm_enabled": True,
         "exploration_reconfirm_min_hold_days": 1,
-        "exploration_reconfirm_layers": ["direction_only", "unknown"],
+        "exploration_reconfirm_states": ["watch_for_trigger", "unknown"],
         "exploration_reconfirm_min_confirmation_score": 0.55,
         "exploration_reconfirm_exit_confirmation_score": 0.48,
         "exploration_reconfirm_min_signal_strength": 0.30,
@@ -405,12 +405,12 @@ DEFAULT_HOLDING_REBALANCE_CONTROL = {
         "losing_hold_exit_ratio": -0.02,
         "losing_hold_reduction_multiplier": 0.50,
     },
-    "direction_only_new_entry": {
+    "watch_for_trigger_new_entry": {
         "enabled": True,
         "semantic_role": "observation_candidate_only",
-        "audit_name": "direction_only_observation_candidate",
+        "audit_name": "watch_for_trigger_observation_candidate",
         "can_create_trade_authority": False,
-        "requires_final_new_entry_trade_authority": True,
+        "requires_final_contract_authority": True,
         "allow_probe": True,
         "probe_max_ratio": 0.01,
         "probe_floor_ratio": 0.005,
@@ -421,7 +421,7 @@ DEFAULT_HOLDING_REBALANCE_CONTROL = {
     "daily_tradeability_gate": {
         "enabled": True,
         "apply_to_new_entries": True,
-        "block_direction_only_medium_in_choppy": True,
+        "block_watch_for_trigger_medium_in_choppy": True,
         "regimes_requiring_short_timing": ["choppy", "range", "ranging", "range_bound", "weak_trend"],
         "horizons_requiring_short_timing": ["medium", "long"],
         "allow_with_tradeable_support": True,
@@ -485,40 +485,40 @@ def _scorecard_probe_seed(
     opportunity_scorecard: dict,
     control: dict,
 ) -> tuple[str, float, dict]:
-    direction_only_cfg = control.get("direction_only_new_entry") or {}
-    if not bool(direction_only_cfg.get("allow_probe", False)):
+    watch_for_trigger_cfg = control.get("watch_for_trigger_new_entry") or {}
+    if not bool(watch_for_trigger_cfg.get("allow_probe", False)):
         return "flat", 0.0, {}
-    min_support = int(direction_only_cfg.get("scorecard_probe_min_supporting_signals", 2) or 2)
-    min_score = _safe_float(direction_only_cfg.get("scorecard_probe_min_score"), 0.35)
-    block_critical_gap = bool(direction_only_cfg.get("scorecard_probe_block_on_critical_data_gap", True))
-    allow_single_high_quality = bool(direction_only_cfg.get("allow_single_high_quality_probe", True))
-    single_min_score = _safe_float(direction_only_cfg.get("single_high_quality_probe_min_score"), 0.52)
+    min_support = int(watch_for_trigger_cfg.get("scorecard_probe_min_supporting_signals", 2) or 2)
+    min_score = _safe_float(watch_for_trigger_cfg.get("scorecard_probe_min_score"), 0.35)
+    block_critical_gap = bool(watch_for_trigger_cfg.get("scorecard_probe_block_on_critical_data_gap", True))
+    allow_single_high_quality = bool(watch_for_trigger_cfg.get("allow_single_high_quality_probe", True))
+    single_min_score = _safe_float(watch_for_trigger_cfg.get("single_high_quality_probe_min_score"), 0.52)
     single_min_setup_quality = _safe_float(
-        direction_only_cfg.get("single_high_quality_probe_min_setup_quality"),
+        watch_for_trigger_cfg.get("single_high_quality_probe_min_setup_quality"),
         0.60,
     )
     single_min_business_quality = _safe_float(
-        direction_only_cfg.get("single_high_quality_probe_min_business_quality"),
+        watch_for_trigger_cfg.get("single_high_quality_probe_min_business_quality"),
         0.60,
     )
     single_min_confirmation_score = _safe_float(
-        direction_only_cfg.get("single_high_quality_probe_min_confirmation_score"),
+        watch_for_trigger_cfg.get("single_high_quality_probe_min_confirmation_score"),
         0.45,
     )
-    scorecard_tradeable_min_confirmation = _safe_float(
-        direction_only_cfg.get("scorecard_tradeable_setup_probe_min_confirmation_score"),
+    scorecard_tradeable_candidate_min_confirmation = _safe_float(
+        watch_for_trigger_cfg.get("scorecard_tradeable_candidate_probe_min_confirmation_score"),
         0.68,
     )
-    probe_cap = max(0.0, _safe_float(direction_only_cfg.get("probe_max_ratio"), 0.01))
-    probe_floor = max(0.0, _safe_float(direction_only_cfg.get("probe_floor_ratio"), 0.005))
+    probe_cap = max(0.0, _safe_float(watch_for_trigger_cfg.get("probe_max_ratio"), 0.01))
+    probe_floor = max(0.0, _safe_float(watch_for_trigger_cfg.get("probe_floor_ratio"), 0.005))
     candidates: list[tuple[str, dict]] = []
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     for side in ("long", "short"):
         row = scorecard.get(side) if isinstance(scorecard.get(side), dict) else {}
         if not row:
             continue
-        layer = str(row.get("final_layer") or "").lower()
-        if layer not in {"direction_only", "tradeable_setup", "deployable_alpha"}:
+        state = str(row.get("final_state") or "").lower()
+        if state not in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}:
             continue
         failures = [str(item) for item in (row.get("gating_failures") or [])]
         if "no_directional_support" in failures or "missing_entry_setup" in failures:
@@ -530,10 +530,10 @@ def _scorecard_probe_seed(
         max_setup_quality = _safe_float(row.get("max_setup_quality"), 0.0)
         max_business_quality = _safe_float(row.get("max_business_quality"), 0.0)
         confirmation_score = _safe_float(row.get("market_confirmation_score"), 0.0)
-        scorecard_confirmed_tradeable_setup = bool(
-            layer in {"tradeable_setup", "deployable_alpha"}
+        scorecard_confirmed_tradeable_candidate = bool(
+            state in {"probe_candidate", "tradeable_candidate"}
             and support_count >= 1
-            and confirmation_score >= scorecard_tradeable_min_confirmation
+            and confirmation_score >= scorecard_tradeable_candidate_min_confirmation
             and "missing_entry_setup" not in failures
             and "missing_invalidation_boundary" not in failures
             and "weak_entry_setup_quality" not in failures
@@ -553,7 +553,7 @@ def _scorecard_probe_seed(
             and "missing_invalidation_boundary" not in failures
             and "same_scope_alpha_setup_capped_or_rejected" not in failures
         )
-        if regular_probe or single_high_quality_probe or scorecard_confirmed_tradeable_setup:
+        if regular_probe or single_high_quality_probe or scorecard_confirmed_tradeable_candidate:
             candidates.append((side, row))
     if not candidates or probe_cap <= 0:
         return "flat", 0.0, {}
@@ -575,7 +575,7 @@ def _is_controlled_probe_reason(reason: str) -> bool:
         "business_quality_observe_or_block",
         "opportunity_scorecard_probe_seed",
         "single_high_quality_probe_only",
-        "pm_direction_only_probe_cap",
+        "pm_watch_for_trigger_probe_cap",
         "horizon_consistency_probe_cap",
         "market_confirmation_quality_gate",
         "market_confirmation_conflict",
@@ -646,7 +646,7 @@ def _pm_new_entry_semantic_block_reason(justification: str) -> str | None:
         r"\b(?:new\s+)?entry\s+is\s+not\s+(?:warranted|recommended|justified)",
         r"\b(?:new\s+)?position\s+is\s+not\s+(?:warranted|recommended|justified)",
         r"\bsizing\s+prior\s+(?:set\s+)?to\s+0\b",
-        r"\b(?:not|isn['’]?t)\s+(?:a\s+)?(?:tradeable|tradable|actionable)\s+(?:setup|entry|opportunity)",
+        r"\b(?:not|is\s+not|isn't)\s+(?:a\s+)?(?:tradeable|tradable|actionable)\s+(?:setup|entry|opportunity)",
     )
     no_trigger_patterns = (
         r"\bwithout\s+(?:an?\s+)?(?:actionable|valid|clear|current)\s+(?:entry\s+)?(?:timing\s+)?triggers?\b",
@@ -676,8 +676,8 @@ def _semantic_watchlist_authority(final_entry_authority: dict | None, reason: st
         "requires_authority": True,
         "decision": "watchlist_only",
         "authority_type": "watchlist_only",
-        "can_open_real_position": False,
-        "can_apply_min_real_floor": False,
+        "open_action_evidence": False,
+        "strong_current_evidence": False,
         "max_allowed_margin_ratio": 0.0,
         "reason_codes": reason_codes,
         "semantic_consistency_gate": {
@@ -701,28 +701,31 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
     not enough to create a real order.
     """
     if not isinstance(final_entry_authority, dict) or not final_entry_authority:
-        return "missing_final_new_entry_trade_authority"
+        return "missing_final_contract_authority"
     authority_type = str(final_entry_authority.get("authority_type") or "").strip().lower()
     reason_codes = {str(item or "") for item in (final_entry_authority.get("reason_codes") or [])}
     if authority_type in {"watchlist_only", "no_trade", "not_applicable", ""}:
-        return "final_new_entry_trade_authority_watchlist_only"
+        return "final_contract_authority_watchlist_only"
     if authority_type == "real_budget_entry":
-        if not bool(final_entry_authority.get("can_open_real_position")):
-            return "final_new_entry_trade_authority_real_entry_not_allowed"
+        if not bool(
+            final_entry_authority.get("open_action_evidence")
+            and final_entry_authority.get("strong_current_evidence")
+        ):
+            return "final_contract_authority_real_entry_not_allowed"
         return None
     if authority_type == "exploration_probe":
-        if bool(final_entry_authority.get("direction_only_block")):
-            return "final_new_entry_trade_authority_direction_only_probe_block"
+        if bool(final_entry_authority.get("watch_for_trigger_block")):
+            return "final_action_contract_watch_for_trigger_probe_block"
         hard_watchlist_codes = {
             "pm_text_no_trade_blocks_new_entry",
             "pm_text_no_entry_trigger_blocks_new_entry",
             "pm_text_watchlist_only_blocks_new_entry",
-            "direction_only_cannot_open_position",
+            "watch_for_trigger_cannot_open_position",
             "daily_tradeability_watchlist_only",
             "real_probe_qualification_not_met",
         }
         if reason_codes & hard_watchlist_codes:
-            return "final_new_entry_trade_authority_watchlist_only"
+            return "final_contract_authority_watchlist_only"
         current_evidence = bool(
             final_entry_authority.get("open_action_evidence")
             or final_entry_authority.get("strong_current_evidence")
@@ -732,9 +735,9 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
             or final_entry_authority.get("market_confirmation")
         )
         if not current_evidence:
-            return "final_new_entry_trade_authority_probe_lacks_current_evidence"
+            return "final_contract_authority_probe_lacks_current_evidence"
         return None
-    return "final_new_entry_trade_authority_not_met"
+    return "final_contract_authority_not_met"
 
 
 def _enrich_final_authority_with_analyst_evidence(
@@ -762,22 +765,18 @@ def _enrich_final_authority_with_analyst_evidence(
         if agent not in {"technical", "fundamental", "commodity_news"}:
             continue
         fields = _derive_signal_contract_fields(signal, agent)
-        trigger_valid = bool(fields.get("trigger_valid") or getattr(signal, "trigger_valid", False))
-        invalidation_present = bool(fields.get("invalidation_present") or getattr(signal, "invalidation_present", False))
+        action_contract = _canonical_action_evidence_contract(signal)
+        trigger_valid = _canonical_trigger_valid(signal)
+        invalidation_present = _canonical_invalidation_present(signal)
         evidence_role = str(fields.get("evidence_role") or "")
         side = _signal_side_text(getattr(signal, "signal", None))
-        layer = _signal_opportunity_layer(signal)
-        action_contract = (
-            (getattr(signal, "metadata", {}) or {}).get("action_evidence_contract")
-            if isinstance(getattr(signal, "metadata", {}) or {}, dict)
-            else {}
-        )
+        state = _signal_opportunity_state(signal)
         current_evidence = bool(
             trigger_valid
             and invalidation_present
             and side in {"long", "short"}
             and (not target_side or side == target_side)
-            and layer in {"tradeable_setup", "deployable_alpha", "risk_reduction"}
+            and state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}
         )
         if agent == "technical" and current_evidence and evidence_role == "entry_timing":
             has_technical_confirmation = True
@@ -790,10 +789,10 @@ def _enrich_final_authority_with_analyst_evidence(
         evidence_by_agent[agent] = {
             "evidence_role": evidence_role,
             "side": side,
-            "opportunity_layer": layer,
+            "opportunity_state": state,
             "trigger_valid": trigger_valid,
             "invalidation_present": invalidation_present,
-            "trade_trigger": fields.get("trade_trigger"),
+            "entry_trigger": fields.get("entry_trigger"),
             "entry_timing_signal": fields.get("entry_timing_signal"),
             "action_evidence_contract": action_contract if isinstance(action_contract, dict) else {},
         }
@@ -820,11 +819,6 @@ def _build_structured_pm_justification(
     signal_snapshot: dict,
 ) -> str:
     """Render PM text from the final structured outlet, not from raw rationale."""
-    authority = (
-        signal_snapshot.get("final_new_entry_trade_authority")
-        if isinstance(signal_snapshot.get("final_new_entry_trade_authority"), dict)
-        else {}
-    )
     audit = (
         signal_snapshot.get("active_opportunity_audit")
         if isinstance(signal_snapshot.get("active_opportunity_audit"), dict)
@@ -840,12 +834,9 @@ def _build_structured_pm_justification(
     final_action = action_contract.get("final_action")
     target_lots = action_contract.get("target_lots")
     target_ratio = action_contract.get("target_position_ratio")
-    tradable_lots = action_contract.get("tradable_lots_if_executed_now")
-    tradable_reason = action_contract.get("tradable_lots_reason")
-    authority_type = authority.get("authority_type") or (audit.get("decision") or {}).get("authority_type") or "not_applicable"
-    reason_codes = authority.get("reason_codes") or []
-    if not reason_codes and tradable_reason:
-        reason_codes = [tradable_reason]
+    lots_delta = action_contract.get("lots_delta")
+    authority_type = action_contract.get("authority_type") or (audit.get("decision") or {}).get("authority_type") or "not_applicable"
+    reason_codes = action_contract.get("reason_codes") or []
     consistency = action_contract.get("consistency") if isinstance(action_contract.get("consistency"), dict) else {}
     consistency_status = consistency.get("status") or "unknown"
     semantic_gate = signal_snapshot.get("pm_semantic_consistency_gate")
@@ -858,8 +849,7 @@ def _build_structured_pm_justification(
             f"final_action={final_action or 'not_available'}; "
             f"authority_type={authority_type}; target_lots={target_lots}; "
             f"target_position_ratio={target_ratio}; "
-            f"tradable_lots_if_executed_now={tradable_lots}; "
-            f"tradable_lots_reason={tradable_reason or 'none'}; "
+            f"lots_delta={lots_delta}; "
             f"reason_codes={','.join(str(item) for item in reason_codes) if reason_codes else 'none'}; "
             f"recommendation_position_consistency={consistency_status}"
             f"{semantic_text}. Raw PM rationale is stored in signal_snapshot.pm_raw_rationale for audit only."
@@ -909,11 +899,11 @@ def _build_final_action_contract(
     opportunity_scorecard: dict | None,
     market_confirmation: dict | None,
     alpha_setup_action_values: list | None,
-    execution_plan: dict | None = None,
+    execution_contract_fields: dict | None = None,
 ) -> dict:
     diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
-    execution_plan_payload = dict(execution_plan) if isinstance(execution_plan, dict) else {}
+    execution_contract_payload = dict(execution_contract_fields) if isinstance(execution_contract_fields, dict) else {}
     target_side = "long" if int(target_lots or 0) > 0 else "short" if int(target_lots or 0) < 0 else "flat"
     scorecard_side = scorecard.get(target_side) if target_side in {"long", "short"} and isinstance(scorecard.get(target_side), dict) else {}
     authority = final_entry_authority if isinstance(final_entry_authority, dict) else {}
@@ -933,8 +923,8 @@ def _build_final_action_contract(
             ),
             "side": scorecard_seed.get("side"),
             "ratio": scorecard_seed.get("ratio"),
-            "scorecard_layer": (
-                (scorecard_seed.get("scorecard") or {}).get("final_layer")
+            "scorecard_state": (
+                (scorecard_seed.get("scorecard") or {}).get("final_state")
                 if isinstance(scorecard_seed.get("scorecard"), dict)
                 else None
             ),
@@ -981,6 +971,26 @@ def _build_final_action_contract(
     margin_ratio_estimate = (
         float(margin_required or 0.0) / max(float(account_equity or 0.0), 1.0)
     )
+    reason_codes = {str(item) for item in (control_reasons or []) if item}
+    if lots_to_trade_reason:
+        reason_codes.add(str(lots_to_trade_reason))
+    execution_fields = {
+        key: execution_contract_payload.get(key)
+        for key in (
+            "execution_profile",
+            "trigger_source",
+            "entry_trigger",
+            "invalidation",
+            "valid_until",
+            "requires_intraday_confirmation",
+            "can_execute_without_intraday_trigger",
+            "allow_confirmed_memory_vwap_fallback",
+            "fallback_authority_boundary",
+            "execution_action_value_preference",
+            "analyst_execution_roles",
+        )
+        if key in execution_contract_payload
+    }
     return {
         "contract_version": _FINAL_ACTION_CONTRACT_VERSION,
         "ticker": ticker,
@@ -988,20 +998,25 @@ def _build_final_action_contract(
         "current_lots": int(current_lots or 0),
         "target_lots": int(target_lots or 0),
         "lots_delta": int((target_lots or 0) - (current_lots or 0)),
-        "tradable_lots_if_executed_now": int(lots_to_trade or 0),
-        "tradable_lots_reason": lots_to_trade_reason,
+        "lots_delta_abs": abs(int((target_lots or 0) - (current_lots or 0))),
         "target_position_ratio": float(position_ratio or 0.0),
         "target_margin_ratio_estimate": margin_ratio_estimate,
         "authority_type": authority.get("authority_type") or "not_applicable",
-        "can_open_real_position": bool(authority.get("can_open_real_position")),
-        "can_apply_min_real_floor": bool(authority.get("can_apply_min_real_floor")),
+        "authority_decision": authority.get("decision") or "not_applicable",
+        "requires_authority": bool(authority.get("requires_authority")),
+        "open_action_evidence": bool(authority.get("open_action_evidence")),
+        "strong_current_evidence": bool(authority.get("strong_current_evidence")),
+        "watch_for_trigger_block": bool(authority.get("watch_for_trigger_block")),
+        "negative_profile": bool(authority.get("negative_profile")),
+        "tradeable_state": bool(authority.get("tradeable_state")),
+        "weak_conflict_probe": bool(authority.get("weak_conflict_probe")),
         "max_allowed_margin_ratio": float(_safe_float(authority.get("max_allowed_margin_ratio"), 0.0)),
-        "reason_codes": sorted({str(item) for item in (control_reasons or []) if item}),
+        "reason_codes": sorted(reason_codes),
         "recommendation_intent": recommendation_intent,
         "action_candidates": candidates,
         "evidence_used": {
             "scorecard_preferred_side": scorecard.get("preferred_side"),
-            "scorecard_layer": scorecard_side.get("final_layer"),
+            "scorecard_state": scorecard_side.get("final_state"),
             "scorecard_score": scorecard_side.get("score"),
             "market_confirmation_score": (
                 _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
@@ -1013,7 +1028,6 @@ def _build_final_action_contract(
                 if isinstance(market_confirmation, dict)
                 else None
             ),
-            "final_new_entry_trade_authority": authority,
         },
         "learning_used": {
             "alpha_setup_action_values": selected_action_values,
@@ -1036,9 +1050,9 @@ def _build_final_action_contract(
                 else ""
             ),
         },
-        "risk_flags": sorted({str(item) for item in (control_reasons or []) if item}),
-        "execution_plan": execution_plan_payload,
-        "execution_profile": execution_plan_payload.get("execution_profile"),
+        "risk_flags": sorted(reason_codes),
+        **execution_fields,
+        "execution_profile": execution_contract_payload.get("execution_profile"),
         "execution_requirement": (
             "intraday_trigger_required"
             if final_action in {"open_probe", "open_real", "scale"}
@@ -1061,7 +1075,7 @@ def _release_block_category(primary_reason: str, reason_summary: dict) -> str:
     if reason_summary.get("hard_blocks"):
         return "hard_risk_or_authority"
     if requires_watchlist_reason(reason):
-        return "watchlist_or_direction_only"
+        return "watchlist_or_watch_for_trigger"
     if "confirmation" in reason or "trigger" in reason:
         return "current_confirmation_missing"
     if "invalidation" in reason or "stop" in reason:
@@ -1097,7 +1111,7 @@ def _build_release_ladder_diagnostics(full_config: dict | None) -> dict:
             },
             "current_confirmation_floor": _diagnostic_config_value(
                 config,
-                ("portfolio", "direction_only_new_entry", "scorecard_tradeable_setup_probe_min_confirmation_score"),
+                ("portfolio", "watch_for_trigger_new_entry", "scorecard_tradeable_candidate_probe_min_confirmation_score"),
             ),
             "purpose": "small_real_trade_for_current_tradeable_probe",
         },
@@ -1206,14 +1220,14 @@ def _build_release_block_diagnostics(
         "reason_effect_summary": reason_summary,
         "evidence_snapshot": {
             "preferred_side": preferred_side or "flat",
-            "preferred_side_layer": preferred_side_card.get("final_layer"),
+            "preferred_side_state": preferred_side_card.get("final_state"),
             "preferred_side_score": preferred_side_card.get("score"),
             "market_confirmation_score": confirmation.get("confirmation_score"),
             "market_confirmation_status": confirmation.get("status") or confirmation.get("confirmation_label"),
             "has_release_signal": bool(reason_summary.get("release_signals")),
             "has_hard_block": bool(reason_summary.get("hard_blocks")),
             "has_watchlist_required_reason": any(requires_watchlist_reason(item) for item in reasons),
-            "direction_only_block": bool(authority.get("direction_only_block")),
+            "watch_for_trigger_block": bool(authority.get("watch_for_trigger_block")),
             "current_evidence_present": bool(
                 authority.get("current_evidence")
                 or authority.get("strong_current_evidence")
@@ -1228,7 +1242,7 @@ def _build_release_block_diagnostics(
         "release_ladder_diagnostics": _build_release_ladder_diagnostics(full_config),
         "next_evidence_needed": {
             "hard_risk_or_authority": ["remove_hard_block_or_wait_for_auditor_clearance"],
-            "watchlist_or_direction_only": ["current_tradeable_setup_evidence"],
+            "watchlist_or_watch_for_trigger": ["current_tradeable_candidate_evidence"],
             "current_confirmation_missing": ["current_price_or_volume_confirmation"],
             "invalidation_missing": ["explicit_invalidation_or_stop_boundary"],
             "capital_capacity": ["feasible_budget_and_lot_capacity"],
@@ -1239,7 +1253,7 @@ def _build_release_block_diagnostics(
         }.get(category, ["review_release_block_reason"]),
         "audit_boundary": (
             "diagnostic_only; not consumed by Trader; does not alter final_action_contract, "
-            "final_new_entry_trade_authority, lots, budget, or execution"
+            "final_action_contract authority, lots, budget, or execution"
         ),
     }
 
@@ -1269,7 +1283,7 @@ def _build_minimal_final_action_contract(
         opportunity_scorecard={},
         market_confirmation={},
         alpha_setup_action_values=[],
-        execution_plan={},
+        execution_contract_fields={},
     )
 
 
@@ -1348,10 +1362,9 @@ def _apply_position_budget_policy_for_new_entry(
         "min_required_margin": min_required_margin,
         "target_lots_before_abs": current_abs_lots,
         "final_authority_type": final_entry_authority.get("authority_type"),
-        "can_apply_min_real_floor": bool(final_entry_authority.get("can_apply_min_real_floor")),
         "max_allowed_margin_ratio": final_entry_authority.get("max_allowed_margin_ratio"),
     })
-    if not bool(final_entry_authority.get("can_apply_min_real_floor", True)):
+    if str(final_entry_authority.get("authority_type") or "") != "real_budget_entry":
         max_allowed_margin_ratio = _safe_float(final_entry_authority.get("max_allowed_margin_ratio"), 0.0)
         max_allowed_margin = equity * max(0.0, max_allowed_margin_ratio)
         probe_floor_margin = equity * max(0.0, float(cfg.get("probe_margin_ratio") or 0.0))
@@ -1547,7 +1560,7 @@ def _probe_like_control_reason_present(reasons: list[str]) -> bool:
         "unknown_alpha_probe",
         "minimum_one_lot_probe",
         "controlled_probe_below_min_entry_kept",
-        "pm_direction_only_probe_cap",
+        "pm_watch_for_trigger_probe_cap",
         "horizon_consistency_probe_cap",
         "opportunity_scorecard_probe_seed",
         "trade_auditor_soft_probe_floor",
@@ -1596,14 +1609,11 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
     """
     if not isinstance(alpha_ev, dict):
         alpha_ev = {}
-    scorecard_layer = str(alpha_ev.get("scorecard_layer") or "").lower()
+    scorecard_state = str(alpha_ev.get("scorecard_state") or "").lower()
     strong_realtime = bool(alpha_ev.get("strong_realtime_evidence"))
     strong_market = bool(alpha_ev.get("strong_market_confirmation"))
     technical_support = bool(alpha_ev.get("technical_supports_side"))
-    technical_entry_timing_support = bool(
-        alpha_ev.get("technical_entry_timing_supports_side")
-        or alpha_ev.get("technical_trigger_valid")
-    )
+    technical_entry_timing_support = bool(alpha_ev.get("technical_entry_timing_supports_side"))
     technical_opposes = bool(alpha_ev.get("technical_opposes_side"))
     has_tradeable_support = bool(alpha_ev.get("has_tradeable_support"))
     has_invalidation = bool(alpha_ev.get("has_invalidation_or_stop"))
@@ -1637,13 +1647,13 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
     )
     current_setup_confirmation = bool(
         has_tradeable_support
-        and scorecard_layer in {"tradeable_setup", "deployable_alpha"}
+        and scorecard_state in {"probe_candidate", "tradeable_candidate"}
         and confirmation_score >= 0.60
         and not technical_opposes
         and has_invalidation
     )
-    direction_only_without_setup = bool(
-        scorecard_layer == "direction_only"
+    watch_for_trigger_without_setup = bool(
+        scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
         and not has_tradeable_support
         and not technical_confirmation
         and not event_catalyst_confirmation
@@ -1653,12 +1663,12 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         strong_market
         and confirmation_score >= 0.68
         and independent_support_count >= 1
-        and not direction_only_without_setup
+        and not watch_for_trigger_without_setup
         and not technical_opposes
         and has_invalidation
     )
-    direction_only_without_confirmation = bool(
-        direction_only_without_setup and not market_confirmation
+    watch_for_trigger_without_confirmation = bool(
+        watch_for_trigger_without_setup and not market_confirmation
     )
     open_action_evidence = bool(
         technical_confirmation
@@ -1672,7 +1682,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         or (qualified_positive and (technical_confirmation or event_catalyst_confirmation or market_confirmation))
     )
     return {
-        "scorecard_layer": scorecard_layer,
+        "scorecard_state": scorecard_state,
         "qualified_positive": qualified_positive,
         "analyst_tradeable_probe_candidate": analyst_tradeable_probe,
         "strong_realtime_evidence": strong_realtime,
@@ -1691,8 +1701,8 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         "current_setup_confirmation": current_setup_confirmation,
         "executable_setup_confirmation": current_setup_confirmation,
         "open_action_evidence": open_action_evidence,
-        "direction_only_without_setup": direction_only_without_setup,
-        "direction_only_without_confirmation": direction_only_without_confirmation,
+        "watch_for_trigger_without_setup": watch_for_trigger_without_setup,
+        "watch_for_trigger_without_confirmation": watch_for_trigger_without_confirmation,
         "current_trade_authority": current_trade_authority,
         "action_evidence_router": {
             "open": {
@@ -1732,13 +1742,13 @@ def _qualified_real_probe_release(
     hard_watchlist = any(_real_probe_requires_watchlist(reason) for reason in reasons)
     soft_blocks = sorted({reason for reason in reasons if _real_probe_soft_block_can_be_overridden(reason)})
     trade_authority = _alpha_ev_trade_authority(alpha_ev)
-    scorecard_layer = str(trade_authority.get("scorecard_layer") or "").strip().lower()
-    direction_semantic_block = bool(
-        "pm_direction_only_probe_cap" in reasons
-        or "direction_only_cannot_open_position" in reasons
+    scorecard_state = str(trade_authority.get("scorecard_state") or "").strip().lower()
+    watch_for_trigger_semantic_block = bool(
+        "pm_watch_for_trigger_probe_cap" in reasons
+        or "watch_for_trigger_cannot_open_position" in reasons
         or "daily_tradeability_watchlist_only" in reasons
-        or scorecard_layer in {"direction_only", "watchlist_only", "no_trade"}
-        or trade_authority.get("direction_only_without_setup")
+        or scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
+        or trade_authority.get("watch_for_trigger_without_setup")
     )
     strong_realtime = bool(trade_authority.get("strong_realtime_evidence"))
     strong_market = bool(trade_authority.get("strong_market_confirmation"))
@@ -1751,7 +1761,7 @@ def _qualified_real_probe_release(
         soft_blocks
         and not hard_zero
         and not hard_watchlist
-        and not direction_semantic_block
+        and not watch_for_trigger_semantic_block
         and trade_authority.get("current_trade_authority")
     )
     return release, {
@@ -1759,8 +1769,8 @@ def _qualified_real_probe_release(
         "soft_blocks": soft_blocks,
         "hard_zero": hard_zero,
         "hard_watchlist": hard_watchlist,
-        "direction_semantic_block": direction_semantic_block,
-        "scorecard_layer": scorecard_layer,
+        "watch_for_trigger_semantic_block": watch_for_trigger_semantic_block,
+        "scorecard_state": scorecard_state,
         "qualified_positive_expectancy": qualified_positive,
         "positive_action_value": positive_action_value,
         "positive_profile": positive_profile,
@@ -1771,8 +1781,8 @@ def _qualified_real_probe_release(
         "market_confirmation": trade_authority.get("market_confirmation"),
         "technical_confirmation": trade_authority.get("technical_confirmation"),
         "executable_setup_confirmation": trade_authority.get("executable_setup_confirmation"),
-        "direction_only_without_setup": trade_authority.get("direction_only_without_setup"),
-        "direction_only_without_confirmation": trade_authority.get("direction_only_without_confirmation"),
+        "watch_for_trigger_without_setup": trade_authority.get("watch_for_trigger_without_setup"),
+        "watch_for_trigger_without_confirmation": trade_authority.get("watch_for_trigger_without_confirmation"),
         "current_trade_authority": trade_authority.get("current_trade_authority"),
         "money_objective": "allow_positive_or_strong_confirmed_probe_without_releasing_hard_risk",
     }
@@ -1797,7 +1807,7 @@ _MINIMUM_REAL_PROBE_DISQUALIFIED_REASONS = {
     "negative_expectancy_cap_or_exit",
     "negative_expectancy_new_entry_watchlist_only",
     "alpha_setup_open_action_value_missing",
-    "pm_direction_only_probe_cap",
+    "pm_watch_for_trigger_probe_cap",
     "single_high_quality_probe_only",
     "horizon_consistency_probe_cap",
     "missing_pretrade_invalidation",
@@ -1816,8 +1826,8 @@ def _should_attempt_minimum_real_probe(
 ) -> bool:
     reasons = [str(reason or "") for reason in control_reasons or []]
     direction_or_watchlist_semantics = {
-        "pm_direction_only_probe_cap",
-        "direction_only_cannot_open_position",
+        "pm_watch_for_trigger_probe_cap",
+        "watch_for_trigger_cannot_open_position",
         "daily_tradeability_watchlist_only",
     }
     return bool(
@@ -1892,8 +1902,8 @@ def _qualified_analyst_tradeable_probe_candidate(
         "matched_analysts": [],
         "blocked_reasons": [],
         "does_not_create_trade_authority": True,
-        "requires_final_new_entry_trade_authority": True,
-        "keeps_direction_only_boundary": True,
+        "requires_final_contract_authority": True,
+        "keeps_watch_for_trigger_boundary": True,
     }
     if target_side not in {"long", "short"}:
         detail["blocked_reasons"].append("missing_target_side")
@@ -1920,34 +1930,19 @@ def _qualified_analyst_tradeable_probe_candidate(
         signal_side = _signal_side_text(getattr(signal, "signal", None))
         if signal_side != target_side:
             continue
-        layer = _signal_opportunity_layer(signal)
         state = str(getattr(signal, "opportunity_state", "") or "").strip().lower()
-        trigger_valid = bool(getattr(signal, "trigger_valid", False))
-        invalidation_present = bool(getattr(signal, "invalidation_present", False))
-        metadata = getattr(signal, "metadata", {}) or {}
-        action_contract = (
-            metadata.get("action_evidence_contract")
-            if isinstance(metadata, dict) and isinstance(metadata.get("action_evidence_contract"), dict)
-            else {}
-        )
+        trigger_valid = _canonical_trigger_valid(signal)
+        invalidation_present = _canonical_invalidation_present(signal)
+        action_contract = _canonical_action_evidence_contract(signal)
         if action_contract:
-            layer = str(action_contract.get("opportunity_layer") or layer or "").strip().lower()
             state = str(action_contract.get("opportunity_state") or state or "").strip().lower()
-            trigger_valid = bool(action_contract.get("trigger_valid") or trigger_valid)
-            invalidation_present = bool(
-                action_contract.get("has_invalidation")
-                or action_contract.get("invalidation_present")
-                or invalidation_present
-            )
         tradeable_candidate = bool(
-            layer in {"tradeable_setup", "deployable_alpha"}
-            or state == "tradeable_candidate"
+            state in {"probe_candidate", "tradeable_candidate"}
         )
         if tradeable_candidate and trigger_valid and invalidation_present:
             detail["matched_analysts"].append(
                 {
                     "analyst": _normalize_agent_name(str(getattr(signal, "agent_name", "") or "unknown")),
-                    "layer": layer,
                     "opportunity_state": state,
                     "trigger_valid": True,
                     "invalidation_present": True,
@@ -1958,13 +1953,13 @@ def _qualified_analyst_tradeable_probe_candidate(
     if not detail["matched_analysts"]:
         detail["blocked_reasons"].append("no_same_side_tradeable_triggered_analyst")
     allowed = not detail["blocked_reasons"]
-    detail["decision"] = "allow_controlled_probe_candidate" if allowed else "watchlist_only"
+    detail["decision"] = "allow_controlled_probe_candidate" if allowed else "watch_for_trigger"
     return allowed, detail
 
 
-_FINAL_NEW_ENTRY_WEAK_REASONS = {
+_FINAL_ACTION_AUTHORITY_WEAK_REASONS = {
     "alpha_setup_open_action_value_missing",
-    "pm_direction_only_probe_cap",
+    "pm_watch_for_trigger_probe_cap",
     "single_high_quality_probe_only",
     "horizon_consistency_probe_cap",
     "market_confirmation_quality_gate",
@@ -1979,7 +1974,7 @@ _FINAL_NEW_ENTRY_WEAK_REASONS = {
     "unknown_alpha_probe",
 }
 
-_FINAL_NEW_ENTRY_HARD_BLOCK_REASONS = {
+_FINAL_ACTION_AUTHORITY_HARD_BLOCK_REASONS = {
     "repeat_loss_watchlist_only",
     "negative_expectancy_cap_or_exit",
     "negative_expectancy_new_entry_watchlist_only",
@@ -1987,7 +1982,7 @@ _FINAL_NEW_ENTRY_HARD_BLOCK_REASONS = {
 }
 
 
-def _final_new_entry_trade_authority(
+def _final_contract_authority(
     *,
     control_reasons: list[str],
     control_diagnostics: dict,
@@ -2024,11 +2019,11 @@ def _final_new_entry_trade_authority(
         alpha_ev["analyst_tradeable_probe_candidate"] = True
         alpha_ev["has_tradeable_support"] = True
         alpha_ev["has_invalidation_or_stop"] = True
-        if not alpha_ev.get("scorecard_layer"):
-            alpha_ev["scorecard_layer"] = "tradeable_setup"
+        if not alpha_ev.get("scorecard_state"):
+            alpha_ev["scorecard_state"] = "probe_candidate"
     reason_effects = reason_effect_summary(reasons)
-    weak_markers = sorted(reason_set & _FINAL_NEW_ENTRY_WEAK_REASONS)
-    hard_blocks = sorted(set(reason_set & _FINAL_NEW_ENTRY_HARD_BLOCK_REASONS) | set(reason_effects.get("hard_blocks") or []))
+    weak_markers = sorted(reason_set & _FINAL_ACTION_AUTHORITY_WEAK_REASONS)
+    hard_blocks = sorted(set(reason_set & _FINAL_ACTION_AUTHORITY_HARD_BLOCK_REASONS) | set(reason_effects.get("hard_blocks") or []))
     hard_zero = bool(reason_effects.get("hard_zero"))
     negative_profile = bool(
         alpha_ev.get("negative_action_value")
@@ -2058,66 +2053,66 @@ def _final_new_entry_trade_authority(
         or event_catalyst_confirmation
     )
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
-    direction_only_without_setup = bool(trade_authority.get("direction_only_without_setup"))
-    scorecard_layer = str(trade_authority.get("scorecard_layer") or "").lower()
-    tradeable_layer = scorecard_layer in {"tradeable_setup", "deployable_alpha"}
-    direction_semantic_block = bool(
-        analyst_policy.get("direction_only_cannot_open_position", True)
+    watch_for_trigger_without_setup = bool(trade_authority.get("watch_for_trigger_without_setup"))
+    scorecard_state = str(trade_authority.get("scorecard_state") or "").lower()
+    tradeable_state = scorecard_state in {"probe_candidate", "tradeable_candidate"}
+    watch_for_trigger_semantic_block = bool(
+        analyst_policy.get("watch_for_trigger_cannot_open_position", True)
         and (
-            "pm_direction_only_probe_cap" in reason_set
-            or "direction_only_cannot_open_position" in reason_set
+            "pm_watch_for_trigger_probe_cap" in reason_set
+            or "watch_for_trigger_cannot_open_position" in reason_set
             or "daily_tradeability_watchlist_only" in reason_set
-            or scorecard_layer in {"direction_only", "watchlist_only", "no_trade"}
-            or direction_only_without_setup
+            or scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
+            or watch_for_trigger_without_setup
         )
     )
     market_conflict = "market_confirmation_conflict" in reason_set
     weak_conflict_probe = bool(
         market_conflict
         and not trade_authority.get("market_confirmation")
-        and scorecard_layer in {"direction_only", "unknown", "no_trade", ""}
+        and scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
         and not current_setup_confirmation
         and not event_catalyst_confirmation
     )
-    direction_only_block = bool(
-        direction_semantic_block
+    watch_for_trigger_block = bool(
+        watch_for_trigger_semantic_block
     )
     prior_only_mode = str(analyst_policy.get("static_weights_mode") or analyst_policy.get("mode") or "").lower() in {
         "prior_only",
         "evidence_router",
     }
     static_weights_can_open = bool(analyst_policy.get("static_weights_can_create_trade_authority", False))
-    direction_only_cfg = (
-        ((_get_holding_rebalance_config(full_config or {}) or {}).get("direction_only_new_entry") or {})
+    watch_for_trigger_cfg = (
+        ((_get_holding_rebalance_config(full_config or {}) or {}).get("watch_for_trigger_new_entry") or {})
         if isinstance(full_config, dict)
         else {}
     )
-    direction_only_semantic_audit = {
-        "config_key": "portfolio_manager.holding_rebalance_control.direction_only_new_entry",
-        "audit_name": str(direction_only_cfg.get("audit_name") or "direction_only_observation_candidate"),
-        "semantic_role": str(direction_only_cfg.get("semantic_role") or "observation_candidate_only"),
-        "legacy_allow_probe": bool(direction_only_cfg.get("allow_probe", False)),
-        "can_create_trade_authority": bool(direction_only_cfg.get("can_create_trade_authority", False)),
-        "requires_final_new_entry_trade_authority": bool(
-            direction_only_cfg.get("requires_final_new_entry_trade_authority", True)
+    watch_for_trigger_semantic_audit = {
+        "config_key": "portfolio_manager.holding_rebalance_control.watch_for_trigger_new_entry",
+        "audit_name": str(watch_for_trigger_cfg.get("audit_name") or "watch_for_trigger_observation_candidate"),
+        "semantic_role": str(watch_for_trigger_cfg.get("semantic_role") or "observation_candidate_only"),
+        "allow_probe": bool(watch_for_trigger_cfg.get("allow_probe", False)),
+        "can_create_trade_authority": bool(watch_for_trigger_cfg.get("can_create_trade_authority", False)),
+        "requires_final_contract_authority": bool(
+            watch_for_trigger_cfg.get("requires_final_contract_authority", True)
         ),
         "boundary": (
             "direction-only may create only an audited candidate/probe-sized intent; "
-            "real lots still require final_new_entry_trade_authority and cannot be created by this key alone"
+            "real lots still require final_action_contract authority and cannot be created by this key alone"
         ),
     }
-    weak_only = bool(weak_markers or open_action_missing or direction_only_block)
+    weak_only = bool(weak_markers or open_action_missing or watch_for_trigger_block)
     release_qualified = bool(release and (qualified_positive or strong_current_evidence))
-    requires_authority = bool(hard_zero or hard_blocks or weak_markers or negative_profile or direction_only_block or open_action_missing)
+    requires_authority = bool(hard_zero or hard_blocks or weak_markers or negative_profile or watch_for_trigger_block or open_action_missing)
     can_real = bool(
         not hard_zero
         and not hard_blocks
         and not negative_profile
         and not weak_conflict_probe
         and not open_action_missing
-        and not direction_only_block
+        and not watch_for_trigger_block
         and open_action_evidence
-        and tradeable_layer
+        and tradeable_state
         and (
             (qualified_positive and strong_current_evidence)
             or (release_qualified and qualified_positive)
@@ -2128,8 +2123,8 @@ def _final_new_entry_trade_authority(
         and not hard_blocks
         and not negative_profile
         and not weak_conflict_probe
-        and not direction_only_block
-        and tradeable_layer
+        and not watch_for_trigger_block
+        and tradeable_state
         and (
             (release_qualified and open_action_evidence)
             or strong_current_evidence
@@ -2188,8 +2183,8 @@ def _final_new_entry_trade_authority(
                 "market_confirmation_conflict",
                 "horizon_consistency_probe_cap",
             }]
-            + (["direction_only_cannot_open_position"] if direction_only_block else [])
-            + (["direction_semantic_release_block"] if direction_semantic_block and release else [])
+            + (["watch_for_trigger_cannot_open_position"] if watch_for_trigger_block else [])
+            + (["watch_for_trigger_semantic_release_block"] if watch_for_trigger_semantic_block and release else [])
             + (["weak_conflict_probe_requires_stronger_confirmation"] if weak_conflict_probe else [])
             + (["negative_expectancy"] if negative_profile else [])
             + (["hard_zero"] if hard_zero else [])
@@ -2200,8 +2195,6 @@ def _final_new_entry_trade_authority(
         "requires_authority": requires_authority,
         "decision": decision,
         "authority_type": authority_type,
-        "can_open_real_position": bool(can_real),
-        "can_apply_min_real_floor": bool(can_real),
         "max_allowed_margin_ratio": float(max_allowed_margin_ratio),
         "reason_codes": reason_codes,
         "source_parameters": {
@@ -2216,7 +2209,7 @@ def _final_new_entry_trade_authority(
                 "block_below_min_when_cannot_scale": budget_cfg.get("block_below_min_when_cannot_scale"),
             },
             "analyst_weight_policy": {
-                "direction_only_cannot_open_position": bool(analyst_policy.get("direction_only_cannot_open_position", True)),
+                "watch_for_trigger_cannot_open_position": bool(analyst_policy.get("watch_for_trigger_cannot_open_position", True)),
                 "strategic_view_cannot_open_position": bool(analyst_policy.get("strategic_view_cannot_open_position", True)),
                 "static_weights_mode": analyst_policy.get("static_weights_mode") or analyst_policy.get("mode") or "prior_only",
                 "static_weights_can_create_trade_authority": bool(
@@ -2227,11 +2220,11 @@ def _final_new_entry_trade_authority(
                 "min_confirmation_score_for_new_entry": market_cfg.get("min_confirmation_score_for_new_entry"),
             },
             "opportunity_scorecard": {
-                "single_tradeable_setup_confirmation_score": opportunity_cfg.get("single_tradeable_setup_confirmation_score"),
+                "single_tradeable_candidate_setup_confirmation_score": opportunity_cfg.get("single_tradeable_candidate_setup_confirmation_score"),
             },
-            "direction_only_new_entry": direction_only_semantic_audit,
+            "watch_for_trigger_new_entry": watch_for_trigger_semantic_audit,
         },
-        "direction_only_cannot_open_position": bool(analyst_policy.get("direction_only_cannot_open_position", True)),
+        "watch_for_trigger_cannot_open_position": bool(analyst_policy.get("watch_for_trigger_cannot_open_position", True)),
         "strategic_view_cannot_open_position": bool(analyst_policy.get("strategic_view_cannot_open_position", True)),
         "market_confirmation_policy": {
             "min_confirmation_score_for_new_entry": market_cfg.get("min_confirmation_score_for_new_entry"),
@@ -2246,10 +2239,10 @@ def _final_new_entry_trade_authority(
         "unknown_trade_effects": reason_effects.get("unknown_trade_effects") or [],
         "negative_profile": negative_profile,
         "open_action_value_missing": open_action_missing,
-        "direction_only_block": direction_only_block,
-        "direction_semantic_block": direction_semantic_block,
-        "tradeable_layer": tradeable_layer,
-        "tradeable_layer_required": True,
+        "watch_for_trigger_block": watch_for_trigger_block,
+        "watch_for_trigger_semantic_block": watch_for_trigger_semantic_block,
+        "tradeable_state": tradeable_state,
+        "opportunity_state_required": True,
         "weak_conflict_probe": weak_conflict_probe,
         "weak_only": weak_only,
         "release": release,
@@ -2266,9 +2259,9 @@ def _final_new_entry_trade_authority(
         "event_catalyst_confirmation": trade_authority.get("event_catalyst_confirmation"),
         "open_action_evidence": open_action_evidence,
         "executable_setup_confirmation": trade_authority.get("executable_setup_confirmation"),
-        "direction_only_without_setup": trade_authority.get("direction_only_without_setup"),
-        "direction_only_without_confirmation": trade_authority.get("direction_only_without_confirmation"),
-        "direction_only_semantic_audit": direction_only_semantic_audit,
+        "watch_for_trigger_without_setup": trade_authority.get("watch_for_trigger_without_setup"),
+        "watch_for_trigger_without_confirmation": trade_authority.get("watch_for_trigger_without_confirmation"),
+        "watch_for_trigger_semantic_audit": watch_for_trigger_semantic_audit,
         "analyst_prior_policy": {
             "static_weights_mode": analyst_policy.get("static_weights_mode") or analyst_policy.get("mode") or "prior_only",
             "static_weights_can_create_trade_authority": static_weights_can_open,
@@ -2372,7 +2365,7 @@ _GENERIC_PM_TRIGGER_TEXT = {
     "none",
     "n/a",
     "null",
-    "requires_current_confirmation",
+    "wait_for_trigger",
     "technical_price_trigger",
     "fundamental_anchor",
     "news_event_trigger",
@@ -2413,6 +2406,26 @@ def _pm_has_specific_trigger_text(value) -> bool:
     )
 
 
+def _canonical_action_evidence_contract(signal) -> dict:
+    metadata = _signal_metadata(signal)
+    contract = metadata.get("action_evidence_contract")
+    return contract if isinstance(contract, dict) else {}
+
+
+def _canonical_trigger_valid(signal) -> bool:
+    contract = _canonical_action_evidence_contract(signal)
+    return bool(contract.get("trigger_valid")) if "trigger_valid" in contract else False
+
+
+def _canonical_invalidation_present(signal) -> bool:
+    contract = _canonical_action_evidence_contract(signal)
+    if "invalidation_present" in contract:
+        return bool(contract.get("invalidation_present"))
+    if "has_invalidation" in contract:
+        return bool(contract.get("has_invalidation"))
+    return bool(getattr(signal, "invalidation_present", False))
+
+
 def _pm_has_invalidation_contract(signal, metadata: dict | None = None) -> bool:
     metadata = metadata if isinstance(metadata, dict) else _signal_metadata(signal)
     contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
@@ -2433,17 +2446,18 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     metadata = _signal_metadata(signal)
     context = _nested_context(metadata, agent_name)
     contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
-    action_contract = (
-        metadata.get("action_evidence_contract")
-        if isinstance(metadata.get("action_evidence_contract"), dict)
+    action_contract = _canonical_action_evidence_contract(signal)
+    learning_scope = (
+        action_contract.get("learning_scope")
+        if isinstance(action_contract.get("learning_scope"), dict)
         else {}
     )
-    technical_setup = context.get("current_trade_setup") if isinstance(context.get("current_trade_setup"), dict) else {}
     entry_trigger = (
-        getattr(signal, "trade_trigger", "")
+        getattr(signal, "entry_trigger", "")
         or getattr(signal, "entry_trigger", "")
         or contract.get("entry_trigger")
-        or technical_setup.get("required_confirmation")
+        or action_contract.get("entry_trigger")
+        or learning_scope.get("required_confirmation")
         or ""
     )
     invalidation_present = _pm_has_invalidation_contract(signal, metadata)
@@ -2451,8 +2465,8 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     direction_context = getattr(signal, "direction_context", "") or (
         "long" if signal_text.upper() == "BULLISH" else "short" if signal_text.upper() == "BEARISH" else "neutral"
     )
-    position_horizon = (
-        getattr(signal, "position_horizon", "")
+    horizon_class = (
+        getattr(signal, "horizon_class", "")
         or getattr(signal, "holding_period_hint", "")
         or contract.get("holding_period_hint")
         or getattr(signal, "horizon_class", "")
@@ -2466,18 +2480,15 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
             or getattr(signal, "trend_stage", "")
             or direction_context
         )
-        setup_family = technical_setup.get("setup_family") or getattr(signal, "opportunity_type", "") or "unknown"
-        trigger_valid = bool(
-            getattr(signal, "trigger_valid", False)
-            or (
-                str(setup_family).lower() in {"trend_breakout", "range_reversal", "volatility_breakout"}
-                and _pm_has_specific_trigger_text(entry_trigger)
-                and invalidation_present
-                and str(getattr(signal, "entry_quality", "") or "").lower() not in {"poor", "weak"}
-            )
+        setup_family = (
+            learning_scope.get("setup_family")
+            or action_contract.get("setup_type")
+            or getattr(signal, "opportunity_type", "")
+            or "unknown"
         )
+        trigger_valid = _canonical_trigger_valid(signal)
         entry_timing_signal = getattr(signal, "entry_timing_signal", "") or (
-            setup_family if trigger_valid else "trend_direction_only"
+            setup_family if trigger_valid else "trend_watch_for_trigger"
         )
         price_location = (
             getattr(signal, "price_location", "")
@@ -2487,26 +2498,20 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     elif agent_name == "fundamental":
         evidence_role = getattr(signal, "evidence_role", "") or "direction_context"
         trend_direction = getattr(signal, "trend_direction", "") or direction_context
-        trigger_valid = bool(
-            getattr(signal, "trigger_valid", False)
-            or ((action_contract.get("open") or {}).get("current_confirmation") is True)
-        )
+        trigger_valid = _canonical_trigger_valid(signal)
         entry_timing_signal = getattr(signal, "entry_timing_signal", "") or "requires_technical_or_market_timing"
         price_location = getattr(signal, "price_location", "") or ""
     else:
         evidence_role = getattr(signal, "evidence_role", "") or "event_catalyst"
         trend_direction = getattr(signal, "trend_direction", "") or direction_context
-        trigger_valid = bool(
-            getattr(signal, "trigger_valid", False)
-            or ((action_contract.get("open") or {}).get("current_confirmation") is True)
-        )
+        trigger_valid = _canonical_trigger_valid(signal)
         entry_timing_signal = getattr(signal, "entry_timing_signal", "") or "event_requires_market_confirmation"
         price_location = getattr(signal, "price_location", "") or ""
     return {
         "evidence_role": evidence_role,
         "direction_context": direction_context,
         "opportunity_state": _signal_opportunity_state(signal),
-        "trade_trigger": entry_trigger,
+        "entry_trigger": entry_trigger,
         "invalidation": (
             getattr(signal, "would_change_view_if", "")
             or metadata.get("invalidation_condition")
@@ -2514,7 +2519,7 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
             or getattr(signal, "exit_hint", "")
             or ""
         ),
-        "position_horizon": position_horizon,
+        "horizon_class": horizon_class,
         "trend_direction": trend_direction,
         "entry_timing_signal": entry_timing_signal,
         "price_location": price_location,
@@ -2534,18 +2539,6 @@ def _signal_risk_flags(signal, agent_name: str) -> list:
     context = _nested_context(metadata, agent_name)
     flags = metadata.get("risk_flags") or context.get("risk_flags") or []
     return [str(flag) for flag in flags] if isinstance(flags, list) else []
-
-
-def _signal_opportunity_layer(signal) -> str:
-    metadata = _signal_metadata(signal)
-    contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
-    layer = (
-        getattr(signal, "opportunity_layer", None)
-        or contract.get("opportunity_layer")
-        or "direction_only"
-    )
-    text = str(layer or "direction_only").strip().lower()
-    return text if text else "direction_only"
 
 
 def _signal_opportunity_state(signal) -> str:
@@ -2568,27 +2561,24 @@ def _signal_opportunity_state(signal) -> str:
         "risk_reduction_candidate",
     }:
         return text
-    layer = _signal_opportunity_layer(signal)
-    if layer == "no_trade":
-        return "no_opportunity"
-    if layer == "direction_only":
-        return "watch_for_trigger"
-    if layer == "tradeable_setup":
-        return "probe_candidate"
-    if layer == "deployable_alpha":
-        return "tradeable_candidate"
-    if layer == "risk_reduction":
-        return "risk_reduction_candidate"
     return "watch_for_trigger"
 
 
-def _opportunity_layer_multiplier(signal, full_config: dict) -> tuple[float, str]:
+def _opportunity_state_multiplier(signal, full_config: dict) -> tuple[float, str]:
     pm_config = _get_portfolio_manager_config(full_config)
     quality_config = pm_config.get("quality_aware_fusion", {}) or {}
-    configured = quality_config.get("opportunity_layer_multipliers") or {}
-    multipliers = {**DEFAULT_OPPORTUNITY_LAYER_MULTIPLIERS, **configured}
-    layer = _signal_opportunity_layer(signal)
-    return float(multipliers.get(layer, multipliers.get("unknown", 0.50))), layer
+    configured = quality_config.get("opportunity_state_multipliers") or {}
+    multipliers = {
+        "tradeable_candidate": 1.10,
+        "probe_candidate": 0.90,
+        "watch_for_trigger": 0.30,
+        "risk_reduction_candidate": 0.80,
+        "no_opportunity": 0.05,
+        "unknown": 0.50,
+        **configured,
+    }
+    state = _signal_opportunity_state(signal)
+    return float(multipliers.get(state, multipliers.get("unknown", 0.50))), state
 
 
 def _quality_multiplier(signal, agent_name: str, full_config: dict) -> tuple[float, str, list]:
@@ -2615,11 +2605,11 @@ def _quality_multiplier(signal, agent_name: str, full_config: dict) -> tuple[flo
     if severe_flags.intersection(risk_flags):
         multiplier *= float(quality_config.get("severe_risk_flag_multiplier", 0.80))
 
-    layer_multiplier, layer = _opportunity_layer_multiplier(signal, full_config)
-    multiplier *= layer_multiplier
-    if layer in {"direction_only", "no_trade"}:
+    state_multiplier, state = _opportunity_state_multiplier(signal, full_config)
+    multiplier *= state_multiplier
+    if state in {"watch_for_trigger", "no_opportunity"}:
         risk_flags = list(risk_flags)
-        note = f"opportunity_layer_{layer}"
+        note = f"opportunity_state_{state}"
         if note not in risk_flags:
             risk_flags.append(note)
 
@@ -2649,8 +2639,8 @@ def _effective_signal_confidence(signal, agent_name: str, quality_summary: dict,
     }
     tradeability = quality_summary.get(agent_name, {}).get("tradeability", "unknown")
     cap = float(caps.get(tradeability, caps.get("unknown", 0.55)))
-    layer_multiplier, _layer = _opportunity_layer_multiplier(signal, full_config)
-    return min(raw_confidence, cap) * max(0.0, min(1.25, layer_multiplier))
+    state_multiplier, _state = _opportunity_state_multiplier(signal, full_config)
+    return min(raw_confidence, cap) * max(0.0, min(1.25, state_multiplier))
 
 
 def _quality_aware_fusion_context(
@@ -2740,9 +2730,9 @@ def _quality_aware_fusion_context(
             "effective_confidence": effective_confidence,
             "tradeability": tradeability,
             "business_quality_score": _safe_float(getattr(signal, "business_quality_score", 0.0), 0.0),
-            "template_name": getattr(signal, "template_name", "unknown"),
+            "setup_type": getattr(signal, "setup_type", "unknown"),
             "horizon_class": getattr(signal, "horizon_class", "unknown"),
-            "opportunity_layer": _signal_opportunity_layer(signal),
+            "opportunity_state": _signal_opportunity_state(signal),
             "opportunity_type": getattr(signal, "opportunity_type", "unknown"),
             "risk_flags": risk_flags,
             "quality_multiplier": quality_multiplier,
@@ -2861,7 +2851,6 @@ def _build_phase1_recommendation(
     source_artifacts = []
     research_contracts = {}
     opportunity_types = []
-    opportunity_layers = []
     opportunity_states = []
     factor_focus = []
     evidence_conflicts = []
@@ -2870,18 +2859,25 @@ def _build_phase1_recommendation(
         signal_payload = signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
         agent_key = _normalize_agent_name(str(key))
         contract_fields = _derive_signal_contract_fields(signal, agent_key)
+        action_contract = (
+            (signal_payload.get("metadata") or {}).get("action_evidence_contract")
+            if isinstance(signal_payload.get("metadata"), dict)
+            and isinstance((signal_payload.get("metadata") or {}).get("action_evidence_contract"), dict)
+            else {}
+        )
+        canonical_trigger_valid = _canonical_trigger_valid(signal)
         signal_payload.update({
             "evidence_role": signal_payload.get("evidence_role") or contract_fields.get("evidence_role", ""),
             "direction_context": signal_payload.get("direction_context") or contract_fields.get("direction_context", ""),
             "opportunity_state": signal_payload.get("opportunity_state") or contract_fields.get("opportunity_state", ""),
-            "trade_trigger": signal_payload.get("trade_trigger") or contract_fields.get("trade_trigger", ""),
+            "entry_trigger": signal_payload.get("entry_trigger") or contract_fields.get("entry_trigger", ""),
             "invalidation": signal_payload.get("invalidation") or contract_fields.get("invalidation", ""),
-            "position_horizon": signal_payload.get("position_horizon") or contract_fields.get("position_horizon", ""),
+            "horizon_class": signal_payload.get("horizon_class") or contract_fields.get("horizon_class", ""),
             "trend_direction": signal_payload.get("trend_direction") or contract_fields.get("trend_direction", ""),
             "entry_timing_signal": signal_payload.get("entry_timing_signal") or contract_fields.get("entry_timing_signal", ""),
             "price_location": signal_payload.get("price_location") or contract_fields.get("price_location", ""),
-            "trigger_valid": bool(signal_payload.get("trigger_valid") or contract_fields.get("trigger_valid")),
-            "invalidation_present": bool(signal_payload.get("invalidation_present") or contract_fields.get("invalidation_present")),
+            "trigger_valid": canonical_trigger_valid,
+            "invalidation_present": _canonical_invalidation_present(signal),
         })
         signal_snapshot[key] = signal_payload
         source_artifacts.append(f"AnalystSignalArtifact:{key}")
@@ -2894,7 +2890,6 @@ def _build_phase1_recommendation(
             contract = {
                 "contract_version": signal_payload.get("research_contract_version", "agentquant.research.v1"),
                 "opportunity_type": signal_payload.get("opportunity_type", "unknown"),
-                "opportunity_layer": signal_payload.get("opportunity_layer", "direction_only"),
                 "opportunity_state": signal_payload.get("opportunity_state", "watch_for_trigger"),
                 "entry_trigger": signal_payload.get("entry_trigger", ""),
                 "exit_hint": signal_payload.get("exit_hint", ""),
@@ -2909,29 +2904,15 @@ def _build_phase1_recommendation(
         research_contracts[key] = contract
         if contract.get("opportunity_type"):
             opportunity_types.append(str(contract.get("opportunity_type")))
-        if contract.get("opportunity_layer"):
-            opportunity_layers.append(str(contract.get("opportunity_layer")))
+        if contract.get("opportunity_state"):
+            opportunity_states.append(str(contract.get("opportunity_state")))
         if contract.get("opportunity_state") or signal_payload.get("opportunity_state"):
             opportunity_states.append(str(contract.get("opportunity_state") or signal_payload.get("opportunity_state")))
         factor_focus.extend([str(item) for item in (contract.get("factor_focus") or [])])
         evidence_conflicts.extend([str(item) for item in (contract.get("current_evidence_conflict") or [])])
     if plan_snapshot:
-        signal_snapshot["pm_draft_pre_open_plan_not_trade_source"] = True
         if isinstance(plan_snapshot.get("strategy_controls"), dict):
             diagnostics = plan_snapshot["strategy_controls"].get("diagnostics") or {}
-            if isinstance(diagnostics.get("final_new_entry_trade_authority"), dict):
-                target_side = (
-                    "long"
-                    if decision_action_value == RecommendationAction.OPEN_LONG.value
-                    else "short"
-                    if decision_action_value == RecommendationAction.OPEN_SHORT.value
-                    else ""
-                )
-                signal_snapshot["final_new_entry_trade_authority"] = _enrich_final_authority_with_analyst_evidence(
-                    diagnostics["final_new_entry_trade_authority"],
-                    analyst_signals,
-                    target_side=target_side,
-                )
             if isinstance(diagnostics.get("position_budget_policy"), dict):
                 signal_snapshot["position_budget_policy"] = diagnostics["position_budget_policy"]
         if isinstance(plan_snapshot.get("release_block_diagnostics"), dict):
@@ -2968,9 +2949,7 @@ def _build_phase1_recommendation(
         str(decision_action_value).lower() in {"open_long", "open_short"}
         and int(getattr(decision, "lots", 0) or 0) > 0
     ):
-        semantic_block_reason = _structured_new_entry_block_reason(
-            signal_snapshot.get("final_new_entry_trade_authority")
-        )
+        semantic_block_reason = _structured_new_entry_block_reason(signal_snapshot.get("final_action_contract"))
         text_audit_reason = _pm_new_entry_semantic_block_reason(getattr(decision, "justification", ""))
         if text_audit_reason:
             signal_snapshot["pm_raw_rationale_semantic_audit"] = {
@@ -2978,16 +2957,12 @@ def _build_phase1_recommendation(
                 "blocks_trade": False,
                 "why": (
                     "Raw PM rationale is audit material only; blocking decisions "
-                    "come from final_new_entry_trade_authority."
+                    "come from final_action_contract."
                 ),
             }
     if semantic_block_reason:
         original_action = decision_action_value
         original_lots = int(getattr(decision, "lots", 0) or 0)
-        signal_snapshot["final_new_entry_trade_authority"] = _semantic_watchlist_authority(
-            signal_snapshot.get("final_new_entry_trade_authority"),
-            semantic_block_reason,
-        )
         semantic_gate = {
             "passed": False,
             "block_reason": semantic_block_reason,
@@ -2997,40 +2972,36 @@ def _build_phase1_recommendation(
         }
         signal_snapshot["pm_semantic_consistency_gate"] = semantic_gate
         if isinstance(plan_snapshot, dict):
-            pre_open_plan = plan_snapshot
+            decision_context = plan_snapshot
             current_lots_for_plan = int(
-                pre_open_plan.get("current_lots_before_open")
-                or ((pre_open_plan.get("rebalance_summary") or {}).get("current_lots") if isinstance(pre_open_plan.get("rebalance_summary"), dict) else 0)
+                decision_context.get("current_lots_before_open")
+                or ((decision_context.get("rebalance_summary") or {}).get("current_lots") if isinstance(decision_context.get("rebalance_summary"), dict) else 0)
                 or 0
             )
-            pre_open_plan["target_lots_estimate"] = current_lots_for_plan
-            pre_open_plan["target_position_ratio"] = (
-                pre_open_plan.get("current_ticker_exposure")
-                if pre_open_plan.get("current_ticker_exposure") is not None
+            decision_context["target_position_ratio"] = (
+                decision_context.get("current_ticker_exposure")
+                if decision_context.get("current_ticker_exposure") is not None
                 else 0.0
             )
-            pre_open_plan["tradable_lots_if_executed_now"] = 0
-            pre_open_plan["tradable_lots_reason"] = semantic_block_reason
-            pre_open_plan["semantic_consistency_gate"] = semantic_gate
-            pre_open_plan["recommendation_position_consistency"] = build_lot_intent_consistency(
+            decision_context["semantic_consistency_gate"] = semantic_gate
+            decision_context["recommendation_position_consistency"] = build_lot_intent_consistency(
                 current_lots=current_lots_for_plan,
                 target_lots=current_lots_for_plan,
                 action=FuturesAction.HOLD,
                 lots=0,
                 mode="recommendation",
             )
-            if isinstance(pre_open_plan.get("rebalance_summary"), dict):
-                pre_open_plan["rebalance_summary"]["target_lots"] = current_lots_for_plan
-                pre_open_plan["rebalance_summary"]["lots_delta"] = 0
-                pre_open_plan["rebalance_summary"]["action_type"] = "keep"
-                pre_open_plan["rebalance_summary"]["reason"] = semantic_block_reason
-            if isinstance(pre_open_plan.get("strategy_controls"), dict):
-                controls = pre_open_plan["strategy_controls"]
+            if isinstance(decision_context.get("rebalance_summary"), dict):
+                decision_context["rebalance_summary"]["target_lots"] = current_lots_for_plan
+                decision_context["rebalance_summary"]["lots_delta"] = 0
+                decision_context["rebalance_summary"]["action_type"] = "keep"
+                decision_context["rebalance_summary"]["reason"] = semantic_block_reason
+            if isinstance(decision_context.get("strategy_controls"), dict):
+                controls = decision_context["strategy_controls"]
                 controls.setdefault("reasons", [])
                 if semantic_block_reason not in controls["reasons"]:
                     controls["reasons"].append(semantic_block_reason)
                 controls.setdefault("diagnostics", {})
-                controls["diagnostics"]["final_new_entry_trade_authority"] = signal_snapshot["final_new_entry_trade_authority"]
                 controls["diagnostics"]["pm_semantic_consistency_gate"] = semantic_gate
         if not isinstance(signal_snapshot.get("final_action_contract"), dict):
             current_lots_for_contract = int(
@@ -3061,11 +3032,9 @@ def _build_phase1_recommendation(
                 "final_action": "hold" if current_lots_for_contract else "wait",
                 "target_lots": current_lots_for_contract,
                 "lots_delta": 0,
-                "tradable_lots_if_executed_now": 0,
-                "tradable_lots_reason": semantic_block_reason,
+                "lots_delta_abs": 0,
                 "authority_type": "watchlist_only",
-                "can_open_real_position": False,
-                "can_apply_min_real_floor": False,
+                "authority_decision": "watchlist_only",
                 "max_allowed_margin_ratio": 0.0,
                 "semantic_consistency_gate": semantic_gate,
                 "single_source_of_trade_truth": True,
@@ -3100,7 +3069,7 @@ def _build_phase1_recommendation(
             else str(decision.action)
         ),
         decision_lots=int(getattr(decision, "lots", 0) or 0),
-        final_entry_authority=signal_snapshot.get("final_new_entry_trade_authority"),
+        final_entry_authority=signal_snapshot.get("final_action_contract"),
         opportunity_scorecard=signal_snapshot.get("opportunity_scorecard"),
     )
     signal_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
@@ -3108,16 +3077,15 @@ def _build_phase1_recommendation(
     signal_snapshot["pm_research_contract_summary"] = {
         "contract_version": "agentquant.research.v1",
         "dominant_opportunity_types": sorted(set(opportunity_types)),
-        "opportunity_layers": sorted(set(opportunity_layers)),
         "opportunity_states": sorted(set(opportunity_states)),
         "factor_focus": sorted(set(factor_focus))[:12],
         "current_evidence_conflict": sorted(set(evidence_conflicts))[:12],
-        "pm_decision_layer": (
-            (plan_snapshot or {}).get("pm_decision_layer")
+        "pm_decision_state": (
+            (plan_snapshot or {}).get("pm_decision_state")
             or (plan_snapshot or {}).get("capital_allocation_tier")
             or "probe_or_observe"
         ),
-        "opportunity_scorecard_layer": (
+        "opportunity_scorecard_state": (
             ((plan_snapshot or {}).get("opportunity_scorecard") or {})
             .get("preferred_side", "flat")
             if isinstance((plan_snapshot or {}).get("opportunity_scorecard"), dict)
@@ -3151,7 +3119,7 @@ def _build_phase1_recommendation(
         "recommendation_justification_is_derived": True,
         "business_boundary": (
             "PM natural-language rationale is audit material only; "
-            "recommendation text is derived from final_action_contract and final_new_entry_trade_authority"
+            "recommendation text is derived from final_action_contract"
         ),
     }
     signal_snapshot = attach_snapshot_contract(
@@ -3242,7 +3210,7 @@ def _resolve_pre_open_signal_confidence(direction: str, long_scores: dict, short
 def _resolve_decision_horizon(analyst_signals: list, target_lots: int) -> str:
     return _fusion_resolve_decision_horizon(analyst_signals, target_lots)
 
-def _build_pre_open_plan_snapshot(
+def _build_pm_decision_context(
     target_lots: int,
     current_price: float,
     position_ratio: float,
@@ -3265,11 +3233,11 @@ def _build_pre_open_plan_snapshot(
         "signal_confidence": _resolve_pre_open_signal_confidence(direction, long_scores, short_scores),
         "target_position_ratio": float(position_ratio),
         "target_margin_ratio_estimate": abs(float(position_ratio)) * max(0.0, float(margin_rate or 0.0)),
-        "target_lots_estimate": int(target_lots),
+        "target_lots": int(target_lots),
         "reference_price": float(current_price),
         "risk_level": risk_level.value,
     }
-    plan["execution_plan"] = _build_execution_plan_snapshot(
+    execution_fields = _build_execution_contract_fields(
         ticker=ticker,
         current_lots=int(current_lots or 0),
         target_lots=int(target_lots or 0),
@@ -3280,6 +3248,7 @@ def _build_pre_open_plan_snapshot(
         control_reasons=control_reasons or [],
         alpha_setup_action_values=alpha_setup_action_values,
     )
+    plan.update(execution_fields)
     return plan
 
 
@@ -3293,9 +3262,9 @@ _EXECUTION_PULLBACK_TOKENS = {
     "hold below",
     "stabilize",
     "stabilization",
-    "回踩",
-    "支撑",
-    "压力",
+    "pullback_confirmed",
+    "retest_confirmed",
+    "vwap_confirmed",
 }
 _EXECUTION_EVENT_TOKENS = {
     "event",
@@ -3304,8 +3273,8 @@ _EXECUTION_EVENT_TOKENS = {
     "shock",
     "supply disruption",
     "news",
-    "事件",
-    "催化",
+    "event_catalyst",
+    "news_catalyst",
 }
 
 
@@ -3330,21 +3299,23 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
         if agent_name not in {"technical", "fundamental", "commodity_news"}:
             continue
         contract_fields = _derive_signal_contract_fields(signal, agent_name)
+        trigger_valid = _canonical_trigger_valid(signal)
+        invalidation_present = _canonical_invalidation_present(signal)
         payload = {
             "agent_name": agent_name,
             "side": _signal_side(signal),
             "signal": _signal_to_text(getattr(signal, "signal", "Neutral")),
             "evidence_role": contract_fields.get("evidence_role"),
-            "trade_trigger": contract_fields.get("trade_trigger") or getattr(signal, "entry_trigger", ""),
+            "entry_trigger": contract_fields.get("entry_trigger") or getattr(signal, "entry_trigger", ""),
             "invalidation": contract_fields.get("invalidation") or getattr(signal, "exit_hint", ""),
-            "position_horizon": contract_fields.get("position_horizon"),
+            "horizon_class": contract_fields.get("horizon_class"),
             "trend_direction": contract_fields.get("trend_direction"),
             "entry_timing_signal": contract_fields.get("entry_timing_signal"),
             "price_location": contract_fields.get("price_location"),
-            "trigger_valid": bool(contract_fields.get("trigger_valid")),
-            "invalidation_present": bool(contract_fields.get("invalidation_present")),
+            "trigger_valid": trigger_valid,
+            "invalidation_present": invalidation_present,
             "opportunity_type": str(getattr(signal, "opportunity_type", "") or ""),
-            "trigger_type": str(getattr(signal, "trigger_type", "") or ""),
+            "entry_trigger": str(getattr(signal, "entry_trigger", "") or ""),
             "event_type": str(getattr(signal, "event_type", "") or ""),
             "confidence": _safe_float(getattr(signal, "confidence", 0.0), 0.0),
         }
@@ -3384,7 +3355,7 @@ def _first_execution_text(payloads: dict, *keys: str) -> str:
     return " ".join(parts)
 
 
-def _build_execution_plan_snapshot(
+def _build_execution_contract_fields(
     *,
     ticker: str = "",
     current_lots: int,
@@ -3409,15 +3380,15 @@ def _build_execution_plan_snapshot(
     news = signal_payloads.get("commodity_news") or {}
     trigger_text = _first_execution_text(
         {"technical": technical},
-        "trade_trigger",
+        "entry_trigger",
         "entry_timing_signal",
         "price_location",
         "opportunity_type",
     )
     event_text = _first_execution_text(
         {"commodity_news": news},
-        "trade_trigger",
-        "trigger_type",
+        "entry_trigger",
+        "entry_trigger",
         "event_type",
         "opportunity_type",
     )
@@ -3444,13 +3415,13 @@ def _build_execution_plan_snapshot(
         trigger_source = "technical_breakout"
 
     if target_lots and technical.get("side") == target_side and technical.get("trigger_valid"):
-        entry_trigger = technical.get("trade_trigger") or technical.get("entry_timing_signal") or ""
+        entry_trigger = technical.get("entry_trigger") or technical.get("entry_timing_signal") or ""
         invalidation = technical.get("invalidation") or ""
     elif profile == "event_immediate":
-        entry_trigger = news.get("trade_trigger") or news.get("trigger_type") or "event_catalyst"
+        entry_trigger = news.get("entry_trigger") or news.get("entry_trigger") or "event_catalyst"
         invalidation = news.get("invalidation") or ""
     else:
-        entry_trigger = technical.get("trade_trigger") or news.get("trade_trigger") or ""
+        entry_trigger = technical.get("entry_trigger") or news.get("entry_trigger") or ""
         invalidation = technical.get("invalidation") or news.get("invalidation") or ""
 
     date_text = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date or "")
@@ -3459,16 +3430,16 @@ def _build_execution_plan_snapshot(
         or (
             profile == "event_immediate"
             and authority_type == "real_budget_entry"
-            and final_entry_authority.get("can_open_real_position")
+            and final_entry_authority.get("open_action_evidence")
+            and final_entry_authority.get("strong_current_evidence")
         )
     )
     allow_confirmed_memory_vwap_fallback = bool(
         profile in {"breakout", "pullback"}
         and authority_type == "real_budget_entry"
-        and final_entry_authority.get("can_open_real_position")
         and final_entry_authority.get("open_action_evidence")
         and final_entry_authority.get("strong_current_evidence")
-        and not final_entry_authority.get("direction_only_block")
+        and not final_entry_authority.get("watch_for_trigger_block")
         and not final_entry_authority.get("negative_profile")
     )
     execution_preference = _execution_action_value_preference(
@@ -3486,7 +3457,7 @@ def _build_execution_plan_snapshot(
         control_reasons = sorted(set(list(control_reasons or []) + execution_preference["reason_codes"]))
 
     return {
-        "contract_version": "agentquant.execution_plan.v1",
+        "contract_version": "agentquant.execution_contract_fields.v1",
         "execution_profile": profile,
         "trigger_source": trigger_source,
         "target_side": target_side,
@@ -3504,8 +3475,6 @@ def _build_execution_plan_snapshot(
             "may_use_confirmed_memory_vwap_fallback"
         ),
         "authority_type": authority_type,
-        "can_open_real_position": bool(final_entry_authority.get("can_open_real_position")),
-        "can_apply_min_real_floor": bool(final_entry_authority.get("can_apply_min_real_floor")),
         "max_allowed_margin_ratio": _safe_float(final_entry_authority.get("max_allowed_margin_ratio"), 0.0),
         "reason_codes": sorted(set([str(item) for item in (control_reasons or [])] + [
             str(item) for item in (final_entry_authority.get("reason_codes") or [])
@@ -3525,7 +3494,7 @@ def _compact_policy_row(row: dict) -> dict:
         "policy_action": row.get("policy_action"),
         "ticker": row.get("ticker"),
         "side": row.get("side"),
-        "signal_template": row.get("signal_template"),
+        "setup_type": row.get("setup_type"),
         "horizon_class": row.get("horizon_class"),
         "market_regime": row.get("market_regime"),
         "confidence_score": row.get("confidence_score"),
@@ -3595,9 +3564,6 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "canonical_action_preference_source": (
             payload.get("canonical_action_preference_source") or "payload.action_preference"
         ),
-        "deprecated_policy_hint_mirror": (
-            payload.get("deprecated_policy_hint_mirror") or row.get("policy_hint")
-        ),
         "max_position_impact": row.get("max_position_impact"),
         "valid_until": row.get("valid_until"),
         "source": payload.get("source") or row.get("source"),
@@ -3610,8 +3576,8 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "exact_ticker_sample_count": payload.get("exact_ticker_sample_count"),
         "exact_ticker_real_trade_sample_count": payload.get("exact_ticker_real_trade_sample_count"),
         "real_trade_reward_count": payload.get("real_trade_reward_count"),
-        "shadow_prior_only": payload.get("shadow_prior_only"),
-        "shadow_reward_count": payload.get("shadow_reward_count"),
+        "counterfactual_prior_only": payload.get("counterfactual_prior_only"),
+        "counterfactual_reward_count": payload.get("counterfactual_reward_count"),
         "loss_reward_count": payload.get("loss_reward_count"),
         "tail_loss_count": payload.get("tail_loss_count"),
         "worst_reward": payload.get("worst_reward"),
@@ -3767,7 +3733,7 @@ _ACTION_VALUE_SCOPE_QUALITIES = {
     "exact_real_state",
     "partial_real_state",
     "similar_sql_prior",
-    "shadow_prior",
+    "counterfactual_prior",
     "unqualified",
 }
 _INCOMPLETE_ACTION_VALUE_SETUP_TYPES = {
@@ -3775,10 +3741,11 @@ _INCOMPLETE_ACTION_VALUE_SETUP_TYPES = {
     "*",
     "unknown",
     "generic_trade_setup",
-    "direction_only",
-    "tradeable_setup",
-    "deployable_alpha",
-    "deployable_alpha_setup",
+    "watch_for_trigger",
+    "probe_candidate",
+    "tradeable_candidate",
+    "no_opportunity",
+    "risk_reduction_candidate",
 }
 
 
@@ -3847,8 +3814,8 @@ def _action_value_scope_quality(row: dict, ticker: str | None = None, side: str 
             if target_side and row_side not in {target_side, ""}:
                 return "partial_real_state"
         return explicit_quality
-    if bool(payload.get("shadow_prior_only")):
-        return "shadow_prior"
+    if bool(payload.get("counterfactual_prior_only")):
+        return "counterfactual_prior"
     source = str(payload.get("source") or row.get("source") or "").strip().lower()
     if source == "similar_alpha_setup_sql":
         if _action_value_int(row, "exact_state_real_trade_sample_count") > 0:
@@ -3861,8 +3828,8 @@ def _action_value_scope_quality(row: dict, ticker: str | None = None, side: str 
             return "partial_real_state"
         if _action_value_int(row, "real_trade_reward_count") > 0:
             return "similar_sql_prior"
-        if _action_value_int(row, "shadow_reward_count") > 0:
-            return "shadow_prior"
+        if _action_value_int(row, "counterfactual_reward_count") > 0:
+            return "counterfactual_prior"
         return "similar_sql_prior"
     if _action_value_int(row, "real_trade_reward_count") > 0:
         if target_ticker and row_ticker and row_ticker != target_ticker:
@@ -3870,8 +3837,8 @@ def _action_value_scope_quality(row: dict, ticker: str | None = None, side: str 
         if target_side and row_side and row_side not in {target_side, "*"}:
             return "similar_sql_prior"
         return "partial_real_state"
-    if _action_value_int(row, "shadow_reward_count") > 0:
-        return "shadow_prior"
+    if _action_value_int(row, "counterfactual_reward_count") > 0:
+        return "counterfactual_prior"
     if source:
         return "unqualified"
     if row_ticker and target_ticker and row_ticker not in {target_ticker, "*"}:
@@ -4033,9 +4000,9 @@ def _current_open_evidence_snapshot(
     """Build the same current-day evidence fields the final PM outlet consumes."""
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     side_scorecard = scorecard.get(side) if isinstance(scorecard.get(side), dict) else {}
-    layer = str(side_scorecard.get("final_layer") or "unknown").lower()
+    layer = str(side_scorecard.get("final_state") or "unknown").lower()
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
-    has_tradeable_support = layer in {"deployable_alpha", "tradeable_setup"}
+    has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
     has_invalidation = (
         _has_structured_invalidation_condition(analyst_signals or [])
         or _has_explicit_stop_protection(analyst_signals or [])
@@ -4077,7 +4044,7 @@ def _current_open_evidence_snapshot(
         or (strong_market_confirmation and has_tradeable_support and has_invalidation)
     )
     alpha_ev = {
-        "scorecard_layer": layer,
+        "scorecard_state": layer,
         "strong_realtime_evidence": strong_realtime_evidence,
         "strong_market_confirmation": strong_market_confirmation,
         "technical_supports_side": technical_entry_timing_supports_side,
@@ -4256,12 +4223,9 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
     ]
     rows = [row for row in rows if row]
     preference_counts: dict[str, int] = {}
-    deprecated_policy_hint_mirror_counts: dict[str, int] = {}
     for row in rows:
         key = str(row.get("action_preference") or "none")
         preference_counts[key] = preference_counts.get(key, 0) + 1
-        mirror = str(row.get("deprecated_policy_hint_mirror") or "none")
-        deprecated_policy_hint_mirror_counts[mirror] = deprecated_policy_hint_mirror_counts.get(mirror, 0) + 1
     action_groups = {
         "open_action_value": [],
         "hold_action_value": [],
@@ -4282,7 +4246,6 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
         "action_value_count": len(rows),
         "action_preference_counts": preference_counts,
         "canonical_action_preference_source": "payload.action_preference",
-        "deprecated_policy_hint_mirror_counts": deprecated_policy_hint_mirror_counts,
         "action_values": rows[:8],
         "open_action_value": action_groups["open_action_value"][:4],
         "hold_action_value": action_groups["hold_action_value"][:4],
@@ -4317,7 +4280,7 @@ def _learning_to_position_trace(
     alpha_setup_action_values: list | None = None,
 ) -> dict:
     final_side = _target_side_from_ratio(final_position_ratio)
-    layer_summary = _side_opportunity_layer_summary(analyst_signals or [], final_side) if final_side in {"long", "short"} else {}
+    state_summary = _side_opportunity_state_summary(analyst_signals or [], final_side) if final_side in {"long", "short"} else {}
     mature_alpha_records = _mature_alpha_policy_records(adaptive_policy_state, final_side) if final_side in {"long", "short"} else []
     fast_alpha_records = _fast_candidate_alpha_records(adaptive_policy_state, final_side) if final_side in {"long", "short"} else []
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
@@ -4348,26 +4311,26 @@ def _learning_to_position_trace(
         },
         "opportunity_to_position": {
             "target_side": final_side,
-            "opportunity_layer_summary": layer_summary,
+            "opportunity_state_summary": state_summary,
             "opportunity_scorecard_side": scorecard_side,
             "scorecard_preferred_side": scorecard.get("preferred_side"),
             "mature_alpha_policy_count": len(mature_alpha_records),
             "fast_candidate_alpha_count": len(fast_alpha_records),
             "high_quality_opportunity_present": bool(
-                layer_summary.get("has_tradeable_support")
+                state_summary.get("has_tradeable_support")
                 or mature_alpha_records
                 or fast_alpha_records
-                or str(scorecard_side.get("final_layer") or "") in {"deployable_alpha", "tradeable_setup"}
+                or str(scorecard_side.get("final_state") or "") in {"tradeable_candidate", "probe_candidate"}
             ),
             "high_quality_opportunity_executed_or_targeted": bool(
                 abs(final_position_ratio) > 1e-12 or target_lots != current_lots
             ),
             "if_not_targeted_requires_accountability": bool(
                 (
-                    layer_summary.get("has_tradeable_support")
+                    state_summary.get("has_tradeable_support")
                     or mature_alpha_records
                     or fast_alpha_records
-                    or str(scorecard_side.get("final_layer") or "") in {"deployable_alpha", "tradeable_setup"}
+                    or str(scorecard_side.get("final_state") or "") in {"tradeable_candidate", "probe_candidate"}
                 )
                 and abs(final_position_ratio) <= 1e-12
                 and target_lots == current_lots
@@ -4424,26 +4387,27 @@ def _build_active_opportunity_audit(
     conflict_items = []
     for signal in analyst_signals or []:
         agent = _normalize_agent_name(str(getattr(signal, "agent_name", "") or "unknown"))
-        layer = _signal_opportunity_layer(signal)
+        state = _signal_opportunity_state(signal)
         trigger = str(
             getattr(signal, "entry_trigger", "")
-            or getattr(signal, "trade_trigger", "")
             or ""
         )
         neutral_trigger = str(getattr(signal, "neutral_trigger_condition", "") or "")
-        shadow_side = str(getattr(signal, "neutral_shadow_side", "flat") or "flat").lower()
+        counterfactual_side = str(getattr(signal, "counterfactual_side", "flat") or "flat").lower()
         priority = str(getattr(signal, "neutral_watchlist_priority", "none") or "none").lower()
+        trigger_valid = _canonical_trigger_valid(signal)
+        invalidation_present = _canonical_invalidation_present(signal)
         candidate = {
             "analyst": agent,
             "signal": _signal_to_text(getattr(signal, "signal", None)),
             "evidence_role": str(getattr(signal, "evidence_role", "") or ""),
-            "opportunity_layer": layer,
+            "opportunity_state": state,
             "opportunity_type": str(getattr(signal, "opportunity_type", "unknown") or "unknown"),
-            "trigger_valid": bool(getattr(signal, "trigger_valid", False)),
-            "invalidation_present": bool(getattr(signal, "invalidation_present", False)),
+            "trigger_valid": trigger_valid,
+            "invalidation_present": invalidation_present,
             "entry_trigger": trigger,
             "neutral_trigger_condition": neutral_trigger,
-            "shadow_side": shadow_side if shadow_side in {"long", "short", "flat"} else "flat",
+            "counterfactual_side": counterfactual_side if counterfactual_side in {"long", "short", "flat"} else "flat",
             "watchlist_priority": priority if priority in {"none", "low", "medium", "high"} else "none",
             "learning_scope": (
                 (getattr(signal, "metadata", {}) or {}).get("learning_scope")
@@ -4461,13 +4425,13 @@ def _build_active_opportunity_audit(
             if research_contract:
                 candidate["trade_research_contract"] = {
                     "opportunity_type": research_contract.get("opportunity_type"),
-                    "opportunity_layer": research_contract.get("opportunity_layer"),
+                    "opportunity_state": research_contract.get("opportunity_state"),
                     "product_context": research_contract.get("product_context") or {},
                     "action_evidence_contract": research_contract.get("action_evidence_contract") or {},
                 }
-        if layer in {"tradeable_setup", "deployable_alpha", "risk_reduction"} or candidate["trigger_valid"]:
+        if state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"} or candidate["trigger_valid"]:
             analyst_candidates.append(candidate)
-        if neutral_trigger or candidate["watchlist_priority"] in {"medium", "high"} or candidate["shadow_side"] in {"long", "short"}:
+        if neutral_trigger or candidate["watchlist_priority"] in {"medium", "high"} or candidate["counterfactual_side"] in {"long", "short"}:
             watchlist_items.append(candidate)
         conflicts = getattr(signal, "current_evidence_conflict", None) or []
         if conflicts:
@@ -4483,25 +4447,25 @@ def _build_active_opportunity_audit(
     )
     high_quality_present = bool(
         analyst_candidates
-        or str(preferred_card.get("final_layer") or "") in {"tradeable_setup", "deployable_alpha"}
+        or str(preferred_card.get("final_state") or "") in {"probe_candidate", "tradeable_candidate"}
         or diagnostics.get("mature_alpha_release")
         or diagnostics.get("fast_candidate_alpha_probe")
     )
     no_trade_reason = (
-        plan_snapshot.get("tradable_lots_reason")
-        or final_entry_authority.get("decision")
-        or (controls.get("reasons") or [""])[0]
+        (controls.get("reasons") or [""])[0]
         if controls
-        else plan_snapshot.get("tradable_lots_reason")
+        else final_entry_authority.get("authority_decision")
+        or final_entry_authority.get("decision")
+        or ""
     )
     learning_follow_up = []
     if high_quality_present and not decision_lands_position:
         learning_follow_up.append("high_quality_or_triggered_candidate_not_landed")
     if watchlist_items:
-        learning_follow_up.append("track_watchlist_or_shadow_forward_outcome")
+        learning_follow_up.append("track_watchlist_or_counterfactual_forward_outcome")
     if conflict_items:
         learning_follow_up.append("review_conflict_effect_on_entry_or_exit")
-    if authority_type in {"watchlist_only", "exploration_probe"}:
+    if authority_type in {"watch_for_trigger", "exploration_probe"}:
         learning_follow_up.append("verify_authority_type_outcome_after_settlement")
 
     return {
@@ -4516,15 +4480,15 @@ def _build_active_opportunity_audit(
         },
         "opportunity": {
             "preferred_side": preferred_side,
-            "preferred_layer": str(preferred_card.get("final_layer") or "unknown"),
+            "preferred_state": str(preferred_card.get("final_state") or "unknown"),
             "preferred_score": preferred_card.get("score"),
             "analyst_candidate_count": len(analyst_candidates),
-            "watchlist_or_shadow_count": len(watchlist_items),
+            "watchlist_or_counterfactual_count": len(watchlist_items),
             "conflict_count": len(conflict_items),
             "high_quality_present": high_quality_present,
         },
         "analyst_candidates": analyst_candidates[:8],
-        "watchlist_or_shadow": watchlist_items[:8],
+        "watchlist_or_counterfactual": watchlist_items[:8],
         "conflicts": conflict_items[:8],
         "research_follow_up": learning_follow_up,
         "research_contract": {
@@ -4570,10 +4534,10 @@ def _build_pm_landing_consistency_audit(
     if not side_scorecard:
         preferred = str(scorecard.get("preferred_side") or "flat")
         side_scorecard = scorecard.get(preferred) if preferred in {"long", "short"} and isinstance(scorecard.get(preferred), dict) else {}
-    layer = str(side_scorecard.get("final_layer") or "unknown")
+    layer = str(side_scorecard.get("final_state") or "unknown")
     setup_count = int(side_scorecard.get("entry_setup_count") or 0)
     invalidation_count = int(side_scorecard.get("invalidation_count") or 0)
-    high_quality_layer = layer in {"deployable_alpha", "tradeable_setup"}
+    high_quality_state = layer in {"tradeable_candidate", "probe_candidate"}
     action_type = str((recommendation_intent or {}).get("action_type") or "unknown")
     lots_delta = int(target_lots - current_lots)
     targeted_or_executed = abs(float(final_position_ratio or 0.0)) > 1e-12 or lots_delta != 0
@@ -4598,15 +4562,15 @@ def _build_pm_landing_consistency_audit(
     consistency_flags: list[str] = []
     if not scorecard:
         consistency_flags.append("missing_opportunity_scorecard")
-    if layer == "no_trade" and abs(lots_delta) > 0 and action_type not in {"close_long", "close_short"}:
+    if layer == "no_opportunity" and abs(lots_delta) > 0 and action_type not in {"close_long", "close_short"}:
         consistency_flags.append("new_or_incremental_trade_against_no_trade_scorecard")
-    if layer == "direction_only" and abs(lots_delta) > 0 and abs(float(final_position_ratio or 0.0)) > 0.035:
-        consistency_flags.append("direction_only_position_above_probe_scope")
-    if high_quality_layer and not targeted_or_executed and not (control_reasons or lots_to_trade_reason):
+    if layer == "watch_for_trigger" and abs(lots_delta) > 0 and abs(float(final_position_ratio or 0.0)) > 0.035:
+        consistency_flags.append("watch_for_trigger_position_above_probe_scope")
+    if high_quality_state and not targeted_or_executed and not (control_reasons or lots_to_trade_reason):
         consistency_flags.append("high_quality_opportunity_not_targeted_without_reason")
-    if high_quality_layer and setup_count <= 0:
+    if high_quality_state and setup_count <= 0:
         consistency_flags.append("high_quality_scorecard_missing_setup")
-    if high_quality_layer and invalidation_count <= 0:
+    if high_quality_state and invalidation_count <= 0:
         consistency_flags.append("high_quality_scorecard_missing_invalidation")
     if lots_to_trade > 0 and margin_required > margin_available:
         consistency_flags.append("pre_execution_margin_insufficient")
@@ -4621,7 +4585,7 @@ def _build_pm_landing_consistency_audit(
         metadata = getattr(signal, "metadata", {}) or {}
         analyst_setup_summary[agent] = {
             "signal": _signal_to_text(getattr(signal, "signal", None)),
-            "opportunity_layer": getattr(signal, "opportunity_layer", None),
+            "opportunity_state": getattr(signal, "opportunity_state", None),
             "trade_setup_contract_status": metadata.get("trade_setup_contract_status"),
             "entry_trigger": getattr(signal, "entry_trigger", ""),
             "exit_hint": getattr(signal, "exit_hint", ""),
@@ -4645,7 +4609,7 @@ def _build_pm_landing_consistency_audit(
         "opportunity_scorecard_alignment": {
             "preferred_side": scorecard.get("preferred_side"),
             "target_side": side,
-            "side_final_layer": layer,
+            "side_final_state": layer,
             "side_score": side_scorecard.get("score"),
             "gating_failures": side_scorecard.get("gating_failures") or [],
             "entry_setup_count": setup_count,
@@ -4663,7 +4627,6 @@ def _build_pm_landing_consistency_audit(
             "alpha_setup_lifecycle_counts": setup_profile_trace.get("lifecycle_counts", {}),
             "alpha_setup_action_value_count": action_value_trace.get("action_value_count", 0),
             "alpha_setup_action_preference_counts": action_value_trace.get("action_preference_counts", {}),
-            "deprecated_policy_hint_mirror_counts": action_value_trace.get("deprecated_policy_hint_mirror_counts", {}),
             "money_decision_trace_required": True,
         },
         "auditor_alignment": auditor_payload or {},
@@ -4738,18 +4701,18 @@ def _market_regime_from_signals(analyst_signals: list, target_side: str) -> str:
     return "unknown"
 
 
-def _signal_template_from_signals(target_side: str, analyst_signals: list, signal_combo: tuple[str, str, str]) -> str:
+def _setup_type_from_signals(target_side: str, analyst_signals: list, signal_combo: tuple[str, str, str]) -> str:
     for signal in analyst_signals or []:
         if _signal_side_text(getattr(signal, "signal", None)) != target_side:
             continue
-        template_name = str(getattr(signal, "template_name", "") or "").strip()
-        if template_name and template_name != "unknown":
+        setup_type = str(getattr(signal, "setup_type", "") or "").strip()
+        if setup_type and setup_type != "unknown":
             horizon = str(
                 getattr(signal, "analyst_horizon", None)
                 or getattr(signal, "horizon_class", None)
                 or "unknown"
             )
-            return f"{target_side}_{template_name}_{horizon}"[:160]
+            return f"{target_side}_{setup_type}_{horizon}"[:160]
     normalized_combo = "_".join(str(item).lower() for item in signal_combo)
     return f"{target_side}_{normalized_combo}"[:160]
 
@@ -5298,7 +5261,7 @@ def _policy_row_applies(row: dict, *, ticker: str, side: str, horizon: str, regi
         row_value = str(row.get(key) or "*")
         if row_value not in {"*", "", "unknown", str(value)}:
             return False
-    row_template = str(row.get("signal_template") or "*")
+    row_template = str(row.get("setup_type") or "*")
     if row_template not in {"*", "", "unknown", template} and template != "*":
         return False
     return True
@@ -5325,7 +5288,7 @@ def _apply_adaptive_policy_position_control(
     horizon = _resolve_decision_horizon(analyst_signals, 1 if target_side == "long" else -1)
     regime = _market_regime_from_signals(analyst_signals, target_side)
     combo = _analyst_signal_combo(analyst_signals)
-    template = _signal_template_from_signals(target_side, analyst_signals, combo)
+    template = _setup_type_from_signals(target_side, analyst_signals, combo)
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     matching: list[dict] = []
     for row in adaptive_policy_state or []:
@@ -5342,7 +5305,7 @@ def _apply_adaptive_policy_position_control(
         "target_side": target_side,
         "horizon_class": horizon,
         "market_regime": regime,
-        "signal_template": template,
+        "setup_type": template,
         "matching_cap_count": len(matching),
         "confirmation_score": confirmation_score,
         "pre_control_ratio": float(position_ratio),
@@ -5561,30 +5524,30 @@ def _apply_opportunity_quality_position_control(
         return position_ratio, reasons, notes, diagnostics
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     side_scorecard = scorecard.get(target_side) if isinstance(scorecard.get(target_side), dict) else {}
-    layer = str(side_scorecard.get("final_layer") or "unknown").lower()
+    layer = str(side_scorecard.get("final_state") or "unknown").lower()
     score = _safe_float(side_scorecard.get("score"), 0.0)
     setup_quality = _safe_float(side_scorecard.get("max_setup_quality"), 0.0)
     gating_failures = [str(item) for item in (side_scorecard.get("gating_failures") or [])]
-    layer_multipliers = quality_cfg.get("layer_multipliers") or {
-        "deployable_alpha": 1.10,
-        "tradeable_setup": 0.90,
-        "direction_only": 0.30,
-        "no_trade": 0.0,
+    state_multipliers = quality_cfg.get("state_multipliers") or {
+        "tradeable_candidate": 1.10,
+        "probe_candidate": 0.90,
+        "watch_for_trigger": 0.30,
+        "no_opportunity": 0.0,
         "unknown": 0.45,
     }
-    multiplier = float(layer_multipliers.get(layer, layer_multipliers.get("unknown", 0.45)) or 0.45)
+    multiplier = float(state_multipliers.get(layer, state_multipliers.get("unknown", 0.45)) or 0.45)
     weak_setup_threshold = float(quality_cfg.get("weak_setup_quality_below", 0.42) or 0.42)
     if setup_quality and setup_quality < weak_setup_threshold:
         multiplier = min(multiplier, float(quality_cfg.get("weak_setup_multiplier", 0.35) or 0.35))
         gating_failures = sorted(set(gating_failures + ["weak_setup_quality_position_cap"]))
-    if layer == "no_trade":
+    if layer == "no_opportunity":
         multiplier = 0.0
     before = position_ratio
     position_ratio = _scale_signed_ratio(position_ratio, multiplier)
     diagnostics["opportunity_quality_position_sizing"] = {
         "enabled": True,
         "target_side": target_side,
-        "scorecard_layer": layer,
+        "scorecard_state": layer,
         "score": score,
         "setup_quality": setup_quality,
         "multiplier": multiplier,
@@ -5597,7 +5560,7 @@ def _apply_opportunity_quality_position_control(
         reasons.append("opportunity_quality_position_sizing")
         notes.append(
             f"{ticker} {target_side} sized by opportunity/setup quality: "
-            f"layer={layer}, score={score:.2f}, setup_quality={setup_quality:.2f}, "
+            f"state={layer}, score={score:.2f}, setup_quality={setup_quality:.2f}, "
             f"{before:.2%}->{position_ratio:.2%}"
         )
     return position_ratio, reasons, notes, diagnostics
@@ -5644,8 +5607,8 @@ def _apply_alpha_setup_ev_position_control(
         confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
         scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
         side_scorecard = scorecard.get(target_side) if isinstance(scorecard.get(target_side), dict) else {}
-        layer = str(side_scorecard.get("final_layer") or "unknown").lower()
-        has_tradeable_support = layer in {"deployable_alpha", "tradeable_setup"}
+        layer = str(side_scorecard.get("final_state") or "unknown").lower()
+        has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
         has_invalidation = _has_structured_invalidation_condition(analyst_signals or []) or _has_explicit_stop_protection(analyst_signals or [])
         payloads = _analyst_signal_payloads(analyst_signals or {})
         min_support_confidence = float(ev_cfg.get("real_trade_min_analyst_confidence", 0.45) or 0.45)
@@ -5681,7 +5644,7 @@ def _apply_alpha_setup_ev_position_control(
             "enabled": True,
             "decision": "no_expectancy_evidence",
             "target_side": target_side,
-            "scorecard_layer": layer,
+            "scorecard_state": layer,
             "current_confirmation_score": confirmation_score,
             "has_tradeable_support": has_tradeable_support,
             "has_invalidation_or_stop": has_invalidation,
@@ -5746,7 +5709,7 @@ def _apply_alpha_setup_ev_position_control(
             "exact_real_state": 3,
             "partial_real_state": 2,
             "similar_sql_prior": 1,
-            "shadow_prior": 0,
+            "counterfactual_prior": 0,
         }.get(_action_value_scope_quality(row, ticker=ticker, side=target_side), 0)
         return (
             preference_rank,
@@ -5784,9 +5747,9 @@ def _apply_alpha_setup_ev_position_control(
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     side_scorecard = scorecard.get(target_side) if isinstance(scorecard.get(target_side), dict) else {}
-    layer = str(side_scorecard.get("final_layer") or "unknown").lower()
+    layer = str(side_scorecard.get("final_state") or "unknown").lower()
     gating_failures = [str(item) for item in (side_scorecard.get("gating_failures") or [])]
-    has_tradeable_support = layer in {"deployable_alpha", "tradeable_setup"}
+    has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
     has_invalidation = _has_structured_invalidation_condition(analyst_signals or []) or _has_explicit_stop_protection(analyst_signals or [])
     payloads = _analyst_signal_payloads(analyst_signals or {})
     technical_payload = payloads.get("technical", {})
@@ -5979,7 +5942,7 @@ def _apply_alpha_setup_ev_position_control(
         "action_value_count": len(action_values),
         "matched_action_value_count": len(intent_matched_action_values),
         "ignored_action_value_count": max(0, len(action_values) - len(intent_matched_action_values)),
-        "scorecard_layer": layer,
+        "scorecard_state": layer,
         "scorecard_gating_failures": gating_failures,
         "current_confirmation_score": confirmation_score,
         "has_tradeable_support": has_tradeable_support,
@@ -6022,9 +5985,6 @@ def _apply_alpha_setup_ev_position_control(
             "confidence_score": action_confidence,
             "action_preference": action_preference,
             "canonical_action_preference_source": "payload.action_preference",
-            "deprecated_policy_hint_mirror": _action_value_payload(best_action_value).get(
-                "deprecated_policy_hint_mirror"
-            ) or best_action_value.get("policy_hint"),
             "exact_ticker_support": action_exact_ticker_support,
             "scope_quality": action_scope_quality,
             "real_amplification_support": action_real_amplification_support,
@@ -6056,7 +6016,7 @@ def _apply_alpha_setup_ev_position_control(
         notes.append(
             f"{ticker} {target_side} alpha setup EV fusion: state={state}, "
             f"n={sample_count}, conf={confidence:.2f}, action={action_name or 'n/a'}, "
-            f"reward_mean={action_reward_mean:.0f}, layer={layer}, lane={expectancy_lane}, "
+            f"reward_mean={action_reward_mean:.0f}, state={layer}, lane={expectancy_lane}, "
             f"gates={gate_failures or ['passed']}, {before:.2%}->{position_ratio:.2%}"
         )
     return position_ratio, reasons, notes, diagnostics
@@ -6095,11 +6055,11 @@ def _apply_winning_template_continuation_control(
         return position_ratio, reasons, notes, diagnostics
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     min_confirmation = float(control.get("min_confirmation_score", 0.55) or 0.55)
-    layer_summary = _side_opportunity_layer_summary(analyst_signals, current_side)
+    state_summary = _side_opportunity_state_summary(analyst_signals, current_side)
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     side_scorecard = scorecard.get(current_side) if isinstance(scorecard.get(current_side), dict) else {}
-    layer = str(side_scorecard.get("final_layer") or "").lower()
-    has_support = bool(layer_summary.get("has_tradeable_support") or layer in {"deployable_alpha", "tradeable_setup"})
+    layer = str(side_scorecard.get("final_state") or "").lower()
+    has_support = bool(state_summary.get("has_tradeable_support") or layer in {"tradeable_candidate", "probe_candidate"})
     if confirmation_score < min_confirmation or not has_support:
         diagnostics["winning_template_continuation"] = {
             "enabled": True,
@@ -6107,7 +6067,7 @@ def _apply_winning_template_continuation_control(
             "pnl_ratio": float(pnl_ratio),
             "confirmation_score": confirmation_score,
             "has_tradeable_support": has_support,
-            "scorecard_layer": layer,
+            "scorecard_state": layer,
         }
         ev_cfg = (_get_portfolio_manager_config(full_config).get("alpha_setup_ev_fusion") or {})
         learned_exit = _negative_hold_or_positive_exit_action_value(
@@ -6196,7 +6156,7 @@ def _apply_winning_template_continuation_control(
         "decision": "preserve_profitable_same_scope_position",
         "pnl_ratio": float(pnl_ratio),
         "confirmation_score": confirmation_score,
-        "scorecard_layer": layer,
+        "scorecard_state": layer,
         "preserve_current_multiplier": preserve_multiplier,
         "pre_control_ratio": float(before),
         "final_ratio": float(position_ratio),
@@ -6296,13 +6256,13 @@ def _apply_drawdown_and_ticker_loss_control(
                 mode = "hard_initial_cooldown" if initial_cooldown_active else "hard_observation_only"
                 drawdown_diag.update({
                     "mode": mode,
-                    "shadow_recommendation": True,
+                    "counterfactual_recommendation": True,
                     "final_ratio": float(position_ratio),
                 })
                 notes.append(
                     f"hard drawdown {mode}: drawdown={drawdown:.2%}; "
                     f"new/incremental exposure {before:.2%}->{position_ratio:.2%}; "
-                    "agents continue analysis and shadow recommendation logging"
+                    "agents continue analysis and counterfactual recommendation logging"
                 )
             else:
                 min_score = _safe_float(drawdown_control.get("recovery_probe_min_confirmation_score"), 0.65)
@@ -6339,12 +6299,12 @@ def _apply_drawdown_and_ticker_loss_control(
                     position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
                     reasons.append("drawdown_control")
                     drawdown_diag.update({
-                        "mode": "hard_recovery_shadow_only",
-                        "shadow_recommendation": True,
+                        "mode": "hard_recovery_counterfactual_only",
+                        "counterfactual_recommendation": True,
                         "final_ratio": float(position_ratio),
                     })
                     notes.append(
-                        f"hard drawdown recovery shadow-only: failures={gate_failures}; "
+                        f"hard drawdown recovery counterfactual-only: failures={gate_failures}; "
                         f"new/incremental exposure {before:.2%}->{position_ratio:.2%}"
                     )
                 else:
@@ -6363,15 +6323,15 @@ def _apply_drawdown_and_ticker_loss_control(
                         position_ratio = _block_new_or_incremental_exposure(position_ratio, current_ratio)
                         reasons.append("drawdown_control")
                         drawdown_diag.update({
-                            "mode": "hard_recovery_shadow_only",
-                            "shadow_recommendation": True,
+                            "mode": "hard_recovery_counterfactual_only",
+                            "counterfactual_recommendation": True,
                             "recovery_probe_margin_ratio_budget": recovery_budget,
                             "allowed_increment_margin_ratio": allowed_increment_margin,
                             "gate_failures": ["no_capacity_under_recovery_probe_budget"],
                             "final_ratio": float(position_ratio),
                         })
                         notes.append(
-                            f"hard drawdown recovery shadow-only: current_margin={float(current_margin_ratio or 0.0):.2%} "
+                            f"hard drawdown recovery counterfactual-only: current_margin={float(current_margin_ratio or 0.0):.2%} "
                             f">= recovery_budget={recovery_budget:.2%}; "
                             f"new/incremental exposure {before:.2%}->{position_ratio:.2%}"
                         )
@@ -6386,7 +6346,7 @@ def _apply_drawdown_and_ticker_loss_control(
                             reasons.append("drawdown_recovery_probe")
                         drawdown_diag.update({
                             "mode": "hard_recovery_probe",
-                            "shadow_recommendation": False,
+                            "counterfactual_recommendation": False,
                             "recovery_probe_margin_ratio_budget": recovery_budget,
                             "allowed_increment_margin_ratio": allowed_increment_margin,
                             "final_ratio": float(position_ratio),
@@ -6512,19 +6472,19 @@ def _analyst_signal_payloads(analyst_signals: list, fusion_context=None) -> dict
                 getattr(signal, "business_quality_score", business.get("score", 0.0)),
                 0.0,
             ),
-            "template_name": str(getattr(signal, "template_name", metadata.get("template_name", "unknown")) or "unknown"),
+            "setup_type": str(getattr(signal, "setup_type", metadata.get("setup_type", "unknown")) or "unknown"),
             "horizon_class": str(getattr(signal, "horizon_class", "unknown") or "unknown"),
             "analyst_horizon": str(getattr(signal, "analyst_horizon", getattr(signal, "horizon_class", "unknown")) or "unknown"),
             "evidence_role": contract_fields.get("evidence_role"),
             "direction_context": contract_fields.get("direction_context"),
-            "trade_trigger": contract_fields.get("trade_trigger"),
+            "entry_trigger": contract_fields.get("entry_trigger"),
             "invalidation": contract_fields.get("invalidation"),
-            "position_horizon": contract_fields.get("position_horizon"),
+            "horizon_class": contract_fields.get("horizon_class"),
             "trend_direction": contract_fields.get("trend_direction"),
             "entry_timing_signal": contract_fields.get("entry_timing_signal"),
             "price_location": contract_fields.get("price_location"),
-            "trigger_valid": bool(contract_fields.get("trigger_valid")),
-            "invalidation_present": bool(contract_fields.get("invalidation_present")),
+            "trigger_valid": _canonical_trigger_valid(signal),
+            "invalidation_present": _canonical_invalidation_present(signal),
             "primary_business_driver": getattr(signal, "primary_business_driver", business.get("primary_business_driver", "")),
             "counter_evidence": getattr(signal, "counter_evidence", business.get("counter_evidence", "")),
             "risk_flags": quality.get("risk_flags") or metadata.get("risk_flags") or context.get("risk_flags") or [],
@@ -6549,7 +6509,7 @@ def _technical_payload_has_entry_timing(payload, side: str, min_confidence: floa
     return bool(
         payload.get("trigger_valid")
         and payload.get("invalidation_present")
-        and _pm_has_specific_trigger_text(payload.get("trade_trigger"))
+        and _pm_has_specific_trigger_text(payload.get("entry_trigger"))
     )
 
 
@@ -6697,7 +6657,7 @@ def _profitable_hold_still_supported(
     fundamental_supports_current: bool,
     technical_supports_current: bool,
     news_supports_current: bool,
-    current_layer: str,
+    current_state: str,
     lifecycle_config: dict,
 ) -> bool:
     """Protect profitable positions only when current same-side evidence remains alive."""
@@ -6727,7 +6687,7 @@ def _profitable_hold_still_supported(
         fundamental_supports_current
         or technical_supports_current
         or news_supports_current
-        or str(current_layer or "").lower() in {"tradeable_setup", "deployable_alpha", "risk_reduction"}
+        or str(current_state or "").lower() in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}
     )
     anchor_supported = fundamental_supports_current or news_supports_current
     if anchor_supported:
@@ -6785,35 +6745,30 @@ def _side_signal_counts(payloads: dict, side: str) -> dict:
     return counts
 
 
-def _side_opportunity_layer_summary(analyst_signals: list, side: str) -> dict:
+def _side_opportunity_state_summary(analyst_signals: list, side: str) -> dict:
     target_signal = "Bullish" if side == "long" else "Bearish" if side == "short" else ""
-    counts: dict[str, int] = {}
-    state_counts: dict[str, int] = {}
+    opportunity_state_counts: dict[str, int] = {}
     supporting = 0
     tradeable_support = 0
     probe_candidate_support = 0
     watch_for_trigger_support = 0
     risk_reduction_support = 0
-    layers: list[str] = []
     states: list[str] = []
     for signal in analyst_signals or []:
         signal_side = _signal_to_text(getattr(signal, "signal", "Neutral"))
         state = _signal_opportunity_state(signal)
-        neutral_shadow_side = str(getattr(signal, "neutral_shadow_side", "") or "").lower()
+        counterfactual_side = str(getattr(signal, "counterfactual_side", "") or "").lower()
         state_targets_side = (
             signal_side == target_signal
-            or (signal_side == "Neutral" and state == "watch_for_trigger" and neutral_shadow_side == side)
+            or (signal_side == "Neutral" and state == "watch_for_trigger" and counterfactual_side == side)
             or (state == "risk_reduction_candidate" and signal_side in {target_signal, "Neutral"})
         )
         if not state_targets_side:
             continue
         supporting += 1
-        layer = _signal_opportunity_layer(signal)
-        layers.append(layer)
         states.append(state)
-        counts[layer] = counts.get(layer, 0) + 1
-        state_counts[state] = state_counts.get(state, 0) + 1
-        if layer in {"tradeable_setup", "deployable_alpha", "risk_reduction"}:
+        opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
+        if state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}:
             tradeable_support += 1
         if state in {"probe_candidate", "tradeable_candidate"}:
             probe_candidate_support += 1
@@ -6828,9 +6783,7 @@ def _side_opportunity_layer_summary(analyst_signals: list, side: str) -> dict:
         "probe_candidate_support_count": probe_candidate_support,
         "watch_for_trigger_support_count": watch_for_trigger_support,
         "risk_reduction_support_count": risk_reduction_support,
-        "layer_counts": counts,
-        "opportunity_state_counts": state_counts,
-        "layers": layers,
+        "opportunity_state_counts": opportunity_state_counts,
         "opportunity_states": states,
         "has_tradeable_support": tradeable_support > 0,
         "has_probe_candidate_support": probe_candidate_support > 0,
@@ -6877,7 +6830,7 @@ def _daily_tradeability_gate_result(
     news_payload: dict | None,
     market_confirmation: dict | None,
     opportunity_scorecard_side: dict,
-    layer_summary: dict,
+    state_summary: dict,
     horizon_result: dict | None,
     has_invalidation: bool,
     adaptive_policy_state: list | None,
@@ -6906,7 +6859,7 @@ def _daily_tradeability_gate_result(
         detail["decision"] = "allow_existing_position"
         return detail
 
-    scorecard_layer = str((opportunity_scorecard_side or {}).get("final_layer") or "").lower()
+    scorecard_state = str((opportunity_scorecard_side or {}).get("final_state") or "").lower()
     regime = str((opportunity_scorecard_side or {}).get("market_regime") or "").lower()
     if not regime:
         regime = str(_market_regime_from_signals(analyst_signals, side) or "").lower()
@@ -6932,9 +6885,9 @@ def _daily_tradeability_gate_result(
     high_quality_news = _news_high_quality_override(news_payload, side, control)
     mature_alpha = _daily_tradeability_mature_alpha_present(adaptive_policy_state, side, control)
     strong_confirmation = confirmation_score >= _safe_float(control.get("strong_market_confirmation_score"), 0.68)
-    has_tradeable_support = bool((layer_summary or {}).get("has_tradeable_support"))
+    has_tradeable_support = bool((state_summary or {}).get("has_tradeable_support"))
     detail.update({
-        "scorecard_layer": scorecard_layer,
+        "scorecard_state": scorecard_state,
         "market_regime": regime,
         "decision_horizon": horizon,
         "horizon_failures": fail_reasons,
@@ -6960,22 +6913,22 @@ def _daily_tradeability_gate_result(
         detail["allowances"].append("mature_alpha_with_invalidation")
 
     risky_daily_mismatch = (
-        bool(control.get("block_direction_only_medium_in_choppy", True))
-        and scorecard_layer in {"direction_only", "unknown", ""}
+        bool(control.get("block_watch_for_trigger_medium_in_choppy", True))
+        and scorecard_state in {"watch_for_trigger", "unknown", ""}
         and (regime in regimes or any(token in regime for token in ("choppy", "range")))
         and horizon in horizons
         and (
             "missing_short_timing_confirmation" in fail_reasons
-            or "no_tradeable_setup_layer" in scorecard_failures
+            or "no_tradeable_candidate_state" in scorecard_failures
             or "weak_entry_setup_quality" in scorecard_failures
             or not has_tradeable_support
         )
     )
     if risky_daily_mismatch and not detail["allowances"]:
-        detail["decision"] = "watchlist_only"
+        detail["decision"] = "watch_for_trigger"
         detail["reason"] = "daily_tradeability_requires_short_timing"
         detail["failures"] = sorted(set([
-            "direction_only_medium_or_long",
+            "watch_for_trigger_medium_or_long",
             "choppy_or_range_regime",
             "missing_daily_timing_or_tradeable_support",
             *fail_reasons,
@@ -7048,7 +7001,7 @@ def _apply_mature_alpha_release_control(
         return position_ratio, reasons, notes, diagnostics
 
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
-    layer_summary = _side_opportunity_layer_summary(analyst_signals, target_side)
+    state_summary = _side_opportunity_state_summary(analyst_signals, target_side)
     has_invalidation = _has_structured_invalidation_condition(analyst_signals or [])
     policy_records = _mature_alpha_policy_records(adaptive_policy_state, target_side)
     fast_candidate_records = _fast_candidate_alpha_records(adaptive_policy_state, target_side)
@@ -7065,9 +7018,9 @@ def _apply_mature_alpha_release_control(
     if confirmation_score < min_confirmation:
         gate_failures.append("market_confirmation_below_release_threshold")
     if bool(control.get("require_tradeable_support", True)) and not (
-        layer_summary.get("has_tradeable_support") or layer_summary.get("has_probe_candidate_support")
+        state_summary.get("has_tradeable_support") or state_summary.get("has_probe_candidate_support")
     ):
-        gate_failures.append("no_tradeable_setup_support")
+        gate_failures.append("no_tradeable_candidate_support")
     if bool(control.get("require_invalidation", True)) and not has_invalidation:
         gate_failures.append("missing_invalidation_boundary")
     if not eligible_records:
@@ -7079,7 +7032,7 @@ def _apply_mature_alpha_release_control(
         "confirmation_score": confirmation_score,
         "min_confirmation_score": min_confirmation,
         "has_invalidation": bool(has_invalidation),
-        "opportunity_layer_summary": layer_summary,
+        "opportunity_state_summary": state_summary,
         "policy_count": len(policy_records),
         "eligible_policy_count": len(eligible_records),
         "fast_candidate_alpha_count": len(fast_candidate_records),
@@ -7147,8 +7100,8 @@ def _apply_fast_candidate_alpha_probe_control(
     if current_ratio != 0 or abs(position_ratio) > 1e-12:
         return position_ratio, reasons, notes, diagnostics
 
-    long_summary = _side_opportunity_layer_summary(analyst_signals, "long")
-    short_summary = _side_opportunity_layer_summary(analyst_signals, "short")
+    long_summary = _side_opportunity_state_summary(analyst_signals, "long")
+    short_summary = _side_opportunity_state_summary(analyst_signals, "short")
     long_records = _fast_candidate_alpha_records(adaptive_policy_state, "long")
     short_records = _fast_candidate_alpha_records(adaptive_policy_state, "short")
     min_policy_confidence = _safe_float(control.get("min_policy_confidence"), 0.50)
@@ -7171,8 +7124,8 @@ def _apply_fast_candidate_alpha_probe_control(
         "has_invalidation": bool(has_invalidation),
         "long_candidate_count": len(long_records),
         "short_candidate_count": len(short_records),
-        "long_layer_summary": long_summary,
-        "short_layer_summary": short_summary,
+        "long_state_summary": long_summary,
+        "short_state_summary": short_summary,
         "pre_control_ratio": float(position_ratio),
         "current_ratio": float(current_ratio),
     }
@@ -7188,7 +7141,7 @@ def _apply_fast_candidate_alpha_probe_control(
         if bool(control.get("require_tradeable_support", True)) and not (
             summary.get("has_tradeable_support") or summary.get("has_probe_candidate_support")
         ):
-            gate_failures.append("no_tradeable_setup_support")
+            gate_failures.append("no_tradeable_candidate_support")
         if bool(control.get("require_invalidation", True)) and not has_invalidation:
             gate_failures.append("missing_invalidation_boundary")
         if not gate_failures:
@@ -7219,7 +7172,7 @@ def _apply_fast_candidate_alpha_probe_control(
         "target_side": side,
         "final_ratio": float(position_ratio),
         "policy_refs": [_compact_policy_row(row) for row in records[:5]],
-        "opportunity_layer_summary": summary,
+        "opportunity_state_summary": summary,
         "hard_margin_cap": hard_margin_cap,
     })
     return position_ratio, reasons, notes, diagnostics
@@ -7474,37 +7427,37 @@ def _apply_holding_rebalance_control(
         return position_ratio, reasons, notes, diagnostics
 
     if current_side == "flat":
-        direction_only_cfg = control.get("direction_only_new_entry") or {}
-        direction_only_audit = {
-            "config_key": "portfolio_manager.holding_rebalance_control.direction_only_new_entry",
-            "audit_name": str(direction_only_cfg.get("audit_name") or "direction_only_observation_candidate"),
-            "semantic_role": str(direction_only_cfg.get("semantic_role") or "observation_candidate_only"),
-            "legacy_allow_probe": bool(direction_only_cfg.get("allow_probe", False)),
-            "can_create_trade_authority": bool(direction_only_cfg.get("can_create_trade_authority", False)),
-            "requires_final_new_entry_trade_authority": bool(
-                direction_only_cfg.get("requires_final_new_entry_trade_authority", True)
+        watch_for_trigger_cfg = control.get("watch_for_trigger_new_entry") or {}
+        watch_for_trigger_audit = {
+            "config_key": "portfolio_manager.holding_rebalance_control.watch_for_trigger_new_entry",
+            "audit_name": str(watch_for_trigger_cfg.get("audit_name") or "watch_for_trigger_observation_candidate"),
+            "semantic_role": str(watch_for_trigger_cfg.get("semantic_role") or "observation_candidate_only"),
+            "allow_probe": bool(watch_for_trigger_cfg.get("allow_probe", False)),
+            "can_create_trade_authority": bool(watch_for_trigger_cfg.get("can_create_trade_authority", False)),
+            "requires_final_contract_authority": bool(
+                watch_for_trigger_cfg.get("requires_final_contract_authority", True)
             ),
             "boundary": (
                 "direction-only can only seed an audited candidate intent; final new-entry "
-                "authority decides whether lots can reach Trader"
+                "final_action_contract authority decides whether lots can reach Trader"
             ),
         }
-        detail["direction_only_new_entry_audit"] = direction_only_audit
+        detail["watch_for_trigger_new_entry_audit"] = watch_for_trigger_audit
         scorecard_side = {}
-        layer_summary = {}
+        state_summary = {}
         new_entry_horizon = None
-        if target_side in {"long", "short"} and bool(direction_only_cfg.get("enabled", True)):
-            layer_summary = _side_opportunity_layer_summary(analyst_signals, target_side)
+        if target_side in {"long", "short"} and bool(watch_for_trigger_cfg.get("enabled", True)):
+            state_summary = _side_opportunity_state_summary(analyst_signals, target_side)
             scorecard = fusion_context.get("opportunity_scorecard") if isinstance(fusion_context, dict) else {}
             scorecard_side = (
                 scorecard.get(target_side)
                 if isinstance(scorecard, dict) and isinstance(scorecard.get(target_side), dict)
                 else {}
             )
-            scorecard_layer = str(scorecard_side.get("final_layer") or "").lower()
-            detail["opportunity_layer_summary"] = layer_summary
+            scorecard_state = str(scorecard_side.get("final_state") or "").lower()
+            detail["opportunity_state_summary"] = state_summary
             detail["opportunity_scorecard_side"] = scorecard_side
-            if scorecard_layer == "no_trade":
+            if scorecard_state == "no_opportunity":
                 reasons.append("pm_opportunity_scorecard_no_trade")
                 notes.append(
                     f"{ticker} new {target_side} entry skipped by opportunity scorecard: "
@@ -7513,10 +7466,10 @@ def _apply_holding_rebalance_control(
                 detail["decision"] = "skip_scorecard_no_trade"
                 detail["final_target_ratio"] = 0.0
                 return 0.0, reasons, notes, diagnostics
-            if not layer_summary.get("has_tradeable_support") or scorecard_layer == "direction_only":
-                if bool(direction_only_cfg.get("allow_probe", False)):
-                    probe_cap = max(0.0, float(direction_only_cfg.get("probe_max_ratio", 0.01) or 0.01))
-                    probe_floor = max(0.0, float(direction_only_cfg.get("probe_floor_ratio", 0.005) or 0.005))
+            if not state_summary.get("has_tradeable_support") or scorecard_state == "watch_for_trigger":
+                if bool(watch_for_trigger_cfg.get("allow_probe", False)):
+                    probe_cap = max(0.0, float(watch_for_trigger_cfg.get("probe_max_ratio", 0.01) or 0.01))
+                    probe_floor = max(0.0, float(watch_for_trigger_cfg.get("probe_floor_ratio", 0.005) or 0.005))
                     capped_ratio = _probe_ratio_from_soft_gate(
                         side=target_side,
                         current_ratio=current_ratio,
@@ -7524,24 +7477,24 @@ def _apply_holding_rebalance_control(
                         cap_ratio=probe_cap,
                         floor_ratio=probe_floor,
                     )
-                    reasons.append("pm_direction_only_probe_cap")
+                    reasons.append("pm_watch_for_trigger_probe_cap")
                     notes.append(
                         f"{ticker} new {target_side} direction-only setup capped to probe: "
                         f"{position_ratio:.2%}->{capped_ratio:.2%}; "
-                        f"layers={layer_summary.get('layer_counts')}, scorecard={scorecard_side.get('final_layer')}"
+                        f"states={state_summary.get('opportunity_state_counts')}, scorecard={scorecard_side.get('final_state')}"
                     )
                     position_ratio = capped_ratio
                     target_side = _target_side_from_ratio(position_ratio)
-                    detail["direction_only_probe_cap"] = probe_cap
-                    detail["direction_only_probe_floor"] = probe_floor
-                    detail["raw_target_ratio_after_direction_only_gate"] = float(position_ratio)
+                    detail["watch_for_trigger_probe_cap"] = probe_cap
+                    detail["watch_for_trigger_probe_floor"] = probe_floor
+                    detail["raw_target_ratio_after_watch_for_trigger_gate"] = float(position_ratio)
                 else:
-                    reasons.append("pm_direction_only_not_tradeable")
+                    reasons.append("pm_watch_for_trigger_not_tradeable")
                     notes.append(
                         f"{ticker} new {target_side} entry skipped: analyst support is direction-only; "
-                        f"layers={layer_summary.get('layer_counts')}"
+                        f"states={state_summary.get('opportunity_state_counts')}"
                     )
-                    detail["decision"] = "skip_direction_only_new_entry"
+                    detail["decision"] = "skip_watch_for_trigger_new_entry"
                     detail["final_target_ratio"] = 0.0
                     return 0.0, reasons, notes, diagnostics
         if target_side in {"long", "short"} and bool(horizon_config.get("apply_to_new_entries", True)):
@@ -7597,14 +7550,14 @@ def _apply_holding_rebalance_control(
                 news_payload=news_payload,
                 market_confirmation=market_confirmation,
                 opportunity_scorecard_side=scorecard_side,
-                layer_summary=layer_summary,
+                state_summary=state_summary,
                 horizon_result=new_entry_horizon,
                 has_invalidation=has_invalidation_boundary,
                 adaptive_policy_state=adaptive_policy_state,
                 control=control.get("daily_tradeability_gate") or {},
             )
             detail["daily_tradeability_gate"] = daily_gate
-            if daily_gate.get("decision") == "watchlist_only":
+            if daily_gate.get("decision") == "watch_for_trigger":
                 reasons.append("daily_tradeability_watchlist_only")
                 notes.append(
                     f"{ticker} new {target_side} kept on watchlist: medium/long direction-only idea "
@@ -7750,11 +7703,11 @@ def _apply_holding_rebalance_control(
         if isinstance(scorecard, dict) and isinstance(scorecard.get(current_side), dict)
         else {}
     )
-    current_layer = str(current_scorecard.get("final_layer") or "").lower()
-    current_layer_failures = [str(item) for item in (current_scorecard.get("gating_failures") or [])]
+    current_state = str(current_scorecard.get("final_state") or "").lower()
+    current_state_failures = [str(item) for item in (current_scorecard.get("gating_failures") or [])]
     exploration_layers = set(
         str(item).lower()
-        for item in (lifecycle_config.get("exploration_reconfirm_layers") or ["direction_only", "unknown"])
+        for item in (lifecycle_config.get("exploration_reconfirm_states") or ["watch_for_trigger", "unknown"])
     )
     exploration_reconfirm_due = (
         lifecycle_enabled
@@ -7764,9 +7717,9 @@ def _apply_holding_rebalance_control(
         and held_days >= int(lifecycle_config.get("exploration_reconfirm_min_hold_days", 1))
         and not trend_position
         and (
-            current_layer in exploration_layers
-            or "no_tradeable_setup_layer" in current_layer_failures
-            or "weak_entry_setup_quality" in current_layer_failures
+            current_state in exploration_layers
+            or "no_tradeable_candidate_state" in current_state_failures
+            or "weak_entry_setup_quality" in current_state_failures
         )
     )
     profitable_hold_supported = _profitable_hold_still_supported(
@@ -7778,7 +7731,7 @@ def _apply_holding_rebalance_control(
         fundamental_supports_current=fundamental_supports_current or fundamental_hold_anchor_current,
         technical_supports_current=technical_supports_current,
         news_supports_current=news_supports_current or news_hold_anchor_current,
-        current_layer=current_layer,
+        current_state=current_state,
         lifecycle_config=lifecycle_config,
     )
     exploration_positive_hold = (
@@ -7787,7 +7740,7 @@ def _apply_holding_rebalance_control(
         and confirmation_score >= float(lifecycle_config.get("exploration_reconfirm_profit_min_confirmation", 0.45))
     )
     exploration_reconfirmed = (
-        current_layer in {"tradeable_setup", "deployable_alpha"}
+        current_state in {"probe_candidate", "tradeable_candidate"}
         or profitable_hold_supported
         or (
             current_strength >= float(lifecycle_config.get("exploration_reconfirm_min_signal_strength", 0.30))
@@ -7805,8 +7758,8 @@ def _apply_holding_rebalance_control(
     )
     exploration_reconfirm_failures: list[str] = []
     if exploration_reconfirm_due and not exploration_reconfirmed:
-        if current_layer not in {"tradeable_setup", "deployable_alpha"}:
-            exploration_reconfirm_failures.append(f"layer_{current_layer or 'missing'}")
+        if current_state not in {"probe_candidate", "tradeable_candidate"}:
+            exploration_reconfirm_failures.append(f"layer_{current_state or 'missing'}")
         if confirmation_score < float(lifecycle_config.get("exploration_reconfirm_min_confirmation_score", 0.55)):
             exploration_reconfirm_failures.append("confirmation_low")
         if signal_counts_current.get("opposite", 0) > 0:
@@ -7918,7 +7871,7 @@ def _apply_holding_rebalance_control(
         "exploration_reconfirm_exit": bool(exploration_reconfirm_exit),
         "exploration_reconfirm_failures": exploration_reconfirm_failures,
         "profitable_hold_supported": bool(profitable_hold_supported),
-        "current_opportunity_layer": current_layer,
+        "current_opportunity_state": current_state,
         "horizon_losing_hold_failed": bool(horizon_losing_hold_failed),
         "horizon_losing_hold_exit": bool(horizon_losing_hold_exit),
         "probe_expired": bool(probe_expired),
@@ -7970,7 +7923,7 @@ def _apply_holding_rebalance_control(
         notes.append(
             f"{ticker} {current_side} exploration probe failed daily reconfirmation; exiting: "
             f"held_days={held_days}, pnl_ratio={position_pnl_ratio:.2%}, "
-            f"layer={current_layer or 'unknown'}, confirmation={confirmation_score:.2f}, "
+            f"state={current_state or 'unknown'}, confirmation={confirmation_score:.2f}, "
             f"failures={exploration_reconfirm_failures}"
         )
         detail["decision"] = "exit_failed_exploration_reconfirm"
@@ -7989,7 +7942,7 @@ def _apply_holding_rebalance_control(
         notes.append(
             f"{ticker} {current_side} exploration probe not reconfirmed; reducing: "
             f"held_days={held_days}, pnl_ratio={position_pnl_ratio:.2%}, "
-            f"layer={current_layer or 'unknown'}, confirmation={confirmation_score:.2f}, "
+            f"state={current_state or 'unknown'}, confirmation={confirmation_score:.2f}, "
             f"failures={exploration_reconfirm_failures}, ratio {current_ratio:.2%}->{reduced_ratio:.2%}"
         )
         detail["decision"] = "reduce_unconfirmed_exploration_probe"
@@ -8095,7 +8048,7 @@ def _apply_holding_rebalance_control(
             notes.append(
                 f"{ticker} {current_side} profitable hold retained: pnl_ratio={position_pnl_ratio:.2%}, "
                 f"confirmation={confirmation_score:.2f}, current_strength={current_strength:.2f}, "
-                f"layer={current_layer or 'unknown'}"
+                f"state={current_state or 'unknown'}"
             )
             detail["decision"] = "keep_profitable_supported_hold"
             detail["final_target_ratio"] = float(current_ratio)
@@ -8162,7 +8115,7 @@ def _apply_holding_rebalance_control(
             notes.append(
                 f"{ticker} {current_side} profitable exit deferred: pnl_ratio={position_pnl_ratio:.2%}, "
                 f"confirmation={confirmation_score:.2f}, current_strength={current_strength:.2f}, "
-                f"layer={current_layer or 'unknown'}"
+                f"state={current_state or 'unknown'}"
             )
             detail["decision"] = "keep_profitable_supported_exit_deferred"
             detail["final_target_ratio"] = float(current_ratio)
@@ -8479,12 +8432,12 @@ def portfolio_agent_futures(state: FundState):
                 "signal_confidence": 0.0,
                 "target_position_ratio": 0.0,
                 "target_margin_ratio_estimate": 0.0,
-                "target_lots_estimate": 0,
+                "target_lots": 0,
                 "reference_price": float(current_price),
                 "risk_level": "data_quality",
                 "decision_horizon": "none",
                 "validation_horizon": "same_day",
-                "tradable_lots_reason": "data_price_anomaly",
+                "reason_codes": ["data_price_anomaly"],
                 "no_trade_reason": "data_price_anomaly",
                 "data_price_anomaly": {
                     "status": price_sanity.get("status"),
@@ -8725,7 +8678,7 @@ def portfolio_agent_futures(state: FundState):
             f"Tradeability={quality.get('tradeability', 'unknown')}, "
             f"EffectiveConfidence={quality.get('effective_confidence', signal.confidence):.2f}, "
             f"BusinessQuality={getattr(signal, 'business_quality_score', 0.0):.2f}, "
-            f"Template={getattr(signal, 'template_name', 'unknown')}, "
+            f"SetupType={getattr(signal, 'setup_type', 'unknown')}, "
             f"Horizon={getattr(signal, 'horizon_class', 'unknown')}, "
             f"RiskFlags={quality.get('risk_flags', [])}"
         )
@@ -8995,7 +8948,7 @@ def portfolio_agent_futures(state: FundState):
                 1 if target_side_for_confirmation == "long" else -1,
             )
             early_market_regime = _market_regime_from_signals(analyst_signals, target_side_for_confirmation)
-            early_signal_template = _signal_template_from_signals(
+            early_setup_type = _setup_type_from_signals(
                 target_side_for_confirmation,
                 analyst_signals,
                 signal_combo,
@@ -9004,7 +8957,7 @@ def portfolio_agent_futures(state: FundState):
                 config_id=config_id,
                 ticker=ticker,
                 side=target_side_for_confirmation,
-                signal_template=early_signal_template,
+                setup_type=early_setup_type,
                 horizon_class=early_horizon,
                 market_regime=early_market_regime,
                 trading_date=trading_date,
@@ -9037,7 +8990,7 @@ def portfolio_agent_futures(state: FundState):
                 else {}
             )
             best_profile = preferred_card.get("best_alpha_setup_profile") if isinstance(preferred_card.get("best_alpha_setup_profile"), dict) else {}
-            similar_setup_type = str(best_profile.get("setup_type") or preferred_card.get("final_layer") or "*")
+            similar_setup_type = str(best_profile.get("setup_type") or preferred_card.get("final_state") or "*")
             similar_alpha_action_values = db.get_similar_alpha_setup_action_values(
                 config_id=config_id,
                 ticker=ticker,
@@ -9118,12 +9071,12 @@ def portfolio_agent_futures(state: FundState):
             }
             position_risk.justification += (
                 f"\n[Opportunity probe candidate not applied: scorecard {scorecard_probe_side} "
-                f"{scorecard_probe_row.get('final_layer')} score={scorecard_probe_row.get('score')} "
+                f"{scorecard_probe_row.get('final_state')} score={scorecard_probe_row.get('score')} "
                 f"conflicts with PM entry conclusion ({scorecard_semantic_block_reason})]"
             )
             logger.info(
                 f"{ticker}: Opportunity scorecard probe candidate not applied: "
-                f"side={scorecard_probe_side}, layer={scorecard_probe_row.get('final_layer')}, "
+                f"side={scorecard_probe_side}, state={scorecard_probe_row.get('final_state')}, "
                 f"score={scorecard_probe_row.get('score')}, reason={scorecard_semantic_block_reason}"
             )
         else:
@@ -9131,12 +9084,12 @@ def portfolio_agent_futures(state: FundState):
             scorecard_probe_seed_applied = True
             position_risk.justification += (
                 f"\n[Opportunity probe seed: scorecard {scorecard_probe_side} "
-                f"{scorecard_probe_row.get('final_layer')} score={scorecard_probe_row.get('score')} "
+                f"{scorecard_probe_row.get('final_state')} score={scorecard_probe_row.get('score')} "
                 f"-> target ratio {scorecard_probe_ratio:.2%}]"
             )
             logger.info(
                 f"{ticker}: Opportunity scorecard seeded real probe {scorecard_probe_side}: "
-                f"layer={scorecard_probe_row.get('final_layer')}, score={scorecard_probe_row.get('score')}, "
+                f"state={scorecard_probe_row.get('final_state')}, score={scorecard_probe_row.get('score')}, "
                 f"ratio={scorecard_probe_ratio:.2%}"
             )
 
@@ -9147,7 +9100,7 @@ def portfolio_agent_futures(state: FundState):
         control_reasons.append("opportunity_scorecard_probe_seed")
         control_notes.append(
             f"{ticker} scorecard converted qualified {scorecard_probe_side} opportunity to probe seed: "
-            f"layer={scorecard_probe_row.get('final_layer')}, score={scorecard_probe_row.get('score')}, "
+            f"state={scorecard_probe_row.get('final_state')}, score={scorecard_probe_row.get('score')}, "
             f"ratio={scorecard_probe_ratio:.2%}"
         )
         control_diagnostics["opportunity_scorecard_probe_seed"] = {
@@ -9177,7 +9130,7 @@ def portfolio_agent_futures(state: FundState):
             "current_evidence": {
                 key: selected_evidence.get(key)
                 for key in (
-                    "scorecard_layer",
+                    "scorecard_state",
                     "strong_realtime_evidence",
                     "strong_market_confirmation",
                     "technical_entry_timing_supports_side",
@@ -9189,7 +9142,7 @@ def portfolio_agent_futures(state: FundState):
                 )
             },
             "not_product_rule": True,
-            "does_not_bypass_final_new_entry_trade_authority": True,
+            "does_not_bypass_final_contract_authority": True,
         }
     control_reasons.extend(directional_reasons)
     control_notes.extend(directional_notes)
@@ -9223,7 +9176,7 @@ def portfolio_agent_futures(state: FundState):
                 1 if auditor_side == "long" else -1,
             )
             market_regime_key = _market_regime_from_signals(analyst_signals, auditor_side)
-            signal_template_key = _signal_template_from_signals(
+            setup_type_key = _setup_type_from_signals(
                 auditor_side,
                 analyst_signals,
                 signal_combo,
@@ -9258,7 +9211,7 @@ def portfolio_agent_futures(state: FundState):
                     config_id=config_id,
                     ticker=ticker,
                     side=auditor_side,
-                    signal_template=signal_template_key,
+                    setup_type=setup_type_key,
                     horizon_class=decision_horizon,
                     market_regime=market_regime_key,
                     trading_date=trading_date,
@@ -9268,7 +9221,7 @@ def portfolio_agent_futures(state: FundState):
                     config_id=config_id,
                     ticker=ticker,
                     side=auditor_side,
-                    signal_template=signal_template_key,
+                    setup_type=setup_type_key,
                     horizon_class=decision_horizon,
                     trading_date=trading_date,
                 )
@@ -9860,10 +9813,10 @@ def portfolio_agent_futures(state: FundState):
             f"reasons={sorted(set(control_reasons) & _MINIMUM_REAL_PROBE_DISQUALIFIED_REASONS)}"
         )
         control_diagnostics["real_probe_qualification"] = {
-            "decision": "watchlist_only",
+            "decision": "watch_for_trigger",
             "blocked_reasons": sorted(set(control_reasons) & _MINIMUM_REAL_PROBE_DISQUALIFIED_REASONS),
             "alpha_ev_blocks_real_probe": alpha_ev_blocks_real_probe,
-            "money_objective": "avoid_repeating_negative_or_direction_only_real_lot",
+            "money_objective": "avoid_repeating_negative_or_watch_for_trigger_real_lot",
             "does_not_block_qualified_positive_or_fast_candidate_probe": True,
         }
         position_risk.optimal_position_ratio = 0.0
@@ -9976,20 +9929,20 @@ def portfolio_agent_futures(state: FundState):
 
     final_entry_authority = {}
     if current_lots == 0 and target_lots != 0:
-        has_final_entry_authority, final_entry_authority = _final_new_entry_trade_authority(
+        has_final_entry_authority, final_entry_authority = _final_contract_authority(
             control_reasons=control_reasons,
             control_diagnostics=control_diagnostics,
             full_config=full_config,
         )
         final_entry_authority["target_lots_before_gate"] = int(target_lots)
         final_entry_authority["target_ratio_before_gate"] = float(position_risk.optimal_position_ratio)
-        control_diagnostics["final_new_entry_trade_authority"] = final_entry_authority
+        control_diagnostics["final_action_authority"] = final_entry_authority
         if (
             final_entry_authority.get("requires_authority")
             and not has_final_entry_authority
             and final_entry_authority.get("authority_type") != "exploration_probe"
         ):
-            control_reasons.append("final_new_entry_trade_authority_not_met")
+            control_reasons.append("final_contract_authority_not_met")
             control_notes.append(
                 f"{ticker} new entry kept as watchlist: final trading authority not met; "
                 f"weak_markers={final_entry_authority.get('weak_markers')}, "
@@ -10003,7 +9956,7 @@ def portfolio_agent_futures(state: FundState):
             target_lots = 0
             margin_required = 0.0
             new_net_exposure = current_net_exposure - current_ticker_exposure
-            control_block_reason = "final_new_entry_trade_authority_not_met"
+            control_block_reason = "final_contract_authority_not_met"
 
     if current_lots == 0 and target_lots != 0:
         semantic_block_reason = _pm_new_entry_semantic_block_reason(position_risk.justification)
@@ -10012,7 +9965,7 @@ def portfolio_agent_futures(state: FundState):
                 final_entry_authority,
                 semantic_block_reason,
             )
-            control_diagnostics["final_new_entry_trade_authority"] = final_entry_authority
+            control_diagnostics["final_action_authority"] = final_entry_authority
             control_diagnostics["pm_semantic_consistency_gate"] = {
                 "passed": False,
                 "block_reason": semantic_block_reason,
@@ -10093,7 +10046,7 @@ def portfolio_agent_futures(state: FundState):
     pre_open_action = FuturesAction(recommendation_intent["action"])
     pre_open_lots = int(recommendation_intent["lots"])
 
-    plan_snapshot = _build_pre_open_plan_snapshot(
+    plan_snapshot = _build_pm_decision_context(
         target_lots=target_lots,
         current_price=current_price,
         position_ratio=position_risk.optimal_position_ratio,
@@ -10116,8 +10069,6 @@ def portfolio_agent_futures(state: FundState):
     plan_snapshot["current_net_exposure"] = float(current_net_exposure)
     plan_snapshot["current_ticker_exposure"] = float(current_ticker_exposure)
     plan_snapshot["projected_net_exposure"] = float(new_net_exposure)
-    plan_snapshot["tradable_lots_if_executed_now"] = int(lots_to_trade)
-    plan_snapshot["tradable_lots_reason"] = lots_to_trade_reason
     plan_snapshot["max_position_ratio_after_performance"] = float(max_position_ratio)
     plan_snapshot["analyst_signal_combo"] = list(signal_combo)
     plan_snapshot["adaptive_fusion"] = fusion_context
@@ -10186,7 +10137,7 @@ def portfolio_agent_futures(state: FundState):
         opportunity_scorecard=opportunity_scorecard,
         market_confirmation=market_confirmation,
         alpha_setup_action_values=alpha_setup_action_values,
-        execution_plan=plan_snapshot.get("execution_plan"),
+        execution_contract_fields=plan_snapshot,
     )
     plan_snapshot["release_block_diagnostics"] = _build_release_block_diagnostics(
         ticker=ticker,
@@ -10246,28 +10197,28 @@ def portfolio_agent_futures(state: FundState):
         if str(row.get("policy_type") or "") == "tail_loss_sentinel"
     ]
     if target_lots == 0:
-        pm_decision_layer = "no_trade"
+        pm_decision_state = "no_opportunity"
     elif alpha_protect_records:
-        pm_decision_layer = "deployable_alpha"
+        pm_decision_state = "tradeable_candidate"
     elif abs(target_lots) < abs(current_lots):
-        pm_decision_layer = "risk_reduction"
+        pm_decision_state = "risk_reduction_candidate"
     elif current_lots == 0 and target_lots != 0:
-        pm_decision_layer = "tradeable_setup"
+        pm_decision_state = "probe_candidate"
     elif abs(target_lots) > abs(current_lots):
-        pm_decision_layer = "tradeable_setup"
+        pm_decision_state = "probe_candidate"
     else:
-        pm_decision_layer = "direction_only"
+        pm_decision_state = "watch_for_trigger"
     scorecard_target_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
     scorecard_side = (
         opportunity_scorecard.get(scorecard_target_side)
         if scorecard_target_side in {"long", "short"} and isinstance(opportunity_scorecard.get(scorecard_target_side), dict)
         else {}
     )
-    scorecard_layer = str(scorecard_side.get("final_layer") or "").lower()
-    if scorecard_layer in {"deployable_alpha", "tradeable_setup", "direction_only", "no_trade"}:
-        if pm_decision_layer not in {"risk_reduction", "no_trade"}:
-            pm_decision_layer = scorecard_layer
-    plan_snapshot["pm_decision_layer"] = pm_decision_layer
+    scorecard_state = str(scorecard_side.get("final_state") or "").lower()
+    if scorecard_state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger", "no_opportunity"}:
+        if pm_decision_state not in {"risk_reduction_candidate", "no_opportunity"}:
+            pm_decision_state = scorecard_state
+    plan_snapshot["pm_decision_state"] = pm_decision_state
     plan_snapshot["research_memory_maturity"] = {
         "candidate_hypothesis_count": pm_learning_audit.get("candidate_hypothesis_count", 0),
         "validated_hypothesis_count": pm_learning_audit.get("validated_hypothesis_count", 0),
@@ -10305,7 +10256,7 @@ def portfolio_agent_futures(state: FundState):
         "scope_keys": [
             "ticker",
             "side",
-            "signal_template",
+            "setup_type",
             "horizon_class",
             "market_regime",
             "data_combination",
@@ -10375,7 +10326,8 @@ def portfolio_agent_futures(state: FundState):
             f"{position_risk.justification}\n"
             f"[Pre-open target plan: target_lots={target_lots}, "
             f"target_position_ratio={position_risk.optimal_position_ratio:.2%}, "
-            f"tradable_lots_if_executed_now={lots_to_trade} ({lots_to_trade_reason}), "
+            f"lots_delta={target_lots - current_lots}, "
+            f"reason={lots_to_trade_reason or 'target_plan'}, "
             f"recommendation_action={pre_open_action.value}, recommendation_lots={pre_open_lots}]"
             + (f"\n{cooling_period_note}" if cooling_period_note else "")
         ),
@@ -10549,3 +10501,12 @@ def calculate_position_ratio_with_balance(
         final_ratio = 0
 
     return final_ratio, direction
+
+
+
+
+
+
+
+
+

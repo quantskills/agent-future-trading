@@ -1,4 +1,4 @@
-[
+﻿[
   {
     "artifact_type": "AnalystSignalArtifact",
     "header": {
@@ -20,7 +20,7 @@
     "payload": {
       "signal": "Bullish",
       "horizon_class": "short",
-      "template_name": "breakout_continuation",
+      "setup_type": "breakout_continuation",
       "business_quality_score": 0.72
     }
   },
@@ -93,7 +93,10 @@
       "validation_errors": []
     },
     "payload": {
-      "pre_open_plan": {
+      "final_action_contract": {
+        "contract_version": "agentquant.final_action.v1",
+        "contract_type": "strategy",
+        "final_action": "open_real",
         "target_position_ratio": 0.08,
         "decision_horizon": "medium"
       },
@@ -192,7 +195,7 @@
     "payload": {
       "ticker": "BU",
       "side": "long",
-      "signal_template": "breakout_continuation",
+      "setup_type": "breakout_continuation",
       "realized_pnl": 1200,
       "attribution_status": "complete"
     }
@@ -248,3 +251,5 @@
     }
   }
 ]
+
+

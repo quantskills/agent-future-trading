@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Classify why an exploration/probe happened."""
 
@@ -21,14 +21,14 @@ def classify_exploration_intent(final_action_contract: Dict[str, Any]) -> str:
         return "unknown"
     authority = str(final_action_contract.get("authority_type") or "")
     reasons = " ".join(_reason_codes(final_action_contract)).lower()
-    if authority not in {"exploration_probe", "probe_only", "watchlist_only", "direction_only"} and "probe" not in reasons:
+    if authority not in {"exploration_probe", "probe_only", "watchlist_only"} and "probe" not in reasons:
         return "not_exploration"
     if "positive_candidate" in reasons or "alpha_promotion" in reasons:
         return "positive_alpha_promotion"
     if "negative_revalidate" in reasons or "tail_loss" in reasons:
         return "negative_setup_revalidation"
-    if "shadow" in reasons or authority in {"watchlist_only", "direction_only"}:
-        return "shadow_no_trade_observation"
+    if "counterfactual" in reasons or authority == "watchlist_only":
+        return "counterfactual_no_trade_observation"
     if "execution" in reasons or "timing" in reasons or "vwap" in reasons:
         return "execution_timing_experiment"
     if "new_setup" in reasons or authority in {"exploration_probe", "probe_only"}:
@@ -42,3 +42,5 @@ def summarize_exploration_intents(contracts: Iterable[Dict[str, Any]]) -> Dict[s
         intent = classify_exploration_intent(contract)
         summary[intent] = summary.get(intent, 0) + 1
     return summary
+
+

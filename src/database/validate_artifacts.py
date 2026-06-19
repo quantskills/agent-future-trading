@@ -20,7 +20,7 @@ ARTIFACT_TABLES = {
     "futures_recommendation": ["signal_snapshot", "audit_payload"],
     "futures_transactions": ["audit_payload", "llm_prompt"],
     "signal": ["llm_prompt", "artifact_json"],
-    "signal_context_history": ["analyst_signals", "market_confirmation", "pre_open_plan"],
+    "signal_context_history": ["analyst_signals", "market_confirmation", "final_action_contract"],
     "reviewer_llm_notes": ["raw_prompt", "raw_response", "payload"],
 }
 

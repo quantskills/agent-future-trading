@@ -60,7 +60,7 @@ def business_quality_position_gate(
                 "agent_name": getattr(signal, "agent_name", ""),
                 "signal": signal_text,
                 "business_quality_score": score,
-                "template_name": getattr(signal, "template_name", "unknown"),
+                "setup_type": getattr(signal, "setup_type", "unknown"),
                 "primary_business_driver": getattr(signal, "primary_business_driver", ""),
                 "counter_evidence": getattr(signal, "counter_evidence", ""),
             }
@@ -101,3 +101,4 @@ def business_quality_position_gate(
             diagnostics,
         )
     return position_ratio, ["business_quality_deployable"], [], diagnostics
+

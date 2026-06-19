@@ -116,11 +116,9 @@ def _build_no_fundamental_data_signal(
         horizon_class="medium",
         analyst_horizon="medium",
         expected_horizon_days=0,
-        horizon_days=0,
         market_regime="data_gap",
         trend_stage="data_gap",
-        trigger_type="none",
-        entry_type="hold",
+        setup_type="data_unavailable_no_trade",
         data_freshness="missing",
         evidence_quality="low",
         business_quality_score=0.0,
@@ -128,7 +126,7 @@ def _build_no_fundamental_data_signal(
         data_coverage_score=0.0,
         tradeability_reason="local Finoview fundamental data unavailable",
         opportunity_type="no_trade",
-        opportunity_layer="no_trade",
+        opportunity_state="no_opportunity",
         setup_quality_score=0.0,
         entry_quality="poor",
         setup_quality_notes=["fundamental_data_unavailable"],
@@ -142,7 +140,7 @@ def _build_no_fundamental_data_signal(
         would_change_view_if="fresh local Finoview fundamental fields become available before the decision cutoff",
         neutral_opportunity_bucket="evidence_gap",
         neutral_trigger_condition="fresh fundamental evidence plus short-timing confirmation",
-        neutral_shadow_side="flat",
+        counterfactual_side="flat",
         neutral_watchlist_priority="none",
         do_not_trade_reason="fundamental_data_unavailable",
         metadata={
@@ -538,8 +536,8 @@ def fundamental_agent(state: FundState):
     signal.expected_horizon_days = signal.expected_horizon_days or 5
     signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
-    signal.trigger_type = signal.trigger_type if signal.trigger_type != "unknown" else "fundamental_anchor"
-    signal.entry_type = signal.entry_type if signal.entry_type != "unknown" else "direction_anchor"
+    signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else "fundamental_timing_setup"
+    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_fundamental_data_usage(
         ticker=ticker,
         trading_date=trading_date,
@@ -599,7 +597,7 @@ def fundamental_agent(state: FundState):
     signal.justification += (
         f"\n[Fundamental context: sector={fundamental_context.get('sector')}; "
         f"tradeability={fundamental_context.get('tradeability')}; llm_path={llm_path}; "
-        f"business_quality={signal.business_quality_score:.2f}; template={signal.template_name}]"
+        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
     )
 
     signal.justification = sanitize_visible_text(signal.justification)

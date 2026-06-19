@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sqlite3
 from dotenv import load_dotenv
 from pathlib import Path
@@ -44,6 +44,111 @@ def _ensure_columns(cursor: sqlite3.Cursor, table_name: str, column_defs: dict) 
     for column_name, column_sql in column_defs.items():
         if column_name not in existing:
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+
+def _quote_identifier(identifier: str) -> str:
+    if not identifier.replace("_", "").isalnum():
+        raise ValueError(f"Unsafe SQLite identifier: {identifier!r}")
+    return f'"{identifier}"'
+
+
+def _migrate_column_value(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    source_column: str,
+    target_column: str,
+) -> None:
+    columns = _get_column_info(cursor, table_name)
+    if source_column not in columns or target_column not in columns:
+        return
+    table_sql = _quote_identifier(table_name)
+    source_sql = _quote_identifier(source_column)
+    target_sql = _quote_identifier(target_column)
+    cursor.execute(
+        f"""
+        UPDATE {table_sql}
+        SET {target_sql} = COALESCE(NULLIF({target_sql}, ''), {source_sql})
+        WHERE {source_sql} IS NOT NULL AND {source_sql} != ''
+        """
+    )
+
+
+def _drop_columns(cursor: sqlite3.Cursor, table_name: str, column_names: list[str]) -> None:
+    if not _table_exists(cursor, table_name):
+        return
+    table_sql = _quote_identifier(table_name)
+    for column_name in column_names:
+        columns = _get_column_info(cursor, table_name)
+        if column_name not in columns:
+            continue
+        cursor.execute(f"ALTER TABLE {table_sql} DROP COLUMN {_quote_identifier(column_name)}")
+
+
+def _migrate_and_drop_columns(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    migrations: dict[str, str],
+    drop_only: list[str] | None = None,
+) -> None:
+    if not _table_exists(cursor, table_name):
+        return
+    for source_column, target_column in migrations.items():
+        _migrate_column_value(cursor, table_name, source_column, target_column)
+    _drop_columns(cursor, table_name, list(migrations.keys()) + list(drop_only or []))
+
+
+def _migrate_signal_template_performance_table(cursor: sqlite3.Cursor) -> None:
+    """Move the old signal-template performance table into setup_type_performance."""
+    old_table = "signal_template_performance"
+    new_table = "setup_type_performance"
+    if not _table_exists(cursor, old_table) or not _table_exists(cursor, new_table):
+        return
+    old_columns = _get_column_info(cursor, old_table)
+    new_columns = _get_column_info(cursor, new_table)
+    if not old_columns or not new_columns:
+        cursor.execute(f"DROP TABLE IF EXISTS {_quote_identifier(old_table)}")
+        return
+
+    def source_expr(target_column: str) -> str:
+        if target_column == "id":
+            if "id" in old_columns:
+                return "COALESCE(NULLIF(id, ''), lower(hex(randomblob(16))))"
+            return "lower(hex(randomblob(16)))"
+        if target_column == "setup_type":
+            if "signal_template" in old_columns:
+                return "COALESCE(NULLIF(signal_template, ''), 'generic_trade_setup')"
+            if "setup_type" in old_columns:
+                return "COALESCE(NULLIF(setup_type, ''), 'generic_trade_setup')"
+            return "'generic_trade_setup'"
+        if target_column == "config_id":
+            return "COALESCE(NULLIF(config_id, ''), 'unknown')" if "config_id" in old_columns else "'unknown'"
+        if target_column == "ticker":
+            return "COALESCE(NULLIF(ticker, ''), '*')" if "ticker" in old_columns else "'*'"
+        if target_column == "side":
+            return "COALESCE(NULLIF(side, ''), '*')" if "side" in old_columns else "'*'"
+        if target_column in {"horizon_class", "market_regime"}:
+            return (
+                f"COALESCE(NULLIF({target_column}, ''), 'unknown')"
+                if target_column in old_columns
+                else "'unknown'"
+            )
+        if target_column == "last_updated":
+            return "COALESCE(NULLIF(last_updated, ''), datetime('now'))" if "last_updated" in old_columns else "datetime('now')"
+        if target_column in old_columns:
+            return _quote_identifier(target_column)
+        return "NULL"
+
+    insert_columns = list(new_columns.keys())
+    column_sql = ", ".join(_quote_identifier(col) for col in insert_columns)
+    value_sql = ", ".join(source_expr(col) for col in insert_columns)
+    cursor.execute(
+        f"""
+        INSERT OR IGNORE INTO {_quote_identifier(new_table)} ({column_sql})
+        SELECT {value_sql}
+        FROM {_quote_identifier(old_table)}
+        """
+    )
+    cursor.execute(f"DROP TABLE IF EXISTS {_quote_identifier(old_table)}")
 
 
 def _json_artifact_columns(prefix: str) -> dict:
@@ -439,19 +544,19 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             ticker TEXT NOT NULL,
             side TEXT NOT NULL,
             signal_combo TEXT NOT NULL DEFAULT '[]',
-            signal_template TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
             horizon_class TEXT DEFAULT 'unknown',
             expected_horizon_days INTEGER DEFAULT 0,
             market_regime TEXT DEFAULT 'unknown',
             price_stage TEXT DEFAULT 'unknown',
             price_percentile REAL,
-            trigger_type TEXT DEFAULT 'unknown',
-            entry_type TEXT DEFAULT 'unknown',
+            entry_trigger TEXT DEFAULT '',
+            action_name TEXT DEFAULT 'unknown',
             invalidation_level REAL,
             target_return REAL,
             analyst_signals_json TEXT,
             market_confirmation_json TEXT,
-            pre_open_plan_json TEXT,
+            final_action_contract_json TEXT,
             outcome_status TEXT DEFAULT 'pending',
             created_at TEXT NOT NULL,
             FOREIGN KEY (config_id) REFERENCES config(id)
@@ -460,12 +565,12 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         '''
-        CREATE TABLE IF NOT EXISTS signal_template_performance (
+        CREATE TABLE IF NOT EXISTS setup_type_performance (
             id TEXT PRIMARY KEY,
             config_id TEXT NOT NULL,
             ticker TEXT NOT NULL,
             side TEXT NOT NULL,
-            signal_template TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
             horizon_class TEXT DEFAULT 'unknown',
             market_regime TEXT DEFAULT 'unknown',
             sample_count INTEGER DEFAULT 0,
@@ -478,7 +583,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             last_updated TEXT NOT NULL,
             valid_until TEXT,
             payload_json TEXT,
-            UNIQUE(config_id, ticker, side, signal_template, horizon_class, market_regime),
+            UNIQUE(config_id, ticker, side, setup_type, horizon_class, market_regime),
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
@@ -514,7 +619,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             config_id TEXT NOT NULL,
             ticker TEXT NOT NULL DEFAULT '*',
             side TEXT NOT NULL DEFAULT '*',
-            signal_template TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
             horizon_class TEXT NOT NULL DEFAULT '*',
             market_regime TEXT NOT NULL DEFAULT '*',
             policy_type TEXT NOT NULL,
@@ -529,7 +634,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             valid_until TEXT,
             payload_json TEXT,
             active INTEGER DEFAULT 1,
-            UNIQUE(config_id, ticker, side, signal_template, horizon_class, market_regime, policy_type),
+            UNIQUE(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type),
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
@@ -568,7 +673,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             "target_return": "REAL",
             **_json_artifact_columns("analyst_signals"),
             **_json_artifact_columns("market_confirmation"),
-            **_json_artifact_columns("pre_open_plan"),
+            **_json_artifact_columns("final_action_contract"),
         },
     )
     _ensure_columns(
@@ -667,7 +772,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             trading_date TEXT NOT NULL,
             ticker TEXT NOT NULL,
             side TEXT NOT NULL DEFAULT 'flat',
-            signal_template TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
             horizon_class TEXT NOT NULL DEFAULT '*',
             market_regime TEXT NOT NULL DEFAULT '*',
             recommendation_id TEXT,
@@ -706,7 +811,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             data_combo TEXT NOT NULL DEFAULT 'unknown',
             scope_key TEXT NOT NULL,
             lifecycle_state TEXT NOT NULL DEFAULT 'candidate',
-            action_bias TEXT NOT NULL DEFAULT 'watchlist',
+            profile_state_hint TEXT NOT NULL DEFAULT 'profile_watchlist',
             sample_count INTEGER DEFAULT 0,
             trade_count INTEGER DEFAULT 0,
             no_trade_count INTEGER DEFAULT 0,
@@ -760,7 +865,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             holding_days INTEGER DEFAULT 0,
             outcome_label TEXT DEFAULT 'observed',
             setup_quality_score REAL DEFAULT 0,
-            opportunity_layer TEXT DEFAULT 'unknown',
+            opportunity_state TEXT DEFAULT 'watch_for_trigger',
             evidence_json TEXT,
             result_json TEXT,
             created_at TEXT NOT NULL,
@@ -788,7 +893,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             reward_mean REAL DEFAULT 0,
             win_rate REAL DEFAULT 0,
             confidence_score REAL DEFAULT 0,
-            policy_hint TEXT DEFAULT 'observe',
+            action_preference TEXT DEFAULT '',
             max_position_impact REAL DEFAULT 0,
             last_sample_date TEXT,
             created_at TEXT NOT NULL,
@@ -852,12 +957,12 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             config_id TEXT NOT NULL,
             ticker TEXT NOT NULL DEFAULT '*',
             side TEXT NOT NULL DEFAULT '*',
-            signal_template TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
             horizon_class TEXT NOT NULL DEFAULT '*',
             policy_action TEXT NOT NULL,
             multiplier REAL DEFAULT 1,
             confidence_score REAL DEFAULT 0,
-            trigger_type TEXT,
+            event_type TEXT,
             sample_count INTEGER DEFAULT 0,
             reason TEXT,
             source_trading_date TEXT,
@@ -866,7 +971,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             valid_until TEXT,
             active INTEGER DEFAULT 1,
             payload_json TEXT,
-            UNIQUE(config_id, ticker, side, signal_template, horizon_class, policy_action),
+            UNIQUE(config_id, ticker, side, setup_type, horizon_class, policy_action),
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
@@ -902,7 +1007,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             ticker TEXT NOT NULL,
             side TEXT NOT NULL,
             sector TEXT DEFAULT 'unknown',
-            signal_template TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
             signal_combo TEXT NOT NULL DEFAULT '*',
             horizon_class TEXT DEFAULT 'unknown',
             market_regime TEXT DEFAULT 'unknown',
@@ -918,7 +1023,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             lesson_text TEXT,
             payload_json TEXT,
             created_at TEXT NOT NULL,
-            UNIQUE(config_id, ticker, side, open_date, close_date, signal_template),
+            UNIQUE(config_id, ticker, side, open_date, close_date, setup_type),
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
@@ -932,26 +1037,26 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             ticker TEXT NOT NULL,
             side TEXT NOT NULL,
             sector TEXT DEFAULT 'unknown',
-            signal_template TEXT NOT NULL DEFAULT '*',
+            setup_type TEXT NOT NULL DEFAULT '*',
             signal_combo TEXT NOT NULL DEFAULT '*',
             horizon_class TEXT DEFAULT 'unknown',
             market_regime TEXT DEFAULT 'unknown',
             opportunity_type TEXT DEFAULT 'unknown',
-            opportunity_layer TEXT DEFAULT 'direction_only',
+            opportunity_state TEXT DEFAULT 'watch_for_trigger',
             candidate_lots INTEGER DEFAULT 1,
-            shadow_lots INTEGER DEFAULT 1,
-            shadow_entry_price REAL,
+            counterfactual_lots INTEGER DEFAULT 1,
+            counterfactual_entry_price REAL,
             pm_reason TEXT,
             auditor_reason TEXT,
             execution_reason TEXT,
             evidence_summary TEXT,
             status TEXT DEFAULT 'open',
             classification TEXT DEFAULT 'pending',
-            shadow_results_json TEXT,
+            counterfactual_results_json TEXT,
             payload_json TEXT,
             created_at TEXT NOT NULL,
             last_reviewed_at TEXT,
-            UNIQUE(config_id, trading_date, ticker, side, signal_template),
+            UNIQUE(config_id, trading_date, ticker, side, setup_type),
             FOREIGN KEY (config_id) REFERENCES config(id)
         )
         '''
@@ -1012,11 +1117,12 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     _ensure_columns(
         cursor,
-        "signal_template_performance",
+        "setup_type_performance",
         {
             "last_sample_date": "TEXT",
         },
     )
+    _migrate_signal_template_performance_table(cursor)
     _ensure_columns(
         cursor,
         "analyst_performance",
@@ -1032,6 +1138,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             "active": "INTEGER DEFAULT 1",
             "max_position_impact": "REAL DEFAULT 0",
             "last_sample_date": "TEXT",
+            "profile_state_hint": "TEXT DEFAULT 'profile_watchlist'",
         },
     )
     _ensure_columns(
@@ -1056,27 +1163,97 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             "payload_json": "TEXT",
             "active": "INTEGER DEFAULT 1",
             "max_position_impact": "REAL DEFAULT 0",
+            "action_preference": "TEXT DEFAULT ''",
         },
+    )
+    _migrate_and_drop_columns(
+        cursor,
+        "signal_context_history",
+        {
+            "final_action_context_json": "final_action_contract_json",
+            "final_action_context_artifact_path": "final_action_contract_artifact_path",
+            "final_action_context_sha256": "final_action_contract_sha256",
+            "final_action_context_size": "final_action_contract_size",
+            "final_action_context_summary_json": "final_action_contract_summary_json",
+            "signal_template": "setup_type",
+            "trigger_type": "entry_trigger",
+            "entry_type": "action_name",
+        },
+        drop_only=[
+            "pre_open_plan_json",
+            "target_lots_estimate",
+            "current_trade_setup",
+            "pm_layer_hint",
+        ],
+    )
+    _migrate_and_drop_columns(
+        cursor,
+        "provisional_policy_state",
+        {
+            "signal_template": "setup_type",
+            "trigger_type": "event_type",
+        },
+    )
+    _migrate_and_drop_columns(cursor, "adaptive_policy_state", {"signal_template": "setup_type"})
+    _migrate_and_drop_columns(cursor, "capital_deployment_state", {"signal_template": "setup_type"})
+    _migrate_and_drop_columns(cursor, "trade_episode_memory", {"signal_template": "setup_type"})
+    _migrate_and_drop_columns(cursor, "no_trade_opportunity_memory", {"signal_template": "setup_type"})
+    _migrate_and_drop_columns(
+        cursor,
+        "alpha_setup_action_value",
+        {"policy_hint": "action_preference"},
+        drop_only=[
+            "deprecated_policy_hint_mirror",
+            "action_bias",
+            "deprecated_action_bias_mirror",
+        ],
+    )
+    _migrate_and_drop_columns(
+        cursor,
+        "alpha_setup_profile",
+        {"action_bias": "profile_state_hint"},
+        drop_only=[
+            "policy_hint",
+            "deprecated_action_bias_mirror",
+            "deprecated_policy_hint_mirror",
+        ],
     )
     _ensure_columns(
         cursor,
         "no_trade_opportunity_memory",
         {
             "opportunity_type": "TEXT DEFAULT 'unknown'",
-            "opportunity_layer": "TEXT DEFAULT 'direction_only'",
+            "opportunity_state": "TEXT DEFAULT 'watch_for_trigger'",
             "candidate_lots": "INTEGER DEFAULT 1",
-            "shadow_lots": "INTEGER DEFAULT 1",
-            "shadow_entry_price": "REAL",
+            "counterfactual_lots": "INTEGER DEFAULT 1",
+            "counterfactual_entry_price": "REAL",
             "pm_reason": "TEXT",
             "auditor_reason": "TEXT",
             "execution_reason": "TEXT",
             "evidence_summary": "TEXT",
             "status": "TEXT DEFAULT 'open'",
             "classification": "TEXT DEFAULT 'pending'",
-            "shadow_results_json": "TEXT",
+            "counterfactual_results_json": "TEXT",
             "last_reviewed_at": "TEXT",
             **_json_artifact_columns("payload"),
         },
+    )
+    _ensure_columns(
+        cursor,
+        "alpha_setup_sample",
+        {
+            "opportunity_state": "TEXT DEFAULT 'watch_for_trigger'",
+        },
+    )
+    _migrate_and_drop_columns(
+        cursor,
+        "alpha_setup_sample",
+        {"opportunity_layer": "opportunity_state"},
+    )
+    _migrate_and_drop_columns(
+        cursor,
+        "no_trade_opportunity_memory",
+        {"opportunity_layer": "opportunity_state"},
     )
     _ensure_columns(cursor, "exploratory_hypothesis", _json_artifact_columns("payload"))
     cursor.execute(
@@ -1089,7 +1266,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_template_perf_lookup "
-        "ON signal_template_performance(config_id, ticker, side, signal_template)"
+        "ON setup_type_performance(config_id, ticker, side, setup_type)"
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_analyst_perf_lookup "
@@ -1132,7 +1309,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
         "ON no_trade_opportunity_memory(config_id, ticker, sector, horizon_class, market_regime, trading_date)"
     )
     cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_no_trade_opportunity_shadow "
+        "CREATE INDEX IF NOT EXISTS idx_no_trade_opportunity_counterfactual "
         "ON no_trade_opportunity_memory(config_id, status, classification, trading_date)"
     )
     cursor.execute(
@@ -1215,7 +1392,7 @@ def init_database():
             artifact_json TEXT,
             business_quality_score REAL DEFAULT 0,
             horizon_class TEXT DEFAULT 'unknown',
-            template_name TEXT DEFAULT 'unknown',
+            setup_type TEXT DEFAULT 'unknown',
             FOREIGN KEY (portfolio_id) REFERENCES portfolio(id)
         )
         ''')
@@ -1226,10 +1403,15 @@ def init_database():
                 "artifact_json": "TEXT",
                 "business_quality_score": "REAL DEFAULT 0",
                 "horizon_class": "TEXT DEFAULT 'unknown'",
-                "template_name": "TEXT DEFAULT 'unknown'",
+                "setup_type": "TEXT DEFAULT 'unknown'",
                 **_text_artifact_columns("llm_prompt"),
                 **_json_artifact_columns("artifact_json"),
             },
+        )
+        _migrate_and_drop_columns(
+            cursor,
+            "signal",
+            {"setup_type": "setup_type"},
         )
 
         # Create portfolio_forced_settlement table
@@ -1371,3 +1553,6 @@ def init_database():
 if __name__ == "__main__":
     init_database()
     print(f"Database initialized at {DB_PATH}")
+
+
+

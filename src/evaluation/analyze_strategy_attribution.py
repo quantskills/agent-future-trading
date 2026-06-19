@@ -503,8 +503,8 @@ def _release_block_summary_from_recommendations(recommendations: List[Dict[str, 
             evidence_counts["current_evidence_present"] += 1
         if evidence.get("invalidation_present"):
             evidence_counts["invalidation_present"] += 1
-        if evidence.get("direction_only_block"):
-            evidence_counts["direction_only_block"] += 1
+        if evidence.get("watch_for_trigger_block"):
+            evidence_counts["watch_for_trigger_block"] += 1
         if len(samples) < 12:
             samples.append({
                 "trading_date": _normalize_date(recommendation.get("trading_date")),
@@ -512,7 +512,7 @@ def _release_block_summary_from_recommendations(recommendations: List[Dict[str, 
                 "primary_block_reason": primary_reason,
                 "blocking_category": category,
                 "preferred_side": evidence.get("preferred_side"),
-                "preferred_side_layer": evidence.get("preferred_side_layer"),
+                "preferred_side_state": evidence.get("preferred_side_state"),
                 "current_evidence_present": bool(evidence.get("current_evidence_present")),
                 "invalidation_present": bool(evidence.get("invalidation_present")),
             })

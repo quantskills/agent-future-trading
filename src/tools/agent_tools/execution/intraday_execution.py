@@ -169,13 +169,13 @@ def select_intraday_execution(
     normalized_signal_bars = _normalize_bars(signal_bars, cutoff_datetime=cutoff_datetime)
     normalized_execution_bars = _normalize_bars(execution_bars, cutoff_datetime=cutoff_datetime)
     min_volume = float(config.get("min_execution_volume", 0) or 0)
-    execution_plan = (
-        decision_context.get("execution_plan")
-        if isinstance(decision_context.get("execution_plan"), dict)
+    execution_contract = (
+        decision_context.get("execution_contract")
+        if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
     execution_profile = _execution_profile_from_context(decision_context)
-    can_execute_without_intraday_trigger = bool(execution_plan.get("can_execute_without_intraday_trigger"))
+    can_execute_without_intraday_trigger = bool(execution_contract.get("can_execute_without_intraday_trigger"))
 
     if not normalized_execution_bars:
         return IntradayExecutionSelection(
@@ -205,7 +205,7 @@ def select_intraday_execution(
             features={
                 "execution_mode": "immediate",
                 "execution_profile": execution_profile,
-                "execution_plan": execution_plan,
+                "execution_contract": execution_contract,
                 "execution_bars": len(normalized_execution_bars),
             },
             source=BasePriceSource.INTRADAY_FIRST_VALID_1M_OPEN,
@@ -327,7 +327,7 @@ def select_intraday_execution(
             features={
                 "execution_mode": execution_mode,
                 "execution_profile": execution_profile,
-                "execution_plan": execution_plan,
+                "execution_contract": execution_contract,
                 "action": action_value,
                 "signal_close": signal_close,
                 "vwap": vwap_value,
@@ -353,7 +353,7 @@ def select_intraday_execution(
         strategy_memory=strategy_memory,
         contextual_diag=contextual_diag,
         execution_profile=execution_profile,
-        execution_plan=execution_plan,
+        execution_contract=execution_contract,
     )
     if fallback_selection is not None:
         return fallback_selection
@@ -370,7 +370,7 @@ def select_intraday_execution(
             "finalize_untriggered": finalize_untriggered,
             "contextual_rule_calibration": contextual_diag,
             "execution_profile": execution_profile,
-            "execution_plan": execution_plan,
+            "execution_contract": execution_contract,
         },
     )
 
@@ -387,13 +387,13 @@ def _confirmed_memory_fallback_selection(
     strategy_memory: Optional[Dict[str, Any]],
     contextual_diag: Optional[Dict[str, Any]] = None,
     execution_profile: str = "breakout",
-    execution_plan: Optional[Dict[str, Any]] = None,
+    execution_contract: Optional[Dict[str, Any]] = None,
 ) -> Optional[IntradayExecutionSelection]:
     """Allow proven templates to execute on VWAP support when breakout is narrowly absent."""
     if not bool(config.get("allow_confirmed_memory_vwap_fallback", False)):
         return None
-    execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
-    if not bool(execution_plan.get("allow_confirmed_memory_vwap_fallback", False)):
+    execution_contract = execution_contract if isinstance(execution_contract, dict) else {}
+    if not bool(execution_contract.get("allow_confirmed_memory_vwap_fallback", False)):
         return None
     if action_value not in _BUY_LIKE_ACTIONS | _SELL_LIKE_ACTIONS:
         return None
@@ -453,10 +453,10 @@ def _confirmed_memory_fallback_selection(
             features={
                 "execution_mode": "confirmed_memory_vwap_fallback",
                 "execution_profile": execution_profile,
-                "execution_plan": execution_plan,
+                "execution_contract": execution_contract,
                 "fallback_authorized_by_pm": True,
                 "fallback_authority_boundary": (
-                    "confirmed_memory_vwap_fallback_requires_pm_execution_plan_flag_"
+                    "confirmed_memory_vwap_fallback_requires_pm_execution_contract_flag_"
                     "plus_protected_or_deployable_memory_market_confirmation_and_chase_check"
                 ),
                 "action": action_value,
@@ -553,12 +553,12 @@ def _side_from_action(action_value: str) -> str:
 
 
 def _execution_profile_from_context(decision_context: Dict[str, Any]) -> str:
-    execution_plan = (
-        decision_context.get("execution_plan")
-        if isinstance(decision_context.get("execution_plan"), dict)
+    execution_contract = (
+        decision_context.get("execution_contract")
+        if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
-    profile = str(execution_plan.get("execution_profile") or decision_context.get("execution_profile") or "breakout").lower()
+    profile = str(execution_contract.get("execution_profile") or decision_context.get("execution_profile") or "breakout").lower()
     allowed = {"breakout", "pullback", "vwap_confirmed", "event_immediate", "exit_immediate", "hold"}
     return profile if profile in allowed else "breakout"
 

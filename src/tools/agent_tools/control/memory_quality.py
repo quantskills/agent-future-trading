@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Classify what retrieved memory is allowed to do.
 
 This is not a new trading gate. It prevents memory/RAG evidence from being
 misrepresented: exact real state can support sizing decisions, while similar
-or shadow evidence remains a prior.
+or counterfactual evidence remains a prior.
 """
 
 from typing import Any, Dict
@@ -26,8 +26,8 @@ def classify_memory_quality(memory_payload: Dict[str, Any]) -> str:
         return "stale_or_conflicted_memory"
     if _truthy(memory_payload.get("is_stale")) or _truthy(memory_payload.get("conflicted_memory")):
         return "stale_or_conflicted_memory"
-    if _truthy(memory_payload.get("shadow_prior_only")) or str(memory_payload.get("reward_source") or "") == "shadow":
-        return "shadow_prior"
+    if _truthy(memory_payload.get("counterfactual_prior_only")) or str(memory_payload.get("reward_source") or "") == "counterfactual":
+        return "counterfactual_prior"
 
     explicit = str(
         memory_payload.get("amplification_scope_quality")
@@ -49,7 +49,7 @@ def allowed_memory_uses(memory_quality: str) -> Dict[str, bool]:
         "can_support_scale": quality == "exact_real_state",
         "can_support_probe": quality in {"exact_real_state", "partial_real_state", "similar_sql_prior"},
         "can_inform_analysis": quality
-        in {"exact_real_state", "partial_real_state", "similar_sql_prior", "shadow_prior"},
+        in {"exact_real_state", "partial_real_state", "similar_sql_prior", "counterfactual_prior"},
         "audit_only": quality in {"stale_or_conflicted_memory", "unqualified"},
     }
 
@@ -57,3 +57,5 @@ def allowed_memory_uses(memory_quality: str) -> Dict[str, bool]:
 def classify_memory_payload(memory_payload: Dict[str, Any]) -> Dict[str, Any]:
     quality = classify_memory_quality(memory_payload)
     return {"memory_quality": quality, "allowed_uses": allowed_memory_uses(quality)}
+
+

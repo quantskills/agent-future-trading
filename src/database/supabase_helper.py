@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from graph.schema import AnalystSignal
@@ -242,7 +242,7 @@ class SupabaseDB(BaseDB):
                 'artifact_json': build_signal_artifact_payload(signal),
                 'business_quality_score': float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 'horizon_class': str(getattr(signal, "horizon_class", "unknown") or "unknown"),
-                'template_name': str(getattr(signal, "template_name", "unknown") or "unknown"),
+                'setup_type': str(getattr(signal, "setup_type", "unknown") or "unknown"),
             }
             
             response = self.client.table('signal').insert(data).execute()
@@ -256,3 +256,4 @@ class SupabaseDB(BaseDB):
 
 # Initialize global instance
 # db = SupabaseDB() 
+

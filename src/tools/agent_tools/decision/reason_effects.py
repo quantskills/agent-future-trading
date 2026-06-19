@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Shared reason-effect taxonomy for PM, Auditor, and Trader diagnostics.
 
@@ -28,14 +28,14 @@ HARD_BLOCK_REASONS = {
     "contract_expiry_hard_block",
     "future_data_contamination",
     "missing_pm_final_action_contract",
-    "final_new_entry_trade_authority_source_mismatch",
-    "final_new_entry_trade_authority_missing_or_not_met",
-    "final_new_entry_trade_authority_not_met",
-    "missing_final_new_entry_trade_authority",
-    "final_new_entry_trade_authority_watchlist_only",
-    "final_new_entry_trade_authority_real_entry_not_allowed",
-    "final_new_entry_trade_authority_direction_only_probe_block",
-    "final_new_entry_trade_authority_probe_lacks_current_evidence",
+    "final_contract_authority_source_mismatch",
+    "final_contract_authority_missing_or_not_met",
+    "final_contract_authority_not_met",
+    "missing_final_contract_authority",
+    "final_contract_authority_watchlist_only",
+    "final_contract_authority_real_entry_not_allowed",
+    "final_action_contract_watch_for_trigger_probe_block",
+    "final_contract_authority_probe_lacks_current_evidence",
     "position_budget_authority_not_met",
     "minimum_real_trade_margin_not_reachable",
     "minimum_real_trade_no_feasible_lot",
@@ -53,7 +53,7 @@ HARD_BLOCK_REASONS = {
 
 SOFT_LIMIT_REASONS = {
     "alpha_setup_open_action_value_missing",
-    "pm_direction_only_probe_cap",
+    "pm_watch_for_trigger_probe_cap",
     "single_high_quality_probe_only",
     "horizon_consistency_probe_cap",
     "market_confirmation_quality_gate",
@@ -106,7 +106,7 @@ SOFT_LIMIT_REASONS = {
     "static_side_cap",
     "protected_memory_evidence_rejected",
     "daily_tradeability_watchlist_only",
-    "pm_direction_only_not_tradeable",
+    "pm_watch_for_trigger_not_tradeable",
     "horizon_consistency_requires_short_timing",
     "minimum_new_entry_threshold",
     "real_probe_qualification_not_met",
@@ -199,11 +199,11 @@ WATCHLIST_REQUIRED_REASONS = {
     "pm_text_no_trade_blocks_new_entry",
     "pm_text_no_entry_trigger_blocks_new_entry",
     "pm_text_watchlist_only_blocks_new_entry",
-    "missing_final_new_entry_trade_authority",
-    "final_new_entry_trade_authority_watchlist_only",
-    "final_new_entry_trade_authority_real_entry_not_allowed",
-    "final_new_entry_trade_authority_direction_only_probe_block",
-    "final_new_entry_trade_authority_probe_lacks_current_evidence",
+    "missing_final_contract_authority",
+    "final_contract_authority_watchlist_only",
+    "final_contract_authority_real_entry_not_allowed",
+    "final_action_contract_watch_for_trigger_probe_block",
+    "final_contract_authority_probe_lacks_current_evidence",
     "daily_tradeability_watchlist_only",
     "real_probe_qualification_not_met",
 }
@@ -327,3 +327,5 @@ def reason_effect_summary(
             "must still pass current evidence and PM final authority"
         ),
     }
+
+

@@ -356,3 +356,25 @@
 （6）对齐策略归因报告到唯一合约与动作分账边界。
 修改了什么：`src/evaluation/analyze_strategy_attribution.py`、`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_strategy_attribution_report.py`。
 为什么改：让归因报告只读 `final_action_contract`、释放阻塞诊断和 `learning_used.alpha_setup_action_values`，不再从缺失字段补算交易事实，也不输出可被误解为 PM 规则或风控指令的弱侧建议。
+
+==========2026年06月19日========
+
+（1）收紧分析师条件触发句的结构化证据归一化。
+修改了什么：`src/tools/agent_tools/analysis/quality.py`、`src/llm/prompt.py`、`src/tests/test_agent_contracts.py`。
+为什么改：防止分析师把“如果/等待/需要确认后才交易”的未来条件写成 `trigger_valid=true` 和 `tradeable_candidate`；只有已有当前确认事实时，条件触发才可保持可交易，否则统一落到 `watch_for_trigger`，避免 PM 后续等待被误读成压死交易。
+
+（2）对齐配置注释到条件触发归一化边界。
+修改了什么：`src/config/portfolio_policy_catalog.yaml`。
+为什么改：明确 `direction_only_new_entry.allow_probe=true` 只是观察/候选语义，不是交易授权；等待确认类 pending 条件必须先归一化为 `watch_for_trigger + trigger_valid=false`，不能被配置注释误读为可交易 setup。
+
+（3）对齐主配置中文注释到当前分析师证据边界。
+修改了什么：`src/config/dev.yaml`。
+为什么改：在主配置入口明确“如果/等待/确认后才交易”属于 pending 条件，不能被当成当前触发或可交易候选；方向观点和等待触发不能开仓，只有当前触发成立且有失效边界的结构化证据才进入 PM 可交易候选链路。
+
+（4）统一运行时字段语义并切断旧字段读写入口。
+修改了什么：`src/tools/agent_tools/analysis/quality.py`、`src/tools/agent_tools/analysis/signal_fusion.py`、`src/agents/decision_team/portfolio_manager.py`、`src/agents/execution_team/trader.py`、`src/tools/agent_tools/research/alpha_setup.py`、`src/tools/agent_tools/research/reviewer_tools.py`、`src/tools/agent_tools/research/learning_contract.py`、`src/tools/agent_tools/research/neutral_accountability.py`、`src/database/sqlite_setup.py`、`src/database/sqlite_helper.py`、`src/evaluation/analyze_strategy_attribution.py`、`src/llm/prompt.py`、`src/config/dev.yaml`、`src/config/portfolio_policy_catalog.yaml`、`src/tests/test_unified_field_migration.py`、`src/tests/test_agent_contracts.py`、`src/tests/test_reviewer_learning.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：旧字段仍可能让分析师触发、PM 释放、Reviewer/Researcher 中性观察和学习输出出现第二套语义；本次把运行时统一到 `action_evidence_contract.trigger_valid`、`opportunity_state`、`action_preference`、`final_action_contract`，旧字段只允许在数据库迁移脚本和迁移测试中出现，避免旧字段继续驱动交易、复盘或学习。
+
+（5）把字段统一检查接入回测前验收和每日系统审计。
+修改了什么：`src/tools/agent_tools/control/unified_field_audit.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_unified_field_migration.py`、`src/tests/test_pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：让回测前 `structured_io` 静态扫描生产路径是否重新读写旧字段，让每日 `system_invariant_audit` 扫新生成推荐产物是否泄露旧字段键，避免字段统一只停留在单测而没有进入真实验收链路。

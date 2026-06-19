@@ -265,9 +265,10 @@ class BaseDB(ABC):
         config_id: str,
         ticker: str,
         side: Optional[str] = None,
-        signal_template: Optional[str] = None,
+        setup_type: Optional[str] = None,
         horizon_class: Optional[str] = None,
         trading_date=None,
     ) -> List[Dict[str, Any]]:
         """Get short-lived reviewer risk sentinels."""
         raise NotImplementedError
+

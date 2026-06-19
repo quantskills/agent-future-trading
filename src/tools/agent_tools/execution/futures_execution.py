@@ -1097,7 +1097,7 @@ class FuturesExecutionEngine:
             "execution_learning_type": "market_rule_or_execution_block",
             "turn_into_memory": True,
             "timing_strategy_question": (
-                "If same-scope shadow results later show missed alpha, test whether earlier entry, "
+                "If same-scope Counterfactual results later show missed alpha, test whether earlier entry, "
                 "pullback entry, or lower chase tolerance would have improved execution without using future data."
             ),
             "not_direction_evidence": True,
@@ -1194,3 +1194,4 @@ class FuturesExecutionEngine:
         if hasattr(value, "model_dump"):
             return value.model_dump()
         return dict(value)
+

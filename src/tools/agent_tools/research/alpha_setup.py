@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Alpha setup profile and action-value helpers.
 
@@ -92,15 +92,15 @@ def build_scope_key(
 def infer_setup_type(
     *,
     snapshot: Optional[Mapping[str, Any]] = None,
-    signal_template: Optional[str] = None,
+    setup_type: Optional[str] = None,
     opportunity_type: Optional[str] = None,
-    opportunity_layer: Optional[str] = None,
+    opportunity_state: Optional[str] = None,
 ) -> str:
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     raw_parts: List[str] = [
-        str(signal_template or ""),
+        str(setup_type or ""),
         str(opportunity_type or ""),
-        str(opportunity_layer or ""),
+        str(opportunity_state or ""),
     ]
     summary = (
         snapshot.get("pm_research_contract_summary")
@@ -109,7 +109,7 @@ def infer_setup_type(
     )
     raw_parts.extend([
         str(summary.get("primary_opportunity_type") or ""),
-        str(summary.get("primary_opportunity_layer") or ""),
+        str(summary.get("primary_opportunity_state") or ""),
     ])
     contracts = snapshot.get("trade_research_contracts") if isinstance(snapshot.get("trade_research_contracts"), Mapping) else {}
     for contract in contracts.values():
@@ -117,7 +117,7 @@ def infer_setup_type(
             continue
         raw_parts.extend([
             str(contract.get("opportunity_type") or ""),
-            str(contract.get("opportunity_layer") or ""),
+            str(contract.get("opportunity_state") or ""),
             str(contract.get("entry_trigger") or ""),
             str(contract.get("event_type") or ""),
             " ".join(str(item) for item in (contract.get("factor_focus") or []) if item),
@@ -127,11 +127,11 @@ def infer_setup_type(
         if not isinstance(payload, Mapping):
             continue
         raw_parts.extend([
-            str(payload.get("template_name") or ""),
-            str(payload.get("trigger_type") or ""),
-            str(payload.get("entry_type") or ""),
+            str(payload.get("setup_type") or ""),
+            str(payload.get("entry_trigger") or ""),
+            str(payload.get("action_name") or ""),
             str(payload.get("opportunity_type") or ""),
-            str(payload.get("opportunity_layer") or ""),
+            str(payload.get("opportunity_state") or ""),
             str(payload.get("entry_trigger") or ""),
             str(payload.get("event_type") or ""),
             str(payload.get("primary_business_driver") or ""),
@@ -142,16 +142,12 @@ def infer_setup_type(
     text = " ".join(raw_parts).lower()
     if any(token in text for token in ("news", "event", "catalyst")):
         return "news_event_setup"
-    if any(token in text for token in ("breakout", "trend", "continuation", "momentum")):
+    if any(token in text for token in ("breakout", "trend", "continuation", "momentum", "tradeable_candidate", "probe_candidate")):
         return "trend_breakout_setup"
     if any(token in text for token in ("fundamental", "basis", "inventory", "supply", "demand")):
         return "fundamental_timing_setup"
     if any(token in text for token in ("reversal", "mean", "range", "choppy")):
         return "range_reversal_setup"
-    if "deployable_alpha" in text:
-        return "deployable_alpha_setup"
-    if "tradeable_setup" in text:
-        return "tradeable_setup"
     return "generic_trade_setup"
 
 
@@ -174,22 +170,18 @@ def classify_action(action: Any, *, target_lots: int = 0, current_lots: int = 0)
     return "observe"
 
 
-SHADOW_SOURCE_TYPES = {
-    "shadow_missed_alpha",
-    "shadow_reasonable_avoidance",
-    "shadow_correct_avoidance",
+COUNTERFACTUAL_SOURCE_TYPES = {
+    "counterfactual_missed_alpha",
+    "counterfactual_reasonable_avoidance",
+    "counterfactual_correct_avoidance",
 }
-SHADOW_REWARD_WEIGHT = 0.35
+COUNTERFACTUAL_REWARD_WEIGHT = 0.35
 RESEARCH_ACTION_VALUE_CONTRACT_VERSION = "agentquant.research_action_value.v1"
 INCOMPLETE_SETUP_TYPES = {
     "",
     "*",
     "unknown",
     "generic_trade_setup",
-    "direction_only",
-    "tradeable_setup",
-    "deployable_alpha",
-    "deployable_alpha_setup",
 }
 INCOMPLETE_STATE_TOKENS = {"", "*", "unknown"}
 
@@ -355,9 +347,9 @@ def _signal_calibration_contract(
     }
 
 
-def _is_shadow_source(source_type: Any) -> bool:
+def _is_counterfactual_source(source_type: Any) -> bool:
     text = str(source_type or "").strip().lower()
-    return text in SHADOW_SOURCE_TYPES or text.startswith("shadow_")
+    return text in COUNTERFACTUAL_SOURCE_TYPES or text.startswith("counterfactual_")
 
 
 def _alpha_state_completeness(profile_scope: Mapping[str, Any], action_name: str) -> Dict[str, Any]:
@@ -435,7 +427,7 @@ def _action_preference_from_stats(
 def _reward_signal_for_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
     """Return reward contribution and source class for action-value learning.
 
-    Real executed trades keep full weight.  Shadow no-trade outcomes are
+    Real executed trades keep full weight.  counterfactual no-trade outcomes are
     counterfactual and therefore enter only as a weak prior; they must not
     mature a setup into deployable authority by themselves.
     """
@@ -452,8 +444,8 @@ def _reward_signal_for_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
         return reward, "episode_trade"
     if _safe_int(row.get("executed_lots")) > 0 or source_type == "trade":
         return reward, "real_trade"
-    if _is_shadow_source(source_type):
-        return reward * SHADOW_REWARD_WEIGHT, "shadow_prior"
+    if _is_counterfactual_source(source_type):
+        return reward * COUNTERFACTUAL_REWARD_WEIGHT, "counterfactual_prior"
     return None, "ignored"
 
 
@@ -610,8 +602,6 @@ def classify_lifecycle(stats: Mapping[str, Any], cfg: Mapping[str, Any]) -> Dict
         "lifecycle_state": state,
         "reason": reason,
         "profile_state_hint": profile_state_hint,
-        "action_bias": profile_state_hint,
-        "deprecated_action_bias_mirror": profile_state_hint,
         "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "confidence_score": confidence,
         "max_position_impact": max_position_impact,
@@ -675,7 +665,7 @@ def upsert_alpha_setup_sample_and_profile(
             market_regime, setup_type, data_combo, scope_key, source_type,
             recommendation_id, action_taken, pm_action, auditor_decision,
             trader_status, target_lots, executed_lots, net_pnl, commission,
-            holding_days, outcome_label, setup_quality_score, opportunity_layer,
+            holding_days, outcome_label, setup_quality_score, opportunity_state,
             evidence_json, result_json, created_at, payload_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(config_id, trading_date, ticker, side, setup_type, source_type, recommendation_id)
@@ -696,7 +686,7 @@ def upsert_alpha_setup_sample_and_profile(
             holding_days=excluded.holding_days,
             outcome_label=excluded.outcome_label,
             setup_quality_score=excluded.setup_quality_score,
-            opportunity_layer=excluded.opportunity_layer,
+            opportunity_state=excluded.opportunity_state,
             evidence_json=excluded.evidence_json,
             result_json=excluded.result_json,
             payload_json=excluded.payload_json
@@ -726,7 +716,7 @@ def upsert_alpha_setup_sample_and_profile(
             _safe_int(sample.get("holding_days")),
             str(sample.get("outcome_label") or "observed"),
             _safe_float(sample.get("setup_quality_score")),
-            str(sample.get("opportunity_layer") or "unknown"),
+            str(sample.get("opportunity_state") or "watch_for_trigger"),
             _json_dumps(evidence),
             _json_dumps(result),
             now,
@@ -802,7 +792,6 @@ def upsert_alpha_setup_sample_and_profile(
         "stats": stats,
         "classification": lifecycle,
         "profile_state_hint": lifecycle["profile_state_hint"],
-        "deprecated_action_bias_mirror": lifecycle["action_bias"],
         "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "last_sample": payload,
         "lookback_days": lookback_days,
@@ -813,7 +802,7 @@ def upsert_alpha_setup_sample_and_profile(
         """
         INSERT INTO alpha_setup_profile (
             id, config_id, ticker, side, sector, horizon_class, market_regime,
-            setup_type, data_combo, scope_key, lifecycle_state, action_bias,
+            setup_type, data_combo, scope_key, lifecycle_state, profile_state_hint,
             sample_count, trade_count, no_trade_count, win_count, loss_count,
             gross_profit, gross_loss, net_pnl, total_commission, profit_factor,
             win_rate, max_loss, avg_holding_days, confidence_score,
@@ -830,7 +819,7 @@ def upsert_alpha_setup_sample_and_profile(
             setup_type=excluded.setup_type,
             data_combo=excluded.data_combo,
             lifecycle_state=excluded.lifecycle_state,
-            action_bias=excluded.action_bias,
+            profile_state_hint=excluded.profile_state_hint,
             sample_count=excluded.sample_count,
             trade_count=excluded.trade_count,
             no_trade_count=excluded.no_trade_count,
@@ -864,7 +853,7 @@ def upsert_alpha_setup_sample_and_profile(
             data_combo,
             scope_key,
             lifecycle["lifecycle_state"],
-            lifecycle["action_bias"],
+            lifecycle["profile_state_hint"],
             stats["sample_count"],
             stats["trade_count"],
             stats["no_trade_count"],
@@ -912,8 +901,6 @@ def upsert_alpha_setup_sample_and_profile(
         "scope_key": scope_key,
         "lifecycle_state": lifecycle["lifecycle_state"],
         "profile_state_hint": lifecycle["profile_state_hint"],
-        "action_bias": lifecycle["action_bias"],
-        "deprecated_action_bias_mirror": lifecycle["action_bias"],
         "confidence_score": lifecycle["confidence_score"],
         "stats": stats,
     }
@@ -945,8 +932,8 @@ def _upsert_action_values(
         reward_values: List[float] = []
         real_trade_reward_count = 0
         episode_trade_reward_count = 0
-        shadow_reward_count = 0
-        shadow_source_types = set()
+        counterfactual_reward_count = 0
+        counterfactual_source_types = set()
         for row in action_rows:
             reward, reward_source = _reward_signal_for_row(row)
             if reward is None:
@@ -957,9 +944,9 @@ def _upsert_action_values(
                 episode_trade_reward_count += 1
             elif reward_source == "real_trade":
                 real_trade_reward_count += 1
-            elif reward_source == "shadow_prior":
-                shadow_reward_count += 1
-                shadow_source_types.add(str(row.get("source_type") or "shadow"))
+            elif reward_source == "counterfactual_prior":
+                counterfactual_reward_count += 1
+                counterfactual_source_types.add(str(row.get("source_type") or "counterfactual"))
         reward_sum = sum(reward_values)
         sample_count = len(action_rows)
         reward_mean = reward_sum / len(reward_values) if reward_values else 0.0
@@ -976,8 +963,8 @@ def _upsert_action_values(
             amplification_scope_quality = "partial_real_state"
             exact_state_real_trade_sample_count = 0
             partial_state_real_trade_sample_count = real_trade_reward_count
-        elif shadow_reward_count > 0:
-            amplification_scope_quality = "shadow_prior"
+        elif counterfactual_reward_count > 0:
+            amplification_scope_quality = "counterfactual_prior"
             exact_state_real_trade_sample_count = 0
             partial_state_real_trade_sample_count = 0
         else:
@@ -988,8 +975,8 @@ def _upsert_action_values(
             reward_source = "trade_episode"
         elif real_trade_reward_count > 0:
             reward_source = "real_trade"
-        elif shadow_reward_count > 0:
-            reward_source = "shadow_prior"
+        elif counterfactual_reward_count > 0:
+            reward_source = "counterfactual_prior"
         else:
             reward_source = "unqualified"
         confidence = min(
@@ -1009,8 +996,6 @@ def _upsert_action_values(
             tail_loss_count=tail_loss_count,
             worst_reward=worst_reward,
         )
-        policy_hint = action_preference or "no_action_preference"
-        deprecated_policy_hint_mirror = policy_hint
         action_value_lane = _action_value_lane(action_name)
         usage_boundary = _action_value_usage_boundary(
             action_name=action_name,
@@ -1038,7 +1023,6 @@ def _upsert_action_values(
             "source": "alpha_setup_profile_action_value",
             "action_preference": action_preference,
             "canonical_action_preference_source": "payload.action_preference",
-            "deprecated_policy_hint_mirror": deprecated_policy_hint_mirror,
             "prior_role": "" if action_preference else "weak_prior_not_action_preference",
             "action_preference_boundary": (
                 "candidate preferences guide PM action arbitration; they do not create "
@@ -1058,14 +1042,14 @@ def _upsert_action_values(
             "reward_source": reward_source,
             "sample_source": reward_source,
             "state_completeness": state_completeness,
-            "shadow_reward_count": shadow_reward_count,
+            "counterfactual_reward_count": counterfactual_reward_count,
             "loss_reward_count": loss_reward_count,
             "tail_loss_count": tail_loss_count,
             "worst_reward": worst_reward,
-            "shadow_reward_weight": SHADOW_REWARD_WEIGHT,
-            "shadow_source_types": sorted(shadow_source_types),
-            "has_shadow_samples": shadow_reward_count > 0,
-            "shadow_prior_only": shadow_reward_count > 0 and real_trade_reward_count <= 0,
+            "counterfactual_reward_weight": COUNTERFACTUAL_REWARD_WEIGHT,
+            "counterfactual_source_types": sorted(counterfactual_source_types),
+            "has_counterfactual_samples": counterfactual_reward_count > 0,
+            "counterfactual_prior_only": counterfactual_reward_count > 0 and real_trade_reward_count <= 0,
             "not_rl_black_box": True,
             "bandit_style_update": True,
             "future_only": True,
@@ -1075,7 +1059,7 @@ def _upsert_action_values(
             INSERT INTO alpha_setup_action_value (
                 id, config_id, scope_key, ticker, side, horizon_class, market_regime,
                 setup_type, data_combo, action_name, sample_count, reward_sum,
-                reward_mean, win_rate, confidence_score, policy_hint,
+                reward_mean, win_rate, confidence_score, action_preference,
                 max_position_impact, last_sample_date, created_at, updated_at,
                 valid_until, active, payload_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
@@ -1086,7 +1070,7 @@ def _upsert_action_values(
                 reward_mean=excluded.reward_mean,
                 win_rate=excluded.win_rate,
                 confidence_score=excluded.confidence_score,
-                policy_hint=excluded.policy_hint,
+                action_preference=excluded.action_preference,
                 max_position_impact=excluded.max_position_impact,
                 last_sample_date=excluded.last_sample_date,
                 updated_at=excluded.updated_at,
@@ -1110,7 +1094,7 @@ def _upsert_action_values(
                 reward_mean,
                 win_rate,
                 confidence,
-                policy_hint,
+                action_preference,
                 _safe_float(profile_lifecycle.get("max_position_impact")),
                 str(trading_date)[:10],
                 now,
@@ -1125,8 +1109,6 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
     state = str(profile.get("lifecycle_state") or "candidate")
     hint = str(
         profile.get("profile_state_hint")
-        or profile.get("deprecated_action_bias_mirror")
-        or profile.get("action_bias")
         or "profile_observe"
     )
     return (
@@ -1143,7 +1125,6 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
 def action_value_prompt_line(action_value: Mapping[str, Any]) -> str:
     payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
     preference = str(payload.get("action_preference") or "").strip()
-    deprecated_hint = str(payload.get("deprecated_policy_hint_mirror") or action_value.get("policy_hint") or "").strip()
     signal_calibration = payload.get("signal_calibration") if isinstance(payload.get("signal_calibration"), Mapping) else {}
     lane = str(payload.get("action_value_lane") or action_value.get("action_name") or "unknown")
     analysis_boundary = ""
@@ -1156,7 +1137,7 @@ def action_value_prompt_line(action_value: Mapping[str, Any]) -> str:
         f"{action_value.get('ticker')}/{action_value.get('side')}/"
         f"{action_value.get('horizon_class')}/{action_value.get('market_regime')}: "
         f"setup={action_value.get('setup_type')}, action={action_value.get('action_name')}, lane={lane}, "
-        f"action_preference={preference or 'none'}, deprecated_policy_hint_mirror={deprecated_hint or 'none'}, "
+        f"action_preference={preference or 'none'}, "
         f"n={_safe_int(action_value.get('sample_count'))}, "
         f"reward_mean={_safe_float(action_value.get('reward_mean')):.0f}, "
         f"reward_sum={_safe_float(action_value.get('reward_sum')):.0f}, "
@@ -1226,8 +1207,7 @@ def _analyst_signal_calibration_view(signal_calibration: Mapping[str, Any]) -> D
 def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
     profile_state_hint = (
         profile.get("profile_state_hint")
-        or profile.get("deprecated_action_bias_mirror")
-        or profile.get("action_bias")
+        or "profile_observe"
     )
     return {
         "scope_key": profile.get("scope_key"),
@@ -1239,7 +1219,6 @@ def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
         "data_combo": _compact_text(profile.get("data_combo"), 90),
         "lifecycle_state": profile.get("lifecycle_state"),
         "profile_state_hint": profile_state_hint,
-        "deprecated_action_bias_mirror": profile.get("action_bias"),
         "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "sample_count": profile.get("sample_count"),
         "trade_count": profile.get("trade_count"),
@@ -1271,7 +1250,6 @@ def compact_action_value_for_trace(action_value: Mapping[str, Any]) -> Dict[str,
         "confidence_score": action_value.get("confidence_score"),
         "action_preference": action_preference,
         "canonical_action_preference_source": payload.get("canonical_action_preference_source") or "payload.action_preference",
-        "deprecated_policy_hint_mirror": payload.get("deprecated_policy_hint_mirror") or action_value.get("policy_hint"),
         "max_position_impact": action_value.get("max_position_impact"),
         "valid_until": action_value.get("valid_until"),
         "research_output_contract_version": payload.get("research_output_contract_version"),
@@ -1314,3 +1292,7 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
             "signal_calibration_only_no_trade_authority_no_lots_no_margin_no_direction_override"
         ),
     }
+
+
+
+

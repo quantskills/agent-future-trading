@@ -953,7 +953,7 @@ class TradeAuditor:
                 "risk_flags": risk_flags,
                 "confidence": confidence,
                 "business_quality_score": business_quality,
-                "template_name": item.get("template_name") or metadata.get("template_name") or "unknown",
+                "setup_type": item.get("setup_type") or metadata.get("setup_type") or "unknown",
                 "primary_business_driver": item.get("primary_business_driver") or (metadata.get("business_quality") or {}).get("primary_business_driver"),
                 "freshness_score": _safe_float(metadata.get("freshness_score") or context.get("freshness_score"), 0.0),
                 "relevance_score": _safe_float(metadata.get("relevance_score") or context.get("relevance_score"), 0.0),
@@ -1591,3 +1591,4 @@ __all__ = [
     "DecisionPlannerOutput",
     "LightweightDecisionPlanner",
 ]
+

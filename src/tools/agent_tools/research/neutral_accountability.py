@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Neutral-signal accountability diagnostics shared by reviewer and evaluation."""
 
@@ -133,17 +133,19 @@ def _neutral_contract(payload: Mapping[str, Any]) -> Dict[str, Any]:
         or payload.get("would_change_view_if")
         or ""
     )
-    shadow_side = str(payload.get("neutral_shadow_side") or contract.get("shadow_side") or "flat").lower()
-    if shadow_side not in {"long", "short", "flat"}:
-        shadow_side = "flat"
+    counterfactual_side = str(payload.get("counterfactual_side") or contract.get("counterfactual_side") or "flat").lower()
+    if counterfactual_side not in {"long", "short", "flat"}:
+        counterfactual_side = "flat"
     priority = str(payload.get("neutral_watchlist_priority") or contract.get("watchlist_priority") or "none")
     return {
         "bucket": bucket,
         "trigger_condition": trigger,
-        "shadow_side": shadow_side,
+        "counterfactual_side": counterfactual_side,
         "watchlist_priority": priority,
         "tracking_only": bool(contract.get("tracking_only", True)),
-        "trade_permission": str(contract.get("trade_permission") or "none_without_current_confirmation"),
+        "opportunity_state": str(contract.get("opportunity_state") or "watch_for_trigger"),
+        "trigger_valid": bool(contract.get("trigger_valid", False)),
+        "action_preference": str(contract.get("action_preference") or "watch_for_trigger"),
     }
 
 
@@ -411,7 +413,7 @@ def build_neutral_accountability_summary(
     if category_counts.get("conservative_against_consensus", 0):
         action_items.append("Review analyst prompt/thresholds where Neutral disagrees with aligned directional evidence without a risk reason.")
     if category_counts.get("conditional_watchlist", 0):
-        action_items.append("Track conditional Neutral opportunities with forward shadow results; only convert them when today's trigger and invalidation are clear.")
+        action_items.append("Track conditional Neutral opportunities with forward Counterfactual results; only convert them when today's trigger and invalidation are clear.")
 
     return {
         "total_signal_count": total_signals,
@@ -426,3 +428,4 @@ def build_neutral_accountability_summary(
         "examples": examples,
         "action_items": action_items,
     }
+

@@ -19,13 +19,12 @@ def _as_list(value: Any) -> List[Any]:
 def _extract_final_contract(pm_snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(pm_snapshot, dict):
         return {}
-    for key in ("final_action_contract", "final_new_entry_trade_authority"):
-        value = pm_snapshot.get(key)
-        if isinstance(value, dict):
-            return value
+    value = pm_snapshot.get("final_action_contract")
+    if isinstance(value, dict):
+        return value
     nested = pm_snapshot.get("signal_snapshot")
     if isinstance(nested, dict):
-        value = nested.get("final_action_contract") or nested.get("final_new_entry_trade_authority")
+        value = nested.get("final_action_contract")
         if isinstance(value, dict):
             return value
     return {}

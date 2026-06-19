@@ -38,8 +38,11 @@ REQUIRED_INTERNAL_MESSAGE_FIELDS = [
 
 REQUIRED_TRADE_RESEARCH_FIELDS = [
     "opportunity_type",
-    "opportunity_layer",
     "opportunity_state",
+    "setup_type",
+    "setup_quality_ok",
+    "trigger_valid",
+    "invalidation_present",
     "entry_trigger",
     "exit_hint",
     "holding_period_hint",
@@ -151,8 +154,11 @@ def validate_internal_message_contract(contract: Dict[str, Any]) -> List[str]:
 def build_trade_research_contract(
     *,
     opportunity_type: str = "unknown",
-    opportunity_layer: str = "direction_only",
     opportunity_state: str = "watch_for_trigger",
+    setup_type: str = "unknown",
+    setup_quality_ok: bool = False,
+    trigger_valid: bool = False,
+    invalidation_present: bool = False,
     entry_trigger: str = "",
     exit_hint: str = "",
     holding_period_hint: str = "",
@@ -168,8 +174,11 @@ def build_trade_research_contract(
     return {
         "contract_version": "agentquant.research.v1",
         "opportunity_type": str(opportunity_type or "unknown"),
-        "opportunity_layer": str(opportunity_layer or "direction_only"),
         "opportunity_state": str(opportunity_state or "watch_for_trigger"),
+        "setup_type": str(setup_type or "unknown"),
+        "setup_quality_ok": bool(setup_quality_ok),
+        "trigger_valid": bool(trigger_valid),
+        "invalidation_present": bool(invalidation_present),
         "entry_trigger": str(entry_trigger or ""),
         "exit_hint": str(exit_hint or ""),
         "holding_period_hint": str(holding_period_hint or ""),

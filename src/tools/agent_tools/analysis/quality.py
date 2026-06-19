@@ -335,25 +335,25 @@ def _factor_focus_from_context(quality_context: Dict[str, Any], analyst: str) ->
 def infer_opportunity_type(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
     if signal_value(signal.signal) == Signal.NEUTRAL.value:
         return "no_trade"
-    trigger = str(getattr(signal, "trigger_type", "") or "").lower()
-    template = str(getattr(signal, "template_name", "") or "").lower()
+    trigger = str(getattr(signal, "entry_trigger", "") or "").lower()
+    setup_type = str(getattr(signal, "setup_type", "") or "").lower()
     regime = str(getattr(signal, "market_regime", "") or quality_context.get("market_regime") or "").lower()
     if analyst == "commodity_news" or "event" in trigger or "news" in trigger:
         return "event_driven"
     if analyst == "fundamental":
         return "medium_fundamental"
-    if "continuation" in trigger or "trend" in trigger or "trend" in template or regime in {"trend", "trending"}:
+    if "continuation" in trigger or "trend" in trigger or "trend" in setup_type or regime in {"trend", "trending"}:
         return "trend_continuation"
-    if "reversal" in trigger or "reversal" in template or "reversal" in regime:
+    if "reversal" in trigger or "reversal" in setup_type or "reversal" in regime:
         return "reversal"
-    if "breakout" in trigger or "breakout" in template:
+    if "breakout" in trigger or "breakout" in setup_type:
         return "range_breakout"
     return "short_timing" if analyst == "technical" else "probe"
 
 
 def _holding_period_hint(signal: AnalystSignal) -> str:
     horizon = str(getattr(signal, "horizon_class", "") or "unknown")
-    days = int(getattr(signal, "expected_horizon_days", 0) or getattr(signal, "horizon_days", 0) or 0)
+    days = int(getattr(signal, "expected_horizon_days", 0) or 0)
     if days > 0:
         return f"{horizon}:{days} trading day(s)"
     return horizon
@@ -364,7 +364,7 @@ def _has_actionable_text(value: Any) -> bool:
     if not text or text in {"unknown", "none", "n/a", "null"}:
         return False
     generic_markers = {
-        "requires_current_confirmation",
+        "wait_for_trigger",
         "primary driver and secondary confirmation align with acceptable reward/risk",
         "exit/reduce if current confirmation fails",
     }
@@ -372,7 +372,7 @@ def _has_actionable_text(value: Any) -> bool:
 
 
 _GENERIC_ENTRY_MARKERS = {
-    "requires_current_confirmation",
+    "wait_for_trigger",
     "technical_price_trigger",
     "fundamental_anchor",
     "news_event_trigger",
@@ -421,6 +421,138 @@ def _has_specific_entry_text(value: Any) -> bool:
     )
 
 
+_PENDING_ENTRY_TRIGGER_MARKERS = (
+    "only if",
+    "only after",
+    "if price",
+    "if futures",
+    "if volume",
+    "if basis",
+    "if inventory",
+    "would require",
+    "becomes tradeable",
+    "become tradeable",
+    "tradeable only if",
+    "make the setup tradeable",
+    "move from watchlist to tradeable",
+    "convert to a tradeable",
+    "requires price",
+    "requires technical",
+    "requires market",
+    "requires current",
+    "requires confirmation",
+    "require price",
+    "require technical",
+    "require market",
+    "require post-open",
+    "requires post-open",
+    "needs price",
+    "needs technical",
+    "needs market",
+    "needs confirmation",
+    "needs post-open",
+    "need confirmation",
+    "wait for",
+    "waiting for",
+    "should confirm",
+    "must confirm",
+    "must break",
+    "must hold",
+    "becomes actionable",
+    "become actionable",
+    "actionable only if",
+    "before entry",
+    "before execution",
+    "until price",
+    "until futures",
+    "如果",
+    "若",
+    "等待",
+    "确认后",
+    "后再",
+    "之后再",
+    "需要",
+    "才可",
+)
+
+
+_CURRENT_ENTRY_TRIGGER_MARKERS = (
+    "has broken",
+    "has breached",
+    "has crossed",
+    "has confirmed",
+    "is breaking",
+    "is below",
+    "is above",
+    "currently below",
+    "currently above",
+    "current breakout",
+    "current breakdown",
+    "trigger is active",
+    "trigger is valid",
+    "confirmed by current",
+    "已突破",
+    "已跌破",
+    "已站上",
+    "已站稳",
+    "已经突破",
+    "已经跌破",
+    "当前突破",
+    "当前跌破",
+    "触发成立",
+)
+
+
+_STRICT_PENDING_ENTRY_MARKERS = (
+    "only if",
+    "only after",
+    "would require",
+    "becomes tradeable",
+    "become tradeable",
+    "tradeable only if",
+    "make the setup tradeable",
+    "move from watchlist to tradeable",
+    "convert to a tradeable",
+    "wait for",
+    "waiting for",
+    "should confirm",
+    "must confirm",
+    "must break",
+    "must hold",
+    "becomes actionable",
+    "become actionable",
+    "actionable only if",
+    "require post-open",
+    "requires post-open",
+    "needs post-open",
+    "before entry",
+    "before execution",
+    "等待",
+    "确认后",
+    "后再",
+    "之后再",
+    "才可",
+)
+
+
+def _has_current_entry_trigger_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return any(marker in text for marker in _CURRENT_ENTRY_TRIGGER_MARKERS)
+
+
+def _is_pending_conditional_entry_trigger(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not _has_actionable_text(text):
+        return False
+    pending = any(marker in text for marker in _PENDING_ENTRY_TRIGGER_MARKERS)
+    if not pending:
+        return False
+    strict_pending = any(marker in text for marker in _STRICT_PENDING_ENTRY_MARKERS)
+    if _has_current_entry_trigger_text(text) and not strict_pending:
+        return False
+    return True
+
+
 _FUNDAMENTAL_DERIVED_SHORT_TRIGGER_MARKERS = (
     "short-term technical/price confirmation aligns with fundamental factor groups",
 )
@@ -457,6 +589,8 @@ def _has_explicit_fundamental_short_trigger(signal: AnalystSignal, quality_conte
     entry_trigger = getattr(signal, "entry_trigger", "")
     if _is_derived_fundamental_short_trigger(entry_trigger):
         return False
+    if _is_pending_conditional_entry_trigger(entry_trigger):
+        return False
     return _has_specific_entry_text(entry_trigger)
 
 
@@ -468,13 +602,75 @@ def _current_confirmation_flag(signal: AnalystSignal, quality_context: Dict[str,
     return False
 
 
+def _current_entry_confirmation_available(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    analyst: str,
+) -> bool:
+    if _current_confirmation_flag(
+        signal,
+        quality_context,
+        "current_trigger_confirmed",
+        "short_term_trigger_confirmed",
+        "short_term_confirmation_confirmed",
+        "technical_confirmation_confirmed",
+        "price_trigger_confirmed",
+        "intraday_confirmation_confirmed",
+        "market_confirmation_confirmed",
+        "execution_trigger_confirmed",
+        "price_reaction_confirmed",
+    ):
+        return True
+    if analyst == "technical":
+        # The setup-quality flags below used to mean "tradeable now". They now
+        # only mean the pattern is worth attention; current entry confirmation
+        # must come from explicit current-confirmation fields or trigger text
+        # that has already been normalized into signal.trigger_valid.
+        return False
+    if analyst == "commodity_news":
+        return bool(
+            quality_context.get("tradable_event")
+            and not quality_context.get("price_reaction_required", True)
+        )
+    return False
+
+
+def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: str = "") -> Dict[str, Any]:
+    contract = quality_context.get("action_evidence_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    learning_scope = contract.get("learning_scope")
+    learning_scope = learning_scope if isinstance(learning_scope, dict) else {}
+    return {
+        "setup_family": (
+            learning_scope.get("setup_family")
+            or contract.get("setup_type")
+            or contract.get("setup_family")
+            or quality_context.get("setup_type")
+            or opportunity_type
+            or "unknown"
+        ),
+        "sector_setup_alignment": learning_scope.get("sector_setup_alignment") or quality_context.get("sector_setup_alignment"),
+        "market_regime": learning_scope.get("market_regime") or quality_context.get("market_regime"),
+        "required_confirmation": (
+            contract.get("entry_trigger")
+            or quality_context.get("required_confirmation")
+            or "current technical confirmation"
+        ),
+        "invalidation_template": (
+            contract.get("invalidation_condition")
+            or quality_context.get("invalidation_condition")
+            or "T-day confirmation fails, price closes back inside the failed trigger area, or opposite momentum/volume confirmation appears"
+        ),
+    }
+
+
 def _build_action_evidence_contract(
     signal: AnalystSignal,
     quality_context: Dict[str, Any],
     *,
     analyst: str,
     opportunity_type: str,
-    layer: str,
+    opportunity_state: str,
     entry_trigger: str,
     exit_hint: str,
     has_invalidation: bool,
@@ -490,16 +686,20 @@ def _build_action_evidence_contract(
             "sector": sector,
             "side": side,
             "opportunity_type": opportunity_type,
-            "opportunity_layer": layer,
+            "opportunity_state": str(opportunity_state or "watch_for_trigger"),
+            "setup_type": str(opportunity_type or "unknown"),
+            "setup_quality_ok": bool(quality_context.get("setup_quality_ok")),
+            "trigger_valid": bool(getattr(signal, "trigger_valid", False)),
             "entry_trigger": entry_trigger,
             "exit_hint": exit_hint,
             "has_invalidation": bool(has_invalidation),
+            "invalidation_present": bool(has_invalidation),
             "money_objective": "improve_signal_quality_then_route_to_pm_trader_research",
         }
     )
     learning_scope = dict(contract.get("learning_scope") or {})
     if analyst == "technical":
-        setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+        setup = _technical_setup_scope(quality_context, opportunity_type)
         learning_scope.update(
             {
                 "setup_family": setup.get("setup_family") or opportunity_type,
@@ -530,7 +730,6 @@ def _build_action_evidence_contract(
         {
             "trigger_checked_by_trader": True,
             "trigger_source": analyst,
-            "requires_current_confirmation": not bool(getattr(signal, "trigger_valid", False)),
             "invalidation_required": True,
         }
     )
@@ -582,7 +781,7 @@ def _signal_side(signal: AnalystSignal) -> str:
 def _has_trade_setup_text(signal: AnalystSignal) -> bool:
     return (
         _has_specific_entry_text(getattr(signal, "entry_trigger", ""))
-        or _has_actionable_text(getattr(signal, "trade_setup", ""))
+        or _has_actionable_text(getattr(signal, "setup_type", ""))
     )
 
 
@@ -603,7 +802,7 @@ def _trade_setup_contract_presence(signal: AnalystSignal) -> Dict[str, bool]:
         _holding_period_hint(signal)
     )
     tradable_why_present = bool(
-        _has_actionable_text(getattr(signal, "template_name", ""))
+        _has_actionable_text(getattr(signal, "setup_type", ""))
         or _clean_list(getattr(signal, "factor_focus", []), max_items=2)
         or _has_actionable_text(getattr(signal, "justification", ""))
     )
@@ -664,7 +863,7 @@ def _derive_analyst_trade_setup_fields(
     The function does not invent price levels. It only converts existing
     technical/fundamental/news context into explicit conditions that PM can
     audit. If the context is too weak, the entry condition stays empty and the
-    signal remains direction_only/no_trade downstream.
+    signal remains watch_for_trigger/no_opportunity downstream.
     """
     if signal_value(signal.signal) == Signal.NEUTRAL.value:
         return {"notes": ["neutral_no_derived_trade_setup"]}
@@ -678,14 +877,22 @@ def _derive_analyst_trade_setup_fields(
         if analyst == "technical" and side_ok and tradeability in {"medium", "high"}:
             features = quality_context.get("features") or {}
             regime = str(quality_context.get("market_regime") or "technical_state")
-            setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+            setup = _technical_setup_scope(quality_context)
             setup_family = str(setup.get("setup_family") or "technical_setup")
             required_confirmation = str(setup.get("required_confirmation") or "current technical confirmation")
-            entry = (
-                f"{direction} {setup_family} entry only after T-day price confirms {regime} direction: "
-                f"{required_confirmation}; volume_ratio >= 0.80 and no new opposite technical vote; "
-                f"current trend_strength={_safe_float(features.get('trend_strength'), 0.0):.2f}"
-            )
+            if bool(quality_context.get("setup_quality_ok")):
+                entry = (
+                    f"{direction} {setup_family} current trigger confirmed by T-day {regime} "
+                    f"technical alignment: {required_confirmation}; volume_ratio >= 0.80, "
+                    "no new opposite technical vote; "
+                    f"current trend_strength={_safe_float(features.get('trend_strength'), 0.0):.2f}"
+                )
+            else:
+                entry = (
+                    f"{direction} {setup_family} entry only after T-day price confirms {regime} direction: "
+                    f"{required_confirmation}; volume_ratio >= 0.80 and no new opposite technical vote; "
+                    f"current trend_strength={_safe_float(features.get('trend_strength'), 0.0):.2f}"
+                )
         elif analyst == "fundamental" and side_ok and tradeability in {"medium", "high"}:
             group_counts = quality_context.get("factor_group_counts") or {}
             factor_groups = ", ".join(sorted(group_counts.keys())[:4]) if isinstance(group_counts, dict) else "fundamental factors"
@@ -714,7 +921,7 @@ def _derive_analyst_trade_setup_fields(
     if not _has_specific_invalidation_text(invalidation_text):
         invalidation = ""
         if analyst == "technical" and side_ok:
-            setup = quality_context.get("current_trade_setup") if isinstance(quality_context.get("current_trade_setup"), dict) else {}
+            setup = _technical_setup_scope(quality_context)
             setup_family = str(setup.get("setup_family") or "technical_setup")
             invalidation_template = str(
                 setup.get("invalidation_template")
@@ -865,39 +1072,46 @@ def _setup_quality_assessment(
     }
 
 
-def _resolve_opportunity_layer(
+def _resolve_opportunity_candidate_state(
     signal: AnalystSignal,
     quality_context: Dict[str, Any],
     *,
     analyst: str,
-    base_layer: str,
+    base_state: str,
     opportunity_type: str,
     has_invalidation: bool,
 ) -> tuple[str, List[str]]:
-    """Convert analyst output into a tradeability layer without hard product rules."""
+    """Convert analyst output into a unified opportunity_state candidate."""
     risk_flags = _clean_list(quality_context.get("risk_flags"), max_items=12)
-    layer_notes: List[str] = []
+    state_notes: List[str] = []
     signal_text = signal_value(signal.signal)
     if signal_text == Signal.NEUTRAL.value:
-        return "no_trade", layer_notes
+        if (
+            getattr(signal, "neutral_trigger_condition", "")
+            or getattr(signal, "counterfactual_side", "")
+            or getattr(signal, "neutral_opportunity_bucket", "")
+        ):
+            state_notes.append("neutral_observation_kept_for_counterfactual_learning")
+            return "watch_for_trigger", state_notes
+        return "no_opportunity", state_notes
 
     if analyst == "commodity_news":
         tradable_event = bool(quality_context.get("tradable_event"))
         price_reaction_confirmed = bool(quality_context.get("price_reaction_confirmed"))
         if not tradable_event:
-            layer_notes.append("news_event_not_tradable_catalyst")
-            return "direction_only", layer_notes
+            state_notes.append("news_event_not_tradable_catalyst")
+            return "watch_for_trigger", state_notes
         if quality_context.get("price_reaction_required", True) and not price_reaction_confirmed:
-            layer_notes.append("news_event_requires_price_or_intraday_confirmation")
-            return "direction_only", layer_notes
+            state_notes.append("news_event_requires_price_or_intraday_confirmation")
+            return "watch_for_trigger", state_notes
 
     if analyst == "technical":
         regime = str(quality_context.get("market_regime") or "").lower()
         trend_like = "trend" in str(opportunity_type or "").lower()
         if trend_like and regime in {"choppy", "range", "weak_trend", "high_volatility"}:
-            if not bool(quality_context.get("trend_continuation_tradeable")):
-                layer_notes.append("technical_trend_requires_regime_confirmation")
-                return "direction_only", layer_notes
+            if not bool(quality_context.get("setup_quality_ok")):
+                state_notes.append("technical_trend_requires_regime_confirmation")
+                return "watch_for_trigger", state_notes
 
     if analyst == "fundamental":
         # Fundamental evidence is a medium anchor. It may support PM sizing, but
@@ -905,19 +1119,19 @@ def _resolve_opportunity_layer(
         entry_trigger = getattr(signal, "entry_trigger", "")
         data_quality = quality_context.get("data_quality") if isinstance(quality_context, dict) else {}
         if isinstance(data_quality, dict) and not bool(data_quality.get("supports_fundamental_trade_setup", True)):
-            layer_notes.append("fundamental_local_data_insufficient_for_trade_setup")
-            return "direction_only", layer_notes
+            state_notes.append("fundamental_local_data_insufficient_for_trade_setup")
+            return "watch_for_trigger", state_notes
         if str(getattr(signal, "horizon_class", "") or "").lower() in {"medium", "long", "unknown"}:
             if not has_invalidation or not _has_explicit_fundamental_short_trigger(signal, quality_context):
-                layer_notes.append("fundamental_anchor_requires_short_trigger_and_invalidation")
-                return "direction_only", layer_notes
-            layer_notes.append("fundamental_anchor_has_short_trigger_and_invalidation")
-            if base_layer == "deployable_alpha" and not bool(quality_context.get("fundamental_deployable_confirmed")):
-                layer_notes.append("fundamental_anchor_tradeable_until_pm_confirmation")
-                return "tradeable_setup", layer_notes
-            return base_layer, layer_notes
+                state_notes.append("fundamental_anchor_requires_short_trigger_and_invalidation")
+                return "watch_for_trigger", state_notes
+            state_notes.append("fundamental_anchor_has_short_trigger_and_invalidation")
+            if base_state == "tradeable_candidate" and not bool(quality_context.get("fundamental_deployable_confirmed")):
+                state_notes.append("fundamental_anchor_tradeable_until_pm_confirmation")
+                return "probe_candidate", state_notes
+            return base_state, state_notes
 
-    return base_layer, layer_notes
+    return base_state, state_notes
 
 
 VALID_OPPORTUNITY_STATES = {
@@ -927,50 +1141,6 @@ VALID_OPPORTUNITY_STATES = {
     "tradeable_candidate",
     "risk_reduction_candidate",
 }
-
-
-def _resolve_opportunity_state(
-    signal: AnalystSignal,
-    *,
-    layer: str,
-    has_invalidation: bool,
-    entry_trigger: str,
-    exit_hint: str,
-) -> str:
-    """Summarize analyst evidence into PM-readable opportunity state.
-
-    This does not create trade authority. It only prevents Neutral/direction-only
-    evidence from hiding whether a setup is absent, trackable, probe-worthy, or
-    tradeable.
-    """
-    layer_text = str(layer or "direction_only").strip().lower()
-    signal_text = signal_value(signal.signal)
-    if layer_text == "risk_reduction":
-        return "risk_reduction_candidate"
-    if layer_text == "no_trade":
-        neutral_bucket = str(getattr(signal, "neutral_opportunity_bucket", "") or "").strip().lower()
-        neutral_trigger = str(getattr(signal, "neutral_trigger_condition", "") or "").strip()
-        shadow_side = str(getattr(signal, "neutral_shadow_side", "") or "").strip().lower()
-        if signal_text == Signal.NEUTRAL.value and (
-            neutral_bucket in {"watchlist_trigger", "accountable_observation", "evidence_gap"}
-            or bool(neutral_trigger)
-            or shadow_side in {"long", "short"}
-        ):
-            return "watch_for_trigger"
-        return "no_opportunity"
-    if layer_text == "deployable_alpha":
-        return "tradeable_candidate"
-    if layer_text == "tradeable_setup":
-        if has_invalidation and _has_specific_entry_text(entry_trigger):
-            return "tradeable_candidate"
-        return "probe_candidate"
-    if layer_text == "direction_only":
-        if has_invalidation and _has_specific_entry_text(entry_trigger):
-            return "probe_candidate"
-        return "watch_for_trigger"
-    if str(exit_hint or "").strip() and signal_text == Signal.NEUTRAL.value:
-        return "watch_for_trigger"
-    return "watch_for_trigger"
 
 
 def _sync_learning_impact_summary(signal: AnalystSignal, *, opportunity_state: str) -> Dict[str, Any]:
@@ -1031,7 +1201,11 @@ def apply_trade_research_contract(
     missing_setup_fields = _trade_setup_missing_fields(setup_presence)
     has_invalidation = setup_presence.get("invalidation_present", False)
     if is_neutral:
-        layer = "no_trade"
+        candidate_state = "watch_for_trigger" if (
+            getattr(signal, "neutral_trigger_condition", "")
+            or getattr(signal, "counterfactual_side", "")
+            or getattr(signal, "neutral_opportunity_bucket", "")
+        ) else "no_opportunity"
     elif (
         tradeability == "high"
         and has_invalidation
@@ -1040,18 +1214,18 @@ def apply_trade_research_contract(
         and float(getattr(signal, "confidence", 0.0) or 0.0) >= 0.65
         and not _clean_list(conflicts, max_items=4)
     ):
-        layer = "deployable_alpha"
+        candidate_state = "tradeable_candidate"
     elif (
         tradeability == "high"
         and has_invalidation
         and _has_trade_setup_text(signal)
         and float(getattr(signal, "business_quality_score", 0.0) or 0.0) >= 0.60
     ):
-        layer = "tradeable_setup"
+        candidate_state = "probe_candidate"
     elif tradeability in {"medium", "high"} and float(getattr(signal, "confidence", 0.0) or 0.0) >= 0.45:
-        layer = "direction_only"
+        candidate_state = "watch_for_trigger"
     else:
-        layer = "direction_only"
+        candidate_state = "watch_for_trigger"
 
     opportunity_type = getattr(signal, "opportunity_type", "unknown")
     if not opportunity_type or opportunity_type == "unknown":
@@ -1067,8 +1241,11 @@ def apply_trade_research_contract(
     )
     entry_trigger = (
         getattr(signal, "entry_trigger", "")
-        or getattr(signal, "trigger_type", "")
-        or "requires_current_confirmation"
+        or "wait_for_trigger"
+    )
+    pending_conditional_trigger = (
+        _is_pending_conditional_entry_trigger(entry_trigger)
+        and not _current_entry_confirmation_available(signal, quality_context, analyst)
     )
     exit_hint = (
         getattr(signal, "exit_hint", "")
@@ -1077,31 +1254,31 @@ def apply_trade_research_contract(
         or "exit/reduce if current confirmation fails"
     )
     holding_hint = getattr(signal, "holding_period_hint", "") or _holding_period_hint(signal)
-    layer, layer_notes = _resolve_opportunity_layer(
+    candidate_state, state_notes = _resolve_opportunity_candidate_state(
         signal,
         quality_context,
         analyst=analyst,
-        base_layer=layer,
+        base_state=candidate_state,
         opportunity_type=opportunity_type,
         has_invalidation=has_invalidation,
     )
-    if layer_notes:
+    if state_notes:
         conflicts = list(conflicts or [])
-        for note in layer_notes:
+        for note in state_notes:
             if note not in conflicts:
                 conflicts.append(note)
     if not is_neutral:
         setup_score = _safe_float(setup_quality.get("score"), 0.0)
         if setup_score < 0.42:
-            if "setup_quality_poor_downgrade" not in layer_notes:
-                layer_notes.append("setup_quality_poor_downgrade")
+            if "setup_quality_poor_downgrade" not in state_notes:
+                state_notes.append("setup_quality_poor_downgrade")
             if "setup_quality_poor_downgrade" not in conflicts:
                 conflicts.append("setup_quality_poor_downgrade")
-            layer = "direction_only"
-        elif setup_score < 0.60 and layer == "deployable_alpha":
-            layer = "tradeable_setup"
-            if "setup_quality_not_strong_enough_for_deployable_alpha" not in layer_notes:
-                layer_notes.append("setup_quality_not_strong_enough_for_deployable_alpha")
+            candidate_state = "watch_for_trigger"
+        elif setup_score < 0.60 and candidate_state == "tradeable_candidate":
+            candidate_state = "probe_candidate"
+            if "setup_quality_not_strong_enough_for_tradeable_candidate" not in state_notes:
+                state_notes.append("setup_quality_not_strong_enough_for_tradeable_candidate")
     critical_missing_setup_fields = [
         field
         for field in missing_setup_fields
@@ -1111,27 +1288,30 @@ def apply_trade_research_contract(
         missing_note = "missing_trade_setup_contract:" + ",".join(missing_setup_fields)
         if missing_note not in conflicts:
             conflicts.append(missing_note)
-        if critical_missing_setup_fields and layer in {"deployable_alpha", "tradeable_setup"}:
-            layer = "direction_only"
-            if "trade_setup_contract_incomplete_downgrade" not in layer_notes:
-                layer_notes.append("trade_setup_contract_incomplete_downgrade")
+        if critical_missing_setup_fields and candidate_state in {"tradeable_candidate", "probe_candidate"}:
+            candidate_state = "watch_for_trigger"
+            if "trade_setup_contract_incomplete_downgrade" not in state_notes:
+                state_notes.append("trade_setup_contract_incomplete_downgrade")
+    if pending_conditional_trigger:
+        if "conditional_entry_trigger_pending" not in state_notes:
+            state_notes.append("conditional_entry_trigger_pending")
+        if "conditional_entry_trigger_pending" not in conflicts:
+            conflicts.append("conditional_entry_trigger_pending")
+        if candidate_state in {"tradeable_candidate", "probe_candidate"}:
+            candidate_state = "watch_for_trigger"
     action_evidence_contract = _build_action_evidence_contract(
         signal,
         quality_context,
         analyst=analyst,
         opportunity_type=opportunity_type,
-        layer=layer,
+        opportunity_state=candidate_state,
         entry_trigger=entry_trigger,
         exit_hint=exit_hint,
         has_invalidation=has_invalidation,
     )
-    opportunity_state = _resolve_opportunity_state(
-        signal,
-        layer=layer,
-        has_invalidation=has_invalidation,
-        entry_trigger=entry_trigger,
-        exit_hint=exit_hint,
-    )
+    opportunity_state = candidate_state
+    if pending_conditional_trigger and opportunity_state in {"probe_candidate", "tradeable_candidate"}:
+        opportunity_state = "watch_for_trigger"
     action_evidence_contract["opportunity_state"] = opportunity_state
     action_evidence_contract["state_permissions"] = {
         "no_opportunity": {
@@ -1179,8 +1359,11 @@ def apply_trade_research_contract(
     }
     research_contract = build_trade_research_contract(
         opportunity_type=opportunity_type,
-        opportunity_layer=layer,
         opportunity_state=opportunity_state,
+        setup_type=str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown"),
+        setup_quality_ok=bool(action_evidence_contract.get("setup_quality_ok") or setup_quality.get("score", 0.0) >= 0.42),
+        trigger_valid=bool(action_evidence_contract.get("trigger_valid")),
+        invalidation_present=bool(has_invalidation),
         entry_trigger=entry_trigger,
         exit_hint=exit_hint,
         holding_period_hint=holding_hint,
@@ -1189,7 +1372,7 @@ def apply_trade_research_contract(
         invalidation_level=getattr(signal, "invalidation_level", None),
         atr_stop_distance=getattr(signal, "atr_stop_distance", None),
         sample_state="current_day_evidence",
-        maturity="candidate" if layer != "deployable_alpha" else "validated",
+        maturity="candidate" if opportunity_state != "tradeable_candidate" else "validated",
         action_evidence_contract=action_evidence_contract,
         product_context=product_context,
     )
@@ -1207,7 +1390,6 @@ def apply_trade_research_contract(
     message_errors = validate_internal_message_contract(message_contract)
 
     signal.opportunity_type = opportunity_type
-    signal.opportunity_layer = layer
     signal.opportunity_state = opportunity_state
     signal.setup_quality_score = _safe_float(setup_quality.get("score"), 0.0)
     signal.entry_quality = str(setup_quality.get("entry_quality") or "unknown")
@@ -1226,13 +1408,7 @@ def apply_trade_research_contract(
         else "short" if signal_value(signal.signal) == Signal.BEARISH.value
         else "neutral"
     )
-    signal.trade_trigger = entry_trigger
-    signal.position_horizon = holding_hint
-    current_trade_setup = (
-        quality_context.get("current_trade_setup")
-        if isinstance(quality_context.get("current_trade_setup"), dict)
-        else {}
-    )
+    technical_setup_scope = _technical_setup_scope(quality_context, opportunity_type)
     if str(analyst) == "technical":
         signal.trend_direction = str(
             quality_context.get("dominant_direction")
@@ -1240,16 +1416,17 @@ def apply_trade_research_contract(
             or signal.direction_context
             or "unknown"
         )
-        setup_family = str(current_trade_setup.get("setup_family") or opportunity_type or "unknown")
+        setup_family = str(technical_setup_scope.get("setup_family") or opportunity_type or "unknown")
         signal.entry_timing_signal = (
             setup_family
             if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
-            else "trend_direction_only"
+            else "trend_watch_for_trigger"
         )
         signal.price_location = str(getattr(signal, "price_percentile", "") or "")
         signal.trigger_valid = bool(
             setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
             and _has_specific_entry_text(entry_trigger)
+            and not pending_conditional_trigger
             and has_invalidation
             and signal.entry_quality not in {"poor", "weak"}
         )
@@ -1279,6 +1456,18 @@ def apply_trade_research_contract(
                 and has_invalidation
             )
     signal.invalidation_present = bool(has_invalidation)
+    if pending_conditional_trigger:
+        signal.trigger_valid = False
+    action_evidence_contract["trigger_valid"] = bool(signal.trigger_valid)
+    action_evidence_contract["invalidation_present"] = bool(signal.invalidation_present)
+    action_evidence_contract["setup_quality_ok"] = bool(
+        action_evidence_contract.get("setup_quality_ok")
+        or signal.setup_quality_score >= 0.42
+    )
+    action_evidence_contract["setup_type"] = str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown")
+    execution_contract = dict(action_evidence_contract.get("execution") or {})
+    execution_contract["trigger_valid"] = bool(signal.trigger_valid)
+    action_evidence_contract["execution"] = execution_contract
     signal.factor_focus = focus
     signal.current_evidence_conflict = conflicts
     signal.research_contract_version = research_contract["contract_version"]
@@ -1301,7 +1490,7 @@ def apply_trade_research_contract(
         "internal_message_validation_errors": message_errors,
         "tradeability": tradeability,
         "risk_flags": risk_flags,
-        "opportunity_layer_notes": layer_notes,
+        "opportunity_state_notes": state_notes,
         "opportunity_state": opportunity_state,
         "learning_impact_summary": learning_impact_summary,
         "setup_quality": {
@@ -1316,7 +1505,7 @@ def apply_trade_research_contract(
             "missing_fields": missing_setup_fields,
             "critical_missing_fields": critical_missing_setup_fields,
             "non_neutral_requires_complete_setup": not is_neutral,
-            "if_critical_missing_then_direction_only": True,
+            "if_critical_missing_then_watch_for_trigger": True,
             "derived_setup_notes": derived_notes,
         },
         "learning_scope": action_evidence_contract.get("learning_scope") or {},
@@ -1389,14 +1578,14 @@ def build_technical_context(
         risk_flags.append("weak_volume_confirmation")
     if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
         risk_flags.append("bullish_setup_lacks_trend_volume_confirmation")
-    trend_continuation_tradeable = (
+    trend_continuation_setup_ok = (
         dominant_direction in {"bullish", "bearish"}
         and trend_strength >= 25
         and conflict_count <= 1
         and volume_ratio >= 0.8
         and aligned >= required_aligned
     )
-    if regime in {"choppy", "range", "weak_trend", "high_volatility"} and not trend_continuation_tradeable:
+    if regime in {"choppy", "range", "weak_trend", "high_volatility"} and not trend_continuation_setup_ok:
         risk_flags.append("trend_continuation_requires_breakout_confirmation")
 
     if aligned >= required_aligned and conflict_count <= 1 and trend_strength >= 20 and volume_ratio >= 0.8:
@@ -1412,14 +1601,14 @@ def build_technical_context(
     if dominant_direction == "bullish" and trend_strength < 22 and volume_ratio < 0.9:
         tradeability = "low"
 
-    range_reversal_tradeable = (
+    range_reversal_setup_ok = (
         regime in {"range", "weak_trend", "choppy"}
         and dominant_direction in {"bullish", "bearish"}
         and conflict_count <= 2
         and aligned >= 3
         and volume_ratio >= 0.75
     )
-    volatility_breakout_candidate = (
+    volatility_breakout_setup_ok = (
         regime == "high_volatility"
         and dominant_direction in {"bullish", "bearish"}
         and aligned >= required_aligned
@@ -1427,15 +1616,15 @@ def build_technical_context(
         and volume_ratio >= 1.0
         and trend_strength >= 22
     )
-    if trend_continuation_tradeable:
+    if trend_continuation_setup_ok:
         setup_family = "trend_breakout"
         required_confirmation = "trend/MACD/DI alignment plus volume or open-interest confirmation"
         invalidation_template = "price closes back inside the failed breakout area or opposite momentum/volume confirmation appears"
-    elif range_reversal_tradeable:
+    elif range_reversal_setup_ok:
         setup_family = "range_reversal"
         required_confirmation = "RSI/Stochastic/mean-reversion signal aligns with nearby support/resistance and volume is not weak"
         invalidation_template = "price fails to hold the reversal area or resumes breakout against the reversal side"
-    elif volatility_breakout_candidate:
+    elif volatility_breakout_setup_ok:
         setup_family = "volatility_breakout"
         required_confirmation = "high-volatility breakout keeps direction with strong volume and no opposite technical vote"
         invalidation_template = "breakout fails on volume or closes back through the trigger zone"
@@ -1461,23 +1650,17 @@ def build_technical_context(
     if sector_setup_alignment == "caution" and setup_family not in {"direction_watchlist", "no_trade"}:
         risk_flags.append("sector_caution_setup_requires_stronger_confirmation")
 
-    current_trade_setup = {
-        "setup_family": setup_family,
-        "dominant_direction": dominant_direction,
-        "required_confirmation": required_confirmation,
-        "invalidation_template": invalidation_template,
-        "sector_setup_alignment": sector_setup_alignment,
-        "sector_preferred_setups": sorted(preferred_setups),
-        "sector_caution_setups": sorted(caution_setups),
-        "primary_confirmation": sector_policy.get("primary_confirmation") or [],
-        "execution_focus": sector_policy.get("execution_focus"),
-        "trend_continuation_tradeable": trend_continuation_tradeable,
-        "range_reversal_tradeable": range_reversal_tradeable,
-        "volatility_breakout_candidate": volatility_breakout_candidate,
-        "pm_layer_hint": "tradeable_setup"
-        if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"} and tradeability in {"medium", "high"}
-        else "direction_only" if dominant_direction in {"bullish", "bearish"} else "no_trade",
-    }
+    setup_quality_ok = bool(
+        setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
+        and tradeability in {"medium", "high"}
+    )
+    opportunity_state = (
+        "probe_candidate"
+        if setup_quality_ok
+        else "watch_for_trigger"
+        if dominant_direction in {"bullish", "bearish"}
+        else "no_opportunity"
+    )
 
     return {
         "sector": get_sector(ticker),
@@ -1487,12 +1670,26 @@ def build_technical_context(
         "market_regime": regime,
         "dominant_direction": dominant_direction,
         "tradeability": tradeability,
-        "trend_continuation_tradeable": trend_continuation_tradeable,
-        "range_reversal_tradeable": range_reversal_tradeable,
-        "volatility_breakout_candidate": volatility_breakout_candidate,
-        "current_trade_setup": current_trade_setup,
+        "setup_type": setup_family,
+        "setup_quality_ok": setup_quality_ok,
         "action_evidence_contract": {
             "analyst": "technical",
+            "setup_type": setup_family,
+            "setup_quality_ok": setup_quality_ok,
+            "opportunity_state": opportunity_state,
+            "trigger_valid": False,
+            "invalidation_present": setup_family not in {"no_trade"},
+            "entry_trigger": required_confirmation,
+            "invalidation_condition": invalidation_template,
+            "learning_scope": {
+                "setup_family": setup_family,
+                "sector_setup_alignment": sector_setup_alignment,
+                "sector_preferred_setups": sorted(preferred_setups),
+                "sector_caution_setups": sorted(caution_setups),
+                "primary_confirmation": sector_policy.get("primary_confirmation") or [],
+                "execution_focus": sector_policy.get("execution_focus"),
+                "market_regime": regime,
+            },
             "open": {
                 "setup_family": setup_family,
                 "requires_current_trigger": setup_family not in {"no_trade", "direction_watchlist"},
@@ -2143,7 +2340,7 @@ def write_analyst_report(
         f"Confidence: {float(signal.confidence or 0.0):.2f}",
         f"Tradeability: {sections.get('tradeability', signal.metadata.get('tradeability', 'unknown'))}",
         f"Opportunity Type: {getattr(signal, 'opportunity_type', 'unknown')}",
-        f"Opportunity Layer: {getattr(signal, 'opportunity_layer', 'direction_only')}",
+        f"Opportunity State: {getattr(signal, 'opportunity_state', 'watch_for_trigger')}",
         f"Entry Trigger: {getattr(signal, 'entry_trigger', '')}",
         f"Exit Hint: {getattr(signal, 'exit_hint', '')}",
         f"Holding Period Hint: {getattr(signal, 'holding_period_hint', '')}",

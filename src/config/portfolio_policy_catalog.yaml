@@ -1,4 +1,4 @@
-# PM 与市场确认策略目录。
+﻿# PM 与市场确认策略目录。
 # 由 config_normalizer.py 展开到 market_confirmation / directional_override_control / portfolio_manager。
 # 这些是冷启动业务策略，不是交易所事实；任何学习校准都不能突破 20% 总保证金硬上限。
 
@@ -7,9 +7,9 @@ gatekeeping_policy:
   # 旧 block/cap/probe 字段仍保留给运行时代码兼容读取，但业务上必须先被 reason_effects.py
   # 解释为 hard_block / soft_limit / learning_adjustment / release_signal，再由 PM 最终出口仲裁。
   # 统一出口主线：所有 scorecard、action-value、lifecycle 和 learning 信号只生成 action candidate；
-  # 最终交易事实只能来自 final_action_contract / final_new_entry_trade_authority。
+  # 最终交易事实只能来自 final_action_contract。
   mode: pm_final_authority_arbiter
-  final_authority_fields: [authority_type, lots, margin_ratio, reason_codes, final_new_entry_trade_authority]
+  final_authority_fields: [authority_type, lots_delta, margin_ratio, reason_codes, authority_decision]
   hard_risk_role: must_block
   soft_risk_role: tag_then_pm_arbitrate
   release_signal_role: may_release_soft_risk_only_with_current_evidence
@@ -164,7 +164,7 @@ portfolio_manager:
   holding_rebalance_control:
     # 持仓周期与再平衡：技术看短线，基本面做中期锚，新闻处理事件冲击。
     # 这里的 cap/probe/reduction 字段只描述目标 lots 倾向；最终交易事实仍以
-    # final_new_entry_trade_authority、target_lots、reason_codes 和 Trader 执行为准。
+    # final_action_contract.target_lots、lots_delta、reason_codes 和 Trader 执行为准。
     enabled: true
     min_rebalance_ratio: 0.008
     min_new_entry_ratio: 0.004
@@ -226,7 +226,7 @@ portfolio_manager:
       # 目的不是压死交易，而是避免最小一手把弱机会放大成真实亏损仓。
       exploration_reconfirm_enabled: true
       exploration_reconfirm_min_hold_days: 1
-      exploration_reconfirm_layers: [direction_only, unknown]
+      exploration_reconfirm_layers: [watch_for_trigger, unknown]
       exploration_reconfirm_min_confirmation_score: 0.55
       exploration_reconfirm_exit_confirmation_score: 0.48
       exploration_reconfirm_min_signal_strength: 0.30
@@ -247,15 +247,19 @@ portfolio_manager:
       require_pretrade_invalidation_for_new_entry: true
       missing_invalidation_cap_multiplier: 0.35
       missing_invalidation_probe_max_ratio: 0.015
-    direction_only_new_entry:
-      # 语义边界：该旧字段只表示“方向观点观察候选”，不是交易授权。
-      # 即使 allow_probe=true，也必须经过 final_new_entry_trade_authority，不能单独生成真实开仓。
+    watch_for_trigger_new_entry:
+      # 语义边界：watch_for_trigger 只表示“等待触发/观察候选”，不是交易授权。
+      # 即使 allow_probe=true，也必须经过 final_action_contract authority，不能单独生成真实开仓。
+      # 2026-06-19 起，分析师的“等待/如果/确认后才可交易”会先被归一化为
+      # watch_for_trigger + trigger_valid=false；这里不能把这种 pending 条件当作
+      # 当前 tradeable_candidate，也不能把 watch_for_trigger 放进真实成交路径。
       semantic_role: observation_candidate_only
-      audit_name: direction_only_observation_candidate
+      audit_name: watch_for_trigger_observation_candidate
       can_create_trade_authority: false
-      requires_final_new_entry_trade_authority: true
+      requires_final_contract_authority: true
       # 方向观点不能等同于可交易机会；默认只允许极小仓探索，不能开正常仓。
-      # 若后续研究证明无效，可改为 allow_probe=false；若证明有效，再调高 probe_max_ratio。
+      # allow_probe=true 只是保留 PM 内部观察/候选语义；真实一手 probe 仍必须有
+      # 当前触发、失效边界、无硬风险/负期望、资金可行和 final_action_contract。
       enabled: true
       allow_probe: true
       probe_max_ratio: 0.015
@@ -268,9 +272,10 @@ portfolio_manager:
       single_high_quality_probe_min_setup_quality: 0.60
       single_high_quality_probe_min_business_quality: 0.60
       single_high_quality_probe_min_confirmation_score: 0.45
-      # 已被 PM scorecard 判定为 tradeable_setup 的机会，若市场确认足够强且无硬失败，
+      # 已被 PM scorecard 判定为 tradeable_candidate 的机会，若市场确认足够强且无硬失败，
       # 可以进入受控最小 probe；纯方向观点仍不能走这条路径。
-      scorecard_tradeable_setup_probe_min_confirmation_score: 0.68
+      # pending 条件触发不属于这里的 tradeable_candidate。
+      scorecard_tradeable_candidate_probe_min_confirmation_score: 0.68
     winning_template_continuation:
       # 盈利模板延续：已有盈利仓位若同向证据仍成立，允许少减仓/继续持有。
       # 仅作用于盈利持仓，不保护亏损仓，不突破 20% 总保证金硬上限。
@@ -293,7 +298,7 @@ portfolio_manager:
       require_invalidation: true
       allow_learning_mechanism_protect: true
     fast_candidate_alpha_probe:
-      # 错过机会经未来 shadow 证明为正后，只允许下一轮同作用域极小仓 probe。
+      # 错过机会经未来 Counterfactual 证明为正后，只允许下一轮同作用域极小仓 probe。
       # 仍必须有当日确认、可交易 setup 和失效边界；不是品种白名单，也不支撑加仓硬扛。
       enabled: true
       min_confirmation_score: 0.58
@@ -307,7 +312,7 @@ portfolio_manager:
       # 该 gate 只定义证据质量边界，不能绕过 PM 最终交易权限。
       enabled: true
       apply_to_new_entries: true
-      block_direction_only_medium_in_choppy: true
+      block_watch_for_trigger_medium_in_choppy: true
       regimes_requiring_short_timing: ["choppy", "range", "ranging", "range_bound", "weak_trend"]
       horizons_requiring_short_timing: ["medium", "long"]
       allow_with_tradeable_support: true
@@ -358,13 +363,13 @@ portfolio_manager:
       unknown: 0.55
     severe_risk_flag_multiplier: 0.80
     min_quality_multiplier: 0.05
-    opportunity_layer_multipliers:
-      # PM 融合时区分“方向观点”和“可交易机会”，避免弱信号直接落仓。
-      deployable_alpha: 1.10
-      tradeable_setup: 1.00
-      risk_reduction: 0.90
-      direction_only: 0.60
-      no_trade: 0.0
+    opportunity_state_multipliers:
+      # PM 融合只读统一 opportunity_state：等待触发不是交易授权，可交易/受控 probe 才进入释放链路。
+      tradeable_candidate: 1.10
+      probe_candidate: 0.90
+      risk_reduction_candidate: 0.80
+      watch_for_trigger: 0.30
+      no_opportunity: 0.05
       unknown: 0.50
     opportunity_scorecard:
       # 统一机会评分：把分析师 setup、数据质量、market confirmation、学习状态合成机器可读机会层级。
@@ -374,22 +379,22 @@ portfolio_manager:
       weak_confirmation_threshold: 0.45
       # 入场质量阈值：用当前 setup、失效边界、市场状态和价格位置评分，避免弱 setup 大仓落地。
       min_deployable_setup_quality: 0.72
-      min_tradeable_setup_quality: 0.55
+      min_tradeable_candidate_setup_quality: 0.55
       # 单一分析师也能贡献真实机会，但必须是完整 setup，并有强当日市场确认；
       # 技术面明确反向时不晋升，避免把方向观点误当交易机会。
-      single_tradeable_setup_confirmation_score: 0.68
-      single_tradeable_setup_min_business_quality: 0.60
-      single_tradeable_setup_min_confidence: 0.42
+      single_tradeable_candidate_setup_confirmation_score: 0.68
+      single_tradeable_candidate_setup_min_business_quality: 0.60
+      single_tradeable_candidate_setup_min_confidence: 0.42
       technical_opposition_min_confidence: 0.45
       block_single_setup_on_technical_opposition: true
     position_quality_sizing:
       # 仓位大小跟机会质量绑定：强机会敢受控落仓，弱机会只小仓/观察，不突破 20% 总保证金硬上限。
       enabled: true
-      layer_multipliers:
-        deployable_alpha: 1.10
-        tradeable_setup: 0.90
-        direction_only: 0.45
-        no_trade: 0.0
+      state_multipliers:
+        tradeable_candidate: 1.10
+        probe_candidate: 0.90
+        watch_for_trigger: 0.30
+        no_opportunity: 0.0
         unknown: 0.45
       weak_setup_quality_below: 0.42
       weak_setup_multiplier: 0.35
@@ -399,7 +404,7 @@ portfolio_manager:
       # 不是产品偏好，不突破 20% 总保证金上限；候选档案不能支撑加仓、position_matched 或亏损硬扛。
       # 正/负 action-value 必须按 open/hold/exit/execution 动作维度使用，不能跨动作裸迁移。
       # PM 只读取 open/hold/exit 对仓位生命周期的偏好；execution lane 由 PM 写入 final_action_contract.execution_profile。
-      # 分析师只能读取 signal_calibration 校准证据质量；similar SQL/RAG 和 shadow 只能作弱先验。
+      # 分析师只能读取 signal_calibration 校准证据质量；similar SQL/RAG 和 Counterfactual 只能作弱先验。
       # 单样本 exact-state 正收益会先成为 positive_candidate_* 动作偏好；
       # 它只能支持更积极确认或 0.8%-1.5% probe 候选，不能直接晋升 real_budget_entry。
       # 样本、置信和当日证据达标后，才可进入 qualified_positive_expectancy 并参与放大。
@@ -430,3 +435,5 @@ portfolio_manager:
 
   # sector_weights 与 strategic_view_weights 由 analyst_prior_profiles.yaml 展开。
   # 日频交易用 trade_timing 权重；中期方向背景用 strategic_view 权重。
+
+

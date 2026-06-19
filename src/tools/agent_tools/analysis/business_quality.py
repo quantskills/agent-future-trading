@@ -67,11 +67,11 @@ def _first_nonempty(*values: Any, default: str = "unknown") -> str:
     return default
 
 
-def infer_template_name(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
-    existing = str(getattr(signal, "template_name", "") or "").strip()
+def infer_setup_type(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
+    existing = str(getattr(signal, "setup_type", "") or "").strip()
     if existing and existing != "unknown":
         return existing
-    trigger = str(getattr(signal, "trigger_type", "") or "").lower()
+    trigger = str(getattr(signal, "entry_trigger", "") or "").lower()
     trend_stage = str(getattr(signal, "trend_stage", "") or quality_context.get("market_regime") or "").lower()
     price_percentile = getattr(signal, "price_percentile", None)
     try:
@@ -169,7 +169,7 @@ def _counter_evidence_from_context(quality_context: Dict[str, Any]) -> str:
     return "no explicit counter-evidence flagged by deterministic precheck"
 
 
-def _shadow_side_from_context(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
+def _counterfactual_side_from_context(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
     text_signal = _signal_value(getattr(signal, "signal", Signal.NEUTRAL))
     if text_signal == Signal.BULLISH.value:
         return "long"
@@ -233,11 +233,11 @@ def _neutral_opportunity_contract(
     else:
         bucket = "accountable_observation"
 
-    raw_shadow_side = str(getattr(signal, "neutral_shadow_side", "") or "").lower()
-    if raw_shadow_side in {"long", "short", "flat"}:
-        shadow_side = raw_shadow_side
+    raw_counterfactual_side = str(getattr(signal, "counterfactual_side", "") or "").lower()
+    if raw_counterfactual_side in {"long", "short", "flat"}:
+        counterfactual_side = raw_counterfactual_side
     else:
-        shadow_side = _shadow_side_from_context(signal, quality_context, analyst)
+        counterfactual_side = _counterfactual_side_from_context(signal, quality_context, analyst)
 
     trigger = _first_nonempty(
         getattr(signal, "neutral_trigger_condition", ""),
@@ -245,7 +245,7 @@ def _neutral_opportunity_contract(
         "primary driver, short timing, and invalidation boundary align",
     )
     priority = "none"
-    if bucket in {"evidence_gap", "horizon_mismatch", "accountable_observation"} and shadow_side in {"long", "short"}:
+    if bucket in {"evidence_gap", "horizon_mismatch", "accountable_observation"} and counterfactual_side in {"long", "short"}:
         priority = "medium"
     if bucket == "conflict_avoidance":
         priority = "low"
@@ -255,10 +255,12 @@ def _neutral_opportunity_contract(
     return {
         "bucket": bucket,
         "trigger_condition": trigger,
-        "shadow_side": shadow_side,
+        "counterfactual_side": counterfactual_side,
         "watchlist_priority": priority,
         "tracking_only": True,
-        "trade_permission": "none_without_current_confirmation",
+        "opportunity_state": "watch_for_trigger",
+        "trigger_valid": False,
+        "action_preference": "watch_for_trigger",
         "missing_evidence": missing,
         "conflicting_factors": conflicts,
     }
@@ -288,8 +290,7 @@ def apply_business_quality_enrichment(
         "short" if analyst_key == "technical" else "event_short" if analyst_key == "commodity_news" else "short"
     )
     signal.validation_horizon = signal.validation_horizon if signal.validation_horizon != "unknown" else signal.horizon_class
-    signal.horizon_days = signal.horizon_days or signal.expected_horizon_days
-    signal.template_name = infer_template_name(signal, quality_context, analyst_key)
+    signal.setup_type = infer_setup_type(signal, quality_context, analyst_key)
     signal.business_quality_score = compute_business_quality_score(signal, quality_context, analyst_key)
     signal.data_coverage_score = max(
         _safe_float(getattr(signal, "data_coverage_score", 0.0), 0.0),
@@ -377,9 +378,9 @@ def apply_business_quality_enrichment(
             signal.neutral_trigger_condition,
             neutral_contract["trigger_condition"],
         )
-        signal.neutral_shadow_side = _first_nonempty(
-            signal.neutral_shadow_side,
-            neutral_contract["shadow_side"],
+        signal.counterfactual_side = _first_nonempty(
+            signal.counterfactual_side,
+            neutral_contract["counterfactual_side"],
         )
         signal.neutral_watchlist_priority = _first_nonempty(
             signal.neutral_watchlist_priority,
@@ -387,7 +388,7 @@ def apply_business_quality_enrichment(
         )
         signal.accountability_tag = _first_nonempty(
             signal.accountability_tag,
-            f"{analyst_key}_neutral_{signal.template_name}",
+            f"{analyst_key}_neutral_{signal.setup_type}",
         )
     else:
         neutral_contract = None
@@ -404,7 +405,7 @@ def apply_business_quality_enrichment(
             "data_coverage_score": signal.data_coverage_score,
             "tradeability_reason": signal.tradeability_reason,
         },
-        "template_name": signal.template_name,
+        "setup_type": signal.setup_type,
         "horizon_scope": {
             "analyst_horizon": signal.analyst_horizon,
             "decision_horizon": signal.decision_horizon,
@@ -417,7 +418,7 @@ def apply_business_quality_enrichment(
             **neutral_contract,
             "bucket": signal.neutral_opportunity_bucket,
             "trigger_condition": signal.neutral_trigger_condition,
-            "shadow_side": signal.neutral_shadow_side,
+            "counterfactual_side": signal.counterfactual_side,
             "watchlist_priority": signal.neutral_watchlist_priority,
             "observation_window": signal.recommended_observation_window,
             "opportunity_cost_risk": signal.opportunity_cost_risk,
@@ -433,14 +434,14 @@ def summarize_business_quality(signals: Iterable[AnalystSignal]) -> Dict[str, An
                 "agent_name": getattr(signal, "agent_name", ""),
                 "signal": _signal_value(getattr(signal, "signal", "Neutral")),
                 "business_quality_score": _safe_float(getattr(signal, "business_quality_score", 0.0), 0.0),
-                "template_name": getattr(signal, "template_name", "unknown"),
+                "setup_type": getattr(signal, "setup_type", "unknown"),
                 "horizon_class": getattr(signal, "horizon_class", "unknown"),
                 "analyst_horizon": getattr(signal, "analyst_horizon", "unknown"),
                 "tradeability_reason": getattr(signal, "tradeability_reason", ""),
                 "neutral_reason": getattr(signal, "neutral_reason", ""),
                 "neutral_opportunity_bucket": getattr(signal, "neutral_opportunity_bucket", "unknown"),
                 "neutral_trigger_condition": getattr(signal, "neutral_trigger_condition", ""),
-                "neutral_shadow_side": getattr(signal, "neutral_shadow_side", "flat"),
+                "counterfactual_side": getattr(signal, "counterfactual_side", "flat"),
                 "neutral_watchlist_priority": getattr(signal, "neutral_watchlist_priority", "none"),
             }
         )

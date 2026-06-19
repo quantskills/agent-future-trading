@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Shared schemas for the protocol-governor sidecar.
 
@@ -31,7 +31,7 @@ MEMORY_QUALITY_LEVELS = {
     "exact_real_state",
     "partial_real_state",
     "similar_sql_prior",
-    "shadow_prior",
+    "counterfactual_prior",
     "stale_or_conflicted_memory",
     "unqualified",
 }
@@ -154,3 +154,5 @@ class TaskLifecycleEvent:
             "reasons": list(self.reasons),
             "metadata": dict(self.metadata),
         }
+
+

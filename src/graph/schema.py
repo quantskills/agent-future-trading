@@ -33,16 +33,13 @@ class AnalystSignal(BaseModel):
     execution_horizon: str = Field(default="unknown", description="Trader execution horizon")
     validation_horizon: str = Field(default="unknown", description="Reviewer validation horizon")
     expected_horizon_days: int = Field(default=0, description="Expected signal horizon in trading days")
-    horizon_days: int = Field(default=0, description="Alias for expected_horizon_days used by business gates")
     market_regime: str = Field(default="unknown", description="Market regime used by the analyst")
     trend_stage: str = Field(default="unknown", description="Trend or price-stage classification")
-    template_name: str = Field(default="unknown", description="Trading template classification")
+    setup_type: str = Field(default="unknown", description="Canonical setup classification")
     price_percentile: Optional[float] = Field(
         default=None,
         description="Current price percentile in the analyst lookback window, 0.0 to 1.0 when available",
     )
-    trigger_type: str = Field(default="unknown", description="Signal trigger type")
-    entry_type: str = Field(default="unknown", description="initial / add / reduce / hold / event / unknown")
     invalidation_level: Optional[float] = Field(default=None, description="Price level invalidating the signal")
     atr_stop_distance: Optional[float] = Field(default=None, description="ATR-based stop distance when available")
     add_allowed: bool = Field(default=False, description="Whether this signal permits adding to an existing position")
@@ -74,10 +71,6 @@ class AnalystSignal(BaseModel):
             "Opportunity taxonomy: trend_continuation / reversal / range_breakout / "
             "event_driven / medium_fundamental / short_timing / probe / no_trade / unknown"
         ),
-    )
-    opportunity_layer: str = Field(
-        default="direction_only",
-        description="direction_only / tradeable_setup / deployable_alpha / risk_reduction / no_trade",
     )
     opportunity_state: str = Field(
         default="watch_for_trigger",
@@ -115,8 +108,6 @@ class AnalystSignal(BaseModel):
         ),
     )
     direction_context: str = Field(default="", description="Directional background supplied by this analyst")
-    trade_trigger: str = Field(default="", description="Concrete trade trigger consumed by PM/Trader")
-    position_horizon: str = Field(default="", description="Position horizon consumed by PM and Researcher")
     trend_direction: str = Field(default="", description="Technical trend direction, separated from entry timing")
     entry_timing_signal: str = Field(default="", description="Technical entry timing classification")
     price_location: str = Field(default="", description="Price location or zone used for entry timing")
@@ -137,7 +128,7 @@ class AnalystSignal(BaseModel):
         description="Neutral opportunity bucket: watchlist_trigger / evidence_gap / conflict_avoidance / low_tradeability / horizon_mismatch / accountable_observation / unaccountable",
     )
     neutral_trigger_condition: str = Field(default="", description="Concrete condition that can move Neutral into a tradeable setup")
-    neutral_shadow_side: str = Field(default="flat", description="Shadow direction to track for Neutral: long / short / flat")
+    counterfactual_side: str = Field(default="flat", description="Counterfactual direction to track for Neutral: long / short / flat")
     neutral_watchlist_priority: str = Field(default="none", description="none / low / medium / high priority for conditional Neutral observation")
     accountability_tag: str = Field(default="", description="Post-trade accountability label")
     similar_past_cases: List[str] = Field(default_factory=list, description="Reviewer-provided similar past cases")
@@ -202,9 +193,7 @@ class AnalystSignal(BaseModel):
         "validation_horizon",
         "market_regime",
         "trend_stage",
-        "template_name",
-        "trigger_type",
-        "entry_type",
+        "setup_type",
         "direction_anchor",
         "supply_demand_state",
         "basis_state",
@@ -219,7 +208,6 @@ class AnalystSignal(BaseModel):
         "counter_evidence",
         "tradeability_reason",
         "opportunity_type",
-        "opportunity_layer",
         "opportunity_state",
         "entry_quality",
         "entry_trigger",
@@ -233,7 +221,7 @@ class AnalystSignal(BaseModel):
         "recommended_observation_window",
         "neutral_opportunity_bucket",
         "neutral_trigger_condition",
-        "neutral_shadow_side",
+        "counterfactual_side",
         "neutral_watchlist_priority",
         "accountability_tag",
         "do_not_trade_reason",
@@ -243,7 +231,7 @@ class AnalystSignal(BaseModel):
     def normalize_text_fields(cls, value):
         return "unknown" if value is None or str(value).strip() == "" else str(value)
 
-    @field_validator("expected_horizon_days", "horizon_days", "impact_window_days", mode="before")
+    @field_validator("expected_horizon_days", "impact_window_days", mode="before")
     @classmethod
     def normalize_horizon_days(cls, value):
         try:

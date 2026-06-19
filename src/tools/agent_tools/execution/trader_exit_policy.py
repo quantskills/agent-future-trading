@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Deterministic trader exit policy helpers."""
 
@@ -53,14 +53,14 @@ def _days_held(entry_date: Any, trading_date: Any) -> Optional[int]:
         return None
 
 
-def resolve_exit_policy_config(config: Dict[str, Any], ticker: str, template_name: str = "") -> Dict[str, Any]:
+def resolve_exit_policy_config(config: Dict[str, Any], ticker: str, setup_type: str = "") -> Dict[str, Any]:
     execution_cfg = ((config or {}).get("execution") or {}).get("exit_policy") or {}
     sector = SECTOR_BY_TICKER.get(str(ticker).upper(), "generic")
     resolved = dict(DEFAULT_SECTOR_STOPS.get(sector, DEFAULT_SECTOR_STOPS["generic"]))
     resolved.update(execution_cfg.get("defaults") or {})
     resolved.update((execution_cfg.get("sector_overrides") or {}).get(sector) or {})
-    if template_name:
-        resolved.update((execution_cfg.get("template_overrides") or {}).get(template_name) or {})
+    if setup_type:
+        resolved.update((execution_cfg.get("template_overrides") or {}).get(setup_type) or {})
     resolved["sector"] = sector
     resolved["enabled"] = bool(execution_cfg.get("enabled", True))
     return resolved
@@ -83,8 +83,8 @@ def evaluate_exit_policy(
     an existing exposure should be reduced to zero because the structured
     lifecycle says the trade is invalidated or stale.
     """
-    template_name = str(lifecycle.get("template_name") or "")
-    policy = resolve_exit_policy_config(config, ticker, template_name)
+    setup_type = str(lifecycle.get("setup_type") or "")
+    policy = resolve_exit_policy_config(config, ticker, setup_type)
     result = {
         "enabled": policy.get("enabled", True),
         "exit_required": False,
@@ -119,7 +119,7 @@ def evaluate_exit_policy(
     days = _days_held(getattr(current_position, "entry_date", None), trading_date)
     if days is not None:
         template_state = str((lifecycle.get("template_state") or lifecycle.get("memory_state") or "")).lower()
-        is_probe = template_state in {"probe_only", "recovering", "watchlist"} or "probe" in template_name
+        is_probe = template_state in {"probe_only", "recovering", "watchlist"} or "probe" in setup_type
         max_days = int(policy.get("probe_time_stop_days" if is_probe else "trend_time_stop_days") or 0)
         same_direction_supported = (
             target_lots != 0
@@ -134,3 +134,4 @@ def evaluate_exit_policy(
             result.update({"exit_required": True, "target_lots": 0, "reason": "time_stop"})
             return result
     return result
+

@@ -1,4 +1,4 @@
-"""Capital utilization and alpha release policy helpers for portfolio decisions."""
+﻿"""Capital utilization and alpha release policy helpers for portfolio decisions."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ _SOFT_LIMITED_PRE_CONTROL_REASONS = {
     "business_quality_observe_or_block",
     "opportunity_scorecard_probe_seed",
     "single_high_quality_probe_only",
-    "pm_direction_only_probe_cap",
+    "pm_watch_for_trigger_probe_cap",
     "horizon_consistency_probe_cap",
     "market_confirmation_quality_gate",
     "market_confirmation_conflict",
@@ -172,7 +172,7 @@ def _resolve_alpha_release_tier(
         bool(policy_type)
         and str(evidence.get("ticker") or "*") != "*"
         and str(evidence.get("side") or "*") != "*"
-        and str(evidence.get("signal_template") or "*") != "*"
+        and str(evidence.get("setup_type") or "*") != "*"
     )
     combo_specific = (
         _memory_signal_combo_is_specific(evidence, signal_combo)
@@ -785,3 +785,5 @@ __all__ = [
     "_resolve_alpha_release_tier",
     "_resolve_dynamic_opportunity_budget",
 ]
+
+

@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -52,7 +52,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         cards = build_default_agent_cards()
         trader_card = cards["trader"]
 
-        self.assertIn("final_action_contract.execution_plan", trader_card.reads)
+        self.assertIn("final_action_contract", trader_card.reads)
         self.assertIn("audit_verdict", trader_card.reads)
         self.assertNotIn("execution_action_value", trader_card.reads)
         self.assertFalse(trader_card.may_create_trade_authority)
@@ -105,7 +105,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("ACTION-VALUE USAGE BOUNDARY", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("Analysts may read only signal_calibration", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("execution action-value may inform PM's execution_profile", ACTION_VALUE_USAGE_BOUNDARY)
-        self.assertIn("only final_action_contract.execution_plan / execution_profile", ACTION_VALUE_USAGE_BOUNDARY)
+        self.assertIn("only final_action_contract execution fields / execution_profile", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("must not directly change direction", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("target_lots, margin_ratio, or authority", ACTION_VALUE_USAGE_BOUNDARY)
 
@@ -122,7 +122,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
         self.assertIn("open rewards evaluate the full episode result", researcher_review)
         self.assertIn("PM via matching open/hold/exit/execution lane", researcher_review)
-        self.assertIn("Trader only through final_action_contract.execution_plan", researcher_review)
+        self.assertIn("Trader only through final_action_contract execution fields", researcher_review)
 
     def test_enabled_analyst_prompts_request_learning_explainability_summaries(self):
         technical_prompt = build_futures_technical_prompt(
@@ -272,13 +272,13 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertFalse(similar["allowed_uses"]["can_support_real_budget_entry"])
         self.assertTrue(similar["allowed_uses"]["can_support_probe"])
 
-        shadow = self.governor.classify_memory_quality({"shadow_prior_only": True})
-        self.assertFalse(shadow["allowed_uses"]["can_support_probe"])
-        self.assertTrue(shadow["allowed_uses"]["can_inform_analysis"])
+        counterfactual = self.governor.classify_memory_quality({"counterfactual_prior_only": True})
+        self.assertFalse(counterfactual["allowed_uses"]["can_support_probe"])
+        self.assertTrue(counterfactual["allowed_uses"]["can_inform_analysis"])
 
-        legacy = self.governor.classify_memory_quality({"policy_hint": "positive_candidate_open"})
-        self.assertEqual(legacy["memory_quality"], "unqualified")
-        self.assertFalse(legacy["allowed_uses"]["can_support_real_budget_entry"])
+        preference_only = self.governor.classify_memory_quality({"action_preference": "positive_candidate_open"})
+        self.assertEqual(preference_only["memory_quality"], "unqualified")
+        self.assertFalse(preference_only["allowed_uses"]["can_support_real_budget_entry"])
 
     def test_action_preference_audit_is_observational(self):
         pm_snapshot = {
@@ -371,7 +371,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": 2,
             "lots_delta": 2,
-            "trigger_type": "breakout",
+            "entry_trigger": "breakout",
         }
         simulation = dict(backtest)
         self.assertTrue(
@@ -380,13 +380,13 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                 simulation_contract=simulation,
             ).ok
         )
-        simulation["trigger_type"] = "vwap"
+        simulation["entry_trigger"] = "vwap"
         result = self.governor.compare_backtest_simulation_parity(
             backtest_contract=backtest,
             simulation_contract=simulation,
         )
         self.assertFalse(result.ok)
-        self.assertIn("parity_mismatch:trigger_type", result.errors)
+        self.assertIn("parity_mismatch:entry_trigger", result.errors)
 
     def test_exploration_audit_classifies_probe_purpose(self):
         self.assertEqual(
@@ -403,9 +403,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         )
         self.assertEqual(
             self.governor.classify_exploration(
-                {"authority_type": "watchlist_only", "reason_codes": ["shadow_prior"]}
+                {"authority_type": "watchlist_only", "reason_codes": ["counterfactual_prior"]}
             ),
-            "shadow_no_trade_observation",
+            "counterfactual_no_trade_observation",
         )
 
     def test_protocol_governor_agent_report_is_sidecar(self):
@@ -482,7 +482,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
     def test_cost_budget_audit_rejects_trade_action_fields(self):
         report = self.governor.audit_cost_budget(
-            [{"agent_name": "researcher", "llm_calls": 1, "authority_type": "no_trade"}]
+            [{"agent_name": "researcher", "llm_calls": 1, "authority_type": "no_opportunity"}]
         )
         self.assertFalse(report["ok"])
         self.assertIn("cost_audit_event_contains_trade_action_field", report["errors"])
@@ -540,3 +540,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
