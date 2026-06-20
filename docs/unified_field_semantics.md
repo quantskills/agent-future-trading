@@ -11,7 +11,7 @@
 - Accountant 只按成交和结算价写结算结果：`settlement_result`。
 - Reviewer 写复盘归因。
 - Researcher 写分动作 action-value 学习。
-- 换月、强平、回放、反事实观察不是策略交易，必须用 `order_source != strategy` 分账，不能污染策略 action-value。
+- 换月、强平、回放、反事实观察不是策略交易，必须用 `source_type != strategy` 分账，不能污染策略 action-value。
 - `payload`、`payload_json`、`artifact_json`、`signal_snapshot`、`evidence_json`、`result_json`、`features_json` 等只允许作为结构化容器；容器里的业务字段必须属于本文字段，不能形成第二套语义。
 
 ## 1. 通用消息与 artifact 字段
@@ -48,6 +48,7 @@
 | `started_at` | `trading_day_phase` | 阶段开始时间。 |
 | `completed_at` | `trading_day_phase` | 阶段完成时间。 |
 | `message` | `trading_day_phase` | 阶段说明。 |
+| `incomplete_trading_day_phase` | 验收错误码 | 交易日存在推荐、成交、盘中决策或学习记录，但 phase1-4 未全部 completed；必须删除或重跑当天，不能进入策略结论或学习。 |
 | `payload` | artifact 外层 | 结构化载荷容器；不能引入未登记语义。 |
 | `payload_json` | 数据库存储 | `payload` 序列化结果；不能被当成另一套字段表。 |
 | `artifact_json` | signal 表 | 分析师 artifact 序列化容器。 |
@@ -159,6 +160,7 @@
 | `entry_quality` | 分析师证据 | 入场质量。 |
 | `entry_trigger` | 分析师证据 | 当前触发事实或等待条件。 |
 | `entry_timing_signal` | 技术证据 | 技术入场时机分类。 |
+| `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
 | `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
 | `exit_hint` | 分析师证据 | 退出 / 减仓提示。 |
@@ -250,6 +252,9 @@
 | `target_position_ratio` | `final_action_contract` | 目标仓位比例。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap、event_immediate、exit_immediate、none。 |
+| `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。 |
+| `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
+| `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
 | `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
 | `risk_controls` | `final_action_contract` | 风险控制项。 |
@@ -258,9 +263,14 @@
 | `max_allowed_margin_ratio` | `final_action_contract` | 当前动作允许的最高保证金比例。 |
 | `contract_hash` | 审计 / 执行 | 被审计的合约哈希。 |
 | `single_source_of_trade_truth_remains` | PM 诊断 | 必须等于 `final_action_contract`；只用于审计说明。 |
+| `active_opportunity_audit` | PM 推荐 snapshot | PM 对当前机会释放路径的诊断对象；只用于解释候选、阻断和条件监控，不生成第二张交易合约。 |
 | `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |
 | `tradeable_opportunity_state_count` | PM scorecard | `tradeable_candidate` 与 `probe_candidate` 的证据数量。 |
 | `preferred_state` | PM 主机会审计 | PM 选中的首要机会状态。 |
+| `source_analysts` | PM scorecard / PM 主机会审计 | 支持该方向或条件机会的分析师列表。 |
+| `conditional_monitor_candidate` | PM 主机会审计 | 单个方向是否满足条件监控候选：`watch_for_trigger + setup_quality_ok + trigger_valid=false + entry_trigger + invalidation_present + 明确方向`。 |
+| `conditional_monitor_candidates` | PM 主机会审计 | 满足条件监控候选的方向列表；只供 PM 判断是否生成同一张 `final_action_contract` 的条件 probe 权限。 |
+| `conditional_monitor_candidate_count` | PM 主机会审计 | 条件监控候选数量。 |
 | `watch_for_trigger_semantic_block` | PM 诊断 | `watch_for_trigger` 语义阻止真实开仓。 |
 | `watch_for_trigger_semantic_release_block` | PM 诊断 | 释放路径被 `watch_for_trigger` 语义阻止。 |
 
@@ -360,7 +370,7 @@
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
-| `order_source` | 推荐 / 成交 / 研究 | strategy、rollover、forced_risk、counterfactual。 |
+| `source_type` | 推荐 / 成交 / 研究 | 订单来源唯一字段；取值 `strategy`、`rollover`、`forced_risk`、`counterfactual_*`。策略单只能用 `strategy`；换月与强平必须独立分账，不能污染策略 action-value。 |
 | `from_contract` | 换月订单 | 换出合约。 |
 | `to_contract` | 换月订单 | 换入合约。 |
 | `operation_reason` | 非策略订单 | 换月 / 风控动作原因。 |

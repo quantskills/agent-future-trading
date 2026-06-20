@@ -169,6 +169,95 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
         self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
 
+    def test_requires_confirmed_break_after_open_stays_watch_for_trigger(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.70,
+            entry_trigger=(
+                "In the current range regime, bearish entry timing requires a confirmed break "
+                "below the nearest pre-open support/range floor after the open, with MACD/trend "
+                "still down and volume ratio staying elevated or settlement-price weakness "
+                "persisting; without that confirmation, remain on watch."
+            ),
+            exit_hint="exit if price closes back above the failed breakdown area",
+            invalidation_level=3520.0,
+            business_quality_score=0.72,
+            data_coverage_score=0.86,
+            setup_type="range_breakout",
+            opportunity_state="probe_candidate",
+            trigger_valid=True,
+            invalidation_present=True,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "market_regime": "range",
+                "dominant_direction": "bearish",
+                "setup_type": "range_breakout",
+                "setup_quality_ok": True,
+                "invalidation_condition": "price closes back above the failed breakdown area",
+                "indicator_votes": {"details": {"trend": "Bearish", "macd": "Bearish", "adx": "Neutral"}},
+                "risk_flags": [],
+            },
+            analyst="technical",
+            trading_date="2025-03-05",
+            ticker="HC",
+        )
+
+        action_contract = result.metadata["action_evidence_contract"]
+        research_contract = result.metadata["trade_research_contract"]
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(action_contract["trigger_valid"])
+        self.assertFalse(research_contract["trigger_valid"])
+        self.assertFalse(research_contract["action_evidence_contract"]["trigger_valid"])
+        self.assertEqual(action_contract["opportunity_state"], "watch_for_trigger")
+        self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
+
+    def test_setup_quality_without_current_confirmation_stays_watch_for_trigger(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.74,
+            entry_trigger="trend_breakout setup below range floor with volume expansion",
+            exit_hint="exit if price closes back above range floor",
+            invalidation_level=3520.0,
+            business_quality_score=0.74,
+            data_coverage_score=0.88,
+            setup_type="trend_breakout",
+            opportunity_state="tradeable_candidate",
+            trigger_valid=True,
+            invalidation_present=True,
+        )
+
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "tradeability": "high",
+                "market_regime": "trend",
+                "dominant_direction": "bearish",
+                "setup_type": "trend_breakout",
+                "setup_quality_ok": True,
+                "invalidation_condition": "price closes back above range floor",
+                "indicator_votes": {"details": {"trend": "Bearish", "macd": "Bearish", "adx": "Bearish"}},
+                "risk_flags": [],
+            },
+            analyst="technical",
+            trading_date="2025-03-06",
+            ticker="PB",
+        )
+
+        action_contract = result.metadata["action_evidence_contract"]
+        self.assertTrue(action_contract["setup_quality_ok"])
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(action_contract["trigger_valid"])
+        self.assertFalse(action_contract["current_trigger_confirmed"])
+        self.assertIn("current_entry_trigger_not_confirmed", result.current_evidence_conflict)
+
     def test_current_trigger_and_invalidation_cannot_be_hidden_as_no_opportunity(self):
         signal = AnalystSignal(
             agent_name="technical",
@@ -220,6 +309,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
         self.assertTrue(result.trigger_valid)
         self.assertTrue(result.invalidation_present)
+        self.assertTrue(result.metadata["action_evidence_contract"]["current_trigger_confirmed"])
 
     def test_generic_trigger_does_not_become_tradeable_candidate(self):
         signal = AnalystSignal(
@@ -562,6 +652,10 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(result.opportunity_state, "watch_for_trigger")
         self.assertIn("price/volume", result.entry_trigger)
         self.assertIn("news_event_requires_price_or_intraday_confirmation", result.current_evidence_conflict)
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
+        self.assertFalse(result.metadata["trade_research_contract"]["trigger_valid"])
+        self.assertFalse(result.metadata["trade_research_contract"]["action_evidence_contract"]["trigger_valid"])
 
     def test_pm_invalidation_ignores_generic_would_change_view_text(self):
         weak = AnalystSignal(
@@ -612,6 +706,47 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn("missing_invalidation_boundary", weak_card["long"]["gating_failures"])
         self.assertEqual(strong_card["long"]["invalidation_count"], 1)
         self.assertNotIn("missing_invalidation_boundary", strong_card["long"]["gating_failures"])
+
+    def test_scorecard_preserves_conditional_watch_trigger_fields(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            opportunity_state="watch_for_trigger",
+            setup_quality_score=0.67,
+            business_quality_score=0.64,
+            entry_trigger=(
+                "wait for post-open break below support with volume confirmation"
+            ),
+            would_change_view_if="short setup invalid if price closes back above range high",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support with volume confirmation",
+                }
+            },
+        )
+
+        card = build_opportunity_scorecard(
+            ticker="HC",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.52},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+
+        row = card["short"]
+        self.assertEqual(row["final_state"], "watch_for_trigger")
+        self.assertTrue(row["setup_quality_ok"])
+        self.assertFalse(row["trigger_valid"])
+        self.assertFalse(row["current_trigger_confirmed"])
+        self.assertTrue(row["invalidation_present"])
+        self.assertEqual(row["opportunity_state"], "watch_for_trigger")
+        self.assertIn("post-open break", row["entry_trigger"])
+        self.assertEqual(row["source_analysts"], ["technical"])
 
     def test_single_complete_fundamental_setup_with_strong_market_confirmation_is_tradeable(self):
         """Regression for PM over-blocking a complete setup as watch_for_trigger."""

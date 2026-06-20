@@ -100,6 +100,16 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     active INTEGER,
                     payload_json TEXT
                 );
+                CREATE TABLE trading_day_phase (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    trading_date TEXT,
+                    phase TEXT,
+                    status TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    message TEXT
+                );
                 """
             )
             now = datetime.utcnow().isoformat()
@@ -213,6 +223,59 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertEqual(report.failed_checks, [])
             self.assertIn("environment_api", report.checks)
             self.assertIn("learning_landing", report.checks)
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_incomplete_trading_day_before_backtest(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        now = datetime.utcnow().isoformat()
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "wait",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                    "authority_type": "watchlist_only",
+                }
+            }
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, trading_date, action, status, audit_payload, signal_snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-running", "cfg", "2025-03-10", "hold", "skipped", _dumps(payload), _dumps(payload), now),
+            )
+            conn.executemany(
+                "INSERT INTO trading_day_phase VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("p1", "cfg", "2025-03-10", "phase1", "completed", now, now, ""),
+                    ("p2", "cfg", "2025-03-10", "phase2", "running", now, None, ""),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    check_llm_auth=False,
+                )
+            self.assertFalse(report.ok)
+            self.assertIn("data_time_boundary", report.failed_checks)
+            self.assertTrue(
+                any(error.startswith("data_time_boundary:incomplete_trading_day_phase:2025-03-10:") for error in report.errors),
+                report.to_dict(),
+            )
         finally:
             Path(db_path).unlink(missing_ok=True)
 

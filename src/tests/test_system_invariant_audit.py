@@ -112,6 +112,16 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     active INTEGER DEFAULT 1,
                     payload_json TEXT
                 );
+                CREATE TABLE trading_day_phase (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    trading_date TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    message TEXT
+                );
                 """
             )
             conn.execute(
@@ -214,6 +224,48 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.counts["open_transactions"], 1)
 
+    def test_system_invariant_audit_fails_incomplete_trading_day_phase(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["llm_neutral"],
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-phase", "cfg", "pf", "2025-03-10", "2025-03-10", "strategy", "RB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            rows = [
+                ("p1", "cfg", "2025-03-10", "phase1", "completed", now, now, ""),
+                ("p2", "cfg", "2025-03-10", "phase2", "running", now, None, ""),
+            ]
+            conn.executemany("INSERT INTO trading_day_phase VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("incomplete_trading_day_phase:2025-03-10:") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_fails_forbidden_old_field_keys_in_recommendation_artifact(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -240,6 +292,116 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
         self.assertTrue(any("action_evidence_contract.opportunity_layer" in error for error in report.errors))
+
+    def test_system_invariant_audit_fails_pending_trigger_marked_valid(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()
+            payload = json.loads(row[0])
+            payload["technical"] = {
+                "trade_research_contract": {
+                    "opportunity_state": "probe_candidate",
+                    "trigger_valid": True,
+                    "entry_trigger": (
+                        "In the current range regime, bearish entry timing requires a confirmed break "
+                        "below support after the open; without that confirmation, remain on watch."
+                    ),
+                    "action_evidence_contract": {
+                        "opportunity_state": "probe_candidate",
+                        "trigger_valid": True,
+                        "entry_trigger": (
+                            "In the current range regime, bearish entry timing requires a confirmed break "
+                            "below support after the open; without that confirmation, remain on watch."
+                        ),
+                    },
+                }
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=? WHERE id='rec1'",
+                (_dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("action_evidence_contract_pending_trigger_marked_valid:") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_fails_research_and_action_trigger_mismatch(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()
+            payload = json.loads(row[0])
+            payload["technical"] = {
+                "trade_research_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "trigger_valid": True,
+                    "entry_trigger": "current breakout above opening range is confirmed by volume expansion",
+                    "action_evidence_contract": {
+                        "opportunity_state": "watch_for_trigger",
+                        "trigger_valid": False,
+                        "entry_trigger": "current breakout above opening range is confirmed by volume expansion",
+                    },
+                }
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=? WHERE id='rec1'",
+                (_dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("trade_research_action_evidence_trigger_valid_mismatch:") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_fails_setup_quality_used_as_trigger(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()
+            payload = json.loads(row[0])
+            payload["technical"] = {
+                "trade_research_contract": {
+                    "opportunity_state": "tradeable_candidate",
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "entry_trigger": "trend_breakout setup below range floor with volume expansion",
+                    "action_evidence_contract": {
+                        "opportunity_state": "tradeable_candidate",
+                        "setup_quality_ok": True,
+                        "trigger_valid": True,
+                        "entry_trigger": "trend_breakout setup below range floor with volume expansion",
+                    },
+                }
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=? WHERE id='rec1'",
+                (_dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("setup_quality_ok_used_as_current_trigger:") for error in report.errors),
+            report.to_dict(),
+        )
 
     def test_system_invariant_audit_accepts_observation_only_release_block_diagnostics(self):
         db_path = self._make_db()
@@ -429,6 +591,43 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertTrue(any(error.startswith("direction_or_watchlist_probe_opened") for error in report.errors))
+
+    def test_system_invariant_audit_allows_conditional_trigger_probe_after_intraday_confirmation(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = json.loads(conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()[0])
+            contract = payload["final_action_contract"]
+            contract.update(
+                {
+                    "final_action": "open_probe",
+                    "authority_type": "exploration_probe",
+                    "authority_decision": "allow_exploration_probe",
+                    "open_action_evidence": False,
+                    "strong_current_evidence": False,
+                    "tradeable_state": True,
+                    "conditional_trigger_authority": True,
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "watch_for_trigger_block": False,
+                    "execution_requirement": "intraday_trigger_required",
+                    "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+                }
+            )
+            payload["trade_contract_audit"]["execution_requirement"] = "intraday_trigger_required"
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertTrue(report.ok, report.errors)
 
     def test_system_invariant_audit_fails_missing_intraday_record(self):
         db_path = self._make_db()
@@ -761,6 +960,150 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(
             any(error.startswith("strategy_recommendation_non_strategy_final_action_contract") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_accepts_forced_risk_close_without_strategy_contract(self):
+        db_path = self._make_db()
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            audit_payload = {
+                "operation_reason": "margin_liquidation",
+                "forced_risk_execution": {
+                    "source_type": "forced_risk",
+                    "operation_reason": "margin_liquidation",
+                    "strategy_learning_boundary": "excluded_from_strategy_action_value",
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "risk-rec",
+                    "cfg",
+                    "pf",
+                    "2025-03-03",
+                    "2025-03-03",
+                    "forced_risk",
+                    "RB",
+                    "close_short",
+                    1,
+                    _dumps({}),
+                    _dumps(audit_payload),
+                    "executed",
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO futures_transactions(
+                    id, portfolio_id, config_id, recommendation_id, trading_date, ticker, action, lots,
+                    execution_price, contract_multiplier, margin_rate, margin_used, audit_payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "risk-tx",
+                    "pf",
+                    "cfg",
+                    "risk-rec",
+                    "2025-03-03",
+                    "RB",
+                    "close_short",
+                    1,
+                    3300.0,
+                    10.0,
+                    0.1,
+                    0.0,
+                    _dumps(audit_payload),
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_fails_same_day_rollover_effective_date(self):
+        db_path = self._make_db()
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "rollover-same-day",
+                    "cfg",
+                    "pf",
+                    "2025-03-03",
+                    "2025-03-03",
+                    "rollover",
+                    "RB",
+                    "rollover",
+                    2,
+                    _dumps({}),
+                    _dumps({}),
+                    "pending",
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("rollover_effective_trade_date_not_after_detection") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_fails_forced_risk_open(self):
+        db_path = self._make_db()
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("risk-open-rec", "cfg", "pf", "2025-03-03", "2025-03-03", "forced_risk", "RB", "open_short", 1, _dumps({}), _dumps({}), "executed", now),
+            )
+            conn.execute(
+                """
+                INSERT INTO futures_transactions(
+                    id, portfolio_id, config_id, recommendation_id, trading_date, ticker, action, lots,
+                    execution_price, contract_multiplier, margin_rate, margin_used, audit_payload, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("risk-open-tx", "pf", "cfg", "risk-open-rec", "2025-03-03", "RB", "open_short", 1, 3300.0, 10.0, 0.1, 3300.0, _dumps({}), now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("forced_risk_recommendation_cannot_open") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(
+            any(error.startswith("forced_risk_open_transaction_not_allowed") for error in report.errors),
             report.to_dict(),
         )
 

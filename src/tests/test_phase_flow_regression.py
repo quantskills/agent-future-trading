@@ -61,7 +61,11 @@ from agents.decision_team.portfolio_manager import (
     _side_opportunity_state_summary,
     portfolio_agent_futures,
 )
-from agents.execution_team.trader import _execution_contract_from_snapshot, _setup_execution_learning_context
+from agents.execution_team.trader import (
+    _execute_pending_forced_risk_before_strategy,
+    _execution_contract_from_snapshot,
+    _setup_execution_learning_context,
+)
 from tools.agent_tools.analysis.quality import (
     apply_trade_research_contract,
     build_technical_context,
@@ -1254,6 +1258,23 @@ class _FailingSettlementRouter:
         raise RuntimeError("HTTP 403 provider blocked")
 
 
+class _RolloverSettlementRouter:
+    def get_futures_main_contract_quote_on_date(self, ticker, trading_date):
+        return SimpleNamespace(ticker=f"{ticker}2601")
+
+
+class _RolloverSettlementDb:
+    def __init__(self):
+        self.saved = []
+
+    def get_futures_recommendations_by_effective_date(self, **kwargs):
+        return []
+
+    def save_futures_recommendation(self, recommendation):
+        self.saved.append(recommendation)
+        return "rollover-rec"
+
+
 class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
     def test_settlement_price_provider_failure_does_not_fallback(self):
         engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
@@ -1276,6 +1297,41 @@ class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
                 transactions=[],
                 trading_date=datetime(2025, 1, 6),
             )
+
+    @patch("tools.agent_tools.execution.futures_settlement.get_next_trading_day")
+    def test_rollover_detected_after_settlement_is_scheduled_for_next_trading_day(self, mock_next_day):
+        mock_next_day.return_value = datetime(2025, 3, 4)
+        engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
+        engine.router = _RolloverSettlementRouter()
+        engine.db = _RolloverSettlementDb()
+
+        portfolio = Portfolio(
+            id="pf",
+            cashflow=1000000.0,
+            margin_used=10000.0,
+            positions={
+                "RB": Position(
+                    shares=2,
+                    value=50000.0,
+                    contract_code="RB2505",
+                    margin_used=10000.0,
+                )
+            },
+        )
+
+        engine._detect_rollover_recommendations(
+            config_id="cfg",
+            portfolio=portfolio,
+            trading_date=datetime(2025, 3, 3),
+        )
+
+        self.assertEqual(len(engine.db.saved), 1)
+        recommendation = engine.db.saved[0]
+        self.assertEqual(recommendation.trading_date, "2025-03-03")
+        self.assertEqual(recommendation.effective_trade_date, "2025-03-04")
+        self.assertEqual(recommendation.source_type, RecommendationSourceType.ROLLOVER)
+        self.assertEqual(recommendation.from_contract, "RB2505")
+        self.assertEqual(recommendation.to_contract, "RB2601")
 
 
 class FuturesAuditRegressionTest(unittest.TestCase):
@@ -3213,6 +3269,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "price_range": 0.03,
             },
         )
+        technical_context["current_trigger_confirmed"] = True
+        technical_context["action_evidence_contract"] = {
+            "entry_trigger": "current breakout above prior high is confirmed",
+            "current_trigger_confirmed": True,
+            "trigger_valid": True,
+            "invalidation_present": True,
+        }
         technical = apply_trade_research_contract(
             AnalystSignal(
                 agent_name="technical",
@@ -5568,6 +5631,75 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(strong_detail["watch_for_trigger_semantic_block"])
         self.assertFalse(strong_detail["reason_effects"]["hard_zero"])
 
+    def test_final_new_entry_gate_allows_conditional_watch_for_trigger_probe_contract(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=[
+                "alpha_setup_ev_fusion",
+                "opportunity_scorecard_probe_seed",
+                "pm_watch_for_trigger_probe_cap",
+                "unknown_alpha_probe",
+            ],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "watch_for_trigger",
+                    "has_tradeable_support": True,
+                    "setup_quality_ok": True,
+                    "has_invalidation_or_stop": True,
+                    "strong_realtime_evidence": False,
+                    "strong_market_confirmation": False,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": False,
+                    "technical_opposes_side": False,
+                    "qualified_positive_expectancy": False,
+                    "positive_action_value": False,
+                    "negative_action_value": False,
+                    "repeat_loss_without_new_evidence": False,
+                    "current_confirmation_score": 0.50,
+                    "independent_support_count": 1,
+                }
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "exploration_probe")
+        self.assertEqual(detail["decision"], "allow_exploration_probe")
+        self.assertTrue(detail["conditional_trigger_authority"])
+        self.assertTrue(detail["requires_intraday_confirmation"])
+        self.assertFalse(detail["can_execute_without_intraday_trigger"])
+        self.assertFalse(detail["watch_for_trigger_block"])
+        self.assertFalse(detail["watch_for_trigger_semantic_block"])
+        self.assertFalse(detail["open_action_evidence"])
+        self.assertIn("conditional_trigger_authority", detail["reason_codes"])
+
+    def test_final_new_entry_gate_blocks_watch_for_trigger_without_setup_quality(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=[
+                "alpha_setup_ev_fusion",
+                "opportunity_scorecard_probe_seed",
+                "pm_watch_for_trigger_probe_cap",
+            ],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "watch_for_trigger",
+                    "has_tradeable_support": True,
+                    "setup_quality_ok": False,
+                    "has_invalidation_or_stop": True,
+                    "strong_realtime_evidence": False,
+                    "strong_market_confirmation": False,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": False,
+                    "technical_opposes_side": False,
+                    "current_confirmation_score": 0.50,
+                    "independent_support_count": 1,
+                }
+            },
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(detail["authority_type"], "watchlist_only")
+        self.assertFalse(detail["conditional_trigger_authority"])
+        self.assertTrue(detail["watch_for_trigger_block"])
+
     def test_final_new_entry_gate_allows_tradeable_release_or_strong_current_evidence(self):
         release_allowed, release_detail = _final_contract_authority(
             control_reasons=[
@@ -6587,7 +6719,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "tradeability": "high",
                 "sector": "generic",
                 "dominant_direction": "bullish",
-                "action_evidence_contract": {"setup_family": "trend_breakout"},
+                "current_trigger_confirmed": True,
+                "action_evidence_contract": {
+                    "setup_family": "trend_breakout",
+                    "entry_trigger": "current breakout above opening range is confirmed",
+                    "current_trigger_confirmed": True,
+                    "trigger_valid": True,
+                    "invalidation_present": True,
+                },
                 "market_regime": "trend",
             },
             analyst="technical",
@@ -7158,6 +7297,107 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(audit["opportunity"]["preferred_state"], "tradeable_candidate")
         self.assertNotEqual(audit["opportunity"]["preferred_state"], "unknown")
         self.assertTrue(audit["opportunity"]["high_quality_present"])
+
+    def test_active_opportunity_audit_lists_clean_conditional_monitor_candidate(self):
+        portfolio = SimpleNamespace(id="pf1")
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            opportunity_state="watch_for_trigger",
+            entry_trigger="wait for post-open break below support with volume confirmation",
+            invalidation_level=3520.0,
+            trigger_valid=False,
+            evidence_role="entry_timing",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support with volume confirmation",
+                }
+            },
+        )
+        decision = FuturesDecision(
+            ticker="HC",
+            action=FuturesAction.HOLD,
+            lots=0,
+            price=3500.0,
+            settle_price=3500.0,
+            margin_rate=0.1,
+            contract_multiplier=10.0,
+            contract_code="hc2505",
+            justification="conditional monitor",
+        )
+
+        recommendation = _build_phase1_recommendation(
+            config_id="cfg",
+            portfolio=portfolio,
+            ticker="HC",
+            trading_date="2025-03-05",
+            contract_code="hc2505",
+            decision=decision,
+            morning_price_context=SimpleNamespace(
+                base_price=3500.0,
+                base_price_source=None,
+                base_price_date="2025-03-05",
+                open_price=3500.0,
+                prev_close_price=3510.0,
+                warning_message=None,
+            ),
+            analyst_signals=[signal],
+            plan_snapshot={
+                "reason_codes": "conditional_watch",
+                "strategy_controls": {
+                    "diagnostics": {},
+                    "reasons": ["conditional_watch"],
+                },
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {
+                        "final_state": "watch_for_trigger",
+                        "score": 0.52,
+                        "setup_quality_ok": True,
+                        "trigger_valid": False,
+                        "current_trigger_confirmed": False,
+                        "invalidation_present": True,
+                        "entry_trigger": "wait for post-open break below support with volume confirmation",
+                    },
+                },
+            },
+            final_action_contract={
+                "contract_version": "agentquant.final_action.v1",
+                "contract_type": "strategy",
+                "ticker": "HC",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "lots_delta_abs": 0,
+                "target_position_ratio": 0.0,
+                "authority_type": "watchlist_only",
+                "open_action_evidence": False,
+                "strong_current_evidence": False,
+                "max_allowed_margin_ratio": 0.0,
+                "reason_codes": ["pm_watch_for_trigger_probe_cap"],
+                "consistency": {"status": "ok"},
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+            },
+            full_config={},
+        )
+
+        audit = recommendation.signal_snapshot["active_opportunity_audit"]
+        self.assertEqual(audit["opportunity"]["analyst_candidate_count"], 0)
+        self.assertEqual(audit["opportunity"]["conditional_monitor_candidate_count"], 1)
+        self.assertTrue(audit["opportunity"]["high_quality_present"])
+        candidate = audit["conditional_monitor_candidates"][0]
+        self.assertTrue(candidate["conditional_monitor_candidate"])
+        self.assertTrue(candidate["setup_quality_ok"])
+        self.assertFalse(candidate["trigger_valid"])
+        self.assertTrue(candidate["invalidation_present"])
 
     def test_strong_real_budget_entry_passes_phase1_and_phase2(self):
         portfolio = SimpleNamespace(id="pf1")
@@ -8871,6 +9111,46 @@ class FuturesTradePairRegressionTest(unittest.TestCase):
         self.assertTrue(all_pairs[0]["contains_rollover"])
         self.assertEqual(strategy_only_pairs, [])
 
+    def test_trade_pair_builder_excludes_forced_risk_from_strategy_only_view(self):
+        transactions = [
+            {
+                "id": "o1",
+                "recommendation_id": "r1",
+                "trading_date": "2025-10-13",
+                "created_at": "2025-10-13T09:00:00",
+                "ticker": "C",
+                "contract_code": "c2601",
+                "action": "open_short",
+                "lots": 1,
+                "execution_price": 2100.0,
+                "contract_multiplier": 10.0,
+                "commission": 1.0,
+                "source_type": "strategy",
+            },
+            {
+                "id": "c1",
+                "recommendation_id": "risk1",
+                "trading_date": "2025-10-15",
+                "created_at": "2025-10-15T09:00:00",
+                "ticker": "C",
+                "contract_code": "c2601",
+                "action": "close_short",
+                "lots": 1,
+                "execution_price": 2090.0,
+                "contract_multiplier": 10.0,
+                "commission": 1.0,
+                "source_type": "forced_risk",
+            },
+        ]
+
+        all_pairs = build_completed_trade_pairs(transactions)
+        strategy_only_pairs = build_completed_trade_pairs(transactions, include_rollover=False)
+
+        self.assertEqual(len(all_pairs), 1)
+        self.assertTrue(all_pairs[0]["contains_forced_risk"])
+        self.assertTrue(all_pairs[0]["contains_non_strategy"])
+        self.assertEqual(strategy_only_pairs, [])
+
 
 class ConditionalPerformanceRegressionTest(unittest.TestCase):
     def test_conditional_trade_performance_filters_signal_combo_and_future_rows(self):
@@ -10518,6 +10798,78 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(validation["reason"], "final_contract_authority_not_met")
         self.assertEqual(validation["target_lots_after_validation"], 0)
 
+    def test_phase2_conditional_probe_contract_can_reach_intraday_trigger_check(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5000000.0,
+            margin_used=0.0,
+            positions={},
+        )
+        contract = self._strategy_contract(
+            "SR",
+            target_lots=1,
+            final_action="open_probe",
+            authority_type="exploration_probe",
+            current_evidence=False,
+            reason_codes=["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+        )
+        contract.update(
+            {
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "watch_for_trigger_block": False,
+                "execution_profile": "breakout",
+                "entry_trigger": "wait for price to break above 5900 after open",
+                "invalidation": "below 5840",
+            }
+        )
+        recommendation = {
+            "underlying_code": "SR",
+            "contract_code": "sr2505",
+            "source_type": RecommendationSourceType.STRATEGY.value,
+            "action": RecommendationAction.OPEN_LONG.value,
+            "lots": 1,
+            "signal_snapshot": {
+                "pm_internal_draft": {
+                    "target_position_ratio": 0.02,
+                    "target_lots": 8,
+                    "lots_delta_abs": 8,
+                    "reason_codes": "legacy_draft_must_not_expand_contract",
+                },
+                "final_action_contract": contract,
+            },
+        }
+        config = {
+            "cashflow": 5000000,
+            "max_total_margin_ratio": 0.20,
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+        snapshot = {}
+
+        decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=5900.0),
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(decision.action, FuturesAction.OPEN_LONG)
+        self.assertEqual(decision.lots, 1)
+        validation = snapshot["phase2_execution"]["pm_plan_validation"]
+        self.assertTrue(validation["passed"])
+        self.assertEqual(validation["target_lots"], 1)
+        self.assertEqual(
+            snapshot["execution_translation"]["final_action_contract_source"]["target_lots"],
+            1,
+        )
+
     def test_phase2_exploration_probe_with_current_evidence_can_translate_to_open(self):
         portfolio = Portfolio(
             id="p1",
@@ -11023,6 +11375,190 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(adjusted["rollover_execution_type"], "close_only_rollover")
         self.assertEqual(adjusted["rollover_close_lots"], 2)
         self.assertEqual(adjusted["rollover_open_lots"], 0)
+
+    def test_rollover_reconciliation_preserves_strategy_same_direction_target(self):
+        rollover = {
+            "underlying_code": "C",
+            "from_contract": "c2511",
+            "to_contract": "c2601",
+        }
+        strategy = {
+            "signal_snapshot": {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "current_lots": -2,
+                    "target_lots": -3,
+                    "lots_delta": -1,
+                    "final_action": "scale",
+                }
+            }
+        }
+
+        adjusted = _reconcile_rollover_with_strategy_target(
+            rollover_recommendation=rollover,
+            strategy_recommendation=strategy,
+            current_lots=-2,
+            config={"rollover": {"mode": "reconcile_with_strategy"}},
+        )
+
+        self.assertEqual(adjusted["rollover_execution_type"], "full_rollover")
+        self.assertEqual(adjusted["rollover_close_lots"], 2)
+        self.assertEqual(adjusted["rollover_open_lots"], 3)
+        self.assertEqual(adjusted["rollover_strategy_target_lots"], -3)
+
+    def test_forced_risk_orders_execute_before_strategy_phase2_processing(self):
+        calls = []
+
+        class FakeExecutionEngine:
+            def scan_and_create_intraday_forced_risk_orders(self, *, config_id, trading_date, portfolio, cutoff_datetime=None):
+                calls.append(("scan", config_id, trading_date, portfolio, cutoff_datetime))
+                return ["risk-rec"]
+
+            def execute_pending_forced_risk_orders(self, *, config_id, trading_date, portfolio, execution_phase):
+                calls.append(("execute", config_id, trading_date, portfolio, execution_phase))
+                return {"after": "forced_risk"}
+
+        result = _execute_pending_forced_risk_before_strategy(
+            execution_engine=FakeExecutionEngine(),
+            config_id="cfg",
+            trading_date="2025-03-04",
+            portfolio={"before": "risk"},
+        )
+
+        self.assertEqual(result, {"after": "forced_risk"})
+        self.assertEqual(
+            calls,
+            [
+                ("scan", "cfg", "2025-03-04", {"before": "risk"}, None),
+                ("execute", "cfg", "2025-03-04", {"before": "risk"}, TradingPhase.PHASE2),
+            ],
+        )
+
+    def test_intraday_margin_call_creates_forced_risk_close_order(self):
+        saved = []
+
+        class FakeDb:
+            def get_futures_recommendations_by_effective_date(self, **kwargs):
+                return []
+
+            def save_futures_recommendation(self, recommendation):
+                saved.append(recommendation.model_dump())
+                return "forced-risk-1"
+
+        class FakeRouter:
+            def get_china_futures_minute_bars(self, **kwargs):
+                return [
+                    {"datetime": "2025-03-04 10:00:00", "open": 5.0, "close": 5.0, "volume": 10},
+                ]
+
+            def get_futures_contract_quote_on_date(self, contract_code, trading_date):
+                return SimpleNamespace(close_price=5.0, settle_price=5.0, open_price=5.0)
+
+        engine = FuturesExecutionEngine(
+            {
+                "execution": {
+                    "forced_risk": {
+                        "enabled": True,
+                        "intraday_margin_call_ratio": 0.80,
+                        "post_reduce_target_margin_ratio": 0.50,
+                    },
+                    "dynamic_margin": {"enabled": False},
+                }
+            },
+            FakeDb(),
+        )
+        engine.router = FakeRouter()
+        portfolio = Portfolio(
+            id="pf-risk",
+            cashflow=1000.0,
+            margin_used=1000.0,
+            positions={
+                "RB": Position(
+                    shares=10,
+                    entry_price=100.0,
+                    contract_code="rb2505",
+                    contract_multiplier=10,
+                    margin_rate=0.1,
+                    margin_used=1000.0,
+                )
+            },
+        )
+
+        created = engine.scan_and_create_intraday_forced_risk_orders(
+            config_id="cfg",
+            trading_date="2025-03-04",
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(created, ["forced-risk-1"])
+        self.assertEqual(saved[0]["source_type"], "forced_risk")
+        self.assertEqual(saved[0]["action"], "close_long")
+        self.assertEqual(saved[0]["effective_trade_date"], "2025-03-04")
+        self.assertGreater(saved[0]["lots"], 0)
+        self.assertNotIn("final_action_contract", saved[0].get("signal_snapshot") or {})
+        self.assertEqual(
+            saved[0]["audit_payload"]["strategy_learning_boundary"],
+            "excluded_from_strategy_action_value",
+        )
+
+    def test_intraday_margin_below_call_does_not_create_forced_risk_order(self):
+        saved = []
+
+        class FakeDb:
+            def get_futures_recommendations_by_effective_date(self, **kwargs):
+                return []
+
+            def save_futures_recommendation(self, recommendation):
+                saved.append(recommendation.model_dump())
+                return "forced-risk-1"
+
+        class FakeRouter:
+            def get_china_futures_minute_bars(self, **kwargs):
+                return [
+                    {"datetime": "2025-03-04 10:00:00", "open": 100.0, "close": 100.0, "volume": 10},
+                ]
+
+            def get_futures_contract_quote_on_date(self, contract_code, trading_date):
+                return SimpleNamespace(close_price=100.0, settle_price=100.0, open_price=100.0)
+
+        engine = FuturesExecutionEngine(
+            {
+                "execution": {
+                    "forced_risk": {
+                        "enabled": True,
+                        "intraday_margin_call_ratio": 0.80,
+                        "post_reduce_target_margin_ratio": 0.50,
+                    },
+                    "dynamic_margin": {"enabled": False},
+                }
+            },
+            FakeDb(),
+        )
+        engine.router = FakeRouter()
+        portfolio = Portfolio(
+            id="pf-safe",
+            cashflow=100000.0,
+            margin_used=10000.0,
+            positions={
+                "RB": Position(
+                    shares=10,
+                    entry_price=100.0,
+                    contract_code="rb2505",
+                    contract_multiplier=10,
+                    margin_rate=0.1,
+                    margin_used=10000.0,
+                )
+            },
+        )
+
+        created = engine.scan_and_create_intraday_forced_risk_orders(
+            config_id="cfg",
+            trading_date="2025-03-04",
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(created, [])
+        self.assertEqual(saved, [])
 
 
 class EvaluationRegressionTest(unittest.TestCase):

@@ -68,12 +68,12 @@ def build_default_agent_cards() -> Dict[str, AgentCapabilityCard]:
         AgentCapabilityCard(
             agent_name="trader",
             team="execution_team",
-            reads=["final_action_contract", "audit_verdict", "intraday_market_data"],
+            reads=["final_action_contract", "audit_verdict", "intraday_market_data", "portfolio_margin_state"],
             writes=["ExecutionArtifact"],
-            outputs=["orders", "execution_learning_event"],
+            outputs=["orders", "forced_risk_operational_recommendation", "execution_learning_event"],
             may_execute_orders=True,
             required_contract_versions=["agentquant.snapshot.v2"],
-            failure_mode="skip_execution_with_reason",
+            failure_mode="skip_execution_with_reason_or_emit_forced_risk_close_only",
         ),
         AgentCapabilityCard(
             agent_name="accountant",

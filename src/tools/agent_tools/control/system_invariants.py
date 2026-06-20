@@ -20,8 +20,13 @@ from tools.agent_tools.execution.order_semantics import phase2_order_intent_from
 
 
 OPEN_ACTIONS = {"open_long", "open_short"}
+CLOSE_ACTIONS = {"close_long", "close_short"}
 OPEN_FINAL_ACTIONS = {"open_probe", "open_real"}
 OPEN_AUTHORITY_TYPES = {"exploration_probe", "real_budget_entry"}
+STRATEGY_SOURCE_TYPE = "strategy"
+ROLLOVER_SOURCE_TYPE = "rollover"
+FORCED_RISK_SOURCE_TYPE = "forced_risk"
+OPERATIONAL_SOURCE_TYPES = {ROLLOVER_SOURCE_TYPE, FORCED_RISK_SOURCE_TYPE}
 BLOCKING_AUTHORITY_TYPES = {"", "watchlist_only", "no_trade", "not_applicable", "analysis_or_watchlist_only"}
 TRIGGER_PASSED_REASONS = {
     "intraday_trigger_confirmed",
@@ -89,6 +94,117 @@ RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
     "target_lots",
     "target_margin_ratio_estimate",
     "target_position_ratio",
+}
+PENDING_ENTRY_TRIGGER_MARKERS = {
+    "only if",
+    "only after",
+    "if price",
+    "if futures",
+    "if volume",
+    "if basis",
+    "if inventory",
+    "would require",
+    "becomes tradeable",
+    "become tradeable",
+    "tradeable only if",
+    "make the setup tradeable",
+    "move from watchlist to tradeable",
+    "convert to a tradeable",
+    "requires price",
+    "requires technical",
+    "requires market",
+    "requires current",
+    "wait for",
+    "waiting for",
+    "should confirm",
+    "must confirm",
+    "must break",
+    "must hold",
+    "requires confirmation",
+    "requires a confirmation",
+    "requires confirmed",
+    "requires a confirmed",
+    "requires break",
+    "requires a break",
+    "requires breakout",
+    "requires a breakout",
+    "requires breakdown",
+    "requires a breakdown",
+    "needs price",
+    "needs technical",
+    "needs market",
+    "needs confirmation",
+    "require confirmation",
+    "require a confirmation",
+    "require confirmed",
+    "require a confirmed",
+    "require break",
+    "require a break",
+    "require breakout",
+    "require a breakout",
+    "require breakdown",
+    "require a breakdown",
+    "require post-open",
+    "requires post-open",
+    "needs post-open",
+    "after the open",
+    "after open",
+    "without that confirmation",
+    "without confirmation",
+    "remain on watch",
+    "remains on watch",
+    "stay on watch",
+    "stays on watch",
+    "before entry",
+    "before execution",
+    "until price",
+    "until futures",
+    "如果",
+    "若",
+    "需要",
+    "等待",
+    "确认后",
+    "后再",
+    "之后再",
+    "才可",
+}
+CURRENT_ENTRY_TRIGGER_MARKERS = {
+    "has broken",
+    "has breached",
+    "has crossed",
+    "has confirmed",
+    "is breaking",
+    "is below",
+    "is above",
+    "currently below",
+    "currently above",
+    "current breakout",
+    "current breakdown",
+    "trigger is active",
+    "trigger is valid",
+    "confirmed by current",
+    "已突破",
+    "已跌破",
+    "已站上",
+    "已站稳",
+    "已经突破",
+    "已经跌破",
+    "当前突破",
+    "当前跌破",
+    "触发成立",
+}
+
+CURRENT_CONFIRMATION_FIELD_NAMES = {
+    "current_trigger_confirmed",
+    "short_term_trigger_confirmed",
+    "short_term_confirmation_confirmed",
+    "technical_confirmation_confirmed",
+    "price_trigger_confirmed",
+    "intraday_confirmation_confirmed",
+    "market_confirmation_confirmed",
+    "execution_trigger_confirmed",
+    "price_reaction_confirmed",
+    "current_entry_confirmed",
 }
 
 
@@ -163,6 +279,86 @@ def _nested_value(value: Dict[str, Any], *keys: str) -> Any:
 
 def _lower(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _iter_nested_dicts(value: Any, *, prefix: str = "") -> Iterable[tuple[str, Dict[str, Any]]]:
+    if isinstance(value, dict):
+        yield prefix, value
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_nested_dicts(item, prefix=path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _iter_nested_dicts(item, prefix=f"{prefix}[{index}]")
+
+
+def _entry_trigger_has_pending_confirmation(value: Any) -> bool:
+    text = _lower(value)
+    if not text:
+        return False
+    if not any(marker in text for marker in PENDING_ENTRY_TRIGGER_MARKERS):
+        return False
+    has_current = any(marker in text for marker in CURRENT_ENTRY_TRIGGER_MARKERS)
+    strict_pending = any(
+        marker in text
+        for marker in {
+            "only if",
+            "only after",
+            "would require",
+            "requires confirmed",
+            "requires a confirmed",
+            "requires break",
+            "requires a break",
+            "requires breakout",
+            "requires a breakout",
+            "requires breakdown",
+            "requires a breakdown",
+            "require confirmed",
+            "require a confirmed",
+            "require break",
+            "require a break",
+            "require breakout",
+            "require a breakout",
+            "require breakdown",
+            "require a breakdown",
+            "after the open",
+            "after open",
+            "without that confirmation",
+            "without confirmation",
+            "remain on watch",
+            "remains on watch",
+            "stay on watch",
+            "stays on watch",
+            "wait for",
+            "waiting for",
+            "must confirm",
+            "must break",
+            "before entry",
+            "before execution",
+            "确认后",
+            "后再",
+            "之后再",
+            "才可",
+        }
+    )
+    return strict_pending or not has_current
+
+
+def _entry_trigger_has_current_confirmation(value: Any) -> bool:
+    text = _lower(value)
+    if not text:
+        return False
+    return any(marker in text for marker in CURRENT_ENTRY_TRIGGER_MARKERS)
+
+
+def _node_has_current_confirmation(node: Dict[str, Any]) -> bool:
+    if _entry_trigger_has_current_confirmation(node.get("entry_trigger")):
+        return True
+    for _path, nested in _iter_nested_dicts(node):
+        for field_name in CURRENT_CONFIRMATION_FIELD_NAMES:
+            if nested.get(field_name) is True:
+                return True
+    return False
 
 
 def _date10(value: Any) -> str:
@@ -343,6 +539,28 @@ def _load_action_values(
     return values
 
 
+def _load_trading_day_phases(
+    conn: sqlite3.Connection,
+    *,
+    config_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not _table_exists(conn, "trading_day_phase"):
+        return []
+    date_sql, params = _date_filter_sql("p", start_date, end_date)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM trading_day_phase p
+        WHERE p.config_id = ?{date_sql}
+        ORDER BY p.trading_date ASC, p.phase ASC
+        """,
+        (config_id, *params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = _dict(recommendation.get("signal_snapshot"))
     audit_payload = _dict(recommendation.get("audit_payload"))
@@ -402,6 +620,14 @@ def _source_type(recommendation: Dict[str, Any]) -> str:
     return _lower(recommendation.get("source_type") or "strategy")
 
 
+def _transaction_source_type(transaction: Dict[str, Any], recommendation: Optional[Dict[str, Any]]) -> str:
+    return _lower(
+        transaction.get("source_type")
+        or (recommendation or {}).get("source_type")
+        or STRATEGY_SOURCE_TYPE
+    )
+
+
 def _strategy_contract_type_is_valid(contract: Dict[str, Any]) -> bool:
     contract_type = _lower(contract.get("contract_type") or "strategy")
     return contract_type in {"", "strategy"}
@@ -413,15 +639,36 @@ def _audit_recommendation_final_contract_consistency(
 ) -> None:
     for recommendation_id, recommendation in recommendations.items():
         contract = _contract_from_recommendation(recommendation)
+        source_type = _source_type(recommendation)
+        action = _lower(recommendation.get("action"))
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        if source_type == ROLLOVER_SOURCE_TYPE:
+            trading_day = _date10(recommendation.get("trading_date"))
+            effective_day = _date10(recommendation.get("effective_trade_date"))
+            if trading_day and effective_day and effective_day <= trading_day:
+                errors.append(
+                    "rollover_effective_trade_date_not_after_detection:"
+                    f"{label}:effective_trade_date={effective_day}"
+                )
+            continue
+        if source_type == FORCED_RISK_SOURCE_TYPE:
+            if action in OPEN_ACTIONS:
+                errors.append(f"forced_risk_recommendation_cannot_open:{label}:{action}")
+            if contract:
+                errors.append(f"forced_risk_recommendation_must_not_use_strategy_final_action_contract:{label}")
+            continue
         if not contract:
             continue
-        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker")
+        ticker = ticker or contract.get("ticker")
         label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
-        if _source_type(recommendation) == "strategy" and not _strategy_contract_type_is_valid(contract):
+        if source_type == STRATEGY_SOURCE_TYPE and not _strategy_contract_type_is_valid(contract):
             errors.append(
                 "strategy_recommendation_non_strategy_final_action_contract:"
                 f"{label}:contract_type={contract.get('contract_type')}"
             )
+            continue
+        if source_type in OPERATIONAL_SOURCE_TYPES:
             continue
         required = {"current_lots", "target_lots", "lots_delta", "final_action"}
         missing = sorted(key for key in required if key not in contract)
@@ -500,6 +747,46 @@ def _audit_unified_field_artifacts(
                     "unified_field_artifact_forbidden_field:"
                     f"{label}:{artifact_name}:{sorted(set(forbidden))}"
                 )
+
+
+def _audit_action_evidence_trigger_consistency(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    for recommendation_id, recommendation in recommendations.items():
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        for artifact_name in ("signal_snapshot", "audit_payload"):
+            artifact = recommendation.get(artifact_name)
+            if not isinstance(artifact, dict):
+                continue
+            seen_error_types: set[str] = set()
+            for path, node in _iter_nested_dicts(artifact):
+                if not ("trigger_valid" in node or "action_evidence_contract" in node):
+                    continue
+                entry_trigger = node.get("entry_trigger")
+                trigger_valid = node.get("trigger_valid")
+                if trigger_valid is True and _entry_trigger_has_pending_confirmation(entry_trigger):
+                    error_type = "action_evidence_contract_pending_trigger_marked_valid"
+                    if error_type not in seen_error_types:
+                        errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
+                        seen_error_types.add(error_type)
+                if (
+                    trigger_valid is True
+                    and node.get("setup_quality_ok") is True
+                    and not _node_has_current_confirmation(node)
+                ):
+                    error_type = "setup_quality_ok_used_as_current_trigger"
+                    if error_type not in seen_error_types:
+                        errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
+                        seen_error_types.add(error_type)
+                action_contract = _dict(node.get("action_evidence_contract"))
+                if action_contract and "trigger_valid" in node and "trigger_valid" in action_contract:
+                    if bool(node.get("trigger_valid")) != bool(action_contract.get("trigger_valid")):
+                        error_type = "trade_research_action_evidence_trigger_valid_mismatch"
+                        if error_type not in seen_error_types:
+                            errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
+                            seen_error_types.add(error_type)
 
 
 def _contract_mentions_preference(contract: Dict[str, Any], preference_names: Iterable[str]) -> bool:
@@ -599,13 +886,18 @@ def _audit_open_transactions(
         if not _is_open_transaction(tx):
             continue
         recommendation = recommendations.get(str(tx.get("recommendation_id") or ""))
+        source_type = _transaction_source_type(tx, recommendation)
+        tx_label = f"{tx.get('trading_date')}:{tx.get('ticker')}:{tx.get('id')}"
+        if source_type != STRATEGY_SOURCE_TYPE:
+            if source_type == FORCED_RISK_SOURCE_TYPE:
+                errors.append(f"forced_risk_open_transaction_not_allowed:{tx_label}:{_lower(tx.get('action'))}")
+            continue
         contract = _transaction_contract(tx, recommendation)
         authority = _transaction_authority(tx, recommendation)
         audit = _transaction_trade_contract_audit(tx)
         final_action = _lower(contract.get("final_action"))
         authority_type = _lower(authority.get("authority_type") or contract.get("authority_type"))
         reason_codes = {_lower(item) for item in _list(authority.get("reason_codes")) + _list(contract.get("reason_codes"))}
-        tx_label = f"{tx.get('trading_date')}:{tx.get('ticker')}:{tx.get('id')}"
 
         if final_action not in OPEN_FINAL_ACTIONS:
             errors.append(f"open_transaction_without_open_final_action:{tx_label}:{final_action or 'missing'}")
@@ -624,6 +916,14 @@ def _audit_open_transactions(
                 "pm_text_watchlist_only_blocks_new_entry",
                 "pm_text_no_trade_blocks_new_entry",
             }
+            conditional_trigger_contract = bool(
+                contract.get("conditional_trigger_authority")
+                and contract.get("requires_intraday_confirmation")
+                and not contract.get("can_execute_without_intraday_trigger")
+                and not authority.get("watch_for_trigger_block")
+            )
+            if conditional_trigger_contract:
+                blocking.discard("pm_watch_for_trigger_probe_cap")
             if reason_codes & blocking or bool(authority.get("watch_for_trigger_block")):
                 errors.append(f"direction_or_watchlist_probe_opened:{tx_label}:{sorted(reason_codes & blocking)}")
         if audit and (
@@ -645,6 +945,8 @@ def _audit_transaction_final_contract_consistency(
         if _int(tx.get("lots")) <= 0:
             continue
         recommendation = recommendations.get(str(tx.get("recommendation_id") or ""))
+        if _transaction_source_type(tx, recommendation) != STRATEGY_SOURCE_TYPE:
+            continue
         contract = _transaction_contract(tx, recommendation)
         tx_label = f"{tx.get('trading_date')}:{tx.get('ticker')}:{tx.get('id')}"
         if not contract:
@@ -680,6 +982,7 @@ def _audit_transaction_final_contract_consistency(
 
 def _audit_intraday_triggers(
     transactions: List[Dict[str, Any]],
+    recommendations: Dict[str, Dict[str, Any]],
     intraday_decisions: List[Dict[str, Any]],
     errors: List[str],
 ) -> None:
@@ -689,6 +992,9 @@ def _audit_intraday_triggers(
 
     for tx in transactions:
         if not _is_open_transaction(tx):
+            continue
+        recommendation = recommendations.get(str(tx.get("recommendation_id") or ""))
+        if _transaction_source_type(tx, recommendation) != STRATEGY_SOURCE_TYPE:
             continue
         payload = _dict(tx.get("audit_payload"))
         contract = _dict(payload.get("final_action_contract"))
@@ -849,6 +1155,61 @@ def _audit_recommendation_preference_landing(
         )
 
 
+def _audit_trading_day_phase_completion(
+    phases: List[Dict[str, Any]],
+    recommendations: Dict[str, Dict[str, Any]],
+    transactions: List[Dict[str, Any]],
+    intraday_decisions: List[Dict[str, Any]],
+    action_values: List[Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    if not phases:
+        return
+    days_with_artifacts = {
+        _date10(item.get("trading_date"))
+        for item in recommendations.values()
+        if _date10(item.get("trading_date"))
+    }
+    days_with_artifacts.update(
+        _date10(item.get("trading_date"))
+        for item in transactions
+        if _date10(item.get("trading_date"))
+    )
+    days_with_artifacts.update(
+        _date10(item.get("trading_date"))
+        for item in intraday_decisions
+        if _date10(item.get("trading_date"))
+    )
+    days_with_artifacts.update(
+        _date10(item.get("last_sample_date"))
+        for item in action_values
+        if _date10(item.get("last_sample_date"))
+    )
+    if not days_with_artifacts:
+        return
+    by_day: Dict[str, Dict[str, str]] = {}
+    for row in phases:
+        day = _date10(row.get("trading_date"))
+        phase = str(row.get("phase") or "")
+        status = str(row.get("status") or "")
+        if not day or not phase:
+            continue
+        by_day.setdefault(day, {})[phase] = status
+    required = {"phase1", "phase2", "phase3", "phase4"}
+    for day in sorted(days_with_artifacts):
+        phase_status = by_day.get(day, {})
+        if not phase_status:
+            continue
+        non_completed = {
+            phase: phase_status.get(phase, "missing")
+            for phase in sorted(required)
+            if phase_status.get(phase) != "completed"
+        }
+        if non_completed:
+            encoded = ",".join(f"{phase}={status}" for phase, status in non_completed.items())
+            errors.append(f"incomplete_trading_day_phase:{day}:{encoded}")
+
+
 def audit_system_invariants(
     *,
     db_path: str | Path,
@@ -884,15 +1245,25 @@ def audit_system_invariants(
         transactions = _load_transactions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         intraday_decisions = _load_intraday_decisions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         action_values = _load_action_values(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
+        trading_day_phases = _load_trading_day_phases(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
     finally:
         conn.close()
 
+    _audit_trading_day_phase_completion(
+        trading_day_phases,
+        recommendations,
+        transactions,
+        intraday_decisions,
+        action_values,
+        errors,
+    )
     _audit_recommendation_final_contract_consistency(recommendations, errors)
     _audit_unified_field_artifacts(recommendations, errors)
+    _audit_action_evidence_trigger_consistency(recommendations, errors)
     _audit_release_block_diagnostics(recommendations, errors)
     _audit_transaction_final_contract_consistency(transactions, recommendations, errors, warnings)
     _audit_open_transactions(transactions, recommendations, errors, warnings)
-    _audit_intraday_triggers(transactions, intraday_decisions, errors)
+    _audit_intraday_triggers(transactions, recommendations, intraday_decisions, errors)
     _audit_action_values(action_values, errors, warnings)
     _audit_recommendation_preference_landing(recommendations, action_values, transactions, errors, warnings)
 
@@ -902,6 +1273,7 @@ def audit_system_invariants(
         "open_transactions": sum(1 for item in transactions if _is_open_transaction(item)),
         "intraday_decisions": len(intraday_decisions),
         "action_values": len(action_values),
+        "trading_day_phases": len(trading_day_phases),
     }
     metadata["audit_boundary"] = (
         "system_invariants_only; no strategy profitability judgment; "

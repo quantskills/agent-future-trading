@@ -10,6 +10,7 @@ than another bug-discovery pass?
 """
 
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -66,6 +67,7 @@ INVARIANT_TO_CHECK = {
     "positive_open_from_non_real_reward_source": "learning_landing",
     "action_preferences_exist_but_no_final_action_contract_mentions_them": "learning_landing",
     "unified_field_artifact_forbidden_field": "structured_io",
+    "incomplete_trading_day_phase": "data_time_boundary",
 }
 
 
@@ -361,6 +363,105 @@ def _trading_window_check(cfg: Dict[str, Any], start_date: Optional[str], end_da
     return _pass_check("data_time_boundary", metadata=metadata)
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _resolve_config_id_from_db(
+    conn: sqlite3.Connection,
+    *,
+    config_id: Optional[str],
+    exp_name: Optional[str],
+) -> Optional[str]:
+    if config_id:
+        return str(config_id)
+    if not exp_name or not _table_exists(conn, "config"):
+        return None
+    row = conn.execute("SELECT id FROM config WHERE exp_name = ?", (exp_name,)).fetchone()
+    return str(row[0]) if row else None
+
+
+def _incomplete_trading_day_phase_check(
+    *,
+    db_path: Path,
+    config_id: Optional[str],
+    exp_name: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> AcceptanceCheck:
+    metadata: Dict[str, Any] = {
+        "strategy_profitability_checked": False,
+        "boundary": "existing_phase_records_must_be_completed_before_new_backtest",
+    }
+    if not db_path.exists():
+        return _pass_check("data_time_boundary", metadata=metadata)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        if not _table_exists(conn, "trading_day_phase"):
+            metadata["trading_day_phase_table"] = "missing"
+            return _pass_check("data_time_boundary", metadata=metadata)
+        resolved_config_id = _resolve_config_id_from_db(conn, config_id=config_id, exp_name=exp_name)
+        if not resolved_config_id:
+            metadata["resolved_config_id"] = None
+            return _pass_check("data_time_boundary", metadata=metadata)
+        metadata["resolved_config_id"] = resolved_config_id
+
+        parts = ["config_id = ?"]
+        params: List[Any] = [resolved_config_id]
+        if start_date:
+            parts.append("substr(trading_date, 1, 10) >= ?")
+            params.append(start_date)
+        if end_date:
+            parts.append("substr(trading_date, 1, 10) <= ?")
+            params.append(end_date)
+        rows = conn.execute(
+            f"""
+            SELECT trading_date, phase, status
+            FROM trading_day_phase
+            WHERE {' AND '.join(parts)}
+            ORDER BY trading_date ASC, phase ASC
+            """,
+            tuple(params),
+        ).fetchall()
+    except Exception as exc:
+        return _fail_check(
+            "data_time_boundary",
+            [f"trading_day_phase_check_failed:{type(exc).__name__}:{exc}"],
+            metadata=metadata,
+        )
+    finally:
+        conn.close()
+
+    by_day: Dict[str, Dict[str, str]] = {}
+    for trading_date, phase, status in rows:
+        day = str(trading_date or "")[:10]
+        phase_name = str(phase or "")
+        if not day or not phase_name:
+            continue
+        by_day.setdefault(day, {})[phase_name] = str(status or "")
+
+    errors: List[str] = []
+    for day, phase_status in sorted(by_day.items()):
+        non_completed = {
+            phase: status
+            for phase, status in sorted(phase_status.items())
+            if status != "completed"
+        }
+        if non_completed:
+            encoded = ",".join(f"{phase}={status}" for phase, status in non_completed.items())
+            errors.append(f"incomplete_trading_day_phase:{day}:{encoded}")
+
+    metadata["trading_day_phase_days_checked"] = len(by_day)
+    if errors:
+        return _fail_check("data_time_boundary", errors, metadata=metadata)
+    return _pass_check("data_time_boundary", metadata=metadata)
+
+
 def _checks_from_invariants(
     *,
     db_path: Path,
@@ -474,7 +575,17 @@ def run_pre_backtest_acceptance(
             metadata={"strategy_profitability_checked": False},
         )
 
-    checks["data_time_boundary"] = _trading_window_check(cfg, start_date, end_date)
+    checks["data_time_boundary"] = _merge_acceptance_checks(
+        "data_time_boundary",
+        _trading_window_check(cfg, start_date, end_date),
+        _incomplete_trading_day_phase_check(
+            db_path=db_path,
+            config_id=config_id,
+            exp_name=exp_name,
+            start_date=start_date,
+            end_date=end_date,
+        ),
+    )
     checks["capital_boundary"] = _pass_check(
         "capital_boundary",
         metadata={

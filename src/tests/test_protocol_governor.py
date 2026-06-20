@@ -54,9 +54,13 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
         self.assertIn("final_action_contract", trader_card.reads)
         self.assertIn("audit_verdict", trader_card.reads)
+        self.assertIn("intraday_market_data", trader_card.reads)
+        self.assertIn("portfolio_margin_state", trader_card.reads)
+        self.assertIn("forced_risk_operational_recommendation", trader_card.outputs)
         self.assertNotIn("execution_action_value", trader_card.reads)
         self.assertFalse(trader_card.may_create_trade_authority)
         self.assertFalse(trader_card.may_modify_lots_or_margin)
+        self.assertTrue(trader_card.may_execute_orders)
 
     def test_dev_config_keeps_control_governance_audit_only(self):
         config_path = SRC_ROOT / "config" / "dev.yaml"

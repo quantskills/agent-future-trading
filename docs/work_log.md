@@ -378,3 +378,45 @@
 （5）把字段统一检查接入回测前验收和每日系统审计。
 修改了什么：`src/tools/agent_tools/control/unified_field_audit.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_unified_field_migration.py`、`src/tests/test_pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`。
 为什么改：让回测前 `structured_io` 静态扫描生产路径是否重新读写旧字段，让每日 `system_invariant_audit` 扫新生成推荐产物是否泄露旧字段键，避免字段统一只停留在单测而没有进入真实验收链路。
+
+==========2026年06月20日========
+
+（1）修复分析师证据里等待确认文字与触发字段自相矛盾。
+修改了什么：`src/tools/agent_tools/analysis/quality.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_agent_contracts.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：防止 `entry_trigger` 明确写着“requires confirmed break after open / without confirmation remain on watch”时，运行时仍把 `trigger_valid`、`action_evidence_contract` 或 `trade_research_contract` 标成当前触发；新增审计 hard fail，后续真实记录再出现“等待确认文字 + trigger_valid=true”会直接停在非策略问题。
+
+（2）彻底拆开 `setup_quality_ok` 与当前触发语义。
+修改了什么：`src/tools/agent_tools/analysis/quality.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_agent_contracts.py`、`src/tests/test_system_invariant_audit.py`、`docs/unified_field_semantics.md`。
+为什么改：`setup_quality_ok` 只能表示“形态值得关注”，不能推出 `trigger_valid=true`；新增 `current_trigger_confirmed` 作为当前触发事实来源，并让没有当前确认的 probe/tradeable 候选统一回到 `watch_for_trigger`，避免分析师证据脏字段继续让 PM 误判为可交易。
+
+（3）补齐条件触发机会闭环。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/agents/execution_team/trader.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：让 `watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会不再被 PM 当普通 wait 丢掉，而是由 PM 写成唯一 `final_action_contract` 的受控条件 probe；Auditor 审同一张合约，Trader 只按合约盘中检查触发，未触发只记录原因，触发后才按合约方向和手数成交。
+
+（4）补齐条件机会字段传递与未完成交易日审计。
+修改了什么：`src/tools/agent_tools/analysis/signal_fusion.py`、`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_agent_contracts.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：让 `opportunity_scorecard` 稳定携带 `setup_quality_ok/trigger_valid/current_trigger_confirmed/invalidation_present/entry_trigger/opportunity_state/source_analysts`，让 PM 可见但不落仓地记录干净的条件监控候选；同时把 `phase2=running` 等未完成交易日作为 `incomplete_trading_day_phase` hard fail，避免未完成记录混入策略结论或学习。
+
+（5）把未完成交易日 hard fail 接入回测前验收分类。
+修改了什么：`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：让 `pre_backtest_acceptance` 在回测前把 `incomplete_trading_day_phase` 明确归入 `data_time_boundary` 失败，而不是模糊落到审计解释项，避免带着未完成 phase 记录继续开新回测。
+
+（6）对齐配置目录到条件监控闭环与统一字段语义。
+修改了什么：`src/config/dev.yaml`、`src/config/portfolio_policy_catalog.yaml`、`src/config/learning_policy_catalog.yaml`、`src/config/analyst_prior_profiles.yaml`。
+为什么改：避免配置注释继续表达“旧字段兼容”“watch_for_trigger 不能进入真实路径”等过期口径；明确 `watch_for_trigger + trigger_valid=false` 不是即时开仓，但干净条件机会可由 PM 写入同一张 `final_action_contract` 的条件监控 probe，Trader 只按合约盘中检查触发。
+
+（7）接通强平/风控运营单的非策略执行与审计隔离。
+修改了什么：`src/graph/schema.py`、`src/tools/agent_tools/execution/futures_execution.py`、`src/agents/execution_team/trader.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/util/futures_trade_pairs.py`、`src/evaluation/analyze_strategy_attribution.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：字段表已定义 `source_type=forced_risk`，但代码未完整接入；本次让风控运营单独立执行和核算，禁止它使用策略 `final_action_contract` 或开仓，并让策略归因/学习视图排除 `rollover/forced_risk` 等非策略成交，避免强平或运营动作污染 alpha 学习。
+
+（8）锁住换月时点、强平即时执行与换月敞口协调边界。
+修改了什么：`src/agents/execution_team/trader.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：防止当天结算后才发现的 `rollover` 同日生效影响当天盘前策略；让 phase2 纸面盘中循环每轮先执行当天 pending `forced_risk`，避免强平/强减只等收盘；并用测试锁住换月恢复敞口必须参考同日 PM 策略目标，同方向才平旧开新，空仓/反向只平旧约。
+
+（9）补齐盘中强平/强减运营单生成入口。
+修改了什么：`src/tools/agent_tools/execution/futures_execution.py`、`src/agents/execution_team/trader.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：此前 `forced_risk` 只有 pending 单执行与审计隔离，缺少盘中保证金风险触发器；本次让 Trader phase2 每轮先按盘中价格、账户权益和保证金率扫描风险，超过强平线时生成 `source_type=forced_risk` 的平仓/强减运营单并立即走现有执行链路，同时保持 PM、策略 `final_action_contract`、分析师证据和 alpha 学习边界不变。
+
+（10）对齐协议管理员能力卡到运营风控链路。
+修改了什么：`src/tools/agent_tools/control/agent_cards.py`、`src/tests/test_protocol_governor.py`。
+为什么改：盘中 `forced_risk` 生成入口接入 Trader 后，协议能力卡需要明确 Trader 可读取 `portfolio_margin_state` 并输出 `forced_risk_operational_recommendation`，但仍不能创建策略交易权限、不能修改策略手数/保证金；避免后续把运营风控单误解成策略 `final_action_contract` 旁路。

@@ -117,7 +117,18 @@ def _signal_side(signal: Any) -> str:
 
 
 def _contract_value(signal: Any, key: str, default: Any = None) -> Any:
-    contract = getattr(signal, "next_round_memory_contract", None)
+    metadata = getattr(signal, "metadata", None)
+    contract = None
+    if isinstance(metadata, Mapping):
+        contract = metadata.get("action_evidence_contract")
+        if not isinstance(contract, Mapping):
+            research_contract = metadata.get("trade_research_contract")
+            if isinstance(research_contract, Mapping):
+                contract = research_contract.get("action_evidence_contract")
+        if not isinstance(contract, Mapping):
+            contract = metadata.get("trade_research_contract")
+    if not isinstance(contract, Mapping):
+        contract = getattr(signal, "next_round_memory_contract", None)
     if not isinstance(contract, Mapping):
         contract = getattr(signal, "research_contract", None)
     if isinstance(contract, Mapping):
@@ -132,6 +143,22 @@ def _opportunity_state(signal: Any) -> str:
         or "watch_for_trigger"
     )
     return str(state or "watch_for_trigger").strip().lower() or "watch_for_trigger"
+
+
+def _signal_bool(signal: Any, attr: str, contract_key: str | None = None) -> bool:
+    if hasattr(signal, attr):
+        value = getattr(signal, attr)
+        if value is not None:
+            return bool(value)
+    return bool(_contract_value(signal, contract_key or attr, False))
+
+
+def _signal_text(signal: Any, attr: str, contract_key: str | None = None) -> str:
+    value = getattr(signal, attr, None)
+    if value:
+        return str(value)
+    value = _contract_value(signal, contract_key or attr, "")
+    return str(value or "")
 
 
 def _has_invalidation(signal: Any) -> bool:
@@ -253,6 +280,18 @@ def _has_entry_setup(signal: Any) -> bool:
             "压力",
         ]
     )
+
+
+def _setup_quality_ok(signal: Any) -> bool:
+    value = _contract_value(signal, "setup_quality_ok", None)
+    if value is not None:
+        return bool(value)
+    return _setup_quality(signal) >= 0.42
+
+
+def _source_analysts(signal: Any) -> list[str]:
+    agent = normalize_analyst_name(getattr(signal, "agent_name", ""))
+    return [agent] if agent else []
 
 
 def _setup_quality(signal: Any) -> float:
@@ -386,18 +425,36 @@ def build_opportunity_scorecard(
         setup_quality_notes: list[str] = []
         confidence_scores: list[float] = []
         analyst_names: list[str] = []
+        trigger_valid_count = 0
+        current_trigger_confirmed_count = 0
+        setup_quality_ok_count = 0
+        source_analysts: list[str] = []
+        entry_triggers: list[str] = []
+        opportunity_states: list[str] = []
         for signal in supporting:
             state = _opportunity_state(signal)
+            opportunity_states.append(state)
             opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
             if _has_invalidation(signal):
                 invalidation_count += 1
             if _has_entry_setup(signal):
                 setup_count += 1
+            if _signal_bool(signal, "trigger_valid"):
+                trigger_valid_count += 1
+            if _signal_bool(signal, "current_trigger_confirmed"):
+                current_trigger_confirmed_count += 1
+            if _setup_quality_ok(signal):
+                setup_quality_ok_count += 1
+            trigger_text = _signal_text(signal, "entry_trigger")
+            if trigger_text:
+                entry_triggers.append(trigger_text)
             quality_scores.append(_safe_float(getattr(signal, "business_quality_score", 0.0), 0.0))
             setup_quality_scores.append(_setup_quality(signal))
             setup_quality_notes.extend(_setup_quality_notes(signal))
             confidence_scores.append(_safe_float(getattr(signal, "confidence", 0.0), 0.0))
-            analyst_names.append(normalize_analyst_name(getattr(signal, "agent_name", "")))
+            analyst_name = normalize_analyst_name(getattr(signal, "agent_name", ""))
+            analyst_names.append(analyst_name)
+            source_analysts.extend(_source_analysts(signal))
 
         support_count = len(supporting)
         tradeable_states = (
@@ -527,6 +584,13 @@ def build_opportunity_scorecard(
             "supporting_analysts": sorted(set(name for name in analyst_names if name)),
             "tradeable_opportunity_state_count": tradeable_states,
             "opportunity_state_counts": opportunity_state_counts,
+            "opportunity_state": final_state,
+            "setup_quality_ok": bool(setup_quality_ok_count > 0),
+            "trigger_valid": bool(trigger_valid_count > 0),
+            "current_trigger_confirmed": bool(current_trigger_confirmed_count > 0),
+            "invalidation_present": bool(invalidation_count > 0),
+            "entry_trigger": entry_triggers[0] if entry_triggers else "",
+            "source_analysts": sorted(set(name for name in source_analysts if name)),
             "entry_setup_count": setup_count,
             "invalidation_count": invalidation_count,
             "avg_business_quality": round(avg_quality, 4),

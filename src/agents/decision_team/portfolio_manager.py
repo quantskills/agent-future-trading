@@ -569,6 +569,17 @@ def _scorecard_probe_seed(
     return side, _signed_abs(side, min(probe_cap, max(probe_floor, 0.0))), row
 
 
+def _scorecard_setup_quality_ok(row: dict | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if "setup_quality_ok" in row:
+        return bool(row.get("setup_quality_ok"))
+    failures = {str(item) for item in (row.get("gating_failures") or [])}
+    if "missing_entry_setup" in failures or "weak_entry_setup_quality" in failures:
+        return False
+    return int(row.get("entry_setup_count") or 0) > 0
+
+
 def _is_controlled_probe_reason(reason: str) -> bool:
     return str(reason or "") in {
         "business_quality_probe_only",
@@ -726,6 +737,13 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
         }
         if reason_codes & hard_watchlist_codes:
             return "final_contract_authority_watchlist_only"
+        conditional_trigger_authority = bool(
+            final_entry_authority.get("conditional_trigger_authority")
+            and final_entry_authority.get("requires_intraday_confirmation")
+            and not final_entry_authority.get("can_execute_without_intraday_trigger")
+        )
+        if conditional_trigger_authority:
+            return None
         current_evidence = bool(
             final_entry_authority.get("open_action_evidence")
             or final_entry_authority.get("strong_current_evidence")
@@ -974,6 +992,7 @@ def _build_final_action_contract(
     reason_codes = {str(item) for item in (control_reasons or []) if item}
     if lots_to_trade_reason:
         reason_codes.add(str(lots_to_trade_reason))
+    reason_codes.update(str(item) for item in (authority.get("reason_codes") or []) if item)
     execution_fields = {
         key: execution_contract_payload.get(key)
         for key in (
@@ -1007,6 +1026,7 @@ def _build_final_action_contract(
         "open_action_evidence": bool(authority.get("open_action_evidence")),
         "strong_current_evidence": bool(authority.get("strong_current_evidence")),
         "watch_for_trigger_block": bool(authority.get("watch_for_trigger_block")),
+        "conditional_trigger_authority": bool(authority.get("conditional_trigger_authority")),
         "negative_profile": bool(authority.get("negative_profile")),
         "tradeable_state": bool(authority.get("tradeable_state")),
         "weak_conflict_probe": bool(authority.get("weak_conflict_probe")),
@@ -2055,17 +2075,6 @@ def _final_contract_authority(
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
     watch_for_trigger_without_setup = bool(trade_authority.get("watch_for_trigger_without_setup"))
     scorecard_state = str(trade_authority.get("scorecard_state") or "").lower()
-    tradeable_state = scorecard_state in {"probe_candidate", "tradeable_candidate"}
-    watch_for_trigger_semantic_block = bool(
-        analyst_policy.get("watch_for_trigger_cannot_open_position", True)
-        and (
-            "pm_watch_for_trigger_probe_cap" in reason_set
-            or "watch_for_trigger_cannot_open_position" in reason_set
-            or "daily_tradeability_watchlist_only" in reason_set
-            or scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
-            or watch_for_trigger_without_setup
-        )
-    )
     market_conflict = "market_confirmation_conflict" in reason_set
     weak_conflict_probe = bool(
         market_conflict
@@ -2073,6 +2082,29 @@ def _final_contract_authority(
         and scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
         and not current_setup_confirmation
         and not event_catalyst_confirmation
+    )
+    conditional_trigger_authority = bool(
+        "pm_watch_for_trigger_probe_cap" in reason_set
+        and scorecard_state == "watch_for_trigger"
+        and bool(alpha_ev.get("setup_quality_ok"))
+        and not watch_for_trigger_without_setup
+        and bool(trade_authority.get("has_invalidation_or_stop"))
+        and not hard_zero
+        and not hard_blocks
+        and not negative_profile
+        and not weak_conflict_probe
+    )
+    tradeable_state = scorecard_state in {"probe_candidate", "tradeable_candidate"} or conditional_trigger_authority
+    watch_for_trigger_semantic_block = bool(
+        analyst_policy.get("watch_for_trigger_cannot_open_position", True)
+        and not conditional_trigger_authority
+        and (
+            "pm_watch_for_trigger_probe_cap" in reason_set
+            or "watch_for_trigger_cannot_open_position" in reason_set
+            or "daily_tradeability_watchlist_only" in reason_set
+            or scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
+            or watch_for_trigger_without_setup
+        )
     )
     watch_for_trigger_block = bool(
         watch_for_trigger_semantic_block
@@ -2129,9 +2161,15 @@ def _final_contract_authority(
             (release_qualified and open_action_evidence)
             or strong_current_evidence
             or analyst_tradeable_probe_candidate
+            or conditional_trigger_authority
         )
     )
-    if prior_only_mode and not static_weights_can_open and not open_action_evidence:
+    if (
+        prior_only_mode
+        and not static_weights_can_open
+        and not open_action_evidence
+        and not conditional_trigger_authority
+    ):
         can_real = False
         can_explore = False
     analyst_prior_audit = {
@@ -2189,6 +2227,7 @@ def _final_contract_authority(
             + (["negative_expectancy"] if negative_profile else [])
             + (["hard_zero"] if hard_zero else [])
             + (["analyst_tradeable_probe_candidate"] if analyst_tradeable_probe_candidate else [])
+            + (["conditional_trigger_authority"] if conditional_trigger_authority else [])
         )
     )
     return has_authority, {
@@ -2241,6 +2280,9 @@ def _final_contract_authority(
         "open_action_value_missing": open_action_missing,
         "watch_for_trigger_block": watch_for_trigger_block,
         "watch_for_trigger_semantic_block": watch_for_trigger_semantic_block,
+        "conditional_trigger_authority": conditional_trigger_authority,
+        "requires_intraday_confirmation": bool(conditional_trigger_authority),
+        "can_execute_without_intraday_trigger": False if conditional_trigger_authority else None,
         "tradeable_state": tradeable_state,
         "opportunity_state_required": True,
         "weak_conflict_probe": weak_conflict_probe,
@@ -3434,6 +3476,8 @@ def _build_execution_contract_fields(
             and final_entry_authority.get("strong_current_evidence")
         )
     )
+    if final_entry_authority.get("conditional_trigger_authority"):
+        can_execute_without_intraday_trigger = False
     allow_confirmed_memory_vwap_fallback = bool(
         profile in {"breakout", "pullback"}
         and authority_type == "real_budget_entry"
@@ -4003,6 +4047,7 @@ def _current_open_evidence_snapshot(
     layer = str(side_scorecard.get("final_state") or "unknown").lower()
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
+    setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
     has_invalidation = (
         _has_structured_invalidation_condition(analyst_signals or [])
         or _has_explicit_stop_protection(analyst_signals or [])
@@ -4055,6 +4100,7 @@ def _current_open_evidence_snapshot(
         "news_supports_side": news_supports_side,
         "news_high_quality_override": news_override,
         "has_tradeable_support": has_tradeable_support,
+        "setup_quality_ok": setup_quality_ok,
         "has_invalidation_or_stop": has_invalidation,
         "current_confirmation_score": confirmation_score,
         "independent_support_count": independent_support_count,
@@ -4383,6 +4429,7 @@ def _build_active_opportunity_audit(
         else {}
     )
     analyst_candidates = []
+    conditional_monitor_candidates = []
     watchlist_items = []
     conflict_items = []
     for signal in analyst_signals or []:
@@ -4409,6 +4456,8 @@ def _build_active_opportunity_audit(
             "neutral_trigger_condition": neutral_trigger,
             "counterfactual_side": counterfactual_side if counterfactual_side in {"long", "short", "flat"} else "flat",
             "watchlist_priority": priority if priority in {"none", "low", "medium", "high"} else "none",
+            "setup_quality_ok": False,
+            "conditional_monitor_candidate": False,
             "learning_scope": (
                 (getattr(signal, "metadata", {}) or {}).get("learning_scope")
                 if isinstance(getattr(signal, "metadata", {}), dict)
@@ -4422,6 +4471,7 @@ def _build_active_opportunity_audit(
             if action_contract:
                 candidate["action_evidence_contract"] = action_contract
                 candidate["learning_scope"] = action_contract.get("learning_scope") or candidate["learning_scope"]
+                candidate["setup_quality_ok"] = bool(action_contract.get("setup_quality_ok"))
             if research_contract:
                 candidate["trade_research_contract"] = {
                     "opportunity_type": research_contract.get("opportunity_type"),
@@ -4429,8 +4479,19 @@ def _build_active_opportunity_audit(
                     "product_context": research_contract.get("product_context") or {},
                     "action_evidence_contract": research_contract.get("action_evidence_contract") or {},
                 }
+        clean_conditional_monitor = bool(
+            state == "watch_for_trigger"
+            and candidate["setup_quality_ok"]
+            and not candidate["trigger_valid"]
+            and invalidation_present
+            and trigger
+            and candidate["signal"].lower() in {"bullish", "bearish"}
+        )
+        candidate["conditional_monitor_candidate"] = clean_conditional_monitor
         if state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"} or candidate["trigger_valid"]:
             analyst_candidates.append(candidate)
+        elif clean_conditional_monitor:
+            conditional_monitor_candidates.append(candidate)
         if neutral_trigger or candidate["watchlist_priority"] in {"medium", "high"} or candidate["counterfactual_side"] in {"long", "short"}:
             watchlist_items.append(candidate)
         conflicts = getattr(signal, "current_evidence_conflict", None) or []
@@ -4447,6 +4508,7 @@ def _build_active_opportunity_audit(
     )
     high_quality_present = bool(
         analyst_candidates
+        or conditional_monitor_candidates
         or str(preferred_card.get("final_state") or "") in {"probe_candidate", "tradeable_candidate"}
         or diagnostics.get("mature_alpha_release")
         or diagnostics.get("fast_candidate_alpha_probe")
@@ -4483,11 +4545,13 @@ def _build_active_opportunity_audit(
             "preferred_state": str(preferred_card.get("final_state") or "unknown"),
             "preferred_score": preferred_card.get("score"),
             "analyst_candidate_count": len(analyst_candidates),
+            "conditional_monitor_candidate_count": len(conditional_monitor_candidates),
             "watchlist_or_counterfactual_count": len(watchlist_items),
             "conflict_count": len(conflict_items),
             "high_quality_present": high_quality_present,
         },
         "analyst_candidates": analyst_candidates[:8],
+        "conditional_monitor_candidates": conditional_monitor_candidates[:8],
         "watchlist_or_counterfactual": watchlist_items[:8],
         "conflicts": conflict_items[:8],
         "research_follow_up": learning_follow_up,
@@ -5609,6 +5673,7 @@ def _apply_alpha_setup_ev_position_control(
         side_scorecard = scorecard.get(target_side) if isinstance(scorecard.get(target_side), dict) else {}
         layer = str(side_scorecard.get("final_state") or "unknown").lower()
         has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
+        setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
         has_invalidation = _has_structured_invalidation_condition(analyst_signals or []) or _has_explicit_stop_protection(analyst_signals or [])
         payloads = _analyst_signal_payloads(analyst_signals or {})
         min_support_confidence = float(ev_cfg.get("real_trade_min_analyst_confidence", 0.45) or 0.45)
@@ -5647,6 +5712,7 @@ def _apply_alpha_setup_ev_position_control(
             "scorecard_state": layer,
             "current_confirmation_score": confirmation_score,
             "has_tradeable_support": has_tradeable_support,
+            "setup_quality_ok": setup_quality_ok,
             "has_invalidation_or_stop": has_invalidation,
             "strong_realtime_evidence": strong_realtime_evidence,
             "strong_market_confirmation": strong_market_confirmation,
@@ -5750,6 +5816,7 @@ def _apply_alpha_setup_ev_position_control(
     layer = str(side_scorecard.get("final_state") or "unknown").lower()
     gating_failures = [str(item) for item in (side_scorecard.get("gating_failures") or [])]
     has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
+    setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
     has_invalidation = _has_structured_invalidation_condition(analyst_signals or []) or _has_explicit_stop_protection(analyst_signals or [])
     payloads = _analyst_signal_payloads(analyst_signals or {})
     technical_payload = payloads.get("technical", {})
@@ -5946,6 +6013,7 @@ def _apply_alpha_setup_ev_position_control(
         "scorecard_gating_failures": gating_failures,
         "current_confirmation_score": confirmation_score,
         "has_tradeable_support": has_tradeable_support,
+        "setup_quality_ok": setup_quality_ok,
         "has_invalidation_or_stop": has_invalidation,
         "expectancy_lane": expectancy_lane,
         "positive_action_value": positive_action_value,

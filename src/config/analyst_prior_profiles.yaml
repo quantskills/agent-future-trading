@@ -3,14 +3,14 @@
 # 它只在学习样本不足时提供默认业务常识：技术面偏日频触发，
 # 基本面偏中期背景，新闻偏事件催化/风险。
 #
-# 运行时由 config_normalizer.py 展开到 PM 仍需读取的旧字段：
+# 运行时由 config_normalizer.py 展开到 PM 需要的冷启动先验位置：
 # - portfolio_manager.sector_weights
 # - portfolio_manager.strategic_view_weights
 # - analyst_applicability_profile
 #
 # 最终交易权限必须来自 PM 的 action evidence router：
 # 技术/事件触发、失效边界、市场确认、action-value 和风险约束。
-# 静态先验不能直接生成 open/add/scale 权限。
+# 静态先验不能直接生成 open/hold/exit/execution 动作偏好，也不能直接生成最终交易合约。
 
 dynamic_bounds:
   min_weight: 0.05
@@ -22,6 +22,8 @@ usage_rules:
   allow_static_weights_to_open: false
   strategic_view_only_for: [direction_context, holding_background, medium_term_bias]
   trade_timing_only_for: [cold_start_ordering, quality_context, analyst_prior]
+  # watch_for_trigger 本身不能开仓；干净条件机会只能由 PM 写入 final_action_contract
+  # 条件监控合约后，交给 Trader 盘中检查触发。
   strategic_view_cannot_open_position: true
   watch_for_trigger_cannot_open_position: true
   missing_fundamental_or_news_can_still_trade_if_market_data_setup_confirmed: true

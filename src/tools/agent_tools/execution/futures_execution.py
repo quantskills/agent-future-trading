@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from apis.contract_info_cache import FuturesContractInfoCache
@@ -20,8 +21,10 @@ from tools.agent_tools.execution.futures_market_rules import (
 )
 from graph.schema import (
     FuturesAction,
+    FuturesRecommendation,
     FuturesTransaction,
     Position,
+    BasePriceSource,
     RecommendationAction,
     RecommendationSourceType,
     RecommendationStatus,
@@ -89,6 +92,161 @@ class FuturesExecutionEngine:
             )
 
         return portfolio
+
+    def execute_pending_forced_risk_orders(self, config_id: str, trading_date, portfolio, execution_phase: TradingPhase):
+        recommendations = self.db.get_futures_recommendations_by_effective_date(
+            config_id=config_id,
+            effective_trade_date=trading_date,
+            source_type=RecommendationSourceType.FORCED_RISK.value,
+            status=RecommendationStatus.PENDING.value,
+        )
+
+        if recommendations:
+            logger.info(
+                f"Executing {len(recommendations)} pending forced-risk recommendation(s) for "
+                f"{self._normalize_date_value(trading_date)}"
+            )
+
+        for recommendation in recommendations:
+            recommendation_id = recommendation.get("id")
+            portfolio = self.execute_recommendation(
+                recommendation_id=recommendation_id,
+                recommendation=recommendation,
+                portfolio=portfolio,
+                trading_date=trading_date,
+                execution_phase=execution_phase,
+            )
+
+        return portfolio
+
+    def scan_and_create_intraday_forced_risk_orders(
+        self,
+        *,
+        config_id: str,
+        trading_date,
+        portfolio,
+        cutoff_datetime: Optional[datetime] = None,
+    ) -> List[str]:
+        """Create forced-risk close orders when intraday margin risk breaches hard lines."""
+
+        risk_cfg = ((self.config.get("execution") or {}).get("forced_risk") or {})
+        if not bool(risk_cfg.get("enabled", True)):
+            return []
+
+        trigger_ratio = float(risk_cfg.get("intraday_margin_call_ratio", 0.85) or 0.85)
+        target_ratio = float(risk_cfg.get("post_reduce_target_margin_ratio", 0.70) or 0.70)
+        if trigger_ratio <= 0:
+            return []
+        target_ratio = max(0.0, min(target_ratio, trigger_ratio))
+
+        created_ids: List[str] = []
+        existing_keys = self._pending_forced_risk_keys(
+            config_id=config_id,
+            trading_date=trading_date,
+        )
+        evaluations = self._intraday_margin_risk_evaluations(
+            portfolio=portfolio,
+            trading_date=trading_date,
+            cutoff_datetime=cutoff_datetime,
+        )
+        if not evaluations:
+            return []
+
+        total_margin = sum(item["margin_used"] for item in evaluations)
+        total_unrealized_pnl = sum(item["unrealized_pnl"] for item in evaluations)
+        account_equity = float(getattr(portfolio, "cashflow", 0.0) or 0.0) + total_margin + total_unrealized_pnl
+        margin_ratio = total_margin / account_equity if account_equity > 0 else (1.0 if total_margin > 0 else 0.0)
+        if margin_ratio < trigger_ratio:
+            return []
+
+        ordered = sorted(evaluations, key=lambda item: item["margin_used"], reverse=True)
+        projected_margin = total_margin
+        reduction_target = max(0.0, target_ratio * account_equity)
+        for item in ordered:
+            if projected_margin <= reduction_target:
+                break
+            lots = self._forced_risk_lots_to_reduce(
+                item=item,
+                projected_margin=projected_margin,
+                reduction_target=reduction_target,
+            )
+            if lots <= 0:
+                continue
+            action = (
+                RecommendationAction.CLOSE_LONG
+                if item["shares"] > 0
+                else RecommendationAction.CLOSE_SHORT
+            )
+            dedupe_key = (item["underlying_code"], item["contract_code"], action.value)
+            if dedupe_key in existing_keys:
+                continue
+
+            recommendation = FuturesRecommendation(
+                config_id=config_id,
+                reference_portfolio_id=getattr(portfolio, "id", ""),
+                trading_date=self._normalize_date_value(trading_date),
+                effective_trade_date=self._normalize_date_value(trading_date),
+                source_type=RecommendationSourceType.FORCED_RISK,
+                underlying_code=item["underlying_code"],
+                contract_code=item["contract_code"],
+                action=action,
+                lots=lots,
+                base_price=item["risk_price"],
+                base_price_source=item["base_price_source"],
+                base_price_date=item["base_price_date"],
+                open_price=item["risk_price"],
+                prev_close_price=item["reference_price"],
+                slippage_model=self.execution_config.get("slippage_model", "tick"),
+                slippage_ticks=self._get_slippage_ticks(item["underlying_code"]),
+                justification=(
+                    "Intraday forced-risk reduction: "
+                    f"margin_ratio={margin_ratio:.2%} >= trigger={trigger_ratio:.2%}; "
+                    f"target_margin_ratio={target_ratio:.2%}"
+                ),
+                signal_snapshot={
+                    "source_type": RecommendationSourceType.FORCED_RISK.value,
+                    "operation_reason": "intraday_margin_call",
+                    "risk_status": "LIQUIDATION",
+                    "margin_ratio": margin_ratio,
+                    "current_margin_ratio": margin_ratio,
+                    "trigger_margin_ratio": trigger_ratio,
+                    "post_reduce_target_margin_ratio": target_ratio,
+                    "account_equity": account_equity,
+                    "total_margin": total_margin,
+                    "total_unrealized_pnl": total_unrealized_pnl,
+                    "underlying_code": item["underlying_code"],
+                    "contract_code": item["contract_code"],
+                    "risk_price": item["risk_price"],
+                    "risk_price_source": item["base_price_source"].value if item["base_price_source"] else None,
+                    "risk_price_datetime": item["base_price_date"],
+                    "forced_risk_boundary": "non_strategy_operational_order_excluded_from_alpha_learning",
+                },
+                audit_payload={
+                    "source_type": RecommendationSourceType.FORCED_RISK.value,
+                    "operation_reason": "intraday_margin_call",
+                    "risk_status": "LIQUIDATION",
+                    "margin_ratio": margin_ratio,
+                    "trigger_margin_ratio": trigger_ratio,
+                    "post_reduce_target_margin_ratio": target_ratio,
+                    "account_equity": account_equity,
+                    "total_margin": total_margin,
+                    "total_unrealized_pnl": total_unrealized_pnl,
+                    "forced_risk_scope": "reduce_existing_position_only",
+                    "strategy_learning_boundary": "excluded_from_strategy_action_value",
+                },
+                status=RecommendationStatus.PENDING,
+            )
+            recommendation_id = self.db.save_futures_recommendation(recommendation)
+            if not recommendation_id:
+                raise RuntimeError(f"Failed to save forced-risk recommendation for {item['underlying_code']}")
+            created_ids.append(recommendation_id)
+            existing_keys.add(dedupe_key)
+            projected_margin = max(0.0, projected_margin - item["margin_used"] * (lots / item["lots"]))
+            logger.warning(
+                f"Created forced-risk recommendation for {item['underlying_code']}: "
+                f"action={action.value}, lots={lots}, margin_ratio={margin_ratio:.2%}"
+            )
+        return created_ids
 
     def execute_recommendation(
         self,
@@ -538,6 +696,7 @@ class FuturesExecutionEngine:
                     "market_rules": market_rules_audit,
                     "dynamic_margin": margin_source_audit,
                     "rollover_execution": self._build_rollover_execution_audit(recommendation),
+                    "forced_risk_execution": self._build_forced_risk_execution_audit(recommendation),
                 },
             ),
         )
@@ -579,6 +738,190 @@ class FuturesExecutionEngine:
             contract_code=contract_code,
         )
 
+    def _pending_forced_risk_keys(self, *, config_id: str, trading_date) -> set[tuple[str, str, str]]:
+        recommendations = self.db.get_futures_recommendations_by_effective_date(
+            config_id=config_id,
+            effective_trade_date=trading_date,
+            source_type=RecommendationSourceType.FORCED_RISK.value,
+            status=RecommendationStatus.PENDING.value,
+        )
+        keys: set[tuple[str, str, str]] = set()
+        for recommendation in recommendations:
+            keys.add(
+                (
+                    str(recommendation.get("underlying_code") or ""),
+                    str(recommendation.get("contract_code") or ""),
+                    str(recommendation.get("action") or ""),
+                )
+            )
+        return keys
+
+    def _intraday_margin_risk_evaluations(
+        self,
+        *,
+        portfolio,
+        trading_date,
+        cutoff_datetime: Optional[datetime],
+    ) -> List[Dict[str, Any]]:
+        evaluations: List[Dict[str, Any]] = []
+        for underlying_code, position in getattr(portfolio, "positions", {}).items():
+            shares = int(getattr(position, "shares", 0) or 0)
+            if shares == 0:
+                continue
+            contract_code = getattr(position, "contract_code", None)
+            if not contract_code:
+                continue
+            contract_info = FuturesContractInfoCache.get_contract_info(underlying_code)
+            if not contract_info:
+                continue
+
+            risk_price_payload = self._resolve_forced_risk_price(
+                underlying_code=underlying_code,
+                contract_code=contract_code,
+                trading_date=trading_date,
+                cutoff_datetime=cutoff_datetime,
+            )
+            risk_price = risk_price_payload.get("risk_price")
+            if risk_price is None or float(risk_price) <= 0:
+                continue
+            action_value = (
+                RecommendationAction.CLOSE_LONG.value
+                if shares > 0
+                else RecommendationAction.CLOSE_SHORT.value
+            )
+            margin_rate, _ = self._resolve_dynamic_margin_rate(
+                action_value=action_value,
+                contract_code=contract_code,
+                contract_info=contract_info,
+                trading_date=trading_date,
+                contract_detail=self._get_contract_detail(contract_code, trading_date),
+            )
+            lots = abs(shares)
+            multiplier = float(getattr(position, "contract_multiplier", None) or contract_info["contract_multiplier"])
+            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+            if entry_price > 0:
+                unrealized_pnl = (
+                    (float(risk_price) - entry_price) * lots * multiplier
+                    if shares > 0
+                    else (entry_price - float(risk_price)) * lots * multiplier
+                )
+            else:
+                unrealized_pnl = 0.0
+            margin_used = float(risk_price) * lots * multiplier * margin_rate
+            evaluations.append(
+                {
+                    "underlying_code": underlying_code,
+                    "contract_code": contract_code,
+                    "shares": shares,
+                    "lots": lots,
+                    "risk_price": float(risk_price),
+                    "reference_price": risk_price_payload.get("reference_price"),
+                    "base_price_source": risk_price_payload.get("base_price_source"),
+                    "base_price_date": risk_price_payload.get("base_price_date"),
+                    "margin_rate": margin_rate,
+                    "margin_used": margin_used,
+                    "unrealized_pnl": unrealized_pnl,
+                    "contract_multiplier": multiplier,
+                }
+            )
+        return evaluations
+
+    def _resolve_forced_risk_price(
+        self,
+        *,
+        underlying_code: str,
+        contract_code: str,
+        trading_date,
+        cutoff_datetime: Optional[datetime],
+    ) -> Dict[str, Any]:
+        intraday_cfg = (self.execution_config.get("intraday_confirmation") or {})
+        frequency = str(intraday_cfg.get("execution_frequency", "1m"))
+        time_zone = intraday_cfg.get("time_zone")
+        try:
+            bars = self.router.get_china_futures_minute_bars(
+                contract_id=contract_code,
+                underlying_code=underlying_code,
+                is_main=0,
+                start_date=self._normalize_date_value(trading_date),
+                end_date=self._normalize_date_value(trading_date),
+                frequency=frequency,
+                time_zone=time_zone,
+                cutoff_datetime=cutoff_datetime,
+            )
+        except Exception as exc:
+            logger.warning(f"Forced-risk intraday bars unavailable for {contract_code}: {exc}")
+            bars = []
+        latest_bar = self._latest_price_bar(bars, cutoff_datetime=cutoff_datetime)
+        if latest_bar:
+            return {
+                "risk_price": latest_bar["price"],
+                "reference_price": latest_bar["price"],
+                "base_price_source": BasePriceSource.INTRADAY_FIRST_VALID_1M_OPEN,
+                "base_price_date": latest_bar["datetime"],
+            }
+
+        quote = self._get_execution_quote(contract_code, trading_date)
+        getter = quote.get if isinstance(quote, dict) else lambda key, default=None: getattr(quote, key, default)
+        for key in ("close_price", "settle_price", "open_price", "pre_close_price", "prev_close_price"):
+            value = self._positive_float(getter(key, None))
+            if value is not None:
+                return {
+                    "risk_price": value,
+                    "reference_price": value,
+                    "base_price_source": BasePriceSource.T_MINUS_1_CLOSE_FALLBACK,
+                    "base_price_date": self._normalize_date_value(trading_date),
+                }
+        return {
+            "risk_price": None,
+            "reference_price": None,
+            "base_price_source": None,
+            "base_price_date": None,
+        }
+
+    def _latest_price_bar(self, bars: Any, *, cutoff_datetime: Optional[datetime]) -> Optional[Dict[str, Any]]:
+        latest: Optional[Dict[str, Any]] = None
+        for row in bars or []:
+            record = dict(row)
+            bar_dt = self._parse_bar_datetime(record.get("datetime"))
+            if bar_dt is None:
+                continue
+            if cutoff_datetime is not None and bar_dt > cutoff_datetime:
+                continue
+            price = (
+                self._positive_float(record.get("close"))
+                or self._positive_float(record.get("open"))
+            )
+            if price is None:
+                continue
+            if latest is None or bar_dt > latest["dt"]:
+                latest = {
+                    "dt": bar_dt,
+                    "datetime": bar_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "price": price,
+                }
+        return latest
+
+    def _forced_risk_lots_to_reduce(
+        self,
+        *,
+        item: Dict[str, Any],
+        projected_margin: float,
+        reduction_target: float,
+    ) -> int:
+        margin_to_release = max(0.0, float(projected_margin or 0.0) - float(reduction_target or 0.0))
+        if margin_to_release <= 0:
+            return 0
+        lots = int(item.get("lots") or 0)
+        if lots <= 0:
+            return 0
+        margin_per_lot = float(item.get("margin_used") or 0.0) / lots
+        if margin_per_lot <= 0:
+            return lots
+        required_lots = int((margin_to_release + margin_per_lot - 1e-9) // margin_per_lot)
+        if required_lots * margin_per_lot < margin_to_release:
+            required_lots += 1
+        return max(1, min(lots, required_lots))
+
     def _resolve_transaction_contract_code(
         self,
         underlying_code: str,
@@ -610,7 +953,10 @@ class FuturesExecutionEngine:
         recommendation: Dict[str, Any],
         portfolio,
     ) -> None:
-        if self._enum_value(recommendation.get("source_type")) == RecommendationSourceType.ROLLOVER.value:
+        if self._enum_value(recommendation.get("source_type")) in {
+            RecommendationSourceType.ROLLOVER.value,
+            RecommendationSourceType.FORCED_RISK.value,
+        }:
             return
 
         existing_position = portfolio.positions.get(underlying_code)
@@ -849,6 +1195,31 @@ class FuturesExecutionEngine:
             self._contract_detail_cache[key] = detail if isinstance(detail, dict) else None
         return self._contract_detail_cache[key]
 
+    def _parse_bar_datetime(self, value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value.replace(microsecond=0)
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y%m%d %H%M%S"):
+            try:
+                return datetime.strptime(text[:19] if fmt != "%Y%m%d %H%M%S" else text[:15], fmt)
+            except Exception:
+                continue
+        try:
+            return datetime.fromisoformat(text).replace(microsecond=0)
+        except Exception:
+            return None
+
+    def _positive_float(self, value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except Exception:
+            return None
+        return parsed if parsed > 0 else None
+
     def _build_market_rules_audit(
         self,
         *,
@@ -1000,6 +1371,22 @@ class FuturesExecutionEngine:
             "open_lots": recommendation.get("rollover_open_lots"),
             "execution_type": recommendation.get("rollover_execution_type"),
             "cost_components": ["slippage", "commission"],
+        }
+
+    def _build_forced_risk_execution_audit(self, recommendation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self._enum_value(recommendation.get("source_type")) != RecommendationSourceType.FORCED_RISK.value:
+            return None
+        payload = recommendation.get("audit_payload") if isinstance(recommendation.get("audit_payload"), dict) else {}
+        return {
+            "source_type": RecommendationSourceType.FORCED_RISK.value,
+            "operation_reason": (
+                recommendation.get("operation_reason")
+                or payload.get("operation_reason")
+                or recommendation.get("justification")
+                or "forced_risk"
+            ),
+            "cost_components": ["slippage", "commission"],
+            "strategy_learning_boundary": "excluded_from_strategy_action_value",
         }
 
     def _merge_audit_payload(self, base_payload: Any, additions: Dict[str, Any]) -> Dict[str, Any]:

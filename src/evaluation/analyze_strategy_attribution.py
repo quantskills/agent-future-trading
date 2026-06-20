@@ -391,6 +391,26 @@ def _rollover_summary(transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _forced_risk_summary(transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    forced_risk_transactions = [
+        row for row in transactions
+        if _source_type(row.get("source_type")) == "forced_risk"
+    ]
+    by_action: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"count": 0, "lots": 0, "commission": 0.0})
+    for row in forced_risk_transactions:
+        action = str(row.get("action") or "")
+        by_action[action]["count"] += 1
+        by_action[action]["lots"] += int(row.get("lots") or 0)
+        by_action[action]["commission"] += float(row.get("commission") or 0.0)
+
+    return {
+        "transaction_count": len(forced_risk_transactions),
+        "total_lots": sum(int(row.get("lots") or 0) for row in forced_risk_transactions),
+        "total_commission": sum(float(row.get("commission") or 0.0) for row in forced_risk_transactions),
+        "by_action": dict(by_action),
+    }
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1258,7 +1278,7 @@ def build_attribution_report(
 
     pairs = build_completed_trade_pairs(transactions)
     pairs = _attach_open_recommendation_context(pairs, recommendations_by_id)
-    strategy_only_pairs = [pair for pair in pairs if not pair.get("contains_rollover")]
+    strategy_only_pairs = [pair for pair in pairs if not pair.get("contains_non_strategy")]
 
     overall = summarize_trade_pairs(pairs)
     strategy_only_overall = summarize_trade_pairs(strategy_only_pairs)
@@ -1327,6 +1347,7 @@ def build_attribution_report(
         "weak_side_suggestions": weak_side_suggestions,
         "recommendation_diagnostics": _recommendation_diagnostics(recommendations),
         "rollover_summary": _rollover_summary(transactions),
+        "forced_risk_summary": _forced_risk_summary(transactions),
         "trade_pairs": pairs,
         "strategy_only_trade_pairs": strategy_only_pairs,
     }

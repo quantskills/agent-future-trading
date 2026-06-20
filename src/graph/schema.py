@@ -310,6 +310,7 @@ class BasePriceSource(str, Enum):
 class RecommendationSourceType(str, Enum):
     STRATEGY = "strategy"
     ROLLOVER = "rollover"
+    FORCED_RISK = "forced_risk"
 
 
 class RecommendationStatus(str, Enum):
@@ -357,7 +358,7 @@ class MorningExecutionBasis(BaseModel):
 
 
 class FuturesRecommendation(BaseModel):
-    """Phase1 strategy recommendation or next-day rollover recommendation."""
+    """Phase1 strategy recommendation or non-strategy operational recommendation."""
 
     id: Optional[str] = Field(default=None, description="Recommendation id")
     config_id: str = Field(default="", description="Config id")

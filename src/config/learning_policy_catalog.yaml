@@ -5,15 +5,15 @@
 
 learning_gatekeeping_policy:
   # 学习结果服务 action preference，不直接下交易命令。
-  # 历史字段名中的 block/cap/probe 只表示同作用域的学习倾向或软风险标签；
-  # PM 必须结合当日证据、final_action_contract authority、Auditor 硬风险与 Trader 执行约束后再落仓。
+  # block/cap/probe 只允许作为同作用域学习倾向、reason code 或软风险标签；
+  # PM 必须结合当日证据、final_action_contract 授权、Auditor 硬风险与 Trader 执行约束后再落仓。
   # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
   # 交易出口仍由 final_action_contract 统一落地。
   # Researcher 写入的 action-value 必须带 usage_boundary：open 给 PM 开仓/放大候选，
   # hold 给 PM 持仓生命周期，exit 给 PM 保护/退出，execution 由 PM 写入 final_action_contract.execution_profile；
   # 分析师只能读取 signal_calibration 校准证据质量，不能把 action-value 转成交易授权。
   action_value_role: action_preference_not_trade_authority
-  policy_action_role: compatibility_soft_adjustment
+  policy_action_role: soft_adjustment_reason_code
   can_create_trade_authority_directly: false
   same_scope_required_for_sizing: true
   sector_fallback_role: prior_only_not_open_seed
@@ -101,8 +101,11 @@ learning:
   alpha_setup_policy_state:
     # 将 Alpha Setup 的正/负期望转成 PM 可读取的未来策略状态。
     # 只影响同品种/方向/周期/市场状态；不做品种黑名单，不改当日交易。
-    # probe/cap_multiplier 是动作偏好，不是硬性交易命令。
-    # positive_candidate_*、negative_revalidate、tail_loss_protect 等偏好写入数据库，
+    # probe/cap_multiplier 是学习侧影响强度，不是硬性交易命令。
+    # action_preference 只允许使用统一固定集合：
+    # positive_candidate_open / positive_candidate_hold / positive_candidate_exit / positive_candidate_execution /
+    # negative_revalidate / negative_hold_revalidate / tail_loss_protect。
+    # 这些偏好写入数据库，
     # 由 PM 在下一交易日结合当前证据仲裁，不回写 YAML。
     # open/hold/exit/execution 必须分账：open 正收益不能来自 exit/execution，
     # exit/reduce 正收益不能反向支持开仓放大，execution 只能影响 Trader 触发方式。

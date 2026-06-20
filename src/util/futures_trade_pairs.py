@@ -55,6 +55,14 @@ def _is_rollover_transaction(row: Dict[str, Any]) -> bool:
     return str(_enum_value(row.get("source_type")) or "").lower() == "rollover"
 
 
+def _source_type(row: Dict[str, Any]) -> str:
+    return str(_enum_value(row.get("source_type")) or "strategy").lower()
+
+
+def _is_non_strategy_transaction(row: Dict[str, Any]) -> bool:
+    return _source_type(row) != "strategy"
+
+
 def build_completed_trade_pairs(
     transactions: Iterable[Dict[str, Any]],
     *,
@@ -67,15 +75,17 @@ def build_completed_trade_pairs(
     partial closes by splitting an opening lot block as needed.
 
     Set include_rollover=False when the caller wants a strategy-signal-only
-    view. Account-level evaluation should normally keep the default True,
-    because rollover transactions are part of the realized account path.
+    view. That mode excludes all non-strategy operational transactions,
+    including rollover and forced_risk. Account-level evaluation should
+    normally keep the default True, because operational transactions are part
+    of the realized account path.
     """
 
     open_books: Dict[tuple[str, str, str], Deque[Dict[str, Any]]] = defaultdict(deque)
     pairs: List[Dict[str, Any]] = []
 
     for row in _sorted_transactions(transactions):
-        if not include_rollover and _is_rollover_transaction(row):
+        if not include_rollover and _is_non_strategy_transaction(row):
             continue
 
         action = _enum_value(row.get("action"))
@@ -106,7 +116,7 @@ def build_completed_trade_pairs(
                     "lots_original": lots,
                     "commission_per_lot": commission_per_lot,
                     "contract_multiplier": multiplier,
-                    "source_type": str(_enum_value(row.get("source_type")) or "strategy").lower(),
+                    "source_type": _source_type(row),
                 }
             )
             continue
@@ -143,9 +153,15 @@ def build_completed_trade_pairs(
                     "open_recommendation_id": open_lot.get("recommendation_id"),
                     "close_recommendation_id": row.get("recommendation_id"),
                     "open_source_type": open_lot.get("source_type"),
-                    "close_source_type": str(_enum_value(row.get("source_type")) or "strategy").lower(),
+                    "close_source_type": _source_type(row),
                     "contains_rollover": bool(
                         open_lot.get("source_type") == "rollover" or _is_rollover_transaction(row)
+                    ),
+                    "contains_forced_risk": bool(
+                        open_lot.get("source_type") == "forced_risk" or _source_type(row) == "forced_risk"
+                    ),
+                    "contains_non_strategy": bool(
+                        open_lot.get("source_type") != "strategy" or _is_non_strategy_transaction(row)
                     ),
                     "open_date": open_lot.get("trading_date"),
                     "close_date": _date_key(row.get("trading_date")),

@@ -7,8 +7,10 @@
 # 动作偏好，Trader 只读 execution profile。最终交易事实仍只认 PM 汇总出的
 # final_action_contract，Trader 只执行该最终契约。
 # 分析师输出里的“如果/等待/确认后才交易”属于 pending 条件，必须结构化为
-# watch_for_trigger + trigger_valid=false；只有当前触发已经成立且有失效边界时，才可进入
-# tradeable_candidate，再由 PM、Auditor、Trader 继续处理。
+# watch_for_trigger + trigger_valid=false。它不是即时交易授权；若同时具备
+# setup_quality_ok、明确方向、entry_trigger 和 invalidation_present，PM 只能把它写入
+# 同一张 final_action_contract 的条件监控 probe，Trader 只盘中检查触发，不能自创方向/手数。
+# 只有当前触发已经成立且有失效边界时，才可进入 tradeable_candidate 或即时 probe/开仓候选。
 # 资金参数保护区：
 #   - position_budget_policy
 #   - risk_control
@@ -122,6 +124,7 @@ position_budget_policy:
   min_real_trade_margin_ratio: 0.008
   min_real_trade_margin_abs: 40000
   apply_min_to_new_entries_only: true
+  # 这里的 authority 指 final_action_contract 授权，不是第二张交易合约。
   require_final_trade_authority: true
   block_below_min_when_cannot_scale: true
   # 以下是冷启动资金分层。学习机制只校准进入哪一层，不突破 20% 硬上限。
@@ -136,7 +139,7 @@ position_budget_policy:
   max_single_ticker_margin_ratio: 0.130
 
 analyst_weight_policy:
-  # 历史兼容字段名仍叫 weight_policy，但业务语义是“分析师冷启动先验”。
+  # 该配置块只表达“分析师冷启动先验”。
   # 它只辅助中期背景、冷启动排序和适用性解释；最终开仓/加仓权限必须来自
   # PM 的 action evidence router，不能由静态权重直接生成。
   enabled: true
@@ -147,8 +150,8 @@ analyst_weight_policy:
   strategic_profile: sector_strategic_view
   trade_timing_profile: daily_trade_timing
   dynamic_overlay: database_only
-  # 方向观点、等待触发、未来条件触发都不能开仓；只有当前触发成立的结构化证据
-  # 才能进入 PM 的可交易候选链路。
+  # 方向观点不能开仓；watch_for_trigger 本身不能开仓。
+  # 干净的条件机会只能由 PM 写入 final_action_contract 条件监控合约后交给 Trader 盘中检查。
   strategic_view_cannot_open_position: true
   watch_for_trigger_cannot_open_position: true
 
@@ -279,7 +282,7 @@ capital_utilization_control:
   exceptional_validated_max_fraction_of_remaining_capacity: 0.95
   exceptional_confirmation_allocation_power: 1.00
   allow_probe_above_observation_target: true
-  # 旧版名义 cap 仅作兼容回退。
+  # 名义仓位上限只作配置回退；运行时仓位事实仍以 final_action_contract 和保证金预算为准。
   strong_opportunity_max_position_ratio_multiplier: 20.0
   strong_opportunity_max_position_ratio_cap: 2.00
   allow_confirmed_same_side_add_on: true
@@ -366,7 +369,7 @@ tickers:
   - ZN
 
 planner_mode: false
-# 旧版分析师选择器开关；当前保持 false。
+# 规划器开关；当前保持 false，真实回测使用 workflow_analysts。
 
 workflow_analysts:
   - commodity_news

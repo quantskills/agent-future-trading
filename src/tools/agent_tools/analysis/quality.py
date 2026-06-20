@@ -441,9 +441,28 @@ _PENDING_ENTRY_TRIGGER_MARKERS = (
     "requires market",
     "requires current",
     "requires confirmation",
+    "requires a confirmation",
+    "requires confirmed",
+    "requires a confirmed",
+    "requires break",
+    "requires a break",
+    "requires breakout",
+    "requires a breakout",
+    "requires breakdown",
+    "requires a breakdown",
     "require price",
     "require technical",
     "require market",
+    "require confirmation",
+    "require a confirmation",
+    "require confirmed",
+    "require a confirmed",
+    "require break",
+    "require a break",
+    "require breakout",
+    "require a breakout",
+    "require breakdown",
+    "require a breakdown",
     "require post-open",
     "requires post-open",
     "needs price",
@@ -463,6 +482,14 @@ _PENDING_ENTRY_TRIGGER_MARKERS = (
     "actionable only if",
     "before entry",
     "before execution",
+    "after the open",
+    "after open",
+    "without that confirmation",
+    "without confirmation",
+    "remain on watch",
+    "remains on watch",
+    "stay on watch",
+    "stays on watch",
     "until price",
     "until futures",
     "如果",
@@ -522,11 +549,35 @@ _STRICT_PENDING_ENTRY_MARKERS = (
     "becomes actionable",
     "become actionable",
     "actionable only if",
+    "requires confirmed",
+    "requires a confirmed",
+    "requires break",
+    "requires a break",
+    "requires breakout",
+    "requires a breakout",
+    "requires breakdown",
+    "requires a breakdown",
+    "require confirmed",
+    "require a confirmed",
+    "require break",
+    "require a break",
+    "require breakout",
+    "require a breakout",
+    "require breakdown",
+    "require a breakdown",
     "require post-open",
     "requires post-open",
     "needs post-open",
     "before entry",
     "before execution",
+    "after the open",
+    "after open",
+    "without that confirmation",
+    "without confirmation",
+    "remain on watch",
+    "remains on watch",
+    "stay on watch",
+    "stays on watch",
     "等待",
     "确认后",
     "后再",
@@ -591,7 +642,7 @@ def _has_explicit_fundamental_short_trigger(signal: AnalystSignal, quality_conte
         return False
     if _is_pending_conditional_entry_trigger(entry_trigger):
         return False
-    return _has_specific_entry_text(entry_trigger)
+    return _has_current_entry_trigger_text(entry_trigger)
 
 
 def _current_confirmation_flag(signal: AnalystSignal, quality_context: Dict[str, Any], *names: str) -> bool:
@@ -633,6 +684,19 @@ def _current_entry_confirmation_available(
             and not quality_context.get("price_reaction_required", True)
         )
     return False
+
+
+def _current_entry_trigger_confirmed(
+    signal: AnalystSignal,
+    quality_context: Dict[str, Any],
+    analyst: str,
+    entry_trigger: Any,
+) -> bool:
+    if _is_pending_conditional_entry_trigger(entry_trigger):
+        return False
+    if _current_entry_confirmation_available(signal, quality_context, analyst):
+        return True
+    return _has_current_entry_trigger_text(entry_trigger)
 
 
 def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: str = "") -> Dict[str, Any]:
@@ -1247,6 +1311,12 @@ def apply_trade_research_contract(
         _is_pending_conditional_entry_trigger(entry_trigger)
         and not _current_entry_confirmation_available(signal, quality_context, analyst)
     )
+    current_trigger_confirmed = _current_entry_trigger_confirmed(
+        signal,
+        quality_context,
+        analyst,
+        entry_trigger,
+    )
     exit_hint = (
         getattr(signal, "exit_hint", "")
         or getattr(signal, "counter_evidence", "")
@@ -1299,6 +1369,16 @@ def apply_trade_research_contract(
             conflicts.append("conditional_entry_trigger_pending")
         if candidate_state in {"tradeable_candidate", "probe_candidate"}:
             candidate_state = "watch_for_trigger"
+    if (
+        not is_neutral
+        and not current_trigger_confirmed
+        and candidate_state in {"tradeable_candidate", "probe_candidate"}
+    ):
+        candidate_state = "watch_for_trigger"
+        if "current_entry_trigger_not_confirmed" not in state_notes:
+            state_notes.append("current_entry_trigger_not_confirmed")
+        if "current_entry_trigger_not_confirmed" not in conflicts:
+            conflicts.append("current_entry_trigger_not_confirmed")
     action_evidence_contract = _build_action_evidence_contract(
         signal,
         quality_context,
@@ -1340,6 +1420,77 @@ def apply_trade_research_contract(
             "can_seed_real_entry": False,
         },
     }.get(opportunity_state, {})
+    signal.opportunity_type = opportunity_type
+    signal.opportunity_state = opportunity_state
+    signal.setup_quality_score = _safe_float(setup_quality.get("score"), 0.0)
+    signal.entry_quality = str(setup_quality.get("entry_quality") or "unknown")
+    signal.setup_quality_notes = sorted(set(list(setup_quality.get("notes") or []) + derived_notes))
+    signal.entry_trigger = entry_trigger
+    signal.exit_hint = exit_hint
+    signal.holding_period_hint = holding_hint
+    signal.evidence_role = {
+        "technical": "entry_timing",
+        "fundamental": "direction_context",
+        "commodity_news": "event_catalyst",
+        "company_news": "event_catalyst",
+    }.get(str(analyst), "risk_context")
+    signal.direction_context = (
+        "long" if signal_value(signal.signal) == Signal.BULLISH.value
+        else "short" if signal_value(signal.signal) == Signal.BEARISH.value
+        else "neutral"
+    )
+    technical_setup_scope = _technical_setup_scope(quality_context, opportunity_type)
+    if str(analyst) == "technical":
+        signal.trend_direction = str(
+            quality_context.get("dominant_direction")
+            or getattr(signal, "trend_stage", "")
+            or signal.direction_context
+            or "unknown"
+        )
+        setup_family = str(technical_setup_scope.get("setup_family") or opportunity_type or "unknown")
+        signal.entry_timing_signal = (
+            setup_family
+            if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
+            else "trend_watch_for_trigger"
+        )
+        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
+        signal.trigger_valid = bool(
+            current_trigger_confirmed
+            and has_invalidation
+            and signal.entry_quality not in {"poor", "weak"}
+        )
+    else:
+        signal.trend_direction = signal.direction_context
+        signal.entry_timing_signal = (
+            "event_requires_market_confirmation"
+            if str(analyst) == "commodity_news"
+            else "requires_technical_or_market_timing"
+        )
+        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
+        if str(analyst) == "commodity_news":
+            signal.trigger_valid = bool(
+                current_trigger_confirmed
+            ) and bool(has_invalidation)
+        else:
+            signal.trigger_valid = bool(
+                current_trigger_confirmed
+                and has_invalidation
+            )
+    signal.invalidation_present = bool(has_invalidation)
+    if pending_conditional_trigger:
+        signal.trigger_valid = False
+    action_evidence_contract["trigger_valid"] = bool(signal.trigger_valid)
+    action_evidence_contract["current_trigger_confirmed"] = bool(current_trigger_confirmed)
+    action_evidence_contract["invalidation_present"] = bool(signal.invalidation_present)
+    action_evidence_contract["setup_quality_ok"] = bool(
+        action_evidence_contract.get("setup_quality_ok")
+        or signal.setup_quality_score >= 0.42
+    )
+    action_evidence_contract["setup_type"] = str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown")
+    execution_contract = dict(action_evidence_contract.get("execution") or {})
+    execution_contract["trigger_valid"] = bool(signal.trigger_valid)
+    execution_contract["current_trigger_confirmed"] = bool(current_trigger_confirmed)
+    action_evidence_contract["execution"] = execution_contract
     product_context = {
         "ticker": str(ticker or ""),
         "sector": str(quality_context.get("sector") or ""),
@@ -1389,85 +1540,6 @@ def apply_trade_research_contract(
     )
     message_errors = validate_internal_message_contract(message_contract)
 
-    signal.opportunity_type = opportunity_type
-    signal.opportunity_state = opportunity_state
-    signal.setup_quality_score = _safe_float(setup_quality.get("score"), 0.0)
-    signal.entry_quality = str(setup_quality.get("entry_quality") or "unknown")
-    signal.setup_quality_notes = sorted(set(list(setup_quality.get("notes") or []) + derived_notes))
-    signal.entry_trigger = entry_trigger
-    signal.exit_hint = exit_hint
-    signal.holding_period_hint = holding_hint
-    signal.evidence_role = {
-        "technical": "entry_timing",
-        "fundamental": "direction_context",
-        "commodity_news": "event_catalyst",
-        "company_news": "event_catalyst",
-    }.get(str(analyst), "risk_context")
-    signal.direction_context = (
-        "long" if signal_value(signal.signal) == Signal.BULLISH.value
-        else "short" if signal_value(signal.signal) == Signal.BEARISH.value
-        else "neutral"
-    )
-    technical_setup_scope = _technical_setup_scope(quality_context, opportunity_type)
-    if str(analyst) == "technical":
-        signal.trend_direction = str(
-            quality_context.get("dominant_direction")
-            or getattr(signal, "trend_stage", "")
-            or signal.direction_context
-            or "unknown"
-        )
-        setup_family = str(technical_setup_scope.get("setup_family") or opportunity_type or "unknown")
-        signal.entry_timing_signal = (
-            setup_family
-            if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
-            else "trend_watch_for_trigger"
-        )
-        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
-        signal.trigger_valid = bool(
-            setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
-            and _has_specific_entry_text(entry_trigger)
-            and not pending_conditional_trigger
-            and has_invalidation
-            and signal.entry_quality not in {"poor", "weak"}
-        )
-    else:
-        signal.trend_direction = signal.direction_context
-        signal.entry_timing_signal = (
-            "event_requires_market_confirmation"
-            if str(analyst) == "commodity_news"
-            else "requires_technical_or_market_timing"
-        )
-        signal.price_location = str(getattr(signal, "price_percentile", "") or "")
-        if str(analyst) == "commodity_news":
-            signal.trigger_valid = bool(
-                quality_context.get("tradable_event")
-                and not quality_context.get("price_reaction_required", True)
-                or _current_confirmation_flag(
-                    signal,
-                    quality_context,
-                    "price_reaction_confirmed",
-                    "market_confirmation_confirmed",
-                    "execution_trigger_confirmed",
-                )
-            ) and bool(has_invalidation)
-        else:
-            signal.trigger_valid = bool(
-                _has_explicit_fundamental_short_trigger(signal, quality_context)
-                and has_invalidation
-            )
-    signal.invalidation_present = bool(has_invalidation)
-    if pending_conditional_trigger:
-        signal.trigger_valid = False
-    action_evidence_contract["trigger_valid"] = bool(signal.trigger_valid)
-    action_evidence_contract["invalidation_present"] = bool(signal.invalidation_present)
-    action_evidence_contract["setup_quality_ok"] = bool(
-        action_evidence_contract.get("setup_quality_ok")
-        or signal.setup_quality_score >= 0.42
-    )
-    action_evidence_contract["setup_type"] = str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown")
-    execution_contract = dict(action_evidence_contract.get("execution") or {})
-    execution_contract["trigger_valid"] = bool(signal.trigger_valid)
-    action_evidence_contract["execution"] = execution_contract
     signal.factor_focus = focus
     signal.current_evidence_conflict = conflicts
     signal.research_contract_version = research_contract["contract_version"]

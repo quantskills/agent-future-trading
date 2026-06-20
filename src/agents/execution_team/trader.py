@@ -332,6 +332,9 @@ def _final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, 
         "open_action_evidence": bool(contract.get("open_action_evidence")),
         "strong_current_evidence": bool(contract.get("strong_current_evidence")),
         "watch_for_trigger_block": bool(contract.get("watch_for_trigger_block")),
+        "conditional_trigger_authority": bool(contract.get("conditional_trigger_authority")),
+        "requires_intraday_confirmation": bool(contract.get("requires_intraday_confirmation")),
+        "can_execute_without_intraday_trigger": bool(contract.get("can_execute_without_intraday_trigger")),
         "negative_profile": bool(contract.get("negative_profile")),
         "tradeable_state": bool(contract.get("tradeable_state")),
         "weak_conflict_probe": bool(contract.get("weak_conflict_probe")),
@@ -423,6 +426,13 @@ def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
         }
         if reason_codes & hard_watchlist_codes:
             return False
+        conditional_trigger_authority = bool(
+            authority.get("conditional_trigger_authority")
+            and authority.get("requires_intraday_confirmation")
+            and not authority.get("can_execute_without_intraday_trigger")
+        )
+        if conditional_trigger_authority:
+            return True
         return bool(
             authority.get("open_action_evidence")
             or authority.get("strong_current_evidence")
@@ -887,6 +897,28 @@ def _log_phase2_summary(prefix: str, summary: Dict[str, Any]) -> None:
         f"actions=[{_counter_text(summary['actions'])}], "
         f"intraday=[{_counter_text(summary['intraday'])}], "
         f"no_trade=[{_counter_text(summary['no_trade_reasons'])}]"
+    )
+
+
+def _execute_pending_forced_risk_before_strategy(
+    *,
+    execution_engine: FuturesExecutionEngine,
+    config_id: str,
+    trading_date,
+    portfolio: Portfolio,
+    cutoff_datetime: Optional[datetime] = None,
+) -> Portfolio:
+    execution_engine.scan_and_create_intraday_forced_risk_orders(
+        config_id=config_id,
+        trading_date=trading_date,
+        portfolio=portfolio,
+        cutoff_datetime=cutoff_datetime,
+    )
+    return execution_engine.execute_pending_forced_risk_orders(
+        config_id=config_id,
+        trading_date=trading_date,
+        portfolio=portfolio,
+        execution_phase=TradingPhase.PHASE2,
     )
 
 
@@ -1953,6 +1985,13 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
 
         router = Router(APISource.PANDAAI, market_type="china_futures")
         execution_engine = FuturesExecutionEngine(cfg, db)
+        portfolio = _execute_pending_forced_risk_before_strategy(
+            execution_engine=execution_engine,
+            config_id=config_id,
+            trading_date=cfg["trading_date"],
+            portfolio=portfolio,
+            cutoff_datetime=None,
+        )
 
         strategy_recommendations = db.get_futures_recommendations_by_effective_date(
             config_id=config_id,
@@ -2001,6 +2040,13 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
 
         while True:
             loop_iteration += 1
+            portfolio = _execute_pending_forced_risk_before_strategy(
+                execution_engine=execution_engine,
+                config_id=config_id,
+                trading_date=cfg["trading_date"],
+                portfolio=portfolio,
+                cutoff_datetime=datetime.now() if args.loop else None,
+            )
             strategy_recommendations = db.get_futures_recommendations_by_effective_date(
                 config_id=config_id,
                 effective_trade_date=cfg["trading_date"],
@@ -2042,10 +2088,17 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
                 source_type=RecommendationSourceType.STRATEGY,
                 status=RecommendationStatus.PENDING,
             )
-            if not args.loop or not pending_after or finalize_untriggered:
+            pending_forced_risk_after = db.get_futures_recommendations_by_effective_date(
+                config_id=config_id,
+                effective_trade_date=cfg["trading_date"],
+                source_type=RecommendationSourceType.FORCED_RISK,
+                status=RecommendationStatus.PENDING,
+            )
+            if not args.loop or (not pending_after and not pending_forced_risk_after) or finalize_untriggered:
                 break
             logger.info(
                 f"Phase2 paper loop waiting: pending_recommendations={len(pending_after)}, "
+                f"pending_forced_risk={len(pending_forced_risk_after)}, "
                 f"sleep_seconds={loop_interval}"
             )
             time.sleep(max(1, loop_interval))

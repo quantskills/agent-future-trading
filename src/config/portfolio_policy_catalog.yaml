@@ -4,8 +4,8 @@
 
 gatekeeping_policy:
   # 统一门控语义，不是新增一套交易权限。
-  # 旧 block/cap/probe 字段仍保留给运行时代码兼容读取，但业务上必须先被 reason_effects.py
-  # 解释为 hard_block / soft_limit / learning_adjustment / release_signal，再由 PM 最终出口仲裁。
+  # block/cap/probe 只允许作为 reason code 或软风险标签出现，业务上必须先被 reason_effects.py
+  # 解释为 hard_block / soft_limit / learning_adjustment / release_signal，再由 PM 在唯一出口仲裁。
   # 统一出口主线：所有 scorecard、action-value、lifecycle 和 learning 信号只生成 action candidate；
   # 最终交易事实只能来自 final_action_contract。
   mode: pm_final_authority_arbiter
@@ -107,9 +107,9 @@ trade_auditor:
     log_decision_reasons: true
 
 trade_frequency_control:
-  # 通用历史样本保护。block/cap 字段名为旧 runtime 兼容输入；
-  # 业务上先经 reason_effects.py 归类为软风险/学习调整，再由 PM 最终出口仲裁。
-  # 它们不能单独成为真实开仓或永久封杀依据。
+  # 通用历史样本保护。这里产生的是 reason code / soft risk tag，
+  # 业务上先经 reason_effects.py 归类为软风险或学习调整，再由 PM 唯一出口仲裁。
+  # 它们不能单独成为真实开仓依据，也不能单独永久封杀交易。
   enabled: true
   lookback_trades: 20
   min_completed_trades: 6
@@ -248,18 +248,17 @@ portfolio_manager:
       missing_invalidation_cap_multiplier: 0.35
       missing_invalidation_probe_max_ratio: 0.015
     watch_for_trigger_new_entry:
-      # 语义边界：watch_for_trigger 只表示“等待触发/观察候选”，不是交易授权。
-      # 即使 allow_probe=true，也必须经过 final_action_contract authority，不能单独生成真实开仓。
-      # 2026-06-19 起，分析师的“等待/如果/确认后才可交易”会先被归一化为
-      # watch_for_trigger + trigger_valid=false；这里不能把这种 pending 条件当作
-      # 当前 tradeable_candidate，也不能把 watch_for_trigger 放进真实成交路径。
+      # 语义边界：watch_for_trigger 只表示“等待触发/观察候选”，不是即时交易授权。
+      # 干净条件机会必须是 watch_for_trigger + trigger_valid=false + setup_quality_ok
+      # + 明确方向/entry_trigger/invalidation_present；PM 可把它纳入 conditional_monitor_candidates，
+      # 并在同一张 final_action_contract 写入 conditional_trigger_authority。
+      # Trader 只盘中检查该合约的触发条件；未触发不成交，触发后也只能按合约方向/手数成交。
       semantic_role: observation_candidate_only
       audit_name: watch_for_trigger_observation_candidate
       can_create_trade_authority: false
       requires_final_contract_authority: true
-      # 方向观点不能等同于可交易机会；默认只允许极小仓探索，不能开正常仓。
-      # allow_probe=true 只是保留 PM 内部观察/候选语义；真实一手 probe 仍必须有
-      # 当前触发、失效边界、无硬风险/负期望、资金可行和 final_action_contract。
+      # 方向观点不能等同于条件机会；allow_probe=true 只允许 PM 生成条件监控/受控 probe 候选。
+      # 即时 probe 仍必须有当前触发；条件 probe 必须等待 Trader 盘中触发确认。
       enabled: true
       allow_probe: true
       probe_max_ratio: 0.015
@@ -274,7 +273,7 @@ portfolio_manager:
       single_high_quality_probe_min_confirmation_score: 0.45
       # 已被 PM scorecard 判定为 tradeable_candidate 的机会，若市场确认足够强且无硬失败，
       # 可以进入受控最小 probe；纯方向观点仍不能走这条路径。
-      # pending 条件触发不属于这里的 tradeable_candidate。
+      # pending 条件触发保持 watch_for_trigger，只能走 conditional_monitor_candidates。
       scorecard_tradeable_candidate_probe_min_confirmation_score: 0.68
     winning_template_continuation:
       # 盈利模板延续：已有盈利仓位若同向证据仍成立，允许少减仓/继续持有。
@@ -364,7 +363,8 @@ portfolio_manager:
     severe_risk_flag_multiplier: 0.80
     min_quality_multiplier: 0.05
     opportunity_state_multipliers:
-      # PM 融合只读统一 opportunity_state：等待触发不是交易授权，可交易/受控 probe 才进入释放链路。
+      # PM 融合只读统一 opportunity_state：等待触发不是即时交易授权；
+      # 干净等待触发机会只能进入条件监控候选，可交易/受控 probe 才进入即时释放链路。
       tradeable_candidate: 1.10
       probe_candidate: 0.90
       risk_reduction_candidate: 0.80
@@ -405,7 +405,8 @@ portfolio_manager:
       # 正/负 action-value 必须按 open/hold/exit/execution 动作维度使用，不能跨动作裸迁移。
       # PM 只读取 open/hold/exit 对仓位生命周期的偏好；execution lane 由 PM 写入 final_action_contract.execution_profile。
       # 分析师只能读取 signal_calibration 校准证据质量；similar SQL/RAG 和 Counterfactual 只能作弱先验。
-      # 单样本 exact-state 正收益会先成为 positive_candidate_* 动作偏好；
+      # 单样本 exact-state 正收益会先成为明确动作偏好：
+      # positive_candidate_open / positive_candidate_hold / positive_candidate_exit / positive_candidate_execution。
       # 它只能支持更积极确认或 0.8%-1.5% probe 候选，不能直接晋升 real_budget_entry。
       # 样本、置信和当日证据达标后，才可进入 qualified_positive_expectancy 并参与放大。
       enabled: true
