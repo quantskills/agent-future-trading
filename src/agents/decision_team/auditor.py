@@ -18,6 +18,7 @@ from tools.agent_tools.decision.hard_risk_rules import has_hard_block_reason
 from tools.agent_tools.decision.memory_policy_rules import strategy_memory_record as _memory_strategy_record
 from tools.agent_tools.decision.reason_effects import reason_effect_summary
 from tools.agent_tools.decision.soft_risk_rules import fallback_business_quality_score
+from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 
 
 class TradeAuditorInput(BaseModel):
@@ -797,9 +798,15 @@ class TradeAuditor:
         )
 
     def _evaluate_adaptive_policy(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
-        rows = payload.adaptive_policy_state or []
+        rows, safety_trace = filter_adaptive_policy_state_for_pm(payload.adaptive_policy_state or [])
         if not rows:
-            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
+            return {
+                "block": False,
+                "multiplier": 1.0,
+                "reasons": [],
+                "notes": [],
+                "diagnostics": {"adaptive_policy_safety": safety_trace} if safety_trace else {},
+            }
 
         cfg = (payload.full_config.get("learning", {}) or {}).get("adaptive_policy", {}) or {}
         min_confidence = _safe_float(cfg.get("min_policy_confidence"), 0.35)
@@ -847,6 +854,7 @@ class TradeAuditor:
             "reasons": _dedupe(reasons),
             "notes": notes,
             "diagnostics": {
+                "adaptive_policy_safety": safety_trace,
                 "adaptive_policy_applied": applied,
                 "memory_evidence_maturity": {
                     "policy_type_counts": maturity_counts,

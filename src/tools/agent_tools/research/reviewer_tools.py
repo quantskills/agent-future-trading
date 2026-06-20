@@ -7386,6 +7386,7 @@ def _contextual_rule_policy_payload(
     )
     payload["rule_group"] = rule_group
     payload["rule_adjustments"] = {rule_group: rules}
+    payload["rule_validation_status"] = "validated_rule_applied"
     payload["calibration_boundary"] = (
         "This is a context-scoped weak-parameter adjustment. It cannot override the 20% margin cap, "
         "settlement/accounting checks, no-lookahead gates, limit-lock/expiry business rules, or the need for current evidence."

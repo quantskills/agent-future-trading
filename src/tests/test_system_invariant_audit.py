@@ -292,6 +292,13 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
         self.assertTrue(any("action_evidence_contract.opportunity_layer" in error for error in report.errors))
+        self.assertIn("unified_field_semantics", report.metadata.get("failed_categories", []))
+        semantics = report.metadata.get("unified_field_semantics_audit", {})
+        self.assertFalse(semantics.get("ok"), report.to_dict())
+        self.assertTrue(
+            any(error.startswith("unified_field_artifact_forbidden_field:") for error in semantics.get("errors", [])),
+            report.to_dict(),
+        )
 
     def test_system_invariant_audit_fails_pending_trigger_marked_valid(self):
         db_path = self._make_db()
@@ -402,6 +409,179 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             any(error.startswith("setup_quality_ok_used_as_current_trigger:") for error in report.errors),
             report.to_dict(),
         )
+
+    def test_system_invariant_audit_fails_trigger_valid_without_current_confirmation(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()
+            payload = json.loads(row[0])
+            payload["technical"] = {
+                "trade_research_contract": {
+                    "opportunity_state": "tradeable_candidate",
+                    "trigger_valid": True,
+                    "current_trigger_confirmed": False,
+                    "entry_trigger": "breakout setup is worth watching",
+                    "action_evidence_contract": {
+                        "opportunity_state": "tradeable_candidate",
+                        "setup_quality_ok": False,
+                        "trigger_valid": True,
+                        "current_trigger_confirmed": False,
+                        "entry_trigger": "breakout setup is worth watching",
+                    },
+                }
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=? WHERE id='rec1'",
+                (_dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("trigger_valid_without_current_trigger_confirmed:") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertIn("unified_field_semantics", report.metadata.get("failed_categories", []))
+        self.assertIn("pm_opportunity_routing", report.metadata.get("failed_categories", []))
+
+    def test_system_invariant_audit_fails_conditional_monitor_silent_wait(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "wait",
+                    "authority_type": "watchlist_only",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                    "reason_codes": ["pm_watch_for_trigger_probe_cap"],
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                },
+                "active_opportunity_audit": {
+                    "decision": {
+                        "action": "hold",
+                        "lots": 0,
+                        "lands_position": False,
+                        "authority_type": "watchlist_only",
+                        "reason": "pm_watch_for_trigger_probe_cap",
+                    },
+                    "opportunity": {
+                        "conditional_monitor_candidate_count": 1,
+                        "high_quality_present": True,
+                    },
+                    "conditional_monitor_candidates": [
+                        {
+                            "analyst": "technical",
+                            "signal": "Bearish",
+                            "opportunity_state": "watch_for_trigger",
+                            "setup_quality_ok": True,
+                            "trigger_valid": False,
+                            "invalidation_present": True,
+                            "entry_trigger": "wait for post-open break below support",
+                            "conditional_monitor_candidate": True,
+                        }
+                    ],
+                },
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET action='hold', lots=0, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.execute("DELETE FROM futures_transactions")
+            conn.execute("DELETE FROM futures_intraday_decision")
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("conditional_monitor_candidate_silent_wait:") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertIn("pm_opportunity_routing", report.metadata.get("failed_categories", []))
+        self.assertTrue(
+            any(
+                error.startswith("conditional_monitor_candidate_silent_wait:")
+                for error in report.metadata.get("error_categories", {}).get("pm_opportunity_routing", [])
+            ),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_accepts_conditional_monitor_contract(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_probe",
+                    "authority_type": "exploration_probe",
+                    "authority_decision": "allow_exploration_probe",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "conditional_trigger_authority": True,
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "watch_for_trigger_block": False,
+                    "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                },
+                "active_opportunity_audit": {
+                    "decision": {
+                        "action": "open_short",
+                        "lots": 1,
+                        "lands_position": True,
+                        "authority_type": "exploration_probe",
+                        "reason": "conditional_trigger_authority",
+                    },
+                    "opportunity": {
+                        "conditional_monitor_candidate_count": 1,
+                        "high_quality_present": True,
+                    },
+                    "conditional_monitor_candidates": [
+                        {
+                            "analyst": "technical",
+                            "signal": "Bearish",
+                            "opportunity_state": "watch_for_trigger",
+                            "setup_quality_ok": True,
+                            "trigger_valid": False,
+                            "invalidation_present": True,
+                            "entry_trigger": "wait for post-open break below support",
+                            "conditional_monitor_candidate": True,
+                        }
+                    ],
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+                "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(report.ok, report.to_dict())
 
     def test_system_invariant_audit_accepts_observation_only_release_block_diagnostics(self):
         db_path = self._make_db()
@@ -1742,6 +1922,162 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn(
             "action_value_usage_boundary_forbids_execution_changing_trade_intent:SR:long:execution_exit_immediate_setup:execution:2025-03-07:change_lots",
+            report.errors,
+        )
+
+    def test_system_invariant_audit_fails_candidate_adaptive_policy_release(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE adaptive_policy_state (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    setup_type TEXT NOT NULL,
+                    horizon_class TEXT NOT NULL,
+                    market_regime TEXT NOT NULL,
+                    policy_type TEXT NOT NULL,
+                    policy_action TEXT NOT NULL,
+                    multiplier REAL DEFAULT 1,
+                    confidence_score REAL DEFAULT 0,
+                    sample_count INTEGER DEFAULT 0,
+                    reason TEXT,
+                    source_event_id TEXT,
+                    source_trading_date TEXT,
+                    created_at TEXT NOT NULL,
+                    valid_until TEXT,
+                    payload_json TEXT,
+                    active INTEGER DEFAULT 1
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO adaptive_policy_state (
+                    id, config_id, ticker, side, setup_type, horizon_class, market_regime,
+                    policy_type, policy_action, multiplier, confidence_score, sample_count,
+                    reason, source_trading_date, created_at, payload_json, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "pol1",
+                    "cfg",
+                    "RB",
+                    "long",
+                    "trend_breakout_setup",
+                    "short",
+                    "trend",
+                    "alpha_promotion",
+                    "protect",
+                    1.0,
+                    0.9,
+                    9,
+                    "candidate alpha not validated",
+                    "2025-03-03",
+                    datetime.utcnow().isoformat(),
+                    _dumps(
+                        {
+                            "status": "candidate",
+                            "next_round_memory_contract": {
+                                "status": "candidate",
+                                "maturity_state": "candidate",
+                                "position_authority": "analysis_or_watchlist_only",
+                                "max_position_impact": "no_direct_position_impact",
+                            },
+                        }
+                    ),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("adaptive_policy_release_not_validated:") for error in report.errors),
+            report.errors,
+        )
+
+    def test_system_invariant_audit_allows_validated_contextual_calibrate_policy(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE adaptive_policy_state (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    setup_type TEXT NOT NULL,
+                    horizon_class TEXT NOT NULL,
+                    market_regime TEXT NOT NULL,
+                    policy_type TEXT NOT NULL,
+                    policy_action TEXT NOT NULL,
+                    multiplier REAL DEFAULT 1,
+                    confidence_score REAL DEFAULT 0,
+                    sample_count INTEGER DEFAULT 0,
+                    reason TEXT,
+                    source_event_id TEXT,
+                    source_trading_date TEXT,
+                    created_at TEXT NOT NULL,
+                    valid_until TEXT,
+                    payload_json TEXT,
+                    active INTEGER DEFAULT 1
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO adaptive_policy_state (
+                    id, config_id, ticker, side, setup_type, horizon_class, market_regime,
+                    policy_type, policy_action, multiplier, confidence_score, sample_count,
+                    reason, source_trading_date, created_at, payload_json, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "pol-calibrate",
+                    "cfg",
+                    "M",
+                    "long",
+                    "long_trend_breakout_setup_short",
+                    "short",
+                    "choppy",
+                    "contextual_rule_calibration:portfolio_manager",
+                    "calibrate",
+                    1.0,
+                    0.8,
+                    5,
+                    "validated contextual PM calibration",
+                    "2025-03-05",
+                    datetime.utcnow().isoformat(),
+                    _dumps(
+                        {
+                            "rule_validation_status": "validated_rule_applied",
+                            "next_round_memory_contract": {
+                                "status": "validated",
+                                "maturity_state": "validated_policy",
+                                "position_authority": "bounded_contextual_calibration",
+                                "max_position_impact": "no_direct_trade_authority",
+                            },
+                        }
+                    ),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertFalse(
+            any(error.startswith("adaptive_policy_unknown_action:") for error in report.errors),
             report.errors,
         )
 

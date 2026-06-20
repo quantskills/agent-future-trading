@@ -317,6 +317,13 @@ def _is_strategy_recommendation(recommendation: Dict[str, Any]) -> bool:
     return _recommendation_source_type(recommendation) == RecommendationSourceType.STRATEGY.value
 
 
+def _raw_action_lots_allowed_source(recommendation: Dict[str, Any]) -> bool:
+    return _recommendation_source_type(recommendation) in {
+        RecommendationSourceType.ROLLOVER.value,
+        RecommendationSourceType.FORCED_RISK.value,
+    }
+
+
 def _final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -497,7 +504,7 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
         "final_action_contract": final_contract,
         "analyst_action_evidence_contracts": action_contracts,
         "analyst_learning_scopes": learning_scopes,
-        "execution_contract": {
+        "execution_contract_summary": {
             "profile": execution_contract.get("execution_profile"),
             "trigger_source": execution_contract.get("trigger_source"),
             "entry_trigger": execution_contract.get("entry_trigger"),
@@ -1351,6 +1358,50 @@ def _translate_pre_open_recommendation_to_order(
             justification=(
                 f"{ticker} strategy recommendation missing final_action_contract; "
                 "converted to HOLD so Trader cannot translate PM drafts or raw lots."
+            ),
+        )
+        _record_phase2_order_plan(
+            snapshot,
+            current_lots=current_lots,
+            target_lots=current_lots,
+            account_equity=account_equity,
+            current_price=current_price,
+            risk_level=risk_level,
+            cashflow_ratio=cashflow_ratio,
+            current_margin_ratio=current_margin_ratio,
+            max_total_margin_ratio=max_total_margin_ratio,
+            max_single_margin_ratio=max_single_margin_ratio,
+            remaining_margin=remaining_margin,
+            decision=decision,
+            signal_lifecycle=signal_lifecycle,
+        )
+        return decision
+
+    if not _raw_action_lots_allowed_source(recommendation):
+        add_rewrite_reason(snapshot, "unsupported_raw_action_source_type")
+        _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+            "passed": False,
+            "reason": "unsupported_raw_action_source_type",
+            "source_type": _recommendation_source_type(recommendation),
+            "current_lots": int(current_lots),
+            "target_lots_after_validation": int(current_lots),
+            "business_boundary": (
+                "raw recommendation action/lots translation is only allowed for "
+                "rollover or forced_risk operational orders"
+            ),
+        }
+        decision = FuturesDecision(
+            ticker=ticker,
+            action=FuturesAction.HOLD,
+            lots=0,
+            price=current_price,
+            settle_price=current_price,
+            margin_rate=float(contract_info["margin_rate_long"]),
+            contract_multiplier=multiplier,
+            contract_code=contract_code,
+            justification=(
+                f"{ticker} recommendation source_type={_recommendation_source_type(recommendation)} "
+                "cannot use raw action/lots translation; converted to HOLD."
             ),
         )
         _record_phase2_order_plan(

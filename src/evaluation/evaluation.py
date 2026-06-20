@@ -842,7 +842,7 @@ def calculate_futures_transaction_win_rate(
     start_date: str = None, end_date: str = None,
 ) -> Dict:
     """
-    Calculate futures win rate from completed transaction pairs.
+    Calculate futures strategy win rate from completed strategy transaction pairs.
 
     The matching logic uses FIFO lots by ticker, contract, and direction:
     - open_long is matched by close_long
@@ -850,6 +850,10 @@ def calculate_futures_transaction_win_rate(
 
     A matched open/close lot segment is counted as one completed trade. PnL is
     calculated net of the matched open commission and close commission.
+
+    Account equity still includes operational actions, but this strategy
+    win-rate view excludes source_type != strategy and reports those
+    operational transaction counts separately.
     """
     conn = None
     empty_result = {
@@ -863,6 +867,8 @@ def calculate_futures_transaction_win_rate(
         'unmatched_close_lots': 0,
         'inherited_close_lots': 0,
         'rollover_transaction_count': 0,
+        'forced_risk_transaction_count': 0,
+        'operational_transaction_count': 0,
     }
 
     try:
@@ -920,6 +926,8 @@ def calculate_futures_transaction_win_rate(
         unmatched_close_lots = 0
         inherited_close_lots = 0
         rollover_transaction_count = 0
+        forced_risk_transaction_count = 0
+        operational_transaction_count = 0
 
         for row in transactions:
             action = row['action']
@@ -928,8 +936,14 @@ def calculate_futures_transaction_win_rate(
             multiplier = float(row['contract_multiplier'] or 1.0)
             commission = float(row['commission'] or 0.0)
             contract_code = row['contract_code'] or row['ticker']
-            if str(row['source_type'] or '').lower() == 'rollover':
+            source_type = str(row['source_type'] or 'strategy').lower()
+            if source_type == 'rollover':
                 rollover_transaction_count += 1
+            elif source_type == 'forced_risk':
+                forced_risk_transaction_count += 1
+            if source_type != 'strategy':
+                operational_transaction_count += 1
+                continue
 
             if lots <= 0 or execution_price <= 0:
                 logger.warning(
@@ -1018,7 +1032,10 @@ def calculate_futures_transaction_win_rate(
         logger.info(f"  Flat trades: {flat_trades}")
         logger.info(f"  Transaction win rate: {win_rate:.2%}")
         logger.info(f"  Realized transaction PnL: {realized_trade_pnl:+,.2f}")
-        logger.info(f"  Rollover transactions included in account path: {rollover_transaction_count}")
+        logger.info(
+            "  Operational transactions excluded from strategy win rate: "
+            f"rollover={rollover_transaction_count}, forced_risk={forced_risk_transaction_count}"
+        )
 
         return {
             'winning_trades': winning_trades,
@@ -1031,6 +1048,8 @@ def calculate_futures_transaction_win_rate(
             'unmatched_close_lots': unmatched_close_lots,
             'inherited_close_lots': inherited_close_lots,
             'rollover_transaction_count': rollover_transaction_count,
+            'forced_risk_transaction_count': forced_risk_transaction_count,
+            'operational_transaction_count': operational_transaction_count,
         }
 
     except Exception as e:
@@ -1204,7 +1223,7 @@ def calculate_futures_strategy_quality_metrics(
                 tx_params.append(end_date + "T23:59:59")
             tx_query += " ORDER BY trading_date ASC, created_at ASC"
             cursor.execute(tx_query, tx_params)
-            pairs = build_completed_trade_pairs(cursor.fetchall())
+            pairs = build_completed_trade_pairs(cursor.fetchall(), include_rollover=False)
             if pairs:
                 pairs = sorted(pairs, key=lambda row: (row.get("close_date") or "", row.get("open_date") or ""))
                 pnls = [float(row.get("net_pnl") or 0.0) for row in pairs]
@@ -2221,6 +2240,10 @@ def evaluate_config(
             'evaluated_days': daily_win_rate_metrics['evaluated_days'],
             'realized_trade_pnl': win_rate_metrics['realized_trade_pnl'],
             'unmatched_close_lots': win_rate_metrics['unmatched_close_lots'],
+            'inherited_close_lots': win_rate_metrics.get('inherited_close_lots', 0),
+            'rollover_transaction_count': win_rate_metrics.get('rollover_transaction_count', 0),
+            'forced_risk_transaction_count': win_rate_metrics.get('forced_risk_transaction_count', 0),
+            'operational_transaction_count': win_rate_metrics.get('operational_transaction_count', 0),
 
             # Margin call count (default to 0, could be calculated from forced_liquidation_metrics)
             'margin_call_count': forced_liquidation_metrics['forced_liquidation_count'],

@@ -93,7 +93,7 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 
 当前系统使用轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
 
-同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `final_new_entry_trade_authority`、Auditor、Trader 和 20% 保证金硬上限。
+同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `final_action_contract`、Auditor、Trader 和 20% 保证金硬上限。
 
 ## 九、研究结果如何判断有效
 

@@ -19,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 from tools.agent_tools.control.pre_backtest_acceptance import (
     ACCEPTANCE_CHECKS,
     INVARIANT_TO_CHECK,
+    INVARIANT_TO_CHECKS,
     run_pre_backtest_acceptance,
 )
 
@@ -164,7 +165,9 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 "data_time_boundary",
                 "agent_boundaries",
                 "structured_io",
+                "unified_field_semantics",
                 "single_trade_exit",
+                "pm_opportunity_routing",
                 "trader_trigger_parity",
                 "learning_landing",
                 "capital_boundary",
@@ -176,6 +179,33 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         self.assertEqual(INVARIANT_TO_CHECK["real_open_without_current_contract_evidence"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["direction_or_watchlist_probe_opened"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["trade_contract_source_of_truth_failed"], "single_trade_exit")
+
+    def test_acceptance_maps_pm_routing_invariants_to_pm_opportunity_routing(self):
+        self.assertEqual(
+            INVARIANT_TO_CHECK["conditional_monitor_candidate_silent_wait"],
+            "pm_opportunity_routing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["high_quality_opportunity_silent_wait"],
+            "pm_opportunity_routing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"],
+            "pm_opportunity_routing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["setup_quality_ok_used_as_current_trigger"],
+            "pm_opportunity_routing",
+        )
+
+    def test_acceptance_invariant_mapping_reuses_system_audit_categories(self):
+        from tools.agent_tools.control.system_invariants import ERROR_CATEGORY_PREFIXES
+
+        for category, prefixes in ERROR_CATEGORY_PREFIXES.items():
+            for prefix in prefixes:
+                self.assertIn(category, INVARIANT_TO_CHECKS[prefix])
+        self.assertEqual(INVARIANT_TO_CHECK["unified_field_artifact_forbidden_field"], "unified_field_semantics")
+        self.assertEqual(INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"], "pm_opportunity_routing")
 
     def test_acceptance_maps_preference_landing_failure_to_learning_landing(self):
         self.assertEqual(
@@ -223,6 +253,10 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertEqual(report.failed_checks, [])
             self.assertIn("environment_api", report.checks)
             self.assertIn("learning_landing", report.checks)
+            self.assertEqual(
+                report.checks["unified_field_semantics"].metadata["source_of_truth"],
+                "docs/unified_field_semantics.md",
+            )
         finally:
             Path(db_path).unlink(missing_ok=True)
 
@@ -274,6 +308,178 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertIn("data_time_boundary", report.failed_checks)
             self.assertTrue(
                 any(error.startswith("data_time_boundary:incomplete_trading_day_phase:2025-03-10:") for error in report.errors),
+                report.to_dict(),
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_pm_conditional_monitor_silent_wait_before_backtest(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        now = datetime.utcnow().isoformat()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "authority_type": "watchlist_only",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "reason_codes": ["pm_watch_for_trigger_probe_cap"],
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+            },
+            "active_opportunity_audit": {
+                "decision": {
+                    "action": "hold",
+                    "lots": 0,
+                    "lands_position": False,
+                    "authority_type": "watchlist_only",
+                    "reason": "pm_watch_for_trigger_probe_cap",
+                },
+                "opportunity": {
+                    "conditional_monitor_candidate_count": 1,
+                    "high_quality_present": True,
+                },
+                "conditional_monitor_candidates": [
+                    {
+                        "analyst": "technical",
+                        "signal": "Bearish",
+                        "opportunity_state": "watch_for_trigger",
+                        "setup_quality_ok": True,
+                        "trigger_valid": False,
+                        "invalidation_present": True,
+                        "entry_trigger": "wait for post-open break below support",
+                        "conditional_monitor_candidate": True,
+                    }
+                ],
+            },
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, trading_date, action, status, audit_payload, signal_snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-pm-routing", "cfg", "2025-03-10", "hold", "skipped", _dumps(payload), _dumps(payload), now),
+            )
+            conn.executemany(
+                "INSERT INTO trading_day_phase VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("p1", "cfg", "2025-03-10", "phase1", "completed", now, now, ""),
+                    ("p2", "cfg", "2025-03-10", "phase2", "completed", now, now, ""),
+                    ("p3", "cfg", "2025-03-10", "phase3", "completed", now, now, ""),
+                    ("p4", "cfg", "2025-03-10", "phase4", "completed", now, now, ""),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    check_llm_auth=False,
+                )
+            self.assertFalse(report.ok)
+            self.assertIn("pm_opportunity_routing", report.failed_checks)
+            self.assertTrue(
+                any(
+                    error.startswith(
+                        "pm_opportunity_routing:conditional_monitor_candidate_silent_wait:2025-03-10:"
+                    )
+                    for error in report.errors
+                ),
+                report.to_dict(),
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_unified_field_semantic_violation_before_backtest(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        now = datetime.utcnow().isoformat()
+        payload = {
+            "technical": {
+                "trade_research_contract": {
+                    "opportunity_state": "tradeable_candidate",
+                    "trigger_valid": True,
+                    "current_trigger_confirmed": False,
+                    "entry_trigger": "breakout setup is worth watching",
+                    "action_evidence_contract": {
+                        "opportunity_state": "tradeable_candidate",
+                        "setup_quality_ok": False,
+                        "trigger_valid": True,
+                        "current_trigger_confirmed": False,
+                        "entry_trigger": "breakout setup is worth watching",
+                    },
+                }
+            },
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "authority_type": "watchlist_only",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+            },
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, trading_date, action, status, audit_payload, signal_snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-unified-field", "cfg", "2025-03-10", "hold", "skipped", _dumps(payload), _dumps(payload), now),
+            )
+            conn.executemany(
+                "INSERT INTO trading_day_phase VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("p1", "cfg", "2025-03-10", "phase1", "completed", now, now, ""),
+                    ("p2", "cfg", "2025-03-10", "phase2", "completed", now, now, ""),
+                    ("p3", "cfg", "2025-03-10", "phase3", "completed", now, now, ""),
+                    ("p4", "cfg", "2025-03-10", "phase4", "completed", now, now, ""),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    check_llm_auth=False,
+                )
+            self.assertFalse(report.ok)
+            self.assertIn("unified_field_semantics", report.failed_checks)
+            semantics = report.checks["unified_field_semantics"]
+            self.assertFalse(semantics.ok, report.to_dict())
+            self.assertEqual(semantics.metadata["source_of_truth"], "docs/unified_field_semantics.md")
+            self.assertFalse(
+                semantics.metadata["unified_field_semantics_audit"].get("ok"),
+                report.to_dict(),
+            )
+            self.assertTrue(
+                any(
+                    error.startswith(
+                        "unified_field_semantics:trigger_valid_without_current_trigger_confirmed:"
+                    )
+                    for error in report.errors
+                ),
                 report.to_dict(),
             )
         finally:

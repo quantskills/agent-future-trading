@@ -64,7 +64,7 @@ Fundamental 调用 Finoview 本地基本面 feather、PandaAI 衍生字段和基
 
 ### 4. Commodity News Analyst
 
-Commodity News 调用本地 `data/News_data/Future_news/<ticker>.txt` 和新闻事件学习上下文，按当日可见窗口过滤，不读取未来新闻。它记录新闻文件、解析数量、最终使用新闻数、新闻截止规则、事件方向、强度、新鲜度、相关性、影响窗口和可交易性。新闻面可调用 LLM，但输出要区分真实催化、方向性消息和噪声；缺少强催化或价格反应时只进入 `direction_only`、watchlist 或等待触发。若本地新闻真实无可用内容，Commodity News 必须输出 `deterministic_no_news_no_trade` 信号和 metadata；若新闻读取链路异常，则直接报错，不用空返回掩盖。
+Commodity News 调用本地 `data/News_data/Future_news/<ticker>.txt` 和新闻事件学习上下文，按当日可见窗口过滤，不读取未来新闻。它记录新闻文件、解析数量、最终使用新闻数、新闻截止规则、事件方向、强度、新鲜度、相关性、影响窗口和可交易性。新闻面可调用 LLM，但输出要区分真实催化、方向性消息和噪声；缺少强催化或价格反应时只进入 `direction_context`、`opportunity_state=no_opportunity/watch_for_trigger` 或等待触发。若本地新闻真实无可用内容，Commodity News 必须输出 `deterministic_no_news_no_trade` 信号和 metadata；若新闻读取链路异常，则直接报错，不用空返回掩盖。
 
 ### 5. Portfolio Manager
 

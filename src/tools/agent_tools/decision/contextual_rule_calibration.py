@@ -10,6 +10,8 @@ thresholds by ticker, side, horizon, signal template, and market regime.
 from copy import deepcopy
 from typing import Any, Iterable, Mapping
 
+from tools.agent_tools.research.adaptive_policy_safety import adaptive_policy_runtime_decision
+
 
 POLICY_TYPE = "contextual_rule_calibration"
 
@@ -92,6 +94,9 @@ def select_contextual_rule_calibrations(
     selected: list[dict[str, Any]] = []
     for row in rows or []:
         if not isinstance(row, Mapping):
+            continue
+        runtime_decision = adaptive_policy_runtime_decision(row)
+        if not bool(runtime_decision.get("allowed")):
             continue
         if not str(row.get("policy_type") or "").startswith(POLICY_TYPE):
             continue

@@ -146,29 +146,40 @@ def _opportunity_state(signal: Any) -> str:
 
 
 def _signal_bool(signal: Any, attr: str, contract_key: str | None = None) -> bool:
+    key = contract_key or attr
+    contract_value = _contract_value(signal, key, None)
+    if contract_value is not None:
+        return bool(contract_value)
     if hasattr(signal, attr):
         value = getattr(signal, attr)
         if value is not None:
             return bool(value)
-    return bool(_contract_value(signal, contract_key or attr, False))
+    return False
 
 
 def _signal_text(signal: Any, attr: str, contract_key: str | None = None) -> str:
-    value = getattr(signal, attr, None)
+    value = _contract_value(signal, contract_key or attr, "")
     if value:
         return str(value)
-    value = _contract_value(signal, contract_key or attr, "")
+    value = getattr(signal, attr, None)
     return str(value or "")
 
 
 def _has_invalidation(signal: Any) -> bool:
+    contract_present = _contract_value(signal, "invalidation_present", None)
+    if contract_present is not None:
+        return bool(contract_present)
+    contract_condition = _contract_value(signal, "invalidation_condition", "")
+    if contract_condition:
+        text = str(contract_condition or "").strip().lower()
+        if text and not (text.endswith("_trigger") or text.endswith("_anchor")):
+            return True
     invalidation_level = getattr(signal, "invalidation_level", None)
     if invalidation_level is not None:
         return True
     fields = [
-        getattr(signal, "would_change_view_if", ""),
         getattr(signal, "invalidation_condition", ""),
-        _contract_value(signal, "invalidation_condition", ""),
+        getattr(signal, "would_change_view_if", ""),
     ]
     text = " ".join(str(item or "") for item in fields).strip().lower()
     if not text:

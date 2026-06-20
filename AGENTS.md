@@ -268,6 +268,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invari
 - agent_boundaries；
 - structured_io；
 - single_trade_exit；
+- pm_opportunity_routing；
 - trader_trigger_parity；
 - learning_landing；
 - capital_boundary；

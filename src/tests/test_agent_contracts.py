@@ -748,6 +748,40 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn("post-open break", row["entry_trigger"])
         self.assertEqual(row["source_analysts"], ["technical"])
 
+    def test_scorecard_prefers_action_evidence_contract_text_over_raw_signal_text(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            opportunity_state="watch_for_trigger",
+            setup_quality_score=0.67,
+            business_quality_score=0.64,
+            entry_trigger="raw stale trigger text",
+            would_change_view_if="raw stale invalidation",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "canonical post-open breakdown confirmation",
+                    "invalidation_condition": "canonical invalid if price reclaims range high",
+                }
+            },
+        )
+
+        card = build_opportunity_scorecard(
+            ticker="HC",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.52},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+
+        row = card["short"]
+        self.assertEqual(row["entry_trigger"], "canonical post-open breakdown confirmation")
+        self.assertTrue(row["invalidation_present"])
+
     def test_single_complete_fundamental_setup_with_strong_market_confirmation_is_tradeable(self):
         """Regression for PM over-blocking a complete setup as watch_for_trigger."""
         technical = AnalystSignal(

@@ -12,8 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from database.sqlite_setup import _ensure_reviewer_learning_schema
 from tools.agent_tools.control.unified_field_audit import (
-    FORBIDDEN_RUNTIME_FIELD_TOKENS,
     iter_runtime_field_files,
+    scan_runtime_field_usage,
 )
 
 
@@ -23,12 +23,7 @@ def _iter_runtime_files():
 
 class UnifiedFieldMigrationTests(unittest.TestCase):
     def test_forbidden_runtime_field_tokens_are_absent(self):
-        offenders: list[str] = []
-        for path, rel in _iter_runtime_files():
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            for token in sorted(FORBIDDEN_RUNTIME_FIELD_TOKENS):
-                if token in text:
-                    offenders.append(f"{rel}:{token}")
+        offenders, _checked_files = scan_runtime_field_usage(PROJECT_ROOT)
         self.assertEqual([], offenders)
 
     def test_reviewer_learning_schema_drops_legacy_field_columns(self):

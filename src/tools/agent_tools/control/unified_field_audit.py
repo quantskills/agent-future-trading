@@ -8,8 +8,11 @@ or learning. They are named here so pre-backtest and post-backtest audits can
 fail fast if any old semantic field leaks back into production paths.
 """
 
+import ast
 from pathlib import Path
 from typing import Any, Iterable, List, Sequence, Tuple
+
+import yaml
 
 
 FORBIDDEN_RUNTIME_FIELD_TOKENS = {
@@ -101,17 +104,88 @@ def scan_runtime_field_usage(
     *,
     tokens: Iterable[str] = FORBIDDEN_RUNTIME_FIELD_TOKENS,
 ) -> tuple[List[str], int]:
-    """Return deprecated field tokens found in production runtime files."""
+    """Return deprecated field keys found in production runtime files.
+
+    This scans structured field positions only: Python dict keys, subscript
+    string keys, `.get("key")`, class annotations, and YAML mapping keys.
+    Comments, reason text, log text, and explanatory prose are intentionally
+    ignored; they cannot create a machine-readable semantic path.
+    """
     offenders: List[str] = []
     checked_files = 0
-    sorted_tokens = sorted(set(tokens))
+    token_set = set(tokens)
     for path, rel in iter_runtime_field_files(src_root):
         checked_files += 1
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for token in sorted_tokens:
-            if token in text:
-                offenders.append(f"{rel}:{token}")
+        keys = _structured_field_keys(path)
+        for key in sorted(keys):
+            if any(_field_key_matches_token(key, token) for token in token_set):
+                offenders.append(f"{rel}:{key}")
     return offenders, checked_files
+
+
+def _structured_field_keys(path: Path) -> set[str]:
+    if path.suffix.lower() == ".py":
+        return _python_field_keys(path)
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        return _yaml_field_keys(path)
+    return set()
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _python_field_keys(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key in node.keys:
+                value = _literal_string(key) if key is not None else None
+                if value:
+                    keys.add(value)
+        elif isinstance(node, ast.Subscript):
+            value = _literal_string(node.slice)
+            if value:
+                keys.add(value)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {"get", "setdefault", "pop"}:
+                if node.args:
+                    value = _literal_string(node.args[0])
+                    if value:
+                        keys.add(value)
+        elif isinstance(node, (ast.AnnAssign, ast.Assign)):
+            targets = [node.target] if isinstance(node, ast.AnnAssign) else list(node.targets)
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    keys.add(target.id)
+    return keys
+
+
+def _yaml_field_keys(path: Path) -> set[str]:
+    try:
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return set()
+    keys: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                keys.add(str(key))
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(parsed)
+    return keys
 
 
 def _field_key_matches_token(field_key: str, token: str) -> bool:

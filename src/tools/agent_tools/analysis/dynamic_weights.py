@@ -11,6 +11,7 @@ commodity-news analysts based on:
 from typing import Any, Dict, Optional
 import re
 
+from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 from util.logger import logger
 
 
@@ -519,6 +520,12 @@ def calibrate_weights_by_signal_history(
         except Exception as exc:
             logger.warning(f"Reviewer adaptive-policy calibration unavailable for {ticker}: {exc}")
             policy_rows = []
+        policy_rows, policy_safety = filter_adaptive_policy_state_for_pm(policy_rows)
+        if policy_safety.get("blocked_count"):
+            logger.info(
+                f"Reviewer adaptive-policy calibration ignored {policy_safety['blocked_count']} unsafe "
+                f"adaptive row(s) for {ticker}: {policy_safety.get('blocked_examples')}"
+            )
 
         for row in policy_rows:
             owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))

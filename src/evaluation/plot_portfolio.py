@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from database.sqlite_setup import DB_PATH
 from evaluation.evaluation import (
     calculate_annualized_return,
+    calculate_futures_transaction_win_rate,
     calculate_returns,
     calculate_sharpe_ratio,
     calculate_volatility,
@@ -288,65 +289,14 @@ class PortfolioCurvePlotter:
         drawdown = (net_value - cumulative_max) / cumulative_max
         max_drawdown = drawdown.min() * 100
 
-        # Calculate trade win rate from transaction pairs
+        # Calculate strategy-only trade win rate from completed transaction pairs.
+        # Account net value still includes operational actions, but strategy
+        # win-rate must exclude rollover/forced_risk by source_type.
         config_id = self.get_config_id()
-        conn = self.get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(futures_transactions)")
-        tx_columns = {row[1] for row in cursor.fetchall()}
-        source_expr = "source_type" if "source_type" in tx_columns else "'strategy' AS source_type"
-        cursor.execute(
-            f'''
-            SELECT ticker, action, lots, execution_price, price, contract_multiplier, commission, {source_expr}
-            FROM futures_transactions
-            WHERE config_id = ? AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
-            ORDER BY trading_date ASC, created_at ASC
-            ''',
-            (config_id,),
-        )
-        transactions = cursor.fetchall()
-        open_positions = {}
-        winning_trades = 0
-        losing_trades = 0
-        total_trades = 0
-        for tx in transactions:
-            action = tx['action']
-            lots = int(tx['lots'] or 0)
-            if lots == 0:
-                continue
-            ticker = tx['ticker'] if 'ticker' in tx.keys() else ''
-            key = (ticker, 'long' if 'long' in action else 'short')
-            if action in ('open_long', 'open_short'):
-                if key not in open_positions:
-                    open_positions[key] = []
-                open_positions[key].append({
-                    'lots': lots,
-                    'price': float(tx['execution_price'] or tx['price'] or 0),
-                    'multiplier': float(tx['contract_multiplier'] or 1),
-                    'commission': float(tx['commission'] or 0) / lots,
-                })
-            elif action in ('close_long', 'close_short') and key in open_positions:
-                close_price = float(tx['execution_price'] or tx['price'] or 0)
-                multiplier = float(tx['contract_multiplier'] or 1)
-                close_comm = float(tx['commission'] or 0) / lots
-                remaining = lots
-                while remaining > 0 and open_positions[key]:
-                    entry = open_positions[key][0]
-                    matched = min(remaining, entry['lots'])
-                    direction = 1 if 'long' in action else -1
-                    pnl = direction * (close_price - entry['price']) * multiplier * matched
-                    comm = (entry['commission'] + close_comm) * matched
-                    net = pnl - comm
-                    total_trades += 1
-                    if net > 0:
-                        winning_trades += 1
-                    elif net < 0:
-                        losing_trades += 1
-                    entry['lots'] -= matched
-                    remaining -= matched
-                    if entry['lots'] <= 0:
-                        open_positions[key].pop(0)
-        trade_win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        win_metrics = calculate_futures_transaction_win_rate(config_id, self.db_path)
+        winning_trades = int(win_metrics.get("winning_trades") or 0)
+        total_trades = int(win_metrics.get("total_trades") or 0)
+        trade_win_rate = float(win_metrics.get("win_rate") or 0.0) * 100
 
         # Match evaluate_config.py: headline risk metrics use account-equity daily returns.
         account_equity_curve = [float(initial_capital)] + [float(value) for value in account_equity]

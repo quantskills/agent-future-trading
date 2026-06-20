@@ -8,7 +8,7 @@
 
 AgentQuant 的多智能体机制服务一条主业务链：分析师给证据，PM 生成唯一策略合约，Auditor 审这张合约，Trader 只执行审过的合约或独立运营风控单，Accountant 按事实结算，Reviewer 做确定性复盘验收，Researcher 只在验收后写未来学习，Protocol Governor 做旁路协议检查。
 
-系统最终策略交易事实只认 `final_action_contract`。`pre_open_plan` 只能是 PM 内部草稿和日志，不是 Trader、Researcher、evaluation 或 audit 的交易事实入口。`source_type=strategy` 走策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，独立执行、独立核算，不进入策略 alpha 学习。
+系统最终策略交易事实只认 `final_action_contract`。PM 内部草稿只能保留为本地推演和日志上下文，不是 Trader、Researcher、evaluation 或 audit 的交易事实入口。`source_type=strategy` 走策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，独立执行、独立核算，不进入策略 alpha 学习。
 
 所有学习结果只能影响未来交易日。分析师只用学习校准证据质量；PM 读取 open/hold/exit 的动作偏好，并把 execution 偏好写入最终合约；Trader 不直接读取研究 action-value；Accountant 不被学习改账；Reviewer 不下单；Researcher 不影响当天交易。
 
@@ -19,7 +19,7 @@ AgentQuant 的多智能体机制服务一条主业务链：分析师给证据，
 | `technical` | PandaAI 盘前行情、技术指标、技术参数校准、历史技术学习上下文 | `AnalystSignal`、`action_evidence_contract`、`trade_research_contract`、技术数据摘要 | 是 | 只给技术证据、触发、失效边界和机会状态；不输出手数、保证金或交易命令 |
 | `fundamental` | Finoview 本地 feather、PandaAI 衍生因子、基本面数据质量、历史基本面学习上下文 | `AnalystSignal`、基本面驱动、数据新鲜度、触发/失效边界、研究契约 | 是 | 只给基本面证据；中长期观点必须有短线触发与失效边界才可进入交易审查 |
 | `commodity_news` | 本地新闻 txt、事件上下文、新闻影响窗口、历史新闻学习上下文 | `AnalystSignal`、事件类型、催化质量、影响窗口、研究契约 | 是 | 只给新闻催化证据；普通背景新闻不能直接生成开仓 |
-| `portfolio_manager` | 三位分析师证据、账户/持仓/资金、market confirmation、action-value、memory quality、Auditor 结果 | `FuturesRecommendation`、唯一 `final_action_contract`、`final_new_entry_trade_authority`、PM trace | 是 | 唯一生成策略交易意图和目标手数；不能跳过 Auditor、Trader、资金和字段审计 |
+| `portfolio_manager` | 三位分析师证据、账户/持仓/资金、market confirmation、action-value、memory quality、Auditor 结果 | `FuturesRecommendation`、唯一 `final_action_contract`、PM trace | 是 | 唯一生成策略交易意图和目标手数；不能跳过 Auditor、Trader、资金和字段审计 |
 | `auditor` | `final_action_contract`、风险状态、合约状态、数据质量、硬风险配置 | `audit_verdict`、hard/soft risk reasons、审计 payload | 否 | 只审 PM 合约，不新造方向、手数或第二张合约 |
 | `trader` | 审过的 `final_action_contract`、`audit_verdict`、盘中 PandaAI 行情、账户保证金状态、rollover/forced_risk 运营单 | 成交/未成交记录、执行审计、`execution_learning_trace`、forced-risk close order | 否 | 只执行策略合约和运营风控单；不能自己创造策略方向、手数或保证金目标 |
 | `accountant` | 成交、持仓、结算价、手续费、滑点、合约乘数、保证金率 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | 只按事实结算，不接受 LLM 或学习文本改账 |

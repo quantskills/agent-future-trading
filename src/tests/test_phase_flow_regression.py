@@ -57,6 +57,7 @@ from agents.decision_team.portfolio_manager import (
     _build_release_block_diagnostics,
     _validate_required_analyst_signals,
     _pm_new_entry_semantic_block_reason,
+    _current_open_evidence_snapshot,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
     portfolio_agent_futures,
@@ -89,6 +90,8 @@ from tools.agent_tools.research.reviewer_tools import (
     _loss_failure_family,
     _validate_recommendation_execution_audit,
 )
+from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.agent_tools.decision.capital_allocator import adaptive_policy_record
 from util.futures_audit import (
     build_audit_payload,
     calculate_margin_audit,
@@ -1968,6 +1971,42 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertGreater(ratio, 0.0)
         self.assertEqual(row["final_state"], "tradeable_candidate")
 
+    def test_scorecard_watch_for_trigger_seed_is_conditional_monitor_candidate(self):
+        side, ratio, row = _scorecard_probe_seed(
+            opportunity_scorecard={
+                "short": {
+                    "final_state": "watch_for_trigger",
+                    "supporting_signal_count": 2,
+                    "score": 0.56,
+                    "max_setup_quality": 0.68,
+                    "max_business_quality": 0.64,
+                    "market_confirmation_score": 0.48,
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support",
+                    "gating_failures": [],
+                }
+            },
+            control={
+                "watch_for_trigger_new_entry": {
+                    "allow_probe": True,
+                    "probe_max_ratio": 0.01,
+                    "probe_floor_ratio": 0.005,
+                    "scorecard_probe_min_supporting_signals": 2,
+                    "scorecard_probe_min_score": 0.35,
+                    "scorecard_probe_block_on_critical_data_gap": True,
+                }
+            },
+        )
+
+        self.assertEqual(side, "short")
+        self.assertLess(ratio, 0.0)
+        self.assertEqual(row["final_state"], "watch_for_trigger")
+        self.assertTrue(row["setup_quality_ok"])
+        self.assertFalse(row["trigger_valid"])
+
     def test_scorecard_confirmed_tradeable_candidate_with_technical_opposition_does_not_seed_probe(self):
         side, ratio, _row = _scorecard_probe_seed(
             opportunity_scorecard={
@@ -2925,6 +2964,116 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             }
         }
 
+    def test_candidate_adaptive_policy_cannot_release_trade_authority(self):
+        rows, trace = filter_adaptive_policy_state_for_pm([
+            {
+                "ticker": "RB",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "alpha_promotion",
+                "policy_action": "protect",
+                "confidence_score": 0.90,
+                "sample_count": 9,
+                "payload": {
+                    "status": "candidate",
+                    "next_round_memory_contract": {
+                        "status": "candidate",
+                        "maturity_state": "candidate",
+                        "position_authority": "analysis_or_watchlist_only",
+                        "max_position_impact": "no_direct_position_impact",
+                    },
+                },
+            }
+        ])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(trace["blocked_count"], 1)
+        self.assertEqual(trace["blocked_examples"][0]["reason"], "memory_contract_forbids_position_impact")
+
+    def test_fast_candidate_alpha_remains_probe_only(self):
+        rows, trace = filter_adaptive_policy_state_for_pm([
+            {
+                "ticker": "RB",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "fast_candidate_alpha",
+                "policy_action": "probe",
+                "confidence_score": 0.80,
+                "sample_count": 4,
+                "payload": {
+                    "next_round_memory_contract": {
+                        "status": "candidate",
+                        "maturity_state": "fast_candidate_alpha",
+                        "position_authority": "probe_or_small_setup_only_after_current_confirmation",
+                        "max_position_impact": "same_scope_probe_or_small_trade_only",
+                    },
+                },
+            }
+        ])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["adaptive_policy_runtime_decision"]["decision"], "candidate_probe_only")
+        self.assertEqual(trace["allowed_count"], 1)
+
+    def test_capital_allocator_filters_unvalidated_adaptive_release_policy(self):
+        row = adaptive_policy_record(
+            [
+                {
+                    "ticker": "RB",
+                    "side": "long",
+                    "setup_type": "trend_breakout_setup",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "policy_type": "alpha_promotion",
+                    "policy_action": "allow",
+                    "confidence_score": 0.90,
+                    "sample_count": 6,
+                    "payload": {
+                        "status": "candidate",
+                        "next_round_memory_contract": {
+                            "status": "candidate",
+                            "position_authority": "probe_or_small_setup_only_after_current_confirmation",
+                        },
+                    },
+                }
+            ],
+            {"allow"},
+            policy_types={"alpha_promotion"},
+        )
+
+        self.assertEqual(row, {})
+
+    def test_adaptive_policy_safety_tolerates_dirty_sample_count(self):
+        rows, trace = filter_adaptive_policy_state_for_pm([
+            {
+                "ticker": "RB",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "fast_candidate_alpha",
+                "policy_action": "probe",
+                "confidence_score": 0.75,
+                "sample_count": "not-a-number",
+                "payload": {
+                    "next_round_memory_contract": {
+                        "status": "candidate",
+                        "maturity_state": "fast_candidate_alpha",
+                        "position_authority": "probe_or_small_setup_only_after_current_confirmation",
+                        "max_position_impact": "same_scope_probe_or_small_trade_only",
+                    },
+                },
+            }
+        ])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["adaptive_policy_runtime_decision"]["sample_count"], 0)
+        self.assertEqual(trace["allowed_count"], 1)
+
     def test_pm_no_new_entry_phrase_blocks_scorecard_probe_semantics(self):
         reason = _pm_new_entry_semantic_block_reason(
             "New entry is not warranted under current technical confirmation; sizing prior to 0."
@@ -3015,6 +3164,63 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["execution_profile"], "vwap_confirmed")
         self.assertEqual(contract["trigger_source"], "execution_action_value_vwap")
         self.assertTrue(contract["single_source_of_trade_truth"])
+
+    def test_final_action_contract_separates_conditional_monitor_from_scorecard_probe_seed(self):
+        contract = _build_final_action_contract(
+            ticker="HC",
+            current_lots=0,
+            target_lots=-1,
+            position_ratio=-0.01,
+            margin_required=12000.0,
+            account_equity=5000000.0,
+            lots_to_trade=1,
+            lots_to_trade_reason="conditional_monitor",
+            recommendation_intent={"action": "open_short", "lots": 1, "action_type": "open"},
+            final_entry_authority={
+                "authority_type": "exploration_probe",
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "max_allowed_margin_ratio": 0.02,
+                "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+            },
+            control_reasons=["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+            control_diagnostics={
+                "conditional_monitor_probe_seed": {
+                    "side": "short",
+                    "ratio": -0.01,
+                    "status": "candidate_routed_to_conditional_monitor",
+                    "requires_intraday_confirmation": True,
+                    "scorecard": {
+                        "final_state": "watch_for_trigger",
+                        "setup_quality_ok": True,
+                        "trigger_valid": False,
+                        "current_trigger_confirmed": False,
+                        "invalidation_present": True,
+                        "entry_trigger": "wait for post-open break below support",
+                    },
+                }
+            },
+            opportunity_scorecard={
+                "preferred_side": "short",
+                "short": {
+                    "final_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support",
+                },
+            },
+            market_confirmation={"confirmation_score": 0.52, "conflicts": []},
+            alpha_setup_action_values=[],
+        )
+
+        self.assertEqual(contract["final_action"], "open_probe")
+        self.assertEqual(contract["action_candidates"][0]["source"], "conditional_monitor")
+        self.assertEqual(contract["action_candidates"][0]["action"], "conditional_probe")
+        self.assertTrue(contract["action_candidates"][0]["requires_intraday_confirmation"])
+        self.assertNotIn("opportunity_scorecard_probe_seed", contract["reason_codes"])
 
     def test_negative_action_value_blocks_repeat_new_entry_without_new_evidence(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -5670,6 +5876,66 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(detail["watch_for_trigger_semantic_block"])
         self.assertFalse(detail["open_action_evidence"])
         self.assertIn("conditional_trigger_authority", detail["reason_codes"])
+
+    def test_conditional_watch_for_trigger_real_pm_evidence_snapshot_gets_authority(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            opportunity_state="watch_for_trigger",
+            entry_trigger="wait for post-open break below support with volume confirmation",
+            invalidation_level=3520.0,
+            trigger_valid=False,
+            evidence_role="entry_timing",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support with volume confirmation",
+                }
+            },
+        )
+        alpha_ev = _current_open_evidence_snapshot(
+            side="short",
+            analyst_signals=[signal],
+            opportunity_scorecard={
+                "short": {
+                    "final_state": "watch_for_trigger",
+                    "score": 0.56,
+                    "supporting_signal_count": 1,
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support with volume confirmation",
+                    "gating_failures": [],
+                }
+            },
+            market_confirmation={"confirmation_score": 0.50},
+            ev_cfg={"real_trade_min_analyst_confidence": 0.45},
+        )
+
+        self.assertFalse(alpha_ev["has_tradeable_support"])
+        self.assertTrue(alpha_ev["has_monitorable_setup"])
+        self.assertFalse(alpha_ev["trade_authority"]["watch_for_trigger_without_setup"])
+
+        allowed, detail = _final_contract_authority(
+            control_reasons=[
+                "alpha_setup_ev_fusion",
+                "opportunity_scorecard_probe_seed",
+                "pm_watch_for_trigger_probe_cap",
+            ],
+            control_diagnostics={"alpha_setup_ev_fusion": alpha_ev},
+        )
+
+        self.assertTrue(allowed)
+        self.assertTrue(detail["conditional_trigger_authority"])
+        self.assertTrue(detail["requires_intraday_confirmation"])
+        self.assertFalse(detail["can_execute_without_intraday_trigger"])
+        self.assertFalse(detail["watch_for_trigger_semantic_block"])
 
     def test_final_new_entry_gate_blocks_watch_for_trigger_without_setup_quality(self):
         allowed, detail = _final_contract_authority(
@@ -8973,6 +9239,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     "market_regime": "trend",
                     "policy_type": "contextual_rule_calibration:intraday_confirmation",
                     "policy_action": "calibrate",
+                    "rule_validation_status": "validated_rule_applied",
                     "confidence_score": 0.55,
                     "sample_count": 2,
                     "payload": {
@@ -9002,6 +9269,80 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             result.features["contextual_rule_calibration"]["applied"][0]["id"],
             "cal-intraday",
         )
+
+    def test_unvalidated_contextual_calibration_does_not_change_intraday_rules(self):
+        signal_bars = [
+            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.70, "volume": 10},
+        ]
+        execution_bars = [
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 100.75, "high": 101, "low": 100, "close": 100.75, "volume": 10},
+        ]
+
+        result = select_intraday_execution(
+            signal_bars=signal_bars,
+            execution_bars=execution_bars,
+            action="open_long",
+            config={
+                "opening_range_minutes": 2,
+                "min_execution_volume": 1,
+                "max_chase_ratio": 0.02,
+                "allow_confirmed_memory_vwap_fallback": True,
+                "confirmed_memory_min_market_confirmation_score": 0.70,
+                "confirmed_memory_min_confirmations": 3,
+                "confirmed_memory_max_opening_range_miss": 0.002,
+                "confirmed_memory_min_sample_count": 5,
+            },
+            market_confirmation={
+                "confirmation_score": 0.68,
+                "confirmations": ["basis", "position_rank", "net_cap"],
+            },
+            strategy_memory={
+                "side_memory": {
+                    "memory_state": "protected",
+                    "sample_count": 6,
+                    "win_rate": 0.75,
+                    "net_pnl": 9000,
+                }
+            },
+            adaptive_policy_state=[
+                {
+                    "id": "cal-intraday-candidate",
+                    "ticker": "BU",
+                    "side": "long",
+                    "setup_type": "*",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "policy_type": "contextual_rule_calibration:intraday_confirmation",
+                    "policy_action": "calibrate",
+                    "rule_validation_status": "candidate",
+                    "confidence_score": 0.55,
+                    "sample_count": 2,
+                    "payload": {
+                        "rule_adjustments": {
+                            "intraday_confirmation": {
+                                "confirmed_memory_max_opening_range_miss": 0.0035,
+                                "confirmed_memory_min_market_confirmation_score": 0.65,
+                            }
+                        }
+                    },
+                }
+            ],
+            decision_context={
+                "ticker": "BU",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "execution_contract": {
+                    "execution_profile": "breakout",
+                    "allow_confirmed_memory_vwap_fallback": True,
+                },
+            },
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.reason, "intraday_trigger_not_met")
+        self.assertEqual(result.features["contextual_rule_calibration"]["applied"], [])
 
 
 class MarginAuditRegressionTest(unittest.TestCase):
@@ -10457,6 +10798,57 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         validation = snapshot["phase2_execution"]["pm_plan_validation"]
         self.assertFalse(validation["passed"])
         self.assertEqual(validation["reason"], "unsupported_final_action_contract_type")
+        self.assertEqual(validation["target_lots_after_validation"], 0)
+
+    def test_unknown_source_type_cannot_execute_raw_action_lots(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5000000.0,
+            margin_used=0.0,
+            positions={},
+        )
+        recommendation = {
+            "underlying_code": "RB",
+            "contract_code": "rb2505",
+            "source_type": "legacy_manual",
+            "action": RecommendationAction.OPEN_SHORT.value,
+            "lots": 8,
+            "signal_snapshot": {
+                "phase2_execution": {
+                    "raw_action_fixture": "must_not_execute",
+                }
+            },
+        }
+        config = {
+            "cashflow": 5000000,
+            "max_total_margin_ratio": 0.20,
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+        snapshot = dict(recommendation["signal_snapshot"])
+
+        decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=3500.0),
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(decision.action, FuturesAction.HOLD)
+        self.assertEqual(decision.lots, 0)
+        self.assertIn(
+            "unsupported_raw_action_source_type",
+            snapshot.get("execution_translation", {}).get("rewrite_reasons", []),
+        )
+        validation = snapshot["phase2_execution"]["pm_plan_validation"]
+        self.assertFalse(validation["passed"])
+        self.assertEqual(validation["reason"], "unsupported_raw_action_source_type")
+        self.assertEqual(validation["source_type"], "legacy_manual")
         self.assertEqual(validation["target_lots_after_validation"], 0)
 
     def test_strategy_new_entry_uses_final_contract_authority_fields(self):

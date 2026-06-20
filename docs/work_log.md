@@ -420,3 +420,61 @@
 （10）对齐协议管理员能力卡到运营风控链路。
 修改了什么：`src/tools/agent_tools/control/agent_cards.py`、`src/tests/test_protocol_governor.py`。
 为什么改：盘中 `forced_risk` 生成入口接入 Trader 后，协议能力卡需要明确 Trader 可读取 `portfolio_margin_state` 并输出 `forced_risk_operational_recommendation`，但仍不能创建策略交易权限、不能修改策略手数/保证金；避免后续把运营风控单误解成策略 `final_action_contract` 旁路。
+
+（11）收住学习适应层的候选偏好晋升边界。
+修改了什么：`src/tools/agent_tools/research/adaptive_policy_safety.py`、`src/agents/decision_team/portfolio_manager.py`、`src/agents/decision_team/auditor.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：把 Researcher 生成的候选偏好与 PM/Auditor 可实际使用的自适应策略分开；候选/观察类学习只能作为先验或受控 probe 线索，不能直接释放 `protect/allow`、放大仓位或绕过 `final_action_contract`，并让系统审计对未验证 release 型自适应偏好 hard fail。
+
+（12）收束 PM 条件机会释放的重复路径。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：`watch_for_trigger` 条件机会不能再混用 `opportunity_scorecard_probe_seed`；等待触发的干净机会只进入 `conditional_monitor_probe_seed` 和 `pm_watch_for_trigger_probe_cap`，再由同一张 `final_action_contract` 的 `conditional_trigger_authority` 决定是否交给 Trader 盘中监控。
+
+（13）锁死 Trader raw action/lots 旁路并修复执行学习上下文。
+修改了什么：`src/agents/execution_team/trader.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：策略或未知 `source_type` 不能用 recommendation 顶层 `action/lots` 绕过 `final_action_contract`；raw action/lots 只允许 `rollover/forced_risk` 运营单，同时修复执行学习上下文里 `execution_contract` 被精简字段覆盖的问题。
+
+（14）把自适应学习安全过滤接入分析师权重和资金读取器。
+修改了什么：`src/tools/agent_tools/analysis/dynamic_weights.py`、`src/tools/agent_tools/decision/capital_allocator.py`、`src/tools/agent_tools/research/adaptive_policy_safety.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：Researcher 候选偏好即使不直接开仓，也不能绕到分析师权重或资金配置侧间接改变 PM 输入；所有自适应策略读取都必须先通过同一套候选/验证/风险降低边界。
+
+（15）让分析师融合和统一字段审计只认结构化语义。
+修改了什么：`src/tools/agent_tools/analysis/signal_fusion.py`、`src/tools/agent_tools/control/unified_field_audit.py`、`src/tests/test_unified_field_migration.py`。
+为什么改：融合层读取 `trigger_valid/setup_quality_ok` 等字段时必须优先使用 `action_evidence_contract`，不能让原始信号字段压过 canonical 合约；统一字段审计改为扫描 Python/YAML 的结构化 key，避免注释、reason 文本误杀，同时继续阻断旧字段重新驱动生产路径。
+
+（16）收到底 PM 条件监控、上下文校准 safety 与文本 canonical 优先。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/decision/contextual_rule_calibration.py`、`src/tools/agent_tools/research/adaptive_policy_safety.py`、`src/tools/agent_tools/research/reviewer_tools.py`、`src/tools/agent_tools/analysis/signal_fusion.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_reviewer_learning.py`、`src/tests/test_agent_contracts.py`、`docs/unified_field_semantics.md`。
+为什么改：补上真实 PM 链路里 `watch_for_trigger + setup_quality_ok` 被误判为 `watch_for_trigger_without_setup` 的漏口；让技术参数和盘中执行的 contextual calibration 也必须通过同一套自适应策略安全过滤；让 `entry_trigger/invalidation` 文本同样优先读 `action_evidence_contract`，避免布尔字段已统一但文本解释继续漂移。
+
+（17）修复学习安全过滤与当前触发确认的过度收紧回归。
+修改了什么：`src/tools/agent_tools/analysis/quality.py`、`src/tools/agent_tools/research/adaptive_policy_safety.py`。
+为什么改：显式 `current_trigger_confirmed/short_term_trigger_confirmed` 已成立时，不能再被 `only after/confirmation` 等 pending 文本压回 `watch_for_trigger`；自适应学习安全过滤也不能把动作明确的合规降风险/候选 release 旧记录全部误杀，否则 PM/Auditor 的 cap、protect、calibrate、learned underperformance 降级会失效。
+
+==========2026年06月21日========
+
+（1）把 PM 收成统一证据分流器的运行时入口。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/analysis/signal_fusion.py`、`src/tools/agent_tools/decision/pm_invalidation_policy.py`。
+为什么改：PM 是唯一交易决策人，读取分析师证据时必须优先使用 `action_evidence_contract` 的 `entry_trigger/invalidation_present/invalidation_condition`，不能再让 `would_change_view_if` 或原始信号字段直接生成交易边界；同一机会必须被分流为当前可交易、条件监控或明确不可交易原因，避免干净机会在 PM 中间层静默变成无意义 wait。
+
+（2）新增条件机会与高质量机会静默 wait 的系统审计。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：有 `watch_for_trigger + setup_quality_ok + entry_trigger + invalidation_present` 的条件监控候选时，必须进入同一张 `final_action_contract` 的 `conditional_trigger_authority` 或写出明确拒绝原因；`trigger_valid=true` 也必须有 `current_trigger_confirmed`，否则直接 hard fail，防止分析师证据、PM 分流和 Trader 执行再次语义分叉。
+
+（3）把 PM 机会三分流接入回测前验收。
+修改了什么：`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：回测前验收不能只停留在原来的通用 readiness 项；新增 `pm_opportunity_routing`，把条件监控候选静默 wait、高质量机会静默 wait、`trigger_valid` 缺当前确认、`setup_quality_ok` 被误当触发等 PM 分流问题明确归类为回测前 hard fail，避免新一轮回测才暴露 PM 机会分流没接住。
+
+（4）把 PM 机会三分流归类接入每日系统审计输出。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：每日回测后 `system_invariant_audit` 不能只给普通错误列表；新增共享的错误分类表和 `metadata.error_categories/failed_categories`，让条件机会静默 wait、高质量机会静默 wait、触发字段缺当前确认等问题在每日 fail-fast JSON 中明确归到 `pm_opportunity_routing`，并让回测前验收复用同一分类口径，避免两套检测口径再次漂移。
+
+（5）把统一字段语义接成独立验收项和每日审计摘要。
+修改了什么：`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：字段语义已经统一到 `docs/unified_field_semantics.md`，检测也必须显式体现；本次让回测前报告新增 `unified_field_semantics` 检查项，并让每日 `system_invariant_audit` 输出 `metadata.unified_field_semantics_audit`，把旧字段复活、`trigger_valid/current_trigger_confirmed` 矛盾、`setup_quality_ok` 被误当触发等问题单独归类，而不是埋在普通错误或 PM 分类里。
+
+（6）修正自适应策略审计对白名单动作 `calibrate` 的误杀。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：`contextual_rule_calibration:*` 的 `policy_action=calibrate` 已由 `adaptive_policy_safety.py` 定义为有界校准动作，不能被每日审计判成未知动作；本次让审计白名单与学习安全过滤保持一致，并补测试锁住 validated contextual calibration 不再触发 `adaptive_policy_unknown_action`。
+
+（7）对齐评估模块到统一字段语义与策略/运营分账口径。
+修改了什么：`src/evaluation/evaluation.py`、`src/evaluation/plot_portfolio.py`、`src/evaluation/analyze_strategy_attribution.py`、`src/tests/test_evaluation_unified_semantics.py`。
+为什么改：字段语义表要求 `source_type=strategy` 与换月、强平等运营单分账；本次让策略胜率、策略质量、分析师/PM 归因和弱边建议只看策略交易对，账户曲线继续包含所有真实结算，运营单只进入独立摘要，避免运营成交污染 alpha 归因。

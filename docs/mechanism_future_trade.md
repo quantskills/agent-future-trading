@@ -13,14 +13,14 @@
 5. **多空双向、逐日盯市、保证金占用是核心账户逻辑**：持仓以 signed lots 表示，多头为正、空头为负；账户权益、可用现金、占用保证金、手续费、持仓盈亏和已实现盈亏分开记录。
 6. **现实可执行优先于理想化信号**：有交易信号不等于一定成交。系统会检查盘中触发、最小成交量、追价限制、滑点、手续费、保证金容量、合约是否混用、是否需要先换约或先平后开。
 7. **业务机制必须可审计**：每笔推荐、盘中触发、成交流水、结算记录、品种日 PnL、完整交易日志和 Phase4 验收结果都要能回查，便于确认是否记错账、算错账或发生未来函数。
-8. **最终交易真相只认结构化出口**：PM 自然语言只作为审计材料；新开仓、条件 probe、放大、减仓、持有和退出必须落到顶层 `final_action_contract`、顶层 `final_new_entry_trade_authority`、`active_opportunity_audit`、Trader 执行结果和会计结算结果。普通策略单先由 PM 生成唯一 `final_action_contract`，经 Auditor 审核后再交给 Trader 执行。`pre_open_plan` 只保留为 PM 内部草稿和日志，不是成交、审计、评估或学习的兜底事实来源。`direction_only/watchlist/no_trade` 不能被最小手数、旧 probe seed 或软门控释放绕成真实开仓。
+8. **最终交易真相只认结构化出口**：PM 自然语言只作为审计材料；新开仓、条件 probe、放大、减仓、持有和退出必须落到唯一 `final_action_contract` 及其内部权限字段、`active_opportunity_audit`、Trader 执行结果和会计结算结果。普通策略单先由 PM 生成唯一 `final_action_contract`，经 Auditor 审核后再交给 Trader 执行。PM 内部草稿和日志不是成交、审计、评估或学习的兜底事实来源。仅有 `direction_context`、`opportunity_state=no_opportunity` 或普通观察状态的机会，不能被最小手数、旧 probe seed 或软门控释放绕成真实开仓。
 9. **策略单与运营风控单分账**：`source_type=strategy` 只走 PM/Auditor/Trader 的策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，由执行/结算链独立处理、独立核算，不写入策略 alpha 学习，也不能塞进策略 `final_action_contract`。
 
 ## 二、已经代码落地的实际业务运行机制
 
 ### 1. 四阶段业务流
 
-- **Phase1 盘前策略**：分析师和 PM 生成每个品种的目标方向、目标仓位、推荐动作、目标手数、合约、参考价格、失效边界和审计快照。普通策略执行依据只能是顶层 `final_action_contract`、顶层 `final_new_entry_trade_authority` 和 `active_opportunity_audit`；`pre_open_plan` 只用于 PM 内部草稿留痕，不能成为 Trader 或 Researcher 的事实入口。`watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会，可由 PM 写入同一张 `final_action_contract` 的条件监控 probe。
+- **Phase1 盘前策略**：分析师和 PM 生成每个品种的目标方向、目标仓位、推荐动作、目标手数、合约、参考价格、失效边界和审计快照。普通策略执行依据只能是唯一 `final_action_contract`、其内部权限字段和 `active_opportunity_audit`；PM 内部草稿只用于本地推演和日志留痕，不能成为 Trader 或 Researcher 的事实入口。`watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会，可由 PM 写入同一张 `final_action_contract` 的条件监控 probe。
 - **Phase2 盘中执行**：Trader 读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。Trader 不能从 PM 文本、旧 probe 标记或最小一手机制自行创造策略方向，只能执行 PM/Auditor 已授权计划。
 - **Phase3 日终结算**：Accountant 回放当日成交流水，使用同日官方结算价逐日盯市，更新官方组合、日结算、品种日 PnL 和交易流水结算价；结算后发现换月需要时，只能生成下一交易日执行的 rollover 运营单，不能反向影响当天盘前策略。
 - **Phase4 复盘验收**：Reviewer 检查 Phase1-3 完整性、账务一致性、交易流水入账、分析师信号落库完整性和完整交易日志；Researcher 在此后写入未来可用记忆。未完成交易日会被 `incomplete_trading_day_phase` 硬拦，不能作为策略结论或学习样本。
@@ -117,7 +117,7 @@
 - Researcher 可以研究 Trader 的未成交、涨跌停、盘中触发失败、执行价问题和 no-trade 原因，但不能回写当日交易流水。
 - Trader 还会把推荐对应的 setup 类型、机会层级、alpha setup 融合结果、盘中触发/未成交原因和执行状态写入 `setup_execution_learning`。这些内容只供未来 Researcher 研究择时和执行质量，不改变当日成交、手续费、保证金或结算。
 - 亏损模板、tail-loss、alpha promotion 和机会层级只能影响未来交易日的 PM/Auditor 判断，不能改写历史账务、手续费、保证金、结算价或持仓事实。
-- `direction_only/watchlist/no_trade` 机会默认只能观察或等待触发，不能直接生成真实新开仓。若后续当日结构化证据重新证明机会已成为 `tradeable_setup` 或 `deployable_alpha`，才可进入配置允许的 `exploration_probe` 或正常仓位审查，并仍必须经过 PM 最终新开仓权限、Auditor、Trader 的盘中触发、涨跌停、临近交割、保证金和订单语义约束。
+- 仅有方向背景、普通观察或 `opportunity_state=no_opportunity/watch_for_trigger` 且缺少合规条件监控授权的机会，默认只能观察或等待触发，不能直接生成真实新开仓。若后续当日结构化证据重新证明 `setup_quality_ok=true` 且 `current_trigger_confirmed/trigger_valid` 确认当前触发，或由 PM 在同一张 `final_action_contract` 内生成合规条件监控 probe，才可进入配置允许的 `authority_type=exploration_probe` 或正常仓位审查，并仍必须经过 Auditor、Trader 的盘中触发、涨跌停、临近交割、保证金和订单语义约束。
 - 盈利同作用域仓位若当日证据仍成立，可通过 PM 持仓生命周期机制少减仓或继续持有；亏损仓不受该机制保护，仍必须按当日证据、失效边界和风控再验证。
 - 同品种同方向频繁交易且已结算表现差的样本，会被 PM 交易磨损控制缩放仓位；该机制不改变账务事实，也不是品种黑名单。
 - Researcher 写入的 `alpha_setup_sample/profile/action_value` 会在未来交易日被轻量 SQL 相似 setup 检索读取。检索必须满足历史样本 `trading_date < decision_date`，优先同品种/同方向/同 setup/同 regime；同板块样本只能作弱先验，不能直接授权开仓。PM 将 open/hold/exit 样本转成仓位生命周期偏好，影响未来 `authority_type`、`lots/margin_ratio`、保护性减仓或退出；execution 样本只能由 PM 写入最终合约的执行 profile，Trader 不直接读取研究 action-value。

@@ -4,6 +4,8 @@
 
 from typing import Any, Iterable, Mapping
 
+from tools.agent_tools.research.adaptive_policy_safety import adaptive_policy_runtime_decision
+
 
 HIGH_QUALITY_MEMORY_STATES = {"protected", "deployable"}
 WEAK_MEMORY_STATES = {"watchlist", "weak_block"}
@@ -96,6 +98,9 @@ def adaptive_policy_record(
     best_row: dict[str, Any] = {}
     for row in rows or []:
         if not isinstance(row, Mapping):
+            continue
+        runtime_decision = adaptive_policy_runtime_decision(row)
+        if not bool(runtime_decision.get("allowed")):
             continue
         if str(row.get("policy_action") or "").lower() in actions:
             policy_type = str(row.get("policy_type") or "").lower()

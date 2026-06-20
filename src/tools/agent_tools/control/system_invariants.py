@@ -17,6 +17,7 @@ from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.schemas import ProtocolCheckResult
 from tools.agent_tools.control.unified_field_audit import find_forbidden_artifact_field_keys
 from tools.agent_tools.execution.order_semantics import phase2_order_intent_from_lots
+from tools.agent_tools.research.adaptive_policy_safety import adaptive_policy_runtime_decision
 
 
 OPEN_ACTIONS = {"open_long", "open_short"}
@@ -94,6 +95,22 @@ RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
     "target_lots",
     "target_margin_ratio_estimate",
     "target_position_ratio",
+}
+UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES = {
+    "unified_field_artifact_forbidden_field",
+    "release_block_diagnostics_contains_trade_action_fields",
+    "action_evidence_contract_pending_trigger_marked_valid",
+    "trigger_valid_without_current_trigger_confirmed",
+    "setup_quality_ok_used_as_current_trigger",
+    "trade_research_action_evidence_trigger_valid_mismatch",
+}
+CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS = {
+    "",
+    "pm_watch_for_trigger_probe_cap",
+    "conditional_trigger_authority",
+    "conditional_watch",
+    "conditional_monitor",
+    "candidate_routed_to_conditional_monitor",
 }
 PENDING_ENTRY_TRIGGER_MARKERS = {
     "only if",
@@ -206,6 +223,49 @@ CURRENT_CONFIRMATION_FIELD_NAMES = {
     "price_reaction_confirmed",
     "current_entry_confirmed",
 }
+ERROR_CATEGORY_PREFIXES = {
+    "unified_field_semantics": UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES,
+    "pm_opportunity_routing": {
+        "trigger_valid_without_current_trigger_confirmed",
+        "setup_quality_ok_used_as_current_trigger",
+        "conditional_monitor_candidate_silent_wait",
+        "high_quality_opportunity_silent_wait",
+    },
+    "single_trade_exit": {
+        "open_transaction_without_open_final_action",
+        "open_transaction_without_open_authority",
+        "open_transaction_with_blocking_authority",
+        "real_open_without_current_contract_evidence",
+        "direction_or_watchlist_probe_opened",
+        "trade_contract_source_of_truth_failed",
+    },
+    "trader_trigger_parity": {
+        "open_transaction_without_trigger",
+        "open_transaction_without_intraday_trigger",
+        "intraday_trigger_audit_mirror_mismatch",
+        "open_transaction_without_intraday_record",
+    },
+    "learning_landing": {
+        "action_value_missing_action_preference",
+        "action_value_unknown_action_preference",
+        "positive_open_action_value_not_open_preference",
+        "positive_exit_action_value_not_exit_preference",
+        "negative_action_value_not_protective_preference",
+        "positive_open_from_non_exact_scope",
+        "positive_open_from_non_real_reward_source",
+        "action_preferences_exist_but_no_final_action_contract_mentions_them",
+        "adaptive_policy_release_not_validated",
+        "adaptive_policy_unknown_action",
+        "adaptive_policy_fast_candidate_not_probe_only",
+    },
+    "structured_io": {
+        "unified_field_artifact_forbidden_field",
+    },
+    "data_time_boundary": {
+        "incomplete_trading_day_phase",
+        "future_dated_learning_used",
+    },
+}
 
 
 @dataclass
@@ -233,6 +293,42 @@ class InvariantAuditReport:
             "counts": dict(self.counts),
             "metadata": dict(self.metadata),
         }
+
+
+def categorize_invariant_errors(errors: Iterable[str]) -> Dict[str, List[str]]:
+    categories: Dict[str, List[str]] = {}
+    for error in errors or []:
+        prefix = str(error).split(":", 1)[0]
+        matched_categories: List[str] = []
+        for category, prefixes in ERROR_CATEGORY_PREFIXES.items():
+            if prefix in prefixes:
+                categories.setdefault(category, []).append(str(error))
+                matched_categories.append(category)
+        if not matched_categories:
+            categories.setdefault("audit_explainability", []).append(str(error))
+    return categories
+
+
+def _unified_field_semantics_audit_summary(errors: Iterable[str]) -> Dict[str, Any]:
+    semantic_errors: List[str] = []
+    for error in errors or []:
+        prefix = str(error).split(":", 1)[0]
+        if prefix in UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES:
+            semantic_errors.append(str(error))
+    return {
+        "ok": not semantic_errors,
+        "source_of_truth": "docs/unified_field_semantics.md",
+        "error_count": len(semantic_errors),
+        "errors": semantic_errors,
+        "checked_boundaries": [
+            "runtime_artifacts_must_not_use_deprecated_semantic_keys",
+            "action_evidence_contract_is_canonical_pm_input",
+            "trigger_valid_requires_current_trigger_confirmed",
+            "setup_quality_ok_cannot_imply_trigger_valid",
+            "trade_research_contract_and_action_evidence_contract_must_not_disagree",
+            "diagnostics_cannot_carry_trade_action_fields",
+        ],
+    }
 
 
 def _safe_json(value: Any, artifact_path: Optional[str] = None, sha256: Optional[str] = None) -> Any:
@@ -539,6 +635,40 @@ def _load_action_values(
     return values
 
 
+def _load_adaptive_policy_states(
+    conn: sqlite3.Connection,
+    *,
+    config_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not _table_exists(conn, "adaptive_policy_state"):
+        return []
+    params: List[Any] = [config_id]
+    date_parts: List[str] = []
+    if start_date:
+        date_parts.append("(source_trading_date IS NULL OR substr(source_trading_date, 1, 10) >= ?)")
+        params.append(start_date)
+    if end_date:
+        date_parts.append("(source_trading_date IS NULL OR substr(source_trading_date, 1, 10) <= ?)")
+        params.append(end_date)
+    date_sql = (" AND " + " AND ".join(date_parts)) if date_parts else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM adaptive_policy_state
+        WHERE config_id = ? AND active = 1{date_sql}
+        """,
+        tuple(params),
+    ).fetchall()
+    values: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = _safe_json(item.get("payload_json"))
+        values.append(item)
+    return values
+
+
 def _load_trading_day_phases(
     conn: sqlite3.Connection,
     *,
@@ -773,6 +903,14 @@ def _audit_action_evidence_trigger_consistency(
                         seen_error_types.add(error_type)
                 if (
                     trigger_valid is True
+                    and not _node_has_current_confirmation(node)
+                ):
+                    error_type = "trigger_valid_without_current_trigger_confirmed"
+                    if error_type not in seen_error_types:
+                        errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
+                        seen_error_types.add(error_type)
+                if (
+                    trigger_valid is True
                     and node.get("setup_quality_ok") is True
                     and not _node_has_current_confirmation(node)
                 ):
@@ -787,6 +925,60 @@ def _audit_action_evidence_trigger_consistency(
                         if error_type not in seen_error_types:
                             errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
                             seen_error_types.add(error_type)
+
+
+def _contract_has_conditional_trigger_authority(contract: Dict[str, Any]) -> bool:
+    return bool(
+        contract.get("conditional_trigger_authority")
+        and contract.get("requires_intraday_confirmation")
+        and not contract.get("can_execute_without_intraday_trigger")
+    )
+
+
+def _active_opportunity_has_explicit_rejection(
+    active_audit: Dict[str, Any],
+    contract: Dict[str, Any],
+) -> bool:
+    decision = _dict(active_audit.get("decision"))
+    reason_codes = {
+        _lower(item)
+        for item in _list(contract.get("reason_codes"))
+        + _list(contract.get("audit_reason_codes"))
+        + [decision.get("reason")]
+    }
+    reason_codes = {item for item in reason_codes if item not in CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS}
+    return bool(reason_codes)
+
+
+def _audit_active_opportunity_routing(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    for recommendation_id, recommendation in recommendations.items():
+        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
+            continue
+        snapshot = _dict(recommendation.get("signal_snapshot"))
+        active_audit = _dict(snapshot.get("active_opportunity_audit"))
+        if not active_audit:
+            continue
+        opportunity = _dict(active_audit.get("opportunity"))
+        contract = _contract_from_recommendation(recommendation)
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        conditional_count = _int(opportunity.get("conditional_monitor_candidate_count"))
+        high_quality_present = bool(opportunity.get("high_quality_present"))
+        final_action = _lower(contract.get("final_action"))
+        if conditional_count > 0:
+            if _contract_has_conditional_trigger_authority(contract):
+                continue
+            if _active_opportunity_has_explicit_rejection(active_audit, contract):
+                continue
+            errors.append(f"conditional_monitor_candidate_silent_wait:{label}:count={conditional_count}")
+            continue
+        if high_quality_present and final_action in {"", "wait", "hold"}:
+            if _active_opportunity_has_explicit_rejection(active_audit, contract):
+                continue
+            errors.append(f"high_quality_opportunity_silent_wait:{label}:final_action={final_action or 'missing'}")
 
 
 def _contract_mentions_preference(contract: Dict[str, Any], preference_names: Iterable[str]) -> bool:
@@ -1090,6 +1282,38 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
         _audit_action_value_usage_boundary(row, payload, action_name, action_preference, errors)
 
 
+def _audit_adaptive_policy_states(policy_rows: List[Dict[str, Any]], errors: List[str], warnings: List[str]) -> None:
+    for row in policy_rows:
+        label = ":".join(
+            str(row.get(key) or "*")
+            for key in ("ticker", "side", "setup_type", "horizon_class", "market_regime", "policy_type")
+        )
+        decision = adaptive_policy_runtime_decision(row)
+        action = str(decision.get("policy_action") or "")
+        policy_type = str(decision.get("policy_type") or "")
+        if action in {"protect", "allow"} and not bool(decision.get("allowed")):
+            errors.append(
+                "adaptive_policy_release_not_validated:"
+                f"{label}:{decision.get('reason') or 'blocked'}"
+            )
+        if action not in {
+            "cap",
+            "reduce",
+            "block",
+            "demote",
+            "probe_only",
+            "weak_block",
+            "protect",
+            "allow",
+            "probe",
+            "watchlist",
+            "calibrate",
+        }:
+            errors.append(f"adaptive_policy_unknown_action:{label}:{action or 'missing'}")
+        if policy_type == "fast_candidate_alpha" and action not in {"probe", "watchlist"}:
+            errors.append(f"adaptive_policy_fast_candidate_not_probe_only:{label}:{action or 'missing'}")
+
+
 def _audit_recommendation_preference_landing(
     recommendations: Dict[str, Dict[str, Any]],
     action_values: List[Dict[str, Any]],
@@ -1227,7 +1451,13 @@ def audit_system_invariants(
             ok=True,
             warnings=[f"sqlite_missing:{db_path}"],
             counts={},
-            metadata={"db_path": str(db_path), "audit_boundary": "no_trade_records_to_audit"},
+            metadata={
+                "db_path": str(db_path),
+                "audit_boundary": "no_trade_records_to_audit",
+                "error_categories": {},
+                "failed_categories": [],
+                "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+            },
         )
 
     conn = _connect(db_path)
@@ -1237,7 +1467,12 @@ def audit_system_invariants(
             return InvariantAuditReport(
                 ok=False,
                 errors=[f"config_not_found:{exp_name or config_id or 'missing'}"],
-                metadata={"db_path": str(db_path)},
+                metadata={
+                    "db_path": str(db_path),
+                    "error_categories": categorize_invariant_errors([f"config_not_found:{exp_name or config_id or 'missing'}"]),
+                    "failed_categories": ["audit_explainability"],
+                    "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                },
             )
         metadata["config_id"] = resolved_config_id
         metadata["db_path"] = str(db_path)
@@ -1245,6 +1480,7 @@ def audit_system_invariants(
         transactions = _load_transactions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         intraday_decisions = _load_intraday_decisions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         action_values = _load_action_values(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
+        adaptive_policy_states = _load_adaptive_policy_states(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         trading_day_phases = _load_trading_day_phases(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
     finally:
         conn.close()
@@ -1260,11 +1496,13 @@ def audit_system_invariants(
     _audit_recommendation_final_contract_consistency(recommendations, errors)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
+    _audit_active_opportunity_routing(recommendations, errors)
     _audit_release_block_diagnostics(recommendations, errors)
     _audit_transaction_final_contract_consistency(transactions, recommendations, errors, warnings)
     _audit_open_transactions(transactions, recommendations, errors, warnings)
     _audit_intraday_triggers(transactions, recommendations, intraday_decisions, errors)
     _audit_action_values(action_values, errors, warnings)
+    _audit_adaptive_policy_states(adaptive_policy_states, errors, warnings)
     _audit_recommendation_preference_landing(recommendations, action_values, transactions, errors, warnings)
 
     counts = {
@@ -1273,12 +1511,17 @@ def audit_system_invariants(
         "open_transactions": sum(1 for item in transactions if _is_open_transaction(item)),
         "intraday_decisions": len(intraday_decisions),
         "action_values": len(action_values),
+        "adaptive_policy_states": len(adaptive_policy_states),
         "trading_day_phases": len(trading_day_phases),
     }
     metadata["audit_boundary"] = (
         "system_invariants_only; no strategy profitability judgment; "
         "does_not_create_trade_authority_or_modify_lots"
     )
+    error_categories = categorize_invariant_errors(errors)
+    metadata["error_categories"] = error_categories
+    metadata["failed_categories"] = sorted(error_categories)
+    metadata["unified_field_semantics_audit"] = _unified_field_semantics_audit_summary(errors)
     return InvariantAuditReport(ok=not errors, errors=errors, warnings=warnings, counts=counts, metadata=metadata)
 
 

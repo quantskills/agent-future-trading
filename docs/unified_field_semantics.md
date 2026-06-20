@@ -271,6 +271,7 @@
 | `conditional_monitor_candidate` | PM 主机会审计 | 单个方向是否满足条件监控候选：`watch_for_trigger + setup_quality_ok + trigger_valid=false + entry_trigger + invalidation_present + 明确方向`。 |
 | `conditional_monitor_candidates` | PM 主机会审计 | 满足条件监控候选的方向列表；只供 PM 判断是否生成同一张 `final_action_contract` 的条件 probe 权限。 |
 | `conditional_monitor_candidate_count` | PM 主机会审计 | 条件监控候选数量。 |
+| `has_monitorable_setup` | PM 当前证据诊断 / `alpha_setup_ev_fusion` | 当前方向是否存在干净的条件监控 setup；它允许 PM 生成条件监控合约，但不等于 `has_tradeable_support`，也不代表当前触发成立。 |
 | `watch_for_trigger_semantic_block` | PM 诊断 | `watch_for_trigger` 语义阻止真实开仓。 |
 | `watch_for_trigger_semantic_release_block` | PM 诊断 | 释放路径被 `watch_for_trigger` 语义阻止。 |
 
@@ -440,7 +441,7 @@
 | `no_trade_count` | setup profile | 无交易 / 反事实样本数。 |
 | `win_count` | setup profile | 盈利样本数。 |
 | `loss_count` | setup profile | 亏损样本数。 |
-| `win_rate` | 学习记录 | 胜率。 |
+| `win_rate` | 学习记录 / 评估输出 | 胜率。评估中默认指 `source_type=strategy` 的完成交易对胜率。 |
 | `hit_rate` | analyst performance | 命中率。 |
 | `reward_sum` | action-value | 奖励总和。 |
 | `reward_mean` | action-value | 平均奖励。 |
@@ -494,7 +495,33 @@
 | `verifier` | learning event log | 验证者。 |
 | `event_type` | learning event log | 学习事件类型。 |
 
-## 14. 资金部署字段
+## 14. 评估与归因输出字段
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `overall` | 归因报告 | 全账户完成交易对汇总；可包含 `rollover/forced_risk` 等运营成交，只用于账户路径观察。 |
+| `strategy_only_overall` | 归因报告 | 仅 `source_type=strategy` 的完成交易对汇总；策略胜率、策略净 PnL 和策略归因必须使用它。 |
+| `trade_pairs` | 归因报告 | 全账户交易对列表，可带 `contains_non_strategy` 标记。 |
+| `strategy_only_trade_pairs` | 归因报告 | 仅策略交易对列表；分析师、PM、Auditor 归因和弱边建议必须使用它。 |
+| `by_ticker_side` | 归因报告 | 按品种和方向统计的策略交易对表现。 |
+| `by_signal_combo` | 归因报告 | 按分析师信号组合统计的策略交易对表现。 |
+| `by_trade_auditor_decision` | 归因报告 | 按审计/最终合约决策统计的策略交易对表现。 |
+| `by_ticker_side_signal_combo` | 归因报告 | 按品种、方向、分析师信号组合统计的策略交易对表现。 |
+| `winning_trades` | 评估输出 | 盈利完成交易对数量；默认只统计策略交易对。 |
+| `losing_trades` | 评估输出 | 亏损完成交易对数量；默认只统计策略交易对。 |
+| `flat_trades` | 评估输出 | 盈亏为零的完成交易对数量；默认只统计策略交易对。 |
+| `total_trades` | 评估输出 | 完成交易对数量；默认只统计策略交易对。 |
+| `avg_return_per_trade` | 评估输出 | 单笔完成交易对平均收益率；默认只统计策略交易对。 |
+| `realized_trade_pnl` | 评估输出 | 已实现完成交易对净盈亏；默认只统计策略交易对。 |
+| `unmatched_close_lots` | 评估输出 | 找不到对应开仓的平仓手数。 |
+| `inherited_close_lots` | 评估输出 | 子窗口内继承自窗口前持仓的平仓手数。 |
+| `rollover_transaction_count` | 评估输出 | 换月运营流水笔数；不能计入策略胜率或 alpha 归因。 |
+| `forced_risk_transaction_count` | 评估输出 | 强平/强减风控运营流水笔数；不能计入策略胜率或 alpha 归因。 |
+| `operational_transaction_count` | 评估输出 | `source_type != strategy` 的运营流水笔数。 |
+| `rollover_summary` | 归因报告 | 换月运营流水摘要。 |
+| `forced_risk_summary` | 归因报告 | 强平/强减风控运营流水摘要。 |
+
+## 15. 资金部署字段
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
@@ -511,7 +538,7 @@
 | `reason_bucket` | 资金部署 | 资金状态原因分桶。 |
 | `deployment_plan` | 资金部署 | 资金部署计划。 |
 
-## 15. 静态验证要求
+## 16. 静态验证要求
 
 必须保留静态测试：
 

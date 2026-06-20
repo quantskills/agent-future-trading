@@ -1017,6 +1017,7 @@ def _write_markdown(path: Path, payload: Dict[str, Any]) -> None:
 def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
     diagnostics = payload["recommendation_diagnostics"]
     rollover = payload["rollover_summary"]
+    forced_risk = payload.get("forced_risk_summary", {})
     overall = payload["overall"]
     strategy_overall = payload["strategy_only_overall"]
     rebalance_pairs = payload.get("rebalance_pair_summary", {})
@@ -1046,12 +1047,16 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "",
         "## Performance By Ticker And Side",
         "",
+        "Strategy-only view; rollover and forced_risk operational pairs are excluded.",
+        "",
         _format_table(
             ["Ticker", "Side", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
             _performance_rows(payload.get("by_ticker_side", []), ["ticker", "side"]),
         ),
         "",
         "## Performance By Signal Combo",
+        "",
+        "Strategy-only view; operational actions do not become analyst or PM attribution.",
         "",
         _format_table(
             ["Signal Combo", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
@@ -1203,6 +1208,17 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
             ],
         ),
         "",
+        "## Forced Risk Summary",
+        "",
+        _format_table(
+            ["Metric", "Value"],
+            [
+                ["Forced-risk transaction count", forced_risk.get("transaction_count", 0)],
+                ["Forced-risk lots", forced_risk.get("total_lots", 0)],
+                ["Forced-risk commission", f"{_safe_float(forced_risk.get('total_commission')):.2f}"],
+            ],
+        ),
+        "",
         "## Weak Side Suggestions",
         "",
         "These are review candidates only; they are not PM rules, risk blocks, or trade authority.",
@@ -1282,8 +1298,8 @@ def build_attribution_report(
 
     overall = summarize_trade_pairs(pairs)
     strategy_only_overall = summarize_trade_pairs(strategy_only_pairs)
-    by_ticker_side = _group_summary(pairs, ["ticker", "side"])
-    by_signal_combo = _group_summary(pairs, ["signal_combo"])
+    by_ticker_side = _group_summary(strategy_only_pairs, ["ticker", "side"])
+    by_signal_combo = _group_summary(strategy_only_pairs, ["signal_combo"])
     by_trade_auditor_decision = _group_summary(strategy_only_pairs, ["trade_auditor_decision"])
     by_planner_decision = by_trade_auditor_decision
     by_ticker_side_signal_combo = _group_summary(strategy_only_pairs, ["ticker", "side", "signal_combo"])

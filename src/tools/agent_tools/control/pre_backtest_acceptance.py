@@ -22,7 +22,11 @@ from apis.router import APISource, Router
 from tools.agent_tools.control.agent_cards import build_default_agent_cards, validate_agent_capability
 from tools.agent_tools.control.preflight import run_preflight_checks
 from tools.agent_tools.control.schemas import ProtocolCheckResult
-from tools.agent_tools.control.system_invariants import audit_system_invariants
+from tools.agent_tools.control.system_invariants import (
+    ERROR_CATEGORY_PREFIXES,
+    audit_system_invariants,
+    categorize_invariant_errors,
+)
 from tools.agent_tools.control.tool_access_policy import (
     build_default_tool_access_policy,
     validate_tool_policy_against_capabilities,
@@ -40,34 +44,49 @@ ACCEPTANCE_CHECKS = (
     "data_time_boundary",
     "agent_boundaries",
     "structured_io",
+    "unified_field_semantics",
     "single_trade_exit",
+    "pm_opportunity_routing",
     "trader_trigger_parity",
     "learning_landing",
     "capital_boundary",
     "audit_explainability",
 )
 
+_INVARIANT_CHECK_PRIORITY = (
+    "single_trade_exit",
+    "pm_opportunity_routing",
+    "trader_trigger_parity",
+    "learning_landing",
+    "data_time_boundary",
+    "unified_field_semantics",
+    "audit_explainability",
+)
+
+
+def _build_invariant_check_categories() -> Dict[str, List[str]]:
+    categories_by_prefix: Dict[str, List[str]] = {}
+    for category, prefixes in ERROR_CATEGORY_PREFIXES.items():
+        for prefix in prefixes:
+            categories_by_prefix.setdefault(prefix, []).append(category)
+    return categories_by_prefix
+
+
+def _primary_invariant_check(categories: Iterable[str]) -> str:
+    category_set = set(categories)
+    for preferred in _INVARIANT_CHECK_PRIORITY:
+        if preferred in category_set:
+            return preferred
+    return next(iter(category_set), "audit_explainability")
+
+
+INVARIANT_TO_CHECKS = {
+    prefix: tuple(categories)
+    for prefix, categories in _build_invariant_check_categories().items()
+}
 INVARIANT_TO_CHECK = {
-    "open_transaction_without_open_final_action": "single_trade_exit",
-    "open_transaction_without_open_authority": "single_trade_exit",
-    "open_transaction_with_blocking_authority": "single_trade_exit",
-    "real_open_without_current_contract_evidence": "single_trade_exit",
-    "direction_or_watchlist_probe_opened": "single_trade_exit",
-    "trade_contract_source_of_truth_failed": "single_trade_exit",
-    "open_transaction_without_trigger": "trader_trigger_parity",
-    "open_transaction_without_intraday_trigger": "trader_trigger_parity",
-    "intraday_trigger_audit_mirror_mismatch": "trader_trigger_parity",
-    "open_transaction_without_intraday_record": "trader_trigger_parity",
-    "action_value_missing_action_preference": "learning_landing",
-    "action_value_unknown_action_preference": "learning_landing",
-    "positive_open_action_value_not_open_preference": "learning_landing",
-    "positive_exit_action_value_not_exit_preference": "learning_landing",
-    "negative_action_value_not_protective_preference": "learning_landing",
-    "positive_open_from_non_exact_scope": "learning_landing",
-    "positive_open_from_non_real_reward_source": "learning_landing",
-    "action_preferences_exist_but_no_final_action_contract_mentions_them": "learning_landing",
-    "unified_field_artifact_forbidden_field": "structured_io",
-    "incomplete_trading_day_phase": "data_time_boundary",
+    prefix: _primary_invariant_check(categories)
+    for prefix, categories in INVARIANT_TO_CHECKS.items()
 }
 
 
@@ -479,34 +498,36 @@ def _checks_from_invariants(
     )
     per_check_errors: Dict[str, List[str]] = {name: [] for name in ACCEPTANCE_CHECKS}
     general_warnings = list(invariant_report.warnings)
-    for error in invariant_report.errors:
-        matched = False
-        for prefix, check_name in INVARIANT_TO_CHECK.items():
-            if error.startswith(prefix):
-                per_check_errors.setdefault(check_name, []).append(error)
-                matched = True
-                break
-        if not matched:
-            per_check_errors.setdefault("audit_explainability", []).append(error)
+    for check_name, category_errors in categorize_invariant_errors(invariant_report.errors).items():
+        per_check_errors.setdefault(check_name, []).extend(category_errors)
 
     checks: Dict[str, AcceptanceCheck] = {}
     for name in (
+        "unified_field_semantics",
         "single_trade_exit",
+        "pm_opportunity_routing",
         "trader_trigger_parity",
         "learning_landing",
         "audit_explainability",
     ):
         errors = per_check_errors.get(name, [])
+        metadata = {
+            "system_invariant_counts": dict(invariant_report.counts),
+            "db_path": str(db_path),
+            "strategy_profitability_checked": False,
+            "system_invariant_failed_categories": list(invariant_report.metadata.get("failed_categories") or []),
+        }
+        if name == "unified_field_semantics":
+            metadata["source_of_truth"] = "docs/unified_field_semantics.md"
+            metadata["unified_field_semantics_audit"] = dict(
+                invariant_report.metadata.get("unified_field_semantics_audit") or {}
+            )
         checks[name] = AcceptanceCheck(
             name=name,
             ok=not errors,
             errors=errors,
             warnings=general_warnings if name == "audit_explainability" else [],
-            metadata={
-                "system_invariant_counts": dict(invariant_report.counts),
-                "db_path": str(db_path),
-                "strategy_profitability_checked": False,
-            },
+            metadata=metadata,
         )
     return checks
 
@@ -573,6 +594,22 @@ def run_pre_backtest_acceptance(
             "audit_explainability",
             warnings=[f"sqlite_missing:{db_path}"],
             metadata={"strategy_profitability_checked": False},
+        )
+        checks["unified_field_semantics"] = _pass_check(
+            "unified_field_semantics",
+            metadata={
+                "source_of_truth": "docs/unified_field_semantics.md",
+                "runtime_artifact_audit": "skipped_sqlite_missing",
+                "unified_field_semantics_audit": {
+                    "ok": True,
+                    "error_count": 0,
+                    "errors": [],
+                    "checked_boundaries": [
+                        "static_production_runtime_field_scan_completed",
+                        "runtime_artifact_semantics_require_existing_sqlite_records",
+                    ],
+                },
+            },
         )
 
     checks["data_time_boundary"] = _merge_acceptance_checks(

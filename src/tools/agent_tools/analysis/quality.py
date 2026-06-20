@@ -692,10 +692,10 @@ def _current_entry_trigger_confirmed(
     analyst: str,
     entry_trigger: Any,
 ) -> bool:
-    if _is_pending_conditional_entry_trigger(entry_trigger):
-        return False
     if _current_entry_confirmation_available(signal, quality_context, analyst):
         return True
+    if _is_pending_conditional_entry_trigger(entry_trigger):
+        return False
     return _has_current_entry_trigger_text(entry_trigger)
 
 
@@ -1317,6 +1317,8 @@ def apply_trade_research_contract(
         analyst,
         entry_trigger,
     )
+    if current_trigger_confirmed:
+        pending_conditional_trigger = False
     exit_hint = (
         getattr(signal, "exit_hint", "")
         or getattr(signal, "counter_evidence", "")

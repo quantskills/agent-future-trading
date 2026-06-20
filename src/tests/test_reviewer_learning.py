@@ -5786,6 +5786,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             "horizon_class": "short",
             "market_regime": "*",
             "policy_type": "contextual_rule_calibration:technical_parameters",
+            "policy_action": "calibrate",
+            "rule_validation_status": "validated_rule_applied",
             "confidence_score": 0.55,
             "sample_count": 4,
             "reason": "test",
@@ -5816,6 +5818,44 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         self.assertEqual(adjusted["rsi"]["bearish"], 75)
         self.assertEqual(adjusted["mean_reversion"]["bollinger_std"], 2.2)
         self.assertEqual(len(diagnostics["applied"]), 1)
+
+    def test_technical_parameter_calibration_ignores_unvalidated_policy(self):
+        params = {
+            "trend": {"short": 8, "medium": 21, "long": 55},
+            "rsi": {"period": 14, "bullish": 30, "bearish": 70},
+            "mean_reversion": {"bollinger_std": 2.0, "bollinger_window": 20, "rolling_window": 50},
+        }
+        row = {
+            "id": "policy-candidate",
+            "ticker": "BU",
+            "side": "*",
+            "horizon_class": "short",
+            "market_regime": "*",
+            "policy_type": "contextual_rule_calibration:technical_parameters",
+            "policy_action": "calibrate",
+            "rule_validation_status": "candidate",
+            "confidence_score": 0.55,
+            "sample_count": 4,
+            "reason": "test",
+            "payload": {
+                "rule_adjustments": {
+                    "technical_parameters": {
+                        "trend_short_multiplier": 0.50,
+                    }
+                }
+            },
+        }
+
+        adjusted, diagnostics = apply_technical_parameter_calibration(
+            params,
+            [row],
+            ticker="BU",
+            horizon_class="short",
+            market_regime="trend",
+        )
+
+        self.assertEqual(adjusted["trend"]["short"], 8)
+        self.assertEqual(diagnostics["applied"], [])
 
     def test_phase1_signal_persistence_uses_recommendation_reference_portfolio(self):
         conn = sqlite3.connect(":memory:")
