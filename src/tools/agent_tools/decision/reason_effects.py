@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Shared reason-effect taxonomy for PM, Auditor, and Trader diagnostics.
 
@@ -63,7 +63,7 @@ SOFT_LIMIT_REASONS = {
     "business_quality_probe_only",
     "business_quality_deployable",
     "business_quality_observe_or_block",
-    "opportunity_scorecard_probe_seed",
+    "scorecard_current_tradeable_probe_seed",
     "trade_auditor_soft_probe_floor",
     "controlled_probe_below_min_entry_kept",
     "unknown_alpha_probe",

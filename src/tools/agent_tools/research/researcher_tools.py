@@ -1762,6 +1762,13 @@ def apply_researcher_learning(
         config_id=config_id,
         trading_date=trading_date,
     )
+    opportunity_ranking_preference_rows = reviewer._write_opportunity_ranking_learning_events(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+        cfg=cfg,
+        episode_payloads=getattr(reviewer._write_trade_episode_memory, "last_payloads", []) or [],
+    )
     no_trade_memory_rows = reviewer._write_no_trade_opportunity_memory(
         cursor,
         cfg=cfg,
@@ -1925,6 +1932,7 @@ def apply_researcher_learning(
         "strategy_memory_history_rows": memory_rows,
         **perf_counts,
         "trade_episode_rows": episode_rows,
+        "opportunity_ranking_preference_rows": opportunity_ranking_preference_rows,
         "no_trade_opportunity_rows": no_trade_memory_rows,
         "no_trade_counterfactual_backfill": no_trade_counterfactual_backfill,
         "missed_alpha_accountability": missed_alpha_accountability,

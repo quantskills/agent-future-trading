@@ -97,6 +97,8 @@ class BaseDB(ABC):
         self,
         recommendation_id: str,
         status: str,
+        action: Optional[str] = None,
+        lots: Optional[int] = None,
         execution_price: Optional[float] = None,
         warning_message: Optional[str] = None,
         signal_snapshot: Optional[Dict[str, Any]] = None,

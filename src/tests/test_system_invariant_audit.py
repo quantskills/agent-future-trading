@@ -772,6 +772,28 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(any(error.startswith("direction_or_watchlist_probe_opened") for error in report.errors))
 
+    def test_system_invariant_audit_rejects_opportunity_score_as_contract_authority(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = json.loads(conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()[0])
+            payload["final_action_contract"]["opportunity_score"] = 0.88
+            payload["final_action_contract"]["opportunity_rank"] = 1
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("opportunity_ranking_field_top_level_trade_authority") for error in report.errors)
+        )
+
     def test_system_invariant_audit_allows_conditional_trigger_probe_after_intraday_confirmation(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -1102,6 +1124,51 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(
             any(error.startswith("recommendation_final_action_contract_action_mismatch") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_fails_recommendation_top_level_not_synced_to_contract(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        contract = {
+            "contract_version": "agentquant.final_action.v1",
+            "ticker": "BU",
+            "contract_type": "strategy",
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": -2,
+            "lots_delta": -2,
+            "authority_type": "conditional_trigger_authority",
+            "reason_codes": ["conditional_monitor_probe_seed"],
+            "execution_requirement": "intraday_trigger_required",
+            "single_source_of_trade_truth": True,
+            "candidate_sources_do_not_bypass_contract": True,
+        }
+        payload = {
+            "final_action_contract": contract,
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+            },
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE futures_recommendation SET underlying_code=?, action=?, lots=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                ("BU", "hold", 0, _dumps(payload), _dumps(payload)),
+            )
+            conn.execute("DELETE FROM futures_transactions")
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(
+                error.startswith("recommendation_top_level_action_lots_mismatch_final_action_contract")
+                for error in report.errors
+            ),
             report.to_dict(),
         )
 
@@ -1573,7 +1640,10 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "candidate_sources_do_not_bypass_contract": True,
                 },
             }
-            conn.execute("UPDATE futures_recommendation SET trading_date=?, effective_trade_date=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'", ("2025-03-04", "2025-03-04", _dumps(payload), _dumps(payload)))
+            conn.execute(
+                "UPDATE futures_recommendation SET trading_date=?, effective_trade_date=?, action=?, lots=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                ("2025-03-04", "2025-03-04", "close_short", 1, _dumps(payload), _dumps(payload)),
+            )
             conn.execute("DELETE FROM futures_transactions")
             conn.execute(
                 """

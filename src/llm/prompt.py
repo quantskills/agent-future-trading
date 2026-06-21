@@ -63,6 +63,7 @@ Output format:
 - current_evidence_conflict: list of current evidence against this view
 - metadata.action_evidence_contract: structured open/hold/exit/execution evidence contract for PM and later Researcher review; it is not a Trader instruction
 - metadata.learning_scope: setup/factor/catalyst scope for future lane-scoped action-value learning
+- Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
 
 Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
 - neutral_reason
@@ -418,6 +419,11 @@ Decision framework:
 6. Existing positions should not be flipped or fully closed unless contrary evidence is materially stronger than the evidence required for a new entry.
 7. Same-scope action-value may affect only the matching action lane and only
    when current confirmation and invalidation are still present.
+8. PM is the only capital allocator. When comparing candidates, compute and explain
+   opportunity_score, opportunity_score_components, opportunity_rank,
+   capital_allocation_reason, and learning_adjustment_summary. These fields are
+   diagnostics for ranking and future learning only; they are not a second trade
+   contract and cannot bypass final_action_contract target_lots/lots_delta.
 
 Output requirements:
 - optimal_position_ratio: a signed float between -{max_position_ratio:.2f} and +{max_position_ratio:.2f}; positive is LONG, negative is SHORT, zero is NEUTRAL
@@ -859,6 +865,10 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "probe_only_until_validated, reduce_or_exit_bias, or may_support_alpha_scaling_after_validation. "
         "Candidate memories cannot authorize sizing, add-ons, or holding losing exposure; they must be "
         "validated by future same-scope samples before promotion. "
+        "Also review whether PM opportunity_score/opportunity_rank and capital_allocation_reason "
+        "actually moved capital toward stronger alpha. If ranking was helpful, propose a candidate "
+        "ranking preference; if ranking was harmful, propose a lower-priority preference. These are "
+        "Researcher memories only, not direct trade authority. "
         + ACTION_VALUE_USAGE_BOUNDARY
         + "When writing next-round memory, separate output into action lanes: "
         "open rewards evaluate the full episode result of the entry decision; "

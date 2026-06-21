@@ -1656,6 +1656,8 @@ class SQLiteDB(BaseDB):
         self,
         recommendation_id: str,
         status: Any,
+        action: Optional[Any] = None,
+        lots: Optional[int] = None,
         execution_price: Optional[float] = None,
         warning_message: Optional[str] = None,
         signal_snapshot: Optional[Dict[str, Any]] = None,
@@ -1692,6 +1694,14 @@ class SQLiteDB(BaseDB):
 
             fields = ['status = ?']
             params: List[Any] = [self._enum_value(status)]
+
+            if action is not None:
+                fields.append('action = ?')
+                params.append(self._enum_value(action))
+
+            if lots is not None:
+                fields.append('lots = ?')
+                params.append(int(lots or 0))
 
             if execution_price is not None:
                 fields.append('execution_price = ?')

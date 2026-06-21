@@ -1,6 +1,7 @@
 ﻿from typing import Dict, Any
 from langgraph.graph import StateGraph, START, END
 from typing import Callable
+from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from graph.schema import (
     AnalystSignal,
@@ -205,6 +206,313 @@ class AgentWorkflow:
                 f"rows={counts.get('row_total')}, missing={missing[:12]}, "
                 f"extra={extra[:12]}, duplicate={duplicate_pairs[:12]}"
             )
+
+    @staticmethod
+    def _scorecard_preferred_row(snapshot: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        preferred_side = str(scorecard.get("preferred_side") or "").lower()
+        if preferred_side in {"long", "short"} and isinstance(scorecard.get(preferred_side), dict):
+            return preferred_side, scorecard[preferred_side]
+        best_side = ""
+        best_row: Dict[str, Any] = {}
+        best_score = -1.0
+        for side in ("long", "short"):
+            row = scorecard.get(side)
+            if not isinstance(row, dict):
+                continue
+            try:
+                score = float(row.get("opportunity_score", row.get("score", -1.0)) or -1.0)
+            except (TypeError, ValueError):
+                score = -1.0
+            if score > best_score:
+                best_side = side
+                best_row = row
+                best_score = score
+        return best_side, best_row
+
+    @staticmethod
+    def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) -> None:
+        scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
+        if row:
+            row["opportunity_rank"] = rank
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        evidence_used = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        if evidence_used:
+            evidence_used["opportunity_rank"] = rank
+        active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+        active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
+        if active_opportunity:
+            active_opportunity["opportunity_rank"] = rank
+        consistency = (
+            snapshot.get("pm_landing_consistency_audit")
+            if isinstance(snapshot.get("pm_landing_consistency_audit"), dict)
+            else {}
+        )
+        alignment = (
+            consistency.get("opportunity_scorecard_alignment")
+            if isinstance(consistency.get("opportunity_scorecard_alignment"), dict)
+            else {}
+        )
+        if alignment:
+            alignment["opportunity_rank"] = rank
+
+    @staticmethod
+    def _contract_target_lots(snapshot: Dict[str, Any]) -> int:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        try:
+            return int(contract.get("target_lots") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _contract_current_lots(snapshot: Dict[str, Any]) -> int:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        try:
+            return int(contract.get("current_lots") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _is_new_or_increasing_risk(snapshot: Dict[str, Any]) -> bool:
+        current_lots = AgentWorkflow._contract_current_lots(snapshot)
+        target_lots = AgentWorkflow._contract_target_lots(snapshot)
+        if target_lots == 0 or target_lots == current_lots:
+            return False
+        if current_lots == 0:
+            return True
+        if (current_lots > 0 and target_lots > current_lots) or (current_lots < 0 and target_lots < current_lots):
+            return True
+        if (current_lots > 0 and target_lots < 0) or (current_lots < 0 and target_lots > 0):
+            return True
+        return False
+
+    @staticmethod
+    def _lots_action_from_target(current_lots: int, target_lots: int) -> Tuple[RecommendationAction, int]:
+        current = int(current_lots)
+        target = int(target_lots)
+        if target == current:
+            return RecommendationAction.HOLD, 0
+        if current == 0:
+            return (
+                (RecommendationAction.OPEN_LONG, abs(target))
+                if target > 0
+                else (RecommendationAction.OPEN_SHORT, abs(target))
+            )
+        if current > 0:
+            if target >= 0:
+                return (
+                    (RecommendationAction.OPEN_LONG, target - current)
+                    if target > current
+                    else (RecommendationAction.CLOSE_LONG, current - target)
+                )
+            return RecommendationAction.CLOSE_LONG, current
+        if target <= 0:
+            return (
+                (RecommendationAction.OPEN_SHORT, abs(target) - abs(current))
+                if abs(target) > abs(current)
+                else (RecommendationAction.CLOSE_SHORT, abs(current) - abs(target))
+            )
+        return RecommendationAction.CLOSE_SHORT, abs(current)
+
+    @staticmethod
+    def _apply_deployed_target_to_snapshot(
+        snapshot: Dict[str, Any],
+        *,
+        target_lots: int,
+        reason: str,
+        selected: bool,
+        rank: int | None,
+    ) -> None:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        if not contract:
+            return
+        current_lots = AgentWorkflow._contract_current_lots(snapshot)
+        original_target = int(contract.get("target_lots") or 0)
+        original_final_action = str(contract.get("final_action") or "").strip()
+        target_lots = int(target_lots)
+        lots_delta = target_lots - current_lots
+        contract["target_lots"] = target_lots
+        contract["lots_delta"] = lots_delta
+        contract["lots_delta_abs"] = abs(lots_delta)
+        if selected and target_lots == original_target and original_final_action:
+            contract["final_action"] = original_final_action
+        elif target_lots == current_lots:
+            contract["final_action"] = "hold"
+        elif current_lots == 0:
+            contract["final_action"] = "open_probe"
+        elif target_lots == 0:
+            contract["final_action"] = "exit"
+        elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
+            contract["final_action"] = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
+        else:
+            contract["final_action"] = "exit"
+        reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else []
+        reason_set = {str(item) for item in reason_codes if item}
+        reason_set.add("pm_full_market_capital_deployment")
+        if not selected and original_target != target_lots:
+            reason_set.add("capital_queue_not_selected")
+        contract["reason_codes"] = sorted(reason_set)
+        evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        evidence["capital_allocation_reason"] = reason
+        if rank is not None:
+            evidence["opportunity_rank"] = rank
+        contract["evidence_used"] = evidence
+        deployment = {
+            "selected_for_capital_deployment": bool(selected),
+            "capital_allocation_reason": reason,
+            "original_target_lots": int(original_target),
+            "deployed_target_lots": int(target_lots),
+            "deployed_lots_delta": int(lots_delta),
+            "opportunity_rank": rank,
+            "not_second_contract": True,
+            "pm_remains_single_fund_manager": True,
+        }
+        contract["capital_deployment"] = deployment
+        snapshot["final_action_contract"] = contract
+        rebalance = snapshot.get("rebalance_summary") if isinstance(snapshot.get("rebalance_summary"), dict) else {}
+        if rebalance:
+            rebalance["target_lots"] = int(target_lots)
+            rebalance["lots_delta"] = int(lots_delta)
+            rebalance["capital_allocation_reason"] = reason
+            rebalance["capital_deployment"] = deployment
+        active = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+        opportunity = active.get("opportunity") if isinstance(active.get("opportunity"), dict) else {}
+        if opportunity:
+            opportunity["capital_allocation_reason"] = reason
+            opportunity["selected_for_capital_deployment"] = bool(selected)
+
+    def _daily_capital_deployment_config(self) -> Dict[str, float]:
+        budget = self.config.get("position_budget_policy", {}) or {}
+        capital = self.config.get("capital_utilization_control", {}) or {}
+        hard_max = self._safe_positive_ratio(self.config.get("max_total_margin_ratio"), 0.20)
+        target = self._safe_positive_ratio(capital.get("target_margin_ratio_confirmed"), 0.10)
+        min_probe = self._safe_positive_ratio(budget.get("min_real_trade_margin_ratio"), 0.008)
+        max_single = self._safe_positive_ratio(budget.get("max_single_ticker_margin_ratio"), 0.13)
+        return {
+            "target_margin_ratio": min(target, hard_max),
+            "min_probe_margin_ratio": min_probe,
+            "max_single_ticker_margin_ratio": min(max_single, hard_max),
+            "hard_max_total_margin_ratio": hard_max,
+        }
+
+    def _recommended_margin_ratio(self, recommendation: FuturesRecommendation) -> float:
+        snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        try:
+            estimate = float(contract.get("target_margin_ratio_estimate") or 0.0)
+        except (TypeError, ValueError):
+            estimate = 0.0
+        if estimate > 0:
+            return estimate
+        base_price = float(getattr(recommendation, "base_price", None) or 0.0)
+        target_lots = abs(self._contract_target_lots(snapshot))
+        if base_price <= 0 or target_lots <= 0:
+            return 0.0
+        info = FuturesContractInfoCache.get_contract_info(recommendation.underlying_code)
+        if not info:
+            return 0.0
+        side_rate = info.get("margin_rate_long") if self._contract_target_lots(snapshot) > 0 else info.get("margin_rate_short")
+        margin = base_price * target_lots * float(info.get("contract_multiplier") or 1.0) * float(side_rate or 0.0)
+        equity = float(getattr(self.init_portfolio, "account_equity", 0.0) or getattr(self.init_portfolio, "cashflow", 0.0) or 1.0)
+        return margin / max(equity, 1.0)
+
+    def _apply_daily_capital_deployment(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
+        deployment_cfg = self._daily_capital_deployment_config()
+        candidates: List[Tuple[float, str, FuturesRecommendation, str, float]] = []
+        for ticker, recommendation in generated:
+            if recommendation.status == RecommendationStatus.SKIPPED:
+                continue
+            source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+            if source_type != RecommendationSourceType.STRATEGY.value:
+                continue
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            side, row = self._scorecard_preferred_row(snapshot)
+            if side not in {"long", "short"} or not row:
+                continue
+            try:
+                score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score <= 0:
+                continue
+            self._set_daily_opportunity_rank(snapshot, side, 0)
+            recommendation.signal_snapshot = snapshot
+            margin_ratio = self._recommended_margin_ratio(recommendation)
+            candidates.append((score, str(ticker).upper(), recommendation, side, margin_ratio))
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected_ids: set[str] = set()
+        used_margin_ratio = 0.0
+        target_margin_ratio = deployment_cfg["target_margin_ratio"]
+        min_probe_ratio = deployment_cfg["min_probe_margin_ratio"]
+        max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
+        for rank, (_, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            self._set_daily_opportunity_rank(snapshot, side, rank)
+            current_lots = self._contract_current_lots(snapshot)
+            target_lots = self._contract_target_lots(snapshot)
+            if not self._is_new_or_increasing_risk(snapshot):
+                reason = "not_new_or_increasing_risk_preserve_pm_contract"
+                self._apply_deployed_target_to_snapshot(
+                    snapshot,
+                    target_lots=target_lots,
+                    reason=reason,
+                    selected=True,
+                    rank=rank,
+                )
+                selected_ids.add(str(recommendation.id))
+            else:
+                capped_margin = min(max(margin_ratio, min_probe_ratio), max_single_ratio)
+                can_select = used_margin_ratio + capped_margin <= target_margin_ratio or not selected_ids
+                if can_select:
+                    used_margin_ratio += capped_margin
+                    reason = (
+                        "selected_by_full_market_pm_capital_queue:"
+                        f"rank={rank};score={snapshot.get('final_action_contract', {}).get('evidence_used', {}).get('opportunity_score')};"
+                        f"target_margin_used={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
+                    )
+                    self._apply_deployed_target_to_snapshot(
+                        snapshot,
+                        target_lots=target_lots,
+                        reason=reason,
+                        selected=True,
+                        rank=rank,
+                    )
+                    selected_ids.add(str(recommendation.id))
+                else:
+                    reason = (
+                        "not_selected_by_full_market_pm_capital_queue:"
+                        f"rank={rank};capital_target_filled={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
+                    )
+                    self._apply_deployed_target_to_snapshot(
+                        snapshot,
+                        target_lots=current_lots,
+                        reason=reason,
+                        selected=False,
+                        rank=rank,
+                    )
+            recommendation.signal_snapshot = snapshot
+            action, lots = self._lots_action_from_target(
+                self._contract_current_lots(snapshot),
+                self._contract_target_lots(snapshot),
+            )
+            recommendation.action = action
+            recommendation.lots = lots
+            self.db.update_futures_recommendation_status(
+                recommendation.id,
+                recommendation.status,
+                action=recommendation.action,
+                lots=recommendation.lots,
+                signal_snapshot=snapshot,
+            )
+
+    def _write_daily_opportunity_ranks(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
+        """Compatibility wrapper for tests and older callers.
+
+        The current behavior is stronger than rank writeback: PM applies the
+        daily full-market capital deployment queue before phase2 can execute.
+        """
+        self._apply_daily_capital_deployment(generated)
 
     @staticmethod
     def _normalize_analyst_name(name: str) -> str:
@@ -793,10 +1101,12 @@ class AgentWorkflow:
             self._apply_virtual_pending_rollovers,
             portfolio,
         )
+        phase1_planning_portfolio = portfolio.model_copy(deep=True)
         self._prefetch_local_daily_data(timings)
         self._prefetch_pandaai_daily_data(timings)
         morning_contexts = self._prefetch_pre_open_reference_prices(timings)
         prefetched_analysis = self._prefetch_phase1_analysis(portfolio, morning_contexts, timings)
+        generated_recommendations: List[Tuple[str, FuturesRecommendation]] = []
 
         for ticker in self.tickers:
             ticker_started_at = perf_counter()
@@ -833,6 +1143,8 @@ class AgentWorkflow:
                 recommendation_id = self.db.save_futures_recommendation(recommendation)
                 if not recommendation_id:
                     raise RuntimeError(f"Failed to save futures recommendation for {ticker}")
+                recommendation.id = recommendation_id
+                generated_recommendations.append((ticker, recommendation))
                 logger.warning(f"{ticker} phase1 skipped: {recommendation.warning_message}")
                 logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
                 if self.planner_mode:
@@ -882,11 +1194,10 @@ class AgentWorkflow:
             recommendation_id = self.db.save_futures_recommendation(recommendation)
             if not recommendation_id:
                 raise RuntimeError(f"Failed to save futures recommendation for {ticker}")
+            recommendation.id = recommendation_id
+            generated_recommendations.append((ticker, recommendation))
 
-            if recommendation.status != RecommendationStatus.SKIPPED:
-                portfolio = self._apply_virtual_recommendation_to_portfolio(portfolio, recommendation)
-
-            logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
+            logger.log_portfolio(f"{ticker} phase1 recommendation collected", portfolio)
 
             if self.planner_mode:
                 self.current_analysts = None
@@ -895,6 +1206,11 @@ class AgentWorkflow:
             timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
 
         self._validate_phase1_signal_persistence(portfolio, self.tickers)
+        self._apply_daily_capital_deployment(generated_recommendations)
+        portfolio = phase1_planning_portfolio
+        for _, recommendation in generated_recommendations:
+            if recommendation.status != RecommendationStatus.SKIPPED:
+                portfolio = self._apply_virtual_recommendation_to_portfolio(portfolio, recommendation)
         logger.log_portfolio("Phase1 Intraday Portfolio", portfolio)
         elapsed = perf_counter() - start_time
         if self._phase1_timing_enabled():

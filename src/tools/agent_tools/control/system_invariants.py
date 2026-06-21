@@ -16,7 +16,10 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.schemas import ProtocolCheckResult
 from tools.agent_tools.control.unified_field_audit import find_forbidden_artifact_field_keys
-from tools.agent_tools.execution.order_semantics import phase2_order_intent_from_lots
+from tools.agent_tools.execution.order_semantics import (
+    phase2_order_intent_from_lots,
+    recommendation_intent_from_lots,
+)
 from tools.agent_tools.research.adaptive_policy_safety import adaptive_policy_runtime_decision
 
 
@@ -821,6 +824,66 @@ def _audit_recommendation_final_contract_consistency(
                 f"{label}:action={contract.get('final_action')}:"
                 f"current={current_lots}:target={target_lots}:delta={lots_delta}"
             )
+            continue
+        expected_intent = recommendation_intent_from_lots(current_lots=current_lots, target_lots=target_lots)
+        expected_action = _lower(expected_intent.get("action"))
+        expected_lots = _int(expected_intent.get("lots"))
+        actual_lots = _int(recommendation.get("lots"))
+        if action != expected_action or actual_lots != expected_lots:
+            errors.append(
+                "recommendation_top_level_action_lots_mismatch_final_action_contract:"
+                f"{label}:expected={expected_action}/{expected_lots}:actual={action}/{actual_lots}:"
+                f"current={current_lots}:target={target_lots}"
+            )
+
+
+def _audit_opportunity_ranking_boundary(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    ranking_fields = {
+        "opportunity_score",
+        "opportunity_score_components",
+        "opportunity_rank",
+        "capital_allocation_reason",
+        "learning_adjustment_summary",
+    }
+    allowed_contract_containers = {"evidence_used", "learning_used"}
+    for recommendation_id, recommendation in recommendations.items():
+        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
+            continue
+        snapshot = _dict(recommendation.get("signal_snapshot"))
+        contract = _contract_from_recommendation(recommendation)
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        contract_top_level = sorted(field for field in ranking_fields if field in contract)
+        if contract_top_level:
+            errors.append(f"opportunity_ranking_field_top_level_trade_authority:{label}:{contract_top_level}")
+        for container_name in allowed_contract_containers:
+            container = _dict(contract.get(container_name))
+            if not container:
+                continue
+            for field in ranking_fields.intersection(container.keys()):
+                if field in {"opportunity_score", "opportunity_rank"}:
+                    continue
+                if field in {"opportunity_score_components", "capital_allocation_reason", "learning_adjustment_summary"}:
+                    continue
+        execution_artifacts = [
+            ("execution_result", _dict(snapshot.get("execution_result"))),
+            ("phase2_execution", _dict(snapshot.get("phase2_execution"))),
+            ("execution_translation", _dict(snapshot.get("execution_translation"))),
+        ]
+        for artifact_name, artifact in execution_artifacts:
+            for path, node in _iter_nested_dicts(artifact):
+                dangerous = sorted(
+                    field for field in ranking_fields
+                    if field in node and any(key in node for key in ("target_lots", "lots", "lots_delta", "action", "final_action"))
+                )
+                if dangerous:
+                    errors.append(
+                        "opportunity_ranking_field_used_in_execution_trade_intent:"
+                        f"{label}:{artifact_name}:{path}:{dangerous}"
+                    )
 
 
 def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
@@ -1494,6 +1557,7 @@ def audit_system_invariants(
         errors,
     )
     _audit_recommendation_final_contract_consistency(recommendations, errors)
+    _audit_opportunity_ranking_boundary(recommendations, errors)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
     _audit_active_opportunity_routing(recommendations, errors)

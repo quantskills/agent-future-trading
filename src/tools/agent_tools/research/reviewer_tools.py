@@ -2707,6 +2707,45 @@ def _scorecard_side_row(snapshot: Dict[str, Any], side: str = "") -> Dict[str, A
     return {}
 
 
+def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
+    scorecard_side = _scorecard_side_row(snapshot, side)
+    final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    evidence_used = final_contract.get("evidence_used") if isinstance(final_contract.get("evidence_used"), dict) else {}
+    learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
+    active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+    active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
+    return {
+        "opportunity_score": (
+            scorecard_side.get("opportunity_score")
+            if scorecard_side.get("opportunity_score") is not None
+            else evidence_used.get("opportunity_score")
+        ),
+        "opportunity_score_components": (
+            scorecard_side.get("opportunity_score_components")
+            if isinstance(scorecard_side.get("opportunity_score_components"), dict)
+            else evidence_used.get("opportunity_score_components") if isinstance(evidence_used.get("opportunity_score_components"), dict) else {}
+        ),
+        "opportunity_rank": (
+            scorecard_side.get("opportunity_rank")
+            if scorecard_side.get("opportunity_rank") is not None
+            else evidence_used.get("opportunity_rank")
+        ),
+        "capital_allocation_reason": (
+            scorecard_side.get("capital_allocation_reason")
+            or evidence_used.get("capital_allocation_reason")
+            or active_opportunity.get("capital_allocation_reason")
+            or ""
+        ),
+        "learning_adjustment_summary": (
+            scorecard_side.get("learning_adjustment_summary")
+            if isinstance(scorecard_side.get("learning_adjustment_summary"), dict)
+            else learning_used.get("learning_adjustment_summary") if isinstance(learning_used.get("learning_adjustment_summary"), dict) else {}
+        ),
+        "not_trade_authority": True,
+        "learning_use": "review_ranking_effectiveness_not_trade_command",
+    }
+
+
 def _primary_opportunity_type(snapshot: Dict[str, Any], side: str = "") -> str:
     scorecard_side = _scorecard_side_row(snapshot, side)
     scorecard_type = str(scorecard_side.get("dominant_opportunity_type") or scorecard_side.get("opportunity_type") or "")
@@ -3170,6 +3209,103 @@ def _profit_factor(pairs: List[Dict[str, Any]]) -> float:
     if losses <= 1e-9:
         return wins if wins > 0 else 0.0
     return wins / losses
+
+
+def _write_opportunity_ranking_learning_events(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    cfg: Dict[str, Any],
+    episode_payloads: List[Dict[str, Any]],
+) -> int:
+    policy = cfg.get("opportunity_ranking_learning_policy", {}) or {}
+    if not bool(policy.get("enabled", True)):
+        return 0
+    min_samples = int(policy.get("min_samples_for_ranking_preference", 3) or 3)
+    grouped: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for payload in episode_payloads:
+        pair = payload.get("pair") if isinstance(payload.get("pair"), dict) else {}
+        trace = payload.get("opportunity_ranking_trace") if isinstance(payload.get("opportunity_ranking_trace"), dict) else {}
+        score = _safe_float(trace.get("opportunity_score"), -1.0)
+        if score < 0:
+            continue
+        side = str(pair.get("side") or payload.get("candidate_side") or "").lower()
+        ticker = str(pair.get("ticker") or "").upper()
+        if not ticker or side not in {"long", "short"}:
+            continue
+        key = (
+            ticker,
+            side,
+            str(payload.get("opportunity_type") or _setup_type(side, _signal_combo_from_snapshot(payload.get("signal_snapshot") or {}), payload.get("signal_snapshot") or {}) or "unknown"),
+            str(payload.get("opportunity_state") or "unknown"),
+            str((payload.get("signal_snapshot") or {}).get("market_regime") or "unknown"),
+        )
+        grouped[key].append(payload)
+    inserted = 0
+    for key, rows in grouped.items():
+        if len(rows) < min_samples:
+            continue
+        net_pnl = sum(_safe_float((row.get("pair") or {}).get("net_pnl")) for row in rows)
+        wins = sum(1 for row in rows if _safe_float((row.get("pair") or {}).get("net_pnl")) > 0)
+        avg_score = sum(_safe_float((row.get("opportunity_ranking_trace") or {}).get("opportunity_score")) for row in rows) / len(rows)
+        win_rate = wins / len(rows) if rows else 0.0
+        ticker, side, setup_type, opportunity_state, regime = key
+        confidence = min(0.85, 0.35 + 0.08 * len(rows) + min(0.25, abs(net_pnl) / 80000.0))
+        effect = "raise_priority" if net_pnl > 0 and win_rate >= 0.55 else "lower_priority" if net_pnl < 0 and win_rate <= 0.45 else "observe"
+        multiplier = 1.10 if effect == "raise_priority" else 0.75 if effect == "lower_priority" else 1.0
+        evidence = {
+            "ticker": ticker,
+            "side": side,
+            "setup_type": setup_type,
+            "opportunity_state": opportunity_state,
+            "market_regime": regime,
+            "sample_count": len(rows),
+            "win_rate": win_rate,
+            "net_pnl": net_pnl,
+            "profit_factor": _profit_factor([row.get("pair") or {} for row in rows]),
+            "avg_opportunity_score": avg_score,
+            "source_trading_date": trading_date,
+            "source_fields": policy.get("source_fields") or [],
+            "not_trade_authority": True,
+        }
+        action = {
+            "policy_type": "opportunity_ranking_preference",
+            "policy_action": effect,
+            "policy_multiplier": multiplier,
+            "action_preference": "positive_candidate_open" if effect == "raise_priority" else "negative_revalidate" if effect == "lower_priority" else "",
+            "usage_boundary": {
+                "usable_by": ["portfolio_manager", "reviewer", "researcher"],
+                "allowed_effects": policy.get("allowed_policy_effects") or [
+                    "adjust_pm_opportunity_score",
+                    "adjust_capital_allocation_priority",
+                ],
+                "forbidden_effects": policy.get("forbidden_policy_effects") or [
+                    "create_trade_authority",
+                    "change_trader_lots",
+                    "change_trader_direction",
+                    "bypass_final_action_contract",
+                ],
+            },
+            "reason": (
+                f"opportunity ranking preference {effect}: samples={len(rows)}, "
+                f"win_rate={win_rate:.2%}, net_pnl={net_pnl:.0f}, avg_score={avg_score:.3f}"
+            ),
+            "confidence_score": confidence,
+        }
+        _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="opportunity_ranking_preference",
+            scope_type="ticker_side_setup_state",
+            scope_key=f"{ticker}:{side}:{setup_type}:{opportunity_state}:{regime}",
+            evidence=evidence,
+            action=action,
+            status="candidate",
+        )
+        inserted += 1
+    return inserted
 
 
 def _insert_learning_event(
@@ -3692,6 +3828,7 @@ def _write_trade_episode_memory(
 ) -> int:
     learning_cfg = cfg.get("learning", {}) or {}
     episode_cfg = learning_cfg.get("trade_episode_memory", {}) or {}
+    setattr(_write_trade_episode_memory, "last_payloads", [])
     if not bool(episode_cfg.get("enabled", True)):
         return 0
     pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
@@ -3712,6 +3849,7 @@ def _write_trade_episode_memory(
     )
     now = _utc_now()
     inserted = 0
+    episode_payloads: List[Dict[str, Any]] = []
     for pair in pairs:
         if str(pair.get("close_date") or "") > trading_date:
             continue
@@ -3751,6 +3889,7 @@ def _write_trade_episode_memory(
         open_tx = transaction_lookup.get(str(pair.get("open_transaction_id") or "")) or {}
         close_tx = transaction_lookup.get(str(pair.get("close_transaction_id") or "")) or {}
         safe_snapshot = _learning_safe_snapshot(snapshot)
+        opportunity_ranking_trace = _opportunity_ranking_trace(snapshot, side)
         payload = {
             "pair": pair,
             "open_transaction": open_tx,
@@ -3768,6 +3907,7 @@ def _write_trade_episode_memory(
             "active_opportunity_audit": active_audit,
             "learning_source": "final_action_contract",
             "opportunity_scorecard": opportunity_scorecard,
+            "opportunity_ranking_trace": opportunity_ranking_trace,
             "position_quality_controls": position_quality_controls,
             "learning_to_position_trace": (
                 (final_contract.get("learning_used") or {})
@@ -3806,23 +3946,27 @@ def _write_trade_episode_memory(
                 lesson,
                 f"outcome={payload['pair'].get('net_pnl')}; holding_days={payload['pair'].get('holding_days')}",
                 f"opportunity_state={payload.get('opportunity_state')}; setup_quality={((opportunity_scorecard or {}).get(side) or {}).get('max_setup_quality') if isinstance((opportunity_scorecard or {}).get(side), dict) else None}",
+                f"opportunity_score={opportunity_ranking_trace.get('opportunity_score')}; rank={opportunity_ranking_trace.get('opportunity_rank')}; allocation_reason={opportunity_ranking_trace.get('capital_allocation_reason')}",
                 *data_usage_notes[:3],
             ],
             analysis_strategy_updates=[
                 "Use as a comparable case when today's ticker/sector, side, horizon, and signal template are similar.",
                 "Ask whether today's analyst evidence repeats or contradicts the drivers in this episode.",
                 "Recheck setup quality: entry location, trigger, invalidation, market regime, and data quality before repeating the template.",
+                "Compare whether PM opportunity_score/opportunity_rank actually separated this episode from weaker candidates.",
             ],
             trading_strategy_updates=[
                 "Use the episode to refine entry/exit/hold reasoning, not as a standalone trade command.",
                 "Winning episodes preserve what worked; losing episodes identify what must be rechecked before repeating.",
                 "For winning same-scope templates, PM may consider controlled continuation only with current confirmation; for losing templates, PM must revalidate before new/add-on risk.",
+                "Ranking feedback may change future PM allocation priority, but cannot create trade authority without a final_action_contract.",
             ],
             validation_plan=[
                 "Accumulate same-scope future episodes before treating this as mature template evidence.",
             ],
             sample_count=1,
         )
+        episode_payloads.append(payload)
         episode_id = str(uuid.uuid4())
         payload_ext = externalize_json_for_db(
             payload,
@@ -3906,6 +4050,7 @@ def _write_trade_episode_memory(
             action={"episode_rows": inserted},
             status="applied",
         )
+    setattr(_write_trade_episode_memory, "last_payloads", episode_payloads)
     return inserted
 
 
@@ -5061,12 +5206,18 @@ def _write_no_trade_opportunity_memory(
             validation_updates = [
                 "Backfill no-trade counterfactual windows to test whether the limit-locked skipped trade was a real missed alpha or a correctly avoided unfilled order.",
             ]
+        opportunity_ranking_trace = _opportunity_ranking_trace(snapshot, side)
+        if opportunity_ranking_trace.get("opportunity_score") is not None:
+            validation_updates.append(
+                "Compare skipped candidate forward outcome by opportunity_score/opportunity_rank before changing PM allocation priority."
+            )
         safe_snapshot = _learning_safe_snapshot(snapshot)
         payload = {
             "recommendation_id": recommendation.get("id"),
             "signal_snapshot": safe_snapshot,
             "trade_research_contract_summary": _opportunity_contract_summary(snapshot),
             "opportunity_scorecard": opportunity_scorecard,
+            "opportunity_ranking_trace": opportunity_ranking_trace,
             "position_quality_controls": position_quality_controls,
             "data_usage_summary": data_usage,
             "data_usage_notes": data_usage_notes,
@@ -5134,6 +5285,11 @@ def _write_no_trade_opportunity_memory(
                 "; ".join(
                     f"{item.get('analyst')}:{item.get('bucket')} trigger={item.get('trigger_condition')}"
                     for item in neutral_observations[:3]
+                ),
+                (
+                    f"opportunity_score={opportunity_ranking_trace.get('opportunity_score')}; "
+                    f"rank={opportunity_ranking_trace.get('opportunity_rank')}; "
+                    f"allocation_reason={opportunity_ranking_trace.get('capital_allocation_reason')}"
                 ),
                 *data_usage_notes[:3],
             ],

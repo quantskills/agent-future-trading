@@ -256,6 +256,7 @@
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
+| `scorecard_current_tradeable_probe_seed` | `final_action_contract.reason_codes` / PM 诊断 | PM scorecard 将当前可交易候选释放为受控 probe 的原因代码；只适用于 `probe_candidate` / `tradeable_candidate` 或当前触发已成立的候选，不能用于 `watch_for_trigger` 条件监控。 |
 | `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
 | `risk_controls` | `final_action_contract` | 风险控制项。 |
 | `capital_controls` | `final_action_contract` | 资金控制项。 |
@@ -264,6 +265,12 @@
 | `contract_hash` | 审计 / 执行 | 被审计的合约哈希。 |
 | `single_source_of_trade_truth_remains` | PM 诊断 | 必须等于 `final_action_contract`；只用于审计说明。 |
 | `active_opportunity_audit` | PM 推荐 snapshot | PM 对当前机会释放路径的诊断对象；只用于解释候选、阻断和条件监控，不生成第二张交易合约。 |
+| `opportunity_score` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 对候选机会的综合评分，用于资金部署排序解释；不是交易授权，不能替代 `target_lots`。 |
+| `opportunity_score_components` | PM scorecard / `final_action_contract.evidence_used` / 复盘评估 | `opportunity_score` 的分项来源，如方向支持、setup 质量、市场确认、学习调整和风险扣分。 |
+| `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。 |
+| `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。 |
+| `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。 |
+| `learning_adjustment_summary` | 分析师证据 / PM scorecard / `final_action_contract.learning_used` / Researcher / 复盘评估 | 历史学习如何影响本次证据、评分或资金排序；不能直接改变 Trader 方向或手数。 |
 | `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |
 | `tradeable_opportunity_state_count` | PM scorecard | `tradeable_candidate` 与 `probe_candidate` 的证据数量。 |
 | `preferred_state` | PM 主机会审计 | PM 选中的首要机会状态。 |

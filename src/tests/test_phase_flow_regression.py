@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import hashlib
 import sqlite3
@@ -303,6 +303,106 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             updated = workflow._apply_virtual_recommendation_to_portfolio(portfolio, recommendation)
 
         self.assertEqual(updated.positions["BU"].shares, 0)
+
+    def test_workflow_applies_daily_full_market_capital_deployment_to_contracts(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+        rec_low = FuturesRecommendation(
+            id="low",
+            status=RecommendationStatus.PENDING,
+            underlying_code="A",
+            base_price=3000.0,
+            action=RecommendationAction.OPEN_SHORT,
+            lots=1,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {"opportunity_score": 0.41, "opportunity_rank": 1},
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": -1,
+                    "lots_delta": -1,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {"opportunity_score": 0.41, "opportunity_rank": 1},
+                },
+                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 1}},
+            },
+        )
+        rec_high = FuturesRecommendation(
+            id="high",
+            status=RecommendationStatus.PENDING,
+            underlying_code="B",
+            base_price=3000.0,
+            action=RecommendationAction.OPEN_SHORT,
+            lots=2,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {"opportunity_score": 0.73, "opportunity_rank": 2},
+                },
+                "final_action_contract": {
+                    "final_action": "open_real",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {"opportunity_score": 0.73, "opportunity_rank": 2},
+                },
+                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 2}},
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("A", rec_low), ("B", rec_high)])
+
+        self.assertEqual(rec_high.signal_snapshot["opportunity_scorecard"]["short"]["opportunity_rank"], 1)
+        self.assertEqual(rec_low.signal_snapshot["opportunity_scorecard"]["short"]["opportunity_rank"], 2)
+        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["target_lots"], -2)
+        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["lots_delta"], -2)
+        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["final_action"], "open_real")
+        self.assertEqual(rec_high.action, RecommendationAction.OPEN_SHORT)
+        self.assertEqual(rec_high.lots, 2)
+        self.assertTrue(rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(rec_low.signal_snapshot["final_action_contract"]["target_lots"], 0)
+        self.assertEqual(rec_low.signal_snapshot["final_action_contract"]["lots_delta"], 0)
+        self.assertEqual(rec_low.action, RecommendationAction.HOLD)
+        self.assertEqual(rec_low.lots, 0)
+        self.assertFalse(rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertIn(
+            "not_selected_by_full_market_pm_capital_queue",
+            rec_low.signal_snapshot["final_action_contract"]["evidence_used"]["capital_allocation_reason"],
+        )
+        self.assertEqual(rec_low.signal_snapshot["active_opportunity_audit"]["opportunity"]["opportunity_rank"], 2)
+        self.assertEqual(len(updates), 2)
+        update_by_id = {item[0]: item for item in updates}
+        self.assertEqual(update_by_id["high"][3]["action"], RecommendationAction.OPEN_SHORT)
+        self.assertEqual(update_by_id["high"][3]["lots"], 2)
+        self.assertEqual(update_by_id["low"][3]["action"], RecommendationAction.HOLD)
+        self.assertEqual(update_by_id["low"][3]["lots"], 0)
 
 
 class ResearchLearningMechanismRegressionTest(unittest.TestCase):
@@ -3109,7 +3209,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             },
             opportunity_scorecard={
                 "preferred_side": "long",
-                "long": {"final_state": "tradeable_candidate", "score": 0.72},
+                "long": {
+                    "final_state": "tradeable_candidate",
+                    "score": 0.72,
+                    "opportunity_score": 0.72,
+                    "opportunity_score_components": {"setup_quality": 0.12},
+                    "opportunity_rank": 1,
+                    "capital_allocation_reason": "ranked_deployable_candidate_with_complete_current_evidence",
+                    "learning_adjustment_summary": {"effect": "boosted"},
+                },
             },
             market_confirmation={"confirmation_score": 0.70, "conflicts": []},
             alpha_setup_action_values=[
@@ -3130,6 +3238,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["authority_type"], "real_budget_entry")
         self.assertEqual(contract["target_lots"], 5)
         self.assertEqual(contract["action_candidates"][0]["source"], "alpha_setup_action_value")
+        self.assertEqual(contract["evidence_used"]["opportunity_score"], 0.72)
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(
+            contract["evidence_used"]["capital_allocation_reason"],
+            "ranked_deployable_candidate_with_complete_current_evidence",
+        )
+        self.assertEqual(contract["learning_used"]["learning_adjustment_summary"]["effect"], "boosted")
+        self.assertNotIn("opportunity_score", contract)
 
     def test_final_action_contract_carries_execution_contract_as_trade_truth(self):
         contract = _build_final_action_contract(
@@ -3220,7 +3336,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["action_candidates"][0]["source"], "conditional_monitor")
         self.assertEqual(contract["action_candidates"][0]["action"], "conditional_probe")
         self.assertTrue(contract["action_candidates"][0]["requires_intraday_confirmation"])
-        self.assertNotIn("opportunity_scorecard_probe_seed", contract["reason_codes"])
+        self.assertNotIn("scorecard_current_tradeable_probe_seed", contract["reason_codes"])
 
     def test_negative_action_value_blocks_repeat_new_entry_without_new_evidence(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -5372,7 +5488,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         reasons = [
             "alpha_setup_ev_fusion",
-            "opportunity_scorecard_probe_seed",
+            "scorecard_current_tradeable_probe_seed",
             "market_confirmation_conflict",
             "single_high_quality_probe_only",
             "unknown_alpha_probe",
@@ -5451,7 +5567,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         reasons = [
             "alpha_setup_ev_fusion",
-            "opportunity_scorecard_probe_seed",
+            "scorecard_current_tradeable_probe_seed",
             "pm_watch_for_trigger_probe_cap",
             "unknown_alpha_probe",
         ]
@@ -5841,7 +5957,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "opportunity_scorecard_probe_seed",
+                "scorecard_current_tradeable_probe_seed",
                 "pm_watch_for_trigger_probe_cap",
                 "unknown_alpha_probe",
             ],
@@ -5925,7 +6041,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "opportunity_scorecard_probe_seed",
+                "scorecard_current_tradeable_probe_seed",
                 "pm_watch_for_trigger_probe_cap",
             ],
             control_diagnostics={"alpha_setup_ev_fusion": alpha_ev},
@@ -5941,7 +6057,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "opportunity_scorecard_probe_seed",
+                "scorecard_current_tradeable_probe_seed",
                 "pm_watch_for_trigger_probe_cap",
             ],
             control_diagnostics={
@@ -6752,7 +6868,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "opportunity_scorecard_probe_seed",
+                "scorecard_current_tradeable_probe_seed",
                 "pm_watch_for_trigger_probe_cap",
                 "horizon_consistency_probe_cap",
                 "market_confirmation_quality_gate",

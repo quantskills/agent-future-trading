@@ -197,6 +197,38 @@ def _group_summary(rows: Iterable[Dict[str, Any]], key_fields: List[str]) -> Lis
     return sorted(summary, key=lambda row: float(row.get("total_pnl") or 0.0))
 
 
+def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+    opportunity = audit.get("opportunity") if isinstance(audit.get("opportunity"), dict) else {}
+    score = evidence.get("opportunity_score")
+    if score is None:
+        score = opportunity.get("opportunity_score")
+    score_value = _safe_float(score, -1.0)
+    if score_value >= 0.65:
+        bucket = "high_score"
+    elif score_value >= 0.45:
+        bucket = "mid_score"
+    elif score_value >= 0.0:
+        bucket = "low_score"
+    else:
+        bucket = "unknown_score"
+    return {
+        "opportunity_score": score_value if score_value >= 0 else None,
+        "opportunity_score_bucket": bucket,
+        "opportunity_rank": evidence.get("opportunity_rank") or opportunity.get("opportunity_rank"),
+        "capital_allocation_reason": evidence.get("capital_allocation_reason") or opportunity.get("capital_allocation_reason") or "unknown",
+        "learning_adjustment_summary": (
+            (contract.get("learning_used") or {}).get("learning_adjustment_summary")
+            if isinstance(contract.get("learning_used"), dict)
+            else {}
+        ),
+    }
+
+
 def _attach_open_recommendation_context(
     pairs: List[Dict[str, Any]],
     recommendations_by_id: Dict[str, Dict[str, Any]],
@@ -218,6 +250,8 @@ def _attach_open_recommendation_context(
         item["trade_auditor_decision"] = auditor.get("decision", "none") if auditor else "none"
         item["planner_decision"] = item["trade_auditor_decision"]
         rebalance_summary = _rebalance_summary_from_snapshot(snapshot)
+        ranking_context = _opportunity_ranking_context(snapshot)
+        item.update(ranking_context)
         item["rebalance_summary"] = rebalance_summary
         item["rebalance_action_type"] = (
             rebalance_summary.get("action_type", "unknown") if rebalance_summary else "unknown"
@@ -1063,6 +1097,27 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
             _performance_rows(payload.get("by_signal_combo", []), ["signal_combo"]),
         ),
         "",
+        "## Performance By PM Opportunity Ranking",
+        "",
+        "Scores and ranks are PM allocation diagnostics, not Trader authority.",
+        "",
+        _format_table(
+            ["Score Bucket", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
+            _performance_rows(payload.get("by_opportunity_score_bucket", []), ["opportunity_score_bucket"]),
+        ),
+        "",
+        _format_table(
+            ["Rank", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
+            _performance_rows(payload.get("by_opportunity_rank", []), ["opportunity_rank"]),
+        ),
+        "",
+        "### Capital Allocation Reasons",
+        "",
+        _format_table(
+            ["Reason", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
+            _performance_rows(payload.get("by_capital_allocation_reason", []), ["capital_allocation_reason"]),
+        ),
+        "",
         "## Holding And Rebalance Attribution",
         "",
         _format_table(
@@ -1303,6 +1358,9 @@ def build_attribution_report(
     by_trade_auditor_decision = _group_summary(strategy_only_pairs, ["trade_auditor_decision"])
     by_planner_decision = by_trade_auditor_decision
     by_ticker_side_signal_combo = _group_summary(strategy_only_pairs, ["ticker", "side", "signal_combo"])
+    by_opportunity_score_bucket = _group_summary(strategy_only_pairs, ["opportunity_score_bucket"])
+    by_opportunity_rank = _group_summary(strategy_only_pairs, ["opportunity_rank"])
+    by_capital_allocation_reason = _group_summary(strategy_only_pairs, ["capital_allocation_reason"])
     by_rebalance_action_type = _group_summary(strategy_only_pairs, ["rebalance_action_type"])
     by_rebalance_reason = _group_summary(strategy_only_pairs, ["rebalance_reason"])
     rebalance_pair_summary = _rebalance_pair_summary(strategy_only_pairs)
@@ -1355,6 +1413,9 @@ def build_attribution_report(
         "by_trade_auditor_decision": by_trade_auditor_decision,
         "by_planner_decision": by_planner_decision,
         "by_ticker_side_signal_combo": by_ticker_side_signal_combo,
+        "by_opportunity_score_bucket": by_opportunity_score_bucket,
+        "by_opportunity_rank": by_opportunity_rank,
+        "by_capital_allocation_reason": by_capital_allocation_reason,
         "by_rebalance_action_type": by_rebalance_action_type,
         "by_rebalance_reason": by_rebalance_reason,
         "rebalance_pair_summary": rebalance_pair_summary,

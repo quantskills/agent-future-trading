@@ -427,7 +427,7 @@
 
 （12）收束 PM 条件机会释放的重复路径。
 修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_phase_flow_regression.py`。
-为什么改：`watch_for_trigger` 条件机会不能再混用 `opportunity_scorecard_probe_seed`；等待触发的干净机会只进入 `conditional_monitor_probe_seed` 和 `pm_watch_for_trigger_probe_cap`，再由同一张 `final_action_contract` 的 `conditional_trigger_authority` 决定是否交给 Trader 盘中监控。
+为什么改：`watch_for_trigger` 条件机会不能再混用 `scorecard_current_tradeable_probe_seed`；等待触发的干净机会只进入 `conditional_monitor_probe_seed` 和 `pm_watch_for_trigger_probe_cap`，再由同一张 `final_action_contract` 的 `conditional_trigger_authority` 决定是否交给 Trader 盘中监控。
 
 （13）锁死 Trader raw action/lots 旁路并修复执行学习上下文。
 修改了什么：`src/agents/execution_team/trader.py`、`src/tests/test_phase_flow_regression.py`。
@@ -478,3 +478,27 @@
 （7）对齐评估模块到统一字段语义与策略/运营分账口径。
 修改了什么：`src/evaluation/evaluation.py`、`src/evaluation/plot_portfolio.py`、`src/evaluation/analyze_strategy_attribution.py`、`src/tests/test_evaluation_unified_semantics.py`。
 为什么改：字段语义表要求 `source_type=strategy` 与换月、强平等运营单分账；本次让策略胜率、策略质量、分析师/PM 归因和弱边建议只看策略交易对，账户曲线继续包含所有真实结算，运营单只进入独立摘要，避免运营成交污染 alpha 归因。
+
+（8）打通 PM 全市场机会评分与资金部署解释字段。
+修改了什么：`src/tools/agent_tools/analysis/signal_fusion.py`、`src/agents/decision_team/portfolio_manager.py`、`src/graph/workflow.py`、`src/config/portfolio_policy_catalog.yaml`、`src/config/dev.yaml`、`docs/unified_field_semantics.md`。
+为什么改：把候选机会从逐品种平铺释放收束为可比较的 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary` 诊断，并在 Phase1 完成后写回当日全市场排名；这些字段只进入 scorecard、`final_action_contract.evidence_used/learning_used` 和审计诊断，不生成第二交易权限，不改变 `target_lots/lots_delta/final_action`。
+
+（9）补齐 Reviewer/Researcher 对 PM 排序效果的学习闭环。
+修改了什么：`src/tools/agent_tools/research/reviewer_tools.py`、`src/tools/agent_tools/research/researcher_tools.py`、`src/config/learning_policy_catalog.yaml`、`src/util/config_normalizer.py`。
+为什么改：让复盘不只看单笔盈亏，还记录 PM 评分、排名、资金分配理由是否把资金推向更强 alpha；Researcher 只写候选排序偏好学习事件，不能直接创建交易权限、改 Trader 方向或手数。
+
+（10）对齐审计、归因、提示词和测试到新增排序字段边界。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/evaluation/analyze_strategy_attribution.py`、`src/llm/prompt.py`、`src/tests/test_agent_contracts.py`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_reviewer_learning.py`。
+为什么改：防止 `opportunity_score/opportunity_rank` 被误用成交易授权，同时让策略归因能按高分/低分、排名和资金分配理由评估效果；测试覆盖字段不越权、全市场 rank 写回不改合约、审计拦截顶层交易权限误用。
+
+（11）把 PM 全市场机会排序真正落到资金部署和最终合约。
+修改了什么：`src/graph/workflow.py`、`src/database/sqlite_helper.py`、`src/database/interface.py`、`src/config/dev.yaml`、`src/config/portfolio_policy_catalog.yaml`、`src/tests/test_phase_flow_regression.py`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_research.md`、`docs/mechanism_future_trade.md`、`docs/mechanism_data_model.md`。
+为什么改：此前 `opportunity_score/opportunity_rank/capital_allocation_reason` 已进入诊断、复盘和学习，但还没有真正改变 `final_action_contract.target_lots/lots_delta`；本次让 Phase1 先收集所有品种候选，再由 PM 全市场资金部署 pass 按排名和资金目标回写同一张最终合约与推荐顶层 action/lots，入选候选保留实际 probe/开仓，未入选候选退回不增加敞口并写清可复盘原因，同时保持 Trader 只执行唯一合约、不新增第二交易权限。
+
+（12）锁死推荐顶层 action/lots 与唯一合约部署结果一致。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：每日审计此前只检查 `final_action_contract` 内部一致性和成交是否来自合约，没有直接拦截推荐表顶层 `action/lots` 与部署后的 `final_action_contract.current_lots/target_lots` 不一致；本次新增 hard fail，并让 workflow 部署测试确认 DB 更新接口同步写回 action/lots，防止“合约改了、顶层没同步”的非策略风险。
+
+（13）重命名当前可交易 scorecard probe reason code 并同步字段语义。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/decision/pm_capital_policy.py`、`src/tools/agent_tools/decision/reason_effects.py`、`src/tests/test_phase_flow_regression.py`、`docs/unified_field_semantics.md`。
+为什么改：旧名容易被误读成 `watch_for_trigger` 条件监控释放；本次统一改为 `scorecard_current_tradeable_probe_seed`，明确它只适用于当前可交易或当前触发已成立的候选，条件监控仍走 `conditional_monitor_probe_seed/pm_watch_for_trigger_probe_cap`，避免 PM 当前可交易通道与条件监控通道再次语义混用。

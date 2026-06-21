@@ -11,6 +11,10 @@
 # setup_quality_ok、明确方向、entry_trigger 和 invalidation_present，PM 只能把它写入
 # 同一张 final_action_contract 的条件监控 probe，Trader 只盘中检查触发，不能自创方向/手数。
 # 只有当前触发已经成立且有失效边界时，才可进入 tradeable_candidate 或即时 probe/开仓候选。
+# PM 还会把所有候选写入 opportunity_score / opportunity_rank / capital_allocation_reason：
+# 这些字段驱动 PM 的全市场资金部署 pass，并回写同一张 final_action_contract；
+# 它们不是第二张交易合约，也不给 Trader 新权限。Trader 仍只执行合约里的 target_lots/lots_delta。
+# 被 PM 资金队列入选的 probe 仍按现有 probe 资金边界执行；未入选候选必须留下可复盘原因。
 # 资金参数保护区：
 #   - position_budget_policy
 #   - risk_control

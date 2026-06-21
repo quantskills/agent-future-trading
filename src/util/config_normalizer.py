@@ -190,6 +190,7 @@ def _apply_learning_policy_catalog(
         "llm_signal_quality",
         "learning_context",
         "learning_retention",
+        "opportunity_ranking_learning_policy",
     ):
         section = payload.get(key)
         if isinstance(section, Mapping):
@@ -207,6 +208,7 @@ def _apply_learning_policy_catalog(
         roles["llm_signal_quality"] = "learning_policy_catalog_runtime_expanded"
         roles["learning_context"] = "learning_policy_catalog_runtime_expanded"
         roles["learning_retention"] = "learning_policy_catalog_runtime_expanded"
+        roles["opportunity_ranking_learning_policy"] = "learning_policy_catalog_runtime_expanded"
 
 
 def _apply_execution_catalogs(

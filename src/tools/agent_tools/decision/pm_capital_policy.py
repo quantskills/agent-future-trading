@@ -1,4 +1,4 @@
-﻿"""Capital utilization and alpha release policy helpers for portfolio decisions."""
+"""Capital utilization and alpha release policy helpers for portfolio decisions."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ _ALPHA_RELEASE_TIER_ORDER = {
 _SOFT_LIMITED_PRE_CONTROL_REASONS = {
     "business_quality_probe_only",
     "business_quality_observe_or_block",
-    "opportunity_scorecard_probe_seed",
+    "scorecard_current_tradeable_probe_seed",
     "single_high_quality_probe_only",
     "pm_watch_for_trigger_probe_cap",
     "horizon_consistency_probe_cap",

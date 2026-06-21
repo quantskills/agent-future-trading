@@ -747,6 +747,13 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(row["opportunity_state"], "watch_for_trigger")
         self.assertIn("post-open break", row["entry_trigger"])
         self.assertEqual(row["source_analysts"], ["technical"])
+        self.assertIn("opportunity_score", row)
+        self.assertIn("opportunity_score_components", row)
+        self.assertIn("opportunity_rank", row)
+        self.assertIn("capital_allocation_reason", row)
+        self.assertIn("learning_adjustment_summary", row)
+        self.assertTrue(row["conditional_monitor_candidate"])
+        self.assertEqual(row["capital_allocation_reason"], "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows")
 
     def test_scorecard_prefers_action_evidence_contract_text_over_raw_signal_text(self):
         signal = AnalystSignal(
@@ -781,6 +788,62 @@ class AgentContractFixtureTest(unittest.TestCase):
         row = card["short"]
         self.assertEqual(row["entry_trigger"], "canonical post-open breakdown confirmation")
         self.assertTrue(row["invalidation_present"])
+
+    def test_scorecard_ranks_stronger_side_above_weaker_side(self):
+        long_signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.72,
+            opportunity_state="tradeable_candidate",
+            setup_quality_score=0.76,
+            business_quality_score=0.72,
+            entry_trigger="current breakout confirmed above resistance",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            would_change_view_if="long invalid if price closes below breakout area",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "tradeable_candidate",
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "current_trigger_confirmed": True,
+                    "invalidation_present": True,
+                    "entry_trigger": "current breakout confirmed above resistance",
+                }
+            },
+        )
+        short_signal = AnalystSignal(
+            agent_name="commodity_news",
+            signal=Signal.BEARISH,
+            confidence=0.35,
+            opportunity_state="watch_for_trigger",
+            setup_quality_score=0.45,
+            business_quality_score=0.40,
+            entry_trigger="wait for post-open breakdown",
+            would_change_view_if="short invalid if price closes back above range",
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open breakdown",
+                }
+            },
+        )
+
+        card = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[long_signal, short_signal],
+            market_confirmation={"confirmation_score": 0.72},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+
+        self.assertEqual(card["long"]["opportunity_rank"], 1)
+        self.assertEqual(card["short"]["opportunity_rank"], 2)
+        self.assertGreater(card["long"]["opportunity_score"], card["short"]["opportunity_score"])
+        self.assertIn("setup_quality", card["long"]["opportunity_score_components"])
 
     def test_single_complete_fundamental_setup_with_strong_market_confirmation_is_tradeable(self):
         """Regression for PM over-blocking a complete setup as watch_for_trigger."""

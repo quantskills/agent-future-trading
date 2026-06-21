@@ -350,6 +350,64 @@ def _technical_opposes_side(signals: Iterable[Any], side: str, min_confidence: f
     return False
 
 
+def _score_weight(config: Mapping[str, Any], key: str, default: float) -> float:
+    weights = config.get("score_component_weights") if isinstance(config.get("score_component_weights"), Mapping) else {}
+    return _safe_float(weights.get(key), default)
+
+
+def _score_cap(config: Mapping[str, Any], key: str, default: float) -> float:
+    caps = config.get("score_component_caps") if isinstance(config.get("score_component_caps"), Mapping) else {}
+    return _safe_float(caps.get(key), default)
+
+
+def _capital_allocation_reason(*, row: Mapping[str, Any], deployable_threshold: float, tradeable_threshold: float) -> str:
+    state = str(row.get("final_state") or "unknown")
+    score = _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
+    failures = {str(item) for item in (row.get("gating_failures") or [])}
+    if state == "tradeable_candidate" and score >= deployable_threshold:
+        return "ranked_deployable_candidate_with_complete_current_evidence"
+    if state == "probe_candidate":
+        return "ranked_probe_candidate_selected_only_if_pm_capital_queue_allows"
+    if state == "watch_for_trigger" and bool(row.get("conditional_monitor_candidate")):
+        return "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows"
+    if "missing_invalidation_boundary" in failures:
+        return "not_allocated_missing_invalidation_boundary"
+    if "critical_data_gap" in failures:
+        return "not_allocated_critical_data_gap"
+    if "same_scope_alpha_setup_capped_or_rejected" in failures:
+        return "rank_lowered_by_same_scope_learning"
+    if score < tradeable_threshold:
+        return "rank_lowered_by_insufficient_opportunity_score"
+    return "ranked_candidate_requires_pm_final_contract_authority"
+
+
+def _learning_adjustment_summary(
+    *,
+    policy_counts: Mapping[str, int],
+    alpha_profile_bonus: float,
+    alpha_profile_penalty: float,
+    best_alpha_profile: Mapping[str, Any],
+    capped_profiles: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    net_adjustment = alpha_profile_bonus - alpha_profile_penalty
+    return {
+        "positive_policy_count": int(policy_counts.get("positive", 0) or 0),
+        "negative_policy_count": int(policy_counts.get("negative", 0) or 0),
+        "alpha_setup_score_adjustment": round(net_adjustment, 4),
+        "best_profile_state": best_alpha_profile.get("lifecycle_state") if best_alpha_profile else None,
+        "best_profile_scope_key": best_alpha_profile.get("scope_key") if best_alpha_profile else None,
+        "capped_or_rejected_profile_count": len(capped_profiles),
+        "effect": (
+            "boosted"
+            if net_adjustment > 0
+            else "penalized"
+            if net_adjustment < 0
+            else "neutral"
+        ),
+        "not_trade_authority": True,
+    }
+
+
 def build_opportunity_scorecard(
     *,
     ticker: str,
@@ -477,15 +535,23 @@ def build_opportunity_scorecard(
         avg_setup_quality = sum(setup_quality_scores) / len(setup_quality_scores) if setup_quality_scores else 0.0
         max_setup_quality = max(setup_quality_scores, default=0.0)
         avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
-        score = 0.0
-        score += min(0.28, 0.10 * support_count)
-        score += min(0.24, 0.12 * tradeable_states)
-        score += 0.14 * max_quality
-        score += 0.16 * max_setup_quality
-        score += 0.12 * avg_confidence
-        score += 0.12 * confirmation_score
-        score += 0.05 * min(1.0, policy_counts.get("positive", 0))
-        score -= 0.10 * min(1.0, policy_counts.get("negative", 0))
+        score_components = {
+            "directional_support": min(
+                _score_cap(cfg, "directional_support", 0.28),
+                _score_weight(cfg, "directional_support_per_signal", 0.10) * support_count,
+            ),
+            "tradeable_state": min(
+                _score_cap(cfg, "tradeable_state", 0.24),
+                _score_weight(cfg, "tradeable_state_per_signal", 0.12) * tradeable_states,
+            ),
+            "business_quality": _score_weight(cfg, "business_quality", 0.14) * max_quality,
+            "setup_quality": _score_weight(cfg, "setup_quality", 0.16) * max_setup_quality,
+            "confidence": _score_weight(cfg, "confidence", 0.12) * avg_confidence,
+            "market_confirmation": _score_weight(cfg, "market_confirmation", 0.12) * confirmation_score,
+            "positive_learning": _score_weight(cfg, "positive_learning", 0.05) * min(1.0, policy_counts.get("positive", 0)),
+            "negative_learning": -abs(_score_weight(cfg, "negative_learning", 0.10)) * min(1.0, policy_counts.get("negative", 0)),
+        }
+        score = sum(score_components.values())
         side_profiles = alpha_profiles_by_side.get(side, [])
         deployable_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "deployable"]
         protected_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "protected"]
@@ -508,11 +574,17 @@ def build_opportunity_scorecard(
         elif watchlist_profiles:
             alpha_profile_bonus = 0.025
         alpha_profile_penalty = 0.08 if capped_profiles else 0.0
-        score += alpha_profile_bonus
-        score -= alpha_profile_penalty
-        score -= 0.10 * min(1.0, len(confirmation_conflicts) / 3.0)
-        score -= 0.12 if critical_gap else 0.0
-        score -= 0.06 if fundamental_setup_gap else 0.0
+        score_components["alpha_profile_adjustment"] = alpha_profile_bonus - alpha_profile_penalty
+        score_components["market_conflict_penalty"] = -abs(
+            _score_weight(cfg, "market_conflict_penalty", 0.10)
+        ) * min(1.0, len(confirmation_conflicts) / 3.0)
+        score_components["critical_data_gap_penalty"] = -abs(
+            _score_weight(cfg, "critical_data_gap_penalty", 0.12)
+        ) if critical_gap else 0.0
+        score_components["fundamental_gap_penalty"] = -abs(
+            _score_weight(cfg, "fundamental_gap_penalty", 0.06)
+        ) if fundamental_setup_gap else 0.0
+        score = sum(score_components.values())
         score = max(0.0, min(1.0, score))
 
         gating_failures: list[str] = []
@@ -587,9 +659,15 @@ def build_opportunity_scorecard(
         else:
             final_state = "no_opportunity"
 
+        opportunity_score = round(score, 4)
         side_rows[side] = {
             "side": side,
-            "score": round(score, 4),
+            "score": opportunity_score,
+            "opportunity_score": opportunity_score,
+            "opportunity_score_components": {
+                key: round(float(value or 0.0), 4)
+                for key, value in score_components.items()
+            },
             "final_state": final_state,
             "supporting_signal_count": support_count,
             "supporting_analysts": sorted(set(name for name in analyst_names if name)),
@@ -642,14 +720,51 @@ def build_opportunity_scorecard(
                 "max_position_impact": best_alpha_profile.get("max_position_impact"),
             } if best_alpha_profile else {},
             "alpha_setup_score_adjustment": round(alpha_profile_bonus - alpha_profile_penalty, 4),
+            "learning_adjustment_summary": _learning_adjustment_summary(
+                policy_counts=policy_counts,
+                alpha_profile_bonus=alpha_profile_bonus,
+                alpha_profile_penalty=alpha_profile_penalty,
+                best_alpha_profile=best_alpha_profile,
+                capped_profiles=capped_profiles,
+            ),
             "gating_failures": gating_failures,
         }
+        side_rows[side]["conditional_monitor_candidate"] = bool(
+            final_state == "watch_for_trigger"
+            and side_rows[side]["setup_quality_ok"]
+            and not side_rows[side]["trigger_valid"]
+            and side_rows[side]["invalidation_present"]
+            and bool(side_rows[side]["entry_trigger"])
+        )
+        side_rows[side]["capital_allocation_reason"] = _capital_allocation_reason(
+            row=side_rows[side],
+            deployable_threshold=deployable_threshold,
+            tradeable_threshold=tradeable_threshold,
+        )
 
     preferred_side = "flat"
     if side_rows["long"]["score"] > side_rows["short"]["score"] + 0.04:
         preferred_side = "long"
     elif side_rows["short"]["score"] > side_rows["long"]["score"] + 0.04:
         preferred_side = "short"
+    ranked_sides = sorted(
+        (
+            side
+            for side in ("long", "short")
+            if side_rows[side]["supporting_signal_count"] > 0
+            or side_rows[side]["final_state"] in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
+        ),
+        key=lambda item: (
+            _safe_float(side_rows[item].get("opportunity_score"), 0.0),
+            int(side_rows[item].get("supporting_signal_count") or 0),
+            _safe_float(side_rows[item].get("max_setup_quality"), 0.0),
+        ),
+        reverse=True,
+    )
+    for rank, side in enumerate(ranked_sides, start=1):
+        side_rows[side]["opportunity_rank"] = rank
+    for side in ("long", "short"):
+        side_rows[side].setdefault("opportunity_rank", None)
     return {
         "version": "opportunity_scorecard_v1",
         "ticker": ticker,

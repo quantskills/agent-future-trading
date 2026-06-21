@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 import math
 from datetime import datetime
@@ -630,7 +630,7 @@ def _is_controlled_probe_reason(reason: str) -> bool:
     return str(reason or "") in {
         "business_quality_probe_only",
         "business_quality_observe_or_block",
-        "opportunity_scorecard_probe_seed",
+        "scorecard_current_tradeable_probe_seed",
         "single_high_quality_probe_only",
         "pm_watch_for_trigger_probe_cap",
         "horizon_consistency_probe_cap",
@@ -970,6 +970,13 @@ def _build_final_action_contract(
     execution_contract_payload = dict(execution_contract_fields) if isinstance(execution_contract_fields, dict) else {}
     target_side = "long" if int(target_lots or 0) > 0 else "short" if int(target_lots or 0) < 0 else "flat"
     scorecard_side = scorecard.get(target_side) if target_side in {"long", "short"} and isinstance(scorecard.get(target_side), dict) else {}
+    if not scorecard_side:
+        preferred_side = str(scorecard.get("preferred_side") or "").lower()
+        scorecard_side = (
+            scorecard.get(preferred_side)
+            if preferred_side in {"long", "short"} and isinstance(scorecard.get(preferred_side), dict)
+            else {}
+        )
     authority = final_entry_authority if isinstance(final_entry_authority, dict) else {}
     final_action = _final_action_from_lots(
         current_lots=current_lots,
@@ -977,13 +984,13 @@ def _build_final_action_contract(
         final_entry_authority=authority,
     )
     candidates: list[dict] = []
-    scorecard_seed = diagnostics.get("opportunity_scorecard_probe_seed")
+    scorecard_seed = diagnostics.get("scorecard_current_tradeable_probe_seed")
     if isinstance(scorecard_seed, dict):
         candidates.append({
             "action": "open_probe",
             "source": "opportunity_scorecard",
             "status": scorecard_seed.get("status") or (
-                "applied" if "opportunity_scorecard_probe_seed" in control_reasons else "candidate"
+                "applied" if "scorecard_current_tradeable_probe_seed" in control_reasons else "candidate"
             ),
             "side": scorecard_seed.get("side"),
             "ratio": scorecard_seed.get("ratio"),
@@ -1101,6 +1108,10 @@ def _build_final_action_contract(
             "scorecard_preferred_side": scorecard.get("preferred_side"),
             "scorecard_state": scorecard_side.get("final_state"),
             "scorecard_score": scorecard_side.get("score"),
+            "opportunity_score": scorecard_side.get("opportunity_score", scorecard_side.get("score")),
+            "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
+            "opportunity_rank": scorecard_side.get("opportunity_rank"),
+            "capital_allocation_reason": scorecard_side.get("capital_allocation_reason"),
             "market_confirmation_score": (
                 _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
                 if isinstance(market_confirmation, dict)
@@ -1132,6 +1143,7 @@ def _build_final_action_contract(
                 and isinstance((diagnostics.get("capital_utilization_learning") or {}).get("protected_memory"), dict)
                 else ""
             ),
+            "learning_adjustment_summary": scorecard_side.get("learning_adjustment_summary") or {},
         },
         "risk_flags": sorted(reason_codes),
         **execution_fields,
@@ -1645,7 +1657,7 @@ def _probe_like_control_reason_present(reasons: list[str]) -> bool:
         "controlled_probe_below_min_entry_kept",
         "pm_watch_for_trigger_probe_cap",
         "horizon_consistency_probe_cap",
-        "opportunity_scorecard_probe_seed",
+        "scorecard_current_tradeable_probe_seed",
         "trade_auditor_soft_probe_floor",
         "fast_candidate_alpha_probe",
         "soft_block_converted_to_probe_only",
@@ -1877,7 +1889,7 @@ def _qualified_real_probe_release(
 _MINIMUM_REAL_PROBE_SOFT_REASONS = {
     "business_quality_probe_only",
     "business_quality_observe_or_block",
-    "opportunity_scorecard_probe_seed",
+    "scorecard_current_tradeable_probe_seed",
     "market_confirmation_quality_gate",
     "weak_signal_combo_probe_cap",
     "side_performance_probe_cap",
@@ -2054,7 +2066,7 @@ _FINAL_ACTION_AUTHORITY_WEAK_REASONS = {
     "side_performance_probe_cap",
     "business_quality_probe_only",
     "business_quality_observe_or_block",
-    "opportunity_scorecard_probe_seed",
+    "scorecard_current_tradeable_probe_seed",
     "trade_auditor_soft_probe_floor",
     "controlled_probe_below_min_entry_kept",
     "unknown_alpha_probe",
@@ -4629,6 +4641,11 @@ def _build_active_opportunity_audit(
             "preferred_side": preferred_side,
             "preferred_state": str(preferred_card.get("final_state") or "unknown"),
             "preferred_score": preferred_card.get("score"),
+            "opportunity_score": preferred_card.get("opportunity_score", preferred_card.get("score")),
+            "opportunity_score_components": preferred_card.get("opportunity_score_components") or {},
+            "opportunity_rank": preferred_card.get("opportunity_rank"),
+            "capital_allocation_reason": preferred_card.get("capital_allocation_reason"),
+            "learning_adjustment_summary": preferred_card.get("learning_adjustment_summary") or {},
             "analyst_candidate_count": len(analyst_candidates),
             "conditional_monitor_candidate_count": len(conditional_monitor_candidates),
             "watchlist_or_counterfactual_count": len(watchlist_items),
@@ -4760,6 +4777,11 @@ def _build_pm_landing_consistency_audit(
             "target_side": side,
             "side_final_state": layer,
             "side_score": side_scorecard.get("score"),
+            "opportunity_score": side_scorecard.get("opportunity_score", side_scorecard.get("score")),
+            "opportunity_score_components": side_scorecard.get("opportunity_score_components") or {},
+            "opportunity_rank": side_scorecard.get("opportunity_rank"),
+            "capital_allocation_reason": side_scorecard.get("capital_allocation_reason"),
+            "learning_adjustment_summary": side_scorecard.get("learning_adjustment_summary") or {},
             "gating_failures": side_scorecard.get("gating_failures") or [],
             "entry_setup_count": setup_count,
             "invalidation_count": invalidation_count,
@@ -9272,13 +9294,13 @@ def portfolio_agent_futures(state: FundState):
     control_notes: list[str] = []
     control_diagnostics: dict = {}
     if scorecard_probe_seed_applied:
-        control_reasons.append("opportunity_scorecard_probe_seed")
+        control_reasons.append("scorecard_current_tradeable_probe_seed")
         control_notes.append(
             f"{ticker} scorecard converted qualified {scorecard_probe_side} opportunity to probe seed: "
             f"state={scorecard_probe_row.get('final_state')}, score={scorecard_probe_row.get('score')}, "
             f"ratio={scorecard_probe_ratio:.2%}"
         )
-        control_diagnostics["opportunity_scorecard_probe_seed"] = {
+        control_diagnostics["scorecard_current_tradeable_probe_seed"] = {
             "side": scorecard_probe_side,
             "ratio": float(scorecard_probe_ratio),
             "scorecard": scorecard_probe_row,
@@ -9303,7 +9325,7 @@ def portfolio_agent_futures(state: FundState):
             "requires_intraday_confirmation": True,
         }
     elif scorecard_probe_seed_not_applied:
-        control_diagnostics["opportunity_scorecard_probe_seed"] = scorecard_probe_seed_not_applied
+        control_diagnostics["scorecard_current_tradeable_probe_seed"] = scorecard_probe_seed_not_applied
     if learned_open_seed_applied:
         selected_row = learned_open_seed.get("row") if isinstance(learned_open_seed.get("row"), dict) else {}
         selected_evidence = learned_open_seed.get("evidence") if isinstance(learned_open_seed.get("evidence"), dict) else {}

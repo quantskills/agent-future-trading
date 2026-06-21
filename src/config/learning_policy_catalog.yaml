@@ -32,6 +32,32 @@ learning_gatekeeping_policy:
     - execution_changes_target_lots
     - execution_changes_margin_ratio
 
+opportunity_ranking_learning_policy:
+  # Reviewer/Researcher 复盘 PM 的 opportunity_score / opportunity_rank 是否真的把资金推向正 alpha。
+  # 该学习只生成下一轮排序偏好和 policy_multiplier，不直接开仓、不改 Trader 手数。
+  enabled: true
+  source_fields:
+    - opportunity_score
+    - opportunity_score_components
+    - opportunity_rank
+    - capital_allocation_reason
+    - learning_adjustment_summary
+  researcher_output_role: ranking_preference_not_trade_authority
+  allowed_policy_effects:
+    - adjust_pm_opportunity_score
+    - adjust_capital_allocation_priority
+    - require_clearer_current_confirmation
+  forbidden_policy_effects:
+    - create_trade_authority
+    - change_trader_lots
+    - change_trader_direction
+    - bypass_final_action_contract
+  evaluation_buckets:
+    high_score_min: 0.65
+    low_score_max: 0.45
+  min_samples_for_ranking_preference: 3
+  valid_days: 10
+
 strategy_memory:
   # 数据库驱动的策略记忆，Phase4 写入，下一交易日读取。
   enabled: true
