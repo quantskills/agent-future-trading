@@ -424,6 +424,10 @@ Decision framework:
    capital_allocation_reason, and learning_adjustment_summary. These fields are
    diagnostics for ranking and future learning only; they are not a second trade
    contract and cannot bypass final_action_contract target_lots/lots_delta.
+9. Rank and sizing priors must favor completed episode evidence over one-day noise:
+   positive open/hold/exit/execution episodes may promote rank and support scaling,
+   while recent tail loss or negative revalidation lowers rank and can offset stale
+   positive memories. This is capital migration, not a product blacklist.
 
 Output requirements:
 - optimal_position_ratio: a signed float between -{max_position_ratio:.2f} and +{max_position_ratio:.2f}; positive is LONG, negative is SHORT, zero is NEUTRAL
@@ -875,6 +879,10 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "hold rewards evaluate giveback, protection, and continuation quality; "
         "exit/reduce rewards evaluate whether profit was protected or exits were too early; "
         "execution rewards evaluate trigger method, slippage, chase failure, or missed execution. "
+        "Treat complete trade episodes as stronger learning evidence than single-day noise; "
+        "record when positive alpha should be promoted/scaled, when recent tail loss should "
+        "cool or invalidate stale positive memories, and when exit/hold behavior rather than "
+        "entry selection caused the result. "
         "Each lesson must state who may use it: analysts only via signal_calibration, "
         "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract execution fields after audit_verdict/trade_contract_audit approval, "
         "and protocol-governor only for audit. "

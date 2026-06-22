@@ -72,6 +72,8 @@ Commodity News 调用本地 `data/News_data/Future_news/<ticker>.txt` 和新闻�
 
 PM 调用三位分析师结构化信号、交易研究契约、学习上下文、PandaAI market confirmation、账户持仓、资金、风险状态、数据质量摘要和 Auditor 结果。PM 的 recommendation snapshot 会写入每位分析师的 `data_usage_summary`、market confirmation feature status、每日 `data_quality_summary` 路径、`llm_path`、机会层级、setup 质量、`learning_to_position_trace`、仓位质量控制和 PM 诊断。`opportunity_scorecard` 必须稳定携带 `setup_quality_ok`、`trigger_valid`、`current_trigger_confirmed`、`invalidation_present`、`entry_trigger`、`opportunity_state` 和 `source_analysts`，并写入 PM 计算的 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`。干净的 `watch_for_trigger` 条件机会只进入 `conditional_monitor_candidates` 供 PM 判断是否生成同一张 `final_action_contract` 的条件 probe 权限，不能直接变成开仓，也不能被当成普通 wait 丢失。PM 可以调用 LLM 形成初步判断，但仓位目标必须经过数据质量、setup 质量、机会层级、全市场排序、风控和 Auditor 修正。
 
+`opportunity_score_components` 当前正式包含 `positive_learning`、`negative_learning`、`execution_profile_learning` 和 `recent_tail_loss_penalty` 等学习分项。它们来自 Phase4 后的完整 episode、同作用域 action-value、执行 profile 和近期大亏反馈，按作用域、样本数、收益质量和时间衰减进入 PM 排名；它们不能直接成为 Trader 指令，也不能跳过 `final_action_contract`。
+
 每日回测或模拟盘会输出：
 
 ```text

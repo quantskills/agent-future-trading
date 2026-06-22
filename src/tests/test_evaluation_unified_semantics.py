@@ -15,6 +15,7 @@ from evaluation.evaluation import (
     calculate_futures_strategy_quality_metrics,
     calculate_futures_transaction_win_rate,
 )
+from evaluation.plot_portfolio import PortfolioCurvePlotter
 
 
 class EvaluationUnifiedSemanticsRegressionTest(unittest.TestCase):
@@ -155,6 +156,57 @@ class EvaluationUnifiedSemanticsRegressionTest(unittest.TestCase):
         self.assertEqual(report["strategy_only_overall"]["total_trades"], 1)
         self.assertEqual({row["ticker"] for row in report["by_ticker_side"]}, {"M"})
         self.assertEqual(report["forced_risk_summary"]["transaction_count"], 2)
+
+    def test_portfolio_plotter_loads_margin_utilization_for_deployment_review(self):
+        db_path = self._tmp_db()
+        config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(config_dir.cleanup)
+        config_path = Path(config_dir.name) / "dev.yaml"
+        config_path.write_text("exp_name: plot-margin-test\n", encoding="utf-8")
+
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE config (
+                id TEXT,
+                exp_name TEXT
+            );
+            CREATE TABLE portfolio (
+                id TEXT,
+                config_id TEXT
+            );
+            CREATE TABLE daily_settlement (
+                portfolio_id TEXT,
+                trading_date TEXT,
+                previous_balance REAL,
+                previous_margin REAL,
+                current_balance REAL,
+                current_margin REAL,
+                margin_ratio REAL,
+                daily_pnl REAL,
+                commission REAL
+            );
+            """
+        )
+        conn.execute("INSERT INTO config VALUES (?, ?)", ("cfg", "plot-margin-test"))
+        conn.execute("INSERT INTO portfolio VALUES (?, ?)", ("pf", "cfg"))
+        conn.executemany(
+            "INSERT INTO daily_settlement VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("pf", "2025-03-03", 100000.0, 0.0, 99600.0, 800.0, 0.008, -300.0, 100.0),
+                ("pf", "2025-03-04", 99600.0, 800.0, 99400.0, 4000.0, 0.04, 0.0, 200.0),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        plotter = PortfolioCurvePlotter(str(config_path), output_dir=config_dir.name, db_path=db_path)
+
+        self.assertTrue(plotter.load_config())
+        self.assertTrue(plotter.load_settlement_data())
+        self.assertIn("margin_ratio", plotter.settlement_data.columns)
+        self.assertAlmostEqual(float(plotter.settlement_data["margin_ratio"].iloc[0]), 0.008)
+        self.assertAlmostEqual(float(plotter.settlement_data["margin_ratio"].iloc[1]), 0.04)
 
 
 if __name__ == "__main__":

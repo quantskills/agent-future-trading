@@ -39,9 +39,18 @@ opportunity_ranking_learning_policy:
   source_fields:
     - opportunity_score
     - opportunity_score_components
+    - positive_learning
+    - negative_learning
+    - execution_profile_learning
+    - recent_tail_loss_penalty
     - opportunity_rank
     - capital_allocation_reason
     - learning_adjustment_summary
+  score_component_role:
+    positive_learning: episode_weighted_alpha_promotion
+    negative_learning: episode_weighted_rank_reduction_not_block
+    execution_profile_learning: trigger_and_execution_quality_preference
+    recent_tail_loss_penalty: recent_failure_offsets_stale_positive_learning
   researcher_output_role: ranking_preference_not_trade_authority
   allowed_policy_effects:
     - adjust_pm_opportunity_score

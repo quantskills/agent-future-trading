@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Signal-fusion helpers shared by PM, reviewer tests, and future refactors."""
 
+from datetime import date, datetime
 from typing import Any, Iterable, Mapping
 
 
@@ -93,6 +94,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         if value is None:
             return default
         return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(float(value))
     except Exception:
         return default
 
@@ -360,6 +370,273 @@ def _score_cap(config: Mapping[str, Any], key: str, default: float) -> float:
     return _safe_float(caps.get(key), default)
 
 
+def _clean_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _row_payload(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = row.get("payload")
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _row_value(row: Mapping[str, Any], payload: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _parse_date(value: Any) -> date | None:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text[:10]).date()
+    except Exception:
+        return None
+
+
+def _bounded(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(upper, value))
+
+
+def _mapping_weight(
+    config: Mapping[str, Any],
+    mapping_key: str,
+    value: Any,
+    default_weights: Mapping[str, float],
+    default: float,
+) -> float:
+    text = _clean_key(value)
+    weights = config.get(mapping_key) if isinstance(config.get(mapping_key), Mapping) else {}
+    if text in weights:
+        return _safe_float(weights.get(text), default)
+    return _safe_float(default_weights.get(text), default)
+
+
+def _learning_recency_weight(
+    row: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    decision_date: Any,
+    config: Mapping[str, Any],
+) -> float:
+    decision = _parse_date(decision_date)
+    source_date = _parse_date(
+        _row_value(
+            row,
+            payload,
+            "last_sample_date",
+            "sample_last_trading_date",
+            "source_trading_date",
+            "trading_date",
+            "updated_at",
+            "created_at",
+        )
+    )
+    if not decision or not source_date:
+        return _bounded(_safe_float(config.get("learning_unknown_recency_weight"), 0.65), 0.0, 1.0)
+    days = (decision - source_date).days
+    if days < 0:
+        return 0.0
+    half_life = max(1.0, _safe_float(config.get("learning_recency_half_life_days"), 12.0))
+    floor = _bounded(_safe_float(config.get("learning_recency_floor"), 0.20), 0.0, 1.0)
+    return max(floor, 0.5 ** (days / half_life))
+
+
+_POSITIVE_ACTION_PREFERENCES = {
+    "positive_candidate_open",
+    "positive_candidate_hold",
+    "positive_candidate_exit",
+    "positive_candidate_execution",
+}
+_NEGATIVE_ACTION_PREFERENCES = {
+    "negative_revalidate",
+    "negative_hold_revalidate",
+    "tail_loss_protect",
+}
+
+
+def _action_value_learning_summary(
+    rows: Iterable[Mapping[str, Any]] | None,
+    *,
+    side: str,
+    config: Mapping[str, Any],
+    decision_date: Any = None,
+) -> dict[str, Any]:
+    default_scope_weights = {
+        "exact_real_state": 1.0,
+        "partial_real_state": 0.65,
+        "similar_sql_prior": 0.35,
+        "observation_only": 0.20,
+        "counterfactual_prior": 0.20,
+        "unknown": 0.25,
+    }
+    default_source_weights = {
+        "trade_episode": 1.15,
+        "episode_trade": 1.15,
+        "real_trade": 1.0,
+        "trade_pair": 0.85,
+        "counterfactual_prior": 0.35,
+        "observation_only": 0.25,
+        "unknown": 0.45,
+    }
+    reward_unit = max(1.0, _safe_float(config.get("learning_reward_unit"), 4000.0))
+    full_sample_count = max(1, _safe_int(config.get("learning_full_weight_sample_count"), 3))
+    tail_loss_threshold = _safe_float(config.get("tail_loss_reward_threshold"), -1000.0)
+    positive_signal = 0.0
+    negative_signal = 0.0
+    execution_signal = 0.0
+    recent_tail_loss_signal = 0.0
+    positive_count = 0
+    negative_count = 0
+    exact_real_count = 0
+    episode_count = 0
+    strongest_positive: dict[str, Any] = {}
+    strongest_negative: dict[str, Any] = {}
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        payload = _row_payload(row)
+        row_side = _clean_key(_row_value(row, payload, "side", default="*"))
+        if row_side not in {side, "*", "both", "any"}:
+            continue
+        action_preference = _clean_key(
+            _row_value(row, payload, "action_preference", "policy_action", default="")
+        )
+        if not action_preference:
+            continue
+        lane = _clean_key(_row_value(row, payload, "action_value_lane", "action_name", default=""))
+        scope = _clean_key(
+            _row_value(row, payload, "amplification_scope_quality", "source_quality", "evidence_scope", default="unknown")
+        )
+        reward_source = _clean_key(
+            _row_value(row, payload, "reward_source", "sample_source", default="unknown")
+        )
+        scope_weight = _mapping_weight(
+            config,
+            "learning_scope_weights",
+            scope,
+            default_scope_weights,
+            default_scope_weights["unknown"],
+        )
+        source_weight = _mapping_weight(
+            config,
+            "learning_reward_source_weights",
+            reward_source,
+            default_source_weights,
+            default_source_weights["unknown"],
+        )
+        recency_weight = _learning_recency_weight(
+            row,
+            payload,
+            decision_date=decision_date,
+            config=config,
+        )
+        sample_count = max(
+            1,
+            _safe_int(
+                _row_value(
+                    row,
+                    payload,
+                    "sample_count",
+                    "real_trade_reward_count",
+                    "episode_trade_reward_count",
+                    "exact_state_real_trade_sample_count",
+                    default=1,
+                ),
+                1,
+            ),
+        )
+        sample_weight = _bounded(sample_count / full_sample_count, 0.35, 1.0)
+        confidence_weight = _bounded(
+            _safe_float(_row_value(row, payload, "confidence_score", "confidence", default=0.5), 0.5),
+            0.25,
+            1.0,
+        )
+        reward_mean = _safe_float(_row_value(row, payload, "reward_mean", "avg_reward", default=0.0), 0.0)
+        reward_sum = _safe_float(_row_value(row, payload, "reward_sum", "total_reward", default=0.0), 0.0)
+        worst_reward = _safe_float(_row_value(row, payload, "worst_reward", "min_reward", default=reward_mean), reward_mean)
+        reward_magnitude = max(abs(reward_mean), abs(reward_sum) / max(1, sample_count), abs(worst_reward))
+        magnitude_weight = _bounded(reward_magnitude / reward_unit, 0.25, 1.0)
+        strength = scope_weight * source_weight * recency_weight * sample_weight * confidence_weight * magnitude_weight
+        tail_loss_count = _safe_int(_row_value(row, payload, "tail_loss_count", default=0), 0)
+        is_tail_loss = (
+            action_preference == "tail_loss_protect"
+            or tail_loss_count > 0
+            or worst_reward <= tail_loss_threshold
+            or reward_mean <= tail_loss_threshold
+        )
+        is_positive = action_preference in _POSITIVE_ACTION_PREFERENCES
+        is_negative = action_preference in _NEGATIVE_ACTION_PREFERENCES or action_preference.startswith("negative")
+        if scope == "exact_real_state":
+            exact_real_count += 1
+        if reward_source in {"trade_episode", "episode_trade"}:
+            episode_count += 1
+        summary_ref = {
+            "action_preference": action_preference,
+            "lane": lane or "unknown",
+            "scope": scope or "unknown",
+            "reward_source": reward_source or "unknown",
+            "sample_count": sample_count,
+            "reward_mean": round(reward_mean, 4),
+            "weight": round(strength, 4),
+        }
+        if is_positive:
+            positive_count += 1
+            if action_preference == "positive_candidate_execution" or "execution" in lane:
+                execution_signal += strength if reward_mean >= 0 else -strength
+            elif action_preference == "positive_candidate_hold":
+                positive_signal += strength * 0.65
+            elif action_preference == "positive_candidate_exit":
+                positive_signal += strength * 0.35
+            else:
+                positive_signal += strength
+            if not strongest_positive or strength > _safe_float(strongest_positive.get("weight"), 0.0):
+                strongest_positive = summary_ref
+        if is_negative:
+            negative_count += 1
+            negative_strength = strength * (1.30 if is_tail_loss else 1.0)
+            if action_preference == "negative_hold_revalidate":
+                negative_strength *= 0.75
+            negative_signal += negative_strength
+            if "execution" in lane:
+                execution_signal -= strength
+            if is_tail_loss:
+                recent_tail_loss_signal += strength * 1.35
+            if not strongest_negative or negative_strength > _safe_float(strongest_negative.get("weight"), 0.0):
+                strongest_negative = {
+                    **summary_ref,
+                    "weight": round(negative_strength, 4),
+                    "tail_loss": is_tail_loss,
+                }
+    positive_signal = _bounded(positive_signal)
+    negative_signal = _bounded(negative_signal)
+    execution_signal = _bounded(execution_signal, -1.0, 1.0)
+    recent_tail_loss_signal = _bounded(recent_tail_loss_signal)
+    return {
+        "positive_signal": positive_signal,
+        "negative_signal": negative_signal,
+        "execution_profile_signal": execution_signal,
+        "recent_tail_loss_signal": recent_tail_loss_signal,
+        "positive_count": positive_count,
+        "negative_count": negative_count,
+        "exact_real_count": exact_real_count,
+        "episode_count": episode_count,
+        "strongest_positive": strongest_positive,
+        "strongest_negative": strongest_negative,
+    }
+
+
 def _capital_allocation_reason(*, row: Mapping[str, Any], deployable_threshold: float, tradeable_threshold: float) -> str:
     state = str(row.get("final_state") or "unknown")
     score = _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
@@ -384,6 +661,7 @@ def _capital_allocation_reason(*, row: Mapping[str, Any], deployable_threshold: 
 def _learning_adjustment_summary(
     *,
     policy_counts: Mapping[str, int],
+    action_value_learning: Mapping[str, Any],
     alpha_profile_bonus: float,
     alpha_profile_penalty: float,
     best_alpha_profile: Mapping[str, Any],
@@ -393,15 +671,31 @@ def _learning_adjustment_summary(
     return {
         "positive_policy_count": int(policy_counts.get("positive", 0) or 0),
         "negative_policy_count": int(policy_counts.get("negative", 0) or 0),
+        "positive_action_value_count": int(action_value_learning.get("positive_count", 0) or 0),
+        "negative_action_value_count": int(action_value_learning.get("negative_count", 0) or 0),
+        "exact_real_action_value_count": int(action_value_learning.get("exact_real_count", 0) or 0),
+        "episode_action_value_count": int(action_value_learning.get("episode_count", 0) or 0),
+        "positive_learning_signal": round(_safe_float(action_value_learning.get("positive_signal"), 0.0), 4),
+        "negative_learning_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
+        "execution_profile_learning_signal": round(
+            _safe_float(action_value_learning.get("execution_profile_signal"), 0.0),
+            4,
+        ),
+        "recent_tail_loss_signal": round(
+            _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0),
+            4,
+        ),
+        "strongest_positive_action_value": action_value_learning.get("strongest_positive") or {},
+        "strongest_negative_action_value": action_value_learning.get("strongest_negative") or {},
         "alpha_setup_score_adjustment": round(net_adjustment, 4),
         "best_profile_state": best_alpha_profile.get("lifecycle_state") if best_alpha_profile else None,
         "best_profile_scope_key": best_alpha_profile.get("scope_key") if best_alpha_profile else None,
         "capped_or_rejected_profile_count": len(capped_profiles),
         "effect": (
             "boosted"
-            if net_adjustment > 0
+            if net_adjustment > 0 or _safe_float(action_value_learning.get("positive_signal"), 0.0) > _safe_float(action_value_learning.get("negative_signal"), 0.0)
             else "penalized"
-            if net_adjustment < 0
+            if net_adjustment < 0 or _safe_float(action_value_learning.get("negative_signal"), 0.0) > 0
             else "neutral"
         ),
         "not_trade_authority": True,
@@ -416,6 +710,8 @@ def build_opportunity_scorecard(
     data_quality_summary: Mapping[str, Any] | None = None,
     adaptive_policy_state: Iterable[Mapping[str, Any]] | None = None,
     alpha_setup_profiles: Iterable[Mapping[str, Any]] | None = None,
+    alpha_setup_action_values: Iterable[Mapping[str, Any]] | None = None,
+    decision_date: Any = None,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic opportunity scorecard for PM and Researcher.
@@ -535,21 +831,41 @@ def build_opportunity_scorecard(
         avg_setup_quality = sum(setup_quality_scores) / len(setup_quality_scores) if setup_quality_scores else 0.0
         max_setup_quality = max(setup_quality_scores, default=0.0)
         avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+        action_value_learning = _action_value_learning_summary(
+            alpha_setup_action_values,
+            side=side,
+            config=cfg,
+            decision_date=decision_date,
+        )
+        policy_positive_signal = min(1.0, float(policy_counts.get("positive", 0) or 0)) * 0.55
+        policy_negative_signal = min(1.0, float(policy_counts.get("negative", 0) or 0)) * 0.75
+        positive_learning_signal = max(
+            _safe_float(action_value_learning.get("positive_signal"), 0.0),
+            policy_positive_signal,
+        )
+        negative_learning_signal = max(
+            _safe_float(action_value_learning.get("negative_signal"), 0.0),
+            policy_negative_signal,
+        )
+        execution_profile_signal = _safe_float(action_value_learning.get("execution_profile_signal"), 0.0)
+        recent_tail_loss_signal = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
         score_components = {
             "directional_support": min(
-                _score_cap(cfg, "directional_support", 0.28),
-                _score_weight(cfg, "directional_support_per_signal", 0.10) * support_count,
+                _score_cap(cfg, "directional_support", 0.24),
+                _score_weight(cfg, "directional_support_per_signal", 0.08) * support_count,
             ),
             "tradeable_state": min(
-                _score_cap(cfg, "tradeable_state", 0.24),
-                _score_weight(cfg, "tradeable_state_per_signal", 0.12) * tradeable_states,
+                _score_cap(cfg, "tradeable_state", 0.16),
+                _score_weight(cfg, "tradeable_state_per_signal", 0.08) * tradeable_states,
             ),
-            "business_quality": _score_weight(cfg, "business_quality", 0.14) * max_quality,
-            "setup_quality": _score_weight(cfg, "setup_quality", 0.16) * max_setup_quality,
-            "confidence": _score_weight(cfg, "confidence", 0.12) * avg_confidence,
+            "business_quality": _score_weight(cfg, "business_quality", 0.12) * max_quality,
+            "setup_quality": _score_weight(cfg, "setup_quality", 0.12) * max_setup_quality,
+            "confidence": _score_weight(cfg, "confidence", 0.08) * avg_confidence,
             "market_confirmation": _score_weight(cfg, "market_confirmation", 0.12) * confirmation_score,
-            "positive_learning": _score_weight(cfg, "positive_learning", 0.05) * min(1.0, policy_counts.get("positive", 0)),
-            "negative_learning": -abs(_score_weight(cfg, "negative_learning", 0.10)) * min(1.0, policy_counts.get("negative", 0)),
+            "positive_learning": _score_weight(cfg, "positive_learning", 0.12) * positive_learning_signal,
+            "negative_learning": -abs(_score_weight(cfg, "negative_learning", 0.16)) * negative_learning_signal,
+            "execution_profile_learning": _score_weight(cfg, "execution_profile_learning", 0.10) * execution_profile_signal,
+            "recent_tail_loss_penalty": -abs(_score_weight(cfg, "recent_tail_loss_penalty", 0.18)) * recent_tail_loss_signal,
         }
         score = sum(score_components.values())
         side_profiles = alpha_profiles_by_side.get(side, [])
@@ -574,6 +890,10 @@ def build_opportunity_scorecard(
         elif watchlist_profiles:
             alpha_profile_bonus = 0.025
         alpha_profile_penalty = 0.08 if capped_profiles else 0.0
+        if recent_tail_loss_signal > 0 and alpha_profile_bonus > 0:
+            alpha_profile_bonus *= max(0.0, 1.0 - recent_tail_loss_signal)
+        elif negative_learning_signal > 0 and alpha_profile_bonus > 0:
+            alpha_profile_bonus *= max(0.25, 1.0 - negative_learning_signal * 0.5)
         score_components["alpha_profile_adjustment"] = alpha_profile_bonus - alpha_profile_penalty
         score_components["market_conflict_penalty"] = -abs(
             _score_weight(cfg, "market_conflict_penalty", 0.10)
@@ -636,10 +956,17 @@ def build_opportunity_scorecard(
                 or not technical_opposes
             )
         )
+        single_tradeable_candidate_setup_promoted = bool(
+            single_tradeable_candidate_setup_confirmed
+            and negative_learning_signal < _safe_float(cfg.get("single_candidate_negative_learning_soft_cap"), 0.45)
+            and recent_tail_loss_signal < _safe_float(cfg.get("single_candidate_tail_loss_soft_cap"), 0.35)
+        )
         scorecard_promotion_reasons: list[str] = []
-        if single_tradeable_candidate_setup_confirmed:
+        if single_tradeable_candidate_setup_promoted:
             scorecard_promotion_reasons.append("single_tradeable_candidate_with_strong_market_confirmation")
             score = max(score, tradeable_threshold)
+        elif single_tradeable_candidate_setup_confirmed:
+            scorecard_promotion_reasons.append("single_tradeable_candidate_rank_lowered_by_recent_learning")
 
         if score >= deployable_threshold and max_setup_quality >= min_deployable_setup_quality and not gating_failures:
             final_state = "tradeable_candidate"
@@ -651,7 +978,7 @@ def build_opportunity_scorecard(
                 and tradeable_states > 0
                 and setup_count > 0
             )
-            or single_tradeable_candidate_setup_confirmed
+            or single_tradeable_candidate_setup_promoted
         ):
             final_state = "probe_candidate"
         elif support_count > 0:
@@ -694,10 +1021,23 @@ def build_opportunity_scorecard(
             "data_missing_count": len(data_missing),
             "critical_data_gap": critical_gap,
             "single_tradeable_candidate_setup_confirmed": single_tradeable_candidate_setup_confirmed,
+            "single_tradeable_candidate_setup_promoted": single_tradeable_candidate_setup_promoted,
             "technical_opposes_side": technical_opposes,
             "scorecard_promotion_reasons": scorecard_promotion_reasons,
             "learning_positive_count": policy_counts.get("positive", 0),
             "learning_negative_count": policy_counts.get("negative", 0),
+            "action_value_learning_summary": {
+                "positive_signal": round(_safe_float(action_value_learning.get("positive_signal"), 0.0), 4),
+                "negative_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
+                "execution_profile_signal": round(_safe_float(action_value_learning.get("execution_profile_signal"), 0.0), 4),
+                "recent_tail_loss_signal": round(_safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0), 4),
+                "positive_count": action_value_learning.get("positive_count", 0),
+                "negative_count": action_value_learning.get("negative_count", 0),
+                "exact_real_count": action_value_learning.get("exact_real_count", 0),
+                "episode_count": action_value_learning.get("episode_count", 0),
+                "strongest_positive": action_value_learning.get("strongest_positive") or {},
+                "strongest_negative": action_value_learning.get("strongest_negative") or {},
+            },
             "alpha_setup_profile_counts": {
                 "deployable": len(deployable_profiles),
                 "protected": len(protected_profiles),
@@ -722,6 +1062,7 @@ def build_opportunity_scorecard(
             "alpha_setup_score_adjustment": round(alpha_profile_bonus - alpha_profile_penalty, 4),
             "learning_adjustment_summary": _learning_adjustment_summary(
                 policy_counts=policy_counts,
+                action_value_learning=action_value_learning,
                 alpha_profile_bonus=alpha_profile_bonus,
                 alpha_profile_penalty=alpha_profile_penalty,
                 best_alpha_profile=best_alpha_profile,

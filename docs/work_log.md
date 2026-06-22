@@ -502,3 +502,33 @@
 （13）重命名当前可交易 scorecard probe reason code 并同步字段语义。
 修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/decision/pm_capital_policy.py`、`src/tools/agent_tools/decision/reason_effects.py`、`src/tests/test_phase_flow_regression.py`、`docs/unified_field_semantics.md`。
 为什么改：旧名容易被误读成 `watch_for_trigger` 条件监控释放；本次统一改为 `scorecard_current_tradeable_probe_seed`，明确它只适用于当前可交易或当前触发已成立的候选，条件监控仍走 `conditional_monitor_probe_seed/pm_watch_for_trigger_probe_cap`，避免 PM 当前可交易通道与条件监控通道再次语义混用。
+
+==========2026年06月22日========
+
+（1）把完整 episode/action-value 学习接入 PM 机会评分。
+修改了什么：`src/tools/agent_tools/analysis/signal_fusion.py`、`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：让 `positive_candidate_open/positive_candidate_execution/positive_candidate_hold/positive_candidate_exit`、`tail_loss_protect/negative_revalidate/negative_hold_revalidate` 按 `evidence_scope`、真实 episode 来源、样本数、收益质量和时间衰减进入 `opportunity_score_components`；PM 在取到相似 action-value 后重建 scorecard，使完整交易生命周期学习真正影响排名与后续资金部署，而不是只看上一天或表面 setup。
+
+（2）调整 PM 排名先验与学习配置，避免 probe floor 复活弱机会。
+修改了什么：`src/config/portfolio_policy_catalog.yaml`、`src/config/learning_policy_catalog.yaml`、`docs/unified_field_semantics.md`。
+为什么改：降低 `tradeable_state/setup_quality/confidence` 等表面机会分，提高 `positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 权重；新增组件只作为 `opportunity_score_components` 的正式评分分项，负向学习只降低排名、不做品种黑名单，正向学习可支持 alpha 从 probe 晋升到更高目标仓位。
+
+（3）对齐提示词和机制文档到全周期 alpha 学习与放大。
+修改了什么：`src/llm/prompt.py`、`docs/mechanism_research.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_data_model.md`、`docs/mechanism_future_trade.md`。
+为什么改：明确 PM/Researcher 使用完整 episode 优先于单日噪声；正向 alpha 要支持“probe 验证 → rank 晋升 → 合规放大 → 盈利持有/加仓 → 失效退出”，近期 tail loss 可抵消旧正向学习；所有仓位变化仍只能通过唯一 `final_action_contract`，不让 Researcher 或 Trader 越权。
+
+（4）把新增学习评分分项接入每日审计和回测前验收。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：`positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 只能作为 `opportunity_score_components` 影响 PM 排名；如果这些学习分项和 `action/lots/lots_delta/final_action` 同层出现，说明它们被误当成交易意图，必须在每日审计与回测前验收中归到 `learning_landing` hard fail，避免学习字段绕过唯一合约。
+
+（5）补齐策略归因报告对 PM 学习评分分项的收益统计。
+修改了什么：`src/evaluation/analyze_strategy_attribution.py`、`src/tests/test_strategy_attribution_report.py`、`docs/unified_field_semantics.md`。
+为什么改：下一轮回测后需要直接判断 `positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 是否真的改善 rank 和收益；本次新增只读的 `by_opportunity_learning_component` 归因输出，按学习分项和正/负/零/缺失 bucket 统计策略交易表现，不新增交易字段、不改变 PM/Trader/Auditor 权限。
+
+（6）对齐组合净值图到资金利用率验收目标。
+修改了什么：`src/evaluation/plot_portfolio.py`、`src/tests/test_evaluation_unified_semantics.py`。
+为什么改：PM 全市场排序和学习落地的目标不是少交易，而是让资金更聪明地流向正期望机会；组合净值图需要同时展示 `margin_ratio`、0.8% probe 下限、4% 部署参考和 20% 硬上限，便于回测后直接判断优化是否导致资金利用率塌陷或是否具备实战部署意义。
+
+（7）最后对齐回测前检测与每日回测后检测的 PM 学习/排名边界。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：每日审计已经能拦截学习分项误作交易意图、排名字段越权、推荐顶层 `action/lots` 与唯一合约不一致、未完成交易日混入评估等非策略问题；本次把这些错误统一归类到回测前验收的 `learning_landing`、`pm_opportunity_routing`、`single_trade_exit`、`data_time_boundary`，并在两类报告中显式输出同一组 `pm_learning_ranking_audit_boundaries`，避免回测前检测和每日检测再次出现口径漂移。

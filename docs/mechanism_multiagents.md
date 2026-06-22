@@ -89,6 +89,8 @@ Researcher 写入的学习必须按 action lane 分账：open 评价开仓，hol
 
 排序学习是同一学习闭环的补充。Reviewer 要复盘高分/高排名候选是否真的贡献收益、低排名或未入选候选是否错过收益、资金是否从弱 alpha 迁移到强 alpha；Researcher 只能把这些事实写成未来 `opportunity_ranking_preference` 候选或相关策略状态，不能直接创建开仓权限、改变 Trader 手数或绕过唯一合约。PM 下一轮读取这些学习时，只能影响评分和资金部署优先级，最终仍必须由当日证据、资金、Auditor 和唯一 `final_action_contract` 决定。
 
+PM 排序使用的是全周期 episode 学习，不是只看前一天涨跌。完整交易 episode、同类历史 episode 统计、近期 tail loss 和执行 profile 会按 open/hold/exit/execution 分账进入 `opportunity_score_components`：正向 episode 可以提升 rank 并支持合规放大，近期大亏会降低 rank 并抵消旧正向记忆，执行质量会影响 PM 写入的 execution profile。所有结果仍只通过同一张 `final_action_contract` 改变 `target_lots/lots_delta/final_action`，不新增交易路径。
+
 ## 五、回测前后验收
 
 回测前必须通过 `pre_backtest_acceptance.py`，回测中每个交易日完成后通过累计 `system_invariant_audit.py`。验收重点包括：唯一合约、字段语义一致、分析师证据不自相矛盾、PM 排序字段不越权、Trader 只按最终合约执行、运营风控单与策略单分账、未完成交易日硬拦、账务和阶段状态一致。出现 hard error 时，不能把该窗口盈亏当策略结论。策略评估时还要检查高分/低分、排名和资金分配理由对应的收益贡献，确认排序学习是在提高资金部署质量，而不是新增一层静态门控。

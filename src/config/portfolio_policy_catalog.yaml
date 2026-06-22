@@ -381,20 +381,43 @@ portfolio_manager:
       tradeable_threshold: 0.58
       weak_confirmation_threshold: 0.45
       score_component_weights:
-        directional_support_per_signal: 0.10
-        tradeable_state_per_signal: 0.12
-        business_quality: 0.14
-        setup_quality: 0.16
-        confidence: 0.12
+        directional_support_per_signal: 0.08
+        tradeable_state_per_signal: 0.08
+        business_quality: 0.12
+        setup_quality: 0.12
+        confidence: 0.08
         market_confirmation: 0.12
-        positive_learning: 0.05
-        negative_learning: 0.10
+        positive_learning: 0.12
+        negative_learning: 0.16
+        execution_profile_learning: 0.10
+        recent_tail_loss_penalty: 0.18
         market_conflict_penalty: 0.10
         critical_data_gap_penalty: 0.12
         fundamental_gap_penalty: 0.06
       score_component_caps:
-        directional_support: 0.28
-        tradeable_state: 0.24
+        directional_support: 0.24
+        tradeable_state: 0.16
+      learning_scope_weights:
+        exact_real_state: 1.00
+        partial_real_state: 0.65
+        similar_sql_prior: 0.35
+        observation_only: 0.20
+        counterfactual_prior: 0.20
+        unknown: 0.25
+      learning_reward_source_weights:
+        trade_episode: 1.15
+        episode_trade: 1.15
+        real_trade: 1.00
+        trade_pair: 0.85
+        counterfactual_prior: 0.35
+        observation_only: 0.25
+        unknown: 0.45
+      learning_reward_unit: 4000.0
+      learning_full_weight_sample_count: 3
+      learning_recency_half_life_days: 12
+      learning_recency_floor: 0.20
+      learning_unknown_recency_weight: 0.65
+      tail_loss_reward_threshold: -1000.0
       # 入场质量阈值：用当前 setup、失效边界、市场状态和价格位置评分，避免弱 setup 大仓落地。
       min_deployable_setup_quality: 0.72
       min_tradeable_candidate_setup_quality: 0.55
@@ -403,6 +426,8 @@ portfolio_manager:
       single_tradeable_candidate_setup_confirmation_score: 0.68
       single_tradeable_candidate_setup_min_business_quality: 0.60
       single_tradeable_candidate_setup_min_confidence: 0.42
+      single_candidate_negative_learning_soft_cap: 0.45
+      single_candidate_tail_loss_soft_cap: 0.35
       technical_opposition_min_confidence: 0.45
       block_single_setup_on_technical_opposition: true
     position_quality_sizing:

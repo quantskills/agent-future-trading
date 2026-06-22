@@ -125,6 +125,7 @@
 - 同品种同方向频繁交易且已结算表现差的样本，会被 PM 交易磨损控制缩放仓位；该机制不改变账务事实，也不是品种黑名单。
 - Researcher 写入的 `alpha_setup_sample/profile/action_value` 会在未来交易日被轻量 SQL 相似 setup 检索读取。检索必须满足历史样本 `trading_date < decision_date`，优先同品种/同方向/同 setup/同 regime；同板块样本只能作弱先验，不能直接授权开仓。PM 将 open/hold/exit 样本转成仓位生命周期偏好，影响未来 `authority_type`、`lots/margin_ratio`、保护性减仓或退出；execution 样本只能由 PM 写入最终合约的执行 profile，Trader 不直接读取研究 action-value。
 - Researcher 还可以写入机会排序偏好候选，用于未来 PM 的 `opportunity_score` 和资金部署优先级。排序偏好不是品种黑名单，也不是交易命令；它必须和当日证据、资金、Auditor 审计、唯一 `final_action_contract` 一起生效。
+- PM 排序必须体现全周期学习：完整 episode 的 open/hold/exit/execution action-value 优先于单日噪声；`positive_learning` 可以支持已验证 alpha 从 probe 晋升到更高合规仓位，`recent_tail_loss_penalty` 可以降低排名并抵消旧正向学习。资金迁移目标是让强 alpha 得到放大、失效 alpha 及时降温，而不是靠静态门控减少交易。
 
 ### 12. 与真实期货市场的符合度
 

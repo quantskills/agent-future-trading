@@ -267,6 +267,10 @@
 | `active_opportunity_audit` | PM 推荐 snapshot | PM 对当前机会释放路径的诊断对象；只用于解释候选、阻断和条件监控，不生成第二张交易合约。 |
 | `opportunity_score` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 对候选机会的综合评分，用于资金部署排序解释；不是交易授权，不能替代 `target_lots`。 |
 | `opportunity_score_components` | PM scorecard / `final_action_contract.evidence_used` / 复盘评估 | `opportunity_score` 的分项来源，如方向支持、setup 质量、市场确认、学习调整和风险扣分。 |
+| `positive_learning` | `opportunity_score_components` | 正向 open/hold/exit/execution action-value 对机会排序的加分分项；按 episode、作用域、样本、收益和时间衰减计算，不能单独授权交易。 |
+| `negative_learning` | `opportunity_score_components` | `tail_loss_protect` / `negative_revalidate` / `negative_hold_revalidate` 等负向 action-value 对机会排序的扣分分项；只降低 rank，不是永久封杀。 |
+| `execution_profile_learning` | `opportunity_score_components` | 同类 `execution_profile` / `trigger_reason` 后续收益对排序的影响；可正可负，只供 PM 排名和执行 profile 选择参考，Trader 不能据此改手数或方向。 |
+| `recent_tail_loss_penalty` | `opportunity_score_components` | 近期同作用域大亏或 tail-loss episode 对排序的惩罚分项，可抵消旧正向学习，防止失效 alpha 继续被抬分；不等于硬风险 block。 |
 | `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。 |
 | `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。 |
 | `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。 |
@@ -514,6 +518,10 @@
 | `by_signal_combo` | 归因报告 | 按分析师信号组合统计的策略交易对表现。 |
 | `by_trade_auditor_decision` | 归因报告 | 按审计/最终合约决策统计的策略交易对表现。 |
 | `by_ticker_side_signal_combo` | 归因报告 | 按品种、方向、分析师信号组合统计的策略交易对表现。 |
+| `by_opportunity_learning_component` | 归因报告 | 按 `positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 及其正/负/零/缺失 bucket 统计策略交易对表现；只用于评估 PM 学习评分是否有效，不生成交易权限。 |
+| `learning_component` | `by_opportunity_learning_component` | 被统计的 PM 学习评分分项名称。 |
+| `learning_component_bucket` | `by_opportunity_learning_component` | 该学习分项在开仓推荐中的符号 bucket：positive、negative、zero、missing。 |
+| `learning_component_value` | 归因中间字段 / 交易对诊断 | 该学习分项在开仓推荐中的数值；只用于评估，不进入 PM/Trader 交易权限。 |
 | `winning_trades` | 评估输出 | 盈利完成交易对数量；默认只统计策略交易对。 |
 | `losing_trades` | 评估输出 | 亏损完成交易对数量；默认只统计策略交易对。 |
 | `flat_trades` | 评估输出 | 盈亏为零的完成交易对数量；默认只统计策略交易对。 |

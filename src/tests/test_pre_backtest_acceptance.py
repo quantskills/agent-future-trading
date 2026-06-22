@@ -179,6 +179,22 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         self.assertEqual(INVARIANT_TO_CHECK["real_open_without_current_contract_evidence"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["direction_or_watchlist_probe_opened"], "single_trade_exit")
         self.assertEqual(INVARIANT_TO_CHECK["trade_contract_source_of_truth_failed"], "single_trade_exit")
+        self.assertEqual(
+            INVARIANT_TO_CHECK["recommendation_top_level_action_lots_mismatch_final_action_contract"],
+            "single_trade_exit",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["recommendation_final_action_contract_lots_delta_mismatch"],
+            "single_trade_exit",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["recommendation_final_action_contract_action_mismatch"],
+            "single_trade_exit",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["opportunity_ranking_field_used_in_execution_trade_intent"],
+            "single_trade_exit",
+        )
 
     def test_acceptance_maps_pm_routing_invariants_to_pm_opportunity_routing(self):
         self.assertEqual(
@@ -197,6 +213,10 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             INVARIANT_TO_CHECK["setup_quality_ok_used_as_current_trigger"],
             "pm_opportunity_routing",
         )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["opportunity_ranking_field_top_level_trade_authority"],
+            "pm_opportunity_routing",
+        )
 
     def test_acceptance_invariant_mapping_reuses_system_audit_categories(self):
         from tools.agent_tools.control.system_invariants import ERROR_CATEGORY_PREFIXES
@@ -210,6 +230,10 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
     def test_acceptance_maps_preference_landing_failure_to_learning_landing(self):
         self.assertEqual(
             INVARIANT_TO_CHECK["action_preferences_exist_but_no_final_action_contract_mentions_them"],
+            "learning_landing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["opportunity_learning_component_used_as_trade_intent"],
             "learning_landing",
         )
 
@@ -256,6 +280,18 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertEqual(
                 report.checks["unified_field_semantics"].metadata["source_of_truth"],
                 "docs/unified_field_semantics.md",
+            )
+            self.assertIn(
+                "recommendation_top_level_action_lots_must_match_final_contract",
+                report.metadata["pm_learning_ranking_audit_boundaries"],
+            )
+            self.assertIn(
+                "learning_components_only_inside_opportunity_score_components",
+                report.checks["learning_landing"].metadata["pm_learning_ranking_audit_boundaries"],
+            )
+            self.assertIn(
+                "final_action_contract_remains_single_trade_truth",
+                report.checks["single_trade_exit"].metadata["pm_learning_ranking_audit_boundaries"],
             )
         finally:
             Path(db_path).unlink(missing_ok=True)

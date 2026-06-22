@@ -24,6 +24,7 @@ from tools.agent_tools.control.preflight import run_preflight_checks
 from tools.agent_tools.control.schemas import ProtocolCheckResult
 from tools.agent_tools.control.system_invariants import (
     ERROR_CATEGORY_PREFIXES,
+    PM_LEARNING_RANKING_AUDIT_BOUNDARIES,
     audit_system_invariants,
     categorize_invariant_errors,
 )
@@ -517,6 +518,8 @@ def _checks_from_invariants(
             "strategy_profitability_checked": False,
             "system_invariant_failed_categories": list(invariant_report.metadata.get("failed_categories") or []),
         }
+        if name in {"pm_opportunity_routing", "learning_landing", "single_trade_exit"}:
+            metadata["pm_learning_ranking_audit_boundaries"] = list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES)
         if name == "unified_field_semantics":
             metadata["source_of_truth"] = "docs/unified_field_semantics.md"
             metadata["unified_field_semantics_audit"] = dict(
@@ -643,6 +646,7 @@ def run_pre_backtest_acceptance(
         "config_path": str(config_path),
         "db_path": str(db_path),
         "acceptance_checks": list(ACCEPTANCE_CHECKS),
+        "pm_learning_ranking_audit_boundaries": list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES),
         "strategy_profitability_checked": False,
         "decision": "ready_for_strategy_backtest" if ok else "not_ready_for_backtest",
         "boundary": "system_readiness_only_not_strategy_profitability",

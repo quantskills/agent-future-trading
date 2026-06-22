@@ -24,6 +24,14 @@ from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trad
 from util.logger import logger
 
 
+OPPORTUNITY_LEARNING_COMPONENTS = (
+    "positive_learning",
+    "negative_learning",
+    "execution_profile_learning",
+    "recent_tail_loss_penalty",
+)
+
+
 def resolve_config_path(config_path: str) -> str:
     path = Path(config_path)
     if path.is_absolute() or path.exists():
@@ -197,6 +205,18 @@ def _group_summary(rows: Iterable[Dict[str, Any]], key_fields: List[str]) -> Lis
     return sorted(summary, key=lambda row: float(row.get("total_pnl") or 0.0))
 
 
+def _learning_component_summary(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    expanded: List[Dict[str, Any]] = []
+    for row in rows:
+        for component_name in OPPORTUNITY_LEARNING_COMPONENTS:
+            item = dict(row)
+            item["learning_component"] = component_name
+            item["learning_component_bucket"] = row.get(f"{component_name}_bucket", "missing")
+            item["learning_component_value"] = _safe_float(row.get(component_name), 0.0)
+            expanded.append(item)
+    return _group_summary(expanded, ["learning_component", "learning_component_bucket"])
+
+
 def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -216,9 +236,15 @@ def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         bucket = "low_score"
     else:
         bucket = "unknown_score"
+    components = evidence.get("opportunity_score_components")
+    if not isinstance(components, dict):
+        components = opportunity.get("opportunity_score_components")
+    if not isinstance(components, dict):
+        components = {}
     return {
         "opportunity_score": score_value if score_value >= 0 else None,
         "opportunity_score_bucket": bucket,
+        "opportunity_score_components": components,
         "opportunity_rank": evidence.get("opportunity_rank") or opportunity.get("opportunity_rank"),
         "capital_allocation_reason": evidence.get("capital_allocation_reason") or opportunity.get("capital_allocation_reason") or "unknown",
         "learning_adjustment_summary": (
@@ -252,6 +278,21 @@ def _attach_open_recommendation_context(
         rebalance_summary = _rebalance_summary_from_snapshot(snapshot)
         ranking_context = _opportunity_ranking_context(snapshot)
         item.update(ranking_context)
+        components = ranking_context.get("opportunity_score_components")
+        if not isinstance(components, dict):
+            components = {}
+        for component_name in OPPORTUNITY_LEARNING_COMPONENTS:
+            component_value = _safe_float(components.get(component_name), 0.0)
+            item[component_name] = component_value
+            if component_value > 0:
+                bucket = "positive"
+            elif component_value < 0:
+                bucket = "negative"
+            elif component_name in components:
+                bucket = "zero"
+            else:
+                bucket = "missing"
+            item[f"{component_name}_bucket"] = bucket
         item["rebalance_summary"] = rebalance_summary
         item["rebalance_action_type"] = (
             rebalance_summary.get("action_type", "unknown") if rebalance_summary else "unknown"
@@ -1111,6 +1152,18 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
             _performance_rows(payload.get("by_opportunity_rank", []), ["opportunity_rank"]),
         ),
         "",
+        "### Learning Component Buckets",
+        "",
+        "Learning components are attribution diagnostics from opportunity_score_components; they are not trade authority.",
+        "",
+        _format_table(
+            ["Component", "Bucket", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
+            _performance_rows(
+                payload.get("by_opportunity_learning_component", []),
+                ["learning_component", "learning_component_bucket"],
+            ),
+        ),
+        "",
         "### Capital Allocation Reasons",
         "",
         _format_table(
@@ -1360,6 +1413,7 @@ def build_attribution_report(
     by_ticker_side_signal_combo = _group_summary(strategy_only_pairs, ["ticker", "side", "signal_combo"])
     by_opportunity_score_bucket = _group_summary(strategy_only_pairs, ["opportunity_score_bucket"])
     by_opportunity_rank = _group_summary(strategy_only_pairs, ["opportunity_rank"])
+    by_opportunity_learning_component = _learning_component_summary(strategy_only_pairs)
     by_capital_allocation_reason = _group_summary(strategy_only_pairs, ["capital_allocation_reason"])
     by_rebalance_action_type = _group_summary(strategy_only_pairs, ["rebalance_action_type"])
     by_rebalance_reason = _group_summary(strategy_only_pairs, ["rebalance_reason"])
@@ -1415,6 +1469,7 @@ def build_attribution_report(
         "by_ticker_side_signal_combo": by_ticker_side_signal_combo,
         "by_opportunity_score_bucket": by_opportunity_score_bucket,
         "by_opportunity_rank": by_opportunity_rank,
+        "by_opportunity_learning_component": by_opportunity_learning_component,
         "by_capital_allocation_reason": by_capital_allocation_reason,
         "by_rebalance_action_type": by_rebalance_action_type,
         "by_rebalance_reason": by_rebalance_reason,

@@ -223,6 +223,14 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.counts["open_transactions"], 1)
+        self.assertIn(
+            "recommendation_top_level_action_lots_must_match_final_contract",
+            report.metadata["pm_learning_ranking_audit_boundaries"],
+        )
+        self.assertIn(
+            "learning_components_only_inside_opportunity_score_components",
+            report.metadata["pm_learning_ranking_audit_boundaries"],
+        )
 
     def test_system_invariant_audit_fails_incomplete_trading_day_phase(self):
         db_path = self._make_db()
@@ -792,6 +800,42 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(
             any(error.startswith("opportunity_ranking_field_top_level_trade_authority") for error in report.errors)
+        )
+
+    def test_system_invariant_audit_rejects_learning_component_as_trade_intent(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = json.loads(conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()[0])
+            payload["execution_translation"] = {
+                "intraday_execution": {
+                    "action": "open_short",
+                    "lots": 2,
+                    "positive_learning": 0.12,
+                }
+            }
+            payload["final_action_contract"]["evidence_used"] = {
+                "opportunity_score_components": {
+                    "positive_learning": 0.12,
+                    "negative_learning": 0.0,
+                    "execution_profile_learning": 0.03,
+                    "recent_tail_loss_penalty": 0.0,
+                }
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("opportunity_learning_component_used_as_trade_intent") for error in report.errors),
+            report.to_dict(),
         )
 
     def test_system_invariant_audit_allows_conditional_trigger_probe_after_intraday_confirmation(self):

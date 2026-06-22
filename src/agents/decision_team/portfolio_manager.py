@@ -9157,6 +9157,9 @@ def portfolio_agent_futures(state: FundState):
             logger.warning(f"{ticker}: early adaptive policy state unavailable for opportunity scorecard: {exc}")
 
     data_quality_summary_for_pm = build_pm_data_quality_summary(analyst_signals, market_confirmation)
+    opportunity_scorecard_cfg = (
+        (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
+    )
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
         analyst_signals=analyst_signals,
@@ -9164,7 +9167,9 @@ def portfolio_agent_futures(state: FundState):
         data_quality_summary=data_quality_summary_for_pm,
         adaptive_policy_state=early_adaptive_policy_state,
         alpha_setup_profiles=alpha_setup_profiles,
-        config=((_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}),
+        alpha_setup_action_values=alpha_setup_action_values,
+        decision_date=trading_date,
+        config=opportunity_scorecard_cfg,
     )
     fusion_context["opportunity_scorecard"] = opportunity_scorecard
     if db and config_id and hasattr(db, "get_similar_alpha_setup_action_values"):
@@ -9205,6 +9210,18 @@ def portfolio_agent_futures(state: FundState):
                 pm_learning_audit["similar_alpha_setup_boundary"] = (
                     "strict_history_only_prior_not_trade_authority"
                 )
+                opportunity_scorecard = build_opportunity_scorecard(
+                    ticker=ticker,
+                    analyst_signals=analyst_signals,
+                    market_confirmation=market_confirmation,
+                    data_quality_summary=data_quality_summary_for_pm,
+                    adaptive_policy_state=early_adaptive_policy_state,
+                    alpha_setup_profiles=alpha_setup_profiles,
+                    alpha_setup_action_values=alpha_setup_action_values,
+                    decision_date=trading_date,
+                    config=opportunity_scorecard_cfg,
+                )
+                fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: similar alpha setup action-value PM retrieval skipped: {exc}")
     holding_control_cfg = _get_holding_rebalance_config(full_config)
@@ -9449,7 +9466,9 @@ def portfolio_agent_futures(state: FundState):
                 data_quality_summary=data_quality_summary_for_pm,
                 adaptive_policy_state=adaptive_policy_state,
                 alpha_setup_profiles=alpha_setup_profiles,
-                config=((_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}),
+                alpha_setup_action_values=alpha_setup_action_values,
+                decision_date=trading_date,
+                config=opportunity_scorecard_cfg,
             )
             fusion_context["opportunity_scorecard"] = opportunity_scorecard
 

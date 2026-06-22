@@ -901,6 +901,220 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertTrue(summary["has_probe_candidate_support"])
         self.assertTrue(summary["has_tradeable_support"])
 
+class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
+    def _tradeable_signal(self) -> AnalystSignal:
+        return AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.72,
+            business_quality_score=0.70,
+            setup_quality_score=0.76,
+            opportunity_state="tradeable_candidate",
+            entry_trigger="current breakdown confirmed below support",
+            invalidation_level=105.0,
+            trigger_valid=True,
+            invalidation_present=True,
+            metadata={
+                "action_evidence_contract": {
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "current_trigger_confirmed": True,
+                    "opportunity_state": "tradeable_candidate",
+                    "entry_trigger": "current breakdown confirmed below support",
+                    "invalidation_present": True,
+                    "invalidation_condition": "short invalid if price closes above 105",
+                }
+            },
+        )
+
+    def _action_value(
+        self,
+        *,
+        action_preference: str,
+        lane: str,
+        reward_mean: float,
+        reward_sum: float,
+        worst_reward: float | None = None,
+        reward_source: str = "trade_episode",
+        scope: str = "exact_real_state",
+        last_sample_date: str = "2025-03-12",
+        sample_count: int = 4,
+    ) -> dict:
+        return {
+            "ticker": "TA",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": lane,
+            "sample_count": sample_count,
+            "reward_mean": reward_mean,
+            "reward_sum": reward_sum,
+            "worst_reward": worst_reward if worst_reward is not None else reward_mean,
+            "confidence_score": 0.70,
+            "action_preference": action_preference,
+            "last_sample_date": last_sample_date,
+            "payload": {
+                "source": "alpha_setup_profile_action_value",
+                "action_value_lane": lane,
+                "action_preference": action_preference,
+                "reward_source": reward_source,
+                "amplification_scope_quality": scope,
+                "episode_trade_reward_count": sample_count if "episode" in reward_source else 0,
+                "real_trade_reward_count": sample_count,
+                "last_sample_date": last_sample_date,
+            },
+        }
+
+    def _scorecard_config(self) -> dict:
+        return {
+            "tradeable_threshold": 0.58,
+            "deployable_threshold": 0.72,
+            "weak_confirmation_threshold": 0.45,
+            "score_component_weights": {
+                "positive_learning": 0.12,
+                "negative_learning": 0.16,
+                "execution_profile_learning": 0.10,
+                "recent_tail_loss_penalty": 0.18,
+            },
+            "learning_reward_unit": 1000.0,
+            "learning_full_weight_sample_count": 3,
+            "learning_recency_half_life_days": 10,
+            "learning_recency_floor": 0.20,
+            "tail_loss_reward_threshold": -1000.0,
+        }
+
+    def test_episode_action_values_move_scorecard_rank_without_product_blacklist(self):
+        signal = self._tradeable_signal()
+        positive = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="positive_candidate_open",
+                    lane="open",
+                    reward_mean=1600.0,
+                    reward_sum=6400.0,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        negative = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="tail_loss_protect",
+                    lane="open",
+                    reward_mean=-1800.0,
+                    reward_sum=-7200.0,
+                    worst_reward=-2400.0,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        positive_components = positive["short"]["opportunity_score_components"]
+        negative_components = negative["short"]["opportunity_score_components"]
+        self.assertGreater(positive_components["positive_learning"], 0.0)
+        self.assertLess(negative_components["negative_learning"], 0.0)
+        self.assertLess(negative_components["recent_tail_loss_penalty"], 0.0)
+        self.assertGreater(positive["short"]["opportunity_score"], negative["short"]["opportunity_score"])
+        self.assertNotIn("product_blacklist", json.dumps(negative["short"], ensure_ascii=False))
+
+    def test_execution_profile_learning_is_a_score_component_not_trader_authority(self):
+        signal = self._tradeable_signal()
+        positive_execution = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="positive_candidate_execution",
+                    lane="execution",
+                    reward_mean=1200.0,
+                    reward_sum=4800.0,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        negative_execution = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="negative_revalidate",
+                    lane="execution",
+                    reward_mean=-1200.0,
+                    reward_sum=-4800.0,
+                    worst_reward=-1600.0,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        self.assertGreater(
+            positive_execution["short"]["opportunity_score_components"]["execution_profile_learning"],
+            0.0,
+        )
+        self.assertLess(
+            negative_execution["short"]["opportunity_score_components"]["execution_profile_learning"],
+            0.0,
+        )
+        self.assertNotIn("target_lots", positive_execution["short"])
+        self.assertNotIn("lots_delta", positive_execution["short"])
+
+    def test_recent_tail_loss_offsets_stale_alpha_profile_bonus(self):
+        signal = self._tradeable_signal()
+        scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_profiles=[
+                {
+                    "side": "short",
+                    "setup_type": "trend_breakout_setup",
+                    "lifecycle_state": "deployable",
+                    "sample_count": 8,
+                    "net_pnl": 9000.0,
+                    "confidence_score": 0.82,
+                }
+            ],
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="tail_loss_protect",
+                    lane="open",
+                    reward_mean=-2500.0,
+                    reward_sum=-5000.0,
+                    worst_reward=-3200.0,
+                    last_sample_date="2025-03-14",
+                    sample_count=2,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        components = scorecard["short"]["opportunity_score_components"]
+        self.assertLess(components["recent_tail_loss_penalty"], 0.0)
+        self.assertLessEqual(components["alpha_profile_adjustment"], 0.03)
+        summary = scorecard["short"]["learning_adjustment_summary"]
+        self.assertGreater(summary["recent_tail_loss_signal"], 0.0)
+        self.assertEqual(summary["not_trade_authority"], True)
+
+
 class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
     class _PMTestDB:
         def get_ticker_performance(self, **kwargs):

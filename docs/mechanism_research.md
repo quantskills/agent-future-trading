@@ -85,6 +85,8 @@ PM 读取 open/hold/exit 的动作偏好、alpha setup profile 和机会排序�
 
 PM 现在还要做全市场候选比较。`opportunity_score` 和 `opportunity_rank` 用于决定同一交易日内哪些候选优先获得资金，`capital_allocation_reason` 用于解释为什么给资金、只监控或暂不分配，`learning_adjustment_summary` 用于说明历史学习如何影响排序。它们只能通过 PM 资金部署 pass 回写同一张 `final_action_contract.target_lots/lots_delta/final_action`，不能形成第二套交易命令。
 
+PM 评分必须把完整 episode 学习放在单日噪声之前。`positive_candidate_open/hold/exit/execution` 会进入 `positive_learning` 或 `execution_profile_learning`，支持同作用域机会提升排名、继续持有、择机放大或优化执行 profile；`tail_loss_protect/negative_revalidate/negative_hold_revalidate` 会进入 `negative_learning` 或 `recent_tail_loss_penalty`，用于降低同作用域排名、降级持仓或更快退出。负向学习不是品种黑名单，正向学习也不是无限放大；二者都必须按 `exact_real_state > partial_real_state > similar_sql_prior > observation_only` 和时间衰减生效，并且只能通过 PM 的同一张最终合约改变目标仓位。
+
 PM 还会读取 execution action-value，但只能把它消化成最终合约的执行计划。Trader 仍只读 `final_action_contract` 和盘中数据。
 
 条件机会闭环现在是研究机制的一部分。若分析师输出干净的 `watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/entry_trigger/invalidation`，PM 不能把它当普通 wait 丢掉；PM 可以生成条件 probe 合约。Trader 未触发时只记录未触发原因，Researcher 不能把未触发当成开仓亏损样本，只能研究条件是否太苛刻、监控是否有价值。
@@ -123,6 +125,8 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 3. 资金是否从弱 alpha 状态迁移到强 alpha 状态，而不是单纯减少交易。
 4. 0.8% probe floor 是否只对 PM 入选候选生效，没有把排序落后的弱机会重新拉回交易。
 5. `learning_adjustment_summary` 是否能解释本次排序受哪些真实 action-value、setup profile 或复盘结论影响。
+6. 正向 alpha 是否经历“probe 验证 -> rank 提升 -> 合规放大 -> 持仓保护/加仓 -> 失效退出”的完整周期，而不是长期停留在小仓试探。
+7. 近期 tail loss 是否能抵消旧正向学习，避免失效 alpha 继续被高 rank 和 probe floor 机械放出来。
 
 ## 十、回测前验收口径
 

@@ -67,6 +67,19 @@ ACTION_PREFERENCE_LANDING_TERMS = {
     "negative_hold_revalidate": {"negative_hold_revalidate", "revalidate", "protect", "reduce", "exit", "scale_down"},
     "tail_loss_protect": {"tail_loss_protect", "tail_loss", "protect", "protective", "reduce", "exit", "scale_down", "stop_loss"},
 }
+OPPORTUNITY_SCORE_COMPONENT_FIELDS = {
+    "positive_learning",
+    "negative_learning",
+    "execution_profile_learning",
+    "recent_tail_loss_penalty",
+}
+PM_LEARNING_RANKING_AUDIT_BOUNDARIES = [
+    "learning_components_only_inside_opportunity_score_components",
+    "ranking_fields_cannot_create_trade_authority",
+    "final_action_contract_remains_single_trade_truth",
+    "recommendation_top_level_action_lots_must_match_final_contract",
+    "incomplete_trading_day_cannot_enter_strategy_evaluation",
+]
 OPEN_AMPLIFICATION_EFFECTS = {
     "open_amplification",
     "real_budget_entry",
@@ -233,6 +246,7 @@ ERROR_CATEGORY_PREFIXES = {
         "setup_quality_ok_used_as_current_trigger",
         "conditional_monitor_candidate_silent_wait",
         "high_quality_opportunity_silent_wait",
+        "opportunity_ranking_field_top_level_trade_authority",
     },
     "single_trade_exit": {
         "open_transaction_without_open_final_action",
@@ -241,6 +255,12 @@ ERROR_CATEGORY_PREFIXES = {
         "real_open_without_current_contract_evidence",
         "direction_or_watchlist_probe_opened",
         "trade_contract_source_of_truth_failed",
+        "recommendation_final_action_contract_missing_fields",
+        "recommendation_final_action_contract_lots_delta_mismatch",
+        "recommendation_final_action_contract_action_mismatch",
+        "recommendation_top_level_action_lots_mismatch_final_action_contract",
+        "strategy_recommendation_non_strategy_final_action_contract",
+        "opportunity_ranking_field_used_in_execution_trade_intent",
     },
     "trader_trigger_parity": {
         "open_transaction_without_trigger",
@@ -260,6 +280,7 @@ ERROR_CATEGORY_PREFIXES = {
         "adaptive_policy_release_not_validated",
         "adaptive_policy_unknown_action",
         "adaptive_policy_fast_candidate_not_probe_only",
+        "opportunity_learning_component_used_as_trade_intent",
     },
     "structured_io": {
         "unified_field_artifact_forbidden_field",
@@ -883,6 +904,25 @@ def _audit_opportunity_ranking_boundary(
                     errors.append(
                         "opportunity_ranking_field_used_in_execution_trade_intent:"
                         f"{label}:{artifact_name}:{path}:{dangerous}"
+                    )
+        for artifact_name, artifact in [
+            ("signal_snapshot", snapshot),
+            ("final_action_contract", contract),
+        ]:
+            for path, node in _iter_nested_dicts(artifact):
+                components = OPPORTUNITY_SCORE_COMPONENT_FIELDS.intersection(node.keys())
+                if not components:
+                    continue
+                inside_score_components = (
+                    path.endswith("opportunity_score_components")
+                    or ".opportunity_score_components." in f"{path}."
+                )
+                if inside_score_components:
+                    continue
+                if any(key in node for key in ("target_lots", "lots", "lots_delta", "action", "final_action")):
+                    errors.append(
+                        "opportunity_learning_component_used_as_trade_intent:"
+                        f"{label}:{artifact_name}:{path}:{sorted(components)}"
                     )
 
 
@@ -1582,6 +1622,7 @@ def audit_system_invariants(
         "system_invariants_only; no strategy profitability judgment; "
         "does_not_create_trade_authority_or_modify_lots"
     )
+    metadata["pm_learning_ranking_audit_boundaries"] = list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES)
     error_categories = categorize_invariant_errors(errors)
     metadata["error_categories"] = error_categories
     metadata["failed_categories"] = sorted(error_categories)

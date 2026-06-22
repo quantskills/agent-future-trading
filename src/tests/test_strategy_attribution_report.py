@@ -8,6 +8,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from evaluation.analyze_strategy_attribution import (
     _action_value_summary_from_recommendations,
+    _attach_open_recommendation_context,
+    _learning_component_summary,
     _readable_weak_suggestion,
     _rebalance_summary_from_snapshot,
     _release_block_summary_from_recommendations,
@@ -102,6 +104,49 @@ class StrategyAttributionReportRegressionTest(unittest.TestCase):
         self.assertEqual(action_value["scope_quality_counts"]["exact_real_state"], 1)
         self.assertEqual(action_value["reward_source_counts"]["trade_episode"], 1)
         self.assertIn("diagnostic_not_trade_authority", action_value["audit_boundary"])
+
+    def test_opportunity_learning_component_summary_is_read_only_attribution(self):
+        pairs = [
+            {
+                "open_recommendation_id": "rec1",
+                "pnl": 1200.0,
+                "total_pnl": 1200.0,
+                "net_pnl": 1200.0,
+            }
+        ]
+        recommendations = {
+            "rec1": {
+                "signal_snapshot": {
+                    "final_action_contract": {
+                        "evidence_used": {
+                            "opportunity_score": 0.72,
+                            "opportunity_rank": 1,
+                            "capital_allocation_reason": "ranked_deployable_candidate",
+                            "opportunity_score_components": {
+                                "positive_learning": 0.12,
+                                "negative_learning": 0.0,
+                                "execution_profile_learning": -0.03,
+                                "recent_tail_loss_penalty": 0.0,
+                            },
+                        },
+                        "learning_used": {"learning_adjustment_summary": {"not_trade_authority": True}},
+                    }
+                }
+            }
+        }
+
+        enriched = _attach_open_recommendation_context(pairs, recommendations)
+        summary = _learning_component_summary(enriched)
+        buckets = {
+            (row["learning_component"], row["learning_component_bucket"]): row
+            for row in summary
+        }
+
+        self.assertEqual(enriched[0]["positive_learning_bucket"], "positive")
+        self.assertEqual(enriched[0]["execution_profile_learning_bucket"], "negative")
+        self.assertIn(("positive_learning", "positive"), buckets)
+        self.assertIn(("execution_profile_learning", "negative"), buckets)
+        self.assertEqual(buckets[("positive_learning", "positive")]["total_trades"], 1)
 
 
 if __name__ == "__main__":

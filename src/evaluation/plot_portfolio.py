@@ -185,6 +185,7 @@ class PortfolioCurvePlotter:
                     ds.previous_margin,
                     ds.current_balance,
                     ds.current_margin,
+                    ds.margin_ratio,
                     ds.daily_pnl,
                     ds.commission
                 FROM daily_settlement ds
@@ -224,12 +225,14 @@ class PortfolioCurvePlotter:
                 current_balance = float(s['current_balance'] or 0.0)
                 current_margin = float(s['current_margin'] or 0.0)
                 account_equity = current_balance + current_margin
+                margin_ratio = float(s['margin_ratio'] or 0.0)
 
                 settlement_equity_data.append({
                     'trading_date': datetime.fromisoformat(s['trading_date']),
                     'account_equity': account_equity,
                     'current_balance': current_balance,
                     'current_margin': current_margin,
+                    'margin_ratio': margin_ratio,
                     'daily_pnl': s['daily_pnl'] or 0,
                     'commission': s['commission'] or 0,
                     'cumulative_pnl': cumulative_pnl,
@@ -273,6 +276,7 @@ class PortfolioCurvePlotter:
         dates = self.settlement_data['trading_date']
         account_equity = self.settlement_data['account_equity']
         daily_pnl = self.settlement_data['daily_pnl']
+        margin_ratio = self.settlement_data.get('margin_ratio')
 
         # Calculate net value (normalized to initial value = 1.0)
         # IMPORTANT: Use the actual initial capital for normalization (same as evaluation module)
@@ -309,6 +313,33 @@ class PortfolioCurvePlotter:
         # Plot net value curve
         ax.plot(dates, net_value.values,
                 label='净值曲线', color='#2E86DE', linewidth=2.5)
+        ax_margin = ax.twinx()
+        if margin_ratio is not None:
+            ax_margin.plot(
+                dates,
+                margin_ratio.values * 100,
+                label='保证金利用率',
+                color='#8E44AD',
+                linewidth=1.8,
+                linestyle='-.',
+                alpha=0.85,
+            )
+            for level, label, color in (
+                (0.8, 'probe 0.8%', '#7F8C8D'),
+                (4.0, '部署参考 4%', '#16A085'),
+                (20.0, '硬上限 20%', '#C0392B'),
+            ):
+                ax_margin.axhline(
+                    y=level,
+                    color=color,
+                    linestyle=':',
+                    alpha=0.45,
+                    linewidth=1.0,
+                    label=label,
+                )
+            ax_margin.set_ylabel('保证金利用率 (%)', fontsize=12, fontweight='bold')
+            max_margin_percent = max(float(margin_ratio.max() or 0.0) * 100, 4.0)
+            ax_margin.set_ylim(0, max(5.0, min(22.0, max_margin_percent * 1.35)))
 
         # Add reference line at 1.0
         ax.axhline(y=1.0, color='#95A5A6', linestyle='--', alpha=0.6, linewidth=1.5, label='初始净值')
@@ -329,7 +360,9 @@ class PortfolioCurvePlotter:
         ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
 
         # Add legend
-        ax.legend(loc='best', fontsize=10, framealpha=0.9)
+        handles, labels = ax.get_legend_handles_labels()
+        margin_handles, margin_labels = ax_margin.get_legend_handles_labels()
+        ax.legend(handles + margin_handles, labels + margin_labels, loc='best', fontsize=10, framealpha=0.9)
 
         # Add grid
         ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
@@ -346,6 +379,8 @@ class PortfolioCurvePlotter:
             f"最大回撤: {max_drawdown:.2f}%\n"
             f"夏普比率(账户权益日收益): {sharpe_ratio:.4f}\n"
             f"波动率(账户权益): {volatility * 100:.2f}%\n"
+            f"平均保证金利用率: {(float(margin_ratio.mean()) * 100 if margin_ratio is not None else 0.0):.2f}%\n"
+            f"峰值保证金利用率: {(float(margin_ratio.max()) * 100 if margin_ratio is not None else 0.0):.2f}%\n"
             f"交易胜率: {trade_win_rate:.1f}% ({winning_trades}/{total_trades})\n"
             f"结算交易日: {len(dates)}"
         )
