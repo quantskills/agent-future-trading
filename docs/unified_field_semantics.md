@@ -49,6 +49,11 @@
 | `completed_at` | `trading_day_phase` | 阶段完成时间。 |
 | `message` | `trading_day_phase` | 阶段说明。 |
 | `incomplete_trading_day_phase` | 验收错误码 | 交易日存在推荐、成交、盘中决策或学习记录，但 phase1-4 未全部 completed；必须删除或重跑当天，不能进入策略结论或学习。 |
+| `mechanism_effectiveness_audit` | Protocol Governor 只读报告 / 回测后机制验收 | 机制链路有效性报告；只检查 action-value、PM score/rank、唯一合约、持仓退出和条件 probe 是否接通，不评价收益，不创建交易权限。 |
+| `hard_failures` | `mechanism_effectiveness_audit` | 机制断链列表；如学习存在但 PM 未读取、rank 写入但未影响合约且无解释、条件 probe 消失等。非空时回测应 fail-fast，不能进入策略收益评价。 |
+| `diagnostics` | `mechanism_effectiveness_audit` / 评估报告 | 机制已接通但效果差的诊断列表；如高 rank 亏损、资金利用率低、正 alpha 放大不足。不会停止回测，只进入策略分析。 |
+| `checked_chain` | `mechanism_effectiveness_audit.metadata` | 本次机制审计检查的链路节点，如 action_value_to_pm、score_to_rank、rank_to_final_action_contract、conditional_probe_to_trader_result。 |
+| `classification` | `mechanism_effectiveness_audit.metadata` | 区分 `hard_fail` 与 `diagnostic` 的报告分类说明；不能作为交易字段。 |
 | `payload` | artifact 外层 | 结构化载荷容器；不能引入未登记语义。 |
 | `payload_json` | 数据库存储 | `payload` 序列化结果；不能被当成另一套字段表。 |
 | `artifact_json` | signal 表 | 分析师 artifact 序列化容器。 |
@@ -442,9 +447,17 @@
 | `policy_type` | adaptive policy / provisional policy | 策略学习类型；不能作为交易动作。 |
 | `policy_multiplier` | adaptive policy / provisional policy | 策略学习倍率；只能影响策略参数，不能覆盖 PM 合约。 |
 | `action_name` | action-value | open、hold、exit、reduce、execution。 |
-| `action_preference` | action-value payload | 唯一动作偏好。 |
-| `reward_source` | action-value payload | 奖励来源。 |
-| `evidence_scope` | action-value payload | exact、partial、similar、counterfactual。 |
+| `action_preference` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 唯一动作偏好；PM 评分优先读取 DB 顶层 canonical 字段，payload 只作历史兼容来源。 |
+| `reward_source` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 奖励来源；用于区分真实 episode、真实交易、反事实或观察先验。 |
+| `evidence_scope` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | exact、partial、similar、counterfactual；PM 评分优先使用该字段判断学习作用域。 |
+| `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线，固定为 open、hold、exit、execution；不能跨动作线使用。 |
+| `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读 `pm_learning`，分析师只读 `analyst_calibration` 安全摘要，Trader 只读 `trader_execution_learning` 执行诊断。 |
+| `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务 open、hold、exit、execution、calibration 或 diagnostic。 |
+| `retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM exact state 检索键，格式为 ticker、side、horizon_class、market_regime、setup_type、learning_lane；用于机器检索，不是交易授权。 |
+| `fallback_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM fallback 检索键，格式为 ticker、side、horizon_class、learning_lane；exact state 漂移时用于同品种同方向同期限学习消费。 |
+| `execution_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 执行学习检索键，格式为 ticker、execution_profile、trigger_reason、learning_lane；只能支持执行质量诊断或 PM execution profile 偏好，不产生交易权限。 |
+| `retrieval_match_level` | `final_action_contract.learning_used.alpha_setup_action_values` / 机制审计 | PM 实际消费 action-value 时的命中层级，如 exact_state、same_ticker_side_horizon、same_ticker_side、weak_prior。 |
+| `retrieval_match_reason` | `final_action_contract.learning_used.alpha_setup_action_values` / 机制审计 | PM 使用该 action-value 的机器可读原因；用于审计学习是否按固定层级消费。 |
 | `counterfactual_reward_weight` | action-value payload | 反事实样本在学习奖励中的权重。 |
 | `counterfactual_source_types` | action-value payload | 参与该 action-value 的反事实来源类型。 |
 | `sample_count` | 学习记录 | 样本数。 |

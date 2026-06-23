@@ -75,6 +75,8 @@ control_governance:
   # 控制组只做多智能体协议、工具权限、成本与回测前健康审计。
   # 它不是 PM、Auditor、Trader 或 Researcher，也不是新的交易门控。
   # 任何 control_governance 输出都不能创建/否决交易权限，不能改 lots/margin_ratio。
+  # system_invariant_audit 检查违规；mechanism_effectiveness_audit 只读检查学习/排名/合约/退出链路是否接通。
+  # mechanism hard_fail 会阻止策略收益评价；diagnostic 只进入策略分析，不停止回测。
   enabled: true
   protocol_governor:
     enabled: true

@@ -81,7 +81,7 @@ Technical、Fundamental、Commodity News 只读取受限学习上下文和 `sign
 
 ## 六、PM 如何使用研究成果
 
-PM 读取 open/hold/exit 的动作偏好、alpha setup profile 和机会排序偏好。成熟正向 open setup 在当日触发、失效边界、market confirmation、资金和 Auditor 通过时，可以支持受控落仓或放大；未知 setup 可以保留受控探索；负向 setup 只能同作用域 cap、revalidate、probe/reduce，不能形成全局品种黑名单。
+PM 读取 open/hold/exit 的动作偏好、alpha setup profile 和机会排序偏好。分析师给 PM 的学习摘要只用于解释证据质量，不能替代 PM 的学习输入；PM 在确定 ticker、side、setup、horizon、regime 后，必须重新读取同作用域真实 action-value / episode 记录，并保留 `action_preference/reward_sum/reward_mean/win_rate/sample_count/reward_source/evidence_scope/action_value_lane/last_sample_date/valid_until`。PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard，不能只读初始 preferred side。成熟正向 open setup 在当日触发、失效边界、market confirmation、资金和 Auditor 通过时，可以支持受控落仓或放大；未知 setup 可以保留受控探索；负向 setup 只能同作用域 cap、revalidate、probe/reduce，不能形成全局品种黑名单。
 
 PM 现在还要做全市场候选比较。`opportunity_score` 和 `opportunity_rank` 用于决定同一交易日内哪些候选优先获得资金，`capital_allocation_reason` 用于解释为什么给资金、只监控或暂不分配，`learning_adjustment_summary` 用于说明历史学习如何影响排序。它们只能通过 PM 资金部署 pass 回写同一张 `final_action_contract.target_lots/lots_delta/final_action`，不能形成第二套交易命令。
 
@@ -134,6 +134,7 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 
 - `pre_backtest_acceptance.py` 通过。
 - `system_invariant_audit.py` 对现有库没有 hard error。
+- `mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。
 - 字段语义表仍是唯一字段来源。
 - 未完成交易日不会进入学习。
 - 策略单、rollover、forced_risk 按 `source_type` 分账。

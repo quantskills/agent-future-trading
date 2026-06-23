@@ -203,6 +203,24 @@ def run_system_invariant_audit(config_arg: str, start_date: str, end_date: str, 
     return run_command(command, os.environ.copy())
 
 
+def run_mechanism_effectiveness_audit(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
+    command = [
+        sys.executable,
+        str(RUN_DIR / "control" / "mechanism_effectiveness_audit.py"),
+        "--config",
+        config_arg,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--json",
+    ]
+    if local_db:
+        command.append("--local-db")
+    print("[backtest] Running control/mechanism_effectiveness_audit.py")
+    return run_command(command, os.environ.copy())
+
+
 def run_daily_cumulative_system_invariant_audit(
     config_arg: str,
     start_date: str,
@@ -211,6 +229,16 @@ def run_daily_cumulative_system_invariant_audit(
 ) -> int:
     print(f"[backtest] Running control/system_invariant_audit.py through {trading_day}")
     return run_system_invariant_audit(config_arg, start_date, trading_day, local_db)
+
+
+def run_daily_cumulative_mechanism_effectiveness_audit(
+    config_arg: str,
+    start_date: str,
+    trading_day: str,
+    local_db: bool,
+) -> int:
+    print(f"[backtest] Running control/mechanism_effectiveness_audit.py through {trading_day}")
+    return run_mechanism_effectiveness_audit(config_arg, start_date, trading_day, local_db)
 
 
 def main() -> int:
@@ -334,6 +362,19 @@ def main() -> int:
             )
             return invariant_return_code
 
+        mechanism_return_code = run_daily_cumulative_mechanism_effectiveness_audit(
+            config_arg,
+            trading_days[0],
+            trading_day,
+            args.local_db,
+        )
+        if mechanism_return_code != 0:
+            print(
+                "[backtest] Stopped on "
+                f"{trading_day}: mechanism_effectiveness_audit.py failed with exit code {mechanism_return_code}"
+            )
+            return mechanism_return_code
+
     if args.run_eval and args.skip_eval:
         raise ValueError("--run-eval and --skip-eval cannot be used together.")
 
@@ -361,6 +402,16 @@ def main() -> int:
     if invariant_return_code != 0:
         print(f"[backtest] system_invariant_audit.py failed with exit code {invariant_return_code}")
         return invariant_return_code
+
+    mechanism_return_code = run_mechanism_effectiveness_audit(
+        config_arg,
+        trading_days[0],
+        trading_days[-1],
+        args.local_db,
+    )
+    if mechanism_return_code != 0:
+        print(f"[backtest] mechanism_effectiveness_audit.py failed with exit code {mechanism_return_code}")
+        return mechanism_return_code
 
     if args.plot:
         plot_command = [sys.executable, str(RUN_DIR / "plot_config.py"), "--config", config_arg]

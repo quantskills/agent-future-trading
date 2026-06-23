@@ -1051,10 +1051,7 @@ def _build_final_action_contract(
             "classification": lifecycle.get("lifecycle_classification"),
         })
 
-    selected_action_values = []
-    for row in (alpha_setup_action_values or [])[:6]:
-        if isinstance(row, dict):
-            selected_action_values.append(_compact_alpha_setup_action_value(row))
+    selected_action_values = _select_learning_trace_action_values(alpha_setup_action_values, limit=10)
 
     margin_ratio_estimate = (
         float(margin_required or 0.0) / max(float(account_equity or 0.0), 1.0)
@@ -3686,6 +3683,7 @@ def _alpha_setup_profile_trace(alpha_setup_profiles: list | None) -> dict:
 def _compact_alpha_setup_action_value(row: dict) -> dict:
     if not isinstance(row, dict):
         return {}
+    row = _normalize_alpha_setup_action_value(row)
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     return {
         "scope_key": row.get("scope_key"),
@@ -3702,14 +3700,30 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "confidence_score": row.get("confidence_score"),
         "action_preference": _action_value_preference(row),
         "canonical_action_preference_source": (
-            payload.get("canonical_action_preference_source") or "payload.action_preference"
+            row.get("canonical_action_preference_source")
+            or payload.get("canonical_action_preference_source")
+            or "canonical_action_value"
         ),
         "max_position_impact": row.get("max_position_impact"),
+        "last_sample_date": row.get("last_sample_date"),
         "valid_until": row.get("valid_until"),
         "source": payload.get("source") or row.get("source"),
-        "reward_source": payload.get("reward_source"),
+        "reward_source": row.get("reward_source") or payload.get("reward_source"),
+        "consumer_scope": row.get("consumer_scope") or payload.get("consumer_scope"),
+        "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
+        "retrieval_key": row.get("retrieval_key") or payload.get("retrieval_key"),
+        "fallback_retrieval_key": row.get("fallback_retrieval_key") or payload.get("fallback_retrieval_key"),
+        "execution_retrieval_key": row.get("execution_retrieval_key") or payload.get("execution_retrieval_key"),
+        "retrieval_match_level": row.get("retrieval_match_level") or payload.get("retrieval_match_level"),
+        "retrieval_match_reason": row.get("retrieval_match_reason") or payload.get("retrieval_match_reason"),
         "strict_no_lookahead": payload.get("strict_no_lookahead"),
-        "amplification_scope_quality": payload.get("amplification_scope_quality"),
+        "evidence_scope": row.get("evidence_scope") or payload.get("evidence_scope"),
+        "amplification_scope_quality": (
+            row.get("evidence_scope")
+            or payload.get("amplification_scope_quality")
+            or payload.get("evidence_scope")
+        ),
+        "action_value_lane": row.get("action_value_lane") or payload.get("action_value_lane"),
         "exact_state_real_trade_sample_count": payload.get("exact_state_real_trade_sample_count"),
         "partial_state_real_trade_sample_count": payload.get("partial_state_real_trade_sample_count"),
         "similar_real_trade_sample_count": payload.get("similar_real_trade_sample_count"),
@@ -3724,29 +3738,336 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
     }
 
 
-def _append_unique_action_values(base_rows: list | None, extra_rows: list | None) -> list[dict]:
-    rows: list[dict] = [dict(row) for row in (base_rows or []) if isinstance(row, dict)]
-    seen = {
-        (
-            str(row.get("scope_key") or ""),
-            str(row.get("action_name") or ""),
-            str(row.get("ticker") or ""),
+def _action_value_key(row: dict) -> tuple[str, str, str, str, str, str, str]:
+    return (
+        str(row.get("scope_key") or ""),
+        str(row.get("action_name") or ""),
+        str(row.get("ticker") or ""),
+        str(row.get("side") or ""),
+        str(row.get("horizon_class") or ""),
+        str(row.get("market_regime") or ""),
+        str(row.get("setup_type") or ""),
+    )
+
+
+def _action_value_row_completeness(row: dict) -> tuple[int, int, int, int, int]:
+    if not isinstance(row, dict):
+        return (0, 0, 0, 0, 0)
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    preference = str(
+        row.get("action_preference")
+        or payload.get("action_preference")
+        or ""
+    ).strip()
+    reward_present = any(
+        (row.get(key) not in (None, "") or payload.get(key) not in (None, ""))
+        for key in ("reward_sum", "reward_mean", "win_rate")
+    )
+    scope = str(
+        row.get("evidence_scope")
+        or row.get("amplification_scope_quality")
+        or payload.get("evidence_scope")
+        or payload.get("amplification_scope_quality")
+        or ""
+    ).strip().lower()
+    reward_source = str(row.get("reward_source") or payload.get("reward_source") or "").strip().lower()
+    has_payload = int(bool(payload))
+    return (
+        int(bool(preference)),
+        int(bool(reward_present)),
+        int(scope == "exact_real_state"),
+        int(reward_source in {"real_trade", "trade_episode", "episode_trade", "complete_episode"}),
+        has_payload,
+    )
+
+
+def _normalize_alpha_setup_action_value(row: dict) -> dict:
+    """Return a PM-readable canonical action-value row.
+
+    Analyst learning context can carry compact trace rows. PM scoring needs the
+    machine fields that describe reward, evidence scope and action preference.
+    This normalizer keeps top-level canonical fields first and falls back to
+    legacy payload fields without creating trade authority.
+    """
+    if not isinstance(row, dict):
+        return {}
+    normalized = dict(row)
+    payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+    if payload:
+        normalized["payload"] = dict(payload)
+    def pick(*keys, default=None):
+        for key in keys:
+            value = normalized.get(key)
+            if value not in (None, ""):
+                return value
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+        return default
+
+    action_preference = _canonical_action_preference(pick("action_preference", "policy_action", default=""))
+    if action_preference:
+        normalized["action_preference"] = action_preference
+    reward_source = str(pick("reward_source", "sample_source", default="") or "").strip().lower()
+    if reward_source:
+        normalized["reward_source"] = reward_source
+    evidence_scope = str(
+        pick("evidence_scope", "amplification_scope_quality", "source_quality", default="")
+        or ""
+    ).strip().lower()
+    if evidence_scope:
+        normalized["evidence_scope"] = evidence_scope
+    action_value_lane = str(
+        pick("action_value_lane", "source_action_value_lane", "action_name", default="")
+        or ""
+    ).strip().lower()
+    if action_value_lane:
+        normalized["action_value_lane"] = action_value_lane
+    consumer_scope = str(
+        pick("consumer_scope", "learning_consumer_scope", default="pm_learning")
+        or "pm_learning"
+    ).strip().lower()
+    normalized["consumer_scope"] = consumer_scope
+    learning_lane = str(
+        pick("learning_lane", "action_value_lane", "source_action_value_lane", "action_name", default="")
+        or ""
+    ).strip().lower()
+    if learning_lane:
+        normalized["learning_lane"] = learning_lane
+    for key in (
+        "retrieval_key",
+        "fallback_retrieval_key",
+        "execution_retrieval_key",
+        "retrieval_match_level",
+        "retrieval_match_reason",
+    ):
+        value = pick(key)
+        if value not in (None, ""):
+            normalized[key] = value
+    for key in (
+        "reward_sum",
+        "reward_mean",
+        "win_rate",
+        "sample_count",
+        "confidence_score",
+        "max_position_impact",
+        "last_sample_date",
+        "valid_until",
+        "worst_reward",
+        "tail_loss_count",
+        "real_trade_reward_count",
+        "counterfactual_reward_count",
+        "exact_state_real_trade_sample_count",
+        "partial_state_real_trade_sample_count",
+        "similar_real_trade_sample_count",
+        "exact_ticker_sample_count",
+        "exact_ticker_real_trade_sample_count",
+    ):
+        value = pick(key)
+        if value not in (None, ""):
+            normalized[key] = value
+    normalized["canonical_action_value"] = bool(
+        normalized.get("action_preference")
+        and normalized.get("reward_source")
+        and normalized.get("evidence_scope")
+        and normalized.get("action_value_lane")
+        and (
+            normalized.get("reward_sum") not in (None, "")
+            or normalized.get("reward_mean") not in (None, "")
+            or normalized.get("win_rate") not in (None, "")
         )
-        for row in rows
-    }
+    )
+    normalized["canonical_action_value_source"] = (
+        "top_level_first_payload_compatible"
+        if normalized["canonical_action_value"]
+        else "incomplete_trace_not_for_pm_scoring"
+    )
+    return normalized
+
+
+def _is_pm_learning_action_value(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    normalized = _normalize_alpha_setup_action_value(row)
+    return str(normalized.get("consumer_scope") or "pm_learning").lower() == "pm_learning"
+
+
+def _annotate_pm_action_value_retrieval(row: dict, *, match_level: str, match_reason: str) -> dict:
+    normalized = _normalize_alpha_setup_action_value(row)
+    normalized["consumer_scope"] = "pm_learning"
+    normalized["retrieval_match_level"] = match_level
+    normalized["retrieval_match_reason"] = match_reason
+    payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+    if payload:
+        payload = dict(payload)
+        payload["consumer_scope"] = "pm_learning"
+        payload["retrieval_match_level"] = match_level
+        payload["retrieval_match_reason"] = match_reason
+        normalized["payload"] = payload
+    return normalized
+
+
+def _pm_canonical_action_value_rank(row: dict) -> tuple[int, int, int, int, float, int]:
+    normalized = _normalize_alpha_setup_action_value(row)
+    scope = str(normalized.get("evidence_scope") or "").lower()
+    reward_source = str(normalized.get("reward_source") or "").lower()
+    match_level = str(normalized.get("retrieval_match_level") or "").lower()
+    preference = str(normalized.get("action_preference") or "").lower()
+    return (
+        0 if match_level == "exact_state" else 1 if match_level == "same_ticker_side_horizon" else 2 if match_level == "same_ticker_side" else 3,
+        0 if scope == "exact_real_state" else 1 if scope == "partial_real_state" else 2 if scope == "similar_sql_prior" else 3,
+        0 if any(marker in reward_source for marker in ("episode", "real_trade", "complete_episode")) else 1,
+        0 if preference else 1,
+        -abs(_safe_float(normalized.get("reward_sum"), 0.0)),
+        -int(_safe_int(normalized.get("sample_count"), 0)),
+    )
+
+
+def _select_learning_trace_action_values(rows: list | None, limit: int = 10) -> list[dict]:
+    normalized = _normalize_alpha_setup_action_values(rows)
+    normalized.sort(key=_pm_canonical_action_value_rank)
+    compacted: list[dict] = []
+    for row in normalized:
+        compact = _compact_alpha_setup_action_value(row)
+        if compact:
+            compacted.append(compact)
+        if len(compacted) >= int(limit):
+            break
+    return compacted
+
+
+def _normalize_alpha_setup_action_values(rows: list | None) -> list[dict]:
+    return [
+        normalized
+        for normalized in (_normalize_alpha_setup_action_value(row) for row in (rows or []))
+        if normalized
+    ]
+
+
+def _append_unique_action_values(base_rows: list | None, extra_rows: list | None) -> list[dict]:
+    rows: list[dict] = _normalize_alpha_setup_action_values(base_rows)
+    index = {_action_value_key(row): pos for pos, row in enumerate(rows)}
     for row in extra_rows or []:
         if not isinstance(row, dict):
             continue
-        key = (
-            str(row.get("scope_key") or ""),
-            str(row.get("action_name") or ""),
-            str(row.get("ticker") or ""),
-        )
-        if key in seen:
+        normalized = _normalize_alpha_setup_action_value(row)
+        key = _action_value_key(normalized)
+        if key in index:
+            existing_pos = index[key]
+            if _action_value_row_completeness(normalized) > _action_value_row_completeness(rows[existing_pos]):
+                rows[existing_pos] = normalized
             continue
-        rows.append(dict(row))
-        seen.add(key)
+        rows.append(normalized)
+        index[key] = len(rows) - 1
     return rows
+
+
+def _pm_retrieve_canonical_action_values(
+    *,
+    db,
+    config_id: str,
+    ticker: str,
+    side: str,
+    horizon_class: str | None,
+    market_regime: str | None,
+    setup_type: str | None,
+    trading_date,
+    limit: int = 12,
+) -> tuple[list[dict], dict]:
+    """Retrieve PM-scoped action-values through fixed exact/fallback layers."""
+    details = {
+        "side": side,
+        "horizon_class": horizon_class,
+        "market_regime": market_regime,
+        "setup_type": setup_type,
+        "consumer_scope": "pm_learning",
+        "attempts": [],
+        "row_count": 0,
+    }
+    if not db or not hasattr(db, "get_alpha_setup_action_values"):
+        details["skipped_reason"] = "db_missing_get_alpha_setup_action_values"
+        return [], details
+    layers = [
+        (
+            "exact_state",
+            {
+                "horizon_class": horizon_class,
+                "market_regime": market_regime,
+                "setup_type": setup_type,
+            },
+            "ticker_side_horizon_regime_setup",
+        ),
+        (
+            "same_ticker_side_horizon",
+            {
+                "horizon_class": horizon_class,
+                "market_regime": None,
+                "setup_type": None,
+            },
+            "ticker_side_horizon_fallback",
+        ),
+        (
+            "same_ticker_side",
+            {
+                "horizon_class": None,
+                "market_regime": None,
+                "setup_type": None,
+            },
+            "ticker_side_fallback",
+        ),
+    ]
+    collected: list[dict] = []
+    for match_level, kwargs, reason in layers:
+        try:
+            rows = db.get_alpha_setup_action_values(
+                config_id=config_id,
+                ticker=ticker,
+                side=side,
+                horizon_class=kwargs.get("horizon_class"),
+                market_regime=kwargs.get("market_regime"),
+                setup_type=kwargs.get("setup_type"),
+                trading_date=trading_date,
+                limit=limit,
+                consumer_scope="pm_learning",
+            )
+        except TypeError:
+            rows = db.get_alpha_setup_action_values(
+                config_id=config_id,
+                ticker=ticker,
+                side=side,
+                horizon_class=kwargs.get("horizon_class"),
+                market_regime=kwargs.get("market_regime"),
+                setup_type=kwargs.get("setup_type"),
+                trading_date=trading_date,
+                limit=limit,
+            )
+        except Exception as exc:
+            details["attempts"].append({
+                "match_level": match_level,
+                "match_reason": reason,
+                "row_count": 0,
+                "error": str(exc),
+            })
+            continue
+        pm_rows = [
+            _annotate_pm_action_value_retrieval(row, match_level=match_level, match_reason=reason)
+            for row in (rows or [])
+            if _is_pm_learning_action_value(row)
+        ]
+        details["attempts"].append({
+            "match_level": match_level,
+            "match_reason": reason,
+            "row_count": len(pm_rows),
+        })
+        collected = _append_unique_action_values(collected, pm_rows)
+        if collected:
+            break
+    details["row_count"] = len(collected)
+    details["matched_levels"] = sorted({
+        str(row.get("retrieval_match_level") or "unknown") for row in collected if isinstance(row, dict)
+    })
+    return collected, details
 
 
 _OPEN_OR_ADD_ACTION_NAMES = {
@@ -3803,11 +4124,27 @@ _NEGATIVE_ACTION_PREFERENCES = {
     "negative_hold_revalidate",
     "tail_loss_protect",
 }
+_CANONICAL_ACTION_PREFERENCES = (
+    _POSITIVE_OPEN_ACTION_PREFERENCES
+    | _POSITIVE_HOLD_ACTION_PREFERENCES
+    | _POSITIVE_EXIT_ACTION_PREFERENCES
+    | _POSITIVE_EXECUTION_ACTION_PREFERENCES
+    | _NEGATIVE_ACTION_PREFERENCES
+)
+
+
+def _canonical_action_preference(value: object) -> str:
+    preference = str(value or "").strip().lower()
+    return preference if preference in _CANONICAL_ACTION_PREFERENCES else ""
 
 
 def _action_value_preference(row: dict) -> str:
+    if isinstance(row, dict):
+        preference = _canonical_action_preference(row.get("action_preference"))
+        if preference:
+            return preference
     payload = _action_value_payload(row)
-    preference = str(payload.get("action_preference") or "").strip().lower()
+    preference = _canonical_action_preference(payload.get("action_preference"))
     if preference:
         return preference
     return ""
@@ -3944,7 +4281,13 @@ def _action_value_scope_quality(row: dict, ticker: str | None = None, side: str 
     row_ticker = str(row.get("ticker") or "").strip().upper()
     row_side = str(row.get("side") or "").strip().lower()
     payload = _action_value_payload(row)
-    explicit_quality = str(payload.get("amplification_scope_quality") or "").strip().lower()
+    explicit_quality = str(
+        row.get("evidence_scope")
+        or row.get("amplification_scope_quality")
+        or payload.get("evidence_scope")
+        or payload.get("amplification_scope_quality")
+        or ""
+    ).strip().lower()
     if explicit_quality in _ACTION_VALUE_SCOPE_QUALITIES:
         if explicit_quality == "exact_real_state":
             if not _action_value_has_complete_state(row, ticker=ticker, side=side):
@@ -4368,9 +4711,24 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
     ]
     rows = [row for row in rows if row]
     preference_counts: dict[str, int] = {}
+    canonical_count = 0
+    incomplete_count = 0
     for row in rows:
         key = str(row.get("action_preference") or "none")
         preference_counts[key] = preference_counts.get(key, 0) + 1
+        if (
+            row.get("action_preference")
+            and row.get("reward_source")
+            and row.get("evidence_scope")
+            and (
+                row.get("reward_sum") is not None
+                or row.get("reward_mean") is not None
+                or row.get("win_rate") is not None
+            )
+        ):
+            canonical_count += 1
+        else:
+            incomplete_count += 1
     action_groups = {
         "open_action_value": [],
         "hold_action_value": [],
@@ -4389,8 +4747,10 @@ def _alpha_setup_action_value_trace(alpha_setup_action_values: list | None) -> d
             action_groups["execution_action_value"].append(row)
     return {
         "action_value_count": len(rows),
+        "canonical_action_value_count": canonical_count,
+        "incomplete_trace_action_value_count": incomplete_count,
         "action_preference_counts": preference_counts,
-        "canonical_action_preference_source": "payload.action_preference",
+        "canonical_action_preference_source": "top_level_first_payload_compatible",
         "action_values": rows[:8],
         "open_action_value": action_groups["open_action_value"][:4],
         "hold_action_value": action_groups["hold_action_value"][:4],
@@ -6616,6 +6976,15 @@ def _safe_float(value, default: float = 0.0) -> float:
         if value is None:
             return default
         return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -8927,7 +9296,9 @@ def portfolio_agent_futures(state: FundState):
         "hard_margin_cap_not_overridden": True,
     }
     alpha_setup_profiles = pm_learning_context.get("alpha_setup_items") or []
-    alpha_setup_action_values = pm_learning_context.get("alpha_setup_action_values") or []
+    alpha_setup_action_values = _normalize_alpha_setup_action_values(
+        pm_learning_context.get("alpha_setup_action_values") or []
+    )
     pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
     pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
@@ -9172,6 +9543,112 @@ def portfolio_agent_futures(state: FundState):
         config=opportunity_scorecard_cfg,
     )
     fusion_context["opportunity_scorecard"] = opportunity_scorecard
+    if db and config_id and hasattr(db, "get_alpha_setup_action_values"):
+        try:
+            candidate_sides_for_exact: list[str] = []
+            for side_name in (
+                target_side_for_confirmation,
+                str(opportunity_scorecard.get("preferred_side") or ""),
+                "long",
+                "short",
+            ):
+                side_name = str(side_name or "").lower()
+                if side_name not in {"long", "short"} or side_name in candidate_sides_for_exact:
+                    continue
+                side_card = (
+                    opportunity_scorecard.get(side_name)
+                    if isinstance(opportunity_scorecard.get(side_name), dict)
+                    else {}
+                )
+                score = float(side_card.get("score") or 0.0) if side_card else 0.0
+                opportunity_state = str(side_card.get("opportunity_state") or "").lower()
+                candidate_like = (
+                    side_name == target_side_for_confirmation
+                    or side_name == str(opportunity_scorecard.get("preferred_side") or "").lower()
+                    or score > 0.01
+                    or bool(side_card.get("setup_quality_ok"))
+                    or opportunity_state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger"}
+                )
+                if candidate_like:
+                    candidate_sides_for_exact.append(side_name)
+
+            exact_alpha_action_values: list[dict] = []
+            exact_side_details: list[dict] = []
+            for exact_side in candidate_sides_for_exact:
+                exact_horizon = _resolve_decision_horizon(
+                    analyst_signals,
+                    1 if exact_side == "long" else -1,
+                )
+                exact_regime = _market_regime_from_signals(analyst_signals, exact_side)
+                side_card_for_exact = (
+                    opportunity_scorecard.get(exact_side)
+                    if isinstance(opportunity_scorecard.get(exact_side), dict)
+                    else {}
+                )
+                best_profile_for_exact = (
+                    side_card_for_exact.get("best_alpha_setup_profile")
+                    if isinstance(side_card_for_exact.get("best_alpha_setup_profile"), dict)
+                    else {}
+                )
+                exact_setup_type = str(
+                    best_profile_for_exact.get("setup_type")
+                    or side_card_for_exact.get("final_state")
+                    or _setup_type_from_signals(exact_side, analyst_signals, signal_combo)
+                    or ""
+                )
+                side_action_values, side_retrieval_detail = _pm_retrieve_canonical_action_values(
+                    db=db,
+                    config_id=config_id,
+                    ticker=ticker,
+                    side=exact_side,
+                    horizon_class=exact_horizon,
+                    market_regime=exact_regime,
+                    setup_type=(exact_setup_type or None),
+                    trading_date=trading_date,
+                    limit=12,
+                )
+                if side_action_values:
+                    exact_alpha_action_values.extend(side_action_values)
+                exact_side_details.append({
+                    "side": exact_side,
+                    "horizon_class": exact_horizon,
+                    "market_regime": exact_regime,
+                    "setup_type": exact_setup_type,
+                    "row_count": len(side_action_values or []),
+                    "retrieval_detail": side_retrieval_detail,
+                })
+            pm_learning_audit["pm_action_value_retrieval_attempts"] = exact_side_details
+            if exact_alpha_action_values:
+                before_count = len(alpha_setup_action_values)
+                alpha_setup_action_values = _append_unique_action_values(
+                    alpha_setup_action_values,
+                    exact_alpha_action_values,
+                )
+                pm_learning_audit["pm_exact_alpha_setup_action_value_count"] = len(exact_alpha_action_values)
+                pm_learning_audit["pm_exact_alpha_setup_candidate_sides"] = exact_side_details
+                pm_learning_audit["pm_exact_alpha_setup_action_values"] = [
+                    _compact_alpha_setup_action_value(row) for row in exact_alpha_action_values[:8]
+                ]
+                pm_learning_audit["pm_exact_alpha_setup_action_value_added_count"] = (
+                    len(alpha_setup_action_values) - before_count
+                )
+                pm_learning_audit["pm_exact_alpha_setup_boundary"] = (
+                    "pm_reads_pm_learning_canonical_action_value_by_exact_then_fallback_layers_after_setup_resolution"
+                )
+                opportunity_scorecard = build_opportunity_scorecard(
+                    ticker=ticker,
+                    analyst_signals=analyst_signals,
+                    market_confirmation=market_confirmation,
+                    data_quality_summary=data_quality_summary_for_pm,
+                    adaptive_policy_state=early_adaptive_policy_state,
+                    alpha_setup_profiles=alpha_setup_profiles,
+                    alpha_setup_action_values=alpha_setup_action_values,
+                    decision_date=trading_date,
+                    config=opportunity_scorecard_cfg,
+                )
+                fusion_context["opportunity_scorecard"] = opportunity_scorecard
+        except Exception as exc:
+            logger.warning(f"{ticker}: exact alpha setup action-value PM retrieval skipped: {exc}")
     if db and config_id and hasattr(db, "get_similar_alpha_setup_action_values"):
         try:
             similar_horizon = _resolve_decision_horizon(

@@ -12,7 +12,7 @@ PM 是唯一资金经理。分析师、Reviewer、Researcher 只能提供证据�
 
 系统最终策略交易事实只认 `final_action_contract`。PM 内部草稿只能保留为本地推演和日志上下文，不是 Trader、Researcher、evaluation 或 audit 的交易事实入口。`source_type=strategy` 走策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，独立执行、独立核算，不进入策略 alpha 学习。
 
-所有学习结果只能影响未来交易日。分析师只用学习校准证据质量；PM 读取 open/hold/exit 的动作偏好，并把 execution 偏好写入最终合约；Trader 不直接读取研究 action-value；Accountant 不被学习改账；Reviewer 不下单；Researcher 不影响当天交易。
+所有学习结果只能影响未来交易日。分析师只用学习校准证据质量；PM 读取 open/hold/exit 的动作偏好，并把 execution 偏好写入最终合约；PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard，不能只读初始 preferred side；Trader 不直接读取研究 action-value；Accountant 不被学习改账；Reviewer 不下单；Researcher 不影响当天交易。
 
 ## 二、当前启用智能体清单
 
@@ -27,7 +27,7 @@ PM 是唯一资金经理。分析师、Reviewer、Researcher 只能提供证据�
 | `accountant` | 成交、持仓、结算价、手续费、滑点、合约乘数、保证金率 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | 只按事实结算，不接受 LLM 或学习文本改账 |
 | `reviewer` | Phase1-3 状态、推荐、成交、结算、data quality、交易日志事实、PM 机会评分/排名/资金理由 | Phase4 验收、daily summary、完整交易日志、排序有效性复盘、学习候选 | 否 | 只做确定性验收和日志，复盘 PM 排序是否有效；不下单、不调仓、不写最终学习 |
 | `researcher` | Reviewer 产物、已结算 episode、未交易机会、未触发条件机会、action outcome、排序有效性复盘 | `alpha_setup_profile`、`alpha_setup_action_value`、`adaptive_policy_state`、机会排序偏好候选、未来学习记忆 | 是 | 只写未来可用学习和排序偏好候选，不影响当天交易、成交和账务 |
-| `protocol_governor` | 能力卡、工具权限、字段语义、artifact lineage、preflight/audit 状态 | `protocol_audit`、`preflight_health`、字段/权限/生命周期告警 | 否 | 旁路治理；不创建/否决交易权限，不改 lots/margin |
+| `protocol_governor` | 能力卡、工具权限、字段语义、artifact lineage、preflight/audit 状态、机制有效性报告 | `protocol_audit`、`preflight_health`、字段/权限/生命周期告警、`mechanism_effectiveness_audit` | 否 | 旁路治理；不创建/否决交易权限，不改 lots/margin；只在机制断链 hard_fail 时阻止策略评价 |
 
 ## 三、完整业务链路
 
@@ -61,8 +61,9 @@ Phase4 复盘研究
 
 旁路治理
   protocol_governor
-      -> pre_backtest_acceptance / system_invariant_audit / unified field audit
-      -> 发现非策略 hard error 时让回测 fail-fast
+      -> pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit / unified field audit
+      -> 发现非策略 hard error 或机制断链 hard_fail 时让回测 fail-fast
+      -> 机制已接通但效果差只输出 diagnostic，进入策略分析
 ```
 
 ## 四、关键协作口径
@@ -93,4 +94,4 @@ PM 排序使用的是全周期 episode 学习，不是只看前一天涨跌。�
 
 ## 五、回测前后验收
 
-回测前必须通过 `pre_backtest_acceptance.py`，回测中每个交易日完成后通过累计 `system_invariant_audit.py`。验收重点包括：唯一合约、字段语义一致、分析师证据不自相矛盾、PM 排序字段不越权、Trader 只按最终合约执行、运营风控单与策略单分账、未完成交易日硬拦、账务和阶段状态一致。出现 hard error 时，不能把该窗口盈亏当策略结论。策略评估时还要检查高分/低分、排名和资金分配理由对应的收益贡献，确认排序学习是在提高资金部署质量，而不是新增一层静态门控。
+回测前必须通过 `pre_backtest_acceptance.py`，回测中每个交易日完成后先通过累计 `system_invariant_audit.py`，再通过累计 `mechanism_effectiveness_audit.py`。前者检查唯一合约、字段语义、账务、阶段和执行不变量；后者只读检查 action-value 是否被 PM 读取、学习分项是否进入 score、rank 是否进入唯一合约、条件 probe 是否有盘中结果、持仓/退出学习是否落到合约或有解释。`mechanism_effectiveness_audit.hard_failures` 非空时不能评价策略收益；只有 `diagnostics` 时不停止回测，应进入策略分析。

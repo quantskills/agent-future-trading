@@ -507,6 +507,11 @@ def _action_value_learning_summary(
         if not isinstance(row, Mapping):
             continue
         payload = _row_payload(row)
+        consumer_scope = _clean_key(
+            _row_value(row, payload, "consumer_scope", "learning_consumer_scope", default="pm_learning")
+        )
+        if consumer_scope and consumer_scope != "pm_learning":
+            continue
         row_side = _clean_key(_row_value(row, payload, "side", default="*"))
         if row_side not in {side, "*", "both", "any"}:
             continue
@@ -849,6 +854,12 @@ def build_opportunity_scorecard(
         )
         execution_profile_signal = _safe_float(action_value_learning.get("execution_profile_signal"), 0.0)
         recent_tail_loss_signal = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
+        action_value_signal_present = bool(
+            int(action_value_learning.get("positive_count", 0) or 0)
+            or int(action_value_learning.get("negative_count", 0) or 0)
+            or abs(execution_profile_signal) > 1e-9
+            or recent_tail_loss_signal > 1e-9
+        )
         score_components = {
             "directional_support": min(
                 _score_cap(cfg, "directional_support", 0.24),
@@ -889,6 +900,11 @@ def build_opportunity_scorecard(
             alpha_profile_bonus = 0.06
         elif watchlist_profiles:
             alpha_profile_bonus = 0.025
+        if not action_value_signal_present:
+            alpha_profile_bonus = min(
+                alpha_profile_bonus,
+                _safe_float(cfg.get("profile_prior_only_bonus_cap_without_action_value"), 0.015),
+            )
         alpha_profile_penalty = 0.08 if capped_profiles else 0.0
         if recent_tail_loss_signal > 0 and alpha_profile_bonus > 0:
             alpha_profile_bonus *= max(0.0, 1.0 - recent_tail_loss_signal)

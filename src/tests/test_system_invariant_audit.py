@@ -104,6 +104,14 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     win_rate REAL DEFAULT 0,
                     confidence_score REAL DEFAULT 0,
                     action_preference TEXT DEFAULT '',
+                    reward_source TEXT DEFAULT '',
+                    evidence_scope TEXT DEFAULT '',
+                    action_value_lane TEXT DEFAULT '',
+                    consumer_scope TEXT DEFAULT 'pm_learning',
+                    learning_lane TEXT DEFAULT '',
+                    retrieval_key TEXT DEFAULT '',
+                    fallback_retrieval_key TEXT DEFAULT '',
+                    execution_retrieval_key TEXT DEFAULT '',
                     max_position_impact REAL DEFAULT 0,
                     last_sample_date TEXT,
                     created_at TEXT NOT NULL,
@@ -149,7 +157,30 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "lots_delta": -2,
             "execution_requirement": "intraday_trigger_required",
             "reason_codes": ["positive_candidate_open"],
-            "learning_used": {"alpha_setup_action_values": [{"action_preference": "positive_candidate_open"}]},
+            "evidence_used": {
+                "opportunity_score_components": {
+                    "positive_learning": 0.12,
+                    "negative_learning": 0.0,
+                    "execution_profile_learning": 0.0,
+                    "recent_tail_loss_penalty": 0.0,
+                }
+            },
+            "learning_used": {
+                "alpha_setup_action_values": [
+                    {
+                        "action_preference": "positive_candidate_open",
+                        "reward_sum": 1200.0,
+                        "reward_mean": 1200.0,
+                        "win_rate": 1.0,
+                        "reward_source": "trade_episode",
+                        "evidence_scope": "exact_real_state",
+                        "action_value_lane": "open",
+                        "consumer_scope": "pm_learning",
+                        "learning_lane": "open",
+                        "retrieval_match_level": "exact_state",
+                    }
+                ]
+            },
         }
         payload = {
             "final_action_contract": contract,
@@ -227,9 +258,333 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "recommendation_top_level_action_lots_must_match_final_contract",
             report.metadata["pm_learning_ranking_audit_boundaries"],
         )
+
+    def test_system_invariant_audit_accepts_empty_database_before_fresh_backtest(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        db_path = Path(tmpdir.name) / "agentquant.db"
+        sqlite3.connect(db_path).close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertIn("empty_db_no_invariant_records_to_audit", report.metadata.get("record_boundary", ""))
+        self.assertTrue(any(item.startswith("config_not_found_empty_db:") for item in report.warnings))
+
+    def test_system_invariant_audit_rejects_pm_action_value_trace_missing_reward_scope(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = json.loads(conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()[0])
+            payload["final_action_contract"]["learning_used"]["alpha_setup_action_values"] = [
+                {"action_preference": "positive_candidate_open"}
+            ]
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_action_value_missing_canonical_fields") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_pm_consuming_trader_execution_learning(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_real",
+                    "authority_type": "real_budget_entry",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "execution_requirement": "intraday_trigger_required",
+                    "evidence_used": {
+                        "opportunity_score_components": {
+                            "positive_learning": 0.12,
+                            "negative_learning": 0.0,
+                            "execution_profile_learning": 0.0,
+                            "recent_tail_loss_penalty": 0.0,
+                        }
+                    },
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "action_preference": "positive_candidate_execution",
+                                "reward_sum": 1200.0,
+                                "reward_mean": 1200.0,
+                                "win_rate": 1.0,
+                                "reward_source": "trade_episode",
+                                "evidence_scope": "exact_real_state",
+                                "action_value_lane": "execution",
+                                "consumer_scope": "trader_execution_learning",
+                            }
+                        ]
+                    },
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+                "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+            }
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(
+            any(error.startswith("pm_consumed_non_pm_learning_action_value") for error in report.errors),
+            report.to_dict(),
+        )
         self.assertIn(
             "learning_components_only_inside_opportunity_score_components",
             report.metadata["pm_learning_ranking_audit_boundaries"],
+        )
+
+    def test_system_invariant_audit_rejects_learning_signal_without_contract_effect_or_reason(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["learning_signal_seen"],
+                "evidence_used": {
+                    "opportunity_score_components": {
+                        "positive_learning": 0.12,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    }
+                },
+                "learning_used": {
+                    "learning_adjustment_summary": {
+                        "positive_learning_signal": 0.12,
+                        "negative_learning_signal": 0.0,
+                        "execution_profile_learning_signal": 0.0,
+                        "recent_tail_loss_signal": 0.0,
+                    }
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-learning-no-effect", "cfg", "pf", "2025-03-04", "2025-03-04", "strategy", "RB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_learning_signal_without_contract_effect_or_explanation") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_accepts_learning_signal_no_lot_change_with_capital_reason(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["capital_queue_not_selected"],
+                "evidence_used": {
+                    "capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking",
+                    "opportunity_score_components": {
+                        "positive_learning": 0.12,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": False,
+                    "capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking",
+                    "original_target_lots": 1,
+                    "deployed_target_lots": 0,
+                    "deployed_lots_delta": 0,
+                },
+                "learning_used": {
+                    "learning_adjustment_summary": {
+                        "positive_learning_signal": 0.12,
+                        "negative_learning_signal": 0.0,
+                        "execution_profile_learning_signal": 0.0,
+                        "recent_tail_loss_signal": 0.0,
+                    }
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-learning-explained", "cfg", "pf", "2025-03-04", "2025-03-04", "strategy", "RB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_rejects_rank_without_contract_effect_or_reason(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "wait",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["pm_full_market_capital_deployment"],
+                "evidence_used": {
+                    "opportunity_rank": 1,
+                    "opportunity_score_components": {
+                        "positive_learning": 0.08,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": True,
+                    "opportunity_rank": 1,
+                    "original_target_lots": 0,
+                    "deployed_target_lots": 0,
+                    "deployed_lots_delta": 0,
+                },
+                "learning_used": {
+                    "learning_adjustment_summary": {
+                        "positive_learning_signal": 0.08,
+                    }
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-rank-no-effect", "cfg", "pf", "2025-03-04", "2025-03-04", "strategy", "RB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_rank_changed_without_contract_effect") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_hold_exit_learning_without_effect_or_reason(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "hold",
+                "current_lots": -2,
+                "target_lots": -2,
+                "lots_delta": 0,
+                "authority_type": "position_lifecycle",
+                "reason_codes": ["position_matched_without_learning_detail"],
+                "evidence_used": {
+                    "opportunity_score_components": {
+                        "positive_learning": 0.0,
+                        "negative_learning": -0.12,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": -0.08,
+                    }
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "action_preference": "tail_loss_protect",
+                            "reward_sum": -2400.0,
+                            "reward_mean": -1200.0,
+                            "win_rate": 0.0,
+                            "reward_source": "trade_episode",
+                            "evidence_scope": "exact_real_state",
+                            "action_value_lane": "exit",
+                        }
+                    ],
+                    "learning_adjustment_summary": {
+                        "negative_learning_signal": -0.12,
+                        "recent_tail_loss_signal": -0.08,
+                    },
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-hold-exit-no-effect", "cfg", "pf", "2025-03-04", "2025-03-04", "strategy", "RB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation") for error in report.errors),
+            report.to_dict(),
         )
 
     def test_system_invariant_audit_fails_incomplete_trading_day_phase(self):
@@ -1678,6 +2033,27 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "target_lots": -1,
                     "lots_delta": 1,
                     "reason_codes": ["protective_reduce_after_tail_loss"],
+                    "evidence_used": {
+                        "opportunity_score_components": {
+                            "positive_learning": 0.0,
+                            "negative_learning": -0.12,
+                            "execution_profile_learning": 0.0,
+                            "recent_tail_loss_penalty": -0.08,
+                        }
+                    },
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "action_preference": "tail_loss_protect",
+                                "reward_sum": -1200.0,
+                                "reward_mean": -1200.0,
+                                "win_rate": 0.0,
+                                "reward_source": "trade_episode",
+                                "evidence_scope": "partial_real_state",
+                                "action_value_lane": "exit",
+                            }
+                        ]
+                    },
                 },
                 "trade_contract_audit": {
                     "single_source_of_trade_truth": True,

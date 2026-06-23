@@ -60,6 +60,8 @@ from agents.decision_team.portfolio_manager import (
     _current_open_evidence_snapshot,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
+    _normalize_alpha_setup_action_value,
+    _pm_retrieve_canonical_action_values,
     portfolio_agent_futures,
 )
 from agents.execution_team.trader import (
@@ -403,6 +405,152 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(update_by_id["high"][3]["lots"], 2)
         self.assertEqual(update_by_id["low"][3]["action"], RecommendationAction.HOLD)
         self.assertEqual(update_by_id["low"][3]["lots"], 0)
+
+    def test_workflow_learning_rank_changes_final_contract_or_explains_no_effect(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=1_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=1_000_000,
+        )
+        rec_positive = FuturesRecommendation(
+            id="positive-learning",
+            status=RecommendationStatus.PENDING,
+            underlying_code="EB",
+            base_price=3000.0,
+            action=RecommendationAction.OPEN_LONG,
+            lots=2,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "long",
+                    "long": {
+                        "opportunity_score": 0.66,
+                        "opportunity_score_components": {
+                            "positive_learning": 0.14,
+                            "negative_learning": 0.0,
+                            "execution_profile_learning": 0.04,
+                            "recent_tail_loss_penalty": 0.0,
+                        },
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 2,
+                    "lots_delta": 2,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {
+                        "opportunity_score": 0.66,
+                        "opportunity_score_components": {
+                            "positive_learning": 0.14,
+                            "negative_learning": 0.0,
+                            "execution_profile_learning": 0.04,
+                            "recent_tail_loss_penalty": 0.0,
+                        },
+                    },
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "action_preference": "positive_candidate_open",
+                                "reward_sum": 4200.0,
+                                "reward_mean": 1400.0,
+                                "win_rate": 0.67,
+                                "reward_source": "trade_episode",
+                                "evidence_scope": "exact_real_state",
+                                "action_value_lane": "open",
+                            }
+                        ]
+                    },
+                },
+            },
+        )
+        rec_negative = FuturesRecommendation(
+            id="negative-learning",
+            status=RecommendationStatus.PENDING,
+            underlying_code="TA",
+            base_price=3000.0,
+            action=RecommendationAction.OPEN_SHORT,
+            lots=2,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {
+                        "opportunity_score": 0.48,
+                        "opportunity_score_components": {
+                            "positive_learning": 0.0,
+                            "negative_learning": -0.15,
+                            "execution_profile_learning": 0.0,
+                            "recent_tail_loss_penalty": -0.08,
+                        },
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {
+                        "opportunity_score": 0.48,
+                        "opportunity_score_components": {
+                            "positive_learning": 0.0,
+                            "negative_learning": -0.15,
+                            "execution_profile_learning": 0.0,
+                            "recent_tail_loss_penalty": -0.08,
+                        },
+                    },
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "action_preference": "tail_loss_protect",
+                                "reward_sum": -3600.0,
+                                "reward_mean": -1200.0,
+                                "win_rate": 0.0,
+                                "reward_source": "trade_episode",
+                                "evidence_scope": "exact_real_state",
+                                "action_value_lane": "open",
+                            }
+                        ]
+                    },
+                },
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("EB", rec_positive), ("TA", rec_negative)])
+
+        positive_contract = rec_positive.signal_snapshot["final_action_contract"]
+        negative_contract = rec_negative.signal_snapshot["final_action_contract"]
+        self.assertEqual(positive_contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(negative_contract["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(positive_contract["target_lots"], 2)
+        self.assertEqual(positive_contract["lots_delta"], 2)
+        self.assertEqual(rec_positive.action, RecommendationAction.OPEN_LONG)
+        self.assertEqual(negative_contract["target_lots"], 0)
+        self.assertEqual(negative_contract["lots_delta"], 0)
+        self.assertEqual(rec_negative.action, RecommendationAction.HOLD)
+        self.assertIn(
+            "not_selected_by_full_market_pm_capital_queue",
+            negative_contract["capital_deployment"]["capital_allocation_reason"],
+        )
+        self.assertEqual(len(updates), 2)
 
 
 class ResearchLearningMechanismRegressionTest(unittest.TestCase):
@@ -1027,6 +1175,190 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertLess(negative_components["recent_tail_loss_penalty"], 0.0)
         self.assertGreater(positive["short"]["opportunity_score"], negative["short"]["opportunity_score"])
         self.assertNotIn("product_blacklist", json.dumps(negative["short"], ensure_ascii=False))
+
+    def test_pm_action_value_normalizer_preserves_canonical_fields_from_payload_or_top_level(self):
+        payload_only = {
+            "ticker": "TA",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "sample_count": 3,
+            "reward_sum": -3600.0,
+            "reward_mean": -1200.0,
+            "win_rate": 0.0,
+            "last_sample_date": "2025-03-14",
+            "payload": {
+                "action_preference": "tail_loss_protect",
+                "reward_source": "trade_episode",
+                "amplification_scope_quality": "exact_real_state",
+                "action_value_lane": "open",
+            },
+        }
+        normalized = _normalize_alpha_setup_action_value(payload_only)
+
+        self.assertEqual(normalized["action_preference"], "tail_loss_protect")
+        self.assertEqual(normalized["reward_source"], "trade_episode")
+        self.assertEqual(normalized["evidence_scope"], "exact_real_state")
+        self.assertEqual(normalized["action_value_lane"], "open")
+        self.assertEqual(normalized["consumer_scope"], "pm_learning")
+        self.assertTrue(normalized["canonical_action_value"])
+
+    def test_pm_action_value_retrieval_uses_fallback_key_without_scope_drift(self):
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def get_alpha_setup_action_values(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("setup_type") == "trend_breakout_setup":
+                    return []
+                if kwargs.get("horizon_class") == "short" and kwargs.get("setup_type") is None:
+                    return [
+                        {
+                            "scope_key": "TA|short|short|range|execution_pullback_setup|open",
+                            "ticker": "TA",
+                            "side": "short",
+                            "horizon_class": "short",
+                            "market_regime": "range",
+                            "setup_type": "execution_pullback_setup",
+                            "action_name": "open",
+                            "sample_count": 2,
+                            "reward_sum": -3600.0,
+                            "reward_mean": -1800.0,
+                            "win_rate": 0.0,
+                            "action_preference": "tail_loss_protect",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "action_value_lane": "open",
+                            "consumer_scope": "pm_learning",
+                            "last_sample_date": "2025-03-03",
+                        }
+                    ]
+                return []
+
+        rows, detail = _pm_retrieve_canonical_action_values(
+            db=FakeDB(),
+            config_id="cfg",
+            ticker="TA",
+            side="short",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="trend_breakout_setup",
+            trading_date="2025-03-04",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["consumer_scope"], "pm_learning")
+        self.assertEqual(rows[0]["retrieval_match_level"], "same_ticker_side_horizon")
+        self.assertEqual(detail["row_count"], 1)
+        self.assertEqual(detail["attempts"][0]["match_level"], "exact_state")
+        self.assertEqual(detail["attempts"][0]["row_count"], 0)
+
+    def test_scorecard_ignores_non_pm_learning_scope(self):
+        signal = self._tradeable_signal()
+        pm_row = self._action_value(
+            action_preference="tail_loss_protect",
+            lane="open",
+            reward_mean=-1800.0,
+            reward_sum=-7200.0,
+            worst_reward=-2400.0,
+        )
+        trader_row = {
+            **pm_row,
+            "consumer_scope": "trader_execution_learning",
+            "payload": {
+                **pm_row.get("payload", {}),
+                "consumer_scope": "trader_execution_learning",
+            },
+        }
+        pm_scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[pm_row],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        trader_scope_scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[trader_row],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        self.assertLess(pm_scorecard["short"]["opportunity_score_components"]["negative_learning"], 0.0)
+        self.assertEqual(
+            trader_scope_scorecard["short"]["opportunity_score_components"]["negative_learning"],
+            0.0,
+        )
+
+    def test_pm_scorecard_rejects_compressed_trace_as_learning_but_uses_canonical_row(self):
+        signal = self._tradeable_signal()
+        compressed_trace = {
+            "ticker": "TA",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "sample_count": 4,
+            "confidence_score": 0.70,
+            "valid_until": "2025-04-01",
+            "signal_calibration": {"source_action_value_lane": "open"},
+        }
+        canonical_tail_loss = {
+            **compressed_trace,
+            "reward_mean": -1800.0,
+            "reward_sum": -7200.0,
+            "worst_reward": -2400.0,
+            "action_preference": "tail_loss_protect",
+            "last_sample_date": "2025-03-14",
+            "payload": {
+                "action_preference": "tail_loss_protect",
+                "reward_source": "trade_episode",
+                "amplification_scope_quality": "exact_real_state",
+                "action_value_lane": "open",
+                "real_trade_reward_count": 4,
+            },
+        }
+
+        compressed_scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[compressed_trace],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        canonical_scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[canonical_tail_loss],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        self.assertEqual(
+            compressed_scorecard["short"]["opportunity_score_components"]["negative_learning"],
+            0.0,
+        )
+        self.assertLess(
+            canonical_scorecard["short"]["opportunity_score_components"]["negative_learning"],
+            0.0,
+        )
+        self.assertLess(
+            canonical_scorecard["short"]["opportunity_score"],
+            compressed_scorecard["short"]["opportunity_score"],
+        )
 
     def test_execution_profile_learning_is_a_score_component_not_trader_authority(self):
         signal = self._tradeable_signal()
@@ -4205,7 +4537,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertEqual(seed, {})
 
-    def test_action_preference_action_preference_mirror_without_payload_cannot_seed_open_candidate(self):
+    def test_top_level_canonical_action_preference_can_seed_open_candidate_without_payload_duplicate(self):
         technical = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
@@ -4251,7 +4583,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             max_position_ratio=0.05,
         )
 
-        self.assertEqual(seed, {})
+        self.assertEqual(seed["side"], "long")
+        self.assertGreater(seed["seed_position_ratio"], 0.0)
+        self.assertEqual(seed["row"]["action_preference"], "positive_candidate_open")
 
     def test_single_exact_positive_open_action_value_seeds_probe_candidate_only(self):
         technical = AnalystSignal(
@@ -5002,6 +5336,75 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("same-day-open", ids)
         self.assertNotIn("future-open", ids)
         self.assertNotIn("legacy-open", ids)
+
+    def test_direct_alpha_setup_action_value_prioritizes_real_action_preference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SQLiteDB()
+            db.db_path = str(Path(tmpdir) / "agentquant_test.db")
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config (id) VALUES ('cfg')")
+            db._ensure_reviewer_learning_schema(cursor)
+            rows = [
+                (
+                    "weak-high-conf",
+                    "RB|long|weak",
+                    "trend_breakout_setup",
+                    0.99,
+                    "",
+                    9000.0,
+                    {"reward_source": "counterfactual_prior", "amplification_scope_quality": "counterfactual_prior"},
+                ),
+                (
+                    "real-pref",
+                    "RB|long|real",
+                    "trend_breakout_setup",
+                    0.40,
+                    "positive_candidate_open",
+                    800.0,
+                    {
+                        "action_preference": "positive_candidate_open",
+                        "reward_source": "trade_episode",
+                        "amplification_scope_quality": "exact_real_state",
+                    },
+                ),
+            ]
+            for row_id, scope_key, setup_type, confidence, preference, reward_mean, payload in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO alpha_setup_action_value (
+                        id, config_id, scope_key, ticker, side, horizon_class, market_regime,
+                        setup_type, data_combo, action_name, sample_count, reward_sum,
+                        reward_mean, win_rate, confidence_score, action_preference,
+                        max_position_impact, last_sample_date, created_at, updated_at,
+                        valid_until, active, payload_json
+                    ) VALUES (?, 'cfg', ?, 'RB', 'long', 'short', 'trend',
+                        ?, 'combo', 'open', 4, ?, ?, 0.75, ?, ?,
+                        0.04, '2025-03-07', '2025-03-07', '2025-03-07',
+                        '2025-04-01', 1, ?)
+                    """,
+                    (row_id, scope_key, setup_type, reward_mean * 4, reward_mean, confidence, preference, json.dumps(payload)),
+                )
+            conn.commit()
+            conn.close()
+
+            values = db.get_alpha_setup_action_values(
+                config_id="cfg",
+                ticker="RB",
+                side="long",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="trend_breakout_setup",
+                trading_date="2025-03-10",
+                limit=1,
+            )
+
+        self.assertEqual(values[0]["id"], "real-pref")
+        self.assertEqual(values[0]["action_preference"], "positive_candidate_open")
+        self.assertEqual(values[0]["reward_source"], "trade_episode")
+        self.assertEqual(values[0]["evidence_scope"], "exact_real_state")
+        self.assertEqual(values[0]["action_value_lane"], "open")
 
     def test_direct_alpha_setup_action_value_requires_complete_state_for_exact_quality(self):
         from tools.agent_tools.research.alpha_setup import upsert_alpha_setup_sample_and_profile

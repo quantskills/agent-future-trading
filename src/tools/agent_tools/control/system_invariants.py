@@ -79,6 +79,12 @@ PM_LEARNING_RANKING_AUDIT_BOUNDARIES = [
     "final_action_contract_remains_single_trade_truth",
     "recommendation_top_level_action_lots_must_match_final_contract",
     "incomplete_trading_day_cannot_enter_strategy_evaluation",
+    "pm_action_value_transport_must_preserve_preference_reward_and_scope",
+    "matching_real_action_value_must_land_in_pm_score_components",
+    "profile_prior_cannot_substitute_for_action_value_learning",
+    "learning_signal_must_explain_contract_no_change",
+    "rank_change_must_explain_contract_no_change",
+    "hold_exit_learning_must_explain_position_no_change",
 ]
 OPEN_AMPLIFICATION_EFFECTS = {
     "open_amplification",
@@ -271,6 +277,16 @@ ERROR_CATEGORY_PREFIXES = {
     "learning_landing": {
         "action_value_missing_action_preference",
         "action_value_unknown_action_preference",
+        "pm_action_value_missing_canonical_fields",
+        "pm_consumed_non_pm_learning_action_value",
+        "action_value_missing_consumer_scope",
+        "trader_execution_learning_trace_missing_scope",
+        "trader_execution_learning_trace_wrong_scope",
+        "pm_learning_components_zero_despite_prior_real_action_value",
+        "profile_adjustment_substituted_for_missing_action_value_learning",
+        "pm_learning_signal_without_contract_effect_or_explanation",
+        "pm_rank_changed_without_contract_effect",
+        "pm_hold_exit_learning_without_contract_effect_or_explanation",
         "positive_open_action_value_not_open_preference",
         "positive_exit_action_value_not_exit_preference",
         "negative_action_value_not_protective_preference",
@@ -517,6 +533,26 @@ def _fetch_config_id(conn: sqlite3.Connection, *, config_id: Optional[str], exp_
         return None
     row = conn.execute("SELECT id FROM config WHERE exp_name = ?", (exp_name,)).fetchone()
     return str(row["id"]) if row else None
+
+
+def _has_invariant_records(conn: sqlite3.Connection) -> bool:
+    for table_name in (
+        "futures_recommendation",
+        "futures_transactions",
+        "futures_intraday_decision",
+        "alpha_setup_action_value",
+        "adaptive_policy_state",
+        "trading_day_phase",
+    ):
+        if not _table_exists(conn, table_name):
+            continue
+        try:
+            row = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
+        except sqlite3.Error:
+            continue
+        if row and int(row["count"] or 0) > 0:
+            return True
+    return False
 
 
 def _date_filter_sql(alias: str, start_date: Optional[str], end_date: Optional[str]) -> tuple[str, List[Any]]:
@@ -924,6 +960,300 @@ def _audit_opportunity_ranking_boundary(
                         "opportunity_learning_component_used_as_trade_intent:"
                         f"{label}:{artifact_name}:{path}:{sorted(components)}"
                     )
+
+        execution_trace = _dict(_dict(snapshot.get("execution_result")).get("execution_learning_trace"))
+        if execution_trace:
+            scope = _lower(execution_trace.get("consumer_scope"))
+            if not scope:
+                errors.append(f"trader_execution_learning_trace_missing_scope:{label}:execution_result")
+            elif scope != "trader_execution_learning":
+                errors.append(f"trader_execution_learning_trace_wrong_scope:{label}:execution_result:{scope}")
+        setup_execution = _dict(_dict(snapshot.get("phase2_execution")).get("setup_execution_learning"))
+        if setup_execution:
+            scope = _lower(setup_execution.get("consumer_scope"))
+            if not scope:
+                errors.append(f"trader_execution_learning_trace_missing_scope:{label}:phase2_execution")
+            elif scope != "trader_execution_learning":
+                errors.append(f"trader_execution_learning_trace_wrong_scope:{label}:phase2_execution:{scope}")
+
+
+def _contract_learning_components(contract: Dict[str, Any]) -> Dict[str, float]:
+    evidence = _dict(contract.get("evidence_used"))
+    components = _dict(evidence.get("opportunity_score_components"))
+    return {
+        field: float(components.get(field) or 0.0)
+        for field in OPPORTUNITY_SCORE_COMPONENT_FIELDS
+    }
+
+
+def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
+    learning = _dict(contract.get("learning_used"))
+    rows = learning.get("alpha_setup_action_values")
+    if not isinstance(rows, list):
+        return []
+    return [_dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _action_value_row_has_pm_canonical_fields(row: Dict[str, Any]) -> bool:
+    return bool(
+        _payload_or_row_value(row, "action_preference")
+        and _payload_or_row_value(row, "reward_source")
+        and _payload_or_row_value(row, "evidence_scope", "amplification_scope_quality")
+        and _payload_or_row_value(row, "action_value_lane", "source_action_value_lane", "action_name")
+        and (
+            _payload_or_row_value(row, "reward_sum") is not None
+            or _payload_or_row_value(row, "reward_mean") is not None
+            or _payload_or_row_value(row, "win_rate") is not None
+        )
+    )
+
+
+def _action_value_consumer_scope(row: Dict[str, Any]) -> str:
+    return _lower(_payload_or_row_value(row, "consumer_scope", "learning_consumer_scope") or "pm_learning")
+
+
+def _payload_or_row_value(row: Dict[str, Any], key: str, *aliases: str) -> Any:
+    payload = _dict(row.get("payload"))
+    for name in (key, *aliases):
+        value = row.get(name)
+        if value not in (None, ""):
+            return value
+    for name in (key, *aliases):
+        value = payload.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _real_action_value_available_before(
+    action_values: List[Dict[str, Any]],
+    *,
+    ticker: str,
+    side: str,
+    decision_date: str,
+) -> bool:
+    target_ticker = _lower(ticker).upper()
+    target_side = _lower(side)
+    decision_day = _date10(decision_date)
+    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
+        return False
+    for row in action_values:
+        row_ticker = str(row.get("ticker") or "").upper()
+        row_side = _lower(row.get("side"))
+        if row_ticker not in {target_ticker, "*"}:
+            continue
+        if row_side not in {target_side, "*", "both", "any"}:
+            continue
+        sample_day = _date10(row.get("last_sample_date"))
+        if not sample_day or sample_day >= decision_day:
+            continue
+        preference = _lower(row.get("action_preference") or _payload_or_row_value(row, "action_preference"))
+        if preference not in ACTION_PREFERENCE_VALUES:
+            continue
+        payload = _dict(row.get("payload"))
+        reward_source = _lower(row.get("reward_source")) or _effective_reward_source(payload)
+        if any(marker in reward_source for marker in REAL_REWARD_SOURCE_MARKERS):
+            return True
+    return False
+
+
+def _audit_pm_learning_transport_and_contract_effect(
+    recommendations: Dict[str, Dict[str, Any]],
+    action_values: List[Dict[str, Any]],
+    errors: List[str],
+    warnings: List[str],
+) -> None:
+    for recommendation_id, recommendation in recommendations.items():
+        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
+            continue
+        contract = _contract_from_recommendation(recommendation)
+        if not contract:
+            continue
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        rows = _contract_action_value_rows(contract)
+        for row in rows:
+            preference = _lower(row.get("action_preference"))
+            consumer_scope = _action_value_consumer_scope(row)
+            if consumer_scope != "pm_learning":
+                errors.append(
+                    "pm_consumed_non_pm_learning_action_value:"
+                    f"{label}:{consumer_scope or 'missing'}"
+                )
+            if preference in ACTION_PREFERENCE_VALUES and not _action_value_row_has_pm_canonical_fields(row):
+                errors.append(
+                    "pm_action_value_missing_canonical_fields:"
+                    f"{label}:{preference}:missing_preference_reward_scope_or_source"
+                )
+        target_lots = _int(contract.get("target_lots"))
+        current_lots = _int(contract.get("current_lots"))
+        side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
+        if not side and current_lots:
+            side = "long" if current_lots > 0 else "short"
+        components = _contract_learning_components(contract)
+        learning_all_zero = all(abs(value) <= 1e-12 for value in components.values())
+        if _real_action_value_available_before(
+            action_values,
+            ticker=str(ticker),
+            side=side,
+            decision_date=str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or ""),
+        ) and learning_all_zero:
+            errors.append(
+                "pm_learning_components_zero_despite_prior_real_action_value:"
+                f"{label}:side={side or 'missing'}"
+            )
+        alpha_profile_adjustment = float(
+            _dict(_dict(contract.get("evidence_used")).get("opportunity_score_components")).get("alpha_profile_adjustment")
+            or 0.0
+        )
+        if alpha_profile_adjustment > 0.015 and learning_all_zero:
+            errors.append(
+                "profile_adjustment_substituted_for_missing_action_value_learning:"
+                f"{label}:alpha_profile_adjustment={alpha_profile_adjustment}"
+            )
+        learning_summary = _dict(_dict(contract.get("learning_used")).get("learning_adjustment_summary"))
+        learning_signal_present = any(
+            abs(float(learning_summary.get(key) or 0.0)) > 1e-12
+            for key in (
+                "positive_learning_signal",
+                "negative_learning_signal",
+                "execution_profile_learning_signal",
+                "recent_tail_loss_signal",
+            )
+        )
+        if learning_signal_present and int(contract.get("target_lots") or 0) == int(contract.get("current_lots") or 0):
+            if not _learning_no_change_has_contract_explanation(contract):
+                errors.append(
+                    "pm_learning_signal_without_contract_effect_or_explanation:"
+                    f"{label}:final_action={_lower(contract.get('final_action')) or 'missing'}"
+                )
+        rank_value = _rank_value_from_contract(contract)
+        if rank_value is not None and _rank_has_no_contract_effect(contract):
+            if not _learning_no_change_has_contract_explanation(contract):
+                errors.append(
+                    "pm_rank_changed_without_contract_effect:"
+                    f"{label}:rank={rank_value}:final_action={_lower(contract.get('final_action')) or 'missing'}"
+                )
+        if _protective_hold_exit_learning_present(contract) and _hold_exit_learning_has_no_contract_effect(contract):
+            if not _hold_exit_learning_has_contract_explanation(contract):
+                errors.append(
+                    "pm_hold_exit_learning_without_contract_effect_or_explanation:"
+                    f"{label}:target_lots={target_lots}:current_lots={current_lots}"
+                )
+
+
+def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
+    evidence = _dict(contract.get("evidence_used"))
+    deployment = _dict(contract.get("capital_deployment"))
+    raw = (
+        deployment.get("opportunity_rank")
+        if deployment.get("opportunity_rank") not in (None, "")
+        else evidence.get("opportunity_rank")
+    )
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _rank_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
+    deployment = _dict(contract.get("capital_deployment"))
+    if not deployment:
+        return True
+    original = _int(deployment.get("original_target_lots"))
+    deployed = _int(deployment.get("deployed_target_lots"))
+    target = _int(contract.get("target_lots"))
+    current = _int(contract.get("current_lots"))
+    selected = bool(deployment.get("selected_for_capital_deployment"))
+    if original != deployed:
+        return False
+    if target != current:
+        return False
+    if selected and target:
+        return False
+    return True
+
+
+def _protective_hold_exit_learning_present(contract: Dict[str, Any]) -> bool:
+    protective_preferences = {
+        "tail_loss_protect",
+        "negative_hold_revalidate",
+        "negative_revalidate",
+        "positive_candidate_exit",
+    }
+    for row in _contract_action_value_rows(contract):
+        preference = _lower(_payload_or_row_value(row, "action_preference"))
+        if preference in protective_preferences:
+            return True
+    return False
+
+
+def _hold_exit_learning_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
+    current_lots = _int(contract.get("current_lots"))
+    target_lots = _int(contract.get("target_lots"))
+    if not current_lots:
+        return False
+    if abs(target_lots) < abs(current_lots):
+        return False
+    final_action = _lower(contract.get("final_action"))
+    if final_action in {"close_position", "reduce_position", "scale_down", "exit"}:
+        return False
+    return True
+
+
+def _hold_exit_learning_has_contract_explanation(contract: Dict[str, Any]) -> bool:
+    reason_codes = " ".join(str(item).lower() for item in contract.get("reason_codes") or [] if item)
+    evidence = _dict(contract.get("evidence_used"))
+    text = " ".join([
+        reason_codes,
+        _lower(evidence.get("capital_allocation_reason")),
+        _lower(contract.get("final_action")),
+    ])
+    markers = (
+        "hold_exit_action_value_protection",
+        "positive_candidate_hold",
+        "profitable_continuation",
+        "strong_current_confirmation",
+        "min_hold",
+        "cooling",
+        "auditor",
+        "risk",
+        "margin",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _learning_no_change_has_contract_explanation(contract: Dict[str, Any]) -> bool:
+    deployment = _dict(contract.get("capital_deployment"))
+    evidence = _dict(contract.get("evidence_used"))
+    reason = _lower(
+        deployment.get("capital_allocation_reason")
+        or evidence.get("capital_allocation_reason")
+        or contract.get("capital_allocation_reason")
+    )
+    if deployment and reason:
+        return True
+    reason_codes = " ".join(str(item).lower() for item in contract.get("reason_codes") or [] if item)
+    final_action = _lower(contract.get("final_action"))
+    explanation_text = " ".join([reason, reason_codes, final_action])
+    markers = (
+        "capital_queue_not_selected",
+        "not_selected",
+        "already_at_target",
+        "position_matched",
+        "protect",
+        "risk",
+        "margin",
+        "auditor",
+        "watch",
+        "not_triggered",
+        "no_trade",
+        "blocked",
+        "cooling",
+        "min_hold",
+        "invalidation",
+    )
+    return any(marker in explanation_text for marker in markers)
 
 
 def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
@@ -1346,6 +1676,9 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
             or reward_source in {"counterfactual_prior", "similar_sql_prior", "unqualified", ""}
         ))
         label = f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:{row.get('last_sample_date')}"
+        consumer_scope = _action_value_consumer_scope(row)
+        if consumer_scope not in {"pm_learning", "research_diagnostics"}:
+            errors.append(f"action_value_missing_consumer_scope:{label}:{consumer_scope or 'missing'}")
 
         if sample_count <= 0:
             continue
@@ -1567,6 +1900,20 @@ def audit_system_invariants(
     try:
         resolved_config_id = _fetch_config_id(conn, config_id=config_id, exp_name=exp_name)
         if not resolved_config_id:
+            if not _has_invariant_records(conn):
+                return InvariantAuditReport(
+                    ok=True,
+                    warnings=[f"config_not_found_empty_db:{exp_name or config_id or 'missing'}"],
+                    counts={},
+                    metadata={
+                        "db_path": str(db_path),
+                        "audit_boundary": "no_trade_records_to_audit",
+                        "record_boundary": "empty_db_no_invariant_records_to_audit",
+                        "error_categories": {},
+                        "failed_categories": [],
+                        "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                    },
+                )
             return InvariantAuditReport(
                 ok=False,
                 errors=[f"config_not_found:{exp_name or config_id or 'missing'}"],
@@ -1598,6 +1945,7 @@ def audit_system_invariants(
     )
     _audit_recommendation_final_contract_consistency(recommendations, errors)
     _audit_opportunity_ranking_boundary(recommendations, errors)
+    _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
     _audit_active_opportunity_routing(recommendations, errors)

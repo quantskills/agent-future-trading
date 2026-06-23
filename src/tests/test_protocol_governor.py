@@ -107,8 +107,10 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
     def test_central_prompt_boundary_keeps_action_value_usage_scoped_by_agent(self):
         self.assertIn("ACTION-VALUE USAGE BOUNDARY", ACTION_VALUE_USAGE_BOUNDARY)
+        self.assertIn("consumer_scope", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("Analysts may read only signal_calibration", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("execution action-value may inform PM's execution_profile", ACTION_VALUE_USAGE_BOUNDARY)
+        self.assertIn("consumer_scope=trader_execution_learning", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("only final_action_contract execution fields / execution_profile", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("must not directly change direction", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("target_lots, margin_ratio, or authority", ACTION_VALUE_USAGE_BOUNDARY)
@@ -175,8 +177,15 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
         self.assertEqual(policy.get("research_output_contract_version"), "agentquant.research_action_value.v1")
         self.assertEqual(policy.get("analyst_allowed_action_value_view"), "signal_calibration_only")
-        self.assertEqual(policy.get("pm_allowed_action_value_lanes"), ["open", "hold", "exit"])
-        self.assertEqual(policy.get("trader_allowed_action_value_lanes"), [])
+        self.assertEqual(policy.get("pm_allowed_consumer_scope"), "pm_learning")
+        self.assertEqual(policy.get("pm_allowed_action_value_lanes"), ["open", "hold", "exit", "execution"])
+        self.assertEqual(policy.get("analyst_allowed_consumer_scope"), "analyst_calibration")
+        self.assertEqual(policy.get("trader_allowed_consumer_scope"), "trader_execution_learning")
+        self.assertEqual(policy.get("trader_allowed_action_value_lanes"), ["execution"])
+        self.assertEqual(
+            policy.get("pm_action_value_retrieval_order"),
+            ["exact_state", "same_ticker_side_horizon", "same_ticker_side", "weak_prior"],
+        )
         self.assertEqual(policy.get("similar_sql_rag_role"), "weak_prior_not_trade_authority")
         self.assertIn("exit_as_open_amplifier", policy.get("forbidden_cross_action_uses") or [])
         self.assertIn("execution_changes_lots", policy.get("forbidden_cross_action_uses") or [])
@@ -517,6 +526,23 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             ]
         )
         self.assertTrue(result.ok, result.to_dict())
+
+    def test_mechanism_effectiveness_audit_is_protocol_governor_read_only_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self.governor.audit_mechanism_effectiveness(
+                db_path=Path(tmpdir) / "missing-agentquant.db",
+                exp_name="missing-exp",
+            )
+
+        report = result.to_dict()
+        self.assertTrue(report["ok"])
+        self.assertIn("sqlite_missing", "\n".join(report.get("warnings") or []))
+        metadata = report.get("metadata") or {}
+        self.assertIn("mechanism_effectiveness_only", metadata.get("audit_boundary", ""))
+        self.assertIn("action_value_to_pm", metadata.get("checked_chain") or [])
+        self.assertNotIn("final_action", report)
+        self.assertNotIn("target_lots", report)
+        self.assertNotIn("lots_delta", report)
 
     def test_tool_access_policy_rejects_cross_business_line_drift(self):
         result = self.governor.audit_tool_access(

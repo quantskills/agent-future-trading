@@ -217,6 +217,14 @@ class SQLiteDB(BaseDB):
                     "max_position_impact": "REAL DEFAULT 0",
                     "last_sample_date": "TEXT",
                     "action_preference": "TEXT DEFAULT ''",
+                    "reward_source": "TEXT DEFAULT ''",
+                    "evidence_scope": "TEXT DEFAULT ''",
+                    "action_value_lane": "TEXT DEFAULT ''",
+                    "consumer_scope": "TEXT DEFAULT 'pm_learning'",
+                    "learning_lane": "TEXT DEFAULT ''",
+                    "retrieval_key": "TEXT DEFAULT ''",
+                    "fallback_retrieval_key": "TEXT DEFAULT ''",
+                    "execution_retrieval_key": "TEXT DEFAULT ''",
                 },
             )
         if self._table_exists(cursor, "adaptive_policy_state"):
@@ -2902,6 +2910,56 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
 
+    def _promote_action_value_payload_fields(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Promote legacy payload action-value fields into canonical top-level keys."""
+        if not isinstance(item, dict):
+            return {}
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if payload:
+            item["payload"] = payload
+        if not item.get("reward_source"):
+            item["reward_source"] = (
+                payload.get("reward_source")
+                or payload.get("sample_source")
+                or payload.get("source_reward_source")
+                or ""
+            )
+        if not item.get("evidence_scope"):
+            item["evidence_scope"] = (
+                payload.get("evidence_scope")
+                or payload.get("amplification_scope_quality")
+                or payload.get("source_quality")
+                or ""
+            )
+        if not item.get("action_value_lane"):
+            item["action_value_lane"] = (
+                payload.get("action_value_lane")
+                or payload.get("source_action_value_lane")
+                or item.get("action_name")
+                or ""
+            )
+        if not item.get("consumer_scope"):
+            item["consumer_scope"] = (
+                payload.get("consumer_scope")
+                or payload.get("learning_consumer_scope")
+                or "pm_learning"
+            )
+        if not item.get("learning_lane"):
+            item["learning_lane"] = (
+                payload.get("learning_lane")
+                or payload.get("action_value_lane")
+                or item.get("action_value_lane")
+                or item.get("action_name")
+                or ""
+            )
+        if not item.get("retrieval_key"):
+            item["retrieval_key"] = payload.get("retrieval_key") or ""
+        if not item.get("fallback_retrieval_key"):
+            item["fallback_retrieval_key"] = payload.get("fallback_retrieval_key") or ""
+        if not item.get("execution_retrieval_key"):
+            item["execution_retrieval_key"] = payload.get("execution_retrieval_key") or ""
+        return item
+
     def get_alpha_setup_action_values(
         self,
         config_id: str,
@@ -2909,8 +2967,11 @@ class SQLiteDB(BaseDB):
         side: Optional[str] = None,
         horizon_class: Optional[str] = None,
         market_regime: Optional[str] = None,
+        setup_type: Optional[str] = None,
         trading_date=None,
         limit: int = 5,
+        consumer_scope: Optional[str] = "pm_learning",
+        learning_lane: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Read setup action-value hints written after settled future samples."""
         conn = None
@@ -2933,6 +2994,15 @@ class SQLiteDB(BaseDB):
             if market_regime and str(market_regime) != "*":
                 where.append("market_regime IN (?, '*')")
                 params.append(str(market_regime))
+            if setup_type and str(setup_type) != "*":
+                where.append("setup_type IN (?, '*')")
+                params.append(str(setup_type))
+            if consumer_scope and str(consumer_scope) != "*":
+                where.append("(consumer_scope = ? OR consumer_scope IS NULL OR consumer_scope = '')")
+                params.append(str(consumer_scope))
+            if learning_lane and str(learning_lane) != "*":
+                where.append("(learning_lane = ? OR action_value_lane = ?)")
+                params.extend([str(learning_lane), str(learning_lane)])
             trading_day_value = self._normalize_trading_day_value(trading_date)
             if trading_day_value:
                 where.append("last_sample_date IS NOT NULL")
@@ -2946,17 +3016,62 @@ class SQLiteDB(BaseDB):
                 WHERE {' AND '.join(where)}
                 ORDER BY
                     CASE WHEN ticker = ? THEN 0 WHEN ticker = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN ? != '' AND side = ? THEN 0 WHEN side = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN ? != '' AND horizon_class = ? THEN 0 WHEN horizon_class = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN ? != '' AND market_regime = ? THEN 0 WHEN market_regime = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN ? != '' AND setup_type = ? THEN 0 WHEN setup_type = '*' THEN 1 ELSE 2 END,
+                    CASE WHEN consumer_scope = 'pm_learning' THEN 0 ELSE 1 END,
+                    CASE WHEN learning_lane = action_value_lane THEN 0 ELSE 1 END,
+                    CASE WHEN action_preference IS NOT NULL AND action_preference != '' THEN 0 ELSE 1 END,
+                    CASE
+                        WHEN evidence_scope = 'exact_real_state'
+                          OR payload_json LIKE '%"amplification_scope_quality": "exact_real_state"%'
+                          OR payload_json LIKE '%"evidence_scope": "exact_real_state"%'
+                        THEN 0
+                        WHEN evidence_scope = 'partial_real_state'
+                          OR payload_json LIKE '%"amplification_scope_quality": "partial_real_state"%'
+                          OR payload_json LIKE '%"evidence_scope": "partial_real_state"%'
+                        THEN 1
+                        ELSE 2
+                    END,
+                    CASE
+                        WHEN reward_source IN ('trade_episode', 'episode_trade', 'real_trade', 'complete_episode')
+                          OR payload_json LIKE '%"reward_source": "trade_episode"%'
+                          OR payload_json LIKE '%"reward_source": "episode_trade"%'
+                          OR payload_json LIKE '%"reward_source": "real_trade"%'
+                          OR payload_json LIKE '%"reward_source": "complete_episode"%'
+                        THEN 0
+                        WHEN reward_source = 'counterfactual_prior'
+                          OR payload_json LIKE '%"reward_source": "counterfactual_prior"%'
+                        THEN 2
+                        ELSE 1
+                    END,
                     confidence_score DESC,
                     sample_count DESC,
                     updated_at DESC
                 LIMIT ?
                 ''',
-                tuple(params + [ticker_value or "*", int(limit)]),
+                tuple(
+                    params
+                    + [
+                        ticker_value or "*",
+                        str(side or "").lower(),
+                        str(side or "").lower(),
+                        str(horizon_class or ""),
+                        str(horizon_class or ""),
+                        str(market_regime or ""),
+                        str(market_regime or ""),
+                        str(setup_type or ""),
+                        str(setup_type or ""),
+                        int(limit),
+                    ]
+                ),
             )
             rows = []
             for row in cursor.fetchall():
                 item = dict(row)
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
+                self._promote_action_value_payload_fields(item)
                 rows.append(item)
             return rows
         except Exception as e:
@@ -3442,7 +3557,7 @@ class SQLiteDB(BaseDB):
                     ],
                     "current_data_must_dominate": True,
                 }
-                result.append({
+                item = {
                     "scope_key": (
                         f"similar_sql_rag|{ticker_value or '*'}|{sector_value or '*'}|"
                         f"{side_value or '*'}|{horizon_value or '*'}|{regime_value or '*'}|"
@@ -3461,12 +3576,24 @@ class SQLiteDB(BaseDB):
                     "win_rate": win_rate,
                     "confidence_score": confidence_score,
                     "action_preference": action_preference,
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": action_name,
+                    "retrieval_key": (
+                        f"{ticker_value or '*'}|{side_value or '*'}|{horizon_value or '*'}|"
+                        f"{regime_value or '*'}|{setup_value or '*'}|{action_name}"
+                    ),
+                    "fallback_retrieval_key": (
+                        f"{ticker_value or '*'}|{side_value or '*'}|{horizon_value or '*'}|{action_name}"
+                    ),
+                    "execution_retrieval_key": f"{ticker_value or '*'}|*|*|{action_name}",
                     "max_position_impact": 0.0,
                     "valid_until": trading_day_value,
                     "payload": {
                         "research_output_contract_version": "agentquant.research_action_value.v1",
                         "source": "similar_alpha_setup_sql",
                         "action_value_lane": action_name,
+                        "consumer_scope": "pm_learning",
+                        "learning_lane": action_name,
                         "strict_no_lookahead": True,
                         "date_filter": "alpha_setup_sample.trading_date < decision_date",
                         "decision_date": trading_day_value,
@@ -3498,7 +3625,9 @@ class SQLiteDB(BaseDB):
                         "forbidden_effects": usage_boundary["forbidden_effects"],
                         "signal_calibration": signal_calibration,
                     },
-                })
+                }
+                self._promote_action_value_payload_fields(item)
+                result.append(item)
             result.sort(
                 key=lambda row: (
                     0 if str(row.get("ticker") or "").upper() == ticker_value else 1,

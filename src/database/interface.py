@@ -233,6 +233,22 @@ class BaseDB(ABC):
         """Get completed trade episodes as non-authoritative learning context."""
         raise NotImplementedError
 
+    def get_alpha_setup_action_values(
+        self,
+        config_id: str,
+        ticker: str,
+        side: Optional[str] = None,
+        horizon_class: Optional[str] = None,
+        market_regime: Optional[str] = None,
+        setup_type: Optional[str] = None,
+        trading_date=None,
+        limit: int = 5,
+        consumer_scope: Optional[str] = "pm_learning",
+        learning_lane: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get PM-consumable canonical action-value rows, strictly before decision date."""
+        raise NotImplementedError
+
     def get_similar_alpha_setup_action_values(
         self,
         config_id: str,

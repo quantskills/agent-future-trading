@@ -34,7 +34,7 @@ AgentQuant 的业务线是一个闭环：
 
 控制组在主链外做协议、验收、审计和观测：
 
-`protocol_governor / preflight / pre_backtest_acceptance / system_invariant_audit`
+`protocol_governor / preflight / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
 
 控制组不能生成交易权限，不能改手数，不能改保证金，不能替代 PM、Auditor 或 Trader。
 
@@ -65,7 +65,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 控制与验收旁路是：
 
-`protocol_governor / pre_backtest_acceptance / system_invariant_audit`
+`protocol_governor / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
 
 ### 5.1 `technical` 技术分析师
 
@@ -292,7 +292,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 输入：
 
 - 能力卡、工具权限、字段语义、artifact lineage；
-- `pre_backtest_acceptance`、`system_invariant_audit`、统一字段审计和阶段状态；
+- `pre_backtest_acceptance`、`system_invariant_audit`、`mechanism_effectiveness_audit`、统一字段审计和阶段状态；
 - PM、Auditor、Trader、Researcher 的关键运行 artifact。
 
 输出：
@@ -439,7 +439,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 - 目标测试；
 - 相关链路测试；
-- 必要时运行 `pre_backtest_acceptance` 和 `system_invariant_audit`；
+- 必要时运行 `pre_backtest_acceptance`、`system_invariant_audit` 和 `mechanism_effectiveness_audit`；
 - 影响面大时运行全量 `python -m unittest`；
 - 用 `git diff --check` 检查补丁格式。
 
@@ -462,6 +462,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 ```powershell
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
 ```
 
 `pre_backtest_acceptance` 固定覆盖：
@@ -478,13 +479,13 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invari
 - capital_boundary；
 - audit_explainability。
 
-`backtest.py` 已接入回测前验收和逐日累计 `system_invariant_audit` fail-fast。验收通过只表示系统 readiness，不表示策略一定盈利。
+`backtest.py` 已接入回测前验收、逐日累计 `system_invariant_audit` 和逐日累计 `mechanism_effectiveness_audit` fail-fast。验收通过只表示系统 readiness，不表示策略一定盈利。
 
 ## 11. 回测中与回测后判断
 
-如果回测中 `system_invariant_audit` hard fail，必须停止，把结果按系统 bug 处理，不得讨论策略收益。
+如果回测中 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
 
-如果 audit clean 但收益差，才进入策略层分析，重点看：
+如果两类 audit 都 clean 但收益差，才进入策略层分析，重点看：
 
 - 正 alpha 是否被识别；
 - 正 alpha 是否从 probe 走向 real_budget_entry 或 scale；
@@ -507,6 +508,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe -m compileall src
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m unittest
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
 ```
 
 关键测试入口：
@@ -517,6 +519,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invari
 - `src/tests/test_protocol_governor.py`：控制组边界；
 - `src/tests/test_protocol_preflight_cli.py`：preflight 和 backtest 接入；
 - `src/tests/test_system_invariant_audit.py`：真实流水系统不变量；
+- `src/tests/test_mechanism_effectiveness_audit.py`：机制有效性 hard_fail/diagnostic 分流；
 - `src/tests/test_reviewer_learning.py`：复盘和研究学习；
 - `src/tests/test_pandaai_api_adapter.py`：PandaAI adapter，真实 API 必须隔离为 integration；
 - `src/tests/test_futures_market_rules.py`：期货交易规则；

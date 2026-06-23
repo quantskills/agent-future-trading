@@ -199,6 +199,33 @@ def _action_value_lane(action_name: Any) -> str:
     return "observe"
 
 
+def _learning_consumer_scope(action_name: Any) -> str:
+    # alpha_setup_action_value is PM-consumed learning. Trader execution
+    # diagnostics use separate trader_execution_learning traces.
+    return "pm_learning"
+
+
+def _learning_retrieval_keys(
+    *,
+    profile_scope: Mapping[str, Any],
+    action_name: Any,
+    action_value_lane: str,
+) -> Dict[str, str]:
+    ticker = str(profile_scope.get("ticker") or "*").strip().upper() or "*"
+    side = _clean_token(profile_scope.get("side"), "*")
+    horizon = _clean_token(profile_scope.get("horizon_class"), "*")
+    regime = _clean_token(profile_scope.get("market_regime"), "*")
+    setup_type = _clean_token(profile_scope.get("setup_type"), "*")
+    lane = _clean_token(action_value_lane or action_name, "*")
+    execution_profile = _clean_token(profile_scope.get("execution_profile"), "*")
+    trigger_reason = _clean_token(profile_scope.get("trigger_reason"), "*")
+    return {
+        "retrieval_key": "|".join([ticker, side, horizon, regime, setup_type, lane]),
+        "fallback_retrieval_key": "|".join([ticker, side, horizon, lane]),
+        "execution_retrieval_key": "|".join([ticker, execution_profile, trigger_reason, lane]),
+    }
+
+
 def _action_value_usage_boundary(
     *,
     action_name: str,
@@ -327,6 +354,7 @@ def _signal_calibration_contract(
     return {
         "contract_version": "agentquant.analysis_signal_calibration.v1",
         "source_action_value_contract": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+        "consumer_scope": "analyst_calibration",
         "source_action_value_lane": lane,
         "source_action_preference": action_preference,
         "source_quality": amplification_scope_quality,
@@ -997,6 +1025,12 @@ def _upsert_action_values(
             worst_reward=worst_reward,
         )
         action_value_lane = _action_value_lane(action_name)
+        consumer_scope = _learning_consumer_scope(action_name)
+        retrieval_keys = _learning_retrieval_keys(
+            profile_scope=profile_scope,
+            action_name=action_name,
+            action_value_lane=action_value_lane,
+        )
         usage_boundary = _action_value_usage_boundary(
             action_name=action_name,
             action_preference=action_preference,
@@ -1014,6 +1048,9 @@ def _upsert_action_values(
             "scope_key": scope_key,
             "action_name": action_name,
             "action_value_lane": action_value_lane,
+            "consumer_scope": consumer_scope,
+            "learning_lane": action_value_lane,
+            **retrieval_keys,
             "last_sample_date": str(trading_date)[:10],
             "sample_count": sample_count,
             "reward_sum": reward_sum,
@@ -1060,9 +1097,12 @@ def _upsert_action_values(
                 id, config_id, scope_key, ticker, side, horizon_class, market_regime,
                 setup_type, data_combo, action_name, sample_count, reward_sum,
                 reward_mean, win_rate, confidence_score, action_preference,
+                reward_source, evidence_scope, action_value_lane,
+                consumer_scope, learning_lane, retrieval_key,
+                fallback_retrieval_key, execution_retrieval_key,
                 max_position_impact, last_sample_date, created_at, updated_at,
                 valid_until, active, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(config_id, scope_key, action_name)
             DO UPDATE SET
                 sample_count=excluded.sample_count,
@@ -1071,6 +1111,14 @@ def _upsert_action_values(
                 win_rate=excluded.win_rate,
                 confidence_score=excluded.confidence_score,
                 action_preference=excluded.action_preference,
+                reward_source=excluded.reward_source,
+                evidence_scope=excluded.evidence_scope,
+                action_value_lane=excluded.action_value_lane,
+                consumer_scope=excluded.consumer_scope,
+                learning_lane=excluded.learning_lane,
+                retrieval_key=excluded.retrieval_key,
+                fallback_retrieval_key=excluded.fallback_retrieval_key,
+                execution_retrieval_key=excluded.execution_retrieval_key,
                 max_position_impact=excluded.max_position_impact,
                 last_sample_date=excluded.last_sample_date,
                 updated_at=excluded.updated_at,
@@ -1095,6 +1143,14 @@ def _upsert_action_values(
                 win_rate,
                 confidence,
                 action_preference,
+                reward_source,
+                amplification_scope_quality,
+                action_value_lane,
+                consumer_scope,
+                action_value_lane,
+                retrieval_keys["retrieval_key"],
+                retrieval_keys["fallback_retrieval_key"],
+                retrieval_keys["execution_retrieval_key"],
                 _safe_float(profile_lifecycle.get("max_position_impact")),
                 str(trading_date)[:10],
                 now,

@@ -200,6 +200,32 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertIn("2025-03-10", command)
         self.assertIn("--db-path", command)
 
+    def test_backtest_mechanism_effectiveness_command_is_read_only_json_audit(self):
+        import run.backtest as backtest
+
+        command = []
+
+        def fake_run_command(raw_command, env):
+            command.extend(raw_command)
+            return 0
+
+        with patch.object(backtest, "run_command", side_effect=fake_run_command):
+            result = backtest.run_mechanism_effectiveness_audit(
+                str(SRC_ROOT / "config" / "dev.yaml"),
+                "2025-03-01",
+                "2025-03-10",
+                local_db=True,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn(str(SRC_ROOT / "run" / "control" / "mechanism_effectiveness_audit.py"), command)
+        self.assertIn("--start-date", command)
+        self.assertIn("2025-03-01", command)
+        self.assertIn("--end-date", command)
+        self.assertIn("2025-03-10", command)
+        self.assertIn("--json", command)
+        self.assertIn("--local-db", command)
+
     def test_backtest_main_stops_before_trading_loop_when_acceptance_fails(self):
         import run.backtest as backtest
 
@@ -283,6 +309,10 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             side_effect=fake_daily_audit,
         ), patch.object(
             backtest,
+            "run_daily_cumulative_mechanism_effectiveness_audit",
+            return_value=0,
+        ), patch.object(
+            backtest,
             "run_system_invariant_audit",
         ) as final_audit:
             result = backtest.main()
@@ -297,6 +327,71 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         )
         self.assertIn(("validate_phase_flow.py", "2025-03-28"), executed_scripts)
         self.assertNotIn(("proposal.py", "2025-03-29"), executed_scripts)
+        self.assertNotIn(("evaluate_config.py", None), executed_scripts)
+        final_audit.assert_not_called()
+
+    def test_backtest_main_stops_on_first_daily_mechanism_effectiveness_failure(self):
+        import run.backtest as backtest
+
+        argv = [
+            "backtest.py",
+            "--config",
+            str(SRC_ROOT / "config" / "dev.yaml"),
+            "--start-date",
+            "2025-03-06",
+            "--end-date",
+            "2025-04-30",
+            "--local-db",
+        ]
+        trading_days = ["2025-03-27", "2025-03-28"]
+        executed_scripts = []
+        mechanism_windows = []
+
+        def fake_phase_record(*_args, **_kwargs):
+            return None
+
+        def fake_run_command(command, env):
+            script_name = Path(command[1]).name
+            trading_date = None
+            if "--trading-date" in command:
+                trading_date = command[command.index("--trading-date") + 1]
+            executed_scripts.append((script_name, trading_date))
+            return 0
+
+        def fake_mechanism_audit(config_arg, start_date, trading_day, local_db):
+            mechanism_windows.append((start_date, trading_day, local_db))
+            return 9 if trading_day == "2025-03-27" else 0
+
+        with patch.object(sys, "argv", argv), patch.object(
+            backtest,
+            "load_yaml_config",
+            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
+        ), patch.object(backtest, "run_pre_backtest_acceptance", return_value=0), patch.object(
+            backtest,
+            "resolve_trading_days",
+            return_value=trading_days,
+        ), patch.object(backtest, "get_phase_record", side_effect=fake_phase_record), patch.object(
+            backtest,
+            "run_command",
+            side_effect=fake_run_command,
+        ), patch.object(
+            backtest,
+            "run_daily_cumulative_system_invariant_audit",
+            return_value=0,
+        ), patch.object(
+            backtest,
+            "run_daily_cumulative_mechanism_effectiveness_audit",
+            side_effect=fake_mechanism_audit,
+        ), patch.object(
+            backtest,
+            "run_system_invariant_audit",
+        ) as final_audit:
+            result = backtest.main()
+
+        self.assertEqual(result, 9)
+        self.assertEqual(mechanism_windows, [("2025-03-27", "2025-03-27", True)])
+        self.assertIn(("validate_phase_flow.py", "2025-03-27"), executed_scripts)
+        self.assertNotIn(("proposal.py", "2025-03-28"), executed_scripts)
         self.assertNotIn(("evaluate_config.py", None), executed_scripts)
         final_audit.assert_not_called()
 

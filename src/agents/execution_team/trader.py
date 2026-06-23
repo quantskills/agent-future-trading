@@ -492,6 +492,8 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
         if isinstance(value, dict) and isinstance(value.get("learning_scope"), dict)
     }
     return {
+        "consumer_scope": "trader_execution_learning",
+        "learning_lane": "execution",
         "setup_type": (
             final_contract.get("setup_type")
             or execution_contract.get("setup_type")
@@ -514,6 +516,7 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
             "authority_type": execution_contract.get("authority_type"),
         },
         "learning_boundary": {
+            "consumer_scope": "trader_execution_learning",
             "trader_executes_only": True,
             "execution_feedback_future_only": True,
             "not_strategy_creation": True,
@@ -834,6 +837,8 @@ def _mark_intraday_non_execution(
         warning_message=no_trade_reason,
     )
     audit_snapshot["execution_result"]["execution_learning_trace"] = {
+        "consumer_scope": "trader_execution_learning",
+        "learning_lane": "execution",
         "no_trade_reason": no_trade_reason,
         "no_trade_reason_category": reason_category,
         "execution_learning_type": "intraday_timing_gate",

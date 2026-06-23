@@ -102,21 +102,38 @@ ACTION_VALUE_USAGE_BOUNDARY = """
 === ACTION-VALUE USAGE BOUNDARY ===
 
 Researcher action-values are action-scoped learning contracts, not a single
-general memory score. Read them only through action_value_lane and
-usage_boundary:
+general memory score. Read them only through consumer_scope, action_value_lane,
+retrieval_key, and usage_boundary:
 - open action-value may inform PM open/probe/scale candidates only when the
   current setup, side, regime, invalidation, and reward source match.
 - hold action-value may inform PM hold/protect lifecycle decisions only.
 - exit/reduce action-value may inform PM profit protection, reduce, exit, or
   revalidation bias only; it must not be used as open amplification.
-- execution action-value may inform PM's execution_profile and trigger-method
-  preference before PM writes final_action_contract with audit_verdict/trade_contract_audit. Trader may read
-  only final_action_contract execution fields / execution_profile plus
-  intraday data; execution action-value must not directly change direction,
-  lots, target_lots, margin_ratio, or authority.
-- Analysts may read only signal_calibration from action-value payloads to judge
+- PM may read only consumer_scope=pm_learning rows. PM must consume them through
+  exact state -> same ticker/side/horizon -> same ticker/side -> weak prior,
+  then write any effect only into opportunity_score_components,
+  learning_adjustment_summary, final_action_contract.learning_used, and the
+  single final_action_contract target fields.
+- execution action-value may inform PM's execution_profile; execution lane
+  action-value inside consumer_scope=pm_learning may inform PM's
+  execution_profile and trigger-method preference before PM writes
+  final_action_contract with audit_verdict/trade_contract_audit. Trader may read
+  only final_action_contract execution fields / execution_profile plus intraday
+  data and consumer_scope=trader_execution_learning execution traces; execution
+  learning must not directly change direction, lots, target_lots, margin_ratio, or authority.
+- Analysts may read only signal_calibration records with
+  consumer_scope=analyst_calibration from action-value payloads to judge
   evidence quality and setup reliability. Analysts must not convert action-value
   into trade authority, lots, margin, direction override, or Trader instructions.
+- PM must not rely on analyst-compressed action-value traces for scoring.
+  After ticker/side/setup/horizon/regime are known, PM reads canonical
+  action-value rows directly, preferring top-level action_preference,
+  reward_source, evidence_scope, action_value_lane, reward_sum/reward_mean,
+  sample_count, win_rate, last_sample_date, and valid_until, with payload only
+  as backward-compatible fallback.
+- PM must read canonical action-value for both long and short candidate sides
+  before rebuilding the scorecard; the initial preferred side must not prevent
+  real episode learning from correcting ranking.
 - Similar SQL/RAG and counterfactual memories are weak priors unless their usage_boundary
   explicitly proves exact real state and real episode/reward support.
 """

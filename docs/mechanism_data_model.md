@@ -29,7 +29,7 @@
 
 PM 的全市场机会排序是资金部署输入，但不是第二套交易权限。`opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary` 用来比较候选、部署资金和解释学习影响；它们可以进入 scorecard、`final_action_contract.evidence_used/learning_used`、Reviewer/Researcher 和评估模块，并且只能通过 PM 资金部署 pass 回写同一张 `final_action_contract.target_lots/lots_delta/final_action`，不能成为顶层交易命令。
 
-分析师输出的 `Bullish/Bearish/Neutral` 只是方向摘要，不是开仓投票。Technical/Fundamental/Commodity News 必须分别输出动作证据、品种/品类上下文、触发、失效边界、support/conflict/catalyst/risk 等结构化字段。`setup_quality_ok` 只表示形态值得关注，`trigger_valid/current_trigger_confirmed` 才表示当前触发已经成立；`watch_for_trigger + trigger_valid=false` 不是开仓授权，但如果同时有明确方向、触发条件、失效边界和可关注 setup，PM 可以把它纳入条件监控候选。分析师读取历史 action-value 时只能使用 `signal_calibration` 校准证据质量，不能生成交易授权，也不能输出 `opportunity_score/opportunity_rank/capital_allocation_reason`。PM 按 open/hold/exit 读取当前证据和匹配 action lane 的 action-value，并负责全市场候选评分与资金部署；execution action-value 只能由 PM 消化进 `final_action_contract.execution_plan/execution_profile`。最终交易出口仍由 market confirmation、资金参数、Auditor 硬风险、Trader 执行约束和顶层 `final_action_contract` 共同决定。
+分析师输出的 `Bullish/Bearish/Neutral` 只是方向摘要，不是开仓投票。Technical/Fundamental/Commodity News 必须分别输出动作证据、品种/品类上下文、触发、失效边界、support/conflict/catalyst/risk 等结构化字段。`setup_quality_ok` 只表示形态值得关注，`trigger_valid/current_trigger_confirmed` 才表示当前触发已经成立；`watch_for_trigger + trigger_valid=false` 不是开仓授权，但如果同时有明确方向、触发条件、失效边界和可关注 setup，PM 可以把它纳入条件监控候选。分析师读取历史 action-value 时只能使用 `signal_calibration` 校准证据质量，不能生成交易授权，也不能输出 `opportunity_score/opportunity_rank/capital_allocation_reason`。PM 不能把分析师压缩学习 trace 当作 scoring 来源；PM 在确定 ticker、side、setup、horizon、regime 后，重新读取同作用域真实 action-value / episode 记录，优先使用顶层 canonical `action_preference/reward_source/evidence_scope/action_value_lane/reward_sum/reward_mean/sample_count/win_rate/last_sample_date/valid_until`，payload 只作兼容 fallback。PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard，不能让初始 preferred side 阻断学习纠偏。PM 按 open/hold/exit 读取当前证据和匹配 action lane 的 action-value，并负责全市场候选评分与资金部署；execution action-value 只能由 PM 消化进 `final_action_contract.execution_plan/execution_profile`。最终交易出口仍由 market confirmation、资金参数、Auditor 硬风险、Trader 执行约束和顶层 `final_action_contract` 共同决定。
 
 ## 二、当前启用智能体的数据与模型调用方式
 
@@ -46,7 +46,7 @@ PM 的全市场机会排序是资金部署输入，但不是第二套交易权�
 | `accountant` | 成交、持仓、结算价、手续费/滑点/保证金规则 | 否 | 结算、PnL、费用、保证金、持仓状态 | 只核算事实，不改交易意图，不写学习结论 |
 | `reviewer` | 推荐、成交、结算、阶段状态、交易日志所需事实、PM 排序与资金分配理由 | 否 | Phase4 验收、daily summary、完整交易日志、排序有效性复盘、学习候选 | 只做确定性复盘验收，不下单、不调仓、不直接写最终策略学习 |
 | `researcher` | Reviewer 产物、已结算 episode、action outcome、未交易/未触发机会、排序有效性复盘 | 是 | `alpha_setup_profile`、`alpha_setup_action_value`、`adaptive_policy_state`、排序偏好候选 | 只写未来可用学习和排序偏好候选，不影响当天交易和账务 |
-| `protocol_governor` | 能力卡、工具权限、任务生命周期、artifact lineage、preflight/audit 状态 | 否 | `protocol_audit`、`preflight_health`、工具权限/字段语义告警 | 只做旁路治理，不创建/否决交易权限，不改 lots/margin |
+| `protocol_governor` | 能力卡、工具权限、任务生命周期、artifact lineage、preflight/audit 状态、机制有效性报告 | 否 | `protocol_audit`、`preflight_health`、工具权限/字段语义告警、`mechanism_effectiveness_audit` | 只做旁路治理，不创建/否决交易权限，不改 lots/margin；机制断链 hard_fail 才阻止策略评价 |
 
 ### 1. 工作流、预取与共享缓存（运行底座，不是智能体）
 
@@ -110,7 +110,7 @@ Researcher 调用研究工具、Reviewer 产物、已结算 episode、未交易�
 
 ### 10. Protocol Governor
 
-Protocol Governor 调用控制侧工具、能力卡、工具权限策略、字段语义审计、preflight acceptance、system invariant audit 和 artifact lineage，不调用 LLM。它输出 `protocol_audit`、`preflight_health`、字段/权限/生命周期告警和成本观察；这些结果只能发现协议问题或阻止脏回测继续，不能创建交易授权，不能否决 PM 已审合约，不能改 lots 或 margin。
+Protocol Governor 调用控制侧工具、能力卡、工具权限策略、字段语义审计、preflight acceptance、system invariant audit、mechanism effectiveness audit 和 artifact lineage，不调用 LLM。它输出 `protocol_audit`、`preflight_health`、字段/权限/生命周期告警、机制有效性 hard_fail/diagnostic 和成本观察；这些结果只能发现协议问题、机制断链或阻止脏回测继续，不能创建交易授权，不能否决 PM 已审合约，不能改 lots 或 margin。`mechanism_effectiveness_audit` 是只读路径：hard_fail 表示学习、rank、合约、条件 probe 或持仓退出链路断开；diagnostic 表示机制已接通但策略效果差。
 
 模型配置统一来自 `src/config/dev.yaml` 的 `llm` 与各智能体 override；系统通过 `llm_path`、模型 provider、model、reasoning effort、artifact metadata 保持模型调用可追踪。当前 `planner_mode=false`，Planner 不参与当前回测；macroeconomic、policy 等旧分析师已退役，不是当前启用智能体。
 

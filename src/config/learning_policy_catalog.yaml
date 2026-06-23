@@ -9,9 +9,16 @@ learning_gatekeeping_policy:
   # PM 必须结合当日证据、final_action_contract 授权、Auditor 硬风险与 Trader 执行约束后再落仓。
   # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
   # 交易出口仍由 final_action_contract 统一落地。
-  # Researcher 写入的 action-value 必须带 usage_boundary：open 给 PM 开仓/放大候选，
-  # hold 给 PM 持仓生命周期，exit 给 PM 保护/退出，execution 由 PM 写入 final_action_contract.execution_profile；
-  # 分析师只能读取 signal_calibration 校准证据质量，不能把 action-value 转成交易授权。
+  # Researcher 写入的 action-value 必须带 consumer_scope 与 usage_boundary：
+  # pm_learning 给 PM open/hold/exit/execution 评分和合约解释；
+  # analyst_calibration 只给分析师安全 signal_calibration；
+  # trader_execution_learning 只给 Trader 执行诊断，不能改方向/手数。
+  # PM 评分不能使用分析师压缩 trace；PM 在确定 ticker/side/setup/horizon/regime 后，
+  # 按 exact state -> same ticker/side/horizon -> same ticker/side -> weak prior
+  # 读取 consumer_scope=pm_learning 的 canonical action-value / episode 行，
+  # 并优先使用顶层字段，payload 只作为历史兼容 fallback。
+  # PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard；
+  # 不能只按初始 preferred_side 取学习，否则学习本身无法纠偏方向排序。
   action_value_role: action_preference_not_trade_authority
   policy_action_role: soft_adjustment_reason_code
   can_create_trade_authority_directly: false
@@ -21,8 +28,21 @@ learning_gatekeeping_policy:
   action_dimensions: [open, hold, exit, execution]
   research_output_contract_version: agentquant.research_action_value.v1
   analyst_allowed_action_value_view: signal_calibration_only
-  pm_allowed_action_value_lanes: [open, hold, exit]
-  trader_allowed_action_value_lanes: []
+  learning_consumer_scopes:
+    pm_learning: portfolio_manager_only
+    analyst_calibration: analysis_team_safe_summary_only
+    trader_execution_learning: trader_execution_diagnostics_only
+    research_diagnostics: protocol_and_human_review_only
+  pm_allowed_consumer_scope: pm_learning
+  pm_allowed_action_value_lanes: [open, hold, exit, execution]
+  analyst_allowed_consumer_scope: analyst_calibration
+  trader_allowed_consumer_scope: trader_execution_learning
+  trader_allowed_action_value_lanes: [execution]
+  pm_action_value_retrieval_order:
+    - exact_state
+    - same_ticker_side_horizon
+    - same_ticker_side
+    - weak_prior
   similar_sql_rag_role: weak_prior_not_trade_authority
   counterfactual_memory_role: observation_only_not_trade_authority
   forbidden_cross_action_uses:

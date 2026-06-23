@@ -532,3 +532,33 @@
 （7）最后对齐回测前检测与每日回测后检测的 PM 学习/排名边界。
 修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_pre_backtest_acceptance.py`。
 为什么改：每日审计已经能拦截学习分项误作交易意图、排名字段越权、推荐顶层 `action/lots` 与唯一合约不一致、未完成交易日混入评估等非策略问题；本次把这些错误统一归类到回测前验收的 `learning_landing`、`pm_opportunity_routing`、`single_trade_exit`、`data_time_boundary`，并在两类报告中显式输出同一组 `pm_learning_ranking_audit_boundaries`，避免回测前检测和每日检测再次出现口径漂移。
+
+==========2026年06月23日========
+
+（1）修通 PM action-value 真实 episode 学习传输断链。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/database/sqlite_helper.py`、`src/database/sqlite_setup.py`、`src/tools/agent_tools/research/alpha_setup.py`、`src/tools/agent_tools/analysis/signal_fusion.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/llm/prompt.py`、`src/config/learning_policy_catalog.yaml`、`src/config/portfolio_policy_catalog.yaml`、`docs/unified_field_semantics.md`、`docs/mechanism_research.md`、`docs/mechanism_data_model.md`、`docs/mechanism_multiagents.md`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：3 月回测暴露出 DB 里有真实 action-value / episode，但 PM 合约里学习 trace 被压缩到缺 `action_preference/reward/evidence_scope`，导致 `positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 真实路径为 0；本次为 `alpha_setup_action_value` 增加并迁移顶层 canonical 列 `reward_source/evidence_scope/action_value_lane`，Researcher 写入时同步落列，读取时优先顶层字段并兼容 payload，PM normalizer 只让完整 canonical 行参与 scoring。PM 在确定 ticker/side/setup/horizon/regime 后，对 long/short 候选侧分别重新读取真实 action-value，再重建 scorecard，避免初始 preferred side 阻断 episode 学习纠偏；profile 仍只能作弱先验，不能替代真实 action-value 抬 rank。
+
+（2）把学习信号未影响合约且无解释明确列为非策略断链。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_system_invariant_audit.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：学习、排名、交易没有联通不是策略表现差，而是回测前/每日审计必须抓住的系统问题；本次新增 `learning_signal_must_explain_contract_no_change`、`rank_change_must_explain_contract_no_change`、`hold_exit_learning_must_explain_position_no_change` 边界。若 `learning_adjustment_summary` 已有正负学习信号、或 `opportunity_rank/capital_deployment` 已写入，但 `final_action_contract.current_lots == target_lots` 且没有资金队列、风险、未入选、已达目标、cooling/min-hold 等明确解释，则归入 `learning_landing` hard fail；若持仓中出现 `tail_loss_protect/negative_hold_revalidate/positive_candidate_exit` 等退出或保护学习，却既不减仓/退出也不解释继续持有原因，也 hard fail。这样能拦住“学习存在但没有影响下一次建仓/退出”的断链，也不会误杀有清楚资金部署或持仓延续理由的未变仓。
+
+（3）把学习影响 rank 与 rank 影响合约补成真实路径测试。
+修改了什么：`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：此前单测容易手工塞 score 或绕过 workflow，不能证明“学习记录最终影响 rank 和合约”；本次新增 workflow 部署测试，构造正向/负向 learning components 的候选，走 `_write_daily_opportunity_ranks()`，验证高 rank 候选保留 `target_lots/lots_delta/final_action`，低 rank 候选退回 hold 并写 `capital_allocation_reason`。同时补 DB 检索测试，证明 payload 旧来源会被提升为顶层 canonical 字段，PM 不再拿到空 learning trace。
+
+（4）同步提示词、配置、字段语义和机制文档到双侧 action-value 读取与断链审计。
+修改了什么：`src/llm/prompt.py`、`src/config/learning_policy_catalog.yaml`、`src/config/portfolio_policy_catalog.yaml`、`docs/unified_field_semantics.md`、`docs/mechanism_data_model.md`、`docs/mechanism_research.md`、`docs/mechanism_multiagents.md`。
+为什么改：字段语义表明确 `action_preference/reward_source/evidence_scope/action_value_lane` 是 `alpha_setup_action_value` 顶层 canonical 列，payload 只作兼容；提示词和配置明确分析师仍只读 `signal_calibration`，PM 必须分别读取 long/short 候选侧真实 action-value 后再重建 scorecard，Trader 不读学习分数改方向或手数，所有仓位变化仍只通过唯一 `final_action_contract`。
+
+（5）回测前检测与每日审计已同步到学习落地断链。
+修改了什么：`src/tools/agent_tools/control/system_invariants.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/tests/test_pre_backtest_acceptance.py`。
+为什么改：新增的 `pm_rank_changed_without_contract_effect`、`pm_hold_exit_learning_without_contract_effect_or_explanation`、`pm_learning_components_zero_despite_prior_real_action_value` 等错误全部归入 `learning_landing`，回测前验收和每日审计共用同一组 `pm_learning_ranking_audit_boundaries`。当前本地回测库已被删除时，盘前验收会以 `sqlite_missing` warning 通过，但一旦新回测生成记录，每日审计会检查真实 action-value 是否进入 PM score components、rank 是否影响唯一合约、持仓/退出学习是否被 PM 合约接住。
+
+（6）新增 Protocol Governor 只读机制有效性审计路径。
+修改了什么：`src/tools/agent_tools/control/mechanism_effectiveness_audit.py`、`src/run/control/mechanism_effectiveness_audit.py`、`src/run/backtest.py`、`src/agents/control_team/protocol_governor.py`、`src/tools/agent_tools/control/__init__.py`、`src/config/dev.yaml`、`AGENTS.md`、`README.md`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_data_model.md`、`docs/mechanism_future_trade.md`、`docs/mechanism_research.md`、`docs/pandaia_data_introduction.md`、`src/tests/test_mechanism_effectiveness_audit.py`、`src/tests/test_protocol_preflight_cli.py`、`src/tests/test_protocol_governor.py`。
+为什么改：`system_invariant_audit` 只回答系统有没有违规，不能回答学习、排名、资金部署、条件监控和持仓退出机制是否真实接通；本次新增只读 `mechanism_effectiveness_audit`，由 Protocol Governor 管理，在每日 `system_invariant_audit` 之后、策略归因/绩效评价之前执行。输出分为 `hard_failures` 和 `diagnostics`：前者表示机制断链并阻止策略收益评价，后者表示机制已通但效果差，只进入策略分析，不停止回测。该路径不改 PM、不改唯一合约、不写学习、不改 Trader 或资金，只检查 `action-value -> PM -> score -> rank -> final_action_contract -> Trader/Accountant -> Reviewer/Researcher` 是否真实闭环。
+
+（7）修正 PM action-value 偏好读取的 canonical 优先边界。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：全量测试暴露出旧别名 `controlled_open_or_add` 仍可能遮住 payload 或顶层 canonical `positive_candidate_open`，导致真实正向 episode 学习不能稳定进入 `positive_learning` 与后续资金释放；本次让 PM 只承认字段语义表登记的 canonical action preference，旧别名不能单独驱动评分，也不能覆盖 payload 里的 canonical 值，同时保留顶层 canonical `positive_candidate_open` 无需 payload 副本也能参与 open candidate seed，避免 action-value 兼容层再次造成学习落地漂移。

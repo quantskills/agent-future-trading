@@ -94,7 +94,17 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     action_name TEXT,
                     sample_count INTEGER,
                     reward_sum REAL,
+                    reward_mean REAL,
+                    win_rate REAL,
                     action_preference TEXT,
+                    reward_source TEXT,
+                    evidence_scope TEXT,
+                    action_value_lane TEXT,
+                    consumer_scope TEXT DEFAULT 'pm_learning',
+                    learning_lane TEXT,
+                    retrieval_key TEXT,
+                    fallback_retrieval_key TEXT,
+                    execution_retrieval_key TEXT,
                     last_sample_date TEXT,
                     created_at TEXT,
                     updated_at TEXT,
@@ -234,6 +244,14 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         )
         self.assertEqual(
             INVARIANT_TO_CHECK["opportunity_learning_component_used_as_trade_intent"],
+            "learning_landing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["pm_rank_changed_without_contract_effect"],
+            "learning_landing",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["pm_hold_exit_learning_without_contract_effect_or_explanation"],
             "learning_landing",
         )
 
