@@ -46,7 +46,39 @@ LEARNING_COMPONENT_FIELDS = {
     "execution_profile_learning",
     "recent_tail_loss_penalty",
 }
+SCENARIO_OPEN_INCREASE = "open_increase"
+SCENARIO_CONDITIONAL_MONITOR = "conditional_monitor"
+SCENARIO_REDUCE_EXIT = "reduce_exit"
+SCENARIO_POSITION_HOLD = "position_hold"
+SCENARIO_UNSELECTED_CANDIDATE = "unselected_candidate"
+SCENARIO_FLAT_WAIT = "flat_wait"
+CHECKED_SCENARIOS = {
+    SCENARIO_OPEN_INCREASE: "open/add/scale learning must land in score/rank and then the single final_action_contract",
+    SCENARIO_CONDITIONAL_MONITOR: "conditional probe learning must land in score/rank and Trader must record triggered/not_triggered",
+    SCENARIO_REDUCE_EXIT: "hold/exit learning must land in target_lots reduction, exit action, or an explicit lifecycle explanation",
+    SCENARIO_POSITION_HOLD: "hold/exit learning must either preserve a valid hold or explain why no position change happened",
+    SCENARIO_UNSELECTED_CANDIDATE: "ranked candidate not deployed must carry capital_allocation_reason",
+    SCENARIO_FLAT_WAIT: "flat/no-action candidate with prior learning must explain why it did not affect deployment",
+}
 CONDITIONAL_FINAL_ACTIONS = {"conditional_probe", "conditional_monitor", "watch_trigger"}
+OPEN_INCREASE_ACTIONS = {
+    "open",
+    "open_long",
+    "open_short",
+    "open_probe",
+    "conditional_probe",
+    "scale",
+    "add",
+    "increase",
+}
+REDUCE_EXIT_ACTIONS = {
+    "reduce",
+    "exit",
+    "close",
+    "close_long",
+    "close_short",
+    "reduce_only",
+}
 NO_CHANGE_EXPLANATION_MARKERS = {
     "capital_deployment",
     "not_selected",
@@ -520,6 +552,26 @@ def _contract_lots_changed(contract: Dict[str, Any]) -> bool:
     return _int(contract.get("target_lots")) != _int(contract.get("current_lots")) or _lower(contract.get("final_action")) not in {"", "hold", "wait"}
 
 
+def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
+    current = _int(contract.get("current_lots"))
+    target = _int(contract.get("target_lots"))
+    final_action = _lower(contract.get("final_action"))
+    if final_action in OPEN_INCREASE_ACTIONS:
+        return abs(target) > abs(current) or current == 0
+    if final_action in REDUCE_EXIT_ACTIONS:
+        return False
+    return abs(target) > abs(current)
+
+
+def _contract_reduces_or_exits_position(contract: Dict[str, Any]) -> bool:
+    current = _int(contract.get("current_lots"))
+    target = _int(contract.get("target_lots"))
+    final_action = _lower(contract.get("final_action"))
+    if final_action in REDUCE_EXIT_ACTIONS:
+        return True
+    return current != 0 and abs(target) < abs(current)
+
+
 def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
     deployment = _dict(contract.get("capital_deployment"))
     evidence = _dict(contract.get("evidence_used"))
@@ -534,6 +586,20 @@ def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
     return any(marker in text for marker in NO_CHANGE_EXPLANATION_MARKERS)
 
 
+def _scenario_for_contract(contract: Dict[str, Any]) -> str:
+    if _is_conditional_monitor(contract):
+        return SCENARIO_CONDITIONAL_MONITOR
+    if _contract_reduces_or_exits_position(contract):
+        return SCENARIO_REDUCE_EXIT
+    if _contract_increases_risk(contract):
+        return SCENARIO_OPEN_INCREASE
+    if _capital_deployment_selected(contract) is False:
+        return SCENARIO_UNSELECTED_CANDIDATE
+    if _int(contract.get("current_lots")) != 0:
+        return SCENARIO_POSITION_HOLD
+    return SCENARIO_FLAT_WAIT
+
+
 def _hold_exit_has_explanation(contract: Dict[str, Any]) -> bool:
     text = _text_blob(
         contract.get("reason_codes"),
@@ -542,11 +608,22 @@ def _hold_exit_has_explanation(contract: Dict[str, Any]) -> bool:
         _dict(contract.get("evidence_used")).get("capital_allocation_reason"),
         _dict(contract.get("learning_used")).get("learning_adjustment_summary"),
     )
-    return any(marker in text for marker in HOLD_EXIT_EXPLANATION_MARKERS | NO_CHANGE_EXPLANATION_MARKERS)
+    return any(marker in text for marker in HOLD_EXIT_EXPLANATION_MARKERS)
 
 
 def _has_hold_exit_learning(contract: Dict[str, Any]) -> bool:
     for row in _contract_action_value_rows(contract):
+        preference = _row_preference(row)
+        lane = _row_lane(row)
+        if preference in {"negative_hold_revalidate", "tail_loss_protect", "positive_candidate_exit"}:
+            return True
+        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
+            return True
+    return False
+
+
+def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bool:
+    for row in rows:
         preference = _row_preference(row)
         lane = _row_lane(row)
         if preference in {"negative_hold_revalidate", "tail_loss_protect", "positive_candidate_exit"}:
@@ -609,6 +686,7 @@ def _audit_recommendation_mechanisms(
     intraday_decisions: List[Dict[str, Any]],
     hard_failures: List[str],
     diagnostics: List[str],
+    scenario_counts: Dict[str, int],
 ) -> None:
     rank_pnl_rows: List[tuple[int, float, str]] = []
     for recommendation_id, recommendation in recommendations.items():
@@ -617,6 +695,8 @@ def _audit_recommendation_mechanisms(
         contract = _contract_from_recommendation(recommendation)
         if not contract:
             continue
+        scenario = _scenario_for_contract(contract)
+        scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker") or "")
         day = _date10(recommendation.get("trading_date") or recommendation.get("effective_trade_date"))
         label = f"{day}:{ticker}:{recommendation_id}"
@@ -642,18 +722,48 @@ def _audit_recommendation_mechanisms(
                     f"mechanism_pm_action_value_missing_canonical_fields:{label}:{preference or 'missing'}"
                 )
 
-        if prior_rows and not components_nonzero:
+        prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(prior_rows)
+        learning_should_land_in_score = scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}
+        if prior_rows and learning_should_land_in_score and not components_nonzero:
             hard_failures.append(f"mechanism_pm_learning_not_in_score:{label}:side={side or 'missing'}")
+        if (
+            prior_rows
+            and not learning_should_land_in_score
+            and scenario in {SCENARIO_FLAT_WAIT, SCENARIO_UNSELECTED_CANDIDATE}
+            and not components_nonzero
+            and not _capital_allocation_reason(contract)
+            and not _contract_has_no_change_explanation(contract)
+        ):
+            hard_failures.append(f"mechanism_pm_learning_not_explained_for_no_deployment:{label}:side={side or 'missing'}")
+        if (
+            prior_rows
+            and prior_hold_exit_learning
+            and not components_nonzero
+            and not _contract_reduces_or_exits_position(contract)
+            and not _hold_exit_has_explanation(contract)
+        ):
+            hard_failures.append(f"mechanism_hold_exit_learning_not_landed:{label}")
 
         rank = _rank_value(contract)
-        if components_nonzero and rank is None:
+        if components_nonzero and rank is None and scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}:
             hard_failures.append(f"mechanism_learning_score_missing_rank:{label}")
 
         deployment = _dict(contract.get("capital_deployment"))
         reason = _capital_allocation_reason(contract)
-        if rank is not None and not deployment:
+        rank_deployment_scenario = scenario in {
+            SCENARIO_OPEN_INCREASE,
+            SCENARIO_CONDITIONAL_MONITOR,
+            SCENARIO_UNSELECTED_CANDIDATE,
+        }
+        if rank is not None and rank_deployment_scenario and not deployment:
             hard_failures.append(f"mechanism_rank_missing_capital_deployment:{label}:rank={rank}")
-        if rank is not None and not _contract_lots_changed(contract) and not reason and not _contract_has_no_change_explanation(contract):
+        if (
+            rank is not None
+            and rank_deployment_scenario
+            and not _contract_lots_changed(contract)
+            and not reason
+            and not _contract_has_no_change_explanation(contract)
+        ):
             hard_failures.append(f"mechanism_rank_without_contract_effect_or_reason:{label}:rank={rank}")
 
         selected = _capital_deployment_selected(contract)
@@ -748,6 +858,7 @@ def audit_mechanism_effectiveness(
             "conditional_probe_to_trader_result",
             "capital_deployment_explainability",
         ],
+        "checked_scenarios": dict(CHECKED_SCENARIOS),
     }
     db_path = Path(db_path)
     if not db_path.exists():
@@ -812,12 +923,14 @@ def audit_mechanism_effectiveness(
 
     metadata["config_id"] = resolved_config_id
     metadata["db_path"] = str(db_path)
+    scenario_counts: Dict[str, int] = {}
     _audit_recommendation_mechanisms(
         recommendations=recommendations,
         action_values=action_values,
         intraday_decisions=intraday_decisions,
         hard_failures=hard_failures,
         diagnostics=diagnostics,
+        scenario_counts=scenario_counts,
     )
     _audit_capital_deployment_diagnostics(daily_settlements, diagnostics)
     _audit_rank_pnl_diagnostics(recommendations, ticker_daily_pnl, diagnostics)
@@ -829,6 +942,7 @@ def audit_mechanism_effectiveness(
         "ticker_daily_pnl": len(ticker_daily_pnl),
         "hard_failures": len(hard_failures),
         "diagnostics": len(diagnostics),
+        "scenarios": dict(sorted(scenario_counts.items())),
     }
     return MechanismEffectivenessAuditReport(
         ok=not hard_failures,

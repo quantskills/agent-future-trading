@@ -261,8 +261,76 @@ def ensure_execution_result(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     result = snapshot.get("execution_result")
     if not isinstance(result, dict):
         result = {}
-    snapshot["execution_result"] = result
+        snapshot["execution_result"] = result
     return result
+
+
+def build_execution_learning_trace(
+    snapshot: Dict[str, Any],
+    *,
+    outcome: Optional[str] = None,
+    status: Optional[str] = None,
+    no_trade_reason: Optional[str] = None,
+    no_trade_reason_category: Optional[Dict[str, Any]] = None,
+    transaction_count: int = 0,
+    execution_learning_type: Optional[str] = None,
+    turn_into_memory: Optional[bool] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    execution_translation = snapshot.get("execution_translation") if isinstance(snapshot.get("execution_translation"), dict) else {}
+    execution_contract = (
+        execution_translation.get("execution_contract")
+        if isinstance(execution_translation.get("execution_contract"), dict)
+        else {}
+    )
+    ticker = (
+        snapshot.get("ticker")
+        or snapshot.get("underlying_code")
+        or contract.get("underlying_code")
+        or contract.get("ticker")
+        or execution_translation.get("underlying_code")
+        or ""
+    )
+    execution_profile = (
+        contract.get("execution_profile")
+        or execution_contract.get("execution_profile")
+        or execution_translation.get("execution_profile")
+        or "unknown"
+    )
+    trigger_reason = (
+        contract.get("trigger_reason")
+        or contract.get("trigger_source")
+        or execution_contract.get("trigger_reason")
+        or execution_contract.get("trigger_source")
+        or no_trade_reason
+        or outcome
+        or "unknown"
+    )
+    trace: Dict[str, Any] = {
+        "consumer_scope": "trader_execution_learning",
+        "learning_lane": "execution",
+        "execution_retrieval_key": "|".join(
+            str(part or "unknown")
+            for part in (ticker, execution_profile, trigger_reason, "execution")
+        ),
+        "outcome": outcome,
+        "status": status,
+        "no_trade_reason": no_trade_reason,
+        "no_trade_reason_category": no_trade_reason_category,
+        "actual_transaction_count": int(transaction_count),
+        "turn_into_memory": (
+            bool(no_trade_reason and int(transaction_count) == 0)
+            if turn_into_memory is None
+            else bool(turn_into_memory)
+        ),
+        "not_direction_evidence": True,
+    }
+    if execution_learning_type:
+        trace["execution_learning_type"] = execution_learning_type
+    if extra:
+        trace.update({k: v for k, v in extra.items() if v is not None})
+    return trace
 
 
 def add_rewrite_reason(snapshot: Dict[str, Any], reason: Optional[str]) -> None:
@@ -471,14 +539,14 @@ def set_execution_result(
             "actual_lots": _resolve_actual_lots(actual_transactions),
             "no_trade_reason": normalized_reason,
             "no_trade_reason_category": reason_category,
-            "execution_learning_trace": {
-                "outcome": outcome,
-                "status": status,
-                "no_trade_reason": normalized_reason,
-                "no_trade_reason_category": reason_category,
-                "actual_transaction_count": int(transaction_count),
-                "turn_into_memory": bool(normalized_reason and int(transaction_count) == 0),
-            },
+            "execution_learning_trace": build_execution_learning_trace(
+                snapshot,
+                outcome=outcome,
+                status=status,
+                no_trade_reason=normalized_reason,
+                no_trade_reason_category=reason_category,
+                transaction_count=int(transaction_count),
+            ),
             "warning_message": warning_message,
         }
     )

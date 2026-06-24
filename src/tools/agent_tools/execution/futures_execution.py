@@ -33,6 +33,7 @@ from graph.schema import (
 from util.futures_audit import (
     add_rewrite_reason,
     build_actual_transactions,
+    build_execution_learning_trace,
     build_audit_payload,
     calculate_margin_audit,
     categorize_no_trade_reason,
@@ -1478,17 +1479,22 @@ class FuturesExecutionEngine:
             no_trade_reason=blocked.reason,
             warning_message=warning_message,
         )
-        snapshot["execution_result"]["execution_learning_trace"] = {
-            "no_trade_reason": blocked.reason,
-            "no_trade_reason_category": reason_category,
-            "execution_learning_type": "market_rule_or_execution_block",
-            "turn_into_memory": True,
-            "timing_strategy_question": (
-                "If same-scope Counterfactual results later show missed alpha, test whether earlier entry, "
-                "pullback entry, or lower chase tolerance would have improved execution without using future data."
-            ),
-            "not_direction_evidence": True,
-        }
+        snapshot["execution_result"]["execution_learning_trace"] = build_execution_learning_trace(
+            snapshot,
+            outcome="skipped",
+            status=RecommendationStatus.SKIPPED.value,
+            no_trade_reason=blocked.reason,
+            no_trade_reason_category=reason_category,
+            transaction_count=0,
+            execution_learning_type="market_rule_or_execution_block",
+            turn_into_memory=True,
+            extra={
+                "timing_strategy_question": (
+                    "If same-scope Counterfactual results later show missed alpha, test whether earlier entry, "
+                    "pullback entry, or lower chase tolerance would have improved execution without using future data."
+                ),
+            },
+        )
         self.db.update_futures_recommendation_status(
             recommendation_id,
             RecommendationStatus.SKIPPED.value,

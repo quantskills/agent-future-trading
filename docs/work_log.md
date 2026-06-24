@@ -562,3 +562,29 @@
 （7）修正 PM action-value 偏好读取的 canonical 优先边界。
 修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tests/test_phase_flow_regression.py`。
 为什么改：全量测试暴露出旧别名 `controlled_open_or_add` 仍可能遮住 payload 或顶层 canonical `positive_candidate_open`，导致真实正向 episode 学习不能稳定进入 `positive_learning` 与后续资金释放；本次让 PM 只承认字段语义表登记的 canonical action preference，旧别名不能单独驱动评分，也不能覆盖 payload 里的 canonical 值，同时保留顶层 canonical `positive_candidate_open` 无需 payload 副本也能参与 open candidate seed，避免 action-value 兼容层再次造成学习落地漂移。
+
+（8）收敛执行学习 trace 到统一消费契约。
+修改了什么：`src/util/futures_audit.py`、`src/agents/execution_team/trader.py`、`src/tools/agent_tools/execution/futures_execution.py`、`src/tools/agent_tools/research/reviewer_tools.py`、`docs/unified_field_semantics.md`、`src/tests/test_phase_flow_regression.py`、`src/tests/test_system_invariant_audit.py`。
+为什么改：新回测 2025-03-03 暴露 `execution_result.execution_learning_trace` 已写入但缺 `consumer_scope/learning_lane`，说明 06-23 的学习消费契约没有覆盖所有执行生产路径；本次不改 PM 排名、仓位、Trader 权限或唯一合约，而是把执行结果学习 trace 收敛到 `build_execution_learning_trace()` 统一出口，所有进入学习/记忆的执行 trace 固定带 `consumer_scope=trader_execution_learning`、`learning_lane=execution` 和 `execution_retrieval_key`，Reviewer fallback 也走同一构造函数。测试覆盖 hold/zero-lots 真实路径、裸 trace hard fail、普通 execution_result 不误杀，并增加静态检查防止生产代码再次手写裸 `execution_learning_trace`。
+
+（9）新增版本级契约覆盖闸门。
+修改了什么：`src/tools/agent_tools/control/contract_coverage_audit.py`、`src/run/control/contract_coverage_audit.py`、`src/tools/agent_tools/control/pre_backtest_acceptance.py`、`src/run/backtest.py`、`src/tools/agent_tools/control/__init__.py`、`src/tests/test_contract_coverage_audit.py`、`src/tests/test_pre_backtest_acceptance.py`、`src/tests/test_protocol_preflight_cli.py`、`AGENTS.md`、`README.md`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_data_model.md`、`docs/mechanism_future_trade.md`、`docs/mechanism_research.md`。
+为什么改：过去多次出现“字段表、提示词、审计或测试有一处没跟上，回测第一天才暴露”的反复；本次新增 Protocol Governor 管理的只读版本级 `contract_coverage_audit`，输出 `contract -> producers -> consumers -> audits -> tests -> uncovered_risks` 矩阵，至少覆盖 `action_evidence_contract/final_action_contract/alpha_setup_action_value/execution_learning_trace/opportunity_score_components/learning_used/execution_result`。它不改 PM、不改 Trader、不写 DB、不评价策略收益，只在回测前拦截生产端裸写、消费端错 scope、字段表未登记、审计/测试缺口、配置/提示词/机制文档旧口径等版本级覆盖问题；`backtest.py` 会先跑该闸门，再跑 `pre_backtest_acceptance`，每日仍由 `system_invariant_audit` 和 `mechanism_effectiveness_audit` 检查真实运行记录。
+
+==========2026年06月24日========
+
+（1）把机制有效性审计改为交易生命周期场景审计。
+修改了什么：`src/tools/agent_tools/control/mechanism_effectiveness_audit.py`、`src/tools/agent_tools/control/system_invariants.py`、`src/tests/test_mechanism_effectiveness_audit.py`、`src/tests/test_system_invariant_audit.py`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_data_model.md`、`docs/mechanism_future_trade.md`、`docs/pandaia_data_introduction.md`、`AGENTS.md`。
+为什么改：2025-03-06 的 M long 已经由 PM 通过 `position_lifecycle_loss_revalidation_failed` 写成 `final_action=exit/current_lots=4/target_lots=0/lots_delta=-4`，并且 `learning_used.alpha_setup_action_values` 里已有 `tail_loss_protect/positive_candidate_exit` 等 PM 学习；旧 `mechanism_effectiveness_audit` 和 `system_invariants` 仍用开仓评分规则要求 `opportunity_score_components` 非零，误报 `mechanism_pm_learning_not_in_score` / `pm_learning_components_zero_despite_prior_real_action_value`。本次不改 PM、Trader、唯一合约、排名或策略规则，只让只读审计和每日系统不变量按生命周期分场景：开仓/加仓学习必须落到 score/rank 和最终合约，条件监控必须有盘中触发/未触发结果，持仓/减仓/退出学习必须落到目标手数下降、`exit/reduce` 动作、position lifecycle reason 或明确继续持有解释。新增测试锁住“正确退出不误杀”和“有退出学习却不减仓/不解释仍 hard fail”，避免审计再次把正确退出当成学习断链。
+
+（2）收干净减仓/退出场景的 rank 误杀。
+修改了什么：`src/tools/agent_tools/control/mechanism_effectiveness_audit.py`、`src/tests/test_mechanism_effectiveness_audit.py`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`。
+为什么改：2025-03-07 的 C 是保护性减仓，`current_lots=30/target_lots=14/final_action=reduce`，学习分项已经进入 `opportunity_score_components`，并通过 `action_candidates/reason_codes` 落到 `lots_delta=-16`；旧审计仍要求“学习分项非零必须有 `opportunity_rank`”，把减仓当开仓资金部署误杀为 `mechanism_learning_score_missing_rank`。本次把 rank 和 capital_deployment 检查限定到开仓/加仓、条件监控、未入选候选等资金部署场景；减仓/退出只检查是否真的降低目标仓位、写出 `reduce/exit` 或明确持仓生命周期解释。测试新增“C 类保护性减仓不要求 rank”和“开仓学习分项非零仍必须有 rank”的正反用例。
+
+（3）把 Researcher -> PM action-value 传递保真并入回测前契约覆盖闸门。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/control/contract_coverage_audit.py`、`src/tests/test_phase_flow_regression.py`、`docs/unified_field_semantics.md`、`docs/mechanism_multiagents.md`、`docs/mechanism_data_model.md`、`docs/mechanism_research.md`、`AGENTS.md`。
+为什么改：2025-03-11 暴露 Researcher/DB 已有完整 `HC short execution` action-value，但 PM `learning_used` 里同 scope 只剩空壳 execution trace，说明智能体边界传递出现信息保真问题；本次不新增字段、不改交易路径、不改 Trader/Auditor/排名规则，只让 PM action-value 合并时完整 canonical 记录优先于空壳 trace，compact 后保留 `id` 和 canonical 标记，并把“真实 action-value 不得被空壳覆盖”的测试纳入 `contract_coverage_audit` 回测前矩阵，要求版本级闸门证明关键 producer-to-consumer 边界有保真测试覆盖。
+
+（4）补齐 Analyst -> PM、PM -> Trader、Trader -> Researcher 的边界保真测试。
+修改了什么：`src/agents/decision_team/portfolio_manager.py`、`src/tools/agent_tools/control/contract_coverage_audit.py`、`src/tests/test_phase_flow_regression.py`。
+为什么改：`contract_coverage_audit` 已是版本级闸门，但此前只明确锁住 Researcher -> PM action-value 保真；本次继续把同类保真测试并入同一闸门，而不是另起新审计。新增测试证明：分析师 `action_evidence_contract` 进入 PM 时优先于 raw `signal.opportunity_state/trigger_valid`，避免 raw 字段把条件监控误读成当前可交易；PM 的 `final_action_contract` 进入 Trader 时保留目标仓位和执行条件，但 `opportunity_rank/opportunity_score` 不会变成 Trader 执行权限；Trader 写出的 `execution_result/execution_learning_trace` 进入 Reviewer/Researcher 时保留未触发事实、`consumer_scope=trader_execution_learning` 和 `learning_lane=execution`。这次没有新增字段、没有改提示词或配置、没有改 PM 排名/仓位/Trader 权限，只把已有语义落实成回测前可自动验证的 producer-to-consumer 保真测试。

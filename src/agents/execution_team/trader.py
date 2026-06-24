@@ -59,6 +59,7 @@ from util.db_helper import db_initialize, get_db
 from util.futures_audit import (
     add_rewrite_reason,
     append_translated_order,
+    build_execution_learning_trace,
     build_audit_payload,
     categorize_no_trade_reason,
     ensure_execution_translation,
@@ -836,20 +837,23 @@ def _mark_intraday_non_execution(
         no_trade_reason=no_trade_reason,
         warning_message=no_trade_reason,
     )
-    audit_snapshot["execution_result"]["execution_learning_trace"] = {
-        "consumer_scope": "trader_execution_learning",
-        "learning_lane": "execution",
-        "no_trade_reason": no_trade_reason,
-        "no_trade_reason_category": reason_category,
-        "execution_learning_type": "intraday_timing_gate",
-        "turn_into_memory": True,
-        "timing_strategy_question": (
-            "Track whether this skipped setup becomes missed alpha after settlement; "
-            "if repeated in the same scope, Researcher may propose timing adjustments "
-            "such as pullback, VWAP confirmation, or opening-range calibration."
-        ),
-        "not_direction_evidence": True,
-    }
+    audit_snapshot["execution_result"]["execution_learning_trace"] = build_execution_learning_trace(
+        audit_snapshot,
+        outcome="skipped",
+        status=RecommendationStatus.SKIPPED.value,
+        no_trade_reason=no_trade_reason,
+        no_trade_reason_category=reason_category,
+        transaction_count=0,
+        execution_learning_type="intraday_timing_gate",
+        turn_into_memory=True,
+        extra={
+            "timing_strategy_question": (
+                "Track whether this skipped setup becomes missed alpha after settlement; "
+                "if repeated in the same scope, Researcher may propose timing adjustments "
+                "such as pullback, VWAP confirmation, or opening-range calibration."
+            ),
+        },
+    )
     _attach_setup_execution_learning(
         audit_snapshot,
         status="skipped_intraday_trigger_not_met",

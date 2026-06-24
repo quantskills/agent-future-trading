@@ -34,7 +34,7 @@ AgentQuant 的业务线是一个闭环：
 
 控制组在主链外做协议、验收、审计和观测：
 
-`protocol_governor / preflight / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
+`protocol_governor / preflight / contract_coverage_audit / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
 
 控制组不能生成交易权限，不能改手数，不能改保证金，不能替代 PM、Auditor 或 Trader。
 
@@ -65,7 +65,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 控制与验收旁路是：
 
-`protocol_governor / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
+`protocol_governor / contract_coverage_audit / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
 
 ### 5.1 `technical` 技术分析师
 
@@ -292,7 +292,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 输入：
 
 - 能力卡、工具权限、字段语义、artifact lineage；
-- `pre_backtest_acceptance`、`system_invariant_audit`、`mechanism_effectiveness_audit`、统一字段审计和阶段状态；
+- `contract_coverage_audit`、`pre_backtest_acceptance`、`system_invariant_audit`、`mechanism_effectiveness_audit`、统一字段审计和阶段状态；
 - PM、Auditor、Trader、Researcher 的关键运行 artifact。
 
 输出：
@@ -439,7 +439,7 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 - 目标测试；
 - 相关链路测试；
-- 必要时运行 `pre_backtest_acceptance`、`system_invariant_audit` 和 `mechanism_effectiveness_audit`；
+- 必要时运行 `contract_coverage_audit`、`pre_backtest_acceptance`、`system_invariant_audit` 和 `mechanism_effectiveness_audit`；
 - 影响面大时运行全量 `python -m unittest`；
 - 用 `git diff --check` 检查补丁格式。
 
@@ -461,17 +461,19 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 ```powershell
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\contract_coverage_audit.py --repo-root . --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
 ```
 
-`pre_backtest_acceptance` 固定覆盖：
+`contract_coverage_audit` 是版本级只读闸门，固定检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键智能体边界有 producer-to-consumer 保真测试；它不读收益、不写 DB、不改交易。`pre_backtest_acceptance` 固定覆盖：
 
 - environment_api；
 - config_consistency；
 - data_time_boundary；
 - agent_boundaries；
 - structured_io；
+- contract_coverage；
 - single_trade_exit；
 - pm_opportunity_routing；
 - trader_trigger_parity；
@@ -479,11 +481,11 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 - capital_boundary；
 - audit_explainability。
 
-`backtest.py` 已接入回测前验收、逐日累计 `system_invariant_audit` 和逐日累计 `mechanism_effectiveness_audit` fail-fast。验收通过只表示系统 readiness，不表示策略一定盈利。
+`backtest.py` 已接入回测前 `contract_coverage_audit`、回测前验收、逐日累计 `system_invariant_audit` 和逐日累计 `mechanism_effectiveness_audit` fail-fast。验收通过只表示系统 readiness，不表示策略一定盈利。
 
 ## 11. 回测中与回测后判断
 
-如果回测中 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
+如果回测中 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。`mechanism_effectiveness_audit` 必须按交易生命周期场景判断：开仓/加仓看学习是否进入 score/rank 和唯一合约，条件监控看盘中触发结果，持仓/减仓/退出看学习是否落到目标手数下降、退出/减仓动作或明确继续持有解释；不能用开仓评分规则误杀已经正确退出的合约。`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
 
 如果两类 audit 都 clean 但收益差，才进入策略层分析，重点看：
 
@@ -506,6 +508,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 ```powershell
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m compileall src
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m unittest
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\contract_coverage_audit.py --repo-root . --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
@@ -515,11 +518,12 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 
 - `src/tests/test_agent_contracts.py`：智能体结构化契约；
 - `src/tests/test_phase_flow_regression.py`：PM、Trader、Researcher 主链路；
-- `src/tests/test_pre_backtest_acceptance.py`：回测前 10 项验收；
+- `src/tests/test_pre_backtest_acceptance.py`：回测前验收；
 - `src/tests/test_protocol_governor.py`：控制组边界；
 - `src/tests/test_protocol_preflight_cli.py`：preflight 和 backtest 接入；
 - `src/tests/test_system_invariant_audit.py`：真实流水系统不变量；
 - `src/tests/test_mechanism_effectiveness_audit.py`：机制有效性 hard_fail/diagnostic 分流；
+- `src/tests/test_contract_coverage_audit.py`：版本级契约覆盖闸门；
 - `src/tests/test_reviewer_learning.py`：复盘和研究学习；
 - `src/tests/test_pandaai_api_adapter.py`：PandaAI adapter，真实 API 必须隔离为 integration；
 - `src/tests/test_futures_market_rules.py`：期货交易规则；

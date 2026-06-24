@@ -20,6 +20,7 @@ import yaml
 
 from apis.router import APISource, Router
 from tools.agent_tools.control.agent_cards import build_default_agent_cards, validate_agent_capability
+from tools.agent_tools.control.contract_coverage_audit import audit_contract_coverage
 from tools.agent_tools.control.preflight import run_preflight_checks
 from tools.agent_tools.control.schemas import ProtocolCheckResult
 from tools.agent_tools.control.system_invariants import (
@@ -45,6 +46,7 @@ ACCEPTANCE_CHECKS = (
     "data_time_boundary",
     "agent_boundaries",
     "structured_io",
+    "contract_coverage",
     "unified_field_semantics",
     "single_trade_exit",
     "pm_opportunity_routing",
@@ -286,6 +288,26 @@ def _runtime_field_unification_check(repo_root: Path) -> AcceptanceCheck:
             metadata=metadata,
         )
     return _pass_check("structured_io", metadata=metadata)
+
+
+def _contract_coverage_check(repo_root: Path) -> AcceptanceCheck:
+    report = audit_contract_coverage(repo_root)
+    matrix = [row.to_dict() for row in report.matrix]
+    metadata = {
+        "contract_coverage_version": report.contract_version,
+        "strategy_profitability_checked": False,
+        "boundary": "version_level_static_contract_coverage_only_no_trade_authority",
+        "contracts_checked": [row.contract for row in report.matrix],
+        "matrix": matrix,
+    }
+    if report.errors:
+        return _fail_check(
+            "contract_coverage",
+            report.errors,
+            warnings=report.warnings,
+            metadata=metadata,
+        )
+    return _pass_check("contract_coverage", warnings=report.warnings, metadata=metadata)
 
 
 def _parse_window_date(value: str, field_name: str, errors: List[str]) -> Optional[datetime]:
@@ -581,6 +603,7 @@ def run_pre_backtest_acceptance(
         structured_io,
         _runtime_field_unification_check(repo_root),
     )
+    checks["contract_coverage"] = _contract_coverage_check(repo_root)
 
     if db_path.exists():
         checks.update(

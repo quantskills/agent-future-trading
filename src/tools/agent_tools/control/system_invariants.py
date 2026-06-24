@@ -27,6 +27,28 @@ OPEN_ACTIONS = {"open_long", "open_short"}
 CLOSE_ACTIONS = {"close_long", "close_short"}
 OPEN_FINAL_ACTIONS = {"open_probe", "open_real"}
 OPEN_AUTHORITY_TYPES = {"exploration_probe", "real_budget_entry"}
+OPEN_INCREASE_FINAL_ACTIONS = {
+    "open",
+    "open_long",
+    "open_short",
+    "open_probe",
+    "open_real",
+    "conditional_probe",
+    "scale",
+    "add",
+    "increase",
+}
+REDUCE_EXIT_FINAL_ACTIONS = {
+    "reduce",
+    "reduce_position",
+    "reduce_only",
+    "scale_down",
+    "exit",
+    "close",
+    "close_long",
+    "close_short",
+    "close_position",
+}
 STRATEGY_SOURCE_TYPE = "strategy"
 ROLLOVER_SOURCE_TYPE = "rollover"
 FORCED_RISK_SOURCE_TYPE = "forced_risk"
@@ -1057,6 +1079,48 @@ def _real_action_value_available_before(
     return False
 
 
+def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
+    current_lots = _int(contract.get("current_lots"))
+    target_lots = _int(contract.get("target_lots"))
+    final_action = _lower(contract.get("final_action"))
+    if final_action in OPEN_INCREASE_FINAL_ACTIONS:
+        return abs(target_lots) > abs(current_lots) or current_lots == 0
+    if final_action in REDUCE_EXIT_FINAL_ACTIONS:
+        return False
+    return abs(target_lots) > abs(current_lots)
+
+
+def _prior_real_action_value_is_hold_exit(
+    action_values: List[Dict[str, Any]],
+    *,
+    ticker: str,
+    side: str,
+    decision_date: str,
+) -> bool:
+    target_ticker = _lower(ticker).upper()
+    target_side = _lower(side)
+    decision_day = _date10(decision_date)
+    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
+        return False
+    for row in action_values:
+        row_ticker = str(row.get("ticker") or "").upper()
+        row_side = _lower(row.get("side"))
+        if row_ticker not in {target_ticker, "*"}:
+            continue
+        if row_side not in {target_side, "*", "both", "any"}:
+            continue
+        sample_day = _date10(row.get("last_sample_date"))
+        if not sample_day or sample_day >= decision_day:
+            continue
+        preference = _lower(row.get("action_preference") or _payload_or_row_value(row, "action_preference"))
+        lane = _lower(row.get("action_value_lane") or _payload_or_row_value(row, "action_value_lane", "action_name"))
+        if preference in {"tail_loss_protect", "negative_hold_revalidate", "positive_candidate_exit"}:
+            return True
+        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
+            return True
+    return False
+
+
 def _audit_pm_learning_transport_and_contract_effect(
     recommendations: Dict[str, Dict[str, Any]],
     action_values: List[Dict[str, Any]],
@@ -1092,15 +1156,38 @@ def _audit_pm_learning_transport_and_contract_effect(
             side = "long" if current_lots > 0 else "short"
         components = _contract_learning_components(contract)
         learning_all_zero = all(abs(value) <= 1e-12 for value in components.values())
-        if _real_action_value_available_before(
+        decision_date = str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or "")
+        prior_real_action_value_available = _real_action_value_available_before(
             action_values,
             ticker=str(ticker),
             side=side,
-            decision_date=str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or ""),
-        ) and learning_all_zero:
+            decision_date=decision_date,
+        )
+        prior_hold_exit_learning = _prior_real_action_value_is_hold_exit(
+            action_values,
+            ticker=str(ticker),
+            side=side,
+            decision_date=decision_date,
+        )
+        if (
+            prior_real_action_value_available
+            and learning_all_zero
+            and (_contract_increases_risk(contract) or not prior_hold_exit_learning)
+        ):
             errors.append(
                 "pm_learning_components_zero_despite_prior_real_action_value:"
                 f"{label}:side={side or 'missing'}"
+            )
+        if (
+            prior_real_action_value_available
+            and prior_hold_exit_learning
+            and learning_all_zero
+            and _hold_exit_learning_has_no_contract_effect(contract)
+            and not _hold_exit_learning_has_contract_explanation(contract)
+        ):
+            errors.append(
+                "pm_hold_exit_learning_without_contract_effect_or_explanation:"
+                f"{label}:target_lots={target_lots}:current_lots={current_lots}"
             )
         alpha_profile_adjustment = float(
             _dict(_dict(contract.get("evidence_used")).get("opportunity_score_components")).get("alpha_profile_adjustment")

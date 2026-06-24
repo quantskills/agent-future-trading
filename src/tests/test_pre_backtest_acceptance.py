@@ -175,6 +175,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 "data_time_boundary",
                 "agent_boundaries",
                 "structured_io",
+                "contract_coverage",
                 "unified_field_semantics",
                 "single_trade_exit",
                 "pm_opportunity_routing",

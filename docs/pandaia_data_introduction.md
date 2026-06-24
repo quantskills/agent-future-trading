@@ -128,7 +128,7 @@ BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN
 
 ## 七、回测前后的检查口径
 
-回测前 `pre_backtest_acceptance.py` 会检查数据、配置、字段语义、协议边界和本地库状态。回测过程中 `system_invariant_audit.py` 会逐日累计检查唯一合约、字段语义、未完成交易日、策略单与运营单分账、Trader 执行是否只来自最终合约；随后 `mechanism_effectiveness_audit.py` 只读检查 action-value、PM score/rank、唯一合约、条件 probe 和持仓退出链路是否真正接通。PandaAI 数据缺口可以作为 warning 降级，但若导致未来函数、账务错误、交易合约冲突或机制断链 hard_fail，必须停止；若只是 diagnostic，则进入策略效果分析。
+回测前 `pre_backtest_acceptance.py` 会检查数据、配置、字段语义、协议边界和本地库状态。回测过程中 `system_invariant_audit.py` 会逐日累计检查唯一合约、字段语义、未完成交易日、策略单与运营单分账、Trader 执行是否只来自最终合约；随后 `mechanism_effectiveness_audit.py` 按生命周期场景只读检查 action-value、PM score/rank、唯一合约、条件 probe、持仓保护、减仓和退出链路是否真正接通。PandaAI 数据缺口可以作为 warning 降级，但若导致未来函数、账务错误、交易合约冲突或机制断链 hard_fail，必须停止；若只是 diagnostic，则进入策略效果分析。
 
 ## 八、当前限制
 

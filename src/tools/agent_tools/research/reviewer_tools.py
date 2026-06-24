@@ -20,6 +20,7 @@ from database.artifact_store import (
 )
 from graph.schema import RecommendationSourceType, TradingPhase
 from util.futures_audit import (
+    build_execution_learning_trace,
     build_actual_transactions,
     categorize_no_trade_reason,
     classify_zero_transaction_day,
@@ -5249,11 +5250,16 @@ def _write_no_trade_opportunity_memory(
             "execution_learning_trace": (
                 execution_result.get("execution_learning_trace")
                 if isinstance(execution_result.get("execution_learning_trace"), dict)
-                else {
-                    "no_trade_reason": normalized_reason,
-                    "no_trade_reason_category": no_trade_category,
-                    "turn_into_memory": True,
-                }
+                else build_execution_learning_trace(
+                    snapshot,
+                    outcome="skipped",
+                    status=str(recommendation.get("status") or "skipped"),
+                    no_trade_reason=normalized_reason or execution_no_trade_reason or "no_trade_opportunity",
+                    no_trade_reason_category=no_trade_category,
+                    transaction_count=0,
+                    execution_learning_type="phase4_no_trade_opportunity_memory",
+                    turn_into_memory=True,
+                )
             ),
             "market_rule_block": market_rule_block,
             "limit_lock_audit": limit_lock_audit,

@@ -46,7 +46,7 @@ PM 的全市场机会排序是资金部署输入，但不是第二套交易权�
 | `accountant` | 成交、持仓、结算价、手续费/滑点/保证金规则 | 否 | 结算、PnL、费用、保证金、持仓状态 | 只核算事实，不改交易意图，不写学习结论 |
 | `reviewer` | 推荐、成交、结算、阶段状态、交易日志所需事实、PM 排序与资金分配理由 | 否 | Phase4 验收、daily summary、完整交易日志、排序有效性复盘、学习候选 | 只做确定性复盘验收，不下单、不调仓、不直接写最终策略学习 |
 | `researcher` | Reviewer 产物、已结算 episode、action outcome、未交易/未触发机会、排序有效性复盘 | 是 | `alpha_setup_profile`、`alpha_setup_action_value`、`adaptive_policy_state`、排序偏好候选 | 只写未来可用学习和排序偏好候选，不影响当天交易和账务 |
-| `protocol_governor` | 能力卡、工具权限、任务生命周期、artifact lineage、preflight/audit 状态、机制有效性报告 | 否 | `protocol_audit`、`preflight_health`、工具权限/字段语义告警、`mechanism_effectiveness_audit` | 只做旁路治理，不创建/否决交易权限，不改 lots/margin；机制断链 hard_fail 才阻止策略评价 |
+| `protocol_governor` | 能力卡、工具权限、任务生命周期、artifact lineage、契约覆盖、preflight/audit 状态、机制有效性报告 | 否 | `protocol_audit`、`preflight_health`、`contract_coverage_audit`、工具权限/字段语义告警、`mechanism_effectiveness_audit` | 只做旁路治理，不创建/否决交易权限，不改 lots/margin；契约覆盖失败或机制断链 hard_fail 才阻止回测/策略评价 |
 
 ### 1. 工作流、预取与共享缓存（运行底座，不是智能体）
 
@@ -110,7 +110,7 @@ Researcher 调用研究工具、Reviewer 产物、已结算 episode、未交易�
 
 ### 10. Protocol Governor
 
-Protocol Governor 调用控制侧工具、能力卡、工具权限策略、字段语义审计、preflight acceptance、system invariant audit、mechanism effectiveness audit 和 artifact lineage，不调用 LLM。它输出 `protocol_audit`、`preflight_health`、字段/权限/生命周期告警、机制有效性 hard_fail/diagnostic 和成本观察；这些结果只能发现协议问题、机制断链或阻止脏回测继续，不能创建交易授权，不能否决 PM 已审合约，不能改 lots 或 margin。`mechanism_effectiveness_audit` 是只读路径：hard_fail 表示学习、rank、合约、条件 probe 或持仓退出链路断开；diagnostic 表示机制已接通但策略效果差。
+Protocol Governor 调用控制侧工具、能力卡、工具权限策略、字段语义审计、contract coverage、preflight acceptance、system invariant audit、mechanism effectiveness audit 和 artifact lineage，不调用 LLM。它输出 `protocol_audit`、`preflight_health`、`contract_coverage_audit`、字段/权限/生命周期告警、机制有效性 hard_fail/diagnostic 和成本观察；这些结果只能发现协议问题、契约覆盖缺口、机制断链或阻止脏回测继续，不能创建交易授权，不能否决 PM 已审合约，不能改 lots 或 margin。`contract_coverage_audit` 是版本级只读闸门，检查核心契约是否有 producer、consumer、audit、test 和文档/配置/提示词覆盖，并要求关键边界有 producer-to-consumer 保真测试，防止上游完整 artifact 被下游压缩、覆盖或误读；`mechanism_effectiveness_audit` 是回测后只读路径，按 open/add、conditional monitor、position hold、reduce/exit、unselected/wait 等场景检查学习是否落到正确位置。hard_fail 表示学习、rank、合约、条件 probe 或持仓退出链路断开；diagnostic 表示机制已接通但策略效果差。
 
 模型配置统一来自 `src/config/dev.yaml` 的 `llm` 与各智能体 override；系统通过 `llm_path`、模型 provider、model、reasoning effort、artifact metadata 保持模型调用可追踪。当前 `planner_mode=false`，Planner 不参与当前回测；macroeconomic、policy 等旧分析师已退役，不是当前启用智能体。
 

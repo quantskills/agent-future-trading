@@ -166,6 +166,18 @@ def run_protocol_preflight(config_arg: str, local_db: bool) -> int:
     return run_command(command, os.environ.copy())
 
 
+def run_contract_coverage_audit() -> int:
+    command = [
+        sys.executable,
+        str(RUN_DIR / "control" / "contract_coverage_audit.py"),
+        "--repo-root",
+        str(SRC_ROOT.parent),
+        "--json",
+    ]
+    print("[backtest] Running control/contract_coverage_audit.py")
+    return run_command(command, os.environ.copy())
+
+
 def run_pre_backtest_acceptance(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
     command = [
         sys.executable,
@@ -261,6 +273,11 @@ def main() -> int:
         raise ValueError("backtest.py currently supports china_futures only.")
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
+
+    contract_coverage_return_code = run_contract_coverage_audit()
+    if contract_coverage_return_code != 0:
+        print(f"[backtest] contract_coverage_audit.py failed with exit code {contract_coverage_return_code}")
+        return contract_coverage_return_code
 
     acceptance_return_code = run_pre_backtest_acceptance(
         config_arg,

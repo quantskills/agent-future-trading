@@ -2681,10 +2681,10 @@ def _signal_opportunity_state(signal) -> str:
     contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
     action_contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), dict) else {}
     state = (
-        getattr(signal, "opportunity_state", None)
-        or action_contract.get("opportunity_state")
+        action_contract.get("opportunity_state")
         or contract.get("opportunity_state")
         or metadata.get("opportunity_state")
+        or getattr(signal, "opportunity_state", None)
         or ""
     )
     text = str(state or "").strip().lower()
@@ -3686,6 +3686,7 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
     row = _normalize_alpha_setup_action_value(row)
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     return {
+        "id": row.get("id") or payload.get("id"),
         "scope_key": row.get("scope_key"),
         "ticker": row.get("ticker"),
         "side": row.get("side"),
@@ -3735,13 +3736,21 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "loss_reward_count": payload.get("loss_reward_count"),
         "tail_loss_count": payload.get("tail_loss_count"),
         "worst_reward": payload.get("worst_reward"),
+        "canonical_action_value": row.get("canonical_action_value"),
+        "canonical_action_value_source": row.get("canonical_action_value_source"),
     }
 
 
 def _action_value_key(row: dict) -> tuple[str, str, str, str, str, str, str]:
+    action_lane = (
+        row.get("action_name")
+        or row.get("action_value_lane")
+        or row.get("learning_lane")
+        or ""
+    )
     return (
         str(row.get("scope_key") or ""),
-        str(row.get("action_name") or ""),
+        str(action_lane),
         str(row.get("ticker") or ""),
         str(row.get("side") or ""),
         str(row.get("horizon_class") or ""),
@@ -3750,10 +3759,11 @@ def _action_value_key(row: dict) -> tuple[str, str, str, str, str, str, str]:
     )
 
 
-def _action_value_row_completeness(row: dict) -> tuple[int, int, int, int, int]:
+def _action_value_row_completeness(row: dict) -> tuple[int, int, int, int, int, int, int, int]:
     if not isinstance(row, dict):
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0, 0, 0, 0)
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    row_id = str(row.get("id") or payload.get("id") or "").strip()
     preference = str(
         row.get("action_preference")
         or payload.get("action_preference")
@@ -3771,12 +3781,31 @@ def _action_value_row_completeness(row: dict) -> tuple[int, int, int, int, int]:
         or ""
     ).strip().lower()
     reward_source = str(row.get("reward_source") or payload.get("reward_source") or "").strip().lower()
+    action_value_lane = str(
+        row.get("action_value_lane")
+        or row.get("learning_lane")
+        or row.get("action_name")
+        or payload.get("action_value_lane")
+        or payload.get("learning_lane")
+        or payload.get("action_name")
+        or ""
+    ).strip().lower()
     has_payload = int(bool(payload))
+    canonical = bool(
+        preference
+        and reward_present
+        and scope
+        and reward_source
+        and action_value_lane
+    )
     return (
+        int(canonical),
+        int(bool(row_id)),
         int(bool(preference)),
         int(bool(reward_present)),
         int(scope == "exact_real_state"),
         int(reward_source in {"real_trade", "trade_episode", "episode_trade", "complete_episode"}),
+        int(bool(action_value_lane)),
         has_payload,
     )
 
@@ -3795,6 +3824,8 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
     payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
     if payload:
         normalized["payload"] = dict(payload)
+    if not normalized.get("id") and payload.get("id"):
+        normalized["id"] = payload.get("id")
     def pick(*keys, default=None):
         for key in keys:
             value = normalized.get(key)
@@ -3976,12 +4007,28 @@ def _pm_retrieve_canonical_action_values(
     limit: int = 12,
 ) -> tuple[list[dict], dict]:
     """Retrieve PM-scoped action-values through fixed exact/fallback layers."""
+    required_lanes = {"open", "hold", "exit", "execution"}
+
+    def lane_set(rows: list[dict]) -> set[str]:
+        lanes: set[str] = set()
+        for row in rows or []:
+            lane = str(
+                row.get("action_value_lane")
+                or row.get("learning_lane")
+                or row.get("action_name")
+                or ""
+            ).strip().lower()
+            if lane in required_lanes:
+                lanes.add(lane)
+        return lanes
+
     details = {
         "side": side,
         "horizon_class": horizon_class,
         "market_regime": market_regime,
         "setup_type": setup_type,
         "consumer_scope": "pm_learning",
+        "required_lanes": sorted(required_lanes),
         "attempts": [],
         "row_count": 0,
     }
@@ -4055,18 +4102,32 @@ def _pm_retrieve_canonical_action_values(
             for row in (rows or [])
             if _is_pm_learning_action_value(row)
         ]
+        missing_lanes = required_lanes - lane_set(collected)
+        if collected:
+            pm_rows = [
+                row for row in pm_rows
+                if str(
+                    row.get("action_value_lane")
+                    or row.get("learning_lane")
+                    or row.get("action_name")
+                    or ""
+                ).strip().lower() in missing_lanes
+            ]
         details["attempts"].append({
             "match_level": match_level,
             "match_reason": reason,
+            "fetched_row_count": len(rows or []),
             "row_count": len(pm_rows),
+            "matched_lanes": sorted(lane_set(pm_rows)),
         })
         collected = _append_unique_action_values(collected, pm_rows)
-        if collected:
+        if required_lanes.issubset(lane_set(collected)):
             break
     details["row_count"] = len(collected)
     details["matched_levels"] = sorted({
         str(row.get("retrieval_match_level") or "unknown") for row in collected if isinstance(row, dict)
     })
+    details["matched_lanes"] = sorted(lane_set(collected))
     return collected, details
 
 

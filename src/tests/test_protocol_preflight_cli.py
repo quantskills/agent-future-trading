@@ -200,6 +200,24 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertIn("2025-03-10", command)
         self.assertIn("--db-path", command)
 
+    def test_backtest_contract_coverage_command_is_version_level_json_gate(self):
+        import run.backtest as backtest
+
+        command = []
+
+        def fake_run_command(raw_command, env):
+            command.extend(raw_command)
+            return 0
+
+        with patch.object(backtest, "run_command", side_effect=fake_run_command):
+            result = backtest.run_contract_coverage_audit()
+
+        self.assertEqual(result, 0)
+        self.assertIn(str(SRC_ROOT / "run" / "control" / "contract_coverage_audit.py"), command)
+        self.assertIn("--repo-root", command)
+        self.assertIn(str(PROJECT_ROOT), command)
+        self.assertIn("--json", command)
+
     def test_backtest_mechanism_effectiveness_command_is_read_only_json_audit(self):
         import run.backtest as backtest
 
@@ -226,6 +244,35 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertIn("--json", command)
         self.assertIn("--local-db", command)
 
+    def test_backtest_main_stops_before_acceptance_when_contract_coverage_fails(self):
+        import run.backtest as backtest
+
+        argv = [
+            "backtest.py",
+            "--config",
+            str(SRC_ROOT / "config" / "dev.yaml"),
+            "--start-date",
+            "2025-03-01",
+            "--end-date",
+            "2025-03-10",
+            "--local-db",
+        ]
+
+        with patch.object(sys, "argv", argv), patch.object(
+            backtest,
+            "load_yaml_config",
+            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
+        ), patch.object(backtest, "run_contract_coverage_audit", return_value=1) as coverage, patch.object(
+            backtest,
+            "run_pre_backtest_acceptance",
+        ) as acceptance, patch.object(backtest, "resolve_trading_days") as resolve_days:
+            result = backtest.main()
+
+        self.assertEqual(result, 1)
+        coverage.assert_called_once_with()
+        acceptance.assert_not_called()
+        resolve_days.assert_not_called()
+
     def test_backtest_main_stops_before_trading_loop_when_acceptance_fails(self):
         import run.backtest as backtest
 
@@ -244,7 +291,9 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             backtest,
             "load_yaml_config",
             return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
-        ), patch.object(backtest, "run_pre_backtest_acceptance", return_value=1) as acceptance, patch.object(
+        ), patch.object(backtest, "run_contract_coverage_audit", return_value=0), patch.object(
+            backtest, "run_pre_backtest_acceptance", return_value=1
+        ) as acceptance, patch.object(
             backtest,
             "resolve_trading_days",
         ) as resolve_days:

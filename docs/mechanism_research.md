@@ -132,6 +132,7 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 
 回测前应确认：
 
+- `contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖；其中 Researcher -> PM 的 action-value 边界必须有保真测试，证明真实 canonical 记录进入 PM 后不会丢失 `id/action_preference/reward_source/evidence_scope/action_value_lane/reward`，也不会被空壳 trace 覆盖。
 - `pre_backtest_acceptance.py` 通过。
 - `system_invariant_audit.py` 对现有库没有 hard error。
 - `mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。

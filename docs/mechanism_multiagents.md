@@ -27,7 +27,7 @@ PM 是唯一资金经理。分析师、Reviewer、Researcher 只能提供证据�
 | `accountant` | 成交、持仓、结算价、手续费、滑点、合约乘数、保证金率 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | 只按事实结算，不接受 LLM 或学习文本改账 |
 | `reviewer` | Phase1-3 状态、推荐、成交、结算、data quality、交易日志事实、PM 机会评分/排名/资金理由 | Phase4 验收、daily summary、完整交易日志、排序有效性复盘、学习候选 | 否 | 只做确定性验收和日志，复盘 PM 排序是否有效；不下单、不调仓、不写最终学习 |
 | `researcher` | Reviewer 产物、已结算 episode、未交易机会、未触发条件机会、action outcome、排序有效性复盘 | `alpha_setup_profile`、`alpha_setup_action_value`、`adaptive_policy_state`、机会排序偏好候选、未来学习记忆 | 是 | 只写未来可用学习和排序偏好候选，不影响当天交易、成交和账务 |
-| `protocol_governor` | 能力卡、工具权限、字段语义、artifact lineage、preflight/audit 状态、机制有效性报告 | `protocol_audit`、`preflight_health`、字段/权限/生命周期告警、`mechanism_effectiveness_audit` | 否 | 旁路治理；不创建/否决交易权限，不改 lots/margin；只在机制断链 hard_fail 时阻止策略评价 |
+| `protocol_governor` | 能力卡、工具权限、字段语义、artifact lineage、契约覆盖、preflight/audit 状态、机制有效性报告 | `protocol_audit`、`preflight_health`、`contract_coverage_audit`、字段/权限/生命周期告警、`mechanism_effectiveness_audit` | 否 | 旁路治理；不创建/否决交易权限，不改 lots/margin；契约覆盖失败或机制断链 hard_fail 时阻止回测/策略评价 |
 
 ## 三、完整业务链路
 
@@ -61,7 +61,7 @@ Phase4 复盘研究
 
 旁路治理
   protocol_governor
-      -> pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit / unified field audit
+      -> contract_coverage_audit / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit / unified field audit
       -> 发现非策略 hard error 或机制断链 hard_fail 时让回测 fail-fast
       -> 机制已接通但效果差只输出 diagnostic，进入策略分析
 ```
@@ -94,4 +94,4 @@ PM 排序使用的是全周期 episode 学习，不是只看前一天涨跌。�
 
 ## 五、回测前后验收
 
-回测前必须通过 `pre_backtest_acceptance.py`，回测中每个交易日完成后先通过累计 `system_invariant_audit.py`，再通过累计 `mechanism_effectiveness_audit.py`。前者检查唯一合约、字段语义、账务、阶段和执行不变量；后者只读检查 action-value 是否被 PM 读取、学习分项是否进入 score、rank 是否进入唯一合约、条件 probe 是否有盘中结果、持仓/退出学习是否落到合约或有解释。`mechanism_effectiveness_audit.hard_failures` 非空时不能评价策略收益；只有 `diagnostics` 时不停止回测，应进入策略分析。
+回测前必须先通过版本级 `contract_coverage_audit.py`，再通过 `pre_backtest_acceptance.py`；回测中每个交易日完成后先通过累计 `system_invariant_audit.py`，再通过累计 `mechanism_effectiveness_audit.py`。`contract_coverage_audit` 只读检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键跨智能体边界存在 producer-to-consumer 保真测试；例如 Researcher 写出的真实 action-value 进入 PM 后，`id/action_preference/reward_source/evidence_scope/action_value_lane/reward` 不能被空壳 trace 覆盖。`pre_backtest_acceptance.py` 检查唯一合约、字段语义、账务、阶段和执行不变量；`mechanism_effectiveness_audit.py` 按交易生命周期场景只读检查：开仓/加仓学习是否进入 score/rank 并影响同一张合约，条件 probe 是否有盘中触发/未触发结果，持仓/减仓/退出学习是否落到 `target_lots` 下降、`final_action=exit/reduce`、position lifecycle reason 或明确继续持有解释。减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。契约覆盖失败或 `mechanism_effectiveness_audit.hard_failures` 非空时不能评价策略收益；只有 `diagnostics` 时不停止回测，应进入策略分析。

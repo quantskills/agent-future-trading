@@ -55,18 +55,22 @@ from agents.decision_team.portfolio_manager import (
     _build_pm_decision_context,
     _build_final_action_contract,
     _build_release_block_diagnostics,
+    _canonical_action_evidence_contract,
     _validate_required_analyst_signals,
     _pm_new_entry_semantic_block_reason,
     _current_open_evidence_snapshot,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
+    _append_unique_action_values,
     _normalize_alpha_setup_action_value,
+    _select_learning_trace_action_values,
     _pm_retrieve_canonical_action_values,
     portfolio_agent_futures,
 )
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
     _execution_contract_from_snapshot,
+    _final_action_contract_from_snapshot,
     _setup_execution_learning_context,
 )
 from tools.agent_tools.analysis.quality import (
@@ -90,12 +94,14 @@ from tools.agent_tools.research.reviewer_tools import (
     _failure_family_actions,
     _learning_mechanisms_from_recommendation,
     _loss_failure_family,
+    _execution_result_from_snapshot,
     _validate_recommendation_execution_audit,
 )
 from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 from tools.agent_tools.decision.capital_allocator import adaptive_policy_record
 from util.futures_audit import (
     build_audit_payload,
+    build_execution_learning_trace,
     calculate_margin_audit,
     categorize_no_trade_reason,
     classify_zero_transaction_day,
@@ -103,6 +109,7 @@ from util.futures_audit import (
     infer_target_lots,
     infer_no_trade_reason,
     normalize_no_trade_reason,
+    set_execution_result,
 )
 from util.config_normalizer import normalize_config
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
@@ -165,6 +172,136 @@ class TradingCalendarRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(trading_day.strftime("%Y-%m-%d"), "2025-03-07")
+
+
+class AgentBoundaryFidelityRegressionTest(unittest.TestCase):
+    def test_analyst_to_pm_action_evidence_contract_overrides_raw_signal_state(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.88,
+            trigger_valid=True,
+            opportunity_state="tradeable_candidate",
+            entry_trigger="raw immediate breakdown",
+            metadata={
+                "action_evidence_contract": {
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "opportunity_state": "watch_for_trigger",
+                    "entry_trigger": "break below 3520 with volume confirmation",
+                    "invalidation_present": True,
+                    "invalidation_condition": "back above 3560",
+                }
+            },
+        )
+
+        contract = _canonical_action_evidence_contract(signal)
+        state_summary = _side_opportunity_state_summary([signal], "short")
+
+        self.assertFalse(contract["trigger_valid"])
+        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertFalse(state_summary["has_tradeable_support"])
+        self.assertTrue(state_summary["has_watch_for_trigger_support"])
+        self.assertEqual(state_summary["opportunity_state_counts"], {"watch_for_trigger": 1})
+
+    def test_pm_to_trader_final_contract_preserves_authority_without_rank_execution_rights(self):
+        final_contract = {
+            "contract_type": "strategy",
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": -2,
+            "lots_delta": -2,
+            "target_position_ratio": -0.012,
+            "execution_profile": "intraday_pullback_confirmed",
+            "trigger_source": "conditional_monitor",
+            "entry_trigger": "trade below 3520 after pullback",
+            "invalidation": "back above 3560",
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "authority_type": "conditional_monitor_probe",
+            "max_allowed_margin_ratio": 0.015,
+            "reason_codes": ["conditional_monitor_probe_seed"],
+            "opportunity_rank": 1,
+            "opportunity_score": 0.74,
+            "opportunity_score_components": {"positive_learning": 0.2},
+            "analyst_execution_roles": {
+                "technical": {
+                    "action_evidence_contract": {
+                        "trigger_valid": False,
+                        "opportunity_state": "watch_for_trigger",
+                        "entry_trigger": "trade below 3520 after pullback",
+                    },
+                    "learning_scope": {
+                        "consumer_scope": "analyst_calibration",
+                        "learning_lane": "signal_calibration",
+                    },
+                }
+            },
+        }
+        snapshot = {"final_action_contract": final_contract}
+
+        contract = _final_action_contract_from_snapshot(snapshot)
+        execution_contract = _execution_contract_from_snapshot(snapshot)
+        learning_context = _setup_execution_learning_context(snapshot)
+
+        self.assertEqual(contract["target_lots"], -2)
+        self.assertEqual(contract["lots_delta"], -2)
+        self.assertEqual(learning_context["final_action_contract"]["target_lots"], -2)
+        self.assertEqual(learning_context["preferred_side"], "short")
+        self.assertEqual(learning_context["consumer_scope"], "trader_execution_learning")
+        self.assertEqual(learning_context["learning_lane"], "execution")
+        self.assertEqual(execution_contract["execution_profile"], "intraday_pullback_confirmed")
+        self.assertEqual(execution_contract["entry_trigger"], "trade below 3520 after pullback")
+        self.assertNotIn("opportunity_rank", execution_contract)
+        self.assertNotIn("opportunity_score", execution_contract)
+        self.assertNotIn("opportunity_score_components", execution_contract)
+        self.assertNotIn("target_lots", execution_contract)
+        self.assertNotIn("lots_delta", execution_contract)
+
+    def test_trader_to_researcher_execution_result_preserves_no_trade_fact_and_learning_scope(self):
+        snapshot = {
+            "ticker": "HC",
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -1,
+                "lots_delta": -1,
+                "execution_profile": "intraday_trigger_confirmed",
+                "trigger_reason": "breakdown_trigger",
+            },
+        }
+
+        set_execution_result(
+            snapshot,
+            outcome="skipped",
+            status=RecommendationStatus.SKIPPED.value,
+            transaction_count=0,
+            no_trade_reason="intraday_trigger_not_met",
+            warning_message="intraday_trigger_not_met",
+        )
+        expected_trace = build_execution_learning_trace(
+            snapshot,
+            outcome="skipped",
+            status=RecommendationStatus.SKIPPED.value,
+            no_trade_reason="intraday_trigger_not_met",
+            no_trade_reason_category=snapshot["execution_result"]["no_trade_reason_category"],
+            transaction_count=0,
+        )
+
+        result = _execution_result_from_snapshot(snapshot)
+        trace = result["execution_learning_trace"]
+
+        self.assertEqual(result["status"], RecommendationStatus.SKIPPED.value)
+        self.assertEqual(result["transaction_count"], 0)
+        self.assertEqual(result["no_trade_reason"], "intraday_trigger_not_met")
+        self.assertEqual(trace, expected_trace)
+        self.assertEqual(trace["consumer_scope"], "trader_execution_learning")
+        self.assertEqual(trace["learning_lane"], "execution")
+        self.assertIn("HC|intraday_trigger_confirmed|breakdown_trigger|execution", trace["execution_retrieval_key"])
+        self.assertTrue(trace["turn_into_memory"])
+        self.assertTrue(trace["not_direction_evidence"])
 
 
 class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
@@ -1205,6 +1342,53 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(normalized["consumer_scope"], "pm_learning")
         self.assertTrue(normalized["canonical_action_value"])
 
+    def test_pm_action_value_merge_preserves_canonical_researcher_record(self):
+        canonical = {
+            "id": "av-hc-execution-real",
+            "scope_key": "HC|short|short|choppy|breakdown",
+            "ticker": "HC",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "choppy",
+            "setup_type": "breakdown",
+            "action_name": "execution",
+            "action_value_lane": "execution",
+            "learning_lane": "execution",
+            "consumer_scope": "pm_learning",
+            "action_preference": "positive_candidate_execution",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_mean": 199.62,
+            "reward_sum": 199.62,
+            "win_rate": 1.0,
+            "sample_count": 1,
+        }
+        empty_trace = {
+            "scope_key": "HC|short|short|choppy|breakdown",
+            "ticker": "HC",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "choppy",
+            "setup_type": "breakdown",
+            "action_name": "execution",
+            "action_value_lane": "execution",
+            "consumer_scope": "pm_learning",
+        }
+
+        cases = (([empty_trace], [canonical]), ([canonical], [empty_trace]))
+        for base_rows, extra_rows in cases:
+            merged = _append_unique_action_values(base_rows, extra_rows)
+            trace = _select_learning_trace_action_values(merged, limit=3)
+
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["id"], "av-hc-execution-real")
+            self.assertEqual(merged[0]["action_preference"], "positive_candidate_execution")
+            self.assertEqual(merged[0]["reward_source"], "real_trade")
+            self.assertEqual(merged[0]["evidence_scope"], "exact_real_state")
+            self.assertEqual(merged[0]["reward_mean"], 199.62)
+            self.assertEqual(trace[0]["id"], "av-hc-execution-real")
+            self.assertEqual(trace[0]["action_preference"], "positive_candidate_execution")
+
     def test_pm_action_value_retrieval_uses_fallback_key_without_scope_drift(self):
         class FakeDB:
             def __init__(self):
@@ -1255,6 +1439,83 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(detail["row_count"], 1)
         self.assertEqual(detail["attempts"][0]["match_level"], "exact_state")
         self.assertEqual(detail["attempts"][0]["row_count"], 0)
+
+    def test_pm_action_value_retrieval_fills_missing_lanes_after_exact_match(self):
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def get_alpha_setup_action_values(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("setup_type") == "news_event_setup":
+                    return [
+                        {
+                            "id": "m-open-exact",
+                            "scope_key": "M|long|short|trend|news_event_setup|open",
+                            "ticker": "M",
+                            "side": "long",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "setup_type": "news_event_setup",
+                            "action_name": "open",
+                            "sample_count": 1,
+                            "reward_sum": 770.34,
+                            "reward_mean": 770.34,
+                            "win_rate": 1.0,
+                            "confidence_score": 0.65,
+                            "action_preference": "positive_candidate_open",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "action_value_lane": "open",
+                            "consumer_scope": "pm_learning",
+                            "learning_lane": "open",
+                            "last_sample_date": "2025-03-04",
+                        }
+                    ]
+                if kwargs.get("horizon_class") == "short" and kwargs.get("setup_type") is None:
+                    return [
+                        {
+                            "id": "m-execution-fallback",
+                            "scope_key": "M|long|short|trend|execution_pullback_setup|execution",
+                            "ticker": "M",
+                            "side": "long",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "setup_type": "execution_pullback_setup",
+                            "action_name": "execution",
+                            "sample_count": 1,
+                            "reward_sum": 770.34,
+                            "reward_mean": 770.34,
+                            "win_rate": 1.0,
+                            "confidence_score": 0.62,
+                            "action_preference": "positive_candidate_execution",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "action_value_lane": "execution",
+                            "consumer_scope": "pm_learning",
+                            "learning_lane": "execution",
+                            "last_sample_date": "2025-03-03",
+                        }
+                    ]
+                return []
+
+        rows, detail = _pm_retrieve_canonical_action_values(
+            db=FakeDB(),
+            config_id="cfg",
+            ticker="M",
+            side="long",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="news_event_setup",
+            trading_date="2025-03-11",
+        )
+
+        ids = {row["id"] for row in rows}
+        self.assertIn("m-open-exact", ids)
+        self.assertIn("m-execution-fallback", ids)
+        self.assertEqual(detail["attempts"][0]["matched_lanes"], ["open"])
+        self.assertIn("execution", detail["matched_lanes"])
+        self.assertGreaterEqual(len(detail["attempts"]), 2)
 
     def test_scorecard_ignores_non_pm_learning_scope(self):
         signal = self._tradeable_signal()
@@ -10880,6 +11141,11 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertEqual(snapshot["execution_result"]["status"], RecommendationStatus.SKIPPED.value)
         self.assertEqual(snapshot["execution_result"]["transaction_count"], 0)
         self.assertEqual(snapshot["execution_result"]["no_trade_reason"], "position_matched")
+        execution_trace = snapshot["execution_result"]["execution_learning_trace"]
+        self.assertEqual(execution_trace["consumer_scope"], "trader_execution_learning")
+        self.assertEqual(execution_trace["learning_lane"], "execution")
+        self.assertIn("execution", execution_trace["execution_retrieval_key"])
+        self.assertTrue(execution_trace["turn_into_memory"])
 
     def test_dynamic_margin_missing_provider_raises_when_static_fallback_disabled(self):
         engine = FuturesExecutionEngine(
