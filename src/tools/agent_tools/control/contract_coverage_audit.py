@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Read-only version-level contract coverage audit.
 
@@ -86,6 +86,42 @@ def _rule(path: str, patterns: Sequence[str], description: str) -> ContractEvide
 
 CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
     ContractCoverageSpec(
+        contract="signal_collection_contract",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/decision/signal_evidence_collection.py",
+                ("def build_signal_collection_contract", "collector_decision_boundary"),
+                "signal collector builds the PM-facing structured evidence package",
+            ),
+            _rule(
+                "src/agents/decision_team/signal_collector.py",
+                ("signal_collection_contract", "build_signal_collection_contract"),
+                "decision-team agent publishes the signal collection contract",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/agents/decision_team/portfolio_manager.py",
+                ("signal_collection_contract", "build_signal_collection_contract"),
+                "PM consumes the signal collection contract before signing final authority",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("signal_collection_contract", "signal_collector_no_trade_authority"),
+                "mechanism document fixes signal collector authority boundaries",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_decision_workflow_tools.py",
+                ("test_signal_collector_preserves_source_evidence_without_trade_authority",),
+                "decision workflow tests cover signal collector evidence preservation and no-trade-authority boundary",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="action_evidence_contract",
         producers=(
             _rule(
@@ -94,7 +130,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "analysis quality builds canonical analyst action evidence",
             ),
             _rule(
-                "src/tools/agent_tools/contracts.py",
+                "src/tools/common/contracts.py",
                 ("build_trade_research_contract", "action_evidence_contract"),
                 "trade research contract carries the same action evidence",
             ),
@@ -152,7 +188,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "Trader executes only the final contract",
             ),
             _rule(
-                "src/tools/agent_tools/research/reviewer_tools.py",
+                "src/tools/agent_tools/research/phase4_review.py",
                 ("final_action_contract", "learning_source"),
                 "Reviewer binds learning to the final contract",
             ),
@@ -230,15 +266,47 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "src/tests/test_phase_flow_regression.py",
                 (
                     "test_pm_action_value_merge_preserves_canonical_researcher_record",
+                    "test_pm_action_value_retrieval_real_history_not_blocked_by_empty_lane",
                     "_append_unique_action_values",
                     "_select_learning_trace_action_values",
                 ),
-                "phase flow tests prove Researcher-to-PM action-value fields survive merge and trace compaction",
+                "phase flow tests prove Researcher-to-PM action-value fields survive merge, retrieval, and trace compaction",
             ),
             _rule(
                 "src/tests/test_reviewer_learning.py",
                 ("alpha_setup_action_value", "action_preference"),
                 "reviewer/researcher tests cover action-value writes",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
+        contract="effective_memory_summary",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/decision/decision_memory_retrieval.py",
+                ("def retrieve_pm_memory", "empty_history_cannot_block_real_history"),
+                "memory retrieval tool returns quality-first PM memory summary",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/agents/decision_team/portfolio_manager.py",
+                ("retrieve_pm_memory", "effective_memory_summary"),
+                "PM reads decision memory only through the retrieval tool output",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("decision_memory_retrieval", "empty_history_cannot_block_real_history"),
+                "mechanism document fixes memory retrieval boundary",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_decision_workflow_tools.py",
+                ("test_memory_retrieval_real_history_not_blocked_by_empty_history",),
+                "decision workflow tests lock empty-history cannot block real profitable history",
             ),
         ),
     ),
@@ -263,7 +331,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/tools/agent_tools/research/reviewer_tools.py",
+                "src/tools/agent_tools/research/phase4_review.py",
                 ("execution_learning_trace", "build_execution_learning_trace"),
                 "Reviewer preserves or builds execution trace for Researcher",
             ),
@@ -340,6 +408,68 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
     ),
     ContractCoverageSpec(
+        contract="opportunity_scorecard",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/decision/opportunity_ranking.py",
+                ("def rank_opportunities", "opportunity_scorecard"),
+                "opportunity ranking tool wraps reproducible scorecard and rank output",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/agents/decision_team/portfolio_manager.py",
+                ("rank_opportunities", "opportunity_ranking"),
+                "PM consumes ranking tool output before sizing",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("opportunity_ranking", "rank_is_not_trade_authority"),
+                "mechanism document fixes ranking tool boundary",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_decision_workflow_tools.py",
+                ("test_opportunity_ranking_ranks_without_trade_authority",),
+                "decision workflow tests cover deterministic rank without trade authority",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
+        contract="position_sizing_result",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/decision/position_sizing.py",
+                ("def build_position_sizing_result", "no_final_action_authority"),
+                "position sizing tool records deterministic sizing math",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/agents/decision_team/portfolio_manager.py",
+                ("build_position_sizing_result", "position_sizing_result"),
+                "PM consumes sizing tool output and then signs the unique contract",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("position_sizing", "no_final_action_authority"),
+                "mechanism document fixes sizing tool no-authority boundary",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_decision_workflow_tools.py",
+                ("test_position_sizing_records_math_without_final_action_authority",),
+                "decision workflow tests cover sizing result boundary",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="learning_used",
         producers=(
             _rule(
@@ -350,7 +480,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/tools/agent_tools/research/reviewer_tools.py",
+                "src/tools/agent_tools/research/phase4_review.py",
                 ("learning_used", "final_action_contract"),
                 "Reviewer uses final-contract learning diagnostics",
             ),
@@ -396,12 +526,12 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/tools/agent_tools/research/researcher_tools.py",
+                "src/tools/agent_tools/research/research_learning.py",
                 ("execution_result", "final_action_contract"),
                 "Researcher reads execution result for episode learning",
             ),
             _rule(
-                "src/tools/agent_tools/research/reviewer_tools.py",
+                "src/tools/agent_tools/research/phase4_review.py",
                 ("_execution_result_from_snapshot",),
                 "Reviewer normalizes execution result for review",
             ),
@@ -528,14 +658,14 @@ def _scan_bare_writes(repo_root: Path) -> List[str]:
             "src/util/futures_audit.py",
             "src/agents/execution_team/trader.py",
             "src/tools/agent_tools/execution/futures_execution.py",
-            "src/tools/agent_tools/research/reviewer_tools.py",
+            "src/tools/agent_tools/research/phase4_review.py",
         },
         "final_action_contract": {
             "src/agents/decision_team/portfolio_manager.py",
         },
         "action_evidence_contract": {
             "src/tools/agent_tools/analysis/quality.py",
-            "src/tools/agent_tools/contracts.py",
+            "src/tools/common/contracts.py",
         },
         "execution_result": {
             "src/util/futures_audit.py",
@@ -587,10 +717,13 @@ def _scan_scope_boundaries(repo_root: Path) -> List[str]:
         if "pm_learning" in text:
             errors.append(f"trader_scope_reads_pm_learning:{rel}")
     pm_text = _read_text(repo_root, "src/agents/decision_team/portfolio_manager.py")
-    if "consumer_scope=\"pm_learning\"" not in pm_text and 'consumer_scope="pm_learning"' not in pm_text:
-        errors.append("pm_action_value_reader_missing_pm_learning_scope")
-    if "_is_pm_learning_action_value" not in pm_text:
-        errors.append("pm_missing_non_pm_learning_filter")
+    memory_tool_text = _read_text(repo_root, "src/tools/agent_tools/decision/decision_memory_retrieval.py")
+    if "retrieve_pm_memory" not in pm_text:
+        errors.append("pm_missing_decision_memory_retrieval")
+    if "consumer_scope=\"pm_learning\"" not in memory_tool_text and 'consumer_scope="pm_learning"' not in memory_tool_text:
+        errors.append("decision_memory_retrieval_missing_pm_learning_scope")
+    if "_consumer_scope" not in memory_tool_text or "non_pm_learning_scope" not in memory_tool_text:
+        errors.append("decision_memory_retrieval_missing_non_pm_learning_filter")
     return errors
 
 

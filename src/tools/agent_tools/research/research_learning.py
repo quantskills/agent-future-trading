@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-"""Researcher tools for Phase4 learning and future-memory generation.
+"""Phase4 research learning and future-memory generation helpers.
 
 The researcher runs only after reviewer validation has established the day's
 settled facts. It may call an LLM to produce research hypotheses, but it does
@@ -27,6 +27,7 @@ from tools.agent_tools.research.alpha_setup import (
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
+from tools.agent_tools.research import research_memory_writers
 from tools.agent_tools.execution.order_semantics import recommendation_intent_from_lots
 from util.futures_audit import categorize_no_trade_reason
 from util.logger import logger
@@ -85,9 +86,9 @@ class ExploratoryHypothesisLLMOutput(BaseModel):
 
 def _reviewer_helpers():
     # Imported lazily to keep the Phase4 reviewer module from owning LLM calls.
-    from tools.agent_tools.research import reviewer_tools
+    from tools.agent_tools.research import phase4_review
 
-    return reviewer_tools
+    return phase4_review
 
 
 def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -232,8 +233,6 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
                 "valid_until",
                 "requires_intraday_confirmation",
                 "can_execute_without_intraday_trigger",
-                "allow_confirmed_memory_vwap_fallback",
-                "fallback_authority_boundary",
                 "execution_action_value_preference",
             )
             if final_contract.get(key) not in (None, "", [])
@@ -1729,66 +1728,65 @@ def apply_researcher_learning(
     transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Persist Phase4 learning after reviewer validation passes."""
-    reviewer = _reviewer_helpers()
     cursor.execute("PRAGMA foreign_keys = ON")
     if hasattr(db, "_ensure_reviewer_learning_schema"):
         db._ensure_reviewer_learning_schema(cursor)
     else:
-        reviewer._ensure_research_learning_schema(cursor)
+        research_memory_writers.ensure_research_learning_schema(cursor)
 
-    context_rows = reviewer._write_signal_context_history(
+    context_rows = research_memory_writers.write_signal_context_history(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
         recommendations=strategy_recommendations,
     )
-    memory_rows = reviewer._write_strategy_memory_history(
+    memory_rows = research_memory_writers.write_strategy_memory_history(
         cursor,
         db=db,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    perf_counts = reviewer._write_template_and_analyst_learning(
+    perf_counts = research_memory_writers.write_template_and_analyst_learning(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    episode_rows = reviewer._write_trade_episode_memory(
+    episode_rows = research_memory_writers.write_trade_episode_memory(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    opportunity_ranking_preference_rows = reviewer._write_opportunity_ranking_learning_events(
+    opportunity_ranking_preference_rows = research_memory_writers.write_opportunity_ranking_learning_events(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
-        episode_payloads=getattr(reviewer._write_trade_episode_memory, "last_payloads", []) or [],
+        episode_payloads=getattr(research_memory_writers.write_trade_episode_memory, "last_payloads", []) or [],
     )
-    no_trade_memory_rows = reviewer._write_no_trade_opportunity_memory(
+    no_trade_memory_rows = research_memory_writers.write_no_trade_opportunity_memory(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
         strategy_recommendations=strategy_recommendations,
     )
-    no_trade_counterfactual_backfill = reviewer._backfill_no_trade_opportunity_counterfactual_results(
+    no_trade_counterfactual_backfill = research_memory_writers.backfill_no_trade_opportunity_counterfactual_results(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    missed_alpha_accountability = reviewer._write_missed_alpha_accountability_state(
+    missed_alpha_accountability = research_memory_writers.write_missed_alpha_accountability_state(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    position_feedback = reviewer._write_research_position_feedback(
+    position_feedback = research_memory_writers.write_research_position_feedback(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -1797,25 +1795,25 @@ def apply_researcher_learning(
         transactions_by_recommendation=transactions_by_recommendation or {},
         settlement_row=settlement_row,
     )
-    adaptive_rows = reviewer._write_adaptive_policy_state(
+    adaptive_rows = research_memory_writers.write_adaptive_policy_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    tail_loss_sentinel_rows = reviewer._write_tail_loss_sentinel_state(
+    tail_loss_sentinel_rows = research_memory_writers.write_tail_loss_sentinel_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    alpha_promotion_rows = reviewer._write_alpha_promotion_state(
+    alpha_promotion_rows = research_memory_writers.write_alpha_promotion_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    contextual_rule_calibration_rows = reviewer._write_contextual_rule_calibration_state(
+    contextual_rule_calibration_rows = research_memory_writers.write_contextual_rule_calibration_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
@@ -1823,28 +1821,28 @@ def apply_researcher_learning(
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
     )
-    loss_template_observation_rows = reviewer._write_loss_template_observation_research(
+    loss_template_observation_rows = research_memory_writers.write_loss_template_observation_research(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
     loss_template_policy_rows = int(
-        getattr(reviewer._write_loss_template_observation_research, "last_policy_rows", 0) or 0
+        getattr(research_memory_writers.write_loss_template_observation_research, "last_policy_rows", 0) or 0
     )
-    fast_loss_sentinel_rows = reviewer._write_fast_loss_sentinel_state(
+    fast_loss_sentinel_rows = research_memory_writers.write_fast_loss_sentinel_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    learned_benchmark_policy = reviewer._write_learned_vs_unlearned_policy_state(
+    learned_benchmark_policy = research_memory_writers.write_learned_vs_unlearned_policy_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    learning_mechanism_policy = reviewer._write_learning_mechanism_policy_state(
+    learning_mechanism_policy = research_memory_writers.write_learning_mechanism_policy_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
@@ -1864,33 +1862,33 @@ def apply_researcher_learning(
         config_id=config_id,
         trading_date=trading_date,
     )
-    provisional_rows = reviewer._write_provisional_policy_state(
+    provisional_rows = research_memory_writers.write_provisional_policy_state(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
     )
-    overlay_rows = reviewer._write_config_overlay(
+    overlay_rows = research_memory_writers.write_config_overlay(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
         cfg=cfg,
         settlement_row=settlement_row,
     )
-    neutral_accountability = reviewer._write_neutral_accountability_state(
+    neutral_accountability = research_memory_writers.write_neutral_accountability_state(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
         strategy_recommendations=strategy_recommendations,
     )
-    neutral_forward_counterfactual_backfill = reviewer._backfill_neutral_forward_counterfactual_tracking(
+    neutral_forward_counterfactual_backfill = research_memory_writers.backfill_neutral_forward_counterfactual_tracking(
         cursor,
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
     )
-    capital_state = reviewer._write_capital_deployment_state(
+    capital_state = research_memory_writers.write_capital_deployment_state(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -1899,7 +1897,7 @@ def apply_researcher_learning(
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
     )
-    template_prior_path = reviewer._export_template_prior(
+    template_prior_path = research_memory_writers.export_template_prior(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -1914,7 +1912,7 @@ def apply_researcher_learning(
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
     )
-    causal_rule_validation = reviewer._write_validated_causal_policy_rules(
+    causal_rule_validation = research_memory_writers.write_validated_causal_policy_rules(
         cursor,
         cfg=cfg,
         config_id=config_id,

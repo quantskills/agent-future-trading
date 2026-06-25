@@ -26,8 +26,8 @@ from agents.analysis_team.technical import (
 )
 from apis.router import Router
 from tools.agent_tools.analysis.signal_fusion import build_opportunity_scorecard
-from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
-from tools.agent_tools.contracts import (
+from tools.agent_tools.decision.invalidation_policy import _has_structured_invalidation_condition
+from tools.common.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
     validate_artifact_header,
@@ -44,6 +44,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             "technical",
             "fundamental",
             "commodity_news",
+            "signal_collector",
             "portfolio_manager",
             "auditor",
             "trader",

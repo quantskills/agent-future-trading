@@ -1,6 +1,7 @@
 ﻿import sys
 import tempfile
 import unittest
+import ast
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -15,13 +16,9 @@ from agents.control_team.protocol_governor import ProtocolGovernor, protocol_gov
 from llm.prompt import (
     ACTION_VALUE_USAGE_BOUNDARY,
     CONTROL_GOVERNANCE_OUTPUT_BOUNDARY,
-    MULTI_ANALYST_LOGIC,
-    RISK_CONTROL_PROMPT,
-    SINGLE_ANALYST_LOGIC,
     build_futures_commodity_news_prompt,
     build_futures_fundamental_prompt,
     build_futures_technical_prompt,
-    build_pm_action_evidence_prompt,
     build_researcher_causal_review_prompt,
     build_researcher_exploratory_prompt,
 )
@@ -48,6 +45,158 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         tool_policy_result = self.governor.validate_tool_policy()
         self.assertTrue(tool_policy_result.ok, tool_policy_result.to_dict())
 
+    def test_non_llm_agents_do_not_import_or_call_llm(self):
+        forbidden_agents = {
+            "signal_collector": SRC_ROOT / "agents" / "decision_team" / "signal_collector.py",
+            "portfolio_manager": SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py",
+            "auditor": SRC_ROOT / "agents" / "decision_team" / "auditor.py",
+            "trader": SRC_ROOT / "agents" / "execution_team" / "trader.py",
+            "accountant": SRC_ROOT / "agents" / "execution_team" / "accountant.py",
+            "reviewer": SRC_ROOT / "agents" / "research_team" / "reviewer.py",
+        }
+        llm_call_names = {"agent_call", "get_model", "with_structured_output"}
+        for agent_name, path in forbidden_agents.items():
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                    self.assertFalse(
+                        any(name == "llm" or name.startswith("llm.") for name in imported),
+                        f"{agent_name} imports LLM module: {imported}",
+                    )
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    self.assertFalse(
+                        module == "llm" or module.startswith("llm."),
+                        f"{agent_name} imports from LLM module: {module}",
+                    )
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+                    self.assertNotIn(name, llm_call_names, f"{agent_name} calls LLM entrypoint: {name}")
+
+    def test_reviewer_does_not_dispatch_researcher_learning(self):
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        tree = ast.parse(reviewer_path.read_text(encoding="utf-8-sig"), filename=str(reviewer_path))
+        forbidden_names = {
+            "researcher_agent",
+            "apply_researcher_learning",
+            "run_researcher_causal_review",
+            "write_exploratory_hypotheses",
+            "agent_call",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported_names = {alias.name for alias in node.names}
+                self.assertFalse(
+                    forbidden_names & imported_names,
+                    f"phase4 reviewer imports researcher/LLM callable: {forbidden_names & imported_names}",
+                )
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+                self.assertNotIn(name, forbidden_names, f"phase4 reviewer calls forbidden callable: {name}")
+
+    def test_reviewer_phase4_main_does_not_write_research_memory(self):
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        tree = ast.parse(reviewer_path.read_text(encoding="utf-8-sig"), filename=str(reviewer_path))
+        run_phase4 = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "run_phase4_review"
+        )
+        forbidden_calls = {
+            "_write_opportunity_ranking_learning_events",
+            "_write_signal_context_history",
+            "_write_template_and_analyst_learning",
+            "_write_trade_episode_memory",
+            "_write_research_position_feedback",
+            "_write_loss_template_observation_research",
+            "_write_fast_loss_sentinel_state",
+            "_write_no_trade_opportunity_memory",
+            "_write_missed_alpha_accountability_state",
+            "_write_validated_causal_policy_rules",
+            "_write_learning_mechanism_policy_state",
+            "_write_learned_vs_unlearned_policy_state",
+            "_write_strategy_memory_history",
+            "_write_adaptive_policy_state",
+            "_write_tail_loss_sentinel_state",
+            "_write_alpha_promotion_state",
+            "_write_contextual_rule_calibration_state",
+            "_write_config_overlay",
+            "_write_neutral_accountability_state",
+            "_write_neutral_accountability_digests",
+            "_write_capital_deployment_state",
+            "_write_provisional_policy_state",
+            "_export_template_prior",
+        }
+        allowed_report_calls = {"_write_daily_transaction_report"}
+        for node in ast.walk(run_phase4):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+            self.assertNotIn(name, forbidden_calls, f"Phase4 reviewer must not call research writer {name}")
+            if name.startswith("_write_"):
+                self.assertIn(
+                    name,
+                    allowed_report_calls,
+                    f"Phase4 reviewer may only write daily transaction reports, not {name}",
+                )
+
+    def test_fixed_workflow_does_not_enable_legacy_llm_planner(self):
+        workflow_path = SRC_ROOT / "graph" / "workflow.py"
+        tree = ast.parse(workflow_path.read_text(encoding="utf-8-sig"), filename=str(workflow_path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                imported_names = {alias.name for alias in node.names}
+                self.assertFalse(
+                    module == "agents.control_team.planner" or "planner_agent" in imported_names,
+                    "fixed workflow must not import the legacy LLM planner",
+                )
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+                self.assertNotEqual(name, "planner_agent", "fixed workflow must not call the legacy LLM planner")
+
+        text = workflow_path.read_text(encoding="utf-8-sig")
+        self.assertIn("planner_mode is disabled by the fixed multi-agent workflow", text)
+        planner_path = SRC_ROOT / "agents" / "control_team" / "planner.py"
+        self.assertTrue(planner_path.exists(), "legacy planner is retained as a dormant development component")
+
+    def test_pm_research_memory_uses_single_decision_tool_entrypoint(self):
+        pm_path = SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py"
+        text = pm_path.read_text(encoding="utf-8-sig")
+        forbidden = (
+            "get_futures_transaction_memory",
+            "build_learning_context",
+            "get_similar_alpha_setup_action_values",
+            "get_strategy_memory",
+            "get_adaptive_policy_state",
+            "get_provisional_policy_state",
+        )
+        for token in forbidden:
+            self.assertNotIn(token, text, f"PM must not directly read research memory via {token}")
+        self.assertIn("retrieve_pm_memory(", text)
+
+    def test_auditor_does_not_consume_research_memory_fields(self):
+        auditor_path = SRC_ROOT / "agents" / "decision_team" / "auditor.py"
+        text = auditor_path.read_text(encoding="utf-8-sig")
+        forbidden = (
+            "strategy_memory:",
+            "adaptive_policy_state:",
+            "payload.strategy_memory",
+            "payload.adaptive_policy_state",
+            "_evaluate_strategy_memory_rule",
+            "strategy_memory_weak_block",
+            "strategy_memory_watchlist_cap",
+            "filter_adaptive_policy_state_for_pm",
+        )
+        for token in forbidden:
+            self.assertNotIn(token, text, f"auditor must not consume research memory token {token}")
+        self.assertIn("auditor_does_not_consume_research_records", text)
+
     def test_trader_reads_execution_profile_only_through_final_contract(self):
         cards = build_default_agent_cards()
         trader_card = cards["trader"]
@@ -62,9 +211,29 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertFalse(trader_card.may_modify_lots_or_margin)
         self.assertTrue(trader_card.may_execute_orders)
 
+    def test_trader_execution_layer_has_no_research_memory_entrypoint(self):
+        trader_text = (SRC_ROOT / "agents" / "execution_team" / "trader.py").read_text(encoding="utf-8-sig")
+        intraday_text = (SRC_ROOT / "tools" / "agent_tools" / "execution" / "intraday_execution.py").read_text(encoding="utf-8-sig")
+        forbidden = (
+            "strategy_memory=",
+            "adaptive_policy_state=",
+            "strategy_memory:",
+            "adaptive_policy_state:",
+            "_strategy_memory_from_recommendation",
+            "_adaptive_policy_state_from_recommendation",
+            "allow_confirmed_memory_vwap_fallback",
+            "intraday_confirmed_memory_vwap_fallback",
+            "confirmed_memory_min_",
+            "apply_intraday_contextual_calibration",
+        )
+        for token in forbidden:
+            self.assertNotIn(token, trader_text, f"trader must not expose research-memory execution token {token}")
+            self.assertNotIn(token, intraday_text, f"intraday execution must not expose research-memory execution token {token}")
+
     def test_dev_config_keeps_control_governance_audit_only(self):
         config_path = SRC_ROOT / "config" / "dev.yaml"
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        self.assertFalse(cfg.get("planner_mode"), "legacy LLM planner must stay disabled")
         governance = cfg.get("control_governance") or {}
         self.assertTrue(governance.get("enabled"))
 
@@ -96,12 +265,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("audit metadata only", CONTROL_GOVERNANCE_OUTPUT_BOUNDARY)
         self.assertIn("Do not transform control-governance metadata into authority_type", CONTROL_GOVERNANCE_OUTPUT_BOUNDARY)
 
-        pm_prompt = build_pm_action_evidence_prompt(weights={}, max_position_ratio=0.1, basis_pct=0.0)
         researcher_review = build_researcher_causal_review_prompt("{}")
         researcher_exploration = build_researcher_exploratory_prompt(trading_date="2025-03-03", episodes_json="[]")
 
-        self.assertIn("CONTROL-GOVERNANCE BOUNDARY", RISK_CONTROL_PROMPT)
-        self.assertIn("CONTROL-GOVERNANCE BOUNDARY", pm_prompt)
         self.assertIn("Control-governance metadata can support chain-health audit only", researcher_review)
         self.assertIn("chain-health audit inputs only", researcher_exploration)
 
@@ -115,16 +281,12 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("must not directly change direction", ACTION_VALUE_USAGE_BOUNDARY)
         self.assertIn("target_lots, margin_ratio, or authority", ACTION_VALUE_USAGE_BOUNDARY)
 
-        pm_prompt = build_pm_action_evidence_prompt(weights={}, max_position_ratio=0.1, basis_pct=0.0)
         researcher_review = build_researcher_causal_review_prompt("{}")
-        single_logic = SINGLE_ANALYST_LOGIC.format(max_position_ratio=0.1)
-        multi_logic = MULTI_ANALYST_LOGIC.format(max_position_ratio=0.1)
 
-        for prompt in (pm_prompt, researcher_review, single_logic, multi_logic):
-            self.assertIn("ACTION-VALUE USAGE BOUNDARY", prompt)
-            self.assertIn("signal_calibration", prompt)
-            self.assertIn("exit/reduce action-value", prompt)
-            self.assertIn("execution action-value", prompt)
+        self.assertIn("ACTION-VALUE USAGE BOUNDARY", researcher_review)
+        self.assertIn("signal_calibration", researcher_review)
+        self.assertIn("exit/reduce action-value", researcher_review)
+        self.assertIn("execution action-value", researcher_review)
 
         self.assertIn("open rewards evaluate the full episode result", researcher_review)
         self.assertIn("PM via matching open/hold/exit/execution lane", researcher_review)
@@ -509,7 +671,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                 },
                 {
                     "agent_name": "portfolio_manager",
-                    "tool": "tools.agent_tools.decision.pm_capital_policy.allocate_position",
+                    "tool": "tools.agent_tools.decision.capital_deployment_policy.allocate_position",
                 },
                 {
                     "agent_name": "trader",
@@ -549,7 +711,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             [
                 {
                     "agent_name": "trader",
-                    "tool": "tools.agent_tools.decision.pm_capital_policy.allocate_position",
+                    "tool": "tools.agent_tools.decision.capital_deployment_policy.allocate_position",
                 },
                 {
                     "agent_name": "protocol_governor",
@@ -559,7 +721,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         )
         self.assertFalse(result.ok)
         self.assertIn(
-            "tool_access_denied:trader:decision:tools.agent_tools.decision.pm_capital_policy.allocate_position",
+            "tool_access_denied:trader:decision:tools.agent_tools.decision.capital_deployment_policy.allocate_position",
             result.errors,
         )
         self.assertIn(

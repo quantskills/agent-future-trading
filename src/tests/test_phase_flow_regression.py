@@ -64,7 +64,6 @@ from agents.decision_team.portfolio_manager import (
     _append_unique_action_values,
     _normalize_alpha_setup_action_value,
     _select_learning_trace_action_values,
-    _pm_retrieve_canonical_action_values,
     portfolio_agent_futures,
 )
 from agents.execution_team.trader import (
@@ -80,12 +79,13 @@ from tools.agent_tools.analysis.quality import (
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
 from tools.agent_tools.execution.futures_settlement import FuturesDailySettlement
 from tools.agent_tools.execution.intraday_execution import select_intraday_execution
 from tools.agent_tools.execution.entry_timing import phase2_entry_audit
-from tools.agent_tools.research.reviewer_tools import (
+from tools.agent_tools.research.phase4_review import (
     _apply_net_exposure_review,
     _build_daily_transaction_report,
     _build_capital_deployment_diagnostics,
@@ -115,8 +115,8 @@ from util.config_normalizer import normalize_config
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.trading_calendar import get_previous_trading_day, map_datetime_to_futures_trading_day
 from run.validate_phase_flow import _expected_settlement_balance_change
-from tools.agent_tools.research.reviewer_tools import _expected_settlement_equity_change
-from tools.agent_tools.execution.trader_exit_policy import evaluate_exit_policy
+from tools.agent_tools.research.phase4_review import _expected_settlement_equity_change
+from tools.agent_tools.execution.execution_exit_policy import evaluate_exit_policy
 from tools.agent_tools.execution.order_semantics import (
     build_lot_intent_consistency,
     phase2_order_intent_from_lots,
@@ -1422,7 +1422,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                     ]
                 return []
 
-        rows, detail = _pm_retrieve_canonical_action_values(
+        result = retrieve_pm_memory(
             db=FakeDB(),
             config_id="cfg",
             ticker="TA",
@@ -1432,13 +1432,16 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             setup_type="trend_breakout_setup",
             trading_date="2025-03-04",
         )
+        rows = result["action_values"]
+        detail = result["effective_memory_summary"]
+        attempts = result["retrieval_attempts"]
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["consumer_scope"], "pm_learning")
         self.assertEqual(rows[0]["retrieval_match_level"], "same_ticker_side_horizon")
-        self.assertEqual(detail["row_count"], 1)
-        self.assertEqual(detail["attempts"][0]["match_level"], "exact_state")
-        self.assertEqual(detail["attempts"][0]["row_count"], 0)
+        self.assertEqual(detail["effective_row_count"], 1)
+        self.assertEqual(attempts[0]["match_level"], "exact_state")
+        self.assertEqual(attempts[0]["row_count"], 0)
 
     def test_pm_action_value_retrieval_fills_missing_lanes_after_exact_match(self):
         class FakeDB:
@@ -1499,7 +1502,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                     ]
                 return []
 
-        rows, detail = _pm_retrieve_canonical_action_values(
+        result = retrieve_pm_memory(
             db=FakeDB(),
             config_id="cfg",
             ticker="M",
@@ -1509,13 +1512,128 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             setup_type="news_event_setup",
             trading_date="2025-03-11",
         )
+        rows = result["action_values"]
+        detail = result["effective_memory_summary"]
+        attempts = result["retrieval_attempts"]
 
         ids = {row["id"] for row in rows}
         self.assertIn("m-open-exact", ids)
         self.assertIn("m-execution-fallback", ids)
-        self.assertEqual(detail["attempts"][0]["matched_lanes"], ["open"])
-        self.assertIn("execution", detail["matched_lanes"])
-        self.assertGreaterEqual(len(detail["attempts"]), 2)
+        self.assertEqual(attempts[0]["row_count"], 1)
+        self.assertIn("exact_state", detail["matched_levels"])
+        self.assertIn("same_ticker_side_horizon", detail["matched_levels"])
+        self.assertGreaterEqual(len(attempts), 2)
+
+    def test_pm_action_value_retrieval_real_history_not_blocked_by_empty_lane(self):
+        class FakeDB:
+            def __init__(self):
+                self.calls = []
+
+            def get_alpha_setup_action_values(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("setup_type") == "execution_pullback_setup":
+                    return []
+                if kwargs.get("horizon_class") == "medium" and kwargs.get("setup_type") is None:
+                    return [
+                        {
+                            "scope_key": "BU|short|medium|choppy|execution_breakout_setup|execution",
+                            "ticker": "BU",
+                            "side": "short",
+                            "horizon_class": "medium",
+                            "market_regime": "choppy",
+                            "setup_type": "execution_breakout_setup",
+                            "action_name": "execution",
+                            "action_value_lane": "execution",
+                            "learning_lane": "execution",
+                            "consumer_scope": "pm_learning",
+                        },
+                        {
+                            "scope_key": "BU|short|medium|choppy|news_event_setup|open",
+                            "ticker": "BU",
+                            "side": "short",
+                            "horizon_class": "medium",
+                            "market_regime": "choppy",
+                            "setup_type": "news_event_setup",
+                            "action_name": "open",
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
+                            "consumer_scope": "pm_learning",
+                        },
+                    ]
+                if kwargs.get("horizon_class") is None and kwargs.get("setup_type") is None:
+                    return [
+                        {
+                            "id": "bu-real-execution",
+                            "scope_key": "BU|short|short|choppy|execution_pullback_setup|execution",
+                            "ticker": "BU",
+                            "side": "short",
+                            "horizon_class": "short",
+                            "market_regime": "choppy",
+                            "setup_type": "execution_pullback_setup",
+                            "action_name": "execution",
+                            "action_value_lane": "execution",
+                            "learning_lane": "execution",
+                            "consumer_scope": "pm_learning",
+                            "action_preference": "positive_candidate_execution",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "reward_sum": 5581.76,
+                            "reward_mean": 5581.76,
+                            "win_rate": 1.0,
+                            "sample_count": 1,
+                            "last_sample_date": "2025-03-04",
+                        },
+                        {
+                            "id": "bu-real-open",
+                            "scope_key": "BU|short|short|choppy|news_event_setup|open",
+                            "ticker": "BU",
+                            "side": "short",
+                            "horizon_class": "short",
+                            "market_regime": "choppy",
+                            "setup_type": "news_event_setup",
+                            "action_name": "open",
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
+                            "consumer_scope": "pm_learning",
+                            "action_preference": "positive_candidate_open",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "reward_sum": 5581.76,
+                            "reward_mean": 5581.76,
+                            "win_rate": 1.0,
+                            "sample_count": 1,
+                            "last_sample_date": "2025-03-04",
+                        },
+                    ]
+                return []
+
+        db = FakeDB()
+        result = retrieve_pm_memory(
+            db=db,
+            config_id="cfg",
+            ticker="BU",
+            side="short",
+            horizon_class="medium",
+            market_regime="choppy",
+            setup_type="execution_pullback_setup",
+            trading_date="2025-03-05",
+        )
+        rows = result["action_values"]
+        detail = result["effective_memory_summary"]
+        attempts = result["retrieval_attempts"]
+
+        ids = [row.get("id") for row in rows]
+        self.assertIn("bu-real-execution", ids)
+        self.assertIn("bu-real-open", ids)
+        self.assertNotIn("bu-empty-execution", ids)
+        self.assertNotIn("bu-empty-open", ids)
+        real_execution = next(row for row in rows if row.get("id") == "bu-real-execution")
+        self.assertEqual(real_execution["action_preference"], "positive_candidate_execution")
+        self.assertEqual(real_execution["retrieval_match_level"], "same_ticker_side")
+        self.assertTrue(detail["empty_history_cannot_block_real_history"])
+        self.assertGreaterEqual(detail["empty_shell_count"], 2)
+        self.assertEqual(attempts[1]["row_count"], 2)
+        self.assertEqual(attempts[2]["row_count"], 2)
 
     def test_scorecard_ignores_non_pm_learning_scope(self):
         signal = self._tradeable_signal()
@@ -2557,8 +2675,12 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(output.decision, "probe_only")
-        self.assertIn("protected_memory_evidence_rejected", output.reasons)
+        self.assertNotIn("protected_memory_evidence_rejected", output.reasons)
         self.assertIn("cold_start_weak_combo_block", output.reasons)
+        self.assertEqual(
+            output.diagnostics.get("research_memory_boundary"),
+            "auditor_does_not_consume_research_records",
+        )
 
     def test_weak_ticker_side_rule_limits_latest_bad_p_long_template_to_probe(self):
         output = self._auditor().plan(
@@ -2668,8 +2790,11 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(output.decision, "probe_only")
-        self.assertIn("strategy_memory_weak_block", output.reasons)
-        self.assertIn("soft_block_converted_to_probe_only", output.reasons)
+        self.assertNotIn("strategy_memory_weak_block", output.reasons)
+        self.assertEqual(
+            output.diagnostics.get("research_memory_boundary"),
+            "auditor_does_not_consume_research_records",
+        )
         self.assertGreater(output.position_ratio_multiplier, 0.0)
 
     def test_contextual_calibration_can_soften_same_scope_auditor_history_block_to_probe(self):
@@ -2725,9 +2850,10 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertEqual(output.decision, "probe_only")
         self.assertIn("side_performance_block", output.reasons)
         self.assertIn("soft_block_converted_to_probe_only", output.reasons)
+        self.assertNotIn("contextual_rule_calibration", output.diagnostics)
         self.assertEqual(
-            output.diagnostics["contextual_rule_calibration"]["softened_reasons"],
-            ["side_performance_block"],
+            output.diagnostics.get("research_memory_boundary"),
+            "auditor_does_not_consume_research_records",
         )
 
     def test_single_high_quality_analyst_support_is_probe_not_block(self):
@@ -9300,14 +9426,14 @@ class DailyTransactionReportRegressionTest(unittest.TestCase):
                 ticker_pnl={},
                 phase4_status_override="completed",
                 phase4_completed_at_override="e4",
-                phase4_message_override="reviewer validation and researcher learning passed",
+                phase4_message_override="reviewer validation passed",
             )
         finally:
             conn.close()
 
         self.assertIn("phase4", text)
         self.assertIn("phase4             completed", text)
-        self.assertIn("reviewer validation and researcher learning passed", text)
+        self.assertIn("reviewer validation passed", text)
         self.assertNotIn("phase4             running", text)
 
 
@@ -9999,7 +10125,42 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertEqual(result.features["signal_bars"], 1)
         self.assertEqual(result.features["execution_bars"], 3)
 
-    def test_protected_confirmed_memory_can_use_vwap_fallback_without_breakout(self):
+    def test_intraday_execution_rejects_research_memory_parameters(self):
+        signal_bars = [
+            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
+        ]
+        execution_bars = [
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 100.9, "high": 101, "low": 100, "close": 100.9, "volume": 10},
+        ]
+
+        with self.assertRaises(TypeError):
+            select_intraday_execution(
+                signal_bars=signal_bars,
+                execution_bars=execution_bars,
+                action="open_long",
+                config={"opening_range_minutes": 2, "min_execution_volume": 1},
+                strategy_memory={"side_memory": {"memory_state": "protected"}},
+            )
+        with self.assertRaises(TypeError):
+            select_intraday_execution(
+                signal_bars=signal_bars,
+                execution_bars=execution_bars,
+                action="open_long",
+                config={"opening_range_minutes": 2, "min_execution_volume": 1},
+                adaptive_policy_state=[{"policy_type": "contextual_rule_calibration:intraday_confirmation"}],
+            )
+        with self.assertRaises(TypeError):
+            select_intraday_execution(
+                signal_bars=signal_bars,
+                execution_bars=execution_bars,
+                action="open_long",
+                config={"opening_range_minutes": 2, "min_execution_volume": 1},
+                market_confirmation={"confirmation_score": 0.75},
+            )
+
+    def test_old_memory_fallback_config_cannot_create_execution_trigger(self):
         signal_bars = [
             {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
         ]
@@ -10022,68 +10183,6 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "confirmed_memory_min_confirmations": 3,
                 "confirmed_memory_max_opening_range_miss": 0.002,
                 "confirmed_memory_min_sample_count": 5,
-            },
-            market_confirmation={
-                "confirmation_score": 0.75,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "protected",
-                    "sample_count": 5,
-                    "win_rate": 1.0,
-                    "net_pnl": 9000,
-                }
-            },
-            decision_context={
-                "execution_contract": {
-                    "execution_profile": "breakout",
-                    "allow_confirmed_memory_vwap_fallback": True,
-                }
-            },
-        )
-
-        self.assertTrue(result.should_execute)
-        self.assertEqual(result.reason, "intraday_confirmed_memory_vwap_fallback")
-        self.assertEqual(result.features["execution_mode"], "confirmed_memory_vwap_fallback")
-        self.assertTrue(result.features["fallback_authorized_by_pm"])
-        self.assertTrue(result.features["strategy_memory"]["passed"])
-
-    def test_vwap_fallback_requires_pm_execution_contract_authority(self):
-        signal_bars = [
-            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
-        ]
-        execution_bars = [
-            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 10:01:00", "open": 100.9, "high": 101, "low": 100, "close": 100.9, "volume": 10},
-        ]
-
-        result = select_intraday_execution(
-            signal_bars=signal_bars,
-            execution_bars=execution_bars,
-            action="open_long",
-            config={
-                "opening_range_minutes": 2,
-                "min_execution_volume": 1,
-                "max_chase_ratio": 0.02,
-                "allow_confirmed_memory_vwap_fallback": True,
-                "confirmed_memory_min_market_confirmation_score": 0.70,
-                "confirmed_memory_min_confirmations": 3,
-                "confirmed_memory_max_opening_range_miss": 0.002,
-                "confirmed_memory_min_sample_count": 5,
-            },
-            market_confirmation={
-                "confirmation_score": 0.75,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "protected",
-                    "sample_count": 5,
-                    "win_rate": 1.0,
-                    "net_pnl": 9000,
-                }
             },
             decision_context={
                 "execution_contract": {
@@ -10095,8 +10194,10 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
 
         self.assertFalse(result.should_execute)
         self.assertEqual(result.reason, "intraday_trigger_not_met")
+        self.assertNotEqual(result.reason, "intraday_confirmed_memory_vwap_fallback")
+        self.assertNotEqual(result.features.get("execution_mode"), "confirmed_memory_vwap_fallback")
 
-    def test_vwap_fallback_does_not_apply_without_high_quality_memory(self):
+    def test_pm_must_encode_vwap_execution_profile_in_contract(self):
         signal_bars = [
             {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
         ]
@@ -10110,233 +10211,20 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             signal_bars=signal_bars,
             execution_bars=execution_bars,
             action="open_long",
-            config={
-                "opening_range_minutes": 2,
-                "min_execution_volume": 1,
-                "allow_confirmed_memory_vwap_fallback": True,
-                "confirmed_memory_min_market_confirmation_score": 0.70,
-                "confirmed_memory_min_confirmations": 3,
-                "confirmed_memory_max_opening_range_miss": 0.002,
-            },
-            market_confirmation={
-                "confirmation_score": 0.75,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "watchlist",
-                    "sample_count": 4,
-                    "win_rate": 0.25,
-                    "net_pnl": -5000,
-                }
-            },
+            config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
                 "execution_contract": {
-                    "execution_profile": "breakout",
-                    "allow_confirmed_memory_vwap_fallback": True,
+                    "execution_profile": "vwap_confirmed",
+                    "entry_trigger": "wait for VWAP directional confirmation",
+                    "can_execute_without_intraday_trigger": False,
                 }
-            },
-        )
-
-        self.assertFalse(result.should_execute)
-        self.assertEqual(result.reason, "intraday_trigger_not_met")
-
-    def test_vwap_fallback_does_not_apply_with_small_sample_protected_memory(self):
-        signal_bars = [
-            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.85, "volume": 10},
-        ]
-        execution_bars = [
-            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 10:01:00", "open": 100.9, "high": 101, "low": 100, "close": 100.9, "volume": 10},
-        ]
-
-        result = select_intraday_execution(
-            signal_bars=signal_bars,
-            execution_bars=execution_bars,
-            action="open_long",
-            config={
-                "opening_range_minutes": 2,
-                "min_execution_volume": 1,
-                "allow_confirmed_memory_vwap_fallback": True,
-                "confirmed_memory_min_market_confirmation_score": 0.70,
-                "confirmed_memory_min_confirmations": 3,
-                "confirmed_memory_max_opening_range_miss": 0.002,
-                "confirmed_memory_min_sample_count": 5,
-            },
-            market_confirmation={
-                "confirmation_score": 0.75,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "protected",
-                    "sample_count": 3,
-                    "win_rate": 1.0,
-                    "net_pnl": 9000,
-                }
-            },
-            decision_context={
-                "execution_contract": {
-                    "execution_profile": "breakout",
-                    "allow_confirmed_memory_vwap_fallback": True,
-                }
-            },
-        )
-
-        self.assertFalse(result.should_execute)
-        self.assertEqual(result.reason, "intraday_trigger_not_met")
-
-    def test_contextual_calibration_can_relax_intraday_memory_fallback_boundary(self):
-        signal_bars = [
-            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.70, "volume": 10},
-        ]
-        execution_bars = [
-            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 10:01:00", "open": 100.75, "high": 101, "low": 100, "close": 100.75, "volume": 10},
-        ]
-
-        result = select_intraday_execution(
-            signal_bars=signal_bars,
-            execution_bars=execution_bars,
-            action="open_long",
-            config={
-                "opening_range_minutes": 2,
-                "min_execution_volume": 1,
-                "max_chase_ratio": 0.02,
-                "allow_confirmed_memory_vwap_fallback": True,
-                "confirmed_memory_min_market_confirmation_score": 0.70,
-                "confirmed_memory_min_confirmations": 3,
-                "confirmed_memory_max_opening_range_miss": 0.002,
-                "confirmed_memory_min_sample_count": 5,
-            },
-            market_confirmation={
-                "confirmation_score": 0.68,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "protected",
-                    "sample_count": 6,
-                    "win_rate": 0.75,
-                    "net_pnl": 9000,
-                }
-            },
-            adaptive_policy_state=[
-                {
-                    "id": "cal-intraday",
-                    "ticker": "BU",
-                    "side": "long",
-                    "setup_type": "*",
-                    "horizon_class": "short",
-                    "market_regime": "trend",
-                    "policy_type": "contextual_rule_calibration:intraday_confirmation",
-                    "policy_action": "calibrate",
-                    "rule_validation_status": "validated_rule_applied",
-                    "confidence_score": 0.55,
-                    "sample_count": 2,
-                    "payload": {
-                        "rule_adjustments": {
-                            "intraday_confirmation": {
-                                "confirmed_memory_max_opening_range_miss": 0.0035,
-                                "confirmed_memory_min_market_confirmation_score": 0.65,
-                            }
-                        }
-                    },
-                }
-            ],
-            decision_context={
-                "ticker": "BU",
-                "horizon_class": "short",
-                "market_regime": "trend",
-                "execution_contract": {
-                    "execution_profile": "breakout",
-                    "allow_confirmed_memory_vwap_fallback": True,
-                },
             },
         )
 
         self.assertTrue(result.should_execute)
-        self.assertEqual(result.reason, "intraday_confirmed_memory_vwap_fallback")
-        self.assertEqual(
-            result.features["contextual_rule_calibration"]["applied"][0]["id"],
-            "cal-intraday",
-        )
-
-    def test_unvalidated_contextual_calibration_does_not_change_intraday_rules(self):
-        signal_bars = [
-            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.70, "volume": 10},
-        ]
-        execution_bars = [
-            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 10:01:00", "open": 100.75, "high": 101, "low": 100, "close": 100.75, "volume": 10},
-        ]
-
-        result = select_intraday_execution(
-            signal_bars=signal_bars,
-            execution_bars=execution_bars,
-            action="open_long",
-            config={
-                "opening_range_minutes": 2,
-                "min_execution_volume": 1,
-                "max_chase_ratio": 0.02,
-                "allow_confirmed_memory_vwap_fallback": True,
-                "confirmed_memory_min_market_confirmation_score": 0.70,
-                "confirmed_memory_min_confirmations": 3,
-                "confirmed_memory_max_opening_range_miss": 0.002,
-                "confirmed_memory_min_sample_count": 5,
-            },
-            market_confirmation={
-                "confirmation_score": 0.68,
-                "confirmations": ["basis", "position_rank", "net_cap"],
-            },
-            strategy_memory={
-                "side_memory": {
-                    "memory_state": "protected",
-                    "sample_count": 6,
-                    "win_rate": 0.75,
-                    "net_pnl": 9000,
-                }
-            },
-            adaptive_policy_state=[
-                {
-                    "id": "cal-intraday-candidate",
-                    "ticker": "BU",
-                    "side": "long",
-                    "setup_type": "*",
-                    "horizon_class": "short",
-                    "market_regime": "trend",
-                    "policy_type": "contextual_rule_calibration:intraday_confirmation",
-                    "policy_action": "calibrate",
-                    "rule_validation_status": "candidate",
-                    "confidence_score": 0.55,
-                    "sample_count": 2,
-                    "payload": {
-                        "rule_adjustments": {
-                            "intraday_confirmation": {
-                                "confirmed_memory_max_opening_range_miss": 0.0035,
-                                "confirmed_memory_min_market_confirmation_score": 0.65,
-                            }
-                        }
-                    },
-                }
-            ],
-            decision_context={
-                "ticker": "BU",
-                "horizon_class": "short",
-                "market_regime": "trend",
-                "execution_contract": {
-                    "execution_profile": "breakout",
-                    "allow_confirmed_memory_vwap_fallback": True,
-                },
-            },
-        )
-
-        self.assertFalse(result.should_execute)
-        self.assertEqual(result.reason, "intraday_trigger_not_met")
-        self.assertEqual(result.features["contextual_rule_calibration"]["applied"], [])
+        self.assertEqual(result.reason, "intraday_vwap_confirmed")
+        self.assertEqual(result.features["execution_profile"], "vwap_confirmed")
+        self.assertEqual(result.features["trigger_rule"], "vwap_direction_confirmation")
 
 
 class MarginAuditRegressionTest(unittest.TestCase):
@@ -10954,7 +10842,9 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertIn("BU", execution["slippage_ticks_by_underlying"])
         self.assertIn("exit_policy", execution)
         self.assertTrue(execution["intraday_confirmation"]["enabled"])
-        self.assertTrue(execution["intraday_confirmation"]["allow_confirmed_memory_vwap_fallback"])
+        self.assertNotIn("allow_confirmed_memory_vwap_fallback", execution["intraday_confirmation"])
+        self.assertNotIn("confirmed_memory_min_market_confirmation_score", execution["intraday_confirmation"])
+        self.assertNotIn("confirmed_memory_min_confirmations", execution["intraday_confirmation"])
 
         raw_dev = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         for moved_key in (

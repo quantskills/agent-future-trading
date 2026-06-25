@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,7 +60,12 @@ def _write_minimal_covered_repo(root: Path) -> None:
     _append_text(
         root,
         "src/agents/decision_team/portfolio_manager.py",
-        'consumer_scope="pm_learning"\n_is_pm_learning_action_value',
+        "retrieve_pm_memory",
+    )
+    _append_text(
+        root,
+        "src/tools/agent_tools/decision/decision_memory_retrieval.py",
+        'consumer_scope="pm_learning"\n_consumer_scope\nnon_pm_learning_scope',
     )
     _append_text(
         root,
@@ -73,12 +78,20 @@ def _write_minimal_covered_repo(root: Path) -> None:
                 "execution_learning_trace",
                 "opportunity_score_components",
                 "learning_used",
-                "execution_result",
-                "consumer_scope",
+                    "execution_result",
+                    "signal_collection_contract",
+                    "effective_memory_summary",
+                    "opportunity_scorecard",
+                    "position_sizing_result",
+                    "consumer_scope",
                 "learning_lane",
                 "retrieval_key",
                 "uncovered_risks",
                 "contract_coverage_audit",
+                "signal_collection_contract",
+                "effective_memory_summary",
+                "opportunity_scorecard",
+                "position_sizing_result",
             ]
         ),
     )

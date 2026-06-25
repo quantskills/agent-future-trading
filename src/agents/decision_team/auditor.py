@@ -13,12 +13,9 @@ from typing import Any, Dict, List, Optional, Sequence
 from pydantic import BaseModel, Field
 from tools.agent_tools.decision.audit_decision_types import hard_block_or_reduce_only, normalize_audit_decision
 from tools.agent_tools.decision.audit_explainer import build_audit_payload, build_audit_state_key
-from tools.agent_tools.decision.contextual_rule_calibration import apply_auditor_contextual_calibration
 from tools.agent_tools.decision.hard_risk_rules import has_hard_block_reason
-from tools.agent_tools.decision.memory_policy_rules import strategy_memory_record as _memory_strategy_record
 from tools.agent_tools.decision.reason_effects import reason_effect_summary
 from tools.agent_tools.decision.soft_risk_rules import fallback_business_quality_score
-from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 
 
 class TradeAuditorInput(BaseModel):
@@ -40,8 +37,6 @@ class TradeAuditorInput(BaseModel):
     account_drawdown_state: Dict[str, Any] = Field(default_factory=dict)
     recent_ticker_side_performance: Dict[str, Any] = Field(default_factory=dict)
     recent_conditional_performance: Dict[str, Any] = Field(default_factory=dict)
-    strategy_memory: Dict[str, Any] = Field(default_factory=dict)
-    adaptive_policy_state: List[Dict[str, Any]] = Field(default_factory=list)
     provisional_policy_state: List[Dict[str, Any]] = Field(default_factory=list)
     risk_level: str = ""
     full_config: Dict[str, Any] = Field(default_factory=dict)
@@ -204,33 +199,6 @@ def _side_rule(config: Dict[str, Any], ticker: Any, side: str) -> Dict[str, Any]
     return side_rule if isinstance(side_rule, dict) else {}
 
 
-def _strategy_memory_record(strategy_memory: Dict[str, Any], states: Sequence[str]) -> Dict[str, Any]:
-    return _memory_strategy_record(strategy_memory, states)
-
-
-def _memory_row_passes_evidence_floor(row: Dict[str, Any], audit_config: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-    min_samples = _safe_int(audit_config.get("protected_min_sample_count"), 5)
-    min_win_rate = _safe_float(audit_config.get("protected_min_win_rate"), 0.60)
-    min_net_pnl = _safe_float(audit_config.get("protected_min_net_pnl"), 1000.0)
-    sample_count = _safe_int(row.get("sample_count"), 0)
-    win_rate = _safe_float(row.get("win_rate"), 0.0)
-    net_pnl = _safe_float(row.get("net_pnl"), 0.0)
-    diagnostics = {
-        "sample_count": sample_count,
-        "min_sample_count": min_samples,
-        "win_rate": win_rate,
-        "min_win_rate": min_win_rate,
-        "net_pnl": net_pnl,
-        "min_net_pnl": min_net_pnl,
-    }
-    return (
-        sample_count >= min_samples
-        and win_rate >= min_win_rate
-        and net_pnl >= min_net_pnl,
-        diagnostics,
-    )
-
-
 def _context_from_metadata(metadata: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
     for key in (
         f"{agent_name}_context",
@@ -270,7 +238,6 @@ class AttributionFeedbackCalibrator:
         self.quality_config = self.auditor_config.get("quality_gate", {}) or {}
         self.trade_config = self.full_config.get("trade_frequency_control", {}) or {}
         self.market_config = self.full_config.get("market_confirmation", {}) or {}
-        self.memory_config = self.full_config.get("strategy_memory", {}) or {}
 
     @property
     def enabled(self) -> bool:
@@ -362,29 +329,6 @@ class AttributionFeedbackCalibrator:
     def _protected_side_rule(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
         if target_side not in {"long", "short"}:
             return {}
-        memory_row = _strategy_memory_record(payload.strategy_memory or {}, ["protected", "deployable"])
-        if memory_row:
-            audit_config = (self.memory_config.get("audit") or {})
-            evidence_ok, evidence_floor = _memory_row_passes_evidence_floor(memory_row, audit_config)
-            if not evidence_ok:
-                return {
-                    "enabled": False,
-                    "rejected": True,
-                    "source": "strategy_memory",
-                    "reason": "protected_memory_evidence_below_auditor_floor",
-                    "memory_state": memory_row.get("memory_state"),
-                    **evidence_floor,
-                }
-            return {
-                "source": "strategy_memory",
-                "min_confirmation_score": audit_config.get("protected_min_confirmation_score", 0.50),
-                "weak_combo_multiplier": audit_config.get("protected_multiplier", 0.50),
-                "cold_start_multiplier": audit_config.get("protected_multiplier", 0.50),
-                "memory_state": memory_row.get("memory_state"),
-                "sample_count": memory_row.get("sample_count"),
-                "net_pnl": memory_row.get("net_pnl"),
-                "win_rate": memory_row.get("win_rate"),
-            }
         rule = _side_rule(self.quality_config.get("protected_ticker_sides") or {}, payload.ticker, target_side)
         if not rule:
             return {}
@@ -654,7 +598,6 @@ class TradeAuditor:
         self.market_config = self.full_config.get("market_confirmation", {}) or {}
         self.trade_config = self.full_config.get("trade_frequency_control", {}) or {}
         self.quality_config = self.auditor_config.get("quality_gate", {}) or {}
-        self.memory_config = self.full_config.get("strategy_memory", {}) or {}
         self.calibrator = AttributionFeedbackCalibrator(self.full_config)
 
     @property
@@ -672,9 +615,8 @@ class TradeAuditor:
             "current_position_ratio": float(payload.current_position_ratio or 0.0),
             "signal_strength": float(payload.signal_strength or 0.0),
             "signal_combo": list(_signal_combo_tuple(payload.signal_combo)),
-            "strategy_memory": payload.strategy_memory or {},
-            "adaptive_policy_state": payload.adaptive_policy_state or [],
             "provisional_policy_state": payload.provisional_policy_state or [],
+            "research_memory_boundary": "auditor_does_not_consume_research_records",
         }
 
         if not self.enabled:
@@ -719,45 +661,28 @@ class TradeAuditor:
         quality_result = self._evaluate_analyst_signal_quality(payload)
         market_result = self._evaluate_market_confirmation(payload)
         attribution_result = self.calibrator.calibrate(payload)
-        adaptive_policy_result = self._evaluate_adaptive_policy(payload, target_side)
         provisional_policy_result = self._evaluate_provisional_policy(payload, target_side)
 
         reasons.extend(quality_result["reasons"])
         reasons.extend(market_result["reasons"])
         reasons.extend(attribution_result["reasons"])
-        reasons.extend(adaptive_policy_result["reasons"])
         reasons.extend(provisional_policy_result["reasons"])
         notes.extend(quality_result["notes"])
         notes.extend(market_result["notes"])
         notes.extend(attribution_result["notes"])
-        notes.extend(adaptive_policy_result["notes"])
         notes.extend(provisional_policy_result["notes"])
         diagnostics.update(quality_result["diagnostics"])
         diagnostics.update(market_result["diagnostics"])
         diagnostics.update(attribution_result["diagnostics"])
-        diagnostics.update(adaptive_policy_result["diagnostics"])
         diagnostics.update(provisional_policy_result["diagnostics"])
 
         if (
             quality_result["block"]
             or market_result["block"]
             or attribution_result["block"]
-            or adaptive_policy_result["block"]
             or provisional_policy_result["block"]
         ):
-            contextual_cfg = (((payload.full_config or {}).get("learning") or {}).get("contextual_rule_calibration") or {})
-            soften_reasons, contextual_diag = apply_auditor_contextual_calibration(
-                payload.adaptive_policy_state or [],
-                ticker=payload.ticker,
-                side=target_side,
-                horizon_class=_infer_horizon_from_payload(payload, target_side),
-                market_regime=_infer_market_regime_from_payload(payload, target_side),
-                reasons=reasons,
-                allowed_soften_reasons=set(contextual_cfg.get("softenable_hard_block_reasons") or []),
-                min_confidence=_safe_float(contextual_cfg.get("min_confidence"), 0.35),
-            )
-            diagnostics["contextual_rule_calibration"] = contextual_diag
-            hard_block = has_hard_block_reason(reasons, softened_reasons=soften_reasons)
+            hard_block = has_hard_block_reason(reasons, softened_reasons=set())
             if hard_block:
                 multiplier = 0.0
                 decision = hard_block_or_reduce_only(
@@ -776,7 +701,6 @@ class TradeAuditor:
                 quality_result["multiplier"],
                 market_result["multiplier"],
                 attribution_result["multiplier"],
-                adaptive_policy_result["multiplier"],
                 provisional_policy_result["multiplier"],
             )
             if multiplier < 0.999999:
@@ -796,76 +720,6 @@ class TradeAuditor:
             policy_version=policy_version,
             learning_mode=learning_mode,
         )
-
-    def _evaluate_adaptive_policy(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
-        rows, safety_trace = filter_adaptive_policy_state_for_pm(payload.adaptive_policy_state or [])
-        if not rows:
-            return {
-                "block": False,
-                "multiplier": 1.0,
-                "reasons": [],
-                "notes": [],
-                "diagnostics": {"adaptive_policy_safety": safety_trace} if safety_trace else {},
-            }
-
-        cfg = (payload.full_config.get("learning", {}) or {}).get("adaptive_policy", {}) or {}
-        min_confidence = _safe_float(cfg.get("min_policy_confidence"), 0.35)
-        block = False
-        multiplier = 1.0
-        reasons: List[str] = []
-        notes: List[str] = []
-        applied: List[Dict[str, Any]] = []
-        for row in rows:
-            action = str(row.get("policy_action") or "").lower()
-            if (
-                str(row.get("policy_type") or "").lower() == "learned_vs_unlearned"
-                and str(row.get("ticker") or "*") == "*"
-            ):
-                continue
-            confidence = _safe_float(row.get("confidence_score"), 0.0)
-            if confidence < min_confidence:
-                continue
-            row_multiplier = max(0.0, _safe_float(row.get("multiplier"), 1.0))
-            if action == "block":
-                block = True
-                multiplier = 0.0
-                reasons.append("adaptive_policy_block")
-            elif action in {"cap", "reduce"}:
-                multiplier = min(multiplier, row_multiplier)
-                reasons.append("adaptive_policy_cap")
-            elif action in {"protect", "allow"}:
-                reasons.append("adaptive_policy_protect")
-            else:
-                continue
-            applied.append(row)
-            notes.append(
-                f"adaptive policy {action} for {payload.ticker} {target_side}: "
-                f"multiplier={row_multiplier:.2f}, confidence={confidence:.2f}, "
-                f"reason={row.get('reason') or 'reviewer learning'}"
-            )
-
-        maturity_counts: Dict[str, int] = {}
-        for row in applied:
-            policy_type = str(row.get("policy_type") or "unknown")
-            maturity_counts[policy_type] = maturity_counts.get(policy_type, 0) + 1
-        return {
-            "block": block,
-            "multiplier": multiplier,
-            "reasons": _dedupe(reasons),
-            "notes": notes,
-            "diagnostics": {
-                "adaptive_policy_safety": safety_trace,
-                "adaptive_policy_applied": applied,
-                "memory_evidence_maturity": {
-                    "policy_type_counts": maturity_counts,
-                    "tail_loss_sentinel": maturity_counts.get("tail_loss_sentinel", 0),
-                    "alpha_promotion": maturity_counts.get("alpha_promotion", 0),
-                    "template_quality": maturity_counts.get("template_quality", 0),
-                    "candidate_hypotheses_are_not_trade_authority": True,
-                    "requires_current_evidence": True,
-                },
-            },
-        }
 
     def _evaluate_provisional_policy(self, payload: TradeAuditorInput, target_side: str) -> Dict[str, Any]:
         rows = payload.provisional_policy_state or []
@@ -1283,18 +1137,9 @@ class TradeAuditor:
         confirmation_score: float,
         qualified_supporters: List[str],
     ) -> Dict[str, Any]:
-        memory_result = self._evaluate_strategy_memory_rule(
-            payload=payload,
-            target_side=target_side,
-            confirmation_score=confirmation_score,
-            qualified_supporters=qualified_supporters,
-        )
-        if memory_result["block"]:
-            return memory_result
-
         rule = _side_rule(self.quality_config.get("weak_ticker_side_rules") or {}, payload.ticker, target_side)
         if not rule:
-            return memory_result
+            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
 
         signal_combo = _signal_combo_tuple(payload.signal_combo)
         block_combos = [tuple(item) for item in (rule.get("block_signal_combos") or [])]
@@ -1316,7 +1161,6 @@ class TradeAuditor:
                 "block_signal_combo": signal_combo in block_combos,
             }
         }
-        diagnostics.update(memory_result["diagnostics"])
 
         if signal_combo in block_combos or confirmation_score < block_below or len(qualified_supporters) < min_supporters:
             reasons.append("weak_ticker_side_quality_gate")
@@ -1340,78 +1184,9 @@ class TradeAuditor:
         )
         return {
             "block": False,
-            "multiplier": min(cap_multiplier, memory_result["multiplier"]),
-            "reasons": _dedupe(memory_result["reasons"] + reasons),
-            "notes": memory_result["notes"] + notes,
-            "diagnostics": diagnostics,
-        }
-
-    def _evaluate_strategy_memory_rule(
-        self,
-        *,
-        payload: TradeAuditorInput,
-        target_side: str,
-        confirmation_score: float,
-        qualified_supporters: List[str],
-    ) -> Dict[str, Any]:
-        if not self.memory_config.get("enabled", False):
-            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
-
-        row = _strategy_memory_record(payload.strategy_memory or {}, ["weak_block", "watchlist"])
-        if not row:
-            return {"block": False, "multiplier": 1.0, "reasons": [], "notes": [], "diagnostics": {}}
-
-        audit_config = self.memory_config.get("audit") or {}
-        state = str(row.get("memory_state") or "")
-        min_supporters = _safe_int(audit_config.get("min_qualified_supporters"), 2)
-        if state == "weak_block":
-            min_score = _safe_float(audit_config.get("weak_block_min_confirmation_score"), 0.65)
-            cap_multiplier = max(0.0, _safe_float(audit_config.get("weak_block_cap_multiplier"), 0.35))
-            reason = "strategy_memory_weak_block"
-        else:
-            min_score = _safe_float(audit_config.get("watchlist_min_confirmation_score"), 0.60)
-            cap_multiplier = max(0.0, _safe_float(audit_config.get("watchlist_cap_multiplier"), 0.50))
-            reason = "strategy_memory_watchlist_cap"
-
-        diagnostics = {
-            "strategy_memory_rule": {
-                "ticker": payload.ticker,
-                "side": target_side,
-                "memory_state": state,
-                "sample_count": row.get("sample_count"),
-                "win_rate": row.get("win_rate"),
-                "net_pnl": row.get("net_pnl"),
-                "signal_combo": row.get("signal_combo"),
-                "confirmation_score": confirmation_score,
-                "qualified_supporters": qualified_supporters,
-            }
-        }
-
-        if state == "weak_block" and (
-            confirmation_score < min_score or len(qualified_supporters) < min_supporters
-        ):
-            return {
-                "block": True,
-                "multiplier": 0.0,
-                "reasons": [reason],
-                "notes": [
-                    f"blocked {payload.ticker} {target_side}: strategy memory state={state}, "
-                    f"sample_count={row.get('sample_count')}, win_rate={_safe_float(row.get('win_rate')):.2%}, "
-                    f"net_pnl={_safe_float(row.get('net_pnl')):.0f}; requires "
-                    f"qualified_supporters>={min_supporters} and confirmation_score>={min_score:.2f}"
-                ],
-                "diagnostics": diagnostics,
-            }
-
-        return {
-            "block": False,
             "multiplier": cap_multiplier,
-            "reasons": [reason],
-            "notes": [
-                f"capped {payload.ticker} {target_side}: strategy memory state={state}, "
-                f"sample_count={row.get('sample_count')}, win_rate={_safe_float(row.get('win_rate')):.2%}, "
-                f"net_pnl={_safe_float(row.get('net_pnl')):.0f}, multiplier={cap_multiplier:.2f}"
-            ],
+            "reasons": _dedupe(reasons),
+            "notes": notes,
             "diagnostics": diagnostics,
         }
 
@@ -1568,7 +1343,7 @@ class TradeAuditor:
             memory_reads={
                 "ticker_side_performance": payload.recent_ticker_side_performance or {},
                 "conditional_performance": payload.recent_conditional_performance or {},
-                "strategy_memory": payload.strategy_memory or {},
+                "research_memory": "not_consumed_by_auditor",
             },
         )
         return TradeAuditorOutput(

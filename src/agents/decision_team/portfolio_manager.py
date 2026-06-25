@@ -1,15 +1,9 @@
-import json
+﻿import json
 import re
 import math
 from datetime import datetime
 from enum import Enum
 from graph.constants import AgentKey
-from llm.prompt import (
-    RISK_CONTROL_PROMPT,
-    SINGLE_ANALYST_LOGIC,
-    MULTI_ANALYST_LOGIC,
-    build_pm_action_evidence_prompt,
-)
 from graph.schema import (
     FundState,
     PositionRisk,
@@ -21,14 +15,13 @@ from graph.schema import (
     RecommendationStatus,
     TradingPhase,
 )
-from llm.inference import agent_call, llm_audit_metadata
 from apis.contract_info_cache import FuturesContractInfoCache
 from agents.decision_team.auditor import TradeAuditor, TradeAuditorInput
 from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.dynamic_weights import DynamicWeightCalculator, calibrate_weights_by_signal_history
-from tools.agent_tools.analysis.learning_context import apply_config_learning_overlay, build_learning_context
+from tools.agent_tools.analysis.learning_context import apply_config_learning_overlay
 from tools.agent_tools.analysis.market_confirmation import MarketConfirmationEngine
 from tools.agent_tools.analysis.business_quality import summarize_business_quality
 from tools.agent_tools.analysis.data_usage import build_pm_data_quality_summary, write_daily_data_quality_summary
@@ -36,7 +29,7 @@ from tools.agent_tools.execution.order_semantics import (
     build_lot_intent_consistency,
     recommendation_intent_from_lots,
 )
-from tools.agent_tools.contracts import (
+from tools.common.contracts import (
     attach_snapshot_contract,
     build_internal_message_contract,
     validate_internal_message_contract,
@@ -53,10 +46,10 @@ from tools.agent_tools.decision.position_lifecycle import (
     scale_signed_ratio as _position_scale_signed_ratio,
     target_side_from_ratio as _position_target_side_from_ratio,
 )
-from tools.agent_tools.decision.pm_capital_policy import (
+from tools.agent_tools.decision.capital_deployment_policy import (
     _apply_capital_utilization_control,
 )
-from tools.agent_tools.decision.pm_invalidation_policy import (
+from tools.agent_tools.decision.invalidation_policy import (
     _apply_pretrade_invalidation_control,
     _has_explicit_stop_protection,
     _has_structured_invalidation_condition,
@@ -68,6 +61,10 @@ from tools.agent_tools.decision.reason_effects import (
     soft_limit_can_release_probe,
 )
 from tools.agent_tools.decision.risk_controls import business_quality_position_gate
+from tools.agent_tools.decision.decision_memory_retrieval import retrieve_pm_memory
+from tools.agent_tools.decision.opportunity_ranking import rank_opportunities
+from tools.agent_tools.decision.position_sizing import build_position_sizing_result
+from tools.agent_tools.decision.signal_evidence_collection import build_signal_collection_contract
 from tools.agent_tools.analysis.signal_fusion import (
     analyst_signal_combo as _fusion_analyst_signal_combo,
     build_opportunity_scorecard,
@@ -75,7 +72,6 @@ from tools.agent_tools.analysis.signal_fusion import (
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
 from tools.agent_tools.research.alpha_setup import compact_profile_for_trace
-from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 
 class RiskLevel(Enum):
     """Risk level classification for futures portfolio control."""
@@ -1070,8 +1066,6 @@ def _build_final_action_contract(
             "valid_until",
             "requires_intraday_confirmation",
             "can_execute_without_intraday_trigger",
-            "allow_confirmed_memory_vwap_fallback",
-            "fallback_authority_boundary",
             "execution_action_value_preference",
             "analyst_execution_roles",
         )
@@ -3571,14 +3565,6 @@ def _build_execution_contract_fields(
     )
     if final_entry_authority.get("conditional_trigger_authority"):
         can_execute_without_intraday_trigger = False
-    allow_confirmed_memory_vwap_fallback = bool(
-        profile in {"breakout", "pullback"}
-        and authority_type == "real_budget_entry"
-        and final_entry_authority.get("open_action_evidence")
-        and final_entry_authority.get("strong_current_evidence")
-        and not final_entry_authority.get("watch_for_trigger_block")
-        and not final_entry_authority.get("negative_profile")
-    )
     execution_preference = _execution_action_value_preference(
         ticker=ticker,
         side=target_side,
@@ -3589,8 +3575,6 @@ def _build_execution_contract_fields(
     if execution_preference:
         profile = execution_preference["execution_profile"]
         trigger_source = execution_preference["trigger_source"]
-        if profile == "vwap_confirmed":
-            allow_confirmed_memory_vwap_fallback = False
         control_reasons = sorted(set(list(control_reasons or []) + execution_preference["reason_codes"]))
 
     return {
@@ -3606,11 +3590,6 @@ def _build_execution_contract_fields(
         "valid_until": f"{date_text} 15:00:00" if date_text else "",
         "requires_intraday_confirmation": not can_execute_without_intraday_trigger and profile != "hold",
         "can_execute_without_intraday_trigger": can_execute_without_intraday_trigger,
-        "allow_confirmed_memory_vwap_fallback": allow_confirmed_memory_vwap_fallback,
-        "fallback_authority_boundary": (
-            "only_real_budget_entry_with_open_action_evidence_and_strong_current_evidence_"
-            "may_use_confirmed_memory_vwap_fallback"
-        ),
         "authority_type": authority_type,
         "max_allowed_margin_ratio": _safe_float(final_entry_authority.get("max_allowed_margin_ratio"), 0.0),
         "reason_codes": sorted(set([str(item) for item in (control_reasons or [])] + [
@@ -3939,17 +3918,19 @@ def _annotate_pm_action_value_retrieval(row: dict, *, match_level: str, match_re
     return normalized
 
 
-def _pm_canonical_action_value_rank(row: dict) -> tuple[int, int, int, int, float, int]:
+def _pm_canonical_action_value_rank(row: dict) -> tuple[int, int, int, int, int, float, int]:
     normalized = _normalize_alpha_setup_action_value(row)
     scope = str(normalized.get("evidence_scope") or "").lower()
     reward_source = str(normalized.get("reward_source") or "").lower()
     match_level = str(normalized.get("retrieval_match_level") or "").lower()
     preference = str(normalized.get("action_preference") or "").lower()
+    canonical = bool(normalized.get("canonical_action_value"))
     return (
-        0 if match_level == "exact_state" else 1 if match_level == "same_ticker_side_horizon" else 2 if match_level == "same_ticker_side" else 3,
-        0 if scope == "exact_real_state" else 1 if scope == "partial_real_state" else 2 if scope == "similar_sql_prior" else 3,
+        0 if canonical else 1,
         0 if any(marker in reward_source for marker in ("episode", "real_trade", "complete_episode")) else 1,
+        0 if scope == "exact_real_state" else 1 if scope == "partial_real_state" else 2 if scope == "similar_sql_prior" else 3,
         0 if preference else 1,
+        0 if match_level == "exact_state" else 1 if match_level == "same_ticker_side_horizon" else 2 if match_level == "same_ticker_side" else 3,
         -abs(_safe_float(normalized.get("reward_sum"), 0.0)),
         -int(_safe_int(normalized.get("sample_count"), 0)),
     )
@@ -3992,143 +3973,6 @@ def _append_unique_action_values(base_rows: list | None, extra_rows: list | None
         rows.append(normalized)
         index[key] = len(rows) - 1
     return rows
-
-
-def _pm_retrieve_canonical_action_values(
-    *,
-    db,
-    config_id: str,
-    ticker: str,
-    side: str,
-    horizon_class: str | None,
-    market_regime: str | None,
-    setup_type: str | None,
-    trading_date,
-    limit: int = 12,
-) -> tuple[list[dict], dict]:
-    """Retrieve PM-scoped action-values through fixed exact/fallback layers."""
-    required_lanes = {"open", "hold", "exit", "execution"}
-
-    def lane_set(rows: list[dict]) -> set[str]:
-        lanes: set[str] = set()
-        for row in rows or []:
-            lane = str(
-                row.get("action_value_lane")
-                or row.get("learning_lane")
-                or row.get("action_name")
-                or ""
-            ).strip().lower()
-            if lane in required_lanes:
-                lanes.add(lane)
-        return lanes
-
-    details = {
-        "side": side,
-        "horizon_class": horizon_class,
-        "market_regime": market_regime,
-        "setup_type": setup_type,
-        "consumer_scope": "pm_learning",
-        "required_lanes": sorted(required_lanes),
-        "attempts": [],
-        "row_count": 0,
-    }
-    if not db or not hasattr(db, "get_alpha_setup_action_values"):
-        details["skipped_reason"] = "db_missing_get_alpha_setup_action_values"
-        return [], details
-    layers = [
-        (
-            "exact_state",
-            {
-                "horizon_class": horizon_class,
-                "market_regime": market_regime,
-                "setup_type": setup_type,
-            },
-            "ticker_side_horizon_regime_setup",
-        ),
-        (
-            "same_ticker_side_horizon",
-            {
-                "horizon_class": horizon_class,
-                "market_regime": None,
-                "setup_type": None,
-            },
-            "ticker_side_horizon_fallback",
-        ),
-        (
-            "same_ticker_side",
-            {
-                "horizon_class": None,
-                "market_regime": None,
-                "setup_type": None,
-            },
-            "ticker_side_fallback",
-        ),
-    ]
-    collected: list[dict] = []
-    for match_level, kwargs, reason in layers:
-        try:
-            rows = db.get_alpha_setup_action_values(
-                config_id=config_id,
-                ticker=ticker,
-                side=side,
-                horizon_class=kwargs.get("horizon_class"),
-                market_regime=kwargs.get("market_regime"),
-                setup_type=kwargs.get("setup_type"),
-                trading_date=trading_date,
-                limit=limit,
-                consumer_scope="pm_learning",
-            )
-        except TypeError:
-            rows = db.get_alpha_setup_action_values(
-                config_id=config_id,
-                ticker=ticker,
-                side=side,
-                horizon_class=kwargs.get("horizon_class"),
-                market_regime=kwargs.get("market_regime"),
-                setup_type=kwargs.get("setup_type"),
-                trading_date=trading_date,
-                limit=limit,
-            )
-        except Exception as exc:
-            details["attempts"].append({
-                "match_level": match_level,
-                "match_reason": reason,
-                "row_count": 0,
-                "error": str(exc),
-            })
-            continue
-        pm_rows = [
-            _annotate_pm_action_value_retrieval(row, match_level=match_level, match_reason=reason)
-            for row in (rows or [])
-            if _is_pm_learning_action_value(row)
-        ]
-        missing_lanes = required_lanes - lane_set(collected)
-        if collected:
-            pm_rows = [
-                row for row in pm_rows
-                if str(
-                    row.get("action_value_lane")
-                    or row.get("learning_lane")
-                    or row.get("action_name")
-                    or ""
-                ).strip().lower() in missing_lanes
-            ]
-        details["attempts"].append({
-            "match_level": match_level,
-            "match_reason": reason,
-            "fetched_row_count": len(rows or []),
-            "row_count": len(pm_rows),
-            "matched_lanes": sorted(lane_set(pm_rows)),
-        })
-        collected = _append_unique_action_values(collected, pm_rows)
-        if required_lanes.issubset(lane_set(collected)):
-            break
-    details["row_count"] = len(collected)
-    details["matched_levels"] = sorted({
-        str(row.get("retrieval_match_level") or "unknown") for row in collected if isinstance(row, dict)
-    })
-    details["matched_lanes"] = sorted(lane_set(collected))
-    return collected, details
 
 
 _OPEN_OR_ADD_ACTION_NAMES = {
@@ -8816,7 +8660,6 @@ def portfolio_agent_futures(state: FundState):
     ticker = state["ticker"]
     trading_date = state["trading_date"]
     analyst_signals = state["analyst_signals"]
-    llm_config = state["llm_config"]
     num_tickers = state["num_tickers"]
     enabled_analysts = state.get("enabled_analysts", [])
     config_id = state.get("config_id", "")
@@ -8828,6 +8671,19 @@ def portfolio_agent_futures(state: FundState):
             "portfolio_agent_futures only supports phase1 pre-open recommendation flow."
         )
     _validate_required_analyst_signals(ticker, enabled_analysts, analyst_signals)
+    signal_collection_contract = (
+        state.get("signal_collection_contract")
+        if isinstance(state.get("signal_collection_contract"), dict)
+        else {}
+    )
+    if not signal_collection_contract:
+        signal_collection_contract = build_signal_collection_contract(
+            ticker=ticker,
+            trading_date=trading_date,
+            analyst_signals=analyst_signals,
+            enabled_analysts=enabled_analysts,
+        )
+        state["signal_collection_contract"] = signal_collection_contract
 
     cfg = state.get("config", {})
     db = get_db()
@@ -9201,11 +9057,6 @@ def portfolio_agent_futures(state: FundState):
         # Apply the tighter of the diversification cap and the margin cap.
         max_position_ratio = min(base_max_ratio, margin_max_ratio)
 
-    if analyst_count == 1:
-        decision_logic = SINGLE_ANALYST_LOGIC.format(max_position_ratio=max_position_ratio)
-    else:
-        decision_logic = MULTI_ANALYST_LOGIC.format(max_position_ratio=max_position_ratio)
-
     formatted_signals_lines = []
 
     # Group analyst outputs by agent name for downstream weighting.
@@ -9255,14 +9106,6 @@ def portfolio_agent_futures(state: FundState):
             f"news={weights['commodity_news']:.2%}; final trade authority still requires action evidence"
         )
 
-        decision_logic = build_pm_action_evidence_prompt(
-            weights=weights,
-            max_position_ratio=max_position_ratio,
-            basis_pct=basis_pct,
-            market_state=None,
-            fundamental_trends=None,
-            fusion_context=fusion_context,
-        )
     for signal in analyst_signals:
         if hasattr(signal, 'agent_name') and signal.agent_name:
             agent_name = "commodity_news" if signal.agent_name == "company_news" else signal.agent_name
@@ -9312,92 +9155,37 @@ def portfolio_agent_futures(state: FundState):
 
     logger.info(f"=== {ticker} Analyst Signals for Risk Control ===\n{formatted_signals}\n{'='*60}")
 
-    decision_memory_lines = []
-    if db and config_id:
-        decision_memory_lines = db.get_futures_transaction_memory(
-            config_id=config_id,
-            ticker=ticker,
-            limit=thresholds["decision_memory_limit"],
-            trading_date=trading_date,
-        )
-    decision_memory = "\n".join(decision_memory_lines) if decision_memory_lines else "No recent transaction memory."
-    pm_learning_context = build_learning_context(
-        db=db,
-        full_config=full_config,
-        config_id=config_id,
-        trading_date=trading_date,
-        analyst="portfolio_manager",
-        ticker=ticker,
-        context=fusion_context or {},
-        horizon_class="*",
-    )
-    if pm_learning_context.get("text"):
-        decision_memory = (
-            decision_memory
-            + "\n\n"
-            + pm_learning_context["text"]
-            + "\n[PM note] Exploratory memories are priors only; do not exceed hard margin/risk controls."
-        )
     pm_learning_audit = {
-        "enabled": bool(pm_learning_context.get("enabled")),
-        "selected_digest_ids": pm_learning_context.get("selected_ids", []),
-        "memory_trace": pm_learning_context.get("memory_trace", {}),
-        "trade_episode_count": len(pm_learning_context.get("trade_episode_items") or []),
-        "no_trade_opportunity_count": len(pm_learning_context.get("no_trade_opportunity_items") or []),
-        "hypothesis_count": len(pm_learning_context.get("hypothesis_items") or []),
-        "candidate_hypothesis_count": int(pm_learning_context.get("candidate_hypothesis_count", 0) or 0),
-        "validated_hypothesis_count": int(pm_learning_context.get("validated_hypothesis_count", 0) or 0),
-        "hypothesis_status_counts": pm_learning_context.get("hypothesis_status_counts", {}),
-        "sector": pm_learning_context.get("sector"),
-        "market_regime": pm_learning_context.get("market_regime"),
-        "prompt_prior_only": True,
-        "candidate_hypothesis_authority": (
-            "prior_only_no_sizing_add_position_matched_losing_hold_or_bypass_without_current_evidence"
-        ),
+        "enabled": bool(db and config_id),
+        "selected_digest_ids": [],
+        "memory_trace": {},
+        "trade_episode_count": 0,
+        "no_trade_opportunity_count": 0,
+        "hypothesis_count": 0,
+        "candidate_hypothesis_count": 0,
+        "validated_hypothesis_count": 0,
+        "hypothesis_status_counts": {},
+        "sector": fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
+        "market_regime": None,
+        "structured_tool_only": True,
+        "memory_retrieval_tool": "decision_memory_retrieval",
+        "candidate_hypothesis_authority": "not_consumed_by_pm_without_structured_action_value",
         "hard_margin_cap_not_overridden": True,
     }
-    alpha_setup_profiles = pm_learning_context.get("alpha_setup_items") or []
-    alpha_setup_action_values = _normalize_alpha_setup_action_values(
-        pm_learning_context.get("alpha_setup_action_values") or []
-    )
+    alpha_setup_profiles: list[dict] = []
+    alpha_setup_action_values: list[dict] = []
     pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
     pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
     pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
-    similar_alpha_action_values: list[dict] = []
-
-    risk_prompt = RISK_CONTROL_PROMPT.format(
-        enabled_analysts=enabled_analysts,
-        analyst_count=analyst_count,
-        ticker_signals=formatted_signals,
-        decision_memory=decision_memory,
-        portfolio=portfolio.model_dump_json(),
-        max_position_ratio=max_position_ratio,
-        total_portfolio_value=account_equity,
-        margin_available=remaining_margin,
-        margin_used=current_margin_used,
-        current_margin_ratio=current_margin_ratio,
-        max_total_margin_ratio=max_total_margin_ratio,
-        max_single_margin_ratio=max_single_margin_ratio,
-        max_allowed_margin=max_allowed_margin,
-        remaining_margin=remaining_margin,
-        max_single_margin=max_single_margin,
-    ) + decision_logic
-
-    portfolio_llm_config = dict(llm_config)
-    pm_llm_config = _get_portfolio_manager_config(full_config)
-    if pm_llm_config.get("llm_mode", "cloud_only") == "cloud_only" and pm_llm_config.get("cloud_model"):
-        portfolio_llm_config["model"] = pm_llm_config["cloud_model"]
-
-    position_risk = agent_call(
-        prompt=risk_prompt,
-        llm_config=portfolio_llm_config,
-        pydantic_model=PositionRisk,
-    )
-    position_risk.justification = _sanitize_visible_text(position_risk.justification)
-
-    logger.log_agent_status(agent_name, ticker, "Risk control")
-    logger.log_risk(ticker, position_risk)
+    effective_memory_summary: dict = {
+        "status": "not_retrieved_yet",
+        "consumer_scope": "pm_learning",
+        "effective_row_count": len(alpha_setup_action_values),
+        "quality_first": True,
+        "empty_history_cannot_block_real_history": True,
+        "tool_boundary": "pm_research_memory_single_entrypoint",
+    }
 
     # Prefer structured basis metadata; text parsing is only a compatibility fallback.
     fundamental_basis = 0.0
@@ -9409,7 +9197,7 @@ def portfolio_agent_futures(state: FundState):
             if fundamental_basis:
                 logger.info(f"Using structured basis percentage for {ticker}: {fundamental_basis:.2f}%")
             break
-    # Reuse the same quality-aware adaptive weights shown to the portfolio LLM.
+    # Reuse the same quality-aware adaptive weights used by deterministic PM scoring.
     dynamic_weights = weights if weights else None
     if not fusion_context:
         calculator = DynamicWeightCalculator(full_config)
@@ -9443,8 +9231,37 @@ def portfolio_agent_futures(state: FundState):
         f"weighted scores are priors, not final new-entry authority"
     )
 
-    # Allow a strong explicit basis signal to override a conflicting LLM direction.
-    #
+    initial_abs_ratio, initial_direction = calculate_position_ratio_with_balance(
+        ticker=ticker,
+        long_scores=long_scores,
+        short_scores=short_scores,
+        max_position_ratio=max_position_ratio,
+        risk_level=risk_level,
+        full_config=full_config,
+    )
+    if initial_direction == "LONG":
+        initial_signed_ratio = float(initial_abs_ratio)
+    elif initial_direction == "SHORT":
+        initial_signed_ratio = -float(initial_abs_ratio)
+    else:
+        initial_signed_ratio = 0.0
+    position_risk = PositionRisk(
+        optimal_position_ratio=initial_signed_ratio,
+        justification=_sanitize_visible_text(
+            "Deterministic PM initial target from structured analyst scores; "
+            f"direction={initial_direction}, long_strength="
+            f"{float(long_scores.get('score', 0.0) or 0.0) * float(long_scores.get('confidence', 0.0) or 0.0):.3f}, "
+            f"short_strength="
+            f"{float(short_scores.get('score', 0.0) or 0.0) * float(short_scores.get('confidence', 0.0) or 0.0):.3f}, "
+            f"max_position_ratio={max_position_ratio:.2%}, risk_level={risk_level.value}; "
+            "PM does not call LLM."
+        ),
+    )
+
+    logger.log_agent_status(agent_name, ticker, "Deterministic risk control")
+    logger.log_risk(ticker, position_risk)
+
+    # Allow a strong explicit basis signal to override a conflicting deterministic direction.
 
     bullish_strength = long_scores['score'] * long_scores['confidence']
     bearish_strength = short_scores['score'] * short_scores['confidence']
@@ -9459,7 +9276,7 @@ def portfolio_agent_futures(state: FundState):
         logger.info(
             f"   blended strength -> bullish={bullish_strength:.3f}, bearish={bearish_strength:.3f}"
         )
-        logger.info("   overriding bearish LLM output because the explicit basis signal is strongly long")
+        logger.info("   overriding bearish deterministic target because the explicit basis signal is strongly long")
 
     elif short_scores['has_strong_basis'] and position_risk.optimal_position_ratio > 0:
         logger.info(
@@ -9471,7 +9288,7 @@ def portfolio_agent_futures(state: FundState):
         logger.info(
             f"   blended strength -> bullish={bullish_strength:.3f}, bearish={bearish_strength:.3f}"
         )
-        logger.info("   overriding bullish LLM output because the explicit basis signal is strongly short")
+        logger.info("   overriding bullish deterministic target because the explicit basis signal is strongly short")
 
     directional_reasons, directional_notes, directional_diagnostics = _apply_directional_override(
         ticker=ticker,
@@ -9561,32 +9378,61 @@ def portfolio_agent_futures(state: FundState):
     signal_combo = _analyst_signal_combo(analyst_signals)
     early_adaptive_policy_state = []
     adaptive_policy_safety_trace = {}
-    if db and config_id and target_side_for_confirmation in {"long", "short"} and hasattr(db, "get_adaptive_policy_state"):
+    early_horizon = "*"
+    early_market_regime = "*"
+    early_setup_type = "*"
+    if target_side_for_confirmation in {"long", "short"}:
+        early_horizon = _resolve_decision_horizon(
+            analyst_signals,
+            1 if target_side_for_confirmation == "long" else -1,
+        )
+        early_market_regime = _market_regime_from_signals(analyst_signals, target_side_for_confirmation)
+        early_setup_type = _setup_type_from_signals(
+            target_side_for_confirmation,
+            analyst_signals,
+            signal_combo,
+        )
+    if db and config_id and target_side_for_confirmation in {"long", "short"}:
         try:
-            early_horizon = _resolve_decision_horizon(
-                analyst_signals,
-                1 if target_side_for_confirmation == "long" else -1,
-            )
-            early_market_regime = _market_regime_from_signals(analyst_signals, target_side_for_confirmation)
-            early_setup_type = _setup_type_from_signals(
-                target_side_for_confirmation,
-                analyst_signals,
-                signal_combo,
-            )
-            early_adaptive_policy_state = db.get_adaptive_policy_state(
+            early_memory_result = retrieve_pm_memory(
+                db=db,
                 config_id=config_id,
                 ticker=ticker,
                 side=target_side_for_confirmation,
-                setup_type=early_setup_type,
                 horizon_class=early_horizon,
                 market_regime=early_market_regime,
+                setup_type=early_setup_type,
+                sector=fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
+                signal_combo=list(signal_combo),
                 trading_date=trading_date,
+                include_profiles=True,
+                include_adaptive_policy_state=True,
+                limit=12,
             )
-            early_adaptive_policy_state, adaptive_policy_safety_trace = filter_adaptive_policy_state_for_pm(
-                early_adaptive_policy_state
+            early_adaptive_policy_state = early_memory_result.get("adaptive_policy_state") or []
+            adaptive_policy_safety_trace = early_memory_result.get("adaptive_policy_safety_trace") or {}
+            alpha_setup_profiles = early_memory_result.get("alpha_setup_profiles") or []
+            alpha_setup_action_values = _append_unique_action_values(
+                alpha_setup_action_values,
+                early_memory_result.get("action_values") or [],
             )
+            effective_memory_summary = early_memory_result.get("effective_memory_summary") or effective_memory_summary
+            pm_learning_audit["decision_memory_retrieval_initial"] = {
+                "tool": "decision_memory_retrieval",
+                "side": target_side_for_confirmation,
+                "horizon_class": early_horizon,
+                "market_regime": early_market_regime,
+                "setup_type": early_setup_type,
+                "effective_memory_summary": effective_memory_summary,
+                "retrieval_attempts": early_memory_result.get("retrieval_attempts") or [],
+                "rejected_or_downgraded": early_memory_result.get("rejected_or_downgraded") or [],
+            }
+            pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
+            pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
+            pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
+            pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
         except Exception as exc:
-            logger.warning(f"{ticker}: early adaptive policy state unavailable for opportunity scorecard: {exc}")
+            logger.warning(f"{ticker}: PM decision memory retrieval unavailable for early scorecard: {exc}")
 
     data_quality_summary_for_pm = build_pm_data_quality_summary(analyst_signals, market_confirmation)
     opportunity_scorecard_cfg = (
@@ -9603,8 +9449,23 @@ def portfolio_agent_futures(state: FundState):
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
+    ranking_tool_result = rank_opportunities(
+        ticker=ticker,
+        analyst_signals=analyst_signals,
+        signal_collection_contract=signal_collection_contract,
+        effective_memory_summary=effective_memory_summary,
+        market_confirmation=market_confirmation,
+        data_quality_summary=data_quality_summary_for_pm,
+        adaptive_policy_state=early_adaptive_policy_state,
+        alpha_setup_profiles=alpha_setup_profiles,
+        alpha_setup_action_values=alpha_setup_action_values,
+        decision_date=trading_date,
+        config=opportunity_scorecard_cfg,
+        prebuilt_scorecard=opportunity_scorecard,
+    )
+    opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
     fusion_context["opportunity_scorecard"] = opportunity_scorecard
-    if db and config_id and hasattr(db, "get_alpha_setup_action_values"):
+    if db and config_id:
         try:
             candidate_sides_for_exact: list[str] = []
             for side_name in (
@@ -9657,7 +9518,7 @@ def portfolio_agent_futures(state: FundState):
                     or _setup_type_from_signals(exact_side, analyst_signals, signal_combo)
                     or ""
                 )
-                side_action_values, side_retrieval_detail = _pm_retrieve_canonical_action_values(
+                side_memory_result = retrieve_pm_memory(
                     db=db,
                     config_id=config_id,
                     ticker=ticker,
@@ -9668,6 +9529,13 @@ def portfolio_agent_futures(state: FundState):
                     trading_date=trading_date,
                     limit=12,
                 )
+                side_action_values = side_memory_result.get("action_values") or []
+                side_retrieval_detail = {
+                    "tool": "decision_memory_retrieval",
+                    "effective_memory_summary": side_memory_result.get("effective_memory_summary") or {},
+                    "retrieval_attempts": side_memory_result.get("retrieval_attempts") or [],
+                    "rejected_or_downgraded": side_memory_result.get("rejected_or_downgraded") or [],
+                }
                 if side_action_values:
                     exact_alpha_action_values.extend(side_action_values)
                 exact_side_details.append({
@@ -9679,6 +9547,24 @@ def portfolio_agent_futures(state: FundState):
                     "retrieval_detail": side_retrieval_detail,
                 })
             pm_learning_audit["pm_action_value_retrieval_attempts"] = exact_side_details
+            if exact_side_details:
+                effective_memory_summary = {
+                    "status": "available" if exact_alpha_action_values else "empty",
+                    "consumer_scope": "pm_learning",
+                    "effective_row_count": len(exact_alpha_action_values),
+                    "quality_first": True,
+                    "empty_history_cannot_block_real_history": True,
+                    "side_summaries": [
+                        detail.get("retrieval_detail", {}).get("effective_memory_summary", {})
+                        for detail in exact_side_details
+                    ],
+                    "rejected_or_downgraded": [
+                        item
+                        for detail in exact_side_details
+                        for item in detail.get("retrieval_detail", {}).get("rejected_or_downgraded", [])
+                    ],
+                }
+                pm_learning_audit["decision_memory_retrieval"] = effective_memory_summary
             if exact_alpha_action_values:
                 before_count = len(alpha_setup_action_values)
                 alpha_setup_action_values = _append_unique_action_values(
@@ -9707,10 +9593,25 @@ def portfolio_agent_futures(state: FundState):
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
+                ranking_tool_result = rank_opportunities(
+                    ticker=ticker,
+                    analyst_signals=analyst_signals,
+                    signal_collection_contract=signal_collection_contract,
+                    effective_memory_summary=effective_memory_summary,
+                    market_confirmation=market_confirmation,
+                    data_quality_summary=data_quality_summary_for_pm,
+                    adaptive_policy_state=early_adaptive_policy_state,
+                    alpha_setup_profiles=alpha_setup_profiles,
+                    alpha_setup_action_values=alpha_setup_action_values,
+                    decision_date=trading_date,
+                    config=opportunity_scorecard_cfg,
+                    prebuilt_scorecard=opportunity_scorecard,
+                )
+                opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
                 fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: exact alpha setup action-value PM retrieval skipped: {exc}")
-    if db and config_id and hasattr(db, "get_similar_alpha_setup_action_values"):
+    if db and config_id:
         try:
             similar_horizon = _resolve_decision_horizon(
                 analyst_signals,
@@ -9725,26 +9626,43 @@ def portfolio_agent_futures(state: FundState):
             )
             best_profile = preferred_card.get("best_alpha_setup_profile") if isinstance(preferred_card.get("best_alpha_setup_profile"), dict) else {}
             similar_setup_type = str(best_profile.get("setup_type") or preferred_card.get("final_state") or "*")
-            similar_alpha_action_values = db.get_similar_alpha_setup_action_values(
+            similar_memory_result = retrieve_pm_memory(
+                db=db,
                 config_id=config_id,
                 ticker=ticker,
+                side=(preferred_side_for_setup if preferred_side_for_setup in {"long", "short"} else target_side_for_confirmation),
+                trading_date=trading_date,
                 sector=fusion_context.get("sector"),
-                side=(preferred_side_for_setup if preferred_side_for_setup in {"long", "short"} else None),
                 horizon_class=similar_horizon,
                 market_regime=similar_regime,
                 setup_type=similar_setup_type,
-                trading_date=trading_date,
+                include_similar=True,
                 limit=6,
             )
+            similar_alpha_action_values = similar_memory_result.get("action_values") or []
             if similar_alpha_action_values:
                 alpha_setup_action_values = _append_unique_action_values(
                     alpha_setup_action_values,
                     similar_alpha_action_values,
                 )
+                similar_summary = similar_memory_result.get("effective_memory_summary") or {}
+                effective_memory_summary = {
+                    **effective_memory_summary,
+                    "similar_memory_summary": similar_summary,
+                    "effective_row_count": len(alpha_setup_action_values),
+                    "quality_first": True,
+                    "empty_history_cannot_block_real_history": True,
+                }
                 pm_learning_audit["similar_alpha_setup_action_value_count"] = len(similar_alpha_action_values)
                 pm_learning_audit["similar_alpha_setup_action_values"] = [
                     _compact_alpha_setup_action_value(row) for row in similar_alpha_action_values[:6]
                 ]
+                pm_learning_audit["similar_alpha_setup_retrieval"] = {
+                    "tool": "decision_memory_retrieval",
+                    "effective_memory_summary": similar_summary,
+                    "retrieval_attempts": similar_memory_result.get("retrieval_attempts") or [],
+                    "rejected_or_downgraded": similar_memory_result.get("rejected_or_downgraded") or [],
+                }
                 pm_learning_audit["similar_alpha_setup_boundary"] = (
                     "strict_history_only_prior_not_trade_authority"
                 )
@@ -9759,6 +9677,21 @@ def portfolio_agent_futures(state: FundState):
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
+                ranking_tool_result = rank_opportunities(
+                    ticker=ticker,
+                    analyst_signals=analyst_signals,
+                    signal_collection_contract=signal_collection_contract,
+                    effective_memory_summary=effective_memory_summary,
+                    market_confirmation=market_confirmation,
+                    data_quality_summary=data_quality_summary_for_pm,
+                    adaptive_policy_state=early_adaptive_policy_state,
+                    alpha_setup_profiles=alpha_setup_profiles,
+                    alpha_setup_action_values=alpha_setup_action_values,
+                    decision_date=trading_date,
+                    config=opportunity_scorecard_cfg,
+                    prebuilt_scorecard=opportunity_scorecard,
+                )
+                opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
                 fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: similar alpha setup action-value PM retrieval skipped: {exc}")
@@ -9967,36 +9900,36 @@ def portfolio_agent_futures(state: FundState):
                     lookback_trades=auditor_lookback,
                     include_rollover=False,
                 )
-            if (full_config.get("strategy_memory", {}) or {}).get("enabled", False) and hasattr(db, "get_strategy_memory"):
-                strategy_memory = db.get_strategy_memory(
-                    config_id=config_id,
-                    ticker=ticker,
-                    side=auditor_side,
-                    trading_date=trading_date,
-                    signal_combo=list(signal_combo),
-                )
-            if hasattr(db, "get_adaptive_policy_state"):
-                adaptive_policy_state = db.get_adaptive_policy_state(
-                    config_id=config_id,
-                    ticker=ticker,
-                    side=auditor_side,
-                    setup_type=setup_type_key,
-                    horizon_class=decision_horizon,
-                    market_regime=market_regime_key,
-                    trading_date=trading_date,
-                )
-                adaptive_policy_state, adaptive_policy_safety_trace = filter_adaptive_policy_state_for_pm(
-                    adaptive_policy_state
-                )
-            if hasattr(db, "get_provisional_policy_state"):
-                provisional_policy_state = db.get_provisional_policy_state(
-                    config_id=config_id,
-                    ticker=ticker,
-                    side=auditor_side,
-                    setup_type=setup_type_key,
-                    horizon_class=decision_horizon,
-                    trading_date=trading_date,
-                )
+            auditor_memory_result = retrieve_pm_memory(
+                db=db,
+                config_id=config_id,
+                ticker=ticker,
+                side=auditor_side,
+                horizon_class=decision_horizon,
+                market_regime=market_regime_key,
+                setup_type=setup_type_key,
+                sector=fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
+                signal_combo=list(signal_combo),
+                trading_date=trading_date,
+                include_strategy_memory=bool((full_config.get("strategy_memory", {}) or {}).get("enabled", False)),
+                include_adaptive_policy_state=True,
+                include_provisional_policy_state=True,
+                limit=12,
+            )
+            strategy_memory = auditor_memory_result.get("strategy_memory") or {}
+            adaptive_policy_state = auditor_memory_result.get("adaptive_policy_state") or []
+            adaptive_policy_safety_trace = auditor_memory_result.get("adaptive_policy_safety_trace") or adaptive_policy_safety_trace
+            provisional_policy_state = auditor_memory_result.get("provisional_policy_state") or []
+            pm_learning_audit["decision_memory_retrieval_policy"] = {
+                "tool": "decision_memory_retrieval",
+                "side": auditor_side,
+                "horizon_class": decision_horizon,
+                "market_regime": market_regime_key,
+                "setup_type": setup_type_key,
+                "effective_memory_summary": auditor_memory_result.get("effective_memory_summary") or {},
+                "retrieval_attempts": auditor_memory_result.get("retrieval_attempts") or [],
+                "rejected_or_downgraded": auditor_memory_result.get("rejected_or_downgraded") or [],
+            }
             opportunity_scorecard = build_opportunity_scorecard(
                 ticker=ticker,
                 analyst_signals=analyst_signals,
@@ -10008,6 +9941,21 @@ def portfolio_agent_futures(state: FundState):
                 decision_date=trading_date,
                 config=opportunity_scorecard_cfg,
             )
+            ranking_tool_result = rank_opportunities(
+                ticker=ticker,
+                analyst_signals=analyst_signals,
+                signal_collection_contract=signal_collection_contract,
+                effective_memory_summary=effective_memory_summary,
+                market_confirmation=market_confirmation,
+                data_quality_summary=data_quality_summary_for_pm,
+                adaptive_policy_state=adaptive_policy_state,
+                alpha_setup_profiles=alpha_setup_profiles,
+                alpha_setup_action_values=alpha_setup_action_values,
+                decision_date=trading_date,
+                config=opportunity_scorecard_cfg,
+                prebuilt_scorecard=opportunity_scorecard,
+            )
+            opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
             fusion_context["opportunity_scorecard"] = opportunity_scorecard
 
         analyst_payload = [
@@ -10030,8 +9978,6 @@ def portfolio_agent_futures(state: FundState):
             fundamental_quality=fundamental_quality,
             recent_ticker_side_performance=recent_side_performance,
             recent_conditional_performance=recent_conditional_performance,
-            strategy_memory=strategy_memory,
-            adaptive_policy_state=adaptive_policy_state,
             provisional_policy_state=provisional_policy_state,
             risk_level=risk_level.value,
             full_config=full_config,
@@ -10802,7 +10748,7 @@ def portfolio_agent_futures(state: FundState):
         elif target_lots == 0 and control_reasons and abs(pre_control_ratio) > 1e-12:
             lots_to_trade_reason = control_reasons[-1]
         elif target_lots == 0:
-            lots_to_trade_reason = "llm_neutral"
+            lots_to_trade_reason = "deterministic_neutral"
         elif abs(target_lots - current_lots) < 0.01:
             lots_to_trade_reason = "position_matched"
         elif margin_required > margin_available:
@@ -10850,7 +10796,30 @@ def portfolio_agent_futures(state: FundState):
     plan_snapshot["execution_horizon"] = "short"
     plan_snapshot["validation_horizon"] = plan_snapshot["decision_horizon"]
     plan_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
+    plan_snapshot["signal_collection_contract"] = signal_collection_contract
     plan_snapshot["opportunity_scorecard"] = opportunity_scorecard
+    plan_snapshot["opportunity_ranking"] = ranking_tool_result
+    plan_snapshot["capital_allocation_reason"] = ranking_tool_result.get("capital_allocation_reason", {})
+    position_sizing_result = build_position_sizing_result(
+        ticker=ticker,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        target_position_ratio=position_risk.optimal_position_ratio,
+        target_value=target_value,
+        margin_required=margin_required,
+        account_equity=account_equity,
+        margin_rate=margin_rate,
+        current_net_exposure=current_net_exposure,
+        projected_net_exposure=new_net_exposure,
+        current_ticker_exposure=current_ticker_exposure,
+        max_position_ratio=max_position_ratio,
+        max_net_exposure=max_net_exposure,
+        risk_level=risk_level.value,
+        lots_to_trade_reason=lots_to_trade_reason,
+        control_reasons=control_reasons,
+        capital_allocation_reason=ranking_tool_result.get("capital_allocation_reason", {}),
+    )
+    plan_snapshot["position_sizing_result"] = position_sizing_result
     plan_snapshot["position_quality_controls"] = {
         "opportunity_quality_position_sizing": (
             control_diagnostics.get("opportunity_quality_position_sizing")
@@ -10913,6 +10882,13 @@ def portfolio_agent_futures(state: FundState):
         alpha_setup_action_values=alpha_setup_action_values,
         execution_contract_fields=plan_snapshot,
     )
+    final_action_contract["position_sizing_result"] = position_sizing_result
+    final_action_contract["signal_collection_contract_ref"] = {
+        "ticker": signal_collection_contract.get("ticker"),
+        "trading_date": signal_collection_contract.get("trading_date"),
+        "source_contract_count": len(signal_collection_contract.get("source_contracts") or []),
+        "collector_decision_boundary": signal_collection_contract.get("collector_decision_boundary"),
+    }
     plan_snapshot["release_block_diagnostics"] = _build_release_block_diagnostics(
         ticker=ticker,
         final_action_contract=final_action_contract,
@@ -11008,14 +10984,11 @@ def portfolio_agent_futures(state: FundState):
                 "candidate_hypotheses_not_counted_as_position_support"
             )
         control_diagnostics["exploratory_learning_context"] = pm_learning_audit
-    pm_llm_audit = llm_audit_metadata(portfolio_llm_config)
     plan_snapshot["portfolio_manager_llm"] = {
-        "mode": "cloud_only",
-        "provider": pm_llm_audit.get("provider"),
-        "model": pm_llm_audit.get("model"),
-        "reasoning_effort": pm_llm_audit.get("reasoning_effort"),
-        "base_url": pm_llm_audit.get("base_url"),
-        "api_key_env": pm_llm_audit.get("api_key_env"),
+        "mode": "disabled",
+        "provider": "",
+        "model": "",
+        "reason": "portfolio_manager_does_not_call_llm",
     }
     if auditor_output:
         auditor_payload = (

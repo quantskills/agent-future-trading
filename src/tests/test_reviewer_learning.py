@@ -23,7 +23,7 @@ from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_stra
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
-from tools.agent_tools.contracts import attach_snapshot_contract, validate_artifact_header
+from tools.common.contracts import attach_snapshot_contract, validate_artifact_header
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.research.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
 from tools.agent_tools.analysis.dynamic_weights import calibrate_weights_by_signal_history
@@ -39,7 +39,7 @@ from tools.agent_tools.research.neutral_accountability import (
     classify_neutral_signal,
 )
 from tools.agent_tools.analysis.quality import build_technical_context, apply_signal_quality_gate
-from tools.agent_tools.research.researcher_tools import (
+from tools.agent_tools.research.research_learning import (
     CausalReviewLLMOutput,
     ExploratoryHypothesisItem,
     ExploratoryHypothesisLLMOutput,
@@ -54,7 +54,7 @@ from tools.agent_tools.research.alpha_setup import (
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
-from tools.agent_tools.research.reviewer_tools import (
+from tools.agent_tools.research.phase4_review import (
     _export_template_prior,
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
@@ -1457,7 +1457,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
 
 
 class AdaptivePolicyAuditorTest(unittest.TestCase):
-    def test_auditor_applies_reviewer_adaptive_cap(self):
+    def test_auditor_ignores_reviewer_adaptive_cap(self):
         auditor = TradeAuditor(
             {
                 "trade_auditor": {
@@ -1488,9 +1488,13 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(output.decision, "scale_down")
-        self.assertAlmostEqual(output.position_ratio_multiplier, 0.5)
-        self.assertIn("adaptive_policy_cap", output.reasons)
+        self.assertEqual(output.decision, "allow")
+        self.assertAlmostEqual(output.position_ratio_multiplier, 1.0)
+        self.assertNotIn("adaptive_policy_cap", output.reasons)
+        self.assertEqual(
+            output.diagnostics.get("research_memory_boundary"),
+            "auditor_does_not_consume_research_records",
+        )
 
     def test_learning_overlay_cannot_raise_portfolio_hard_margin_cap(self):
         self.assertAlmostEqual(
@@ -5619,7 +5623,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_contextual_rule_calibration_writes_intraday_policy_from_missed_timing_counterfactual(self):
+    def test_contextual_rule_calibration_does_not_write_intraday_execution_policy(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -5683,7 +5687,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 no_trade_reason_counter=Counter(),
             )
 
-            self.assertEqual(rows, 1)
+            self.assertEqual(rows, 0)
             row = cursor.execute(
                 """
                 SELECT policy_type, ticker, side, horizon_class, market_regime, payload_json
@@ -5691,15 +5695,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 WHERE policy_type = 'contextual_rule_calibration:intraday_confirmation'
                 """
             ).fetchone()
-            self.assertEqual(row["ticker"], "BU")
-            self.assertEqual(row["side"], "long")
-            saved_payload = load_externalized_json(row["payload_json"])
-            self.assertEqual(saved_payload["rule_group"], "intraday_confirmation")
-            self.assertIn("intraday_confirmation", saved_payload["rule_adjustments"])
-            self.assertEqual(
-                saved_payload["rule_adjustments"]["intraday_confirmation"]["confirmed_memory_min_market_confirmation_score"],
-                0.65,
-            )
+            self.assertIsNone(row)
         finally:
             conn.close()
 

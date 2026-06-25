@@ -276,7 +276,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             SRC_ROOT / "util" / "futures_audit.py",
             SRC_ROOT / "agents" / "execution_team" / "trader.py",
             SRC_ROOT / "tools" / "agent_tools" / "execution" / "futures_execution.py",
-            SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_tools.py",
+            SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py",
         ]
 
         for path in production_files:

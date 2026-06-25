@@ -18,7 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from tools.agent_tools.research.researcher_tools import backfill_alpha_setup_profiles_from_history
+from tools.agent_tools.research.research_learning import backfill_alpha_setup_profiles_from_history
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.logger import logger

@@ -46,10 +46,10 @@ Researcher 是研究员，可以按配置调用 LLM 做 causal review 和探索�
 | `alpha_setup_sample` | 单个 setup 的交易/未交易/执行样本 | Researcher 汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师、PM | 只作为同作用域证据，不是品种黑名单 |
 | `alpha_setup_action_value` | open/hold/exit/execution 分动作结果 | PM、分析师间接使用 | Trader 不直接读取；PM 只按 action lane 使用 |
-| `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | PM、Auditor | 必须被当日证据、失效边界和审计再验证 |
+| `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | Researcher 写入，PM 经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界和审计再验证；Auditor/Trader 不直接消费 |
 | `opportunity_ranking_preference` | PM 排序、资金分配理由、排名与后续收益的关系 | PM、Researcher | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
 | `research_position_feedback` | 研究是否进入 PM、是否改变合约、是否成交和结算 | PM、Researcher | 用于检查学习是否真的进入仓位链路 |
-| `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | PM、Researcher | 只影响未来 execution profile，不改方向/手数 |
+| `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | Researcher 写入，PM 消费 | 只能经 PM 写入未来 `final_action_contract.execution_profile/entry_trigger` 后影响执行，不改方向/手数，Trader 不直接读取 |
 
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
@@ -69,7 +69,7 @@ tail_loss_protect
 
 open 评价“当时开仓是否有正期望”；hold 评价“继续持有是否保护收益或扩大收益”；exit 评价“退出/减仓是否避免回吐或尾部亏损”；execution 评价“触发方式和成交质量是否改善结果”。
 
-不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被 PM 写入 `final_action_contract.execution_plan/execution_profile`，不能改变方向或目标手数。
+不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被 PM 写入 `final_action_contract.execution_plan/execution_profile/entry_trigger`，不能改变方向或目标手数，也不能由 Trader 直接读取后放宽触发。
 
 ## 五、分析师如何使用研究成果
 
@@ -87,13 +87,13 @@ PM 现在还要做全市场候选比较。`opportunity_score` 和 `opportunity_r
 
 PM 评分必须把完整 episode 学习放在单日噪声之前。`positive_candidate_open/hold/exit/execution` 会进入 `positive_learning` 或 `execution_profile_learning`，支持同作用域机会提升排名、继续持有、择机放大或优化执行 profile；`tail_loss_protect/negative_revalidate/negative_hold_revalidate` 会进入 `negative_learning` 或 `recent_tail_loss_penalty`，用于降低同作用域排名、降级持仓或更快退出。负向学习不是品种黑名单，正向学习也不是无限放大；二者都必须按 `exact_real_state > partial_real_state > similar_sql_prior > observation_only` 和时间衰减生效，并且只能通过 PM 的同一张最终合约改变目标仓位。
 
-PM 还会读取 execution action-value，但只能把它消化成最终合约的执行计划。Trader 仍只读 `final_action_contract` 和盘中数据。
+PM 还会读取 execution action-value，但只能把它消化成最终合约的执行计划。Trader 只读 `final_action_contract` 中已合约化的 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
 
 条件机会闭环现在是研究机制的一部分。若分析师输出干净的 `watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/entry_trigger/invalidation`，PM 不能把它当普通 wait 丢掉；PM 可以生成条件 probe 合约。Trader 未触发时只记录未触发原因，Researcher 不能把未触发当成开仓亏损样本，只能研究条件是否太苛刻、监控是否有价值。
 
 ## 七、Trader、Accountant、Reviewer 与学习边界
 
-Trader 写执行事实和执行学习事件，但不直接读取研究 action-value，不创造策略。未触发、涨跌停、追价失败、成交量不足、合约临近交割、保证金不足等，都要写明原因供 Researcher 未来研究。Trader 可以把成交或未成交事实与 PM 排名诊断关联记录，但不能按 `opportunity_score/opportunity_rank` 改方向、改手数或创造交易。
+Trader 写执行事实和执行学习事件，但不直接读取研究 action-value、`strategy_memory` 或 `adaptive_policy_state`，不创造策略，不按历史好坏放宽触发。未触发、涨跌停、追价失败、成交量不足、合约临近交割、保证金不足等，都要写明原因供 Researcher 未来研究。Trader 可以把成交或未成交事实与 PM 排名诊断关联记录，但不能按 `opportunity_score/opportunity_rank` 改方向、改手数或创造交易。
 
 Accountant 只按成交和结算价入账。手续费、保证金、释放保证金、持仓盈亏、平仓盈亏和账户权益都不能被研究文本改写。
 

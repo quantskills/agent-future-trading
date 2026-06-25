@@ -17,7 +17,6 @@ from graph.schema import (
 )
 from graph.constants import AgentKey, Signal
 from agents.registry import AgentRegistry
-from agents.control_team.planner import planner_agent
 from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
 from tools.agent_tools.analysis.quality import write_analyst_report
 from tools.agent_tools.analysis.data_usage import prefetch_local_daily_data, prefetch_pandaai_daily_data
@@ -51,8 +50,12 @@ class AgentWorkflow:
         self.init_portfolio = Portfolio(**portfolio)
         logger.info(f"Portfolio ID: {self.init_portfolio.id}")
         
-        # Initialize workflow configuration
-        self.planner_mode = config.get('planner_mode', False)
+        if config.get('planner_mode', False):
+            raise RuntimeError(
+                "planner_mode is disabled by the fixed multi-agent workflow; "
+                "use workflow_analysts and signal_collector instead."
+            )
+        self.planner_mode = False
         
         # Verify workflow analysts
         if not config.get('workflow_analysts'):
@@ -564,7 +567,9 @@ class AgentWorkflow:
         market_type = self.config.get('market_type', 'china_futures')
         if market_type != "china_futures":
             raise RuntimeError("AgentWorkflow.build() now supports china_futures only.")
+        from agents.decision_team.signal_collector import signal_collector_agent
         from agents.decision_team.portfolio_manager import portfolio_agent_futures
+        graph.add_node(AgentKey.SIGNAL_COLLECTOR, signal_collector_agent)
         portfolio_agent = portfolio_agent_futures
         graph.add_node(AgentKey.PORTFOLIO, portfolio_agent)
 
@@ -573,8 +578,9 @@ class AgentWorkflow:
             agent_func = AgentRegistry.get_agent_func_by_key(analyst)
             graph.add_node(analyst, agent_func)
             graph.add_edge(START, analyst)
-            graph.add_edge(analyst, AgentKey.PORTFOLIO)
+            graph.add_edge(analyst, AgentKey.SIGNAL_COLLECTOR)
 
+        graph.add_edge(AgentKey.SIGNAL_COLLECTOR, AgentKey.PORTFOLIO)
         graph.add_edge(AgentKey.PORTFOLIO, END)
 
         workflow = graph.compile()
@@ -584,18 +590,10 @@ class AgentWorkflow:
 
     def load_analysts(self, ticker: str):
         """
-        Load the analysts for processing:
-        - If planner_mode is True: use planner to select from verified workflow_analysts
-        - If planner_mode is False: use all verified workflow_analysts
+        Load all configured analysts for the fixed futures workflow.
         """
-        if self.planner_mode:
-            logger.info("Using planner agent to select analysts from verified list")
-            self.current_analysts = planner_agent(ticker, self.llm_config, self.workflow_analysts)
-            if not self.current_analysts:
-                raise ValueError("No analysts selected by planner")
-        else:
-            logger.info("Using all verified analysts")
-            self.current_analysts = self.workflow_analysts.copy()
+        logger.info("Using all verified analysts")
+        self.current_analysts = self.workflow_analysts.copy()
             
         logger.info(f"Active analysts for {ticker}: {self.current_analysts}")
 
@@ -843,6 +841,7 @@ class AgentWorkflow:
         }
 
     def _run_phase1_portfolio_only(self, analysis_state: Dict[str, Any], portfolio: Portfolio) -> Dict[str, Any]:
+        from agents.decision_team.signal_collector import signal_collector_agent
         from agents.decision_team.portfolio_manager import portfolio_agent_futures
 
         state = dict(analysis_state)
@@ -855,6 +854,8 @@ class AgentWorkflow:
             list(state.get("enabled_analysts") or self.workflow_analysts),
             list(state.get("analyst_signals") or []),
         )
+        collector_output = signal_collector_agent(state)
+        state.update(collector_output)
         return portfolio_agent_futures(state)
 
     def _prefetch_pre_open_reference_prices(self, timings: Dict[str, float]) -> Dict[str, Any]:

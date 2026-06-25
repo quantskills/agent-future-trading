@@ -163,15 +163,6 @@ PM_RULE_SPECS: dict[str, tuple[tuple[str, str], str, float | None, float | None]
 }
 
 
-INTRADAY_RULE_SPECS: dict[str, tuple[str, float | None, float | None]] = {
-    "confirmed_memory_max_opening_range_miss": ("float", 0.0, 0.006),
-    "confirmed_memory_min_market_confirmation_score": ("float", 0.55, 0.90),
-    "confirmed_memory_min_confirmations": ("int", 1, 5),
-    "max_chase_ratio": ("float", 0.005, 0.03),
-    "opening_range_minutes": ("int", 5, 60),
-}
-
-
 def _coerce_rule_value(value: Any, kind: str, lower: float | None, upper: float | None, default: Any) -> Any:
     if kind == "bool":
         return bool(value)
@@ -270,48 +261,6 @@ def apply_auditor_contextual_calibration(
             "market_regime": market_regime,
         },
     }
-
-
-def apply_intraday_contextual_calibration(
-    intraday_config: Mapping[str, Any],
-    rows: Iterable[Mapping[str, Any]] | None,
-    *,
-    ticker: str,
-    side: str,
-    horizon_class: str,
-    market_regime: str,
-    min_confidence: float = 0.35,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    config = deepcopy(dict(intraday_config or {}))
-    applied: list[dict[str, Any]] = []
-    for row in select_contextual_rule_calibrations(
-        rows,
-        rule_group="intraday_confirmation",
-        ticker=ticker,
-        side=side,
-        horizon_class=horizon_class,
-        market_regime=market_regime,
-        min_confidence=min_confidence,
-    ):
-        rules = (_row_rules(row).get("intraday_confirmation") or {})
-        if not isinstance(rules, Mapping):
-            continue
-        for key, (kind, lower, upper) in INTRADAY_RULE_SPECS.items():
-            if key in rules:
-                config[key] = _coerce_rule_value(rules.get(key), kind, lower, upper, config.get(key))
-        applied.append(_applied_summary(row, rules))
-    diagnostics = {
-        "enabled": True,
-        "rule_group": "intraday_confirmation",
-        "applied": applied,
-        "scope": {
-            "ticker": ticker,
-            "side": side,
-            "horizon_class": horizon_class,
-            "market_regime": market_regime,
-        },
-    }
-    return config, diagnostics
 
 
 def _applied_summary(row: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[str, Any]:

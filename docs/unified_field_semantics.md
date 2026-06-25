@@ -207,6 +207,27 @@
 | `maturity` | trade research contract | 研究成熟度。 |
 | `product_context` | trade research contract | 品种业务上下文。 |
 
+### 3.1 信号收集员结构化证据包字段：`signal_collection_contract`
+
+| 字段 | 放置位置 | 含义 |
+|---|---|---|
+| `signal_collection_contract` | `signal_collector` 输出 / PM 输入 | 信号收集员给投资组合经理的盘前统一结构化预测证据包；不是交易合约，不能包含手数、仓位比例或最终交易动作。 |
+| `source_contracts` | `signal_collection_contract` | 被收集的上游分析师 `action_evidence_contract` 引用列表。 |
+| `evidence_items` | `signal_collection_contract` | 逐条结构化证据明细，必须保留来源分析师、来源字段和证据含义，不能只写汇总文字。 |
+| `dominant_side` | `signal_collection_contract` | 盘前结构化预测证据汇总后的主方向，如 long、short、flat、mixed；不是交易授权。 |
+| `side_consensus` | `signal_collection_contract` | 三类分析师在方向上的一致性或分歧状态。 |
+| `trigger_status` | `signal_collection_contract` | 由 `trigger_valid`、`current_trigger_confirmed`、`entry_trigger` 汇总出的当前触发状态；不是交易员执行权限。 |
+| `supporting_analysts` | `signal_collection_contract` | 支持 `dominant_side` 的分析师列表。 |
+| `opposing_analysts` | `signal_collection_contract` | 反对 `dominant_side` 或给出反向证据的分析师列表。 |
+| `neutral_analysts` | `signal_collection_contract` | 无明确方向或只给背景证据的分析师列表。 |
+| `evidence_strength` | `signal_collection_contract` | 盘前预测证据强弱汇总，来源于分析师置信度、证据质量和触发状态；不能替代 `opportunity_score`。 |
+| `evidence_conflict_level` | `signal_collection_contract` | 盘前预测证据冲突程度汇总，来源于 `current_evidence_conflict`、反向证据和分析师分歧。 |
+| `data_quality_flags` | `signal_collection_contract` | 数据新鲜度、缺失、前视风险和质量问题标记。 |
+| `setup_types` | `signal_collection_contract` | 从上游分析师证据收集到的 `setup_type` 列表。 |
+| `horizon_scope` | `signal_collection_contract` | 汇总后的证据期限范围，来源于 `horizon_class`、`analyst_horizon` 等字段。 |
+| `invalidation_summary` | `signal_collection_contract` | 从上游证据汇总出的失效边界和失效条件。 |
+| `collector_decision_boundary` | `signal_collection_contract` | 信号收集员权限边界标记，固定表达其无交易权限，例如 `no_trade_authority`。 |
+
 ## 4. 基本面分析师字段
 
 | 字段 | 放置位置 | 含义 |
@@ -264,8 +285,10 @@
 | `target_lots` | `final_action_contract` | 动作后目标手数。 |
 | `lots_delta` | `final_action_contract` | `target_lots - current_lots`。 |
 | `target_position_ratio` | `final_action_contract` | 目标仓位比例。 |
+| `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
+| `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / PM 学习审计 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
-| `execution_profile` | `final_action_contract` | breakout、pullback、vwap、event_immediate、exit_immediate、none。 |
+| `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
 | `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
@@ -279,11 +302,12 @@
 | `contract_hash` | 审计 / 执行 | 被审计的合约哈希。 |
 | `single_source_of_trade_truth_remains` | PM 诊断 | 必须等于 `final_action_contract`；只用于审计说明。 |
 | `active_opportunity_audit` | PM 推荐 snapshot | PM 对当前机会释放路径的诊断对象；只用于解释候选、阻断和条件监控，不生成第二张交易合约。 |
+| `opportunity_scorecard` | `opportunity_ranking` 输出 / PM 输入 / `final_action_contract.evidence_used` | PM 对同一品种多方向候选的结构化评分卡，包含现实证据、历史学习、市场确认、数据质量、风险扣分和 rank；它解释资金优先级，不是交易授权。 |
 | `opportunity_score` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 对候选机会的综合评分，用于资金部署排序解释；不是交易授权，不能替代 `target_lots`。 |
 | `opportunity_score_components` | PM scorecard / `final_action_contract.evidence_used` / 复盘评估 | `opportunity_score` 的分项来源，如方向支持、setup 质量、市场确认、学习调整和风险扣分。 |
 | `positive_learning` | `opportunity_score_components` | 正向 open/hold/exit/execution action-value 对机会排序的加分分项；按 episode、作用域、样本、收益和时间衰减计算，不能单独授权交易。 |
 | `negative_learning` | `opportunity_score_components` | `tail_loss_protect` / `negative_revalidate` / `negative_hold_revalidate` 等负向 action-value 对机会排序的扣分分项；只降低 rank，不是永久封杀。 |
-| `execution_profile_learning` | `opportunity_score_components` | 同类 `execution_profile` / `trigger_reason` 后续收益对排序的影响；可正可负，只供 PM 排名和执行 profile 选择参考，Trader 不能据此改手数或方向。 |
+| `execution_profile_learning` | `opportunity_score_components` | 同类 `execution_profile` / `trigger_reason` 后续收益对排序的影响；可正可负，只供 PM 排名和执行 profile 选择参考；必须经 PM 写入 `final_action_contract.execution_profile/entry_trigger` 后才影响执行，Trader 不能直接读取学习记录、改手数或方向。 |
 | `recent_tail_loss_penalty` | `opportunity_score_components` | 近期同作用域大亏或 tail-loss episode 对排序的惩罚分项，可抵消旧正向学习，防止失效 alpha 继续被抬分；不等于硬风险 block。 |
 | `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。 |
 | `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。 |
@@ -464,7 +488,7 @@
 | `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务 open、hold、exit、execution、calibration 或 diagnostic。 |
 | `retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM exact state 检索键，格式为 ticker、side、horizon_class、market_regime、setup_type、learning_lane；用于机器检索，不是交易授权。 |
 | `fallback_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM fallback 检索键，格式为 ticker、side、horizon_class、learning_lane；exact state 漂移时用于同品种同方向同期限学习消费。 |
-| `execution_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 执行学习检索键，格式为 ticker、execution_profile、trigger_reason、learning_lane；只能支持执行质量诊断或 PM execution profile 偏好，不产生交易权限。 |
+| `execution_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 执行学习检索键，格式为 ticker、execution_profile、trigger_reason、learning_lane；只能支持执行质量诊断或 PM execution profile 偏好，不产生交易权限，Trader 不直接读取。 |
 | `retrieval_match_level` | `final_action_contract.learning_used.alpha_setup_action_values` / 机制审计 | PM 实际消费 action-value 时的命中层级，如 exact_state、same_ticker_side_horizon、same_ticker_side、weak_prior。 |
 | `retrieval_match_reason` | `final_action_contract.learning_used.alpha_setup_action_values` / 机制审计 | PM 使用该 action-value 的机器可读原因；用于审计学习是否按固定层级消费。 |
 | `counterfactual_reward_weight` | action-value payload | 反事实样本在学习奖励中的权重。 |

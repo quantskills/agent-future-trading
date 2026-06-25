@@ -6,7 +6,7 @@ from tools.agent_tools.decision.capital_allocator import (
     conflicting_weak_memory_record as _conflicting_weak_memory_record,
     high_quality_learning_context,
 )
-from tools.agent_tools.decision.pm_invalidation_policy import (
+from tools.agent_tools.decision.invalidation_policy import (
     _has_explicit_stop_protection,
     _has_structured_invalidation_condition,
 )

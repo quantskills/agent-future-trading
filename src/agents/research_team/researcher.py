@@ -11,7 +11,7 @@ import sqlite3
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from tools.agent_tools.research.researcher_tools import apply_researcher_learning
+from tools.agent_tools.research.research_learning import apply_researcher_learning
 from util.logger import logger
 
 

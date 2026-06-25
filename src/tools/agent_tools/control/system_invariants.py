@@ -60,7 +60,6 @@ TRIGGER_PASSED_REASONS = {
     "intraday_vwap_confirmed",
     "intraday_immediate_execution",
     "intraday_event_immediate_execution",
-    "intraday_confirmed_memory_vwap_fallback",
 }
 ACTION_PREFERENCE_VALUES = {
     "positive_candidate_open",

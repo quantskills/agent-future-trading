@@ -75,6 +75,37 @@
     }
   },
   {
+    "artifact_type": "SignalCollectionArtifact",
+    "header": {
+      "contract_version": "agentquant.signal_collection.v1",
+      "agent_name": "signal_collector",
+      "trading_date": "2025-01-02",
+      "ticker": "BU",
+      "config_id": "fixture",
+      "recommendation_id": null,
+      "evidence_pack_id": "evidence-pack-fixture",
+      "data_cutoff": "pre_open",
+      "no_lookahead_status": "ok",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
+      "source_artifacts": ["technical:BU:2025-01-02", "fundamental:BU:2025-01-02", "commodity_news:BU:2025-01-02"],
+      "validation_errors": []
+    },
+    "payload": {
+      "signal_collection_contract": {
+        "contract_version": "agentquant.signal_collection.v1",
+        "ticker": "BU",
+        "trading_date": "2025-01-02",
+        "source_contracts": ["technical", "fundamental", "commodity_news"],
+        "evidence_items": [],
+        "dominant_side": "long",
+        "trigger_status": "mixed",
+        "collector_decision_boundary": "no_trade_authority"
+      }
+    }
+  },
+  {
     "artifact_type": "PMDecisionArtifact",
     "header": {
       "contract_version": "agentquant.snapshot.v2",
@@ -86,7 +117,7 @@
       "evidence_pack_id": null,
       "data_cutoff": "pre_open",
       "no_lookahead_status": "ok",
-      "determinism_mode": "llm_with_deterministic_controls",
+      "determinism_mode": "deterministic",
       "llm_provider": "",
       "llm_model": "",
       "source_artifacts": ["technical:I:2025-01-02", "fundamental:I:2025-01-02"],

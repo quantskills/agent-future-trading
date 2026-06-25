@@ -8,7 +8,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 from graph.workflow import AgentWorkflow
-from tools.agent_tools.runtime_setup import (
+from tools.common.runtime_setup import (
     ensure_seed_settled_portfolio,
     load_portfolio_config,
     resolve_net_exposure_config,

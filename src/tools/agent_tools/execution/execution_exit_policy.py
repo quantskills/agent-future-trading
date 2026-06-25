@@ -1,6 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""Deterministic trader exit policy helpers."""
+"""Deterministic execution exit policy helpers."""
 
 from datetime import datetime
 from typing import Any, Dict, Optional

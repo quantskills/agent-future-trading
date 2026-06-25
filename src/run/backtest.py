@@ -30,7 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run historical futures backtests day by day with "
-            "run/proposal.py, run/order.py, run/settlement.py, and run/validate_phase_flow.py."
+            "run/proposal.py, run/order.py, run/settlement.py, run/validate_phase_flow.py, "
+            "and run/research/researcher_learning.py."
         )
     )
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config, e.g. config/dev.yaml")
@@ -334,12 +335,19 @@ def main() -> int:
             trading_date=trading_day,
             local_db=args.local_db,
         )
+        research_cmd = build_command(
+            str(RUN_DIR / "research" / "researcher_learning.py"),
+            config_arg,
+            trading_date=trading_day,
+            local_db=args.local_db,
+        )
 
         for script_name, command, should_skip in (
             ("proposal.py", proposal_cmd, phase1_record is not None and phase1_record.get("status") == "completed"),
             ("order.py", order_cmd, phase2_record is not None and phase2_record.get("status") == "completed"),
             ("settlement.py", settlement_cmd, phase3_record is not None and phase3_record.get("status") == "completed"),
             ("validate_phase_flow.py", validate_cmd, phase4_record is not None and phase4_record.get("status") == "completed"),
+            ("researcher_learning.py", research_cmd, False),
         ):
             if should_skip:
                 print(f"[backtest] Skipping {script_name} for {trading_day}: already completed")

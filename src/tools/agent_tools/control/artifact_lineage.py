@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from tools.agent_tools.contracts import build_artifact_header, validate_artifact_header
+from tools.common.contracts import build_artifact_header, validate_artifact_header
 
 
 PROTOCOL_LINEAGE_FIELDS = ["task_id", "context_id", "phase"]

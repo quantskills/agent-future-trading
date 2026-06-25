@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from graph.schema import BasePriceSource, MorningExecutionBasis
-from tools.agent_tools.decision.contextual_rule_calibration import apply_intraday_contextual_calibration
 
 
 _BUY_LIKE_ACTIONS = {"open_long", "close_short"}
@@ -39,7 +38,6 @@ class IntradayExecutionSelection:
             "intraday_event_immediate_execution",
             "intraday_pullback_confirmed",
             "intraday_vwap_confirmed",
-            "intraday_confirmed_memory_vwap_fallback",
         }
         execution_failure_reason = "" if self.decision == "execute" else self.reason
         missed_opportunity_flag = bool(self.decision in {"skip", "wait"} and self.reason not in {"hold_or_zero_lots"})
@@ -68,9 +66,6 @@ def resolve_intraday_execution_basis(
     trading_date,
     action: Any,
     contract_code: Optional[str] = None,
-    market_confirmation: Optional[Dict[str, Any]] = None,
-    strategy_memory: Optional[Dict[str, Any]] = None,
-    adaptive_policy_state: Optional[List[Dict[str, Any]]] = None,
     decision_context: Optional[Dict[str, Any]] = None,
     cutoff_datetime: Optional[datetime] = None,
     finalize_untriggered: bool = True,
@@ -111,9 +106,6 @@ def resolve_intraday_execution_basis(
             execution_bars=execution_bars,
             action=action_value,
             config=intraday_config,
-            market_confirmation=market_confirmation,
-            strategy_memory=strategy_memory,
-            adaptive_policy_state=adaptive_policy_state,
             decision_context=decision_context,
             cutoff_datetime=cutoff_datetime,
             finalize_untriggered=finalize_untriggered,
@@ -144,9 +136,6 @@ def select_intraday_execution(
     execution_bars: Iterable[Dict[str, Any]],
     action: Any,
     config: Dict[str, Any],
-    market_confirmation: Optional[Dict[str, Any]] = None,
-    strategy_memory: Optional[Dict[str, Any]] = None,
-    adaptive_policy_state: Optional[List[Dict[str, Any]]] = None,
     decision_context: Optional[Dict[str, Any]] = None,
     cutoff_datetime: Optional[datetime] = None,
     finalize_untriggered: bool = True,
@@ -155,17 +144,8 @@ def select_intraday_execution(
     """Select the first valid execution bar using completed signal bars only."""
 
     action_value = _enum_value(action)
-    side = _side_from_action(action_value)
     decision_context = decision_context if isinstance(decision_context, dict) else {}
-    config, contextual_diag = apply_intraday_contextual_calibration(
-        config or {},
-        adaptive_policy_state or [],
-        ticker=str(decision_context.get("ticker") or decision_context.get("underlying_code") or "*").upper(),
-        side=side,
-        horizon_class=str(decision_context.get("horizon_class") or decision_context.get("decision_horizon") or "*"),
-        market_regime=str(decision_context.get("market_regime") or "*"),
-        min_confidence=float(decision_context.get("contextual_min_confidence") or 0.35),
-    )
+    config = config or {}
     normalized_signal_bars = _normalize_bars(signal_bars, cutoff_datetime=cutoff_datetime)
     normalized_execution_bars = _normalize_bars(execution_bars, cutoff_datetime=cutoff_datetime)
     min_volume = float(config.get("min_execution_volume", 0) or 0)
@@ -337,26 +317,9 @@ def select_intraday_execution(
                 "eligible_signal_bars": len(signal_bars_for_trigger),
                 "execution_bars": len(normalized_execution_bars),
                 "chase_check": chase_check,
-                "contextual_rule_calibration": contextual_diag,
             },
             source=BasePriceSource.INTRADAY_NEXT_1M_OPEN,
         )
-
-    fallback_selection = _confirmed_memory_fallback_selection(
-        action_value=action_value,
-        normalized_execution_bars=normalized_execution_bars,
-        signal_bars_for_trigger=signal_bars_for_trigger,
-        opening_range=opening_range,
-        min_volume=min_volume,
-        config=config,
-        market_confirmation=market_confirmation,
-        strategy_memory=strategy_memory,
-        contextual_diag=contextual_diag,
-        execution_profile=execution_profile,
-        execution_contract=execution_contract,
-    )
-    if fallback_selection is not None:
-        return fallback_selection
 
     return IntradayExecutionSelection(
         decision="skip" if finalize_untriggered else "wait",
@@ -368,188 +331,10 @@ def select_intraday_execution(
             "execution_bars": len(normalized_execution_bars),
             "opening_range": opening_range,
             "finalize_untriggered": finalize_untriggered,
-            "contextual_rule_calibration": contextual_diag,
             "execution_profile": execution_profile,
             "execution_contract": execution_contract,
         },
     )
-
-
-def _confirmed_memory_fallback_selection(
-    *,
-    action_value: str,
-    normalized_execution_bars: List[Dict[str, Any]],
-    signal_bars_for_trigger: List[Dict[str, Any]],
-    opening_range: Dict[str, Any],
-    min_volume: float,
-    config: Dict[str, Any],
-    market_confirmation: Optional[Dict[str, Any]],
-    strategy_memory: Optional[Dict[str, Any]],
-    contextual_diag: Optional[Dict[str, Any]] = None,
-    execution_profile: str = "breakout",
-    execution_contract: Optional[Dict[str, Any]] = None,
-) -> Optional[IntradayExecutionSelection]:
-    """Allow proven templates to execute on VWAP support when breakout is narrowly absent."""
-    if not bool(config.get("allow_confirmed_memory_vwap_fallback", False)):
-        return None
-    execution_contract = execution_contract if isinstance(execution_contract, dict) else {}
-    if not bool(execution_contract.get("allow_confirmed_memory_vwap_fallback", False)):
-        return None
-    if action_value not in _BUY_LIKE_ACTIONS | _SELL_LIKE_ACTIONS:
-        return None
-    memory_quality = _high_quality_memory_summary(strategy_memory, config)
-    if not memory_quality.get("passed"):
-        return None
-    confirmation = market_confirmation or {}
-    confirmations = confirmation.get("confirmations") or []
-    min_score = float(config.get("confirmed_memory_min_market_confirmation_score", 0.70) or 0.70)
-    min_confirmations = int(config.get("confirmed_memory_min_confirmations", 3) or 3)
-    confirmation_score = _float(confirmation.get("confirmation_score"), 0.0) or 0.0
-    if confirmation_score < min_score or len(confirmations) < min_confirmations:
-        return None
-    if not signal_bars_for_trigger:
-        return None
-
-    max_opening_range_miss = float(config.get("confirmed_memory_max_opening_range_miss", 0.002) or 0.002)
-    fallback_source = BasePriceSource.INTRADAY_NEXT_1M_OPEN
-    for signal_bar in signal_bars_for_trigger:
-        historical_exec_bars = [bar for bar in normalized_execution_bars if bar["dt"] <= signal_bar["dt"]]
-        if not historical_exec_bars:
-            continue
-        signal_close = _float(signal_bar.get("close"))
-        vwap_value = _vwap(historical_exec_bars)
-        if signal_close is None or vwap_value is None or signal_close <= 0:
-            continue
-
-        long_vwap_support = action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value
-        short_vwap_support = action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value
-        long_range_miss = _relative_miss(signal_close, opening_range.get("high"), direction="long")
-        short_range_miss = _relative_miss(signal_close, opening_range.get("low"), direction="short")
-        long_fallback = long_vwap_support and long_range_miss <= max_opening_range_miss
-        short_fallback = short_vwap_support and short_range_miss <= max_opening_range_miss
-        if not (long_fallback or short_fallback):
-            continue
-
-        execution_bar = _next_execution_bar(
-            normalized_execution_bars,
-            after_dt=signal_bar["dt"],
-            min_volume=min_volume,
-        )
-        if execution_bar is None:
-            continue
-        chase_check = _passes_chase_filter(
-            action_value=action_value,
-            signal_close=signal_close,
-            execution_open=_float(execution_bar.get("open")),
-            config=config,
-        )
-        if not chase_check["passed"]:
-            continue
-
-        return _execution_selection(
-            reason="intraday_confirmed_memory_vwap_fallback",
-            execution_bar=execution_bar,
-            signal_bar=signal_bar,
-            features={
-                "execution_mode": "confirmed_memory_vwap_fallback",
-                "execution_profile": execution_profile,
-                "execution_contract": execution_contract,
-                "fallback_authorized_by_pm": True,
-                "fallback_authority_boundary": (
-                    "confirmed_memory_vwap_fallback_requires_pm_execution_contract_flag_"
-                    "plus_protected_or_deployable_memory_market_confirmation_and_chase_check"
-                ),
-                "action": action_value,
-                "signal_close": signal_close,
-                "vwap": vwap_value,
-                "opening_range": opening_range,
-                "opening_range_miss": long_range_miss if long_fallback else short_range_miss,
-                "max_opening_range_miss": max_opening_range_miss,
-                "market_confirmation_score": confirmation_score,
-                "market_confirmation_count": len(confirmations),
-                "strategy_memory": memory_quality,
-                "eligible_signal_bars": len(signal_bars_for_trigger),
-                "execution_bars": len(normalized_execution_bars),
-                "chase_check": chase_check,
-                "contextual_rule_calibration": contextual_diag or {},
-            },
-            source=fallback_source,
-        )
-    return None
-
-
-def _has_high_quality_memory(strategy_memory: Optional[Dict[str, Any]]) -> bool:
-    return bool(_high_quality_memory_summary(strategy_memory, {}).get("passed"))
-
-
-def _high_quality_memory_summary(
-    strategy_memory: Optional[Dict[str, Any]],
-    config: Dict[str, Any],
-) -> Dict[str, Any]:
-    min_samples = int(config.get("confirmed_memory_min_sample_count", 5) or 5)
-    min_win_rate = float(config.get("confirmed_memory_min_win_rate", 0.60) or 0.60)
-    min_net_pnl = float(config.get("confirmed_memory_min_net_pnl", 1000.0) or 1000.0)
-    for row in _memory_rows(strategy_memory):
-        state = str(row.get("memory_state") or "").lower()
-        if state not in {"protected", "deployable"}:
-            continue
-        sample_count = int(row.get("sample_count") or 0)
-        win_rate = float(row.get("win_rate") or 0.0)
-        net_pnl = float(row.get("net_pnl") or 0.0)
-        passed = (
-            sample_count >= min_samples
-            and win_rate >= min_win_rate
-            and net_pnl >= min_net_pnl
-        )
-        return {
-            "passed": passed,
-            "memory_state": state,
-            "sample_count": sample_count,
-            "min_sample_count": min_samples,
-            "win_rate": win_rate,
-            "min_win_rate": min_win_rate,
-            "net_pnl": net_pnl,
-            "min_net_pnl": min_net_pnl,
-            "source": row.get("source"),
-            "reason": "passed" if passed else "memory_evidence_below_intraday_fallback_floor",
-        }
-    return {"passed": False, "reason": "no_protected_or_deployable_memory"}
-
-
-def _memory_summary(strategy_memory: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    for row in _memory_rows(strategy_memory):
-        state = str(row.get("memory_state") or "").lower()
-        if state in {"protected", "deployable"}:
-            return {
-                "memory_state": state,
-                "sample_count": row.get("sample_count"),
-                "win_rate": row.get("win_rate"),
-                "net_pnl": row.get("net_pnl"),
-                "source": row.get("source"),
-            }
-    return {}
-
-
-def _memory_rows(strategy_memory: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not isinstance(strategy_memory, dict):
-        return []
-    rows: List[Dict[str, Any]] = []
-    for key in ("combo", "side_memory"):
-        row = strategy_memory.get(key)
-        if isinstance(row, dict):
-            rows.append(row)
-    for row in strategy_memory.get("records") or []:
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
-
-
-def _side_from_action(action_value: str) -> str:
-    if action_value in _BUY_LIKE_ACTIONS:
-        return "long"
-    if action_value in _SELL_LIKE_ACTIONS:
-        return "short"
-    return "flat"
 
 
 def _execution_profile_from_context(decision_context: Dict[str, Any]) -> str:

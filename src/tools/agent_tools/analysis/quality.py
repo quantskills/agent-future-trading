@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.contracts import (
+from tools.common.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
     validate_internal_message_contract,

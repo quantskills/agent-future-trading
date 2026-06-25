@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-"""Reviewer tools for Phase4 validation, reporting, and daily transaction logs."""
+"""Phase4 validation, reporting, and daily transaction log helpers."""
 
 import json
 import os
@@ -47,14 +47,6 @@ from tools.agent_tools.research.learning_contract import (
     build_next_round_memory_contract,
 )
 from tools.agent_tools.research.neutral_accountability import build_neutral_accountability_summary
-from tools.agent_tools.research.researcher_tools import (
-    CausalReviewLLMOutput,
-    ExploratoryHypothesisItem,
-    ExploratoryHypothesisLLMOutput,
-    apply_researcher_learning,
-    run_researcher_causal_review,
-    write_exploratory_hypotheses,
-)
 from tools.agent_tools.analysis.data_usage import data_usage_from_snapshot, compact_data_usage_notes
 
 
@@ -7746,41 +7738,6 @@ def _write_contextual_rule_calibration_state(
             "counterfactual_pnl": latest_pnl,
             "counterfactual_results": results,
         }
-        if category == "timing" and item.get("classification") == "missed_opportunity" and latest_pnl >= min_counterfactual_pnl:
-            inserted += _insert_contextual_rule_calibration(
-                cursor,
-                config_id=config_id,
-                trading_date=trading_date,
-                scope=scope,
-                rule_group="intraday_confirmation",
-                rules={
-                    "confirmed_memory_max_opening_range_miss": float(calibration_cfg.get("relaxed_opening_range_miss", 0.003)),
-                    "confirmed_memory_min_market_confirmation_score": float(calibration_cfg.get("relaxed_intraday_confirmation_score", 0.65)),
-                },
-                reason="same-scope no-trade counterfactual suggests timing gate may be too strict",
-                evidence=evidence,
-                confidence_score=min(0.75, 0.45 + latest_pnl / 20000.0),
-                sample_count=len(pnl_values),
-                valid_days=valid_days,
-            )
-        elif category == "timing" and item.get("classification") == "correct_avoidance" and latest_pnl <= -min_counterfactual_loss:
-            inserted += _insert_contextual_rule_calibration(
-                cursor,
-                config_id=config_id,
-                trading_date=trading_date,
-                scope=scope,
-                rule_group="intraday_confirmation",
-                rules={
-                    "confirmed_memory_max_opening_range_miss": float(calibration_cfg.get("tightened_opening_range_miss", 0.001)),
-                    "confirmed_memory_min_market_confirmation_score": float(calibration_cfg.get("tightened_intraday_confirmation_score", 0.72)),
-                },
-                reason="same-scope no-trade counterfactual suggests timing gate correctly avoided loss",
-                evidence=evidence,
-                confidence_score=min(0.75, 0.45 + abs(latest_pnl) / 20000.0),
-                sample_count=len(pnl_values),
-                valid_days=valid_days,
-            )
-
     for recommendation in strategy_recommendations:
         if inserted >= max_rows:
             break
@@ -8573,16 +8530,12 @@ def _write_neutral_accountability_digests(
     return rows
 
 
-def _write_capital_deployment_state(
-    cursor: sqlite3.Cursor,
+def _build_capital_deployment_state(
     *,
     cfg: Dict[str, Any],
-    config_id: str,
-    trading_date: str,
     settlement_row: Optional[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
-    write_learning_event: bool = True,
 ) -> Dict[str, Any]:
     capital_cfg = cfg.get("capital_utilization_control", {}) or {}
     target_min = float(capital_cfg.get("target_margin_ratio_min", 0.16))
@@ -8661,6 +8614,28 @@ def _write_capital_deployment_state(
         "deployment_plan": deployment_plan,
         "capital_diagnostics": deployment_diagnostics,
     }
+    return state
+
+
+def _write_capital_deployment_state(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any],
+    config_id: str,
+    trading_date: str,
+    settlement_row: Optional[Dict[str, Any]],
+    strategy_recommendations: List[Dict[str, Any]],
+    no_trade_reason_counter: Counter,
+    write_learning_event: bool = True,
+) -> Dict[str, Any]:
+    state = _build_capital_deployment_state(
+        cfg=cfg,
+        settlement_row=settlement_row,
+        strategy_recommendations=strategy_recommendations,
+        no_trade_reason_counter=no_trade_reason_counter,
+    )
+    deployment_plan = state["deployment_plan"]
+    deployment_diagnostics = state["capital_diagnostics"]
     cursor.execute(
         '''
         INSERT INTO capital_deployment_state (
@@ -8690,18 +8665,18 @@ def _write_capital_deployment_state(
             str(uuid.uuid4()),
             config_id,
             trading_date,
-            capital_base,
-            current_margin,
-            current_ratio,
-            target_min,
-            target_max,
-            target_abs_min,
-            target_abs_max,
-            1 if under else 0,
-            1 if over else 0,
-            margin_gap_to_min,
-            allocation_tier,
-            reason_bucket,
+            state["capital_base"],
+            state["current_margin"],
+            state["current_margin_ratio"],
+            state["target_margin_ratio_min"],
+            state["target_margin_ratio_max"],
+            state["target_margin_abs_min"],
+            state["target_margin_abs_max"],
+            1 if state["underutilization_breach"] else 0,
+            1 if state["overutilization_breach"] else 0,
+            state["margin_gap_to_min"],
+            state["capital_allocation_tier"],
+            state["reason_bucket"],
             _json_dumps(deployment_plan),
             _utc_now(),
         ),
@@ -8716,7 +8691,7 @@ def _write_capital_deployment_state(
             scope_key=trading_date,
             evidence=state,
             action={
-                "diagnosis": reason_bucket,
+                "diagnosis": state["reason_bucket"],
                 "primary_category": deployment_diagnostics["primary_category"],
                 "alpha_release_candidate_count": deployment_diagnostics["alpha_release_candidate_count"],
                 "recovery_probe_candidate_count": deployment_diagnostics["recovery_probe_candidate_count"],
@@ -8949,93 +8924,6 @@ def _build_causal_evidence_pack(
             "no_trade_reason_categories": _no_trade_reason_category_counts(no_trade_reason_counter),
         },
     }
-
-
-def _run_reviewer_causal_review(
-    cursor: sqlite3.Cursor,
-    *,
-    cfg: Dict[str, Any],
-    config_id: str,
-    trading_date: str,
-    settlement_row: Optional[Dict[str, Any]],
-    strategy_recommendations: List[Dict[str, Any]],
-    no_trade_reason_counter: Counter,
-) -> int:
-    return run_researcher_causal_review(
-        cursor,
-        cfg=cfg,
-        config_id=config_id,
-        trading_date=trading_date,
-        settlement_row=settlement_row,
-        strategy_recommendations=strategy_recommendations,
-        no_trade_reason_counter=no_trade_reason_counter,
-    )
-
-
-def _recent_trade_episodes_for_research(
-    cursor: sqlite3.Cursor,
-    *,
-    config_id: str,
-    trading_date: str,
-    limit: int,
-) -> List[Dict[str, Any]]:
-    cursor.execute(
-        """
-        SELECT id, ticker, side, sector, setup_type, horizon_class,
-               market_regime, open_date, close_date, holding_days, net_pnl,
-               return_on_notional, outcome_label, lesson_text
-        FROM trade_episode_memory
-        WHERE config_id = ?
-          AND (close_date IS NULL OR close_date <= ?)
-        ORDER BY ABS(net_pnl) DESC, close_date DESC, created_at DESC
-        LIMIT ?
-        """,
-        (config_id, trading_date, int(limit)),
-    )
-    return [dict(row) for row in cursor.fetchall()]
-
-
-def _write_exploratory_hypotheses(
-    cursor: sqlite3.Cursor,
-    *,
-    cfg: Dict[str, Any],
-    config_id: str,
-    trading_date: str,
-) -> Dict[str, Any]:
-    return write_exploratory_hypotheses(
-        cursor,
-        cfg=cfg,
-        config_id=config_id,
-        trading_date=trading_date,
-    )
-
-
-def apply_reviewer_learning(
-    *,
-    db: Any,
-    cursor: sqlite3.Cursor,
-    cfg: Dict[str, Any],
-    config_id: str,
-    trading_date: str,
-    settlement_row: Optional[Dict[str, Any]],
-    recommendations: List[Dict[str, Any]],
-    strategy_recommendations: List[Dict[str, Any]],
-    no_trade_reason_counter: Counter,
-    transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-) -> Dict[str, Any]:
-    """Backward-compatible wrapper; Phase4 learning now belongs to Researcher."""
-    return apply_researcher_learning(
-        db=db,
-        cursor=cursor,
-        cfg=cfg,
-        config_id=config_id,
-        trading_date=trading_date,
-        settlement_row=settlement_row,
-        recommendations=recommendations,
-        strategy_recommendations=strategy_recommendations,
-        no_trade_reason_counter=no_trade_reason_counter,
-        transactions_by_recommendation=transactions_by_recommendation or {},
-    )
 
 
 def run_phase4_review(
@@ -9293,17 +9181,11 @@ def run_phase4_review(
             ],
             cfg,
         )
-        if hasattr(db, "_ensure_reviewer_learning_schema"):
-            db._ensure_reviewer_learning_schema(cursor)
-        capital_preview = _write_capital_deployment_state(
-            cursor,
+        capital_preview = _build_capital_deployment_state(
             cfg=cfg,
-            config_id=config_id,
-            trading_date=trading_date,
             settlement_row=settlement_row,
             strategy_recommendations=strategy_recommendations,
             no_trade_reason_counter=no_trade_reason_counter,
-            write_learning_event=False,
         )
 
         logger.info(
@@ -9374,38 +9256,14 @@ def run_phase4_review(
                 logger.error(f"Daily transaction report generation failed: {report_exc}")
             raise RuntimeError(f"Phase flow validation failed with {len(errors)} error(s)")
 
-        from agents.research_team.researcher import researcher_agent
-
-        learning_summary = researcher_agent(
-            db=db,
-            cursor=cursor,
-            cfg=cfg,
-            config_id=config_id,
-            trading_date=trading_date,
-            settlement_row=settlement_row,
-            recommendations=recommendations,
-            strategy_recommendations=strategy_recommendations,
-            no_trade_reason_counter=no_trade_reason_counter,
-            transactions_by_recommendation=transactions_by_recommendation,
-        )
-        reviewer_report_paths = _write_reviewer_learning_report(
-            cursor=cursor,
-            cfg=cfg,
-            config_id=config_id,
-            trading_date=trading_date,
-            learning_summary=learning_summary,
-        )
-        learning_summary["reviewer_report"] = reviewer_report_paths
         conn.commit()
-        logger.info(f"Researcher learning persisted: {learning_summary}")
-        logger.info(f"Researcher learning report written: {reviewer_report_paths}")
 
         db.complete_trading_day_phase(
             config_id,
             trading_date,
             TradingPhase.PHASE4,
             "completed",
-            "reviewer validation and researcher learning passed",
+            "reviewer validation passed",
             memory_config=cfg.get("strategy_memory", {}),
             retention_config=cfg.get("learning_retention", {}),
         )
@@ -9423,19 +9281,28 @@ def run_phase4_review(
                 phase2_transactions=phase2_transactions,
                 phase4_status_override="completed",
                 phase4_completed_at_override=phase4_completed_at,
-                phase4_message_override="reviewer validation and researcher learning passed",
+                phase4_message_override="reviewer validation passed",
             )
             logger.info(f"Daily transaction report written: {report_path}")
         except Exception as report_exc:
             logger.error(f"Daily transaction report generation failed: {report_exc}")
             raise RuntimeError(f"daily transaction report generation failed: {report_exc}") from report_exc
 
-        logger.info("Phase4 reviewer validation and researcher learning passed")
+        logger.info("Phase4 reviewer validation passed")
         return {
             "status": "completed",
             "warnings": warnings,
             "errors": errors,
-            "learning_summary": learning_summary,
+            "reviewer_summary": {
+                "phase1_status": phase1.get("status") if phase1 else "missing",
+                "phase2_status": phase2.get("status") if phase2 else "missing",
+                "phase3_status": phase3.get("status") if phase3 else "missing",
+                "strategy_recommendations": len(strategy_recommendations),
+                "rollover_recommendations": len(rollover_recommendations),
+                "phase1_transactions": len(phase1_transactions),
+                "phase2_transactions": len(phase2_transactions),
+                "no_trade_reason_counts": dict(no_trade_reason_counter),
+            },
         }
     except Exception as exc:
         if conn is not None:

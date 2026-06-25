@@ -48,12 +48,12 @@ from tools.agent_tools.execution.order_semantics import (
     phase2_order_intent_from_lots,
 )
 from tools.agent_tools.decision.position_lifecycle import cap_signed_lots_by_abs_limit
-from tools.agent_tools.runtime_setup import (
+from tools.common.runtime_setup import (
     ensure_seed_settled_portfolio,
     load_portfolio_config,
     resolve_net_exposure_config,
 )
-from tools.agent_tools.execution.trader_exit_policy import evaluate_exit_policy
+from tools.agent_tools.execution.execution_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.futures_audit import (
@@ -299,8 +299,6 @@ def _execution_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         "valid_until",
         "requires_intraday_confirmation",
         "can_execute_without_intraday_trigger",
-        "allow_confirmed_memory_vwap_fallback",
-        "fallback_authority_boundary",
         "authority_type",
         "max_allowed_margin_ratio",
         "reason_codes",
@@ -727,9 +725,6 @@ def _resolve_phase2_execution_basis(
         trading_date=cfg["trading_date"],
         action=decision.action,
         contract_code=decision.contract_code or recommendation.get("contract_code"),
-        market_confirmation=_market_confirmation_from_recommendation(recommendation),
-        strategy_memory=_strategy_memory_from_recommendation(recommendation),
-        adaptive_policy_state=_adaptive_policy_state_from_recommendation(recommendation),
         decision_context=decision_context,
         cutoff_datetime=cutoff_datetime,
         finalize_untriggered=finalize_untriggered,
@@ -742,22 +737,6 @@ def _resolve_phase2_execution_basis(
         )
         return morning_price_context, None
     return basis, selection
-
-
-def _market_confirmation_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
-    snapshot = recommendation.get("signal_snapshot") or {}
-    if not isinstance(snapshot, dict):
-        return {}
-    confirmation = snapshot.get("market_confirmation")
-    return confirmation if isinstance(confirmation, dict) else {}
-
-
-def _strategy_memory_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
-    return {}
-
-
-def _adaptive_policy_state_from_recommendation(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return []
 
 
 def _decision_context_from_recommendation(recommendation: Dict[str, Any], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -775,7 +754,6 @@ def _decision_context_from_recommendation(recommendation: Dict[str, Any], cfg: O
         "entry_trigger": execution_contract.get("entry_trigger"),
         "invalidation": execution_contract.get("invalidation"),
         "trigger_source": execution_contract.get("trigger_source"),
-        "contextual_min_confidence": (((cfg or {}).get("learning") or {}).get("contextual_rule_calibration") or {}).get("min_confidence"),
     }
 
 

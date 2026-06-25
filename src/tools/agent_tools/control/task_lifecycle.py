@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from tools.agent_tools.contracts import date_text
+from tools.common.contracts import date_text
 from tools.agent_tools.control.schemas import TASK_PHASES, TERMINAL_EXECUTION_PHASES, ProtocolCheckResult, TaskLifecycleEvent
 
 

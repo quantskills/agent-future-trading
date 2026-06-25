@@ -9,6 +9,7 @@ class AgentKey:
     MACROECONOMIC = "macroeconomic"
     POLICY = "policy"
     # workflow keys
+    SIGNAL_COLLECTOR = "signal_collector"
     PORTFOLIO = "portfolio manager"
     PLANNER = "analyst planner"
     TRADER = "trader"

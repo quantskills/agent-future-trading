@@ -332,15 +332,6 @@ execution:
     require_complete_opening_range: true
     min_execution_volume: 1
     max_chase_ratio: 0.015
-    # 成熟记忆且市场确认强时，允许 VWAP fallback。
-    allow_confirmed_memory_vwap_fallback: true
-    confirmed_memory_min_market_confirmation_score: 0.70
-    confirmed_memory_min_confirmations: 3
-    # 候选假设和小样本泛化记忆不能触发 fallback。
-    confirmed_memory_min_sample_count: 5
-    confirmed_memory_min_win_rate: 0.60
-    confirmed_memory_min_net_pnl: 1000
-    confirmed_memory_max_opening_range_miss: 0.002
     finalize_after: "15:00:00"
     loop_check_interval_seconds: 300
     time_zone: null
@@ -375,7 +366,7 @@ tickers:
   - ZN
 
 planner_mode: false
-# 规划器开关；当前保持 false，真实回测使用 workflow_analysts。
+# 旧 LLM 规划器已退出固定工作流；该值只能为 false，真实回测固定使用 workflow_analysts。
 
 workflow_analysts:
   - commodity_news
