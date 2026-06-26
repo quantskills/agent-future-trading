@@ -13,7 +13,7 @@ ERROR_NO_TRADE_REASONS = {
 }
 
 EXPECTED_NO_TRADE_REASONS = {
-    "llm_neutral",
+    "neutral_signal_no_trade",
     "position_matched",
     "cold_start_small_cap",
     "hold_or_zero_lots",
@@ -110,7 +110,7 @@ NO_TRADE_REASON_CATEGORY_DESCRIPTIONS = {
 }
 
 NO_TRADE_REASON_CATEGORY_MAP = {
-    "llm_neutral": "signal",
+    "neutral_signal_no_trade": "signal",
     "weak_signal_combo": "signal",
     "market_confirmation_conflict": "signal",
     "market_confirmation_quality_gate": "signal",

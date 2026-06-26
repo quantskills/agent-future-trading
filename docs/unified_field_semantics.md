@@ -137,7 +137,7 @@
 | `alpha_setup_profile` | 数据库表名 | alpha setup profile 表名，不是字段语义。 |
 | `alpha_setup_sample` | 数据库表名 | alpha setup sample 表名，不是字段语义。 |
 | `alpha_setup_action_value` | 数据库表名 | alpha setup action-value 表名，不是字段语义。 |
-| `reviewer_llm_notes` | 数据库表名 | 复盘 LLM notes 表名，不是字段语义。 |
+| `researcher_llm_notes` | 数据库表名 | 研究员 LLM notes 表名，不是字段语义。 |
 | `provisional_policy_state` | 数据库表名 | 临时策略状态表名，不是字段语义。 |
 | `learning_context_budget` | 数据库表名 | 学习上下文预算表名，不是字段语义。 |
 | `trade_episode_memory` | 数据库表名 | 交易 episode 记忆表名，不是字段语义。 |

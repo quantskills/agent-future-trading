@@ -9168,7 +9168,7 @@ def portfolio_agent_futures(state: FundState):
         "sector": fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
         "market_regime": None,
         "structured_tool_only": True,
-        "memory_retrieval_tool": "decision_memory_retrieval",
+        "decision_memory_retrieval": "decision_memory_retrieval",
         "candidate_hypothesis_authority": "not_consumed_by_pm_without_structured_action_value",
         "hard_margin_cap_not_overridden": True,
     }

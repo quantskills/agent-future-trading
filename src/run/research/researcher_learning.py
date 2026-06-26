@@ -21,7 +21,7 @@ from tools.agent_tools.research.phase4_review import (
     _group_transactions_by_recommendation,
     _normalize_date,
     _validate_recommendation_execution_audit,
-    _write_reviewer_learning_report,
+    _write_historical_learning_snapshot_report,
 )
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
@@ -127,14 +127,14 @@ def main() -> None:
             no_trade_reason_counter=no_trade_reason_counter,
             transactions_by_recommendation=transactions_by_recommendation,
         )
-        reviewer_report_paths = _write_reviewer_learning_report(
+        researcher_snapshot_paths = _write_historical_learning_snapshot_report(
             cursor=cursor,
             cfg=cfg,
             config_id=config_id,
             trading_date=trading_date,
             learning_summary=learning_summary,
         )
-        learning_summary["reviewer_report"] = reviewer_report_paths
+        learning_summary["historical_learning_snapshot_report"] = researcher_snapshot_paths
         cursor.execute(
             """
             INSERT INTO learning_event_log (
@@ -153,7 +153,7 @@ def main() -> None:
         )
         conn.commit()
         logger.info(f"Researcher learning persisted: {learning_summary}")
-        logger.info(f"Researcher learning report written: {reviewer_report_paths}")
+        logger.info(f"Researcher historical learning snapshot written: {researcher_snapshot_paths}")
     except Exception:
         conn.rollback()
         raise

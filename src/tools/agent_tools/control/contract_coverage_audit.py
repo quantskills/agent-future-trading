@@ -757,11 +757,11 @@ def _scan_config_prompt_alignment(repo_root: Path) -> List[str]:
         "src/config/learning_policy_catalog.yaml": (
             "learning_consumer_scopes",
             "pm_allowed_consumer_scope",
-            "trader_allowed_consumer_scope",
+            "trader_direct_research_consumption_allowed",
         ),
         "src/config/portfolio_policy_catalog.yaml": (
             "consumer_scope=pm_learning",
-            "trader_execution_learning",
+            "Trader 不读研究记录",
         ),
         "src/llm/prompt.py": (
             "consumer_scope=pm_learning",

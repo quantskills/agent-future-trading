@@ -119,8 +119,10 @@ retrieval_key, and usage_boundary:
   execution_profile and trigger-method preference before PM writes
   final_action_contract with audit_verdict/trade_contract_audit. Trader may read
   only final_action_contract execution fields / execution_profile plus intraday
-  data and consumer_scope=trader_execution_learning execution traces; execution
-  learning must not directly change direction, lots, target_lots, margin_ratio, or authority.
+  data. consumer_scope=trader_execution_learning is an execution trace scope
+  emitted by Trader for Reviewer/Researcher, not a Trader research-consumption
+  permission. execution learning must not directly change direction, lots,
+  target_lots, margin_ratio, or authority.
 - Analysts may read only signal_calibration records with
   consumer_scope=analyst_calibration from action-value payloads to judge
   evidence quality and setup reliability. Analysts must not convert action-value
@@ -592,7 +594,7 @@ def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str
         "Study completed futures trade episodes and propose exploratory trading hypotheses. "
         "The goal is free exploration of commodity-specific trading rules, not rigid constraints. "
         "Do not recommend breaking hard controls: total deployed margin must stay <=20%, no lookahead, "
-        "and LLM output is prompt prior only until future samples validate it. "
+        "and LLM output is structured research hypothesis only until future samples validate it. "
         "Prefer hypotheses scoped by ticker/sector/side/horizon/regime/indicator family. "
         "Return concise hypotheses with suggested_use such as analyst_prior, pm_prior, or probe_candidate. "
         "For each hypothesis, include entry_timing_hint, exit_timing_hint, holding_period_hint, "

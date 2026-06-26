@@ -793,7 +793,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "target_lots": 0,
                 "lots_delta": 0,
                 "authority_type": "not_applicable",
-                "reason_codes": ["llm_neutral"],
+                "reason_codes": ["neutral_signal_no_trade"],
             }
         }
         conn = sqlite3.connect(db_path)
@@ -2799,8 +2799,4 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
 

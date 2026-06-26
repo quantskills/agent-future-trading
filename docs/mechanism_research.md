@@ -1,55 +1,67 @@
 # AgentQuant 记忆与研究机制
 
-更新时间：2026-06-21
+更新时间：2026-06-25
 
-本文档说明当前已经代码落地的研究、复盘和学习闭环。它不把临时想法写成事实；若回测库已被清空，旧样本数量不代表当前系统状态，所有学习结论必须由新一轮干净回测重新生成。
+本文档定义 AgentQuant 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/unified_field_semantics.md` 作为唯一字段语义来源。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和统一字段语义表为准。
+
+研究机制只服务未来交易日的结构化学习，不产生当天交易动作，不改写当天合约、成交、结算或收益。
 
 ## 一、研究机制原则
 
-研究机制服务主动 alpha 迭代，而不是堆叠被动限制。Researcher 要从真实交易、未交易机会、条件机会未触发、Neutral、执行失败、换月/强平运营事件和结算结果中总结：哪些 setup 值得开仓，哪些持仓应保护，哪些退出保护了利润，哪些执行方式更好，哪些证据只是噪音。
+研究机制服务主动 alpha 迭代，而不是堆叠被动限制。研究员要从真实交易、未交易机会、条件机会未触发、neutral 观察、执行失败、换月/强平运营事件和结算结果中总结：
 
-当前研究机制还要评价 PM 的全市场机会排序和资金部署是否有效。PM 写出的 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary` 会驱动 PM 的资金部署 pass，并回写同一张 `final_action_contract`；Reviewer/Researcher 要用这些字段复盘“资金是否流向更强 alpha”，但不能把它们变成第二套交易权限。
+- 哪些 setup 值得开仓；
+- 哪些持仓应继续保护；
+- 哪些退出或减仓保护了利润；
+- 哪些执行触发和成交方式更好；
+- 哪些证据只是噪音；
+- 投资组合经理的评分、排序、资金部署和手数计算是否把资金放到了更强机会。
 
-学习必须守住时间边界。Phase1/2/3 的事实完成后，Reviewer 先做确定性验收；只有 Phase4 验证通过，Researcher 才能写入未来可用学习。任何学习都不能反向修改当天推荐、成交、保证金、手续费、结算价或 PnL。
+结构化字段不是 LLM 推理上限；结构化字段是 LLM 结果的落地格式。研究员可以用 LLM 做解释、冲突分析、反事实推理和不确定性归因，但输出必须落到已登记的结构化研究字段，并按消费对象分作用域写出：分析师只消费本专业校准类研究；投资组合经理只通过 `decision_memory_retrieval` 消费交易决策类研究；信号收集员、审计员、交易员、会计师和复盘员不直接消费研究库。自由文本只能解释研究原因，不能成为任何智能体的交易权限、仓位依据或直接消费的研究结论。
 
-当前有效学习链路是：
+学习必须守住时间边界。Phase1、Phase2、Phase3 的事实完成后，复盘员先做确定性验收；只有 Phase4 验证通过，研究员才能通过 `src/run/research/researcher_learning.py` 输出并持久化未来可用学习。任何研究学习都不能反向修改当天推荐、合约、成交、保证金、手续费、结算价或 PnL。
+
+固定学习链路是：
 
 ```text
-state
-  -> action lane / action_preference
-  -> opportunity score / rank / capital allocation reason
-  -> PM final_action_contract
-  -> Trader execution / not_triggered / no_fill
-  -> Accountant settlement outcome
-  -> Reviewer validation
-  -> Researcher future learning
+Phase1 投资组合经理 final_action_contract
+-> Phase2 交易员 execution_result / execution_learning_trace
+-> Phase3 会计师 daily_settlement
+-> Phase4 复盘员 validation / transaction log / factual attribution
+-> 研究员 structured learning
+-> 下一交易日分析师校准或投资组合经理 decision_memory_retrieval
 ```
 
-state 由品种、板块、方向、setup 类型、horizon、market regime、evidence combo、数据质量、机会状态、触发/失效边界构成。动作价值只分 open、hold、exit、execution 四条主线。probe 是 PM 的受控探索权限或仓位形态，不是单独 action-value；add/reduce/scale 由 `current_lots -> target_lots -> lots_delta` 推出。
+研究结果进入交易链路只有两条合法路径：
 
-排序学习不新增交易动作。它只判断同一批候选里，PM 的评分、排名和资金分配理由是否提高了资金部署质量。被 PM 选中的 probe 仍按既有 0.8% 最小试探资金边界执行；未入选候选不能靠 probe floor 自动复活，必须留下 `capital_allocation_reason` 供复盘。
+1. 分析师消费本专业校准类结构化研究，输出更干净的 `action_evidence_contract`。
+2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再通过 `opportunity_ranking`、`position_sizing` 和唯一 `final_action_contract` 落地。
 
-## 二、Reviewer 与 Researcher 分工
+信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
-Reviewer 是确定性复盘者，不调用 LLM、不下单、不改账。它检查 Phase1-3 是否完成、推荐/成交/结算是否一致、完整交易日志是否输出、未完成交易日是否存在、数据质量和字段语义是否可审计。Reviewer 还要记录 PM 排序字段和资金分配理由，复盘高分/高排名候选是否真的贡献收益、低分/低排名或未入选候选是否错过收益。Reviewer 可以写学习候选和归因事实，但最终未来学习由 Researcher 写入。
+## 二、Phase4 与研究学习分工
 
-Researcher 是研究员，可以按配置调用 LLM 做 causal review 和探索性研究。它只在 Reviewer 验证后的事实底座上运行，写入未来可用记忆、alpha setup 档案、action-value、adaptive policy state、机会排序偏好候选和研究摘要。Researcher 不能下交易指令，不能改账，不能绕过 PM/Auditor/Trader。排序偏好只能影响未来 PM 的评分和资金部署优先级，不能直接生成 `target_lots`、不能改变 Trader 执行方向或手数。
+复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、合约、成交、结算是否一致，完整交易日志是否输出，字段语义和阶段状态是否可审计。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。
 
-未完成交易日必须硬拦。若某天推荐、成交、盘中决策或学习记录已存在，但 phase1-4 没有全部 completed，系统会报 `incomplete_trading_day_phase`；该日不能进入收益判断，也不能被 Researcher 当成学习样本。
+Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_memory` 刷新、学习 retention 清理、研究表写入或任何未来学习状态更新。
 
-## 三、当前写入的研究对象
+研究员可以按配置调用 LLM，但只能在复盘员验证后的事实底座上运行。研究员输出结构化研究信息：分析师校准类研究、交易决策类 action-value、alpha setup profile、adaptive policy state、执行学习、排序偏好和研究反馈；这些信息供其他智能体按各自权限直接或间接使用，持久化到研究库只是保存方式。研究员不能下交易指令，不能改账，不能绕过投资组合经理、审计员或交易员。
 
-| 研究对象 | 记录什么 | 未来谁用 | 边界 |
-| --- | --- | --- | --- |
-| `trade_episode_memory` | 已成交策略 episode、证据、合约、执行、结算、PnL | 分析师、PM、Researcher | 只来自 Phase4 后已验证事实 |
-| `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 分析师、PM、Researcher | 不能直接授权开仓，只能作为先验或反证 |
-| `alpha_setup_sample` | 单个 setup 的交易/未交易/执行样本 | Researcher 汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
-| `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师、PM | 只作为同作用域证据，不是品种黑名单 |
-| `alpha_setup_action_value` | open/hold/exit/execution 分动作结果 | PM、分析师间接使用 | Trader 不直接读取；PM 只按 action lane 使用 |
-| `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | Researcher 写入，PM 经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界和审计再验证；Auditor/Trader 不直接消费 |
-| `opportunity_ranking_preference` | PM 排序、资金分配理由、排名与后续收益的关系 | PM、Researcher | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
-| `research_position_feedback` | 研究是否进入 PM、是否改变合约、是否成交和结算 | PM、Researcher | 用于检查学习是否真的进入仓位链路 |
-| `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | Researcher 写入，PM 消费 | 只能经 PM 写入未来 `final_action_contract.execution_profile/entry_trigger` 后影响执行，不改方向/手数，Trader 不直接读取 |
+未完成交易日必须硬拦。若某天推荐、成交、盘中决策或学习记录已存在，但 phase1-4 没有全部 completed，系统应报 `incomplete_trading_day_phase`；该日不能进入收益判断，也不能被研究员当成学习样本。
+
+## 三、研究对象与消费边界
+
+| 研究对象 | 记录什么 | 合法消费者 | 边界 |
+|---|---|---|---|
+| `trade_episode_memory` | 已成交策略 episode、证据、合约、执行、结算、PnL | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 只来自 Phase4 后已验证事实 |
+| `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
+| `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
+| `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
+| `alpha_setup_action_value` | open/hold/exit/execution 分动作结果 | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action lane 使用 |
+| `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
+| `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
+| `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
+| `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | 投资组合经理经 `decision_memory_retrieval` 消费后写入未来合约执行字段 | 只能影响未来 `final_action_contract.execution_profile/entry_trigger`，不改方向、不改手数；交易员不直接读取 |
 
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
@@ -69,61 +81,121 @@ tail_loss_protect
 
 open 评价“当时开仓是否有正期望”；hold 评价“继续持有是否保护收益或扩大收益”；exit 评价“退出/减仓是否避免回吐或尾部亏损”；execution 评价“触发方式和成交质量是否改善结果”。
 
-不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被 PM 写入 `final_action_contract.execution_plan/execution_profile/entry_trigger`，不能改变方向或目标手数，也不能由 Trader 直接读取后放宽触发。
+不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被投资组合经理写入 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能改变方向或目标手数，也不能由交易员直接读取后放宽触发。
+
+action-value 必须保留以下核心字段，用于 `decision_memory_retrieval` 质量排序和审计保真：
+
+- `id`；
+- `action_preference`；
+- `reward_source`；
+- `evidence_scope`；
+- `action_value_lane`；
+- `consumer_scope`；
+- `learning_lane`；
+- `reward_sum`、`reward_mean`；
+- `sample_count`；
+- `last_sample_date`；
+- `valid_until`；
+- `retrieval_key`、`fallback_retrieval_key` 或 `execution_retrieval_key`。
+
+空壳记录、无收益记录、未来日期记录、非目标 `consumer_scope` 记录、过期记录和弱先验记录不能覆盖真实有效记录。
 
 ## 五、分析师如何使用研究成果
 
-Technical、Fundamental、Commodity News 只读取受限学习上下文和 `signal_calibration`。它们必须把历史经验与当日数据比较，说明当前证据确认、削弱还是反驳历史经验。分析师不能用 action-value 输出手数、保证金、最终开仓或平仓命令，也不能输出 `opportunity_score/opportunity_rank/capital_allocation_reason`。分析师只提供足够可排序的证据，排序和资金部署由 PM 完成。
+技术面分析师、基本面分析师、期货新闻面分析师只消费本专业校准类结构化研究。它们必须把历史经验与盘前或决策时点前可见数据比较，说明当前证据确认、削弱还是反驳历史经验。
 
-分析师当前必须输出结构化证据：`setup_quality_ok`、`trigger_valid`、`current_trigger_confirmed`、`invalidation_present`、`entry_trigger`、`opportunity_state`、`data_usage_summary`。`setup_quality_ok` 只表示形态值得关注；`trigger_valid/current_trigger_confirmed` 才表示当前触发成立。等待确认文字必须落到 `watch_for_trigger + trigger_valid=false`。
+分析师不能用 action-value 输出手数、保证金、最终开仓、加仓、减仓或平仓命令，也不能输出 `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`。分析师只提供结构化预测证据，排序、资金部署和目标手数由投资组合经理及其确定性工具完成。
 
-`watch_for_trigger` 不是“没用的等待”。若它同时带有明确方向、触发条件、失效边界和可关注 setup，PM 可以把它纳入条件监控候选，由同一张 `final_action_contract` 交给 Trader 盘中检查。
+分析师必须输出 `action_evidence_contract`，核心字段包括：
 
-## 六、PM 如何使用研究成果
+- `setup_quality_ok`；
+- `trigger_valid`；
+- `current_trigger_confirmed`；
+- `invalidation_present`；
+- `invalidation_condition`；
+- `entry_trigger`；
+- `opportunity_state`；
+- `data_usage_summary`；
+- `no_lookahead_status`。
 
-PM 读取 open/hold/exit 的动作偏好、alpha setup profile 和机会排序偏好。分析师给 PM 的学习摘要只用于解释证据质量，不能替代 PM 的学习输入；PM 在确定 ticker、side、setup、horizon、regime 后，必须重新读取同作用域真实 action-value / episode 记录，并保留 `action_preference/reward_sum/reward_mean/win_rate/sample_count/reward_source/evidence_scope/action_value_lane/last_sample_date/valid_until`。PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard，不能只读初始 preferred side。成熟正向 open setup 在当日触发、失效边界、market confirmation、资金和 Auditor 通过时，可以支持受控落仓或放大；未知 setup 可以保留受控探索；负向 setup 只能同作用域 cap、revalidate、probe/reduce，不能形成全局品种黑名单。
+`setup_quality_ok=true` 只表示形态值得关注，不代表当前触发成立。`trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。等待确认必须落到 `watch_for_trigger + trigger_valid=false`，不能写成自由文本后再被下游误读。
 
-PM 现在还要做全市场候选比较。`opportunity_score` 和 `opportunity_rank` 用于决定同一交易日内哪些候选优先获得资金，`capital_allocation_reason` 用于解释为什么给资金、只监控或暂不分配，`learning_adjustment_summary` 用于说明历史学习如何影响排序。它们只能通过 PM 资金部署 pass 回写同一张 `final_action_contract.target_lots/lots_delta/final_action`，不能形成第二套交易命令。
+## 六、投资组合经理如何使用研究成果
 
-PM 评分必须把完整 episode 学习放在单日噪声之前。`positive_candidate_open/hold/exit/execution` 会进入 `positive_learning` 或 `execution_profile_learning`，支持同作用域机会提升排名、继续持有、择机放大或优化执行 profile；`tail_loss_protect/negative_revalidate/negative_hold_revalidate` 会进入 `negative_learning` 或 `recent_tail_loss_penalty`，用于降低同作用域排名、降级持仓或更快退出。负向学习不是品种黑名单，正向学习也不是无限放大；二者都必须按 `exact_real_state > partial_real_state > similar_sql_prior > observation_only` 和时间衰减生效，并且只能通过 PM 的同一张最终合约改变目标仓位。
+投资组合经理不直接查研究表，不直接解析原始研究记录，不直接调用 LLM。投资组合经理只通过 `decision_memory_retrieval` 读取结构化研究成果。
 
-PM 还会读取 execution action-value，但只能把它消化成最终合约的执行计划。Trader 只读 `final_action_contract` 中已合约化的 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
+`decision_memory_retrieval` 的固定职责是：
 
-条件机会闭环现在是研究机制的一部分。若分析师输出干净的 `watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/entry_trigger/invalidation`，PM 不能把它当普通 wait 丢掉；PM 可以生成条件 probe 合约。Trader 未触发时只记录未触发原因，Researcher 不能把未触发当成开仓亏损样本，只能研究条件是否太苛刻、监控是否有价值。
+- 按 `ticker`、`side`、`trading_date`、`horizon_class`、`market_regime`、`setup_type`、`consumer_scope=pm_learning` 读取研究成果；
+- 先收集可见历史，再按质量排序；
+- 保留真实有效 action-value；
+- 输出 `effective_memory_summary`、有效 action-value 列表、剔除/降级原因；
+- 拒绝未来数据、过期数据、空壳记录、非 `pm_learning` scope、弱先验越权；
+- 保证空历史不能占位置挡住真实盈利或真实亏损历史。
 
-## 七、Trader、Accountant、Reviewer 与学习边界
+投资组合经理使用研究成果的固定链路是：
 
-Trader 写执行事实和执行学习事件，但不直接读取研究 action-value、`strategy_memory` 或 `adaptive_policy_state`，不创造策略，不按历史好坏放宽触发。未触发、涨跌停、追价失败、成交量不足、合约临近交割、保证金不足等，都要写明原因供 Researcher 未来研究。Trader 可以把成交或未成交事实与 PM 排名诊断关联记录，但不能按 `opportunity_score/opportunity_rank` 改方向、改手数或创造交易。
+```text
+signal_collection_contract
+-> decision_memory_retrieval.effective_memory_summary
+-> opportunity_ranking.opportunity_scorecard / opportunity_rank
+-> position_sizing.position_sizing_result
+-> portfolio_manager.final_action_contract
+```
 
-Accountant 只按成交和结算价入账。手续费、保证金、释放保证金、持仓盈亏、平仓盈亏和账户权益都不能被研究文本改写。
+研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
 
-Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher 才能更新未来学习。若 phase 不完整、账务不一致、交易日志缺失或字段语义冲突，该日不得进入学习。
+投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。交易员只读 `final_action_contract` 中的 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
+
+## 七、交易员、会计师、复盘员与研究边界
+
+交易员写执行事实和 `execution_learning_trace`，不直接读取研究库、action-value、`strategy_memory` 或 `adaptive_policy_state`，不按历史好坏放宽触发，不改方向，不改手数。未触发、涨跌停、追价失败、成交量不足、合约临近交割、保证金不足等，都要写明原因供研究员未来研究。
+
+执行触发机制的迭代路径固定为：
+
+```text
+交易员 execution_result / execution_learning_trace
+-> 复盘员 Phase4 factual validation
+-> 研究员 structured execution learning
+-> 下一交易日投资组合经理 decision_memory_retrieval
+-> 投资组合经理将 execution_profile / entry_trigger 写入 final_action_contract
+-> 交易员执行合约化触发规则
+```
+
+会计师只按成交和结算价入账。手续费、保证金、释放保证金、持仓盈亏、平仓盈亏和账户权益都不能被研究文本改写。
+
+复盘员负责确认事实完整。只有复盘员验证通过，研究员才能更新未来学习。若 phase 不完整、账务不一致、交易日志缺失或字段语义冲突，该日不得进入学习。
+
+审计员不直接消费研究记录。研究记忆只能通过投资组合经理的评分、排序、手数计算和唯一合约间接影响审计对象；审计员只审 `final_action_contract`、账户、持仓、保证金、数据质量和硬风险边界。
 
 ## 八、相似 setup 检索和防未来函数
 
-当前系统使用轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
+当前系统使用结构化检索和轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action lane 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
 
-同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `final_action_contract`、Auditor、Trader 和 20% 保证金硬上限。
+同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing`、`final_action_contract`、审计员、交易员和保证金硬上限。
+
+研究结果不得使用未来行情污染当下决策。回测可以一次性跑多日，但每个具体回测日内部必须按 `proposal.py -> order.py -> settlement.py -> validate_phase_flow.py -> researcher_learning.py` 的时间顺序复刻真实交易流程。
 
 ## 九、研究结果如何判断有效
 
-干净回测后，不只看有没有写入研究表，还要看学习是否真正进入下一轮链路：
+干净回测后，不只看研究表有没有持久化记录，还要看学习是否真正进入下一轮链路：
 
-1. 分析师 metadata 是否读取并解释了学习上下文。
-2. PM 的 `learning_to_position_trace` 是否显示学习进入机会评分、仓位生命周期或执行 profile。
-3. `final_action_contract` 是否仍由当日证据和审计决定，而不是被学习单独覆盖。
-4. Trader 是否只按合约执行或跳过。
-5. Accountant 是否按事实结算。
-6. Researcher 是否按 open/hold/exit/execution 分账更新 action-value。
+1. 分析师 metadata 是否读取并解释了本专业校准类研究。
+2. `decision_memory_retrieval` 是否保留真实有效 action-value，且空历史没有挡住真实历史。
+3. 投资组合经理的 `learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result` 是否显示学习进入评分、排序、仓位生命周期或执行 profile。
+4. `final_action_contract` 是否仍由盘前预测证据、研究分项、资金风控和审计共同决定，而不是被学习单独覆盖。
+5. 交易员是否只按审计通过的合约和合约化触发规则执行或跳过。
+6. 会计师是否按事实结算。
+7. 研究员是否按 open/hold/exit/execution 分账更新 action-value。
 
 如果学习只增加解释文本，却没有在未来同作用域、合规边界内改善开仓、持仓、退出、执行质量或资金部署质量，就不能认为研究机制已经贡献收益。
 
 排序学习的有效性要单独检查：
 
 1. 高分/高排名候选是否比低分/低排名候选贡献更好净收益、盈亏比和回撤表现。
-2. 未入选候选是否频繁错过大收益，若是，Researcher 要生成排序偏好修正候选。
+2. 未入选候选是否频繁错过大收益；若是，研究员要生成排序偏好修正候选。
 3. 资金是否从弱 alpha 状态迁移到强 alpha 状态，而不是单纯减少交易。
-4. 0.8% probe floor 是否只对 PM 入选候选生效，没有把排序落后的弱机会重新拉回交易。
+4. 0.8% probe floor 是否只对投资组合经理入选候选生效，没有把排序落后的弱机会重新拉回交易。
 5. `learning_adjustment_summary` 是否能解释本次排序受哪些真实 action-value、setup profile 或复盘结论影响。
 6. 正向 alpha 是否经历“probe 验证 -> rank 提升 -> 合规放大 -> 持仓保护/加仓 -> 失效退出”的完整周期，而不是长期停留在小仓试探。
 7. 近期 tail loss 是否能抵消旧正向学习，避免失效 alpha 继续被高 rank 和 probe floor 机械放出来。
@@ -132,7 +204,12 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 
 回测前应确认：
 
-- `contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖；其中 Researcher -> PM 的 action-value 边界必须有保真测试，证明真实 canonical 记录进入 PM 后不会丢失 `id/action_preference/reward_source/evidence_scope/action_value_lane/reward`，也不会被空壳 trace 覆盖。
+- `contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖。
+- 研究员 -> 投资组合经理的 action-value 边界必须通过 `decision_memory_retrieval` 保真测试，证明真实 canonical 记录不会丢失 `id/action_preference/reward_source/evidence_scope/action_value_lane/reward`，也不会被空壳 trace 或空历史覆盖。
+- 投资组合经理不直接调用研究库读取函数；研究消费入口只保留 `decision_memory_retrieval`。
+- 审计员输入不含 `strategy_memory` 或 `adaptive_policy_state`。
+- 交易员执行入口不含研究库、action-value、`strategy_memory` 或 `adaptive_policy_state` 消费权限。
+- 复盘员不调用 LLM、不触发研究员学习、不写最终 action-value。
 - `pre_backtest_acceptance.py` 通过。
 - `system_invariant_audit.py` 对现有库没有 hard error。
 - `mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。
@@ -141,5 +218,4 @@ Reviewer 负责确认事实完整。只有 Reviewer 验证通过，Researcher �
 - 策略单、rollover、forced_risk 按 `source_type` 分账。
 - 分析师证据不再出现“等待确认文字 + trigger_valid=true”。
 - 条件 probe 未触发不会被写成真实开仓结果。
-- Trader、Accountant、Reviewer、Researcher 的边界没有互相泄露。
-- PM 排序字段只出现在 scorecard、`final_action_contract.evidence_used/learning_used`、复盘和评估诊断中，没有成为顶层交易权限。
+- 投资组合经理排序字段只出现在 scorecard、`final_action_contract.evidence_used/learning_used`、复盘和评估诊断中，没有成为顶层交易权限。

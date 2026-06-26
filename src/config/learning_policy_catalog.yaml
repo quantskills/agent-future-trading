@@ -1,18 +1,20 @@
 ﻿# 学习、记忆与研究策略目录。
 # 由 config_normalizer.py 展开到 strategy_memory / learning / analyst_business_quality /
-# llm_signal_quality / learning_context / learning_retention。
+# signal_quality / learning_context / learning_retention。
 # 运行时学习结果写数据库 overlay/state；LLM 不直接改写本 YAML。
 
 learning_gatekeeping_policy:
   # 学习结果服务 action preference，不直接下交易命令。
   # block/cap/probe 只允许作为同作用域学习倾向、reason code 或软风险标签；
-  # PM 必须结合当日证据、final_action_contract 授权、Auditor 硬风险与 Trader 执行约束后再落仓。
+  # PM 必须结合当日证据和确定性工具输出写入 final_action_contract；
+  # Auditor 只审合约，Trader 只执行审过的合约。
   # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
   # 交易出口仍由 final_action_contract 统一落地。
   # Researcher 写入的 action-value 必须带 consumer_scope 与 usage_boundary：
   # pm_learning 给 PM open/hold/exit/execution 评分和合约解释；
   # analyst_calibration 只给分析师安全 signal_calibration；
-  # trader_execution_learning 只给 Trader 执行诊断，不能改方向/手数。
+  # trader_execution_learning 是 Trader 输出给复盘/研究的执行学习 trace scope；
+  # Trader 不读取研究库，执行学习必须先由 PM 合约化为 execution_profile / entry_trigger。
   # PM 评分不能使用分析师压缩 trace；PM 在确定 ticker/side/setup/horizon/regime 后，
   # 按 exact state -> same ticker/side/horizon -> same ticker/side -> weak prior
   # 读取 consumer_scope=pm_learning 的 canonical action-value / episode 行，
@@ -31,13 +33,12 @@ learning_gatekeeping_policy:
   learning_consumer_scopes:
     pm_learning: portfolio_manager_only
     analyst_calibration: analysis_team_safe_summary_only
-    trader_execution_learning: trader_execution_diagnostics_only
+    trader_execution_learning: execution_trace_for_research_only
     research_diagnostics: protocol_and_human_review_only
   pm_allowed_consumer_scope: pm_learning
   pm_allowed_action_value_lanes: [open, hold, exit, execution]
   analyst_allowed_consumer_scope: analyst_calibration
-  trader_allowed_consumer_scope: trader_execution_learning
-  trader_allowed_action_value_lanes: [execution]
+  trader_direct_research_consumption_allowed: false
   pm_action_value_retrieval_order:
     - exact_state
     - same_ticker_side_horizon
@@ -130,7 +131,8 @@ learning:
     min_samples_for_policy: 4
   alpha_setup_profile:
     # Alpha Setup 档案层：把历史交易、未交易机会、执行结果沉淀为“品种/方向/周期/市场状态/setup/数据组合”的未来可用记忆。
-    # 不是品种黑名单，也不是硬规则；candidate/watchlist 只能提示分析，protected/deployable 也必须经过当日证据、PM、Auditor、Trader 与 20% 总保证金上限。
+    # 不是品种黑名单，也不是硬规则；candidate/watchlist 只能提示分析，protected/deployable
+    # 也必须先经当日证据、PM 合约化、Auditor 审合约、Trader 执行合约和 20% 总保证金上限。
     # max_position_impact 是学习侧建议影响上限，不是最终仓位参数；最终 margin/lots 仍由 PM 资金出口决定。
     enabled: true
     lookback_days: 90
@@ -163,7 +165,8 @@ learning:
     # 这些偏好写入数据库，
     # 由 PM 在下一交易日结合当前证据仲裁，不回写 YAML。
     # open/hold/exit/execution 必须分账：open 正收益不能来自 exit/execution，
-    # exit/reduce 正收益不能反向支持开仓放大，execution 只能影响 Trader 触发方式。
+    # exit/reduce 正收益不能反向支持开仓放大；execution 只能先影响 PM 写入未来
+    # final_action_contract.execution_profile / entry_trigger，再由 Trader 执行合约化触发规则。
     enabled: true
     valid_days: 10
     max_rows_per_day: 12
@@ -176,7 +179,7 @@ learning:
     # Researcher 写入 overlay，PM 下一交易日按 allowlist 读取。
     enabled: true
   adaptive_policy:
-    # 由成熟模板表现生成 protect/cap 等软策略，供 auditor 读取。
+    # 由成熟模板表现生成 protect/cap 等软策略，供 PM 读取并写入唯一合约。
     enabled: true
     min_policy_confidence: 0.35
   policy_promotion_guard:
@@ -230,19 +233,7 @@ learning:
     technical_positive_hit_rate: 0.62
     technical_weak_hit_rate: 0.38
     technical_valid_days: 10
-    # Auditor 仅允许软化以下历史表现类拦截。
-    auditor_softenable_reasons:
-      - strategy_memory_weak_block
-      - side_performance_block
-      - conditional_performance_block
-      - weak_ticker_side_quality_gate
-      - strict_ticker_side_quality_gate
-    softenable_hard_block_reasons:
-      - strategy_memory_weak_block
-      - side_performance_block
-      - conditional_performance_block
-      - weak_ticker_side_quality_gate
-      - strict_ticker_side_quality_gate
+    # 历史表现类 reason 只进入 PM 的软风险/学习调整仲裁，不给审计员研究记忆权限。
   learned_vs_unlearned_policy:
     # learned 跑输基准时写入降权策略，不写品种黑名单。
     # 该策略只影响同作用域动作偏好，不能绕过 PM 当日证据和最终出口。
@@ -256,7 +247,8 @@ learning:
     min_self_loss_net_pnl: -2500
   learning_mechanism_policy:
     # 将具体学习机制的同作用域绩效写入 adaptive_policy_state。
-    # 赚钱机制只在当日证据、PM、Auditor 通过后小幅影响仓位权限；亏钱机制只降权/cap，不写品种黑名单。
+    # 赚钱机制只能经当日证据、PM 合约化和 Auditor 审合约后小幅影响目标仓位；
+    # 亏钱机制只生成 PM 可读的降权/cap 倾向，不写品种黑名单。
     enabled: true
     infer_from_full_trace: true
     min_samples: 4
@@ -268,7 +260,7 @@ learning:
     valid_days: 10
     max_rows_per_day: 12
   position_feedback_loop:
-    # 研究闭环账本：记录记忆进入 prompt 后，是否被 PM/Auditor/Trader 落到仓位及结果。
+    # 研究闭环账本：记录记忆经 PM 合约化后，是否落到仓位、执行规则及结果。
     # 只写下一轮可用反馈，不直接授权当日交易，不写品种黑名单。
     enabled: true
     valid_days: 30
@@ -289,7 +281,7 @@ learning:
     consecutive_loss_multiplier: 0.35
     valid_days: 10
   trade_episode_memory:
-    # 完整交易片段记忆，只作 prompt 先验，不越过硬风控。
+    # 完整交易片段记忆只作结构化历史先验，不越过 PM 合约、审计和硬风控。
     enabled: true
   no_trade_opportunity_memory:
     # no-trade 影子结果只在未来已结算后进入学习。
@@ -310,7 +302,7 @@ learning:
   tail_loss_sentinel:
     # 新仓异常亏损写短期哨兵；不是品种黑名单。
     # 哨兵只要求更强当日证据、压制晋升或触发保护，不直接删除后续探索权。
-    # tail_loss_protect 是退出/降级动作偏好，不是永久封杀，也不能绕过 PM/Auditor。
+    # tail_loss_protect 是退出/降级动作偏好，不是永久封杀，也不能绕过 PM 合约化和 Auditor 审合约。
     enabled: true
     min_abs_loss: 25000
     min_equity_loss_ratio: 0.005
@@ -392,7 +384,7 @@ analyst_business_quality:
   soft_gate_never_zero: true
   minimum_soft_multiplier: 0.10
 
-llm_signal_quality:
+signal_quality:
   # Neutral 合法，但必须说明原因、缺口、冲突和转向条件。
   neutral_accountability:
     enabled: true
@@ -458,7 +450,7 @@ learning_retention:
     - research_position_feedback
     - analyst_learning_digest
     - learning_context_budget
-    - reviewer_llm_notes
+    - researcher_llm_notes
     - learning_event_log
     - config_learning_overlay
     - alpha_setup_sample
@@ -466,6 +458,4 @@ learning_retention:
     - alpha_setup_profile
     - alpha_setup_action_value
     - adaptive_policy_state
-
-
 

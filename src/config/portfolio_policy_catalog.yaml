@@ -155,11 +155,7 @@ dynamic_weights:
   max_weight: 0.70
 
 portfolio_manager:
-  # PM 默认继承主模型；自适应能力来自融合、审计和持仓控制。
-  llm_mode: cloud_only
-  # null 表示继承 llm.model；仅在 PM 需要单独模型时覆盖。
-  # cloud_model: "claude-opus-4-6-1"
-  cloud_model: null
+  # PM 不调用 LLM；自适应能力来自结构化证据、确定性工具输出、审计和持仓控制。
 
   holding_rebalance_control:
     # 持仓周期与再平衡：技术看短线，基本面做中期锚，新闻处理事件冲击。
@@ -285,7 +281,7 @@ portfolio_manager:
       preserve_current_multiplier: 0.85
     mature_alpha_release:
       # 成熟 alpha 不是自动加仓；必须同作用域策略状态、当日确认、失效边界和可交易支持同时成立。
-      # 通过后只做受控仓位释放，仍受 20% 总保证金硬上限、Auditor 和 Trader 执行约束。
+      # 通过后只做受控仓位释放，仍受 20% 总保证金硬上限、Auditor 审合约和 Trader 执行合约约束。
       enabled: true
       min_confirmation_score: 0.60
       min_policy_confidence: 0.60
@@ -379,7 +375,8 @@ portfolio_manager:
       # 分数本身不是第二交易授权，不能被 Trader 直接读取来改方向或手数。
       # PM 评分只消费 consumer_scope=pm_learning 的 action-value；
       # 检索顺序固定为 exact state -> same ticker/side/horizon -> same ticker/side -> weak prior。
-      # 分析师只读 analyst_calibration 安全摘要，Trader 只读 trader_execution_learning 执行诊断。
+      # 分析师只读 analyst_calibration 安全摘要；Trader 不读研究记录，
+      # 执行学习必须先由 PM 合约化为 execution_profile / entry_trigger 后才能影响执行。
       deployable_threshold: 0.72
       tradeable_threshold: 0.58
       weak_confirmation_threshold: 0.45

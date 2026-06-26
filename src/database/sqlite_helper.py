@@ -145,10 +145,10 @@ class SQLiteDB(BaseDB):
                     **_json_artifact_columns("final_action_contract"),
                 },
             )
-        if self._table_exists(cursor, "reviewer_llm_notes"):
+        if self._table_exists(cursor, "researcher_llm_notes"):
             _ensure_columns(
                 cursor,
-                "reviewer_llm_notes",
+                "researcher_llm_notes",
                 {
                     **_text_artifact_columns("raw_prompt"),
                     **_text_artifact_columns("raw_response"),
@@ -534,7 +534,7 @@ class SQLiteDB(BaseDB):
             "research_position_feedback",
             "analyst_learning_digest",
             "learning_context_budget",
-            "reviewer_llm_notes",
+            "researcher_llm_notes",
             "learning_event_log",
             "config_learning_overlay",
             "alpha_setup_sample",
@@ -866,7 +866,7 @@ class SQLiteDB(BaseDB):
                 "alpha_setup_action_value",
                 "capital_deployment_state",
                 "config_learning_overlay",
-                "reviewer_llm_notes",
+                "researcher_llm_notes",
                 "causal_review_candidate",
                 "provisional_policy_state",
                 "analyst_learning_digest",
@@ -2143,9 +2143,16 @@ class SQLiteDB(BaseDB):
         memory_config: Optional[Dict[str, Any]] = None,
         retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Complete a trading day phase record."""
+        """Complete a trading day phase record.
+
+        Phase completion is a status write only. Research memory refresh and
+        learning retention are handled by the explicit researcher learning
+        entrypoint, not by Phase4 reviewer validation.
+        """
         conn = None
         try:
+            _ = memory_config
+            _ = retention_config
             conn = self._get_connection()
             cursor = conn.cursor()
             phase_value = self._enum_value(phase)
@@ -2171,35 +2178,6 @@ class SQLiteDB(BaseDB):
                     ''',
                     (str(uuid.uuid4()), config_id, trading_date_value, phase_value, status_value, now, now, message),
                 )
-
-            if str(phase_value).lower() == "phase4" and str(status_value).lower() == "completed":
-                update_on_phase4 = True
-                if memory_config is not None:
-                    update_on_phase4 = bool(memory_config.get("update_on_phase4", True))
-                if update_on_phase4:
-                    try:
-                        refreshed = self._refresh_strategy_memory_with_cursor(
-                            cursor,
-                            config_id=config_id,
-                            trading_date=trading_date_value,
-                            updated_at=now,
-                            memory_config=memory_config,
-                        )
-                        logger.info(
-                            f"Strategy memory refreshed for {config_id[:8]} on {trading_date_value}: {refreshed} rows"
-                        )
-                    except Exception as memory_exc:
-                        logger.warning(f"Strategy memory refresh skipped: {memory_exc}")
-                if self._learning_retention_enabled(retention_config):
-                    try:
-                        self._cleanup_learning_retention_with_cursor(
-                            cursor,
-                            config_id=config_id,
-                            trading_date=trading_date_value,
-                            retention_config=retention_config,
-                        )
-                    except Exception as retention_exc:
-                        logger.warning(f"Learning retention cleanup skipped: {retention_exc}")
 
             conn.commit()
             return True
@@ -4487,10 +4465,4 @@ class SQLiteDB(BaseDB):
 
 ## init global instance
 # sqlite_db = SQLiteDB()
-
-
-
-
-
-
 

@@ -717,9 +717,12 @@ def build_learning_context(
             hypothesis_items = []
         raw_hypothesis_lines = []
         for item in hypothesis_items:
-            suggested_use = _compact_inline_text(item.get("suggested_use") or "prior only", 80)
-            if suggested_use and "prior" not in suggested_use.lower():
-                suggested_use = f"{suggested_use}; prompt prior only until validated"
+            suggested_use = _compact_inline_text(
+                item.get("suggested_use") or "structured research hypothesis only",
+                80,
+            )
+            if suggested_use and "structured research hypothesis" not in suggested_use.lower():
+                suggested_use = f"{suggested_use}; structured research hypothesis only until validated"
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
             structured_hints = []
             max_hint_items = int(exploration_cfg.get("max_hypothesis_hint_items", 3) or 3)
@@ -746,7 +749,7 @@ def build_learning_context(
                 f"[{item.get('status')}; conf={float(item.get('confidence_score') or 0.0):.2f}; "
                 f"n={int(item.get('sample_count') or 0)}] "
                 f"{hypothesis_text}{hint_text} "
-                f"Use: {suggested_use}. Boundary: prior only; no sizing/add/position_matched/"
+                f"Use: {suggested_use}. Boundary: structured hypothesis only; no sizing/add/position_matched/"
                 "losing-hold/bypass without current evidence and validation. "
                 "Before using it, state whether today's data confirms or contradicts it; "
                 f"if evidence is missing or conflicting, lower confidence or stay Neutral.{contract_suffix}"

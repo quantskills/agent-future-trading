@@ -253,7 +253,7 @@ def classify_neutral_signal(
     snapshot: Mapping[str, Any],
     cfg: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    account_cfg = (((cfg or {}).get("llm_signal_quality") or {}).get("neutral_accountability") or {})
+    account_cfg = (((cfg or {}).get("signal_quality") or {}).get("neutral_accountability") or {})
     required_fields = account_cfg.get("required_neutral_fields") or (
         "neutral_reason",
         "missing_evidence",

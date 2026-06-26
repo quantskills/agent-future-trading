@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import hashlib
@@ -21,7 +21,7 @@ ARTIFACT_TABLES = {
     "futures_transactions": ["audit_payload", "llm_prompt"],
     "signal": ["llm_prompt", "artifact_json"],
     "signal_context_history": ["analyst_signals", "market_confirmation", "final_action_contract"],
-    "reviewer_llm_notes": ["raw_prompt", "raw_response", "payload"],
+    "researcher_llm_notes": ["raw_prompt", "raw_response", "payload"],
 }
 
 

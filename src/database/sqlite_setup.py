@@ -526,7 +526,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
             net_pnl REAL DEFAULT 0,
             avg_pnl REAL DEFAULT 0,
             confidence_score REAL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT 'reviewer_snapshot',
+            source TEXT NOT NULL DEFAULT 'researcher_snapshot',
             reason TEXT,
             snapshot_at TEXT NOT NULL,
             payload_json TEXT,
@@ -916,7 +916,7 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         '''
-        CREATE TABLE IF NOT EXISTS reviewer_llm_notes (
+        CREATE TABLE IF NOT EXISTS researcher_llm_notes (
             id TEXT PRIMARY KEY,
             config_id TEXT NOT NULL,
             trading_date TEXT NOT NULL,
@@ -932,13 +932,26 @@ def _ensure_reviewer_learning_schema(cursor: sqlite3.Cursor) -> None:
     )
     _ensure_columns(
         cursor,
-        "reviewer_llm_notes",
+        "researcher_llm_notes",
         {
             **_text_artifact_columns("raw_prompt"),
             **_text_artifact_columns("raw_response"),
             **_json_artifact_columns("payload"),
         },
     )
+    if _table_exists(cursor, "reviewer_llm_notes"):
+        old_columns = _get_column_info(cursor, "reviewer_llm_notes")
+        new_columns = _get_column_info(cursor, "researcher_llm_notes")
+        shared_columns = [column for column in new_columns if column in old_columns]
+        if shared_columns:
+            columns_sql = ", ".join(_quote_identifier(column) for column in shared_columns)
+            cursor.execute(
+                f"""
+                INSERT OR IGNORE INTO researcher_llm_notes ({columns_sql})
+                SELECT {columns_sql}
+                FROM reviewer_llm_notes
+                """
+            )
     cursor.execute(
         '''
         CREATE TABLE IF NOT EXISTS causal_review_candidate (

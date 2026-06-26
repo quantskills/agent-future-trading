@@ -2,10 +2,11 @@
 # 本文件只保留可运行参数；机制说明见 docs/mechanism_*.md。
 # 硬约束、交易宇宙、数据源和 LLM 路由由本文件人工控制。
 # 日度弱参和学习结果由 Researcher 写入数据库 overlay/state，不自动改写本文件。
-# 最新业务主线：分析师定义品种化 state 与当前证据，Researcher 写带 usage_boundary 的
-# open/hold/exit/execution action-value；分析师只读 signal_calibration，PM 只读开仓/持仓/退出
-# 动作偏好，Trader 只读 execution profile。最终交易事实仍只认 PM 汇总出的
-# final_action_contract，Trader 只执行该最终契约。
+# 最新业务主线：分析师定义品种化 state 与当前预测证据，Researcher 输出带 usage_boundary 的
+# open/hold/exit/execution action-value；分析师只读 analyst_calibration 安全摘要，PM 通过
+# decision_memory_retrieval 只读 consumer_scope=pm_learning 的结构化研究成果。
+# Trader 不读研究库，不读 action-value；Trader 只读审计通过的 final_action_contract 里的
+# execution_profile、entry_trigger 和盘中触发授权，并按合约执行。
 # 分析师输出里的“如果/等待/确认后才交易”属于 pending 条件，必须结构化为
 # watch_for_trigger + trigger_valid=false。它不是即时交易授权；若同时具备
 # setup_quality_ok、明确方向、entry_trigger 和 invalidation_present，PM 只能把它写入
@@ -231,7 +232,7 @@ drawdown_control:
 # ---------------------------------------------------------------------------
 
 # 学习、记忆、Neutral 追责和保留周期由 learning_policy_catalog.yaml 展开：
-#   strategy_memory / learning / analyst_business_quality / llm_signal_quality / learning_context / learning_retention。
+#   strategy_memory / learning / analyst_business_quality / signal_quality / learning_context / learning_retention。
 
 capital_utilization_control:
   # 用户已调资金参数，属于核心保护区。
@@ -432,6 +433,4 @@ llm:
   #   reasoning_effort: null
   #   api_key_env: "TQX_LLM_API_KEY"
   #   api_key_env_fallbacks: []
-
-
 

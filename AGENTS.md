@@ -1,14 +1,18 @@
-# AgentQuant 项目工作手册
+# AgentQuant AI 开发协作手册
 
-本文件是 AgentQuant 的最高开发工作手册。处理本项目时，无论是修改代码、调整系统框架、改配置参数、排查回测、评估业务路径、整理文档，还是回答“现在该怎么办”，都必须先按本手册校准边界和证据。
+本文件是 AI 协助开发 AgentQuant 时必须遵守的最高工作手册。处理本项目时，无论是回答问题、改代码、改配置、改提示词、改文档、排查回测、评估策略表现，还是判断“下一步该怎么做”，都必须先按本手册校准边界、证据和验收路径。
+
+核心原则：`docs/mechanism_multiagents.md` 定义当前启用智能体的固定工作流；`docs/unified_field_semantics.md` 是唯一字段语义来源；`docs/mechanism_research.md` 定义研究、记忆和学习消费边界。AI 协助开发时不能按旧口径、个人推测或局部函数名改系统。
+
+`AGENTS.md` 是辅助开发手册，不是普通机制文档。除非用户本人明确要求修改、对齐或更新本文件，否则不要主动改动它；发现本文件与代码或机制文档不一致时，先向用户说明不一致和建议改法，不直接修改。
 
 ## 1. 项目目标
 
-AgentQuant 的目标只有一个：让多智能体系统自动生成的期货交易策略，在回测和模拟盘中尽可能实现稳定正收益，并能在真实期货业务链路中一比一复刻。
+AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，在回测和模拟盘中尽可能实现稳定正收益，并能在真实期货业务链路中一比一复刻。
 
-系统设计必须保持主动 alpha 迭代导向：分析师、PM、Auditor、Trader、Researcher 不是用来堆叠被动限制的，而是要基于行情时序、基本面、新闻、执行反馈和历史学习，主动发现可交易优势，验证其正期望，把合格机会落实到仓位和交易出口，并把结果反哺下一轮策略。限制、封顶、观察、probe 只能服务于风险识别和学习验证，不能取代寻找收益机会本身。
+系统采用多智能体结构，是为了利用 LLM 的信息处理和推理能力，对同一条期货价格时序进行技术面、基本面、新闻面和研究复盘的多维分析，提高对开盘后日频价格走势的预测质量。LLM 只能用于分析师和研究员形成结构化预测证据或结构化研究成果，不能直接决定仓位、手数或最终交易合约。
 
-所有工作都必须服务于这个目标。代码更复杂、机制更多、日志更详细、归因更漂亮，都不等于目标达成。判断一次工作是否有价值，要看它是否直接或间接改善：
+判断一次开发工作是否有价值，要看它是否直接或间接改善：
 
 - 净收益、收益稳定性、最大回撤；
 - 胜率、盈亏比、交易成本后收益；
@@ -16,321 +20,324 @@ AgentQuant 的目标只有一个：让多智能体系统自动生成的期货交
 - 正期望机会识别、合理落仓、及时退出、盈利持仓保护；
 - 回测策略能否在模拟盘和真实执行链路复刻。
 
-## 2. 运行环境硬边界
+机制更多、日志更详细、门控更多，不等于目标达成。硬门控只阻断非策略风险、越权、前视、字段缺失、账务错误和非法合约；软门控用于降级、减分、缩手数、条件监控或补证据，不能层层重复把交易压死。
+
+## 2. 必读机制文档
+
+每次涉及系统实际运行方式的任务，动手前必须读对应文档。这里的“系统实际运行方式”指：运行脚本、阶段顺序、启用智能体、输入输出、LLM 调用、字段读写、数据库落库、工具调用、审计门控、交易执行、结算、复盘和研究学习链路。
+
+“涉及系统实际运行方式的任务”包括：
+
+- 修改代码，例如智能体、工具、运行脚本、审计、测试、数据库读写；
+- 修改会影响代码行为的文档、配置或提示词，例如机制文档、字段语义表、prompt、`dev.yaml`；
+- 判断或解释系统如何运行，例如谁调用 LLM、谁消费研究信息、交易员是否能读研究库、Phase4 后学习如何运行。
+
+纯文字润色、错别字和不改变机制含义的格式调整，不属于系统实际运行方式任务。
+
+- `docs/mechanism_multiagents.md`：当前启用智能体、固定工作流、LLM 边界、工具边界、研究信息消费边界。
+- `docs/unified_field_semantics.md`：唯一字段语义表；新增字段必须先在这里登记。
+- `docs/mechanism_research.md`：研究员、复盘员、action-value、记忆读取和未来学习消费机制。
+- `docs/mechanism_data_model.md`：数据、模型调用、运行数据边界。
+- `docs/mechanism_future_trade.md`：期货交易业务机制。
+- `docs/work_log.md`：已完成行为修改记录；避免重复修、反向修和语义漂移。
+
+文档之间发生冲突时，按以下顺序处理：
+
+1. 当前代码事实和测试；
+2. `mechanism_multiagents.md` 固定工作流；
+3. `unified_field_semantics.md` 字段语义；
+4. 其他机制文档；
+5. 历史 work log。
+
+如果文档落后于代码事实，先说明不一致，再按当前任务范围同步文档或代码。
+
+## 3. 运行环境硬边界
 
 - 所有 AgentQuant 程序、测试、验收、回测、评估、数据库脚本都必须在本地 conda 环境 `deepfund` 中运行。
 - 标准 Python 路径是 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
+- 推荐从仓库根目录 `D:\research\AgentQuant` 运行命令。
 - 不要使用 `base` 环境、系统默认 Python 或未确认环境运行本项目。
-- 推荐从仓库根目录 `D:\research\AgentQuant` 运行命令；如果从 `src` 目录运行，必须相应调整路径。
 - `.env` 保存 API key，不得在回复、日志或文档中泄露密钥内容。
 - 临时排查脚本如确实需要，只能放在 `D:\research\Workshop\`，任务结束后删除；不要把一次性脚本长期留在 `src/run`、`src/tests` 或业务模块中。
 - 不要执行 `git reset --hard`、`git checkout --` 等会丢弃用户工作的命令，除非用户明确要求。
 
-## 3. 当前系统主链路
+## 4. 当前固定工作流
 
-AgentQuant 的业务线是一个闭环：
+当前业务主链只有一条：
 
-`数据与行情 -> 分析师结构化证据 -> PM 唯一交易契约 -> Auditor 审计 -> Trader 执行 -> Accountant 结算 -> Reviewer/Researcher 复盘学习 -> 下一轮分析师和 PM 使用学习结果`
+```text
+数据与行情
+-> technical / fundamental / commodity_news 结构化预测证据
+-> signal_collector 信号收集员
+-> portfolio_manager 投资组合经理唯一 final_action_contract
+-> auditor 审计员
+-> trader 交易员
+-> accountant 会计师
+-> reviewer 复盘员
+-> researcher 研究员
+-> 下一交易日分析师校准或投资组合经理 decision_memory_retrieval
+```
 
-控制组在主链外做协议、验收、审计和观测：
+当前四阶段运行框架固定为：
 
-`protocol_governor / preflight / contract_coverage_audit / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
+| 阶段 | 现实含义 | 运行脚本 | 智能体/主流程 | 输出 |
+|---|---|---|---|---|
+| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：技术面分析师、基本面分析师、期货新闻面分析师、信号收集员、投资组合经理 | `final_action_contract`、策略推荐 |
+| Phase2 | 开盘后/盘中执行 | `src/run/order.py` | 交易员 | 成交/未成交、`execution_result`、`futures_transactions` |
+| Phase3 | 收盘后结算 | `src/run/settlement.py` | 会计师 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 |
+| Phase4 | 收盘后复盘验收 | `src/run/validate_phase_flow.py` | 复盘员 | Phase4 验收、完整交易日志、事实归因、研究输入材料 |
+| Phase4 后 | 研究学习 | `src/run/research/researcher_learning.py` | 研究员 | 结构化研究信息，供未来交易日使用 |
 
-控制组不能生成交易权限，不能改手数，不能改保证金，不能替代 PM、Auditor 或 Trader。
+回测、模拟盘和实盘复刻共享同一套阶段顺序、字段契约、智能体边界和 no-lookahead 约束。区别只在 Phase2：回测中 `order.py` 单次回放完整交易日；模拟盘用 `order.py --loop` 按真实盘中时间循环检查触发。
 
-## 4. 唯一交易契约原则
+旧 `planner` 是封存开发组件，不属于当前启用智能体和固定工作流。`planner_mode=false` 是当前唯一合法运行配置；`planner_mode=true` 必须 fail-fast。
 
-策略交易的唯一交易真相是 PM 最终推荐记录中的 `final_action_contract`。
+`preflight` 的 LLM auth probe 是环境认证探针，不是协议管理员的交易链路 LLM 调用，也不是 Phase1-Phase4 智能体。
 
-必须保持如下路径：
+## 5. 启用智能体边界
 
-- 分析师只输出结构化证据，不输出手数、保证金比例或最终交易命令。
-- PM 读取分析师证据、当前持仓、资金边界和研究学习结果，生成唯一 `final_action_contract`。
-- Auditor 只审计这张契约的合规性、权限、风险边界和是否绕出口；审不过时，PM 必须把最终推荐改成 `hold/wait` 或相应受限动作。
-- Trader 只读取最终推荐记录里的 `final_action_contract` 执行；盘中触发只决定成交或不成交，不能改方向、目标手数、变化手数或保证金授权。
-- Accountant 只按实际成交和结算价核算，并把 PnL 绑定回对应契约。
-- Reviewer/Researcher 只研究这张契约导致的完整 episode 结果，不从草稿或旁路学习。
+### 5.1 分析师
 
-PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落入运行时 artifact；它不是交易真相，不是 Trader 成交来源，不是 Researcher 学习来源，不是审计推导目标手数的来源。
+启用分析师只有：
 
-策略单必须是 `contract_type=strategy` 的 `final_action_contract`。换月、强平、风控处置等非策略动作必须走运营或风险事件路径，例如 `source_type=rollover`，独立核算，不得污染 alpha 学习。
+- `technical` 技术面分析师；
+- `fundamental` 基本面分析师；
+- `commodity_news` 期货新闻面分析师。
 
-## 5. 已启用智能体职责边界
+分析师可以调用 LLM。它们只输出结构化预测证据，核心输出是 `AnalystSignal` 和 `action_evidence_contract`。分析师可以消费本专业校准类结构化研究，用于修正证据解释、触发质量和失效边界。
 
-本章只描述当前系统实际启用并参与回测链路的智能体。当前 `src/config/dev.yaml` 的 `workflow_analysts` 只启用 `commodity_news`、`fundamental`、`technical` 三位分析师；策略链路还启用 PM、Auditor、Trader、Accountant、Reviewer、Researcher 和 Protocol Governor。未在本章列出的角色不参与当前主链路。
+分析师禁止输出：
 
-当前完整链路是：
+- 手数；
+- 仓位比例；
+- 保证金授权；
+- 最终交易动作；
+- `final_action_contract`；
+- `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`。
 
-`technical / fundamental / commodity_news -> portfolio_manager -> auditor -> trader -> accountant -> reviewer -> researcher`
+`setup_quality_ok=true` 只表示形态值得关注，不代表当前触发成立。`trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。
 
-控制与验收旁路是：
+### 5.2 `signal_collector` 信号收集员
 
-`protocol_governor / contract_coverage_audit / pre_backtest_acceptance / system_invariant_audit / mechanism_effectiveness_audit`
-
-### 5.1 `technical` 技术分析师
-
-输入：
-
-- PandaAI 盘前价格、成交量、持仓量、结算价、开高低收、合约与交易规则；
-- 趋势、波动率、支撑阻力、RSI、MACD、ADX、均值回归、随机指标、缺口等技术特征；
-- 技术参数校准、技术形态历史学习、数据截止时间和 no-lookahead 状态。
-
-输出：
-
-- `AnalystSignal`；
-- `metadata.action_evidence_contract`；
-- `metadata.trade_research_contract`；
-- `signal`、`confidence`、`market_regime`、`price_location`；
-- `setup_quality_ok`、`setup_type`、`trigger_valid`、`current_trigger_confirmed`；
-- `entry_trigger`、`exit_hint`、`invalidation_present`、`invalidation_condition`、`opportunity_state`；
-- `metadata.data_usage_summary`、`metadata.reviewer_learning_context`、`metadata.learning_impact_summary`。
-
-边界：
-
-- 只判断技术证据质量、触发事实、失效边界和机会状态；
-- `setup_quality_ok=true` 只表示形态值得关注，不能推出当前可交易；
-- 只有 `trigger_valid=true` 且 `current_trigger_confirmed=true` 才表示当前触发成立；
-- 不能输出手数、保证金比例、最终交易命令或 PM 排名分数。
-
-### 5.2 `fundamental` 基本面分析师
-
-输入：
-
-- Finoview 本地 feather 基本面数据；
-- PandaAI 衍生因子、期货库存、仓单、基差、供需、利润、开工率、产量、进口、产业链数据；
-- 基本面数据质量、数据新鲜度、历史因子有效性与误判记录。
-
-输出：
-
-- `AnalystSignal`；
-- `metadata.action_evidence_contract`；
-- `metadata.trade_research_contract`；
-- `primary_business_driver`、`supply_demand_state`、`basis_state`、`inventory_state`、`warehouse_receipt_state`、`data_freshness`；
-- `factor_focus`、`business_quality_score`、`factor_alignment_score`；
-- `entry_trigger`、`invalidation_present`、`invalidation_condition`、`opportunity_state`；
-- `metadata.data_usage_summary`、`metadata.reviewer_learning_context`、`metadata.learning_impact_summary`。
-
-边界：
-
-- 只提供基本面方向、产业链逻辑、数据质量和短期确认要求；
-- 中长期基本面观点不能直接变成开仓，必须有短期触发、失效边界和 PM 审查；
-- 陈旧、缺失或冲突数据必须降级并写入 `data_usage_summary`；
-- 不能给仓位、手数、保证金或最终交易权限。
-
-### 5.3 `commodity_news` 商品新闻分析师
-
-输入：
-
-- 本地商品新闻文本；
-- 新闻发布时间、事件类型、相关度、新鲜度、影响窗口和产业链背景；
-- 历史类似新闻催化是否有效的研究记录。
-
-输出：
-
-- `AnalystSignal`；
-- `metadata.action_evidence_contract`；
-- `metadata.trade_research_contract`；
-- `event_type`、`impact_window_days`、`catalyst_quality`、`news_relevance`；
-- `entry_trigger`、`exit_hint`、`trigger_valid`、`current_trigger_confirmed`、`invalidation_present`、`opportunity_state`；
-- `metadata.data_usage_summary`、`metadata.reviewer_learning_context`、`metadata.learning_impact_summary`。
-
-边界：
-
-- 只判断新闻是否构成真实催化、影响方向、影响窗口和是否需要价格/成交量确认；
-- 背景新闻、低相关新闻、无时间戳新闻不能直接生成开仓证据；
-- 新闻催化必须落到 `action_evidence_contract`，不能以自由文本绕过 PM；
-- 不能输出手数、保证金、PM 排名或最终交易命令。
-
-### 5.4 `portfolio_manager` 组合经理
-
-输入：
-
-- 三位分析师的 `action_evidence_contract` 和 `trade_research_contract`；
-- 当前持仓、账户权益、可用资金、保证金、合约信息和市场确认；
-- `alpha_setup_action_value`、`adaptive_policy_state`、memory quality、历史同类 state/action 结果；
-- Auditor 反馈、配置中的资金边界和机会质量边界。
-
-输出：
-
-- `FuturesRecommendation`；
-- 唯一 `final_action_contract`；
-- `opportunity_scorecard`、`opportunity_score_components`、`opportunity_rank`、`capital_allocation_reason`、`learning_adjustment_summary`；
-- `capital_deployment`、`active_opportunity_audit`、`reason_codes`、`learning_used`、`capital_controls`、`risk_controls`。
+信号收集员属于决策组，文件位置是 `src/agents/decision_team/signal_collector.py`。
 
 职责：
 
-- PM 是唯一策略资金经理和唯一策略交易意图生成者；
-- 对每个品种和方向做证据分流：当前可交易、条件监控、明确不可交易原因；
-- 对全市场候选做机会评分、排序和资金部署；
-- 把入选或未入选结果回写同一张 `final_action_contract.target_lots/lots_delta/final_action`；
-- 对条件机会只能写入同一张合约的 `conditional_trigger_authority`，不能创建第二条交易路径。
+- 读取三类分析师的结构化预测证据；
+- 输出 `signal_collection_contract`；
+- 保留来源引用、逐条证据、方向、触发状态、证据强弱、冲突、缺失、风险、失效边界；
+- 不调用 LLM。
 
-边界：
+禁止：
 
-- 不能用 `pre_open_plan`、旧字段、顶层 action/lots、direction_only、watchlist 或 minimum lot 绕过 `final_action_contract`；
-- 不能把 `opportunity_score/opportunity_rank` 当成交易权限；
-- 不能跳过 Auditor；
-- 不能让 Researcher 候选偏好直接开仓或放大仓位；
-- 未入选候选必须写清不交易原因，不能静默 wait。
+- 直接读取研究库；
+- 混入历史学习结论；
+- 输出 score/rank；
+- 输出仓位、手数、交易动作；
+- 输出 `final_action_contract`。
 
-### 5.5 `auditor` 审计员
+### 5.3 `portfolio_manager` 投资组合经理
+
+投资组合经理不调用 LLM。它是唯一策略资金经理和唯一策略交易意图签发者。
+
+固定输入：
+
+- `signal_collection_contract`；
+- 账户、持仓、合约信息、市场确认；
+- `decision_memory_retrieval` 输出；
+- `opportunity_ranking` 输出；
+- `position_sizing` 输出；
+- 资金与风控配置。
+
+固定输出：
+
+- `FuturesRecommendation`；
+- 唯一 `final_action_contract`；
+- `learning_used`；
+- `opportunity_scorecard`；
+- `opportunity_rank`；
+- `position_sizing_result`；
+- `capital_allocation_reason`。
+
+投资组合经理研究消费入口只有 `decision_memory_retrieval`。投资组合经理不直接查研究表，不直接解析原始研究记录，不直接用空历史覆盖真实历史。
+
+投资组合经理的确定性工具链固定为：
+
+```text
+signal_collection_contract
+-> decision_memory_retrieval
+-> opportunity_ranking
+-> position_sizing
+-> portfolio_manager 签发 final_action_contract
+```
+
+`decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 不能签发 `final_action_contract`。最终交易什么、交易多少，只能由投资组合经理根据工具输出和规则写入唯一合约。
+
+### 5.4 `auditor` 审计员
+
+审计员不调用 LLM，不直接消费研究记录。
 
 输入：
 
-- PM 生成的唯一 `final_action_contract`；
-- 当前账户、持仓、保证金、合约状态、涨跌停、数据质量、硬风险配置；
-- PM 的 `reason_codes`、`learning_used`、`capital_controls`、artifact lineage。
+- 投资组合经理的 `final_action_contract`；
+- 账户；
+- 持仓；
+- 保证金；
+- 数据质量；
+- 硬风险边界。
 
 输出：
 
 - `audit_verdict`；
-- `approved`、`decision`、`hard_blocks`、`soft_controls`、`audit_reason_codes`；
-- 审计 payload 和必要的降级/阻断原因。
+- hard/soft risk reasons；
+- 审计 payload。
 
-边界：
+审计员只审合约，不改方向、不改手数、不新建合约。研究记忆只能通过投资组合经理的评分、排序、手数计算和唯一合约间接影响审计对象。
 
-- 只审 PM 的同一张合约，不创造新方向、新手数、新保证金目标或第二张合约；
-- 可以 block、reduce_only、probe_only 或要求 PM 降级；
-- 审计结果必须回到 PM 最终推荐记录，由 Trader 执行最终合约；
-- 不评价策略是否赚钱，只审权限、风险、字段一致性和业务边界。
+### 5.5 `trader` 交易员
 
-### 5.6 `trader` 交易员
+交易员不调用 LLM，不直接读取研究库、action-value、`strategy_memory` 或 `adaptive_policy_state`。
 
 输入：
 
-- 通过 PM/Auditor 边界后的 `final_action_contract`；
-- 合约内 `current_lots`、`target_lots`、`lots_delta`、`execution_profile`、`entry_trigger`、`conditional_trigger_authority`、`requires_intraday_confirmation`；
-- 盘中 PandaAI 行情、触发状态、滑点模型、手续费、合约交易规则；
-- 独立运营单 `source_type=rollover`、`source_type=forced_risk`。
+- 审计通过的 `final_action_contract`；
+- 合约化执行触发规则；
+- 盘中行情；
+- 执行配置。
 
 输出：
 
-- 成交或未成交记录；
-- `execution_result`、`trigger_fired`、`trigger_reason`、`not_executed_reason`；
-- 成交方向、手数、价格、滑点、手续费；
-- execution learning trace；
-- 必要时生成并执行 `forced_risk` close/reduce 运营单。
+- 成交/未成交；
+- `execution_result`；
+- `execution_learning_trace`。
 
-边界：
+交易员只能按合约中的 `current_lots/target_lots/lots_delta/final_action` 和 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 执行。交易员不能按 `opportunity_score`、`opportunity_rank`、`learning_used` 或研究记录下单、放宽触发、改方向或改手数。
 
-- 策略单只执行 `final_action_contract`，不能从分析师证据、PM 文本、排序字段、旧字段或顶层 raw action/lots 推交易；
-- 条件 probe 只检查盘中触发，触发后按合约方向和手数执行，未触发只记录原因；
-- 不能改变 PM 合约指定的方向、目标手数、变化手数或保证金权限；
-- raw action/lots 只允许 `rollover/forced_risk` 运营单使用；
-- `forced_risk` 只能 close/reduce，不能开新策略仓。
+执行触发机制的迭代路径固定为：
 
-### 5.7 `accountant` 会计
+```text
+交易员 execution_result / execution_learning_trace
+-> 复盘员 Phase4 factual validation
+-> 研究员 structured execution learning
+-> 下一交易日投资组合经理 decision_memory_retrieval
+-> 投资组合经理将 execution_profile / entry_trigger 写入 final_action_contract
+-> 交易员执行合约化触发规则
+```
 
-输入：
+### 5.6 `accountant` 会计师
 
-- Trader 实际成交；
-- 持仓、结算价、手续费、滑点、合约乘数、保证金率、账户余额；
-- rollover/forced_risk 等运营成交事实。
+会计师不调用 LLM。它只按成交、持仓、结算价、手续费、滑点、保证金率和合约乘数入账。
 
-输出：
+会计师禁止：
 
-- `daily_settlement`；
-- 品种 PnL、手续费、保证金占用、释放保证金、账户权益、现金变化；
-- 持仓状态、日终结算状态和评估所需事实表。
+- 用 LLM 调账；
+- 用学习改账；
+- 生成交易动作；
+- 写最终 action-value。
 
-边界：
+### 5.7 `reviewer` 复盘员
 
-- 只按事实核算，不参与策略判断；
-- 不读取 LLM 文本改变账务；
-- 不生成 action-value，不改变 Researcher 学习结论；
-- 策略单和运营单必须分账，运营动作不能污染策略 alpha 归因。
+复盘员不调用 LLM，不触发研究员学习，不写最终 action-value。
 
-### 5.8 `reviewer` 复盘员
+职责：
 
-输入：
+- 验证 Phase1-3 是否完整；
+- 输出 Phase4 验收、完整交易日志、事实归因、研究输入材料；
+- 复盘投资组合经理合约、交易员执行、会计师结算和学习使用痕迹；
+- 区分系统非策略问题和策略表现问题。
 
-- Phase1-3 的推荐、合约、审计、成交、未成交、结算和日志事实；
-- PM 机会评分、排名、资金部署理由；
-- Trader 执行结果、Accountant 结算结果、数据质量记录。
+复盘员可以给研究员提供事实材料，但未来学习由 `researcher_learning.py` 和研究工具写入。
 
-输出：
+### 5.8 `researcher` 研究员
 
-- Phase4 验收结果；
-- daily summary、交易日志、排序有效性复盘；
-- 交易 episode 归因、未触发机会记录、未交易机会观察；
-- 给 Researcher 使用的复盘事实。
+研究员可受限调用 LLM。研究员只在 Phase4 验证完成后运行，入口是 `src/run/research/researcher_learning.py`。
 
-边界：
+输出必须是结构化研究成果：
 
-- Reviewer 是确定性复盘与验收，不下单、不调仓、不写最终学习；
-- 必须区分系统非策略问题和策略表现问题；
-- 必须复盘高分/高排名候选是否贡献收益、低排名/未入选候选是否错过收益；
-- 不能把未触发条件机会写成真实开仓亏损。
-
-### 5.9 `researcher` 研究员
-
-输入：
-
-- Reviewer 产物；
-- 已结算真实交易 episode；
-- 未触发条件机会、未交易机会、shadow/counterfactual 观察；
-- open/hold/exit/execution 结果、PM 排序有效性、执行质量、PnL 和回撤事实。
-
-输出：
-
-- `alpha_setup_profile`；
 - `alpha_setup_action_value`；
+- `alpha_setup_profile`；
 - `adaptive_policy_state`；
-- `opportunity_ranking_preference` 或等价机会排序偏好候选；
-- 策略记忆、未来学习上下文、研究假设。
+- 分析师校准类研究；
+- 交易决策类 action-value；
+- 执行学习；
+- 排序偏好和研究反馈。
 
-边界：
+研究员禁止：
 
-- 必须按 action lane 分账：open、hold、exit/reduce、execution；
-- 只写未来可用学习，不能影响当天交易；
-- 不能直接创建交易权限、修改 Trader 方向/手数、改账或绕过 PM/Auditor；
-- exact real episode 可影响后续 PM 排序和资金部署，partial/similar/shadow 只能作为弱先验或候选；
-- 学习结果必须可审计，不能用自由文本记忆替代结构化 action-value。
+- 生成当天交易指令；
+- 修改投资组合经理手数；
+- 修改交易员权限；
+- 直接修改合约；
+- 输出只供下游消费的自由文本研究结论。
 
-### 5.10 `protocol_governor` 协议管理员
+### 5.9 `protocol_governor` 协议管理员
 
-输入：
+协议管理员不调用 LLM，不参与交易消费，不评价收益。
 
-- 能力卡、工具权限、字段语义、artifact lineage；
-- `contract_coverage_audit`、`pre_backtest_acceptance`、`system_invariant_audit`、`mechanism_effectiveness_audit`、统一字段审计和阶段状态；
-- PM、Auditor、Trader、Researcher 的关键运行 artifact。
+职责：
 
-输出：
+- 契约覆盖；
+- 机制断链；
+- 系统不变量；
+- 回测前/每日非策略风险报告；
+- 字段、提示词、配置、测试和机制文档一致性检查。
 
-- protocol audit；
-- preflight health；
-- 字段、权限、阶段、非策略问题和生命周期告警。
+发现 hard error 时，应阻断回测或阻断收益评价。
 
-边界：
+## 6. 唯一交易契约原则
 
-- Protocol Governor 是旁路治理和 fail-fast 检查，不是 PM、Auditor、Trader 或 Researcher；
-- 不能创建交易权限，不能改方向、手数、保证金，不能执行订单，不能写结算；
-- 发现 hard error 时应阻断回测继续解释策略收益；
-- 只判断系统边界是否 clean，不评价策略是否赚钱。
+策略交易的唯一交易真相是投资组合经理最终推荐记录中的 `final_action_contract`。
 
-## 6. 学习与 RAG 边界
+必须保持如下路径：
 
-研究学习是结构化输入，不是自由文本记忆。
+- 分析师只输出结构化预测证据；
+- 信号收集员只输出统一结构化预测证据包；
+- 投资组合经理使用 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 后签发唯一合约；
+- 审计员只审这张合约；
+- 交易员只执行审计通过后的这张合约和合约化触发规则；
+- 会计师只按成交和结算事实入账；
+- 复盘员只复盘事实；
+- 研究员只输出未来可用结构化学习。
 
-记忆质量分层：
+禁止以下旁路：
 
-- `exact_real_state`：同 ticker/side/setup/regime/action 且来自真实交易 episode，可参与 real_budget_entry 或 scale；
-- `partial_real_state`：真实交易但 state 不完整，只能支持 probe、复核、保护或降级；
-- `similar_sql_prior`：相似历史，只能作弱先验；
-- `shadow_prior`：影子或未交易观察，只能提示观察；
-- `stale_or_conflicted_memory`：过期或冲突记忆，只能审计，不参与放大。
+- 投资组合经理直接把分析师自由文本当交易依据；
+- 信号收集员直接读研究库；
+- 投资组合经理绕过 `decision_memory_retrieval` 直接解析研究记录；
+- `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 生成 `final_action_contract`；
+- 审计员、交易员、会计师、复盘员、研究员改写投资组合经理的交易方向或目标手数；
+- 复盘员入口调用研究员学习或任何 LLM 研究函数；
+- 交易员使用 `opportunity_rank`、`opportunity_score`、`learning_used` 或研究记录作为下单权限；
+- 任何 LLM 自由文本成为交易权限、仓位依据、审计依据、结算依据或下游研究 action-value。
 
-所有学习读取必须满足 `source_trading_date < decision_date`。同日 Phase4/Researcher 或未来记录不得影响当日分析师、PM、Auditor 或 Trader。
+策略单必须使用 `source_type=strategy`。换月、强平、风控处置等非策略动作必须走运营或风险事件路径，例如 `source_type=rollover`、`source_type=forced_risk`，独立核算，不得污染 alpha 学习。
 
-学习使用边界：
+## 7. 字段、提示词和工具命名规则
 
-- 分析师使用学习来校准证据可靠性，不获得交易授权；
-- PM 使用学习来调整 open/hold/exit/execution 倾向和仓位资格；
-- Trader 使用 execution 学习来选择触发 profile，不改变契约方向和手数；
-- Researcher 写入学习，但不能让学习绕过 PM 和 Auditor；
-- protocol_governor 只审计学习是否按契约落仓，不参与收益判断。
+字段语义以 `docs/unified_field_semantics.md` 为唯一来源。
 
-## 7. 数据与事实边界
+- 已有字段能表达同一语义时，必须复用已有字段。
+- 确认需要新字段时，必须同一轮同步字段表、生产端、消费端、提示词、测试和契约覆盖闸门。
+- `payload`、`payload_json`、`artifact_json` 等只允许作为结构化容器；容器里的业务字段仍必须属于统一字段语义表。
+- 字段新增缺任一同步项，都视为语义漂移。
+
+提示词集中在 `src/llm/prompt.py` 管理。涉及智能体输入、输出、禁止项、字段语义、LLM 权限边界的改造，必须同步检查提示词。
+
+不调用 LLM 的智能体和工具不得新增提示词入口。旧提示词入口如仍存在，改造时必须删除。
+
+工具目录按功能边界分类，不按智能体名字分类：
+
+- `src/tools/agent_tools/analysis`：分析侧业务工具；
+- `src/tools/agent_tools/decision`：决策侧业务工具；
+- `src/tools/agent_tools/execution`：执行侧业务工具；
+- `src/tools/agent_tools/research`：研究侧业务工具；
+- `src/tools/agent_tools/control`：控制侧治理工具；
+- `src/tools/common`：跨智能体公共基础能力，例如 `contracts.py` 和 `runtime_setup.py`；
+- `src/util`：更底层的通用基础设施。
+
+`agent_tools` 下的工具必须按具体功能命名，不能按智能体名命名。禁止新增 `*_tools`、`pm_*`、`trader_*`、`reviewer_tools`、`researcher_tools` 这类泛称或角色名工具。
+
+## 8. 数据与事实边界
 
 - PandaAI：行情、分钟线、结算、合约和期货衍生数据。
 - Finoview 本地 feather：基本面数据，只能从 `data/Fundamental_data/Finoview_data/` 调用。
@@ -338,49 +345,33 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 - `finoview_factor_catalog.yaml` 是本地 feather 字段目录。
 - `data_factor_policy_catalog.yaml` 是 PandaAI、Finoview、新闻的数据入口和质量策略目录。
 - 没有日期列、无法确认时点或超过决策日 cutoff 的数据，不能作为当日强证据。
-- `metadata.data_usage_summary` 必须说明数据新鲜度、来源和降级原因。
+- `data_usage_summary` 必须说明数据新鲜度、来源和降级原因。
 
-## 8. 配置边界
-
-主要配置文件：
-
-- `src/config/dev.yaml`：运行入口、账户资金、LLM active block、控制组开关和核心 runtime 配置；
-- `src/config/portfolio_policy_catalog.yaml`：PM、机会质量、市场确认、资金部署边界；
-- `src/config/learning_policy_catalog.yaml`：学习、记忆、neutral 追踪和上下文预算；
-- `src/config/analyst_prior_profiles.yaml`：分析师冷启动先验，不是开仓规则；
-- `src/config/data_factor_policy_catalog.yaml`：数据质量与数据源策略；
-- `src/config/finoview_factor_catalog.yaml`：本地基本面字段目录；
-- `src/config/execution_commission_catalog.yaml`：手续费事实；
-- `src/config/execution_slippage_catalog.yaml`：滑点假设；
-- `src/config/execution_exit_policy_catalog.yaml`：退出策略冷启动边界。
-
-当前 `dev.yaml` 只允许启用 CodexOpenAI / `gpt-5.5` / medium reasoning，网关为 `http://47.74.0.65`。TQXAI / `claude-opus-4-6-1` 必须保留为完整注释备用。代码层可以保留 DeepSeek 和其他 provider 接入能力，但当前 runtime 配置只保留 Codex 与 TQXAI 两类。
-
-不要无证据改手续费、滑点、结算事实、20% 总保证金硬边界、probe 资金边界和用户已调好的资金参数。
+所有学习读取必须满足 `source_trading_date < decision_date`。同日 Phase4、研究员或未来记录不得影响当日分析师、投资组合经理、审计员或交易员。
 
 ## 9. 开发任务流程
 
-本节规定每次任务的执行顺序。无论是回答问题、排查回测、改代码、改配置、改提示词、改文档，还是评估“下一步该做什么”，都必须按本流程执行。
-
 ### 9.1 先定义任务目标
 
-动手前必须先判断本次任务属于哪一类，并用对应边界处理：
+动手前必须先判断任务类型：
 
-- 修非策略 bug：目标是消除系统实现错误、字段误读、未来函数、旁路、未完成交易日、账务不一致等问题。
-- 解决不交易：目标是找出机会在哪一层消失，不能简单放松风险或让 Trader 创造交易。
-- 提升收益：目标是改善净收益、盈亏比、回撤、胜率、品种贡献、退出保护和资金部署。
-- 提高资金利用率：目标是让资金流向更高质量机会，而不是用弱机会凑仓位。
-- 优化学习闭环：目标是让 Reviewer/Researcher 基于真实 episode 和 action-value 生成可审计学习结果，并在不绕过 PM、Auditor、Trader 边界的前提下，影响后续分析师证据校准、PM 机会排序与资金部署、Trader 执行 profile；学习本身不能直接生成交易权限或放大仓位。
-- 对齐文档、提示词或配置：目标是让说明口径和运行口径一致，不能改变交易事实。
+- 修非策略 bug；
+- 解决不交易；
+- 提升收益；
+- 提高资金利用率；
+- 优化学习闭环；
+- 对齐文档、提示词或配置；
+- 整理工具目录或智能体边界。
 
 不同目标不能混用同一套修法。尤其不能把所有问题都处理成“加门控、加限制、少交易”。
 
 ### 9.2 先读上下文
 
-修改或判断前必须先读：
+修改或判断前必须读：
 
-- `docs/work_log.md`：确认过去是否已经做过同类修改，是否存在重复、冲突或未收敛问题；
-- `docs/unified_field_semantics.md`：凡涉及字段、语义、合约、学习、执行、复盘，都必须先核对字段表；
+- `docs/work_log.md`；
+- `docs/mechanism_multiagents.md`；
+- `docs/unified_field_semantics.md`；
 - 相关 `.py`、`.yaml/.yml`、提示词、测试和机制文档；
 - 最近回测记录和系统审计结果，如果任务与回测表现有关。
 
@@ -390,62 +381,57 @@ PM 内部草稿只能是局部计算过程，不能以 `pre_open_plan` 字段落
 
 不得只盯单个函数、单个字段或单个智能体。至少沿这条链路核对：
 
-`分析师证据 -> PM 分流/排序/合约 -> Auditor 审计 -> Trader 执行 -> Accountant 结算 -> Reviewer/Researcher 学习 -> 回测前/每日验收`
-
-检查重点：
-
-- 分析师证据是否结构化、可排序、无未来函数；
-- PM 是否把机会分成当前可交易、条件监控、明确不可交易原因，并写入唯一 `final_action_contract`；
-- PM 的排序、学习影响和资金部署是否真的改变 `target_lots`、`lots_delta`、`final_action`，或明确写出不交易原因；
-- Auditor 是否只审同一张契约，没有创造新交易权限；
-- Trader 是否只按契约执行，并写清触发、成交或未成交原因；
-- Accountant 是否能按成交和结算事实对账；
-- Reviewer/Researcher 是否只按真实 episode 和 action-value 学习；
-- 回测前验收和每日审计是否覆盖这条真实路径。
+```text
+分析师证据
+-> signal_collector
+-> 投资组合经理工具链与唯一合约
+-> 审计员审计
+-> 交易员执行
+-> 会计师结算
+-> 复盘员复盘
+-> 研究员学习
+-> 回测前/每日验收
+```
 
 凡是只写日志、分数、原因、诊断或报告，但没有影响真实合约或明确不交易原因的修改，只能算解释增强，不能算交易链路修复。
 
 ### 9.4 修改边界
 
-修改时必须守住以下边界：
+修改时必须守住：
 
 - 不新增兜底逻辑掩盖错误；
-- 不用旧字段绕过唯一契约；
+- 不用旧字段绕过唯一合约；
 - 不让控制组写交易策略；
 - 不让分析师给仓位；
-- 不让 Trader 创造策略、方向、目标手数或保证金权限；
-- 不让 Researcher 用未来数据、弱先验或候选偏好直接放大真实仓位；
+- 不让信号收集员读研究库；
+- 不让投资组合经理绕过 `decision_memory_retrieval` 读研究；
+- 不让审计员消费研究记录改交易权限；
+- 不让交易员创造策略、方向、目标手数、保证金权限或研究触发权限；
+- 不让复盘员调用 LLM、触发研究员学习或写最终 action-value；
+- 不让研究员用未来数据、弱先验或候选偏好直接放大真实仓位；
 - 不把一个品种、一个窗口或一次偶然失败写成全局硬规则；
 - 不默认通过新增门控解决收益问题。
 
 新增限制前必须说明它是在提升机会排序、资金迁移、退出保护、风险识别，还是单纯减少交易。单纯减少交易不能被当成策略优化。
 
-### 9.5 字段与口径同步
+### 9.5 测试与验收
 
-涉及新增或调整字段时，必须先查 `docs/unified_field_semantics.md`。
-
-- 已有字段能表达同一语义或功能时，必须复用已有字段，不得重复起名；
-- 确认确实需要新字段时，必须在同一轮同步写入字段表，明确放置位置和含义；
-- 新字段进入运行时链路前，必须同步代码、测试和必要审计；
-- 机制变更必须同步检查五类口径：代码、提示词、配置、字段语义表、回测前/每日验收。
-
-只改其中一类会造成后续开发按旧口径理解系统，最终导致字段漂移、边界漂移或交易链路断裂。
-
-### 9.6 测试与验收
-
-如果是修真实失败路径，优先写能复刻该路径的失败测试，再修代码。测试必须尽量覆盖真实入口和真实链路，不能只用绕过主流程的手工构造样例证明局部函数正确。
+如果是修真实失败路径，优先写能复刻该路径的失败测试，再修代码。测试必须覆盖真实入口和真实链路，不能只用绕过主流程的手工构造样例证明局部函数正确。
 
 修改后按影响面选择验证：
 
 - 目标测试；
 - 相关链路测试；
-- 必要时运行 `contract_coverage_audit`、`pre_backtest_acceptance`、`system_invariant_audit` 和 `mechanism_effectiveness_audit`；
-- 影响面大时运行全量 `python -m unittest`；
-- 用 `git diff --check` 检查补丁格式。
+- `compileall`；
+- `contract_coverage_audit`；
+- `pre_backtest_acceptance`；
+- `system_invariant_audit`；
+- `mechanism_effectiveness_audit`；
+- `git diff --check`。
 
-如果问题发生在回测、Phase1、PM 分流、Trader 执行或 Researcher 学习中，测试应尽可能从 workflow、agent 入口或系统审计入口复刻，防止“单测通过但回测仍不交易”。
+影响面大时运行全量 `python -m unittest`。
 
-### 9.7 交付结论
+### 9.6 交付结论
 
 完成后必须给出三个结论：
 
@@ -466,7 +452,9 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invari
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
 ```
 
-`contract_coverage_audit` 是版本级只读闸门，固定检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键智能体边界有 producer-to-consumer 保真测试；它不读收益、不写 DB、不改交易。`pre_backtest_acceptance` 固定覆盖：
+`contract_coverage_audit` 是版本级只读闸门，固定检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键智能体边界有 producer-to-consumer 保真测试。它不读收益、不写 DB、不改交易。
+
+`pre_backtest_acceptance` 固定覆盖：
 
 - environment_api；
 - config_consistency；
@@ -481,25 +469,22 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 - capital_boundary；
 - audit_explainability。
 
-`backtest.py` 已接入回测前 `contract_coverage_audit`、回测前验收、逐日累计 `system_invariant_audit` 和逐日累计 `mechanism_effectiveness_audit` fail-fast。验收通过只表示系统 readiness，不表示策略一定盈利。
+验收通过只表示系统 readiness，不表示策略一定盈利。
 
 ## 11. 回测中与回测后判断
 
-如果回测中 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。`mechanism_effectiveness_audit` 必须按交易生命周期场景判断：开仓/加仓看学习是否进入 score/rank 和唯一合约，条件监控看盘中触发结果，持仓/减仓/退出看学习是否落到目标手数下降、退出/减仓动作或明确继续持有解释；不能用开仓评分规则误杀已经正确退出的合约。`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
+如果 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。
 
-如果两类 audit 都 clean 但收益差，才进入策略层分析，重点看：
+`mechanism_effectiveness_audit` 必须按交易生命周期场景判断：
 
-- 正 alpha 是否被识别；
-- 正 alpha 是否从 probe 走向 real_budget_entry 或 scale；
-- 亏损 setup 是否快速降级；
-- 入场触发是否过慢、过严或错过；
-- 退出是否过慢、过早或回吐；
-- 资金利用率是否过低；
-- 品种/setup 分布是否集中或负期望；
-- 分析师是否长期只输出 no_opportunity/watch_for_trigger；
-- 学习是否真正改变 PM/Trader 的动作偏好。
+- 开仓/加仓看学习是否进入 score/rank 和唯一合约；
+- 条件监控看盘中触发或未触发结果；
+- 持仓/减仓/退出看学习是否落到目标手数下降、退出/减仓动作或明确继续持有解释；
+- 不能用开仓评分规则误杀已经正确退出的合约。
 
-旧回测记录不能证明新代码已经 clean；只有新代码生成的新记录通过 audit，才算该路径可信。
+`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
+
+如果两类 audit 都 clean 但收益差，才进入策略层分析。
 
 ## 12. 测试矩阵
 
@@ -516,56 +501,58 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 
 关键测试入口：
 
-- `src/tests/test_agent_contracts.py`：智能体结构化契约；
-- `src/tests/test_phase_flow_regression.py`：PM、Trader、Researcher 主链路；
-- `src/tests/test_pre_backtest_acceptance.py`：回测前验收；
-- `src/tests/test_protocol_governor.py`：控制组边界；
-- `src/tests/test_protocol_preflight_cli.py`：preflight 和 backtest 接入；
-- `src/tests/test_system_invariant_audit.py`：真实流水系统不变量；
-- `src/tests/test_mechanism_effectiveness_audit.py`：机制有效性 hard_fail/diagnostic 分流；
-- `src/tests/test_contract_coverage_audit.py`：版本级契约覆盖闸门；
-- `src/tests/test_reviewer_learning.py`：复盘和研究学习；
-- `src/tests/test_pandaai_api_adapter.py`：PandaAI adapter，真实 API 必须隔离为 integration；
-- `src/tests/test_futures_market_rules.py`：期货交易规则；
-- `src/tests/test_market_confirmation.py`：市场确认；
-- `src/tests/test_phase1_acceleration.py`：Phase1 加速和入口行为。
+- `src/tests/test_agent_contracts.py`；
+- `src/tests/test_phase_flow_regression.py`；
+- `src/tests/test_decision_workflow_tools.py`;
+- `src/tests/test_pre_backtest_acceptance.py`；
+- `src/tests/test_protocol_governor.py`；
+- `src/tests/test_protocol_preflight_cli.py`；
+- `src/tests/test_system_invariant_audit.py`；
+- `src/tests/test_mechanism_effectiveness_audit.py`；
+- `src/tests/test_contract_coverage_audit.py`；
+- `src/tests/test_reviewer_learning.py`；
+- `src/tests/test_pandaai_api_adapter.py`；
+- `src/tests/test_futures_market_rules.py`；
+- `src/tests/test_market_confirmation.py`；
+- `src/tests/test_phase1_acceleration.py`。
 
 新发现真实失败路径时，先写能复刻该路径的失败测试，再修代码，再跑目标测试、相关链路测试和必要验收。
 
 ## 13. 项目结构索引
 
-- `src/agents/analysis_team/`：分析师 agent；
-- `src/agents/decision_team/portfolio_manager.py`：PM 唯一交易契约生成；
-- `src/agents/decision_team/auditor.py`：策略契约审计；
-- `src/agents/execution_team/trader.py`：Trader 执行最终契约；
-- `src/agents/execution_team/accountant.py`：账务和结算；
-- `src/agents/research_team/`：Reviewer 和 Researcher；
-- `src/agents/control_team/protocol_governor.py`：控制组协议治理，不是交易 agent；
-- `src/tools/agent_tools/analysis/`：分析师工具、学习校准和证据合约；
-- `src/tools/agent_tools/decision/`：PM 辅助工具；
-- `src/tools/agent_tools/execution/`：触发、成交、合约、滑点和执行学习；
-- `src/tools/agent_tools/research/`：研究学习、action-value、RAG、episode 归因；
-- `src/tools/agent_tools/control/`：能力卡、工具权限、artifact lineage、task lifecycle、memory quality、action-preference 审计、cost budget、preflight、acceptance、system invariants；
+- `src/agents/analysis_team/`：技术面、基本面、期货新闻面分析师；
+- `src/agents/decision_team/signal_collector.py`：信号收集员；
+- `src/agents/decision_team/portfolio_manager.py`：投资组合经理，唯一交易合约签发；
+- `src/agents/decision_team/auditor.py`：审计员；
+- `src/agents/execution_team/trader.py`：交易员；
+- `src/agents/execution_team/accountant.py`：会计师；
+- `src/agents/research_team/reviewer.py`：复盘员；
+- `src/agents/research_team/researcher.py`：研究员；
+- `src/agents/control_team/protocol_governor.py`：协议管理员；
+- `src/agents/control_team/planner.py`：封存开发组件，当前 workflow 不启用；
+- `src/tools/agent_tools/analysis/`：分析侧工具；
+- `src/tools/agent_tools/decision/`：决策侧工具；
+- `src/tools/agent_tools/execution/`：执行侧工具；
+- `src/tools/agent_tools/research/`：研究侧工具；
+- `src/tools/agent_tools/control/`：控制侧治理工具；
+- `src/tools/common/`：跨智能体公共基础能力；
 - `src/llm/prompt.py`：集中提示词和 prompt builder；
-- `src/llm/provider.py`、`src/llm/inference.py`：LLM provider 和推理入口；
-- `src/database/`：SQLite schema、迁移、artifact 校验和数据库工具；
 - `src/run/backtest.py`：回测主入口；
 - `src/run/control/`：控制组命令入口；
-- `src/run/research/`：研究初始化和学习相关命令；
-- `src/evaluation/`：评估、报告和图表；
+- `src/run/research/researcher_learning.py`：研究学习入口；
 - `src/tests/`：确定性测试和回归测试。
 
 ## 14. 文档边界
 
 - `docs/work_log.md`：行为代码/配置工作日志；
-- `docs/mechanism_multiagents.md`：多智能体职责、边界和协作；
-- `docs/mechanism_future_trade.md`：期货交易业务机制；
-- `docs/mechanism_data_model.md`：数据与模型调用机制；
+- `docs/mechanism_multiagents.md`：多智能体固定工作流、边界和协作；
 - `docs/mechanism_research.md`：研究、记忆、action-value 和学习闭环；
+- `docs/mechanism_data_model.md`：数据与模型调用机制；
+- `docs/mechanism_future_trade.md`：期货交易业务机制；
+- `docs/unified_field_semantics.md`：唯一字段语义表；
 - `docs/parameter.md`：长期参数调节备忘；
 - `docs/pandaia_data_introduction.md`：PandaAI 数据接入说明；
-- `docs/ppt.md`：演示稿生成提示，不代表运行规则；
-- `docs/release_baseline_2026-06-17.md`：本地基线说明。
+- `docs/ppt.md`：演示稿生成提示，不代表运行规则。
 
 纯文档说明不能替代代码、测试和真实 audit 证据。文档变更必须和现有代码语义一致。
 
@@ -577,7 +564,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 
 - 修改业务逻辑；
 - 修改智能体输入输出；
-- 修改交易契约、审计、执行、结算、学习；
+- 修改交易合约、审计、执行、结算、学习；
 - 修改测试逻辑；
 - 修改控制组工具；
 - 修改 runtime 配置。

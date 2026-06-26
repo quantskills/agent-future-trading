@@ -55,26 +55,28 @@ from tools.agent_tools.research.alpha_setup import (
     upsert_alpha_setup_sample_and_profile,
 )
 from tools.agent_tools.research.phase4_review import (
-    _export_template_prior,
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
-    _backfill_neutral_forward_counterfactual_tracking,
     _neutral_counterfactual_tracking_summary,
-    _write_trade_episode_memory,
-    _write_learning_mechanism_policy_state,
-    _write_research_position_feedback,
-    _write_learned_vs_unlearned_policy_state,
-    _write_validated_causal_policy_rules,
-    _write_config_overlay,
-    _backfill_no_trade_opportunity_counterfactual_results,
-    _write_reviewer_learning_report,
-    _write_alpha_promotion_state,
-    _write_contextual_rule_calibration_state,
-    _write_no_trade_opportunity_memory,
-    _write_tail_loss_sentinel_state,
-    _write_loss_template_observation_research,
+    _write_historical_learning_snapshot_report,
     _validate_phase1_signal_persistence,
+)
+from tools.agent_tools.research.research_memory_writers import (
+    _export_template_prior,
+    _backfill_neutral_forward_counterfactual_tracking,
+    _backfill_no_trade_opportunity_counterfactual_results,
+    _write_alpha_promotion_state,
+    _write_config_overlay,
+    _write_contextual_rule_calibration_state,
+    _write_learning_mechanism_policy_state,
+    _write_learned_vs_unlearned_policy_state,
+    _write_loss_template_observation_research,
+    _write_no_trade_opportunity_memory,
+    _write_research_position_feedback,
     _write_signal_context_history,
+    _write_tail_loss_sentinel_state,
+    _write_trade_episode_memory,
+    _write_validated_causal_policy_rules,
 )
 from tools.agent_tools.decision.capital_allocator import enriched_policy_evidence
 
@@ -1361,10 +1363,10 @@ class ReviewerLearningContextTest(unittest.TestCase):
         cursor.execute("SELECT * FROM exploratory_hypothesis WHERE config_id='cfg'")
         item = dict(cursor.fetchone())
         self.assertEqual(item["status"], "candidate")
-        self.assertIn("prompt prior only", item["suggested_use"])
+        self.assertIn("structured research hypothesis", item["suggested_use"])
         self.assertIn("explicit invalidation", item["hypothesis_text"])
         payload = load_externalized_json(item["payload_json"], item["payload_artifact_path"], item["payload_sha256"])
-        self.assertTrue(payload["hard_constraints"]["prompt_prior_only"])
+        self.assertTrue(payload["hard_constraints"]["structured_hypothesis_only"])
         self.assertTrue(payload["hard_constraints"]["candidate_hypothesis_cannot_control_position"])
         self.assertAlmostEqual(payload["hard_constraints"]["max_total_margin_ratio"], 0.20)
         contract = payload[CONTRACT_KEY]
@@ -1374,7 +1376,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn("pm_action_conditions", contract)
         self.assertEqual(payload["entry_timing_hint"], "wait for price confirmation")
         self.assertEqual(payload["agent_name"], "researcher")
-        cursor.execute("SELECT raw_prompt FROM reviewer_llm_notes WHERE config_id='cfg'")
+        cursor.execute("SELECT raw_prompt FROM researcher_llm_notes WHERE config_id='cfg'")
         note = dict(cursor.fetchone())
         self.assertIn("AgentQuant Researcher", note["raw_prompt"])
         self.assertNotIn("AgentQuant Reviewer acting as a research memory curator", note["raw_prompt"])
@@ -2867,7 +2869,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             )
             cursor.execute(
                 """
-                INSERT INTO reviewer_llm_notes (
+                INSERT INTO researcher_llm_notes (
                     id, config_id, trading_date, evidence_pack_id, ticker,
                     raw_prompt, raw_response, created_at, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -3850,7 +3852,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "SELECT action_json FROM learning_event_log WHERE event_type = ?",
                 ("neutral_counterfactual_tracking",),
             ).fetchone()
-            self.assertTrue(json.loads(event["action_json"])["tracking_only"])
+            self.assertIsNone(event)
         finally:
             conn.close()
 
@@ -3899,7 +3901,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             summary = _neutral_counterfactual_tracking_summary(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
+                cfg={"signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-10",
                 recommendations=[
@@ -3913,7 +3915,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         },
                     }
                 ],
-                write_event=False,
             )
 
             self.assertEqual(summary["forward_status"], "applied")
@@ -3996,13 +3997,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             pending = _backfill_neutral_forward_counterfactual_tracking(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
+                cfg={"signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-12",
             )
             applied = _backfill_neutral_forward_counterfactual_tracking(
                 cursor,
-                cfg={"llm_signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
+                cfg={"signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",
                 trading_date="2025-02-13",
             )
@@ -6000,7 +6001,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_reviewer_learning_report_writes_markdown_and_json(self):
+    def test_historical_learning_snapshot_report_writes_markdown_and_json(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -6088,7 +6089,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ),
             )
             with tempfile.TemporaryDirectory() as temp_dir:
-                paths = _write_reviewer_learning_report(
+                paths = _write_historical_learning_snapshot_report(
                     cursor=cursor,
                     cfg={"exp_name": "unit"},
                     config_id="cfg",
@@ -6102,8 +6103,12 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
                 self.assertTrue(markdown.exists())
                 markdown_text = markdown.read_text(encoding="utf-8")
+                self.assertIn("Phase4 Historical Learning Snapshot", markdown_text)
+                self.assertIn("read_only_snapshot_for_audit_and_replay", markdown_text)
                 self.assertIn("Positive Templates", markdown_text)
                 self.assertIn("Neutral Accountability", markdown_text)
+                self.assertEqual(payload["report_boundary"], "phase4_read_only_historical_learning_snapshot")
+                self.assertTrue(payload["historical_learning_snapshot"]["read_only"])
                 self.assertEqual(payload["positive_templates"][0]["setup_type"], "long_reversal_confirmed_trend")
                 self.assertEqual(payload["neutral_accountability"]["neutral_count"], 1)
         finally:
@@ -6158,11 +6163,4 @@ class ReviewerDynamicWeightsRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-
-
 

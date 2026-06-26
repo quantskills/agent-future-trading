@@ -52,9 +52,14 @@ def _write_minimal_covered_repo(root: Path) -> None:
             [
                 "learning_consumer_scopes",
                 "pm_allowed_consumer_scope",
-                "trader_allowed_consumer_scope",
+                "trader_direct_research_consumption_allowed",
             ]
         ),
+    )
+    _append_text(
+        root,
+        "src/config/portfolio_policy_catalog.yaml",
+        "consumer_scope=pm_learning\nTrader 不读研究记录",
     )
 
     _append_text(

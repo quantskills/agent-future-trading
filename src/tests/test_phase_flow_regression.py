@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import hashlib
 import sqlite3
@@ -2254,7 +2254,7 @@ class PandaAIContractNormalizationRegressionTest(unittest.TestCase):
             def get_market_data(self, **kwargs):
                 self.market_calls += 1
                 if self.market_calls == 1:
-                    raise RuntimeError("鏈嶅姟杩斿洖閿欒:[閿欒鐮?200004 锛歍oken宸茶繃鏈焆")
+                    raise RuntimeError("service returned error: code=200004 token expired")
                 return [{"symbol": "ZN_DOMINANT.SHF", "date": "20250102", "close": 25265.0}]
 
         fake = _FakePandaData()
@@ -2364,7 +2364,7 @@ class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
 
 class FuturesAuditRegressionTest(unittest.TestCase):
     def test_classify_no_trade_reasons(self):
-        self.assertEqual(classify_no_trade_reasons(["llm_neutral", "position_matched"]), "expected")
+        self.assertEqual(classify_no_trade_reasons(["neutral_signal_no_trade", "position_matched"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["position_matched", "cooling_period"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["cold_start_small_cap"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["trade_frequency_control", "weak_signal_combo"]), "expected")
@@ -2374,12 +2374,12 @@ class FuturesAuditRegressionTest(unittest.TestCase):
         self.assertEqual(classify_no_trade_reasons(["strategy_memory_weak_block"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["decision_planner_block"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["intraday_opening_range_incomplete"]), "expected")
-        self.assertEqual(classify_no_trade_reasons(["llm_neutral", "missing_previous_close"]), "error")
+        self.assertEqual(classify_no_trade_reasons(["neutral_signal_no_trade", "missing_previous_close"]), "error")
         self.assertEqual(classify_no_trade_reasons([]), "unknown")
         self.assertEqual(classify_no_trade_reasons(["intraday_trigger_not_met"]), "expected")
 
     def test_no_trade_reason_research_categories(self):
-        self.assertEqual(categorize_no_trade_reason("llm_neutral")["category"], "signal")
+        self.assertEqual(categorize_no_trade_reason("neutral_signal_no_trade")["category"], "signal")
         self.assertEqual(categorize_no_trade_reason("drawdown_control")["category"], "risk")
         self.assertEqual(categorize_no_trade_reason("intraday_trigger_not_met")["category"], "timing")
         self.assertEqual(categorize_no_trade_reason("limit_locked_no_fill")["category"], "execution")
@@ -2797,13 +2797,13 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         )
         self.assertGreater(output.position_ratio_multiplier, 0.0)
 
-    def test_contextual_calibration_can_soften_same_scope_auditor_history_block_to_probe(self):
+    def test_auditor_ignores_legacy_contextual_calibration_research_payload(self):
         config = self._auditor().full_config
         config["learning"] = {
             "contextual_rule_calibration": {
                 "enabled": True,
                 "min_confidence": 0.35,
-                "softenable_hard_block_reasons": ["side_performance_block"],
+                "pm_soft_risk_reasons": ["side_performance_block"],
             }
         }
         auditor = TradeAuditor(config)
@@ -2849,8 +2849,8 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
         self.assertEqual(output.decision, "probe_only")
         self.assertIn("side_performance_block", output.reasons)
-        self.assertIn("soft_block_converted_to_probe_only", output.reasons)
         self.assertNotIn("contextual_rule_calibration", output.diagnostics)
+        self.assertNotIn("contextual_rule_calibration", output.reasons)
         self.assertEqual(
             output.diagnostics.get("research_memory_boundary"),
             "auditor_does_not_consume_research_records",
@@ -3146,7 +3146,7 @@ class ValidationRegressionTest(unittest.TestCase):
         recommendations = [
             {
                 "source_type": "strategy",
-                "signal_snapshot": {"execution_result": {"no_trade_reason": "llm_neutral"}},
+                "signal_snapshot": {"execution_result": {"no_trade_reason": "neutral_signal_no_trade"}},
             },
             {
                 "source_type": "strategy",
@@ -3155,14 +3155,14 @@ class ValidationRegressionTest(unittest.TestCase):
         ]
         result = classify_zero_transaction_day(recommendations)
         self.assertEqual(result["classification"], "expected")
-        self.assertEqual(sorted(result["reasons"]), ["llm_neutral", "position_matched"])
+        self.assertEqual(sorted(result["reasons"]), ["neutral_signal_no_trade", "position_matched"])
         self.assertEqual(result["reason_categories"], {"signal": 1, "business": 1})
 
     def test_zero_transaction_day_allows_horizon_timing_gate(self):
         recommendations = [
             {
                 "source_type": "strategy",
-                "signal_snapshot": {"execution_result": {"no_trade_reason": "llm_neutral"}},
+                "signal_snapshot": {"execution_result": {"no_trade_reason": "neutral_signal_no_trade"}},
             },
             {
                 "source_type": "strategy",
@@ -3190,7 +3190,7 @@ class ValidationRegressionTest(unittest.TestCase):
             },
             {
                 "source_type": "strategy",
-                "signal_snapshot": {"execution_result": {"no_trade_reason": "llm_neutral"}},
+                "signal_snapshot": {"execution_result": {"no_trade_reason": "neutral_signal_no_trade"}},
             },
         ]
 
@@ -10910,11 +10910,11 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertTrue(cfg["learning"]["contextual_rule_calibration"]["enabled"])
         self.assertEqual(cfg["learning_retention"]["detail_retention_days"], 90)
         self.assertEqual(
-            cfg["_config_parameter_roles"]["llm_signal_quality"],
+            cfg["_config_parameter_roles"]["signal_quality"],
             "learning_policy_catalog_runtime_expanded",
         )
-        self.assertTrue(cfg["llm_signal_quality"]["neutral_accountability"]["enabled"])
-        self.assertEqual(cfg["llm_signal_quality"]["neutral_accountability"]["counterfactual_forward_days"], 3)
+        self.assertTrue(cfg["signal_quality"]["neutral_accountability"]["enabled"])
+        self.assertEqual(cfg["signal_quality"]["neutral_accountability"]["counterfactual_forward_days"], 3)
         self.assertIn("data_factor_policy", cfg["_config_catalogs_loaded"])
         self.assertEqual(
             cfg["_config_parameter_roles"]["factor_data"],
@@ -13273,7 +13273,7 @@ class EvaluationRegressionTest(unittest.TestCase):
             cur.executemany(
                 "INSERT INTO capital_deployment_state VALUES (?, ?, ?, ?)",
                 [
-                    ("cfg", "2025-01-02", "under_deployed", "llm_neutral"),
+                    ("cfg", "2025-01-02", "under_deployed", "neutral_signal_no_trade"),
                     ("cfg", "2025-01-03", "under_deployed", "intraday_trigger_not_met"),
                     ("cfg", "2025-01-04", "normal", "alpha_capacity_limited"),
                 ],
@@ -13287,7 +13287,7 @@ class EvaluationRegressionTest(unittest.TestCase):
             self.assertEqual(metrics["under_deployed_days"], 2)
             self.assertEqual(metrics["system_under_deployed_days"], 2)
             self.assertEqual(metrics["non_alpha_under_deployed_days"], 2)
-            self.assertEqual(metrics["under_deployed_reason_counts"]["llm_neutral"], 1)
+            self.assertEqual(metrics["under_deployed_reason_counts"]["neutral_signal_no_trade"], 1)
             self.assertEqual(metrics["under_deployed_reason_counts"]["intraday_trigger_not_met"], 1)
             self.assertEqual(metrics["alpha_capacity_limited_days"], 0)
         finally:
@@ -13296,14 +13296,4 @@ class EvaluationRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-
-
-
-
-
 

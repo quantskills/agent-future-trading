@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
@@ -187,7 +187,7 @@ def _apply_learning_policy_catalog(
         "strategy_memory",
         "learning",
         "analyst_business_quality",
-        "llm_signal_quality",
+        "signal_quality",
         "learning_context",
         "learning_retention",
         "opportunity_ranking_learning_policy",
@@ -205,7 +205,7 @@ def _apply_learning_policy_catalog(
         roles["strategy_memory"] = "learning_policy_catalog_runtime_expanded"
         roles["learning"] = "learning_policy_catalog_runtime_expanded"
         roles["analyst_business_quality"] = "learning_policy_catalog_runtime_expanded"
-        roles["llm_signal_quality"] = "learning_policy_catalog_runtime_expanded"
+        roles["signal_quality"] = "learning_policy_catalog_runtime_expanded"
         roles["learning_context"] = "learning_policy_catalog_runtime_expanded"
         roles["learning_retention"] = "learning_policy_catalog_runtime_expanded"
         roles["opportunity_ranking_learning_policy"] = "learning_policy_catalog_runtime_expanded"

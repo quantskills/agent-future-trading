@@ -164,7 +164,7 @@ class BaseDB(ABC):
         memory_config: Optional[Dict[str, Any]] = None,
         retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Complete a trading day phase record."""
+        """Complete a trading day phase record without learning side effects."""
         raise NotImplementedError
 
     def get_trading_day_phase(
@@ -275,7 +275,7 @@ class BaseDB(ABC):
         trading_date=None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Get reviewer research hypotheses as prompt priors."""
+        """Get strictly historical structured research hypotheses."""
         raise NotImplementedError
 
     def get_provisional_policy_state(

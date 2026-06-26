@@ -53,7 +53,7 @@ mechanism_effectiveness_audit
 |---|---|---|---|---|---|---|
 | 1 | 盘前预测证据分析 | `technical` 技术面分析师、`fundamental` 基本面分析师、`commodity_news` 期货新闻面分析师 | 是 | `action_evidence_contract` | `signal_collector` 信号收集员 | 只能输出结构化预测证据，不能输出手数、仓位、最终交易动作 |
 | 2 | 盘前预测信号收集 | `signal_collector` 信号收集员 | 否 | `signal_collection_contract` | `portfolio_manager` 投资组合经理 | 只整理三类分析师结构化预测证据，不读研究库，不输出 score/rank/手数/交易动作 |
-| 3 | 历史学习读取 | `decision_memory_retrieval` | 否 | `effective_memory_summary`、有效 action-value 列表、剔除/降级原因 | `portfolio_manager` 投资组合经理 | 只能读取结构化研究记录；空历史不能挡真实历史；不能输出手数或交易动作 |
+| 3 | 历史学习读取 | `decision_memory_retrieval` | 否 | `effective_memory_summary`、有效 action-value 列表、剔除/降级原因 | `portfolio_manager` 投资组合经理 | 只能读取结构化研究信息；空历史不能挡真实历史；不能输出手数或交易动作 |
 | 4 | 机会评分排序 | `opportunity_ranking` | 否 | `opportunity_scorecard`、`opportunity_score_components`、`opportunity_rank`、`capital_allocation_reason` | `portfolio_manager` 投资组合经理 | rank 只解释资金优先级，不是交易权限，不能输出最终手数或最终合约 |
 | 5 | 手数计算 | `position_sizing` | 否 | `position_sizing_result` | `portfolio_manager` 投资组合经理 | 只按评分、资金、持仓、风控算目标手数建议；不能改方向，不能签合约 |
 | 6 | 签发唯一交易合约 | `portfolio_manager` 投资组合经理 | 否 | `final_action_contract` | `auditor` 审计员 | 只能由投资组合经理签发唯一策略合约；不得调用 LLM；不得生成第二套交易计划 |
@@ -94,7 +94,7 @@ Phase4 完成后，研究学习单独运行：
 
 | 入口 | 运行脚本 | 智能体 | 作用 | 边界 |
 |---|---|---|---|---|
-| 研究学习 | `src/run/research/researcher_learning.py` | `researcher` 研究员 | 消费复盘事实，写结构化研究记录，供未来交易日使用 | 不是交易执行阶段，不产生当天交易动作，不修改当天合约、手数、成交或结算 |
+| 研究学习 | `src/run/research/researcher_learning.py` | `researcher` 研究员 | 消费复盘事实，输出并持久化结构化研究信息，供未来交易日使用 | 不是交易执行阶段，不产生当天交易动作，不修改当天合约、手数、成交或结算 |
 
 时间边界规则：
 
@@ -102,8 +102,9 @@ Phase4 完成后，研究学习单独运行：
 - Phase2 是开盘后/盘中执行，只能按审计通过的 `final_action_contract` 和盘中触发条件执行，不能重新生成策略方向或手数。
 - Phase3 是收盘后结算，只能按 Phase2 成交、结算价、手续费、滑点、保证金率和合约乘数入账。
 - Phase4 是收盘后复盘验收，只能检查推荐、合约、成交、结算和阶段状态，并输出完整交易日志与事实归因。
-- Phase4 可以写完整交易日志和复盘事实材料，但不能写 `action-value`、`strategy_memory`、`adaptive_policy_state`、`capital_deployment_state` 等未来研究状态。
-- 研究学习只能在 Phase4 完成后运行，写出的学习结果只允许影响未来交易日；研究状态写入统一由 `researcher_learning.py` 和 `research_memory_writers` 承担。
+- Phase4 可以输出完整交易日志和复盘事实材料，但不能输出 `action-value`、`strategy_memory`、`adaptive_policy_state`、`capital_deployment_state` 等未来研究状态。
+- Phase4 标记 completed 只更新阶段状态，不触发 `strategy_memory` 刷新、学习 retention 清理或任何研究表写入。
+- 研究学习只能在 Phase4 完成后运行，输出的结构化研究信息只允许影响未来交易日；研究信息持久化统一由 `researcher_learning.py` 和 `research_memory_writers` 承担。
 
 回测运行规则：
 
@@ -137,7 +138,7 @@ Phase4 完成后，研究学习单独运行：
 | `trader` 交易员 | 审计通过的 `final_action_contract`、合约化执行触发规则、盘中行情、执行配置 | 成交/未成交、`execution_result`、`execution_learning_trace` | 否 | 改投资组合经理方向、改投资组合经理手数、直接读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发 | 复盘员/研究员读取执行事实 |
 | `accountant` 会计师 | 成交、持仓、结算价、手续费、滑点、保证金率、合约乘数 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | LLM 调账、学习改账、交易动作 | 复盘员使用结算事实 |
 | `reviewer` 复盘员 | 推荐、合约、成交、结算、执行结果、阶段状态、投资组合经理学习使用痕迹 | Phase4 验收、交易日志、事实归因、学习输入材料 | 否 | 下单、调仓、写最终 action-value | 研究员消费复盘事实 |
-| `researcher` 研究员 | 复盘员事实、完整 episode、未交易机会、未触发条件机会、执行结果 | 结构化研究成果：`alpha_setup_action_value`、`alpha_setup_profile`、`adaptive_policy_state`、分析师校准类研究记录、交易决策类 action-value | 可调，但受限 | 当天策略交易指令、投资组合经理手数、交易员权限、直接修改合约、只供下游消费的自由文本研究结论 | 分析师消费校准类研究；投资组合经理经工具消费交易决策类研究 |
+| `researcher` 研究员 | 复盘员事实、完整 episode、未交易机会、未触发条件机会、执行结果 | 结构化研究信息：`alpha_setup_action_value`、`alpha_setup_profile`、`adaptive_policy_state`、分析师校准类研究、交易决策类 action-value | 可调，但受限 | 当天策略交易指令、投资组合经理手数、交易员权限、直接修改合约、只供下游消费的自由文本研究结论 | 分析师消费校准类研究；投资组合经理经工具消费交易决策类研究 |
 | `protocol_governor` 协议管理员 | 代码、配置、字段语义、契约覆盖、系统审计、机制审计 | 回测前/每日非策略风险报告、契约覆盖矩阵、机制断链报告 | 否 | 交易动作、手数、保证金、策略收益结论 | 发现非策略 hard error 时阻断回测或阻断收益评价 |
 
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
@@ -149,7 +150,7 @@ Phase4 完成后，研究学习单独运行：
 - `src/tools/agent_tools/analysis`：分析侧业务工具，例如分析师证据质量、学习校准和信号融合。
 - `src/tools/agent_tools/decision`：决策侧业务工具，例如信号证据收集、记忆读取、机会排序、手数计算、资金部署、失效边界。
 - `src/tools/agent_tools/execution`：执行侧业务工具，例如盘中触发、成交模拟、执行退出规则。
-- `src/tools/agent_tools/research`：研究侧业务工具，例如复盘学习、action-value、profile、state、研究记录写入。
+- `src/tools/agent_tools/research`：研究侧业务工具，例如复盘学习、action-value、profile、state 和结构化研究信息持久化。
 - `src/tools/agent_tools/control`：控制侧治理工具，例如契约覆盖、系统不变量、机制审计、能力卡、工具权限。
 - `src/tools/common`：跨智能体公共基础能力，例如 `contracts.py` 和 `runtime_setup.py`。它们不属于任一智能体，不调用 LLM，不生成策略判断、score/rank、手数、交易动作或 `final_action_contract`。
 - `src/util`：更底层的通用基础设施，例如日志、数据库 helper、文本清洗、配置归一化、通用期货审计函数。
@@ -329,7 +330,7 @@ Phase4 完成后，研究学习单独运行：
                            +----------------------+
                            | researcher 研究员    |
                            | 受限可调 LLM         |
-                           | 写结构化历史学习     |
+                           | 输出结构化历史学习   |
                            +----------------------+
                                       |
                                       v
@@ -341,9 +342,9 @@ Phase4 完成后，研究学习单独运行：
                            不调 LLM
 ```
 
-## 七、研究记录消费边界
+## 七、研究信息消费边界
 
-### 直接消费研究记录
+### 直接消费研究信息
 
 | 消费者 | 消费内容 | 用途 | 边界 |
 |---|---|---|---|
@@ -352,18 +353,18 @@ Phase4 完成后，研究学习单独运行：
 | `commodity_news` 期货新闻面分析师 | 新闻事件校准类结构化研究 | 修正新闻催化质量、影响窗口、事件有效性 | 不能生成交易动作、仓位、手数 |
 | `portfolio_manager` 投资组合经理 | 交易决策类 action-value，经 `decision_memory_retrieval` 过滤 | 评分、排序、仓位决策 | 只能通过投资组合经理工具和唯一合约落地 |
 
-### 间接消费研究记录
+### 间接消费研究信息
 
 | 消费者 | 间接路径 | 边界 |
 |---|---|---|
 | `signal_collector` 信号收集员 | 读取已被分析师校准后的结构化信号 | 不直接读研究员/DB，不混入历史交易结论 |
-| `auditor` 审计员 | 审投资组合经理合约里的 `learning_used` 和资金理由 | 不读研究记录改方向或手数 |
+| `auditor` 审计员 | 审投资组合经理合约里的 `learning_used` 和资金理由 | 不读研究信息改方向或手数 |
 | `trader` 交易员 | 只执行审计通过的 `final_action_contract` 及其中已合约化的执行触发规则 | 不直接读取研究库、`strategy_memory`、`adaptive_policy_state` 或 action-value；不按历史好坏放宽触发、改方向或改手数 |
-| `accountant` 会计师 | 只结算研究影响后的真实成交 | 不读研究记录改账 |
-| `reviewer` 复盘员 | 复盘投资组合经理合约、交易员执行和结算结果 | 不用研究记录决定交易 |
-| `protocol_governor` 协议管理员 | 审计研究记录是否正确传到应传边界 | 不参与交易消费，不评价收益 |
+| `accountant` 会计师 | 只结算研究影响后的真实成交 | 不读研究信息改账 |
+| `reviewer` 复盘员 | 复盘投资组合经理合约、交易员执行和结算结果 | 不用研究信息决定交易 |
+| `protocol_governor` 协议管理员 | 审计结构化研究信息是否正确传到应传边界 | 不参与交易消费，不评价收益 |
 
-研究员提供给下游的内容必须是结构化研究成果。自由文本可以解释研究原因，但不能成为下游直接消费的研究结论。
+研究员输出给下游的内容必须是结构化研究信息，并按直接或间接消费边界使用；持久化到研究库只是保存方式。自由文本可以解释研究原因，但不能成为下游直接消费的研究结论。
 
 ## 八、关键字段契约
 
@@ -432,7 +433,7 @@ Phase4 完成后，研究学习单独运行：
 | `researcher` 研究员 | 有，受限 | 生成结构化研究成果和学习记录 | 当天交易指令、手数、交易员权限、自由文本研究结论供下游直接消费 |
 | `signal_collector` 信号收集员 | 无 | 不调用 LLM，只做确定性证据收集 | LLM 自由判断、研究结论、rank、手数、交易动作 |
 | `portfolio_manager` 投资组合经理 | 无 | 不调用 LLM，只用工具和规则签唯一合约 | LLM 自由判断或提示词驱动手数 |
-| `decision_memory_retrieval` | 无 | 确定性读取结构化研究记录 | 自由文本记忆解释、交易动作、手数 |
+| `decision_memory_retrieval` | 无 | 确定性读取结构化研究信息 | 自由文本记忆解释、交易动作、手数 |
 | `opportunity_ranking` | 无 | 确定性评分和排序 | 最终手数、最终合约、交易动作 |
 | `position_sizing` | 无 | 确定性计算目标手数建议 | 改方向、签合约、绕过审计员 |
 | `auditor` 审计员 | 无 | 确定性审计最终合约 | 改方向、改手数、新建合约 |

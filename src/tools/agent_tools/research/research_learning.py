@@ -65,7 +65,7 @@ class ExploratoryHypothesisItem(BaseModel):
     horizon_class: str = Field(default="*")
     market_regime: str = Field(default="*")
     evidence_summary: str = Field(default="")
-    suggested_use: str = Field(default="prompt prior only; validate with future samples")
+    suggested_use: str = Field(default="structured research hypothesis only; validate with future samples")
     entry_timing_hint: str = Field(default="")
     exit_timing_hint: str = Field(default="")
     holding_period_hint: str = Field(default="")
@@ -964,7 +964,7 @@ def _write_alpha_setup_policy_state(
     if not bool(profile_cfg.get("enabled", True)) or not bool(policy_cfg.get("enabled", True)):
         return {"rows": 0, "status": "disabled"}
 
-    reviewer._ensure_research_learning_schema(cursor)
+    research_memory_writers.ensure_research_learning_schema(cursor)
     trading_day = str(trading_date)[:10]
     valid_days = int(
         policy_cfg.get(
@@ -1109,7 +1109,7 @@ def _write_alpha_setup_policy_state(
             "data_combo": profile.get("data_combo"),
             "last_sample_date": profile.get("last_sample_date"),
         }
-        event_id = reviewer._insert_learning_event(
+        event_id = research_memory_writers.insert_learning_event(
             cursor,
             config_id=config_id,
             trading_date=trading_day,
@@ -1242,7 +1242,7 @@ def backfill_alpha_setup_profiles_from_history(
     """
 
     reviewer = _reviewer_helpers()
-    reviewer._ensure_research_learning_schema(cursor)
+    research_memory_writers.ensure_research_learning_schema(cursor)
     bounds: List[Any] = [config_id]
     where_parts = ["config_id = ?", "source_type = 'strategy'"]
     if start_date:
@@ -1373,7 +1373,7 @@ def run_researcher_causal_review(
     note_id = str(uuid.uuid4())
     prompt_ext = externalize_text_for_db(
         prompt,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="raw_prompt",
         config_id=config_id,
@@ -1381,7 +1381,7 @@ def run_researcher_causal_review(
     )
     response_ext = externalize_text_for_db(
         raw_response,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="raw_response",
         config_id=config_id,
@@ -1389,7 +1389,7 @@ def run_researcher_causal_review(
     )
     payload_ext = externalize_json_for_db(
         evidence,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="payload",
         config_id=config_id,
@@ -1397,7 +1397,7 @@ def run_researcher_causal_review(
     )
     cursor.execute(
         """
-        INSERT INTO reviewer_llm_notes (
+        INSERT INTO researcher_llm_notes (
             id, config_id, trading_date, evidence_pack_id, ticker,
             raw_prompt, raw_response, created_at, payload_json,
             raw_prompt_artifact_path, raw_prompt_sha256,
@@ -1530,7 +1530,7 @@ def write_exploratory_hypotheses(
     note_id = str(uuid.uuid4())
     prompt_ext = externalize_text_for_db(
         prompt,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="raw_prompt",
         config_id=config_id,
@@ -1538,7 +1538,7 @@ def write_exploratory_hypotheses(
     )
     response_ext = externalize_text_for_db(
         raw_response,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="raw_response",
         config_id=config_id,
@@ -1547,7 +1547,7 @@ def write_exploratory_hypotheses(
     evidence = {"agent_name": "researcher", "trading_date": trading_date, "episodes": episodes}
     payload_ext = externalize_json_for_db(
         evidence,
-        category="reviewer_llm_notes",
+        category="researcher_llm_notes",
         record_id=note_id,
         field_name="payload",
         config_id=config_id,
@@ -1555,7 +1555,7 @@ def write_exploratory_hypotheses(
     )
     cursor.execute(
         """
-        INSERT INTO reviewer_llm_notes (
+        INSERT INTO researcher_llm_notes (
             id, config_id, trading_date, evidence_pack_id, ticker,
             raw_prompt, raw_response, created_at, payload_json,
             raw_prompt_artifact_path, raw_prompt_sha256,
@@ -1606,9 +1606,12 @@ def write_exploratory_hypotheses(
         side = str(payload.get("side") or "*").lower()
         horizon = str(payload.get("horizon_class") or "*")
         regime = str(payload.get("market_regime") or "*")
-        suggested_use = str(payload.get("suggested_use") or "prompt prior only; validate with future samples")
-        if "prior" not in suggested_use.lower():
-            suggested_use = f"{suggested_use}; prompt prior only until validated"
+        suggested_use = str(
+            payload.get("suggested_use")
+            or "structured research hypothesis only; validate with future samples"
+        )
+        if "structured research hypothesis" not in suggested_use.lower():
+            suggested_use = f"{suggested_use}; structured research hypothesis only until validated"
         hypothesis_contract = build_next_round_memory_contract(
             memory_type="exploratory_hypothesis",
             maturity_state="candidate",
@@ -1634,7 +1637,7 @@ def write_exploratory_hypotheses(
             sample_count=len(episodes),
             confidence_score=confidence,
         )
-        event_id = reviewer._insert_learning_event(
+        event_id = research_memory_writers.insert_learning_event(
             cursor,
             config_id=config_id,
             trading_date=trading_date,
@@ -1662,7 +1665,7 @@ def write_exploratory_hypotheses(
             "source_event_id": event_id,
             "hard_constraints": {
                 "max_total_margin_ratio": cfg.get("max_total_margin_ratio", 0.20),
-                "prompt_prior_only": True,
+                "structured_hypothesis_only": True,
                 "candidate_hypothesis_cannot_control_position": True,
             },
             CONTRACT_KEY: hypothesis_contract,
@@ -1962,7 +1965,4 @@ def apply_researcher_learning(
         "causal_rule_validation_status_counts": causal_rule_validation.get("status_counts", {}),
         "exploratory_hypotheses": exploratory_hypotheses,
     }
-
-
-
 

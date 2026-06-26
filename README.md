@@ -14,16 +14,16 @@ AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系
 AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段：
 
 1. **Phase1 策略生成**  
-   技术面、基本面、新闻面分析师读取当日盘前可见数据，生成结构化信号；Portfolio Manager 汇总分析师信号、账户状态、市场确认、研究记忆和风控状态，生成每个品种的盘前期货推荐。
+   技术面、基本面、新闻面分析师读取盘前可见数据，生成结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理通过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 三个确定性工具读取研究、评分排序和计算手数，最后签发唯一 `final_action_contract`。
 
 2. **Phase2 交易执行**  
-   Trader 读取 Phase1 审计后的 `final_action_contract`，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。Trader 只执行或跳过已批准计划，不创造新的交易策略，不从 PM 草稿或研究 action-value 推导交易。
+   交易员读取 Phase1 审计后的 `final_action_contract`，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。交易员只执行或跳过已批准计划，不创造新的交易策略，不从投资组合经理草稿或研究 action-value 推导交易。
 
 3. **Phase3 日终结算**  
-   Accountant 使用成交流水、合约乘数、保证金率、手续费和官方结算价逐日盯市，更新组合账户、持仓、日结算和品种日 PnL。账务事实不由 LLM 或研究解释改写。
+   会计师使用成交流水、合约乘数、保证金率、手续费和官方结算价逐日盯市，更新组合账户、持仓、日结算和品种日 PnL。账务事实不由 LLM 或研究解释改写。
 
 4. **Phase4 复盘与研究**  
-   Reviewer 做确定性验收，检查 Phase1-3 是否完整、账务是否一致、交易流水是否入账、signal 是否完整唯一、完整交易日志是否输出。Reviewer 验证通过后，Researcher 写入未来可用记忆、探索式假设和学习状态。
+   复盘员做确定性验收，检查 Phase1-3 是否完整、账务是否一致、交易流水是否入账、信号与合约是否完整、完整交易日志是否输出。复盘员验证通过后，研究员通过独立入口输出结构化研究信息，供未来交易日的分析师校准或投资组合经理工具链使用。
 
 ## 二、多智能体结构
 
@@ -32,7 +32,7 @@ AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段
 ```text
 src/agents/
   analysis_team/      # technical、fundamental、commodity_news
-  decision_team/      # portfolio_manager、auditor
+  decision_team/      # signal_collector、portfolio_manager、auditor
   execution_team/     # trader、accountant
   research_team/      # reviewer、researcher
   control_team/       # planner、protocol_governor
@@ -42,16 +42,17 @@ src/agents/
 
 | 智能体 | 当前职责 |
 |---|---|
-| Technical Analyst | 读取 PandaAI 行情与学习上下文，分析价格行为、趋势、波动率、成交量、技术指标和短线交易条件 |
-| Fundamental Analyst | 读取 Finoview 本地基本面数据与 PandaAI 衍生数据，分析供需、库存、基差、仓单、产业链和数据质量 |
-| Commodity News Analyst | 读取本地期货新闻，分析事件方向、强度、新鲜度、相关性和可交易性 |
-| Portfolio Manager | 汇总分析师信号、学习记忆、账户、持仓、市场确认和风控状态，生成唯一 `final_action_contract` 和期货推荐 |
-| Auditor | 做确定性交易审核，审 PM 的最终合约，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
-| Trader | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
-| Accountant | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |
-| Reviewer | 做 Phase4 确定性验收并输出完整交易日志，不调用 LLM |
-| Researcher | 在 Reviewer 验证通过后写入记忆、研究假设、策略状态和学习事件，可调用 LLM 做研究 |
-| Planner | 旧版分析师选择器，默认 `planner_mode=false`，当前主流程不启用 |
+| 技术面分析师 | 读取 PandaAI 行情与学习上下文，分析价格行为、趋势、波动率、成交量、技术指标和短线交易条件 |
+| 基本面分析师 | 读取 Finoview 本地基本面数据与 PandaAI 衍生数据，分析供需、库存、基差、仓单、产业链和数据质量 |
+| 期货新闻面分析师 | 读取本地期货新闻，分析事件方向、强度、新鲜度、相关性和可交易性 |
+| 信号收集员 | 不调用 LLM，收集三类分析师结构化预测证据，输出 `signal_collection_contract` |
+| 投资组合经理 | 不调用 LLM，通过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 后签发唯一 `final_action_contract` |
+| 审计员 | 做确定性交易审核，审投资组合经理的最终合约，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
+| 交易员 | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
+| 会计师 | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |
+| 复盘员 | 做 Phase4 确定性验收并输出完整交易日志，不调用 LLM |
+| 研究员 | 在复盘员验证通过后输出结构化研究信息，可受限调用 LLM 做研究 |
+| 规划员 | 封存开发组件，默认 `planner_mode=false`，当前主流程不启用；`planner_mode=true` 必须 fail-fast |
 
 更多细节见：
 
@@ -78,10 +79,11 @@ src/agents/
 
 LLM 调用原则：
 
-- 分析师、PM、Planner、Researcher 可以调用 LLM。
-- Reviewer、Trader、Accountant 不应让 LLM 直接裁决流程、成交或账务。
+- 只有技术面分析师、基本面分析师、期货新闻面分析师和研究员可以调用 LLM。
+- 信号收集员、投资组合经理、审计员、交易员、会计师、复盘员和协议管理员不调用 LLM。
+- 规划员是封存开发组件，不属于当前启用工作流。
 - 当前主 LLM 路由在 `src/config/dev.yaml` 的 `llm` 段配置，API Key 放在 `.env`，不要写入配置文件。
-- signal artifact 会稳定记录 `llm_path`、`data_usage_summary`、`technical_parameter_calibration`、`adaptive_params`，方便评估和 Researcher 读取。
+- 分析师和研究员的 LLM 输出必须落到结构化字段；自由文本不能成为交易权限、手数依据、审计依据、结算依据或下游直接消费的研究结论。
 
 更多细节见：
 
@@ -117,26 +119,23 @@ max_total_margin_ratio = 0.20
 
 AgentQuant 的学习目标不是写死更多交易规则，而是让智能体从历史交易和未交易样本中探索期货交易规律，并把研究结论变成下一轮可用记忆。
 
-当前已经代码落地的学习链路包括：
+当前学习链路包括：
 
-- 真实交易片段记忆：`trade_episode_memory`
-- 未交易机会记忆：`no_trade_opportunity_memory`
-- no-trade shadow 与 Neutral 后续窗口
-- 探索式假设：`exploratory_hypothesis`
-- 分析师学习摘要：`analyst_learning_digest`
-- 策略记忆与模板表现：`strategy_memory_history`、`signal_template_performance`
+- 真实交易 episode：`trade_episode_memory`
+- 未交易机会：`no_trade_opportunity_memory`
+- setup 样本与 profile：`alpha_setup_sample`、`alpha_setup_profile`
+- 分动作 action-value：`alpha_setup_action_value`
 - 自适应策略状态：`adaptive_policy_state`
-- 资本部署状态：`capital_deployment_state`
-- 学习事件账本：`learning_event_log`
-- 下一轮策略更新契约：`next_round_memory_contract`
+- 执行学习：`setup_execution_learning`
+- 排序偏好与研究反馈：`opportunity_ranking_preference`、`research_position_feedback`
 
 研究结论必须带使用边界：
 
 - 候选假设只能作为分析先验，不能直接放仓、加仓、`position_matched` 或支撑亏损仓继续持有。
-- 成熟经验也必须经过当日证据、市场确认、失效边界、PM、Auditor、Trader 和 20% 保证金硬门槛。
-- Researcher 写入的 action-value 只形成固定动作偏好；PM 读取 open/hold/exit 偏好并把 execution 偏好写入最终合约，Trader 不直接读取研究 action-value。
-- Researcher 写入的 `loss_template_observation` 只是亏损模板观察记忆，不是品种黑名单，也不能直接压仓或放仓。
-- 技术参数情境校准只允许 Technical Analyst 小幅调整 EMA、RSI、Bollinger 等技术参数，不直接生成交易授权。
+- 成熟经验也必须经过当日证据、市场确认、失效边界、投资组合经理、审计员、交易员和 20% 保证金硬门槛。
+- 研究员输出的 action-value 只形成结构化动作偏好；投资组合经理只能经 `decision_memory_retrieval` 消费交易决策类研究。
+- execution 学习必须先由投资组合经理写入未来 `final_action_contract.execution_profile/entry_trigger`，交易员不直接读取研究 action-value。
+- 分析师只消费本专业校准类研究，不获得交易授权。
 
 更多细节见：
 
@@ -217,13 +216,13 @@ python run\validate_phase_flow.py --config config\dev.yaml --local-db --trading-
 
 ### 3. 模拟盘 / 模拟交易
 
-模拟盘使用同一个 Phase2 Trader：
+模拟盘使用同一个 Phase2 交易员：
 
 ```powershell
 python run\order.py --config config\dev.yaml --local-db --trading-date 2025-01-02 --loop
 ```
 
-`--loop` 会让 Trader 在交易日内按配置等待盘中触发。模拟盘仍应先有 Phase1 推荐，之后再执行 Phase2、Phase3、Phase4。
+`--loop` 会让交易员在交易日内按配置等待盘中触发。模拟盘仍应先有 Phase1 推荐，之后再执行 Phase2、Phase3、Phase4。
 
 ## 八、评估与绘图
 
@@ -316,9 +315,10 @@ python -m compileall src
 - 交易流水、手续费、保证金、持仓和账户权益是否对账。
 - 每个交易日是否输出完整交易日志。
 - signal 表和推荐快照是否覆盖全部 `ticker × analyst`，且没有重复。
-- signal artifact 是否能机器读取 `llm_path`、`data_usage_summary`、`technical_parameter_calibration`、`adaptive_params`。
-- Researcher 写入的候选记忆是否进入 prompt，但没有越权直接影响仓位。
-- `final_action_contract` 是否仍是策略交易唯一事实来源，Trader/Researcher/audit 是否没有回退到 PM 草稿。
+- 分析师 artifact 是否能机器读取 `data_usage_summary`、`no_lookahead_status` 和结构化 `action_evidence_contract`。
+- 信号收集员是否只输出 `signal_collection_contract`，没有混入研究结论、score/rank、手数或交易动作。
+- `decision_memory_retrieval` 是否没有让空历史挡住真实有效历史。
+- `final_action_contract` 是否仍是策略交易唯一事实来源，交易员、审计员、复盘员和研究员是否没有回退到投资组合经理草稿或研究库。
 - learned vs unlearned、资金利用率、收益曲线和回撤是否改善。
 
 ## 十三、设计边界

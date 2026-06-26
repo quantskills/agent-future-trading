@@ -100,6 +100,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
     def test_reviewer_phase4_main_does_not_write_research_memory(self):
         reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
         tree = ast.parse(reviewer_path.read_text(encoding="utf-8-sig"), filename=str(reviewer_path))
+        reviewer_text = reviewer_path.read_text(encoding="utf-8-sig")
+        self.assertNotIn("memory_config=", reviewer_text)
+        self.assertNotIn("retention_config=", reviewer_text)
         run_phase4 = next(
             node
             for node in tree.body
@@ -143,6 +146,95 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                     allowed_report_calls,
                     f"Phase4 reviewer may only write daily transaction reports, not {name}",
                 )
+
+    def test_phase4_review_module_does_not_define_research_memory_writers(self):
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        writer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
+        reviewer_text = reviewer_path.read_text(encoding="utf-8-sig")
+        writer_text = writer_path.read_text(encoding="utf-8-sig")
+        tree = ast.parse(reviewer_text, filename=str(reviewer_path))
+        definitions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+        forbidden_definitions = {
+            "_insert_learning_event",
+            "_ensure_research_learning_schema",
+            "_deactivate_adaptive_policy_state",
+            "_deactivate_adaptive_policy_state_from_counterfactual_reversal",
+            "_write_opportunity_ranking_learning_events",
+            "_write_signal_context_history",
+            "_write_template_and_analyst_learning",
+            "_write_trade_episode_memory",
+            "_write_research_position_feedback",
+            "_write_loss_template_observation_research",
+            "_write_fast_loss_sentinel_state",
+            "_write_no_trade_opportunity_memory",
+            "_backfill_no_trade_opportunity_counterfactual_results",
+            "_write_missed_alpha_accountability_state",
+            "_write_validated_causal_policy_rules",
+            "_write_learning_mechanism_policy_state",
+            "_write_learned_vs_unlearned_policy_state",
+            "_write_strategy_memory_history",
+            "_write_adaptive_policy_state",
+            "_write_tail_loss_sentinel_state",
+            "_write_alpha_promotion_state",
+            "_insert_contextual_rule_calibration",
+            "_write_contextual_rule_calibration_state",
+            "_write_config_overlay",
+            "_write_neutral_accountability_state",
+            "_backfill_neutral_forward_counterfactual_tracking",
+            "_write_neutral_accountability_digests",
+            "_write_capital_deployment_state",
+            "_write_provisional_policy_state",
+            "_export_template_prior",
+        }
+        self.assertFalse(
+            definitions & forbidden_definitions,
+            f"phase4_review must not define research writer functions: {definitions & forbidden_definitions}",
+        )
+
+        forbidden_sql = (
+            "INSERT INTO learning_event_log",
+            "INSERT INTO adaptive_policy_state",
+            "UPDATE adaptive_policy_state",
+            "INSERT INTO strategy_memory",
+            "INSERT INTO analyst_learning_digest",
+            "INSERT INTO config_learning_overlay",
+            "INSERT INTO capital_deployment_state",
+            "INSERT INTO provisional_policy_state",
+            "INSERT INTO signal_context_history",
+            "INSERT INTO trade_episode_memory",
+            "INSERT INTO no_trade_opportunity_memory",
+        )
+        for token in forbidden_sql:
+            self.assertNotIn(token, reviewer_text, f"phase4_review must not write research table via {token}")
+
+        self.assertIn("def _insert_learning_event", writer_text)
+        self.assertIn("def _write_adaptive_policy_state", writer_text)
+        self.assertIn("def _write_capital_deployment_state", writer_text)
+
+    def test_phase_completion_has_no_learning_side_effects(self):
+        db_path = SRC_ROOT / "database" / "sqlite_helper.py"
+        tree = ast.parse(db_path.read_text(encoding="utf-8-sig"), filename=str(db_path))
+        complete_phase = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "SQLiteDB"
+        )
+        complete_phase_func = next(
+            node
+            for node in complete_phase.body
+            if isinstance(node, ast.FunctionDef) and node.name == "complete_trading_day_phase"
+        )
+        forbidden_calls = {
+            "_refresh_strategy_memory_with_cursor",
+            "_cleanup_learning_retention_with_cursor",
+            "refresh_strategy_memory",
+        }
+        for node in ast.walk(complete_phase_func):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+            self.assertNotIn(name, forbidden_calls, f"phase completion must not call learning side effect {name}")
 
     def test_fixed_workflow_does_not_enable_legacy_llm_planner(self):
         workflow_path = SRC_ROOT / "graph" / "workflow.py"
@@ -342,8 +434,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertEqual(policy.get("pm_allowed_consumer_scope"), "pm_learning")
         self.assertEqual(policy.get("pm_allowed_action_value_lanes"), ["open", "hold", "exit", "execution"])
         self.assertEqual(policy.get("analyst_allowed_consumer_scope"), "analyst_calibration")
-        self.assertEqual(policy.get("trader_allowed_consumer_scope"), "trader_execution_learning")
-        self.assertEqual(policy.get("trader_allowed_action_value_lanes"), ["execution"])
+        self.assertFalse(policy.get("trader_direct_research_consumption_allowed"))
+        self.assertNotIn("trader_allowed_consumer_scope", policy)
+        self.assertNotIn("trader_allowed_action_value_lanes", policy)
         self.assertEqual(
             policy.get("pm_action_value_retrieval_order"),
             ["exact_state", "same_ticker_side_horizon", "same_ticker_side", "weak_prior"],
