@@ -21,8 +21,8 @@ from tools.agent_tools.research.phase4_review import (
     _group_transactions_by_recommendation,
     _normalize_date,
     _validate_recommendation_execution_audit,
-    _write_historical_learning_snapshot_report,
 )
+from tools.agent_tools.research.research_snapshot_reports import _write_historical_learning_snapshot_report
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.logger import logger

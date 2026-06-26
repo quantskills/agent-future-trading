@@ -96,6 +96,12 @@ Phase4 完成后，研究学习单独运行：
 |---|---|---|---|---|
 | 研究学习 | `src/run/research/researcher_learning.py` | `researcher` 研究员 | 消费复盘事实，输出并持久化结构化研究信息，供未来交易日使用 | 不是交易执行阶段，不产生当天交易动作，不修改当天合约、手数、成交或结算 |
 
+冷启动研究初始化单独运行：
+
+| 入口 | 运行脚本 | 智能体 | 作用 | 边界 |
+|---|---|---|---|---|
+| 模板先验初始化 | `src/run/research/load_template_prior.py` | 研究初始化入口 | 显式加载研究员导出的 template prior 冷启动种子 | 不属于 Phase1-4，不由 `proposal.py` 自动调用，不生成当天交易动作，不读取当天或未来交易结果 |
+
 时间边界规则：
 
 - Phase1 是盘前决策，只能使用盘前或决策时点前可见的信息，禁止读取当天盘中结果、收盘结果或未来交易日信息。
@@ -105,6 +111,7 @@ Phase4 完成后，研究学习单独运行：
 - Phase4 可以输出完整交易日志和复盘事实材料，但不能输出 `action-value`、`strategy_memory`、`adaptive_policy_state`、`capital_deployment_state` 等未来研究状态。
 - Phase4 标记 completed 只更新阶段状态，不触发 `strategy_memory` 刷新、学习 retention 清理或任何研究表写入。
 - 研究学习只能在 Phase4 完成后运行，输出的结构化研究信息只允许影响未来交易日；研究信息持久化统一由 `researcher_learning.py` 和 `research_memory_writers` 承担。
+- `template_prior` 冷启动种子只能通过 `load_template_prior.py` 显式初始化，不得混入 Phase1 `proposal.py` 主流程。
 
 回测运行规则：
 

@@ -77,18 +77,18 @@ def _loaded_template_prior_marker(payload_json: Any) -> str:
 
 
 def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> int:
-    """Load reviewer-exported template prior into strategy_memory at run start.
+    """Load researcher-exported template prior through explicit research initialization.
 
     Template prior is a cold-start bootstrap, not a permanent override: rows are
     marked with source=template_prior and get a fresh validity window for this
-    backtest/run. Reviewer attribution can still expire, replace, or contradict
-    them as new trades settle.
+    run. Research attribution can still expire, replace, or contradict them as
+    new trades settle.
     """
     if cfg.get("market_type") != "china_futures":
         return 0
     learning_cfg = cfg.get("learning", {}) or {}
     prior_cfg = learning_cfg.get("template_prior", {}) or {}
-    if not bool(prior_cfg.get("enabled", False)) or not bool(prior_cfg.get("load_on_backtest_start", False)):
+    if not bool(prior_cfg.get("enabled", False)) or not bool(prior_cfg.get("load_on_research_init", False)):
         return 0
     if not hasattr(db, "_get_connection") or not hasattr(db, "_ensure_strategy_memory_schema"):
         logger.warning("Template prior load skipped: current DB backend does not expose local strategy_memory schema")

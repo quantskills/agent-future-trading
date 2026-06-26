@@ -13,7 +13,6 @@ from tools.common.runtime_setup import (
     load_portfolio_config,
     resolve_net_exposure_config,
 )
-from tools.agent_tools.research.template_prior import load_template_prior_if_enabled
 from util.config import ConfigParser
 from util.logger import logger
 from util.db_helper import db_initialize, get_db
@@ -54,7 +53,6 @@ def main():
 
     logger.info(f"Loading config for {cfg['exp_name']}, trading date: {args.trading_date}")
     config_id = load_portfolio_config(cfg, db, reset_portfolio=args.reset_config)
-    load_template_prior_if_enabled(cfg, db, config_id)
     ensure_seed_settled_portfolio(cfg, db, config_id)
     logger.info("Init AgentQuant proposal workflow and run")
 

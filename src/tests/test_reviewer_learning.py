@@ -58,9 +58,9 @@ from tools.agent_tools.research.phase4_review import (
     _horizon_class,
     _learned_vs_unlearned_trade_performance,
     _neutral_counterfactual_tracking_summary,
-    _write_historical_learning_snapshot_report,
     _validate_phase1_signal_persistence,
 )
+from tools.agent_tools.research.research_snapshot_reports import _write_historical_learning_snapshot_report
 from tools.agent_tools.research.research_memory_writers import (
     _export_template_prior,
     _backfill_neutral_forward_counterfactual_tracking,
@@ -2499,7 +2499,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
 
         self.assertEqual(_horizon_class(2, snapshot), "medium")
 
-    def test_template_prior_loads_into_strategy_memory_at_backtest_start(self):
+    def test_template_prior_loads_into_strategy_memory_at_research_init(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             prior_path = tmp_path / "template_prior.json"
@@ -2535,7 +2535,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                         "memory_expires_after_days": 30,
                         "template_prior": {
                             "enabled": True,
-                            "load_on_backtest_start": True,
+                            "load_on_research_init": True,
                             "path": str(prior_path),
                         },
                     },
@@ -2551,7 +2551,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                         "memory_expires_after_days": 30,
                         "template_prior": {
                             "enabled": True,
-                            "load_on_backtest_start": True,
+                            "load_on_research_init": True,
                             "path": str(prior_path),
                         },
                     },
@@ -2589,7 +2589,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                     "memory_expires_after_days": 30,
                     "template_prior": {
                         "enabled": True,
-                        "load_on_backtest_start": True,
+                        "load_on_research_init": True,
                         "path": str(prior_path),
                     },
                 },

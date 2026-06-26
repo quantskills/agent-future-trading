@@ -161,8 +161,6 @@ class BaseDB(ABC):
         phase: str,
         status: str,
         message: str = "",
-        memory_config: Optional[Dict[str, Any]] = None,
-        retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Complete a trading day phase record without learning side effects."""
         raise NotImplementedError

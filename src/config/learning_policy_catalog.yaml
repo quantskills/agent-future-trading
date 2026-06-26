@@ -268,7 +268,7 @@ learning:
     min_digest_confidence: 0.20
   template_prior:
     enabled: true
-    load_on_backtest_start: true
+    load_on_research_init: true
     export_on_backtest_end: true
     path: src/logs/attribution/template_prior.json
   provisional_policy_state:

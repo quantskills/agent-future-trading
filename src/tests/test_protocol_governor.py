@@ -155,6 +155,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         tree = ast.parse(reviewer_text, filename=str(reviewer_path))
         definitions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
         forbidden_definitions = {
+            "_write_historical_learning_snapshot_report",
             "_insert_learning_event",
             "_ensure_research_learning_schema",
             "_deactivate_adaptive_policy_state",
@@ -210,6 +211,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("def _insert_learning_event", writer_text)
         self.assertIn("def _write_adaptive_policy_state", writer_text)
         self.assertIn("def _write_capital_deployment_state", writer_text)
+        snapshot_report_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_snapshot_reports.py"
+        snapshot_report_text = snapshot_report_path.read_text(encoding="utf-8-sig")
+        self.assertIn("def _write_historical_learning_snapshot_report", snapshot_report_text)
 
     def test_phase_completion_has_no_learning_side_effects(self):
         db_path = SRC_ROOT / "database" / "sqlite_helper.py"
@@ -224,6 +228,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             for node in complete_phase.body
             if isinstance(node, ast.FunctionDef) and node.name == "complete_trading_day_phase"
         )
+        phase_param_names = {arg.arg for arg in complete_phase_func.args.args}
+        self.assertNotIn("memory_config", phase_param_names)
+        self.assertNotIn("retention_config", phase_param_names)
         forbidden_calls = {
             "_refresh_strategy_memory_with_cursor",
             "_cleanup_learning_retention_with_cursor",

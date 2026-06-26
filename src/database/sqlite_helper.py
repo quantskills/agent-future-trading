@@ -2140,8 +2140,6 @@ class SQLiteDB(BaseDB):
         phase: Any,
         status: Any,
         message: str = "",
-        memory_config: Optional[Dict[str, Any]] = None,
-        retention_config: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Complete a trading day phase record.
 
@@ -2151,8 +2149,6 @@ class SQLiteDB(BaseDB):
         """
         conn = None
         try:
-            _ = memory_config
-            _ = retention_config
             conn = self._get_connection()
             cursor = conn.cursor()
             phase_value = self._enum_value(phase)
