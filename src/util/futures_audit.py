@@ -639,29 +639,6 @@ def _first_non_empty(*values: Any) -> Any:
     return None
 
 
-def _compact_action_value_preferences(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
-    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
-    rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
-    compact: List[Dict[str, Any]] = []
-    for row in rows[:3]:
-        if not isinstance(row, dict):
-            continue
-        compact.append(
-            {
-                "action_name": row.get("action_name"),
-                "action_preference": row.get("action_preference"),
-                "canonical_action_preference_source": (
-                    row.get("canonical_action_preference_source") or "payload.action_preference"
-                ),
-                "action_preference": row.get("action_preference"),
-                "sample_scope": row.get("sample_scope"),
-                "memory_quality": row.get("memory_quality"),
-                "reward_mean": row.get("reward_mean"),
-            }
-        )
-    return compact
-
-
 def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, Any], authority: Dict[str, Any]) -> Dict[str, Any]:
     phase2_execution = (
         snapshot.get("phase2_execution")
@@ -683,7 +660,7 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
         reason_codes = authority.get("reason_codes") if isinstance(authority.get("reason_codes"), list) else []
     return {
         "audit_boundary": (
-            "transaction audit mirror only; final_action_contract remains the executable source of truth"
+            "transaction execution audit only; complete PM decision contract remains only in recommendation artifact"
         ),
         "single_source_of_trade_truth": bool(contract.get("single_source_of_trade_truth")),
         "candidate_sources_do_not_bypass_contract": bool(
@@ -713,7 +690,6 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
             pm_plan_validation.get("business_boundary"),
             authority_consistency.get("business_boundary"),
         ),
-        "selected_action_preferences": _compact_action_value_preferences(contract),
     }
 
 
@@ -724,8 +700,6 @@ def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     phase2_execution = snapshot.get("phase2_execution")
     contract = _first_dict(snapshot.get("final_action_contract"))
     authority = contract
-    if contract:
-        payload["final_action_contract"] = deepcopy(contract)
     if contract:
         payload["trade_contract_audit"] = _build_trade_contract_audit(snapshot, contract, authority)
     if isinstance(translation, dict):

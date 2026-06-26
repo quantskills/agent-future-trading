@@ -191,6 +191,18 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
             "execution_translation": {"intraday_execution": {"trigger_passed": True}},
         }
+        transaction_payload = {
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+                "execution_requirement": "intraday_trigger_required",
+                "final_action": "open_real",
+                "current_lots": 0,
+                "target_lots": -2,
+                "lots_delta": -2,
+            },
+            "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+        }
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
@@ -209,7 +221,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     execution_price, contract_multiplier, margin_rate, margin_used, audit_payload, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                ("tx1", "pf", "cfg", "rec1", "2025-03-03", "RB", "open_short", 2, 3300.0, 10.0, 0.1, 6600.0, _dumps(payload), datetime.utcnow().isoformat()),
+                ("tx1", "pf", "cfg", "rec1", "2025-03-03", "RB", "open_short", 2, 3300.0, 10.0, 0.1, 6600.0, _dumps(transaction_payload), datetime.utcnow().isoformat()),
             )
             conn.execute(
                 """
@@ -1386,6 +1398,43 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(
             any(error.startswith("opportunity_learning_component_used_as_trade_intent") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_transaction_payload_pm_explanation_trade_intent(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = {
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_real",
+                    "current_lots": 0,
+                    "target_lots": -2,
+                    "lots_delta": -2,
+                    "position_sizing_result": {
+                        "target_lots": -2,
+                        "capital_allocation_reason": {"rank_is_not_trade_authority": True},
+                    },
+                    "learning_used": {"alpha_setup_action_values": [{"action_preference": "positive_candidate_open"}]},
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+                "execution_translation": {"intraday_execution": {"trigger_passed": True}},
+            }
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("opportunity_ranking_field_used_in_execution_trade_intent") for error in report.errors),
             report.to_dict(),
         )
 

@@ -308,6 +308,38 @@ def _execution_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
     return {key: final_contract.get(key) for key in plan_keys if key in final_contract}
 
 
+def _final_contract_execution_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only the final contract fields Phase2 artifacts may mirror."""
+    final_contract = _final_action_contract_from_snapshot(snapshot)
+    if not isinstance(final_contract, dict) or not final_contract:
+        return {}
+    allowed_keys = {
+        "contract_version",
+        "contract_type",
+        "ticker",
+        "underlying_code",
+        "contract_code",
+        "final_action",
+        "current_lots",
+        "target_lots",
+        "lots_delta",
+        "entry_trigger",
+        "invalidation",
+        "invalidation_condition",
+        "requires_intraday_confirmation",
+        "can_execute_without_intraday_trigger",
+        "execution_profile",
+        "execution_requirement",
+        "trigger_source",
+        "authority_type",
+        "authority_decision",
+        "reason_codes",
+        "single_source_of_trade_truth",
+        "candidate_sources_do_not_bypass_contract",
+    }
+    return {key: final_contract.get(key) for key in allowed_keys if key in final_contract}
+
+
 def _recommendation_source_type(recommendation: Dict[str, Any]) -> str:
     return str(_enum_value(recommendation.get("source_type", RecommendationSourceType.STRATEGY.value)))
 
@@ -472,6 +504,7 @@ def _ensure_phase2_execution(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     execution_contract = _execution_contract_from_snapshot(snapshot)
+    execution_fields = _final_contract_execution_fields(snapshot)
     final_contract = _final_action_contract_from_snapshot(snapshot)
     target_lots = _safe_int(final_contract.get("target_lots"), 0)
     preferred_side = "long" if target_lots > 0 else "short" if target_lots < 0 else "flat"
@@ -502,7 +535,7 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
         "opportunity_state": final_contract.get("opportunity_state") or "unknown",
         "preferred_side": preferred_side or "flat",
         "execution_contract": execution_contract,
-        "final_action_contract": final_contract,
+        "final_contract_execution_fields": execution_fields,
         "analyst_action_evidence_contracts": action_contracts,
         "analyst_learning_scopes": learning_scopes,
         "execution_contract_summary": {
@@ -520,6 +553,7 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
             "execution_feedback_future_only": True,
             "not_strategy_creation": True,
             "learning_source": "final_action_contract",
+            "no_full_final_action_contract_mirror": True,
         },
     }
 
@@ -1201,7 +1235,7 @@ def _translate_pre_open_recommendation_to_order(
                     "source_type": _recommendation_source_type(recommendation),
                     "current_lots": int(current_lots),
                     "target_lots": int(target_lots),
-                    "final_action_contract": final_action_contract,
+                    "final_contract_execution_fields": _final_contract_execution_fields(snapshot),
                     "business_boundary": "strategy_trade_target_lots_come_only_from_final_action_contract",
                 }
 

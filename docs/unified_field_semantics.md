@@ -58,6 +58,7 @@
 | `classification` | `mechanism_effectiveness_audit.metadata` | 区分 `hard_fail` 与 `diagnostic` 的报告分类说明；不能作为交易字段。 |
 | `contract_coverage_audit` | Protocol Governor 只读版本级闸门 / 回测前验收 | 契约覆盖报告；检查关键契约是否有 producer、consumer、audit、test、字段表、配置/提示词/文档对齐，并要求关键智能体边界存在 producer-to-consumer 保真测试；不读收益、不写 DB、不创建交易权限。 |
 | `matrix` | `contract_coverage_audit` | 契约覆盖矩阵列表；每行对应一个核心契约。 |
+| `artifact_phase_boundary` | `contract_coverage_audit.matrix[].contract` / Protocol Governor 只读边界名 | artifact 阶段保存边界；规定 PM、审计员、交易员、会计师、复盘员、研究员 artifact 能保存和禁止保存的字段集合。只用于回测前契约覆盖和系统不变量审计，不是交易字段，不创建合约或交易权限。 |
 | `producers` | `contract_coverage_audit.matrix[]` | 该契约的生产路径证据。 |
 | `consumers` | `contract_coverage_audit.matrix[]` | 该契约的消费路径证据。 |
 | `audits` | `contract_coverage_audit.matrix[]` | 该契约被系统审计或机制审计覆盖的证据。 |

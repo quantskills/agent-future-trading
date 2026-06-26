@@ -69,6 +69,7 @@ from agents.decision_team.portfolio_manager import (
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
     _execution_contract_from_snapshot,
+    _final_contract_execution_fields,
     _final_action_contract_from_snapshot,
     _setup_execution_learning_context,
 )
@@ -247,7 +248,7 @@ class AgentBoundaryFidelityRegressionTest(unittest.TestCase):
 
         self.assertEqual(contract["target_lots"], -2)
         self.assertEqual(contract["lots_delta"], -2)
-        self.assertEqual(learning_context["final_action_contract"]["target_lots"], -2)
+        self.assertEqual(learning_context["final_contract_execution_fields"]["target_lots"], -2)
         self.assertEqual(learning_context["preferred_side"], "short")
         self.assertEqual(learning_context["consumer_scope"], "trader_execution_learning")
         self.assertEqual(learning_context["learning_lane"], "execution")
@@ -258,6 +259,10 @@ class AgentBoundaryFidelityRegressionTest(unittest.TestCase):
         self.assertNotIn("opportunity_score_components", execution_contract)
         self.assertNotIn("target_lots", execution_contract)
         self.assertNotIn("lots_delta", execution_contract)
+        self.assertNotIn("final_action_contract", learning_context)
+        self.assertNotIn("opportunity_rank", learning_context["final_contract_execution_fields"])
+        self.assertNotIn("opportunity_score", learning_context["final_contract_execution_fields"])
+        self.assertNotIn("opportunity_score_components", learning_context["final_contract_execution_fields"])
 
     def test_trader_to_researcher_execution_result_preserves_no_trade_fact_and_learning_scope(self):
         snapshot = {
@@ -11292,7 +11297,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         contract.update(authority)
         return contract
 
-    def test_transaction_audit_payload_carries_final_trade_contract_mirror(self):
+    def test_transaction_audit_payload_keeps_execution_audit_without_full_contract_mirror(self):
         snapshot = {
             "final_action_contract": {
                 "contract_version": "agentquant.final_action.v1",
@@ -11312,6 +11317,12 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "trigger_source": "final_contract_execution_fields",
                 "single_source_of_trade_truth": True,
                 "candidate_sources_do_not_bypass_contract": True,
+                "position_sizing_result": {
+                    "target_lots": -4,
+                    "capital_allocation_reason": {"rank_is_not_trade_authority": True},
+                },
+                "opportunity_rank": 1,
+                "opportunity_score": 0.81,
                 "learning_used": {
                     "alpha_setup_action_values": [
                         {
@@ -11348,8 +11359,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
 
         payload = build_audit_payload(snapshot)
 
-        self.assertEqual(payload["final_action_contract"]["final_action"], "open_real")
-        self.assertEqual(payload["final_action_contract"]["authority_type"], "real_budget_entry")
+        self.assertNotIn("final_action_contract", payload)
         audit = payload["trade_contract_audit"]
         self.assertTrue(audit["single_source_of_trade_truth"])
         self.assertTrue(audit["candidate_sources_do_not_bypass_contract"])
@@ -11363,11 +11373,11 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             audit["authority_consistency_reason"],
             "final_contract_authority_consistent",
         )
-        self.assertEqual(
-            audit["selected_action_preferences"][0]["action_preference"],
-            "positive_candidate_open",
-        )
-        self.assertIn("transaction audit mirror only", audit["audit_boundary"])
+        self.assertNotIn("selected_action_preferences", audit)
+        self.assertNotIn("learning_used", audit)
+        self.assertNotIn("position_sizing_result", audit)
+        self.assertNotIn("capital_allocation_reason", audit)
+        self.assertIn("transaction execution audit only", audit["audit_boundary"])
 
     def test_transaction_audit_does_not_backfill_execution_profile_from_pm_draft(self):
         snapshot = {
@@ -12150,6 +12160,86 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             snapshot["execution_translation"]["final_action_contract_source"]["target_lots"],
             1,
         )
+
+    def test_phase2_artifacts_do_not_mirror_pm_explanation_fields(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5000000.0,
+            margin_used=0.0,
+            positions={},
+        )
+        contract = self._strategy_contract(
+            "SR",
+            target_lots=1,
+            final_action="open_probe",
+            authority_type="exploration_probe",
+            current_evidence=True,
+            reason_codes=["conditional_trigger_authority"],
+        )
+        contract.update(
+            {
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "execution_profile": "breakout",
+                "entry_trigger": "wait for price to break above 5900 after open",
+                "opportunity_rank": 1,
+                "opportunity_score": 0.82,
+                "opportunity_score_components": {"positive_learning": 0.2},
+                "position_sizing_result": {
+                    "target_lots": 1,
+                    "capital_allocation_reason": {"rank_is_not_trade_authority": True},
+                },
+                "capital_allocation_reason": {"selected": True},
+                "learning_used": {"alpha_setup_action_values": [{"action_preference": "positive_candidate_open"}]},
+                "learning_adjustment_summary": {"positive_learning": True},
+            }
+        )
+        recommendation = {
+            "id": "rec-sr",
+            "underlying_code": "SR",
+            "contract_code": "sr2505",
+            "source_type": RecommendationSourceType.STRATEGY.value,
+            "action": RecommendationAction.OPEN_LONG.value,
+            "lots": 1,
+            "signal_snapshot": {"final_action_contract": contract},
+        }
+        config = {
+            "cashflow": 5000000,
+            "max_total_margin_ratio": 0.20,
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+        snapshot = {}
+
+        decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=5900.0),
+            snapshot=snapshot,
+        )
+
+        self.assertEqual(decision.action, FuturesAction.OPEN_LONG)
+        validation = snapshot["phase2_execution"]["pm_plan_validation"]
+        setup_learning = _setup_execution_learning_context(snapshot)
+        self.assertTrue(validation["passed"])
+        self.assertNotIn("final_action_contract", validation)
+        self.assertNotIn("final_action_contract", setup_learning)
+        forbidden = {
+            "position_sizing_result",
+            "capital_allocation_reason",
+            "opportunity_rank",
+            "opportunity_score",
+            "opportunity_score_components",
+            "learning_used",
+            "learning_adjustment_summary",
+        }
+        self.assertFalse(forbidden.intersection(validation.get("final_contract_execution_fields", {}).keys()))
+        self.assertFalse(forbidden.intersection(setup_learning.get("final_contract_execution_fields", {}).keys()))
 
     def test_phase2_exploration_probe_with_current_evidence_can_translate_to_open(self):
         portfolio = Portfolio(

@@ -219,6 +219,47 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
     ),
     ContractCoverageSpec(
+        contract="artifact_phase_boundary",
+        producers=(
+            _rule(
+                "src/agents/execution_team/trader.py",
+                ("final_contract_execution_fields", "no_full_final_action_contract_mirror"),
+                "Trader Phase2 artifacts mirror only execution fields, not the full PM decision contract",
+            ),
+            _rule(
+                "src/util/futures_audit.py",
+                ("transaction execution audit only", "trade_contract_audit"),
+                "transaction audit payload keeps execution audit summary without full PM contract mirror",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/tools/agent_tools/control/system_invariants.py",
+                ("transaction_audit_payload", "opportunity_ranking_field_used_in_execution_trade_intent"),
+                "system invariant audit reads runtime artifacts and rejects PM explanation fields in execution intent",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("artifact 保存边界", "Phase2 artifact"),
+                "mechanism document fixes per-stage artifact persistence boundaries",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_phase_flow_regression.py",
+                ("test_phase2_artifacts_do_not_mirror_pm_explanation_fields",),
+                "phase flow tests cover Trader Phase2 artifact boundary on the real translation path",
+            ),
+            _rule(
+                "src/tests/test_system_invariant_audit.py",
+                ("test_system_invariant_audit_rejects_transaction_payload_pm_explanation_trade_intent",),
+                "system invariant tests reject old transaction audit payload PM explanation mirrors",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="alpha_setup_action_value",
         producers=(
             _rule(

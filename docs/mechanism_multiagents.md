@@ -373,7 +373,29 @@ Phase4 完成后，研究学习单独运行：
 
 研究员输出给下游的内容必须是结构化研究信息，并按直接或间接消费边界使用；持久化到研究库只是保存方式。自由文本可以解释研究原因，但不能成为下游直接消费的研究结论。
 
-## 八、关键字段契约
+## 八、artifact 保存边界
+
+智能体输入输出定义的是业务事实；artifact 是这些事实的持久化载体。artifact 可以引用上游记录，但不能把上游完整对象无差别复制成下游自己的输出。每个阶段落盘前必须遵守以下边界：
+
+| artifact 所属阶段 | 可以保存 | 禁止保存 |
+|---|---|---|
+| PM recommendation artifact | 完整 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、`capital_allocation_reason` | 第二套交易计划、交易员执行结果、收盘后事实 |
+| Auditor artifact | `audit_verdict`、hard/soft risk reasons、审计 payload、对 PM 合约的只读审计摘要 | 改写后的方向、改写后的手数、新建合约、研究库原始记录 |
+| Trader / Phase2 artifact | 执行事实、触发事实、成交/未成交、`execution_result`、`execution_learning_trace`、来自 PM 合约的执行必要字段摘要 | 完整 `final_action_contract` 镜像、`position_sizing_result`、`capital_allocation_reason`、`opportunity_rank`、`opportunity_score`、`opportunity_score_components`、`learning_used`、`learning_adjustment_summary` |
+| Transaction audit payload | 交易执行审计摘要、保证金审计、成交事实、执行触发事实 | 完整 `final_action_contract` 镜像、PM 学习解释、PM 排名解释、PM 资金部署解释 |
+| Accountant artifact | 成交、费用、保证金、结算价、权益、持仓事实 | 研究学习字段、PM 排名字段、LLM 解释、交易动作改写 |
+| Reviewer artifact | Phase4 验收、交易日志、事实归因、上游 artifact 引用、研究输入材料 | 最终 action-value、研究状态写入、当天合约/成交/结算改写 |
+| Researcher artifact | 结构化研究成果、action-value、profile、state、执行学习、分析师校准信息 | 当天交易指令、当天合约改写、交易员权限、会计事实改写 |
+
+核心规则：
+
+- 完整 `final_action_contract` 只能作为 PM recommendation artifact 的策略交易事实保存。
+- 交易员仍然读取审计通过后的 `final_action_contract` 执行，但 Phase2 artifact 不能把完整 PM 合约复制成自己的输出。
+- 下游 artifact 如需说明来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径或执行字段摘要，而不是复制 PM 的学习、排名和资金解释字段。
+- `system_invariant_audit.py` 必须检查执行 artifact 中是否出现 PM 排名、学习或资金解释字段与交易意图字段同节点混用；出现时属于非策略 hard error。
+- `contract_coverage_audit.py` 必须覆盖 artifact 阶段边界的 producer、consumer、audit 和 test。
+
+## 九、关键字段契约
 
 ### 分析师到信号收集员
 
@@ -428,7 +450,7 @@ Phase4 完成后，研究学习单独运行：
 
 交易员只能从审计通过后的 `final_action_contract.current_lots/target_lots/lots_delta/final_action` 和合约内 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 执行策略单。`opportunity_rank/opportunity_score/learning_used` 不是交易员权限，研究库、action-value、`strategy_memory`、`adaptive_policy_state` 也不是交易员触发放宽权限。
 
-## 九、提示词契约
+## 十、提示词契约
 
 提示词是智能体契约的一部分。AgentQuant 的提示词集中在 `src/llm/prompt.py` 管理；涉及智能体输入、输出、禁止项、字段语义、LLM 权限边界的改造，必须同步检查和更新提示词。
 
@@ -451,7 +473,7 @@ Phase4 完成后，研究学习单独运行：
 
 不调用 LLM 的智能体和工具不得新增提示词入口；若代码仍保留旧提示词，改造时必须删除。
 
-## 十、生命周期场景
+## 十一、生命周期场景
 
 投资组合经理生成合约时必须按交易生命周期解释：
 
@@ -465,7 +487,7 @@ Phase4 完成后，研究学习单独运行：
 
 减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。开仓/加仓和资金部署场景必须保留 score/rank/资金理由。
 
-## 十一、回测前后验收
+## 十二、回测前后验收
 
 回测前：
 

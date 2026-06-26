@@ -918,6 +918,7 @@ def _audit_recommendation_final_contract_consistency(
 def _audit_opportunity_ranking_boundary(
     recommendations: Dict[str, Dict[str, Any]],
     errors: List[str],
+    transactions: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     ranking_fields = {
         "opportunity_score",
@@ -996,6 +997,22 @@ def _audit_opportunity_ranking_boundary(
                 errors.append(f"trader_execution_learning_trace_missing_scope:{label}:phase2_execution")
             elif scope != "trader_execution_learning":
                 errors.append(f"trader_execution_learning_trace_wrong_scope:{label}:phase2_execution:{scope}")
+
+    for tx in transactions or []:
+        payload = _dict(tx.get("audit_payload"))
+        if not payload:
+            continue
+        label = f"{tx.get('trading_date')}:{tx.get('ticker')}:{tx.get('id')}"
+        for path, node in _iter_nested_dicts(payload):
+            dangerous = sorted(
+                field for field in ranking_fields
+                if field in node and any(key in node for key in ("target_lots", "lots", "lots_delta", "action", "final_action"))
+            )
+            if dangerous:
+                errors.append(
+                    "opportunity_ranking_field_used_in_execution_trade_intent:"
+                    f"{label}:transaction_audit_payload:{path}:{dangerous}"
+                )
 
 
 def _contract_learning_components(contract: Dict[str, Any]) -> Dict[str, float]:
@@ -2030,7 +2047,7 @@ def audit_system_invariants(
         errors,
     )
     _audit_recommendation_final_contract_consistency(recommendations, errors)
-    _audit_opportunity_ranking_boundary(recommendations, errors)
+    _audit_opportunity_ranking_boundary(recommendations, errors, transactions)
     _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
