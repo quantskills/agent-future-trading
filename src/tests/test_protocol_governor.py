@@ -402,7 +402,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         fundamental_prompt = build_futures_fundamental_prompt(
             ticker="RB",
             fundamentals="inventory down; profit improving",
-            learning_context_text="Reviewer Learning Context",
+            learning_context_text="Research Learning Context",
         )
         news_prompt = build_futures_commodity_news_prompt(
             ticker="RB",
@@ -410,7 +410,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             news=["policy demand catalyst"],
             news_summary="fresh policy news",
             llm_path="cloud_only",
-            learning_context_text="Reviewer Learning Context",
+            learning_context_text="Research Learning Context",
         )
 
         for prompt in (technical_prompt, fundamental_prompt, news_prompt):
@@ -430,6 +430,29 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("effective_catalysts", news_prompt)
         self.assertIn("background_noise", news_prompt)
         self.assertIn("price_volume_confirmation_required", news_prompt)
+
+    def test_researcher_causal_review_config_uses_researcher_name(self):
+        config_path = SRC_ROOT / "config" / "learning_policy_catalog.yaml"
+        text = config_path.read_text(encoding="utf-8")
+        self.assertIn("researcher_causal_review:", text)
+        self.assertNotIn("reviewer_causal_review:", text)
+        self.assertIn("phase4_must_report_missed_opportunity:", text)
+        self.assertNotIn("reviewer_must_attribute_missed_opportunity:", text)
+
+        research_learning_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_learning.py"
+        research_learning_text = research_learning_path.read_text(encoding="utf-8")
+        research_writers_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
+        research_writers_text = research_writers_path.read_text(encoding="utf-8")
+        self.assertNotIn('get("reviewer_causal_review")', research_learning_text)
+        self.assertNotIn('get("reviewer_causal_review")', research_writers_text)
+
+    def test_unified_field_semantics_uses_current_settlement_and_researcher_notes(self):
+        semantics_path = SRC_ROOT.parent / "docs" / "unified_field_semantics.md"
+        text = semantics_path.read_text(encoding="utf-8-sig")
+        self.assertIn("`daily_settlement`", text)
+        self.assertIn("Researcher LLM notes", text)
+        self.assertNotIn("`settlement_result`", text)
+        self.assertNotIn("Reviewer LLM notes", text)
 
     def test_learning_policy_catalog_documents_action_value_usage_boundary(self):
         config_path = SRC_ROOT / "config" / "learning_policy_catalog.yaml"

@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
-"""Bounded reviewer-memory retrieval and config overlay helpers.
+"""Bounded research-memory retrieval and config overlay helpers.
 
-The reviewer writes full learning evidence into SQLite. Analysts and portfolio
+The researcher exposes structured learning evidence from SQLite. Analysts and portfolio
 controls consume only compact, relevant slices from these tables so prompts do
 not grow with the backtest length.
 """
@@ -361,7 +361,7 @@ def _learning_digest_lookup_attempts(
 ) -> List[Dict[str, str]]:
     """Return increasingly broad digest lookups.
 
-    Reviewer learning is useful only if it gets back into prompts. Analyst
+    Research learning is useful only if it gets back into prompts. Analyst
     horizons are sometimes refined over time, so exact horizon misses should
     gracefully fall back to same-ticker mature observations before returning an
     empty prompt block.
@@ -454,7 +454,7 @@ def build_learning_context(
     context: Optional[Dict[str, Any]] = None,
     horizon_class: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return a compact prompt block selected from mature reviewer digests."""
+    """Return a compact prompt block selected from mature research digests."""
     learning_cfg = (full_config or {}).get("learning", {}) or {}
     context_cfg = (full_config or {}).get("learning_context", {}) or {}
     if not bool(learning_cfg.get("enabled", False)) or not bool(context_cfg.get("enabled", True)):
@@ -957,7 +957,7 @@ def build_learning_context(
 
     matched_horizons = sorted({str(item.get("horizon_class") or "*") for item in items if item.get("id") in selected_ids})
     text_parts = [
-        "\n\n=== Reviewer Learning Context (bounded, exploratory, do not overfit) ===",
+        "\n\n=== Research Learning Context (bounded, exploratory, do not overfit) ===",
         "Use these as rebuttable priors and comparable cases. Keep today's data dominant; these notes are not trading authority.",
         "For any prior you cite, explicitly compare it with today's evidence and name the contradiction that would invalidate it.",
     ]
@@ -969,7 +969,7 @@ def build_learning_context(
             "or permission to bypass today's trigger, invalidation, PM, Auditor, or Trader checks."
         )
     if lines:
-        text_parts.append("Mature reviewer digests:")
+        text_parts.append("Mature research digests:")
         text_parts.extend(lines)
     if episode_lines:
         text_parts.append("Similar completed trade episodes:")
@@ -1079,7 +1079,7 @@ def apply_config_learning_overlay(
     config_id: str,
     trading_date: Any,
 ) -> Dict[str, Any]:
-    """Apply reviewer-learned weak-parameter overlays through a strict allowlist."""
+    """Apply research-learned weak-parameter overlays through a strict allowlist."""
     config = deepcopy(full_config or {})
     learning_cfg = config.get("learning", {}) or {}
     overlay_cfg = (learning_cfg.get("config_overlay") or {})
@@ -1120,7 +1120,7 @@ def apply_config_learning_overlay(
         runtime["applied"] = applied
         runtime["skipped"] = skipped
         logger.info(
-            f"Applied {len(applied)} reviewer config overlay(s); skipped {len(skipped)}"
+            f"Applied {len(applied)} research config overlay(s); skipped {len(skipped)}"
         )
 
     return config

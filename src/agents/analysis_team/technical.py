@@ -28,7 +28,10 @@ from tools.agent_tools.analysis.quality import (
     write_analyst_report,
 )
 from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
-from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
+from tools.agent_tools.analysis.analyst_learning_calibration import (
+    calibrate_signal_with_learning_context,
+    retrieve_analyst_policy_calibration,
+)
 from tools.agent_tools.analysis.learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.data_usage import build_technical_data_usage
 from tools.agent_tools.analysis.technical_parameter_calibration import apply_technical_parameter_calibration
@@ -248,17 +251,14 @@ def technical_agent(state: FundState):
                 },
                 features,
             )
-            policy_rows = (
-                db.get_adaptive_policy_state(
-                    config_id=config_id,
-                    ticker=ticker,
-                    side="*",
-                    horizon_class="short",
-                    market_regime=technical_probe_context.get("market_regime") or "*",
-                    trading_date=trading_date,
-                )
-                if hasattr(db, "get_adaptive_policy_state")
-                else []
+            policy_rows, policy_safety = retrieve_analyst_policy_calibration(
+                db,
+                config_id=config_id,
+                ticker=ticker,
+                side="*",
+                horizon_class="short",
+                market_regime=technical_probe_context.get("market_regime") or "*",
+                trading_date=trading_date,
             )
             adaptive_params, technical_calibration_diag = apply_technical_parameter_calibration(
                 adaptive_params,
@@ -274,6 +274,7 @@ def technical_agent(state: FundState):
                     )
                 ),
             )
+            technical_calibration_diag["policy_safety"] = policy_safety
         except Exception as exc:
             technical_calibration_diag = {
                 "enabled": True,
@@ -358,7 +359,7 @@ def technical_agent(state: FundState):
     prompt += learning_context.get("text", "")
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"
-        "When reviewer memories are present, use them only as rebuttable priors. "
+        "When research memories are present, use them only as rebuttable priors. "
         "State whether today's market regime and technical evidence confirm or contradict them. "
         "If the signal is Neutral, specify the concrete technical condition that would convert it "
         "to probe/open and the condition that keeps it on watchlist. Candidate memories cannot "

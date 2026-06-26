@@ -11,7 +11,7 @@ commodity-news analysts based on:
 from typing import Any, Dict, Optional
 import re
 
-from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.agent_tools.analysis.analyst_learning_calibration import retrieve_analyst_policy_calibration
 from util.logger import logger
 
 
@@ -439,7 +439,7 @@ def calibrate_weights_by_signal_history(
                 limit=30,
             )
         except Exception as exc:
-            logger.warning(f"Reviewer analyst-performance calibration unavailable for {ticker}: {exc}")
+            logger.warning(f"Research analyst-performance calibration unavailable for {ticker}: {exc}")
             performance_rows = []
 
         for row in performance_rows:
@@ -457,7 +457,7 @@ def calibrate_weights_by_signal_history(
                 multiplier = 1.0 + min(0.25, 0.20 * confidence)
                 adjusted[analyst] = original_weight * multiplier
                 logger.info(
-                    f"Reviewer learning lifted {ticker} {analyst} weight "
+                    f"Analyst calibration lifted {ticker} {analyst} weight "
                     f"{original_weight:.2%}->{adjusted[analyst]:.2%}; "
                     f"hit_rate={hit_rate:.0%}, samples={sample_count}, pnl={net_pnl:.0f}"
                 )
@@ -465,7 +465,7 @@ def calibrate_weights_by_signal_history(
                 multiplier = max(0.60, 1.0 - min(0.30, 0.25 * confidence))
                 adjusted[analyst] = original_weight * multiplier
                 logger.info(
-                    f"Reviewer learning discounted {ticker} {analyst} weight "
+                    f"Analyst calibration discounted {ticker} {analyst} weight "
                     f"{original_weight:.2%}->{adjusted[analyst]:.2%}; "
                     f"hit_rate={hit_rate:.0%}, samples={sample_count}, pnl={net_pnl:.0f}"
                 )
@@ -479,7 +479,7 @@ def calibrate_weights_by_signal_history(
                 limit=30,
             )
         except Exception as exc:
-            logger.warning(f"Reviewer signal-template calibration unavailable for {ticker}: {exc}")
+            logger.warning(f"Research signal-template calibration unavailable for {ticker}: {exc}")
             template_rows = []
 
         for row in template_rows:
@@ -497,7 +497,7 @@ def calibrate_weights_by_signal_history(
                 multiplier = 1.0 + min(0.18, 0.15 * confidence)
                 adjusted[owner] = original_weight * multiplier
                 logger.info(
-                    f"Reviewer template learning lifted {ticker} {owner} weight "
+                    f"Analyst calibration template learning lifted {ticker} {owner} weight "
                     f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
                     f"horizon={row.get('horizon_class')}, samples={sample_count}, pnl={net_pnl:.0f}"
                 )
@@ -505,49 +505,46 @@ def calibrate_weights_by_signal_history(
                 multiplier = max(0.65, 1.0 - min(0.25, 0.22 * max(confidence, 0.50)))
                 adjusted[owner] = original_weight * multiplier
                 logger.info(
-                    f"Reviewer template learning discounted {ticker} {owner} weight "
+                    f"Analyst calibration template learning discounted {ticker} {owner} weight "
                     f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
                     f"horizon={row.get('horizon_class')}, samples={sample_count}, pnl={net_pnl:.0f}"
                 )
 
-    if hasattr(db, "get_adaptive_policy_state"):
-        try:
-            policy_rows = db.get_adaptive_policy_state(
-                config_id=config_id,
-                ticker=ticker,
-                trading_date=trading_date,
-            )
-        except Exception as exc:
-            logger.warning(f"Reviewer adaptive-policy calibration unavailable for {ticker}: {exc}")
-            policy_rows = []
-        policy_rows, policy_safety = filter_adaptive_policy_state_for_pm(policy_rows)
-        if policy_safety.get("blocked_count"):
-            logger.info(
-                f"Reviewer adaptive-policy calibration ignored {policy_safety['blocked_count']} unsafe "
-                f"adaptive row(s) for {ticker}: {policy_safety.get('blocked_examples')}"
-            )
+    policy_rows, policy_safety = retrieve_analyst_policy_calibration(
+        db,
+        config_id=config_id,
+        ticker=ticker,
+        trading_date=trading_date,
+    )
+    if policy_safety.get("error"):
+        logger.warning(f"Analyst adaptive-policy calibration unavailable for {ticker}: {policy_safety.get('error')}")
+    if policy_safety.get("blocked_count"):
+        logger.info(
+            f"Analyst adaptive-policy calibration ignored {policy_safety['blocked_count']} unsafe "
+            f"adaptive row(s) for {ticker}: {policy_safety.get('blocked_examples')}"
+        )
 
-        for row in policy_rows:
-            owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))
-            if owner not in adjusted:
-                continue
-            confidence = _bounded_float(row.get("confidence_score"), default=0.0)
-            action = str(row.get("policy_action") or "").lower()
-            policy_multiplier = _bounded_float(row.get("multiplier"), default=1.0, lower=0.0, upper=2.0)
-            original_weight = adjusted[owner]
-            if action in {"cap", "block"}:
-                multiplier = max(0.70, 1.0 - min(0.25, (1.0 - min(policy_multiplier, 1.0)) * 0.45 * max(confidence, 0.50)))
-                adjusted[owner] = original_weight * multiplier
-            elif action == "protect":
-                multiplier = 1.0 + min(0.12, 0.10 * confidence)
-                adjusted[owner] = original_weight * multiplier
-            else:
-                continue
-            logger.info(
-                f"Reviewer adaptive policy adjusted {ticker} {owner} weight "
-                f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
-                f"action={action}, horizon={row.get('horizon_class')}, confidence={confidence:.0%}"
-            )
+    for row in policy_rows:
+        owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))
+        if owner not in adjusted:
+            continue
+        confidence = _bounded_float(row.get("confidence_score"), default=0.0)
+        action = str(row.get("policy_action") or "").lower()
+        policy_multiplier = _bounded_float(row.get("multiplier"), default=1.0, lower=0.0, upper=2.0)
+        original_weight = adjusted[owner]
+        if action in {"cap", "block"}:
+            multiplier = max(0.70, 1.0 - min(0.25, (1.0 - min(policy_multiplier, 1.0)) * 0.45 * max(confidence, 0.50)))
+            adjusted[owner] = original_weight * multiplier
+        elif action == "protect":
+            multiplier = 1.0 + min(0.12, 0.10 * confidence)
+            adjusted[owner] = original_weight * multiplier
+        else:
+            continue
+        logger.info(
+            f"Analyst adaptive policy adjusted {ticker} {owner} weight "
+            f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
+            f"action={action}, horizon={row.get('horizon_class')}, confidence={confidence:.0%}"
+        )
 
     total = sum(adjusted.values())
     if total <= 0:

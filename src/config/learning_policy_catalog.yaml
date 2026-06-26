@@ -54,8 +54,8 @@ learning_gatekeeping_policy:
     - execution_changes_margin_ratio
 
 opportunity_ranking_learning_policy:
-  # Reviewer/Researcher 复盘 PM 的 opportunity_score / opportunity_rank 是否真的把资金推向正 alpha。
-  # 该学习只生成下一轮排序偏好和 policy_multiplier，不直接开仓、不改 Trader 手数。
+  # 复盘员提供事实归因，研究员评估 PM 的 opportunity_score / opportunity_rank 是否真的把资金推向正 alpha。
+  # 该学习只生成下一轮排序偏好和 policy_multiplier，不直接开仓、不改交易员手数。
   enabled: true
   source_fields:
     - opportunity_score
@@ -358,7 +358,7 @@ learning:
       min_confidence: 0.60
       cap_multiplier: 0.40
       valid_days: 10
-  reviewer_causal_review:
+  researcher_causal_review:
     enabled: true
     use_llm: true
     run_after_phase4_settlement: true
@@ -402,7 +402,7 @@ signal_quality:
       - range_bound
       - horizon_conflict
       - reward_risk_insufficient
-    reviewer_must_attribute_missed_opportunity: true
+    phase4_must_report_missed_opportunity: true
     # Neutral 追责进入结构化学习。
     write_structured_learning: true
     # 后续窗口只在未来已结算后回填。

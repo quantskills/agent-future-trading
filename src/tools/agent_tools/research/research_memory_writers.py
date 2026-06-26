@@ -2495,7 +2495,7 @@ def _write_validated_causal_policy_rules(
 ) -> Dict[str, Any]:
     """Promote notes-only causal candidates only after deterministic rule validation."""
     learning_cfg = cfg.get("learning", {}) or {}
-    review_cfg = (learning_cfg.get("reviewer_causal_review") or {})
+    review_cfg = learning_cfg.get("researcher_causal_review") or {}
     if not bool(review_cfg.get("enabled", False)):
         return {"validated_rules": 0, "status_counts": {}}
 

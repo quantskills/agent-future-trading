@@ -250,3 +250,7 @@
 （3）收干净 phase completion 旧 API 与研究快照归属。
 修改了什么：`src/database/interface.py`、`src/database/sqlite_helper.py`、`phase4_review.py`、`research_snapshot_reports.py`、`researcher_learning.py`、协议测试和工作流文档。
 为什么改：删除 `complete_trading_day_phase` 的旧学习参数，避免 API 形状继续暗示阶段完成可以触发学习；只读历史学习快照报告迁到研究报告模块，复盘模块只保留 Phase4 验收和交易日志职责。
+
+（4）完成回测前字段、配置、提示词和分析师校准入口收尾。
+修改了什么：`docs/unified_field_semantics.md`、`src/config/learning_policy_catalog.yaml`、`src/llm/prompt.py`、`src/agents/analysis_team/technical.py`、`src/tools/agent_tools/analysis/analyst_learning_calibration.py`、`src/tools/agent_tools/analysis/dynamic_weights.py`、`src/tools/agent_tools/analysis/learning_context.py`、`src/tools/agent_tools/research/research_learning.py`、`src/tools/agent_tools/research/research_memory_writers.py`、协议测试和研究员学习测试。
+为什么改：统一结算事实为 `daily_settlement`，把 LLM 研究说明统一归到研究员语义；研究因果复盘配置只保留 `researcher_causal_review`，不再兼容旧复盘配置名；分析师读取研究校准改走显式安全摘要入口，避免直接碰泛化研究状态表；同时清理旧工具名 `.pyc` 缓存和配置旧命名，减少回测前静态扫描噪音。

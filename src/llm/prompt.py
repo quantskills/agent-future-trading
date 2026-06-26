@@ -32,7 +32,7 @@ Output format:
 - factor_alignment_score: 0.0-1.0
 - data_coverage_score: 0.0-1.0
 - tradeability_reason: why this signal is or is not tradeable
-- similar_past_cases: list of relevant reviewer-learning cases when available
+- similar_past_cases: list of relevant research-learning cases when available
 - do_not_trade_reason: concise reason if this should not be traded
 - evidence_role: entry_timing / direction_context / event_catalyst / risk_context / execution_context.
   risk_context is an evidence role, not a separate agent and not trade authority; PM and Auditor decide permission, while Trader only checks intraday trigger and executes final_action_contract after audit_verdict/trade_contract_audit approval.
@@ -415,7 +415,7 @@ Quality discipline:
 - If directional evidence exists but timing is incomplete, classify it as watch_for_trigger observation and state the exact current trigger that would make it tradable.
 
 Learning explanation:
-- Fill learning_impact_summary using only past reviewer-learning context and today's technical evidence.
+- Fill learning_impact_summary using only past research-learning context and today's technical evidence.
 - historical_support: past technical setups that support today's evidence quality.
 - historical_contradiction: past technical setups that warn against today's evidence quality.
 - current_evidence_confirmed: technical conditions already confirmed today.
@@ -487,7 +487,7 @@ def build_futures_fundamental_prompt(
     prompt += learning_context_text or ""
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"
-        "When reviewer memories are present, use them only as rebuttable priors. "
+        "When research memories are present, use them only as rebuttable priors. "
         "State whether today's available fundamentals, market state, and short-term trigger evidence "
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
         "invalidation boundary, keep it as Neutral/watchlist and specify the condition that would "
@@ -533,7 +533,7 @@ def build_futures_commodity_news_prompt(
     prompt += learning_context_text or ""
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"
-        "When reviewer memories are present, use them only as rebuttable priors. "
+        "When research memories are present, use them only as rebuttable priors. "
         "Classify today's news as catalyst, noise, or no-trade value, and state whether it confirms "
         "or contradicts similar past cases. If Neutral, specify the concrete event/price/volume "
         "condition that would convert it to probe/open. If a catalyst has current price/volume confirmation "

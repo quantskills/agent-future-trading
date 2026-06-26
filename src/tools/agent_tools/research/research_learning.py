@@ -1339,7 +1339,8 @@ def run_researcher_causal_review(
     no_trade_reason_counter: Counter,
 ) -> int:
     reviewer = _reviewer_helpers()
-    review_cfg = ((cfg.get("learning", {}) or {}).get("reviewer_causal_review") or {})
+    learning_cfg = cfg.get("learning", {}) or {}
+    review_cfg = learning_cfg.get("researcher_causal_review") or {}
     if not bool(review_cfg.get("enabled", False)):
         return 0
     evidence = _build_causal_evidence_pack(

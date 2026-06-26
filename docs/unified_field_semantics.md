@@ -8,7 +8,7 @@
 - PM 只输出一张可执行策略合约：`final_action_contract`。
 - Auditor 只输出审计结论：`audit_verdict`。
 - Trader 只执行审计通过后的 `final_action_contract`，只写执行结果：`execution_result`。
-- Accountant 只按成交和结算价写结算结果：`settlement_result`。
+- Accountant 只按成交和结算价写结算事实：`daily_settlement`。
 - Reviewer 写复盘归因。
 - Researcher 写分动作 action-value 学习。
 - 换月、强平、回放、反事实观察不是策略交易，必须用 `source_type != strategy` 分账，不能污染策略 action-value。
@@ -82,8 +82,8 @@
 | `llm_model` | LLM 输出 / config | LLM 模型。 |
 | `determinism_mode` | LLM / 确定性输出 | 生成模式。 |
 | `llm_prompt` | LLM 审计字段 | 发送给 LLM 的提示词记录；不能参与交易决策。 |
-| `raw_prompt` | Reviewer LLM notes | 复盘 LLM 原始 prompt。 |
-| `raw_response` | Reviewer LLM notes | 复盘 LLM 原始 response。 |
+| `raw_prompt` | Researcher LLM notes | 研究员 LLM 原始 prompt。 |
+| `raw_response` | Researcher LLM notes | 研究员 LLM 原始 response。 |
 | `data_cutoff` | 分析师 / PM / artifact | 数据截止点，用于防未来函数。 |
 | `data_usage_summary` | 分析师证据 / 复盘 / 研究 | 本次分析使用的数据来源、日期范围、缺失情况、新鲜度。 |
 | `no_lookahead_status` | 数据派生 artifact | 未来函数检查状态。 |

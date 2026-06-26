@@ -10,12 +10,58 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 
 
 _DIRECTION_BY_SIDE = {
     "long": str(Signal.BULLISH.value).lower(),
     "short": str(Signal.BEARISH.value).lower(),
 }
+
+
+def retrieve_analyst_policy_calibration(
+    db: Any,
+    *,
+    config_id: str,
+    ticker: str,
+    trading_date: str,
+    side: str | None = None,
+    horizon_class: str | None = None,
+    market_regime: str | None = None,
+    setup_type: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return analyst-safe policy calibration rows from structured research state.
+
+    This is an analysis-side calibration interface. It may read persisted research
+    state, but it only returns bounded calibration rows and safety diagnostics; it
+    never creates trade authority, lots, margin, PM score/rank, or execution rights.
+    """
+    if not hasattr(db, "get_adaptive_policy_state"):
+        return [], {"available": False, "reason": "db_method_missing"}
+    try:
+        rows = db.get_adaptive_policy_state(
+            config_id=config_id,
+            ticker=ticker,
+            side=side,
+            setup_type=setup_type,
+            horizon_class=horizon_class,
+            market_regime=market_regime,
+            trading_date=trading_date,
+        )
+    except Exception as exc:
+        return [], {"available": False, "error": str(exc)}
+    safe_rows, safety = filter_adaptive_policy_state_for_pm(list(rows or []))
+    safety = dict(safety or {})
+    safety.update(
+        {
+            "available": True,
+            "consumer_scope": "analyst_calibration",
+            "authority_boundary": "analysis_calibration_only_no_trade_authority_no_lots_no_margin",
+        }
+    )
+    return [dict(row) for row in safe_rows if isinstance(row, Mapping)], safety
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)

@@ -1414,7 +1414,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 cfg={
                     "llm": {"model": "unit-test"},
                     "learning": {
-                        "reviewer_causal_review": {
+                        "researcher_causal_review": {
                             "enabled": True,
                             "use_llm": True,
                         }
@@ -2922,7 +2922,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "learning": {
                         "enabled": True,
                         "memory_expires_after_days": 30,
-                        "reviewer_causal_review": {
+                        "researcher_causal_review": {
                             "enabled": True,
                             "rule_validation": {"min_samples": 2, "min_candidate_confidence": 0.35},
                         },
