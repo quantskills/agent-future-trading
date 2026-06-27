@@ -209,6 +209,8 @@ Phase4 完成后，研究学习单独运行：
 
 同一事实可以有多种载体，但不能有多个入口。例如完整 `final_action_contract` 可以在 PM recommendation DB 记录、PM recommendation artifact 或 PM payload 中保存；但它不能被交易员 Phase2 artifact、transaction audit payload、复盘 artifact 或研究 artifact 复制成自己的事实输出。下游如需追溯来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径、摘要字段或执行必要字段摘要。
 
+边界检查必须区分“事实对象”和“摘要/状态/错误/引用”。字段名本身不等于事实对象；非空 dict/list 结构才可能承载可被下游消费的事实对象。例如 `selected_counts.alpha_setup_action_value=0`、`source_status.alpha_setup_action_value="empty"`、`source_errors.adaptive_policy_state="db_unavailable"` 或上游 ID/path 只是计数、状态、错误或引用摘要，不是研究事实进入 PM artifact。真正的 `alpha_setup_action_value`、`adaptive_policy_state` 或 `researcher_llm_notes` 对象仍只能由研究员学习入口写入。
+
 事实入口边界不改变多智能体底层逻辑：LLM 仍用于分析师和研究员形成结构化预测证据或结构化研究成果；学习仍通过研究员输出、分析师校准和投资组合经理记忆读取影响未来分析与决策；投资组合经理仍是唯一策略交易合约签发者；交易员仍按合约执行。事实入口边界只禁止旁路写入、重复复制和跨阶段改写，不是交易门控，也不能因为没有副本而压死交易。
 
 ### 工具目录边界

@@ -35,6 +35,7 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 纯文字润色、错别字和不改变机制含义的格式调整，不属于系统实际运行方式任务。
 
 - `docs/mechanism_multiagents.md`：当前启用智能体、固定工作流、LLM 边界、工具边界、研究信息消费边界。
+- `docs/mechanism_agent_internal_rules.md`：各智能体内部状态流转、确定性规则引擎和 LLM 输出落地契约。
 - `docs/unified_field_semantics.md`：唯一字段语义表；新增字段必须先在这里登记。
 - `docs/mechanism_research.md`：研究员、复盘员、action-value、记忆读取和未来学习消费机制。
 - `docs/mechanism_data_model.md`：数据、模型调用、运行数据边界。
@@ -46,8 +47,9 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 1. 当前代码事实和测试；
 2. `mechanism_multiagents.md` 固定工作流；
 3. `unified_field_semantics.md` 字段语义；
-4. 其他机制文档；
-5. 历史 work log。
+4. `mechanism_agent_internal_rules.md` 智能体内部转换规则；
+5. 其他机制文档；
+6. 历史 work log。
 
 如果文档落后于代码事实，先说明不一致，再按当前任务范围同步文档或代码。
 

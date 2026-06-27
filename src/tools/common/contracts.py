@@ -82,6 +82,19 @@ RESEARCH_LEARNING_FIELDS = {
     "action_value",
 }
 
+PM_DOWNSTREAM_FACT_FIELDS = {
+    "execution_result",
+    "execution_learning_trace",
+    "daily_settlement",
+    "settlement_result",
+}
+
+PM_RESEARCH_FACT_OBJECT_FIELDS = {
+    "researcher_llm_notes",
+    "alpha_setup_action_value",
+    "adaptive_policy_state",
+}
+
 EXECUTION_ARTIFACT_CONTAINERS = (
     "execution_translation",
     "execution_result",
@@ -257,16 +270,30 @@ def _iter_nested_dicts(value: Any, prefix: str = ""):
             yield from _iter_nested_dicts(child, child_prefix)
 
 
+def _is_fact_object(value: Any) -> bool:
+    return isinstance(value, (dict, list)) and bool(value)
+
+
+def _present_forbidden_fields(node: Dict[str, Any], fields: set[str]) -> List[str]:
+    return sorted(fields.intersection(node.keys()))
+
+
+def _fact_object_forbidden_fields(node: Dict[str, Any], fields: set[str]) -> List[str]:
+    return sorted(field for field in fields.intersection(node.keys()) if _is_fact_object(node.get(field)))
+
+
 def execution_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     """Return execution payload paths that persist PM explanation fields."""
     violations: List[str] = []
     payload = payload if isinstance(payload, dict) else {}
+    object_forbidden = RESEARCH_LEARNING_FIELDS | {"daily_settlement", "settlement_result"}
     for container_name in EXECUTION_ARTIFACT_CONTAINERS:
         container = payload.get(container_name)
         if not isinstance(container, dict):
             continue
         for path, node in _iter_nested_dicts(container):
-            fields = sorted((PM_EXPLANATION_FIELDS | {"final_action_contract"}).intersection(node.keys()))
+            fields = _present_forbidden_fields(node, PM_EXPLANATION_FIELDS | {"final_action_contract"})
+            fields.extend(field for field in _fact_object_forbidden_fields(node, object_forbidden) if field not in fields)
             if fields:
                 violations.append(f"{container_name}:{path or '<root>'}:{fields}")
     return violations
@@ -283,17 +310,9 @@ def pm_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     """Return PM artifact paths that persist downstream execution or settlement facts."""
     violations: List[str] = []
     payload = payload if isinstance(payload, dict) else {}
-    forbidden = {
-        "execution_result",
-        "execution_learning_trace",
-        "daily_settlement",
-        "settlement_result",
-        "researcher_llm_notes",
-        "alpha_setup_action_value",
-        "adaptive_policy_state",
-    }
+    object_forbidden = PM_DOWNSTREAM_FACT_FIELDS | RESEARCH_LEARNING_FIELDS
     for path, node in _iter_nested_dicts(payload):
-        fields = sorted(forbidden.intersection(node.keys()))
+        fields = _fact_object_forbidden_fields(node, object_forbidden)
         if fields:
             violations.append(f"{path or '<root>'}:{fields}")
     return violations
@@ -309,7 +328,7 @@ def accountant_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str
     """Return settlement artifact paths that persist learning or trade-authority fields."""
     violations: List[str] = []
     payload = payload if isinstance(payload, dict) else {}
-    forbidden = PM_EXPLANATION_FIELDS | RESEARCH_LEARNING_FIELDS | {
+    presence_forbidden = PM_EXPLANATION_FIELDS | {
         "llm_prompt",
         "llm_response",
         "raw_prompt",
@@ -320,7 +339,8 @@ def accountant_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str
         "lots_delta",
     }
     for path, node in _iter_nested_dicts(payload):
-        fields = sorted(forbidden.intersection(node.keys()))
+        fields = _present_forbidden_fields(node, presence_forbidden)
+        fields.extend(field for field in _fact_object_forbidden_fields(node, RESEARCH_LEARNING_FIELDS) if field not in fields)
         if fields:
             violations.append(f"{path or '<root>'}:{fields}")
     return violations
@@ -336,7 +356,7 @@ def reviewer_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     """Return Phase4 artifact paths that write research facts or mutate trade facts."""
     violations: List[str] = []
     payload = payload if isinstance(payload, dict) else {}
-    forbidden = RESEARCH_LEARNING_FIELDS | {
+    presence_forbidden = {
         "new_final_action_contract",
         "rewritten_final_action_contract",
         "modified_final_action_contract",
@@ -346,7 +366,8 @@ def reviewer_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
         "final_action_value",
     }
     for path, node in _iter_nested_dicts(payload):
-        fields = sorted(forbidden.intersection(node.keys()))
+        fields = _present_forbidden_fields(node, presence_forbidden)
+        fields.extend(field for field in _fact_object_forbidden_fields(node, RESEARCH_LEARNING_FIELDS) if field not in fields)
         if fields:
             violations.append(f"{path or '<root>'}:{fields}")
     return violations

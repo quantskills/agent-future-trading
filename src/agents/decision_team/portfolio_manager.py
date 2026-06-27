@@ -769,6 +769,13 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
     if authority_type == "exploration_probe":
         if bool(final_entry_authority.get("watch_for_trigger_block")):
             return "final_action_contract_watch_for_trigger_probe_block"
+        conditional_trigger_authority = bool(
+            final_entry_authority.get("conditional_trigger_authority")
+            and final_entry_authority.get("requires_intraday_confirmation")
+            and not final_entry_authority.get("can_execute_without_intraday_trigger")
+        )
+        if conditional_trigger_authority:
+            return None
         hard_watchlist_codes = {
             "pm_text_no_trade_blocks_new_entry",
             "pm_text_no_entry_trigger_blocks_new_entry",
@@ -779,13 +786,6 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
         }
         if reason_codes & hard_watchlist_codes:
             return "final_contract_authority_watchlist_only"
-        conditional_trigger_authority = bool(
-            final_entry_authority.get("conditional_trigger_authority")
-            and final_entry_authority.get("requires_intraday_confirmation")
-            and not final_entry_authority.get("can_execute_without_intraday_trigger")
-        )
-        if conditional_trigger_authority:
-            return None
         current_evidence = bool(
             final_entry_authority.get("open_action_evidence")
             or final_entry_authority.get("strong_current_evidence")
@@ -1957,6 +1957,118 @@ def _minimum_real_probe_candidate_ratio(
     return current
 
 
+def _conditional_monitor_probe_seed_plan(
+    *,
+    ticker: str,
+    current_lots: int,
+    target_lots: int,
+    target_ratio: float,
+    current_ticker_exposure: float,
+    current_net_exposure: float,
+    account_equity: float,
+    current_price: float,
+    multiplier: float,
+    margin_rate: float,
+    margin_available: float,
+    max_position_ratio: float,
+    max_net_exposure: float,
+    morning_price_context: dict | None,
+    control_reasons: list[str],
+    control_diagnostics: dict,
+    full_config: dict | None = None,
+) -> dict:
+    """Keep a clean watch_for_trigger setup as an intraday-only monitor target."""
+    reasons = {str(reason or "") for reason in (control_reasons or [])}
+    diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
+    alpha_ev = diagnostics.get("alpha_setup_ev_fusion") if isinstance(diagnostics.get("alpha_setup_ev_fusion"), dict) else {}
+    seed = diagnostics.get("conditional_monitor_probe_seed") if isinstance(diagnostics.get("conditional_monitor_probe_seed"), dict) else {}
+    trade_authority = _alpha_ev_trade_authority(alpha_ev)
+    reason_effects = reason_effect_summary(list(reasons))
+    hard_blocks = sorted(
+        set(reason_effects.get("hard_blocks") or [])
+        | (reasons & _FINAL_ACTION_AUTHORITY_HARD_BLOCK_REASONS)
+    )
+    hard_zero = bool(reason_effects.get("hard_zero"))
+    negative_profile = bool(
+        alpha_ev.get("negative_action_value")
+        or alpha_ev.get("negative_profile")
+        or alpha_ev.get("repeat_loss_without_new_evidence")
+    )
+    blocked_reasons: list[str] = []
+    if int(current_lots or 0) != 0 or int(target_lots or 0) != 0:
+        blocked_reasons.append("not_flat_zero_target")
+    if "pm_watch_for_trigger_probe_cap" not in reasons:
+        blocked_reasons.append("missing_watch_for_trigger_candidate")
+    if str(trade_authority.get("scorecard_state") or "").lower() != "watch_for_trigger":
+        blocked_reasons.append("not_watch_for_trigger_state")
+    if not bool(alpha_ev.get("setup_quality_ok")):
+        blocked_reasons.append("setup_quality_not_met")
+    if not bool(alpha_ev.get("has_monitorable_setup") or seed):
+        blocked_reasons.append("missing_monitorable_setup")
+    if bool(trade_authority.get("watch_for_trigger_without_setup")):
+        blocked_reasons.append("watch_for_trigger_without_setup")
+    if not bool(trade_authority.get("has_invalidation_or_stop")):
+        blocked_reasons.append("missing_invalidation_or_stop")
+    if hard_zero or hard_blocks:
+        blocked_reasons.append("hard_block_present")
+    if negative_profile:
+        blocked_reasons.append("negative_learning_profile_present")
+
+    probe_side = _target_side_from_ratio(target_ratio)
+    if probe_side not in {"long", "short"}:
+        blocked_reasons.append("missing_target_side")
+    one_lot_notional = float(current_price or 0.0) * abs(float(multiplier or 0.0))
+    one_lot_position_ratio = one_lot_notional / max(float(account_equity or 0.0), 1.0)
+    one_lot_margin = one_lot_notional * float(margin_rate or 0.0)
+    if one_lot_notional <= 0 or float(account_equity or 0.0) <= 0:
+        blocked_reasons.append("invalid_contract_or_equity")
+    if one_lot_margin <= 0 or one_lot_margin > float(margin_available or 0.0) + 1e-12:
+        blocked_reasons.append("one_lot_margin_not_feasible")
+    signed_one_lot_ratio = one_lot_position_ratio if probe_side == "long" else -one_lot_position_ratio
+    projected_net_after_probe = (
+        float(current_net_exposure or 0.0)
+        - float(current_ticker_exposure or 0.0)
+        + signed_one_lot_ratio
+    )
+    if one_lot_position_ratio > float(max_position_ratio or 0.0) + 1e-12:
+        blocked_reasons.append("one_lot_exceeds_position_ratio")
+    if abs(projected_net_after_probe) > float(max_net_exposure or 0.0) + 1e-12:
+        blocked_reasons.append("one_lot_exceeds_net_exposure")
+    risk_budget = {}
+    if not blocked_reasons and probe_side in {"long", "short"}:
+        risk_budget = _one_lot_probe_risk_check(
+            ticker=ticker,
+            probe_side=probe_side,
+            current_price=float(current_price),
+            multiplier=float(multiplier),
+            margin_rate=float(margin_rate),
+            account_equity=float(account_equity),
+            morning_price_context=morning_price_context,
+            control_reasons=list(control_reasons or []),
+            control_diagnostics=diagnostics,
+            full_config=full_config,
+        )
+        if not risk_budget.get("passed", True):
+            blocked_reasons.append("one_lot_risk_budget_not_feasible")
+
+    allowed = not blocked_reasons
+    return {
+        "allowed": allowed,
+        "decision": "allow_conditional_monitor_probe" if allowed else "watch_for_trigger",
+        "blocked_reasons": blocked_reasons,
+        "target_lots": (1 if probe_side == "long" else -1) if allowed else 0,
+        "probe_side": probe_side,
+        "signed_one_lot_ratio": signed_one_lot_ratio if allowed else 0.0,
+        "target_value": one_lot_notional if probe_side == "long" and allowed else -one_lot_notional if allowed else 0.0,
+        "margin_required": one_lot_margin if allowed else 0.0,
+        "new_net_exposure": projected_net_after_probe if allowed else current_net_exposure,
+        "requires_intraday_confirmation": True,
+        "can_execute_without_intraday_trigger": False,
+        "does_not_create_unconditional_execution": True,
+        "risk_budget": risk_budget,
+    }
+
+
 def _qualified_analyst_tradeable_probe_candidate(
     *,
     analyst_signals: list,
@@ -2156,12 +2268,12 @@ def _final_contract_authority(
         "pm_watch_for_trigger_probe_cap" in reason_set
         and scorecard_state == "watch_for_trigger"
         and bool(alpha_ev.get("setup_quality_ok"))
+        and bool(alpha_ev.get("has_monitorable_setup") or control_diagnostics.get("conditional_monitor_probe_seed"))
         and not watch_for_trigger_without_setup
         and bool(trade_authority.get("has_invalidation_or_stop"))
         and not hard_zero
         and not hard_blocks
         and not negative_profile
-        and not weak_conflict_probe
     )
     tradeable_state = scorecard_state in {"probe_candidate", "tradeable_candidate"} or conditional_trigger_authority
     watch_for_trigger_semantic_block = bool(
@@ -2223,7 +2335,7 @@ def _final_contract_authority(
         not hard_zero
         and not hard_blocks
         and not negative_profile
-        and not weak_conflict_probe
+        and (not weak_conflict_probe or conditional_trigger_authority)
         and not watch_for_trigger_block
         and tradeable_state
         and (
@@ -10544,6 +10656,59 @@ def portfolio_agent_futures(state: FundState):
         target_lots = 0
         margin_required = 0.0
         new_net_exposure = current_net_exposure - current_ticker_exposure
+
+    conditional_monitor_side = _target_side_from_ratio(minimum_probe_candidate_ratio)
+    conditional_monitor_margin_rate = (
+        contract_info['margin_rate_long' if conditional_monitor_side == "long" else 'margin_rate_short']
+        if conditional_monitor_side in {"long", "short"}
+        else margin_rate
+    )
+    conditional_monitor_plan = _conditional_monitor_probe_seed_plan(
+        ticker=ticker,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        target_ratio=minimum_probe_candidate_ratio,
+        current_ticker_exposure=current_ticker_exposure,
+        current_net_exposure=current_net_exposure,
+        account_equity=account_equity,
+        current_price=float(current_price),
+        multiplier=float(multiplier),
+        margin_rate=float(conditional_monitor_margin_rate),
+        margin_available=float(margin_available),
+        max_position_ratio=float(max_position_ratio),
+        max_net_exposure=float(max_net_exposure),
+        morning_price_context=morning_price_context,
+        control_reasons=control_reasons,
+        control_diagnostics=control_diagnostics,
+        full_config=full_config,
+    )
+    control_diagnostics["conditional_monitor_probe_plan"] = conditional_monitor_plan
+    if conditional_monitor_plan.get("allowed"):
+        target_lots = int(conditional_monitor_plan.get("target_lots") or 0)
+        margin_rate = conditional_monitor_margin_rate
+        margin_required = float(conditional_monitor_plan.get("margin_required") or 0.0)
+        target_value = float(conditional_monitor_plan.get("target_value") or 0.0)
+        position_risk.optimal_position_ratio = float(
+            conditional_monitor_plan.get("signed_one_lot_ratio") or 0.0
+        )
+        new_net_exposure = float(conditional_monitor_plan.get("new_net_exposure") or 0.0)
+        if "conditional_trigger_authority" not in control_reasons:
+            control_reasons.append("conditional_trigger_authority")
+        seed = (
+            control_diagnostics.get("conditional_monitor_probe_seed")
+            if isinstance(control_diagnostics.get("conditional_monitor_probe_seed"), dict)
+            else {}
+        )
+        if seed:
+            seed["status"] = "applied_to_final_contract"
+            seed["target_lots"] = int(target_lots)
+            seed["requires_intraday_confirmation"] = True
+            seed["can_execute_without_intraday_trigger"] = False
+        control_notes.append(
+            f"{ticker} watch-for-trigger candidate preserved as conditional monitor contract: "
+            f"side={conditional_monitor_plan.get('probe_side')}, lots={target_lots}, "
+            "requires_intraday_confirmation=True"
+        )
 
     # Cooling period: block voluntary reductions within two days of opening unless hard loss or risk pressure applies.
     cooling_period_note = ""

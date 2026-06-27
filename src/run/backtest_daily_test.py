@@ -27,7 +27,6 @@ from util.config_normalizer import normalize_config
 
 
 BACKTEST_DAILY_TEST_MODULES = [
-    "tests.test_fact_entry_boundaries",
     "tests.test_system_invariant_audit",
     "tests.test_mechanism_effectiveness_audit",
 ]

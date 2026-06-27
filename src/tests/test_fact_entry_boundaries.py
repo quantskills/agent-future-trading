@@ -185,6 +185,219 @@ class FactEntryBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "researcher_artifact_forbidden_trade_fact_mutation"):
             validate_researcher_artifact_boundary({"modified_final_action_contract": {"target_lots": 9}})
 
+    def test_pm_artifact_boundary_allows_research_count_summaries_only(self):
+        validate_pm_artifact_boundary(
+            {
+                "technical": {
+                    "metadata": {
+                        "reviewer_learning_context": {
+                            "memory_trace": {
+                                "selected_counts": {
+                                    "alpha_setup_action_value": 0,
+                                }
+                            }
+                        }
+                    }
+                },
+                "fundamental": {
+                    "metadata": {
+                        "reviewer_learning_context": {
+                            "memory_trace": {
+                                "selected_counts": {
+                                    "alpha_setup_action_value": 0,
+                                }
+                            }
+                        }
+                    }
+                },
+                "commodity_news": {
+                    "metadata": {
+                        "reviewer_learning_context": {
+                            "memory_trace": {
+                                "selected_counts": {
+                                    "alpha_setup_action_value": 0,
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        )
+
+        validate_pm_artifact_boundary(
+            {
+                "final_action_contract": {
+                    "position_sizing_result": {
+                        "capital_allocation_reason": {
+                            "memory_summary": {
+                                "side_summaries": [
+                                    {
+                                        "source_status": {
+                                            "alpha_setup_action_value": "empty",
+                                            "adaptive_policy_state": "empty",
+                                        },
+                                        "source_errors": {
+                                            "adaptive_policy_state": "db_unavailable",
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        validate_pm_artifact_boundary(
+            {
+                "final_action_contract": {
+                    "position_sizing_result": {
+                        "capital_allocation_reason": {
+                            "memory_summary": {
+                                "source_status": {
+                                    "alpha_setup_action_value": "available",
+                                    "adaptive_policy_state": [],
+                                    "researcher_llm_notes": 0,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "technical": {
+                        "metadata": {
+                            "reviewer_learning_context": {
+                                "memory_trace": {
+                                    "selected_counts": {
+                                        "alpha_setup_action_value": {"reward": 1.0},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "final_action_contract": {
+                        "position_sizing_result": {
+                            "capital_allocation_reason": {
+                                "memory_summary": {
+                                    "side_summaries": [
+                                        {
+                                            "source_status": {
+                                                "alpha_setup_action_value": {"reward": 1.0},
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "final_action_contract": {
+                        "position_sizing_result": {
+                            "capital_allocation_reason": {
+                                "memory_summary": {
+                                    "source_status": {
+                                        "adaptive_policy_state": [{"policy_action": "widen_trigger"}],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "technical": {
+                        "metadata": {
+                            "alpha_setup_action_value": {"reward": 1.0},
+                        }
+                    }
+                }
+            )
+
+    def test_artifact_boundaries_distinguish_summary_values_from_fact_objects(self):
+        validate_execution_artifact_boundary(
+            {
+                "phase2_execution": {
+                    "execution_result": {
+                        "research_source_status": {
+                            "alpha_setup_action_value": "empty",
+                            "adaptive_policy_state": 0,
+                            "researcher_llm_notes": [],
+                        }
+                    }
+                }
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "execution_artifact_forbidden_pm_fields"):
+            validate_execution_artifact_boundary(
+                {
+                    "phase2_execution": {
+                        "execution_result": {
+                            "alpha_setup_action_value": {"reward": 1.0},
+                        }
+                    }
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "execution_artifact_forbidden_pm_fields"):
+            validate_execution_artifact_boundary(
+                {
+                    "phase2_execution": {
+                        "execution_result": {
+                            "capital_allocation_reason": "ranked_first",
+                        }
+                    }
+                }
+            )
+
+        validate_accountant_artifact_boundary(
+            {
+                "daily_settlement": {
+                    "trading_date": "2025-03-03",
+                    "daily_pnl": 0.0,
+                    "alpha_setup_action_value": "empty",
+                    "adaptive_policy_state": [],
+                }
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "accountant_artifact_forbidden_trade_or_learning_fields"):
+            validate_accountant_artifact_boundary({"daily_settlement": {"alpha_setup_action_value": {"reward": 1.0}}})
+
+        validate_reviewer_artifact_boundary(
+            {
+                "phase4_validation": {
+                    "status": "completed",
+                    "source_status": {
+                        "alpha_setup_action_value": "empty",
+                        "adaptive_policy_state": 0,
+                    },
+                }
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "reviewer_artifact_forbidden_research_or_mutation_fields"):
+            validate_reviewer_artifact_boundary({"phase4_validation": {"adaptive_policy_state": [{"x": 1}]}})
+
+        validate_researcher_artifact_boundary({"alpha_setup_action_value": {"reward_sum": 1.0}})
+        with self.assertRaisesRegex(ValueError, "researcher_artifact_forbidden_trade_fact_mutation"):
+            validate_researcher_artifact_boundary({"modified_daily_settlement": {"daily_pnl": 1.0}})
+
     def test_trader_and_audit_read_pm_contract_through_common_parser(self):
         trader_source = _read("agents/execution_team/trader.py")
         self.assertIn("from tools.common.contracts import", trader_source)

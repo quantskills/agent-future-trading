@@ -40,6 +40,7 @@ from agents.decision_team.portfolio_manager import (
     _apply_holding_rebalance_control,
     _apply_position_budget_policy_for_new_entry,
     _alpha_setup_action_value_trace,
+    _conditional_monitor_probe_seed_plan,
     _final_contract_authority,
     _is_lifecycle_exit_required_reason,
     _minimum_real_probe_candidate_ratio,
@@ -6905,7 +6906,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("drawdown_control", summary["learning_adjustments"])
         self.assertIn("mature_alpha_release", summary["release_signals"])
 
-    def test_final_new_entry_gate_blocks_watch_for_trigger_release_even_with_strong_current_evidence(self):
+    def test_final_new_entry_gate_blocks_watch_for_trigger_without_monitorable_setup(self):
         release_allowed, release_detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
@@ -6974,7 +6975,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
                     "scorecard_state": "watch_for_trigger",
-                    "has_tradeable_support": True,
+                    "has_tradeable_support": False,
+                    "has_monitorable_setup": True,
                     "setup_quality_ok": True,
                     "has_invalidation_or_stop": True,
                     "strong_realtime_evidence": False,
@@ -7002,6 +7004,112 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(detail["watch_for_trigger_semantic_block"])
         self.assertFalse(detail["open_action_evidence"])
         self.assertIn("conditional_trigger_authority", detail["reason_codes"])
+
+    def test_pm_watch_for_trigger_candidate_becomes_conditional_final_contract(self):
+        reasons = [
+            "alpha_setup_ev_fusion",
+            "pm_watch_for_trigger_probe_cap",
+            "horizon_consistency_probe_cap",
+            "market_confirmation_conflict",
+        ]
+        diagnostics = {
+            "conditional_monitor_probe_seed": {
+                "side": "short",
+                "ratio": -0.008,
+                "scorecard": {
+                    "final_state": "watch_for_trigger",
+                    "setup_quality_ok": True,
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
+                    "entry_trigger": "wait for post-open break below support",
+                },
+                "requires_intraday_confirmation": True,
+            },
+            "alpha_setup_ev_fusion": {
+                "scorecard_state": "watch_for_trigger",
+                "has_tradeable_support": False,
+                "has_monitorable_setup": True,
+                "setup_quality_ok": True,
+                "has_invalidation_or_stop": True,
+                "technical_supports_side": True,
+                "technical_entry_timing_supports_side": False,
+                "technical_opposes_side": False,
+                "strong_realtime_evidence": False,
+                "strong_market_confirmation": False,
+                "qualified_positive_expectancy": False,
+                "positive_action_value": False,
+                "negative_action_value": False,
+                "repeat_loss_without_new_evidence": False,
+                "current_confirmation_score": 0.45,
+                "independent_support_count": 1,
+            },
+        }
+        plan = _conditional_monitor_probe_seed_plan(
+            ticker="BU",
+            current_lots=0,
+            target_lots=0,
+            target_ratio=-0.008,
+            current_ticker_exposure=0.0,
+            current_net_exposure=0.0,
+            account_equity=5_000_000.0,
+            current_price=3500.0,
+            multiplier=10.0,
+            margin_rate=0.10,
+            margin_available=1_000_000.0,
+            max_position_ratio=0.12,
+            max_net_exposure=0.40,
+            morning_price_context={},
+            control_reasons=reasons,
+            control_diagnostics=diagnostics,
+            full_config={},
+        )
+        self.assertTrue(plan["allowed"], plan)
+
+        target_lots = int(plan["target_lots"])
+        target_ratio = float(plan["signed_one_lot_ratio"])
+        reasons_with_authority = [*reasons, "conditional_trigger_authority"]
+        allowed, authority = _final_contract_authority(
+            control_reasons=reasons_with_authority,
+            control_diagnostics=diagnostics,
+        )
+        contract = _build_final_action_contract(
+            ticker="BU",
+            current_lots=0,
+            target_lots=target_lots,
+            position_ratio=target_ratio,
+            margin_required=float(plan["margin_required"]),
+            account_equity=5_000_000.0,
+            lots_to_trade=abs(target_lots),
+            lots_to_trade_reason="conditional_trigger_authority",
+            recommendation_intent={"action": "open_short", "lots": abs(target_lots), "action_type": "open"},
+            final_entry_authority=authority,
+            control_reasons=reasons_with_authority,
+            control_diagnostics=diagnostics,
+            opportunity_scorecard={
+                "preferred_side": "short",
+                "short": diagnostics["conditional_monitor_probe_seed"]["scorecard"],
+            },
+            market_confirmation={"confirmation_score": 0.45, "conflicts": ["market_confirmation_conflict"]},
+            alpha_setup_action_values=[],
+            execution_contract_fields={
+                "execution_profile": "breakout",
+                "entry_trigger": "wait for post-open break below support",
+                "invalidation": "above resistance",
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(target_lots, -1)
+        self.assertEqual(contract["final_action"], "open_probe")
+        self.assertEqual(contract["target_lots"], -1)
+        self.assertEqual(contract["lots_delta"], -1)
+        self.assertTrue(contract["conditional_trigger_authority"])
+        self.assertTrue(contract["requires_intraday_confirmation"])
+        self.assertFalse(contract["can_execute_without_intraday_trigger"])
+        self.assertIn("conditional_trigger_authority", contract["reason_codes"])
 
     def test_conditional_watch_for_trigger_real_pm_evidence_snapshot_gets_authority(self):
         signal = AnalystSignal(

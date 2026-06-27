@@ -174,6 +174,8 @@
 
 （10）重整主配置中文注释。修改：`src/config/dev.yaml`。原因：主配置只解释配置职责、资金保护区和不可绕过边界，不再堆叠完整机制说明。
 
+（11）修正 artifact 边界检查器的事实对象语义。修改：`tools/common/contracts.py`、事实入口结构测试和机制/数据模型文档。原因：字段名本身不等于系统事实；数字计数、字符串状态、错误摘要、空列表和上游引用不是事实对象。PM、Trader、Accountant、Reviewer、Researcher 的 artifact 边界统一按“本阶段禁止字段 + 非空 dict/list 事实对象”判断，避免把研究来源摘要误判为研究事实越界。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

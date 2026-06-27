@@ -30,6 +30,7 @@ from util.config_normalizer import normalize_config
 PRE_BACKTEST_TEST_MODULES = [
     "tests.test_fact_entry_boundaries",
     "tests.test_accountant_settlement_formulas",
+    "tests.test_pm_watch_for_trigger_release",
     "tests.test_contract_coverage_audit",
     "tests.test_pre_backtest_acceptance",
     "tests.test_protocol_governor",
