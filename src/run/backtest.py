@@ -152,106 +152,48 @@ def run_command(command: List[str], env: dict) -> int:
     return completed.returncode
 
 
-def run_protocol_preflight(config_arg: str, local_db: bool) -> int:
+def run_pre_backtest_test(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
     command = [
         sys.executable,
-        str(RUN_DIR / "control" / "protocol_preflight.py"),
-        "--config",
-        config_arg,
-        "--json",
-        "--check-llm-auth",
-    ]
-    if local_db:
-        command.append("--local-db")
-    print("[backtest] Running control/protocol_preflight.py")
-    return run_command(command, os.environ.copy())
-
-
-def run_contract_coverage_audit() -> int:
-    command = [
-        sys.executable,
-        str(RUN_DIR / "control" / "contract_coverage_audit.py"),
-        "--repo-root",
-        str(SRC_ROOT.parent),
-        "--json",
-    ]
-    print("[backtest] Running control/contract_coverage_audit.py")
-    return run_command(command, os.environ.copy())
-
-
-def run_pre_backtest_acceptance(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
-    command = [
-        sys.executable,
-        str(RUN_DIR / "control" / "pre_backtest_acceptance.py"),
+        str(RUN_DIR / "pre_backtest_test.py"),
         "--config",
         config_arg,
         "--start-date",
         start_date,
         "--end-date",
         end_date,
-        "--json",
-        "--check-llm-auth",
     ]
     if local_db:
-        command.extend(["--db-path", str(SRC_ROOT / "assets" / "agentquant.db")])
-    print("[backtest] Running control/pre_backtest_acceptance.py")
+        command.append("--local-db")
+    print("[backtest] Running pre_backtest_test.py")
     return run_command(command, os.environ.copy())
 
 
-def run_system_invariant_audit(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
+def run_backtest_daily_test(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
     command = [
         sys.executable,
-        str(RUN_DIR / "control" / "system_invariant_audit.py"),
+        str(RUN_DIR / "backtest_daily_test.py"),
         "--config",
         config_arg,
         "--start-date",
         start_date,
         "--end-date",
         end_date,
-        "--json",
     ]
     if local_db:
         command.append("--local-db")
-    print("[backtest] Running control/system_invariant_audit.py")
+    print("[backtest] Running backtest_daily_test.py")
     return run_command(command, os.environ.copy())
 
 
-def run_mechanism_effectiveness_audit(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
-    command = [
-        sys.executable,
-        str(RUN_DIR / "control" / "mechanism_effectiveness_audit.py"),
-        "--config",
-        config_arg,
-        "--start-date",
-        start_date,
-        "--end-date",
-        end_date,
-        "--json",
-    ]
-    if local_db:
-        command.append("--local-db")
-    print("[backtest] Running control/mechanism_effectiveness_audit.py")
-    return run_command(command, os.environ.copy())
-
-
-def run_daily_cumulative_system_invariant_audit(
+def run_daily_cumulative_backtest_test(
     config_arg: str,
     start_date: str,
     trading_day: str,
     local_db: bool,
 ) -> int:
-    print(f"[backtest] Running control/system_invariant_audit.py through {trading_day}")
-    return run_system_invariant_audit(config_arg, start_date, trading_day, local_db)
-
-
-def run_daily_cumulative_mechanism_effectiveness_audit(
-    config_arg: str,
-    start_date: str,
-    trading_day: str,
-    local_db: bool,
-) -> int:
-    print(f"[backtest] Running control/mechanism_effectiveness_audit.py through {trading_day}")
-    return run_mechanism_effectiveness_audit(config_arg, start_date, trading_day, local_db)
+    print(f"[backtest] Running backtest_daily_test.py through {trading_day}")
+    return run_backtest_daily_test(config_arg, start_date, trading_day, local_db)
 
 
 def main() -> int:
@@ -275,20 +217,15 @@ def main() -> int:
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
 
-    contract_coverage_return_code = run_contract_coverage_audit()
-    if contract_coverage_return_code != 0:
-        print(f"[backtest] contract_coverage_audit.py failed with exit code {contract_coverage_return_code}")
-        return contract_coverage_return_code
-
-    acceptance_return_code = run_pre_backtest_acceptance(
+    pre_backtest_return_code = run_pre_backtest_test(
         config_arg,
         args.start_date,
         args.end_date,
         args.local_db,
     )
-    if acceptance_return_code != 0:
-        print(f"[backtest] pre_backtest_acceptance.py failed with exit code {acceptance_return_code}")
-        return acceptance_return_code
+    if pre_backtest_return_code != 0:
+        print(f"[backtest] pre_backtest_test.py failed with exit code {pre_backtest_return_code}")
+        return pre_backtest_return_code
 
     trading_days = resolve_trading_days(config, start_date, end_date)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -374,31 +311,18 @@ def main() -> int:
                 )
                 return return_code
 
-        invariant_return_code = run_daily_cumulative_system_invariant_audit(
+        daily_test_return_code = run_daily_cumulative_backtest_test(
             config_arg,
             trading_days[0],
             trading_day,
             args.local_db,
         )
-        if invariant_return_code != 0:
+        if daily_test_return_code != 0:
             print(
                 "[backtest] Stopped on "
-                f"{trading_day}: system_invariant_audit.py failed with exit code {invariant_return_code}"
+                f"{trading_day}: backtest_daily_test.py failed with exit code {daily_test_return_code}"
             )
-            return invariant_return_code
-
-        mechanism_return_code = run_daily_cumulative_mechanism_effectiveness_audit(
-            config_arg,
-            trading_days[0],
-            trading_day,
-            args.local_db,
-        )
-        if mechanism_return_code != 0:
-            print(
-                "[backtest] Stopped on "
-                f"{trading_day}: mechanism_effectiveness_audit.py failed with exit code {mechanism_return_code}"
-            )
-            return mechanism_return_code
+            return daily_test_return_code
 
     if args.run_eval and args.skip_eval:
         raise ValueError("--run-eval and --skip-eval cannot be used together.")
@@ -418,25 +342,15 @@ def main() -> int:
             print(f"[backtest] evaluate_config.py failed with exit code {eval_return_code}")
             return eval_return_code
 
-    invariant_return_code = run_system_invariant_audit(
+    final_daily_test_return_code = run_backtest_daily_test(
         config_arg,
         trading_days[0],
         trading_days[-1],
         args.local_db,
     )
-    if invariant_return_code != 0:
-        print(f"[backtest] system_invariant_audit.py failed with exit code {invariant_return_code}")
-        return invariant_return_code
-
-    mechanism_return_code = run_mechanism_effectiveness_audit(
-        config_arg,
-        trading_days[0],
-        trading_days[-1],
-        args.local_db,
-    )
-    if mechanism_return_code != 0:
-        print(f"[backtest] mechanism_effectiveness_audit.py failed with exit code {mechanism_return_code}")
-        return mechanism_return_code
+    if final_daily_test_return_code != 0:
+        print(f"[backtest] backtest_daily_test.py failed with exit code {final_daily_test_return_code}")
+        return final_daily_test_return_code
 
     if args.plot:
         plot_command = [sys.executable, str(RUN_DIR / "plot_config.py"), "--config", config_arg]

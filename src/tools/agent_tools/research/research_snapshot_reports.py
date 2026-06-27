@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from graph.schema import RecommendationSourceType
 from tools.agent_tools.research.neutral_accountability import build_neutral_accountability_summary
@@ -15,6 +16,434 @@ from util.logger import logger
 
 
 SRC_ROOT = Path(__file__).resolve().parents[3]
+
+
+def causal_candidate_scope(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    candidate: Dict[str, Any],
+) -> Dict[str, Any]:
+    tickers = {
+        str(candidate.get("ticker") or "").upper()
+        for _ in [0]
+        if str(candidate.get("ticker") or "*") not in {"", "*"}
+    }
+    sides = {
+        str(candidate.get("side") or "").lower()
+        for _ in [0]
+        if str(candidate.get("side") or "*") not in {"", "*"}
+    }
+    try:
+        cursor.execute(
+            """
+            SELECT payload_json, payload_artifact_path, payload_sha256
+            FROM researcher_llm_notes
+            WHERE config_id = ?
+              AND evidence_pack_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (config_id, candidate.get("evidence_pack_id")),
+        )
+        row = cursor.fetchone()
+    except sqlite3.Error:
+        row = None
+    evidence = (
+        _phase4.load_externalized_json(
+            row["payload_json"],
+            row["payload_artifact_path"] if "payload_artifact_path" in row.keys() else None,
+            row["payload_sha256"] if "payload_sha256" in row.keys() else None,
+        )
+        if row
+        else {}
+    )
+    for item in (evidence or {}).get("pre_trade_evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker") or "").upper()
+        if ticker:
+            tickers.add(ticker)
+        action = str(item.get("action") or "").lower()
+        if "long" in action:
+            sides.add("long")
+        elif "short" in action:
+            sides.add("short")
+        else:
+            snapshot = item.get("signal_snapshot") if isinstance(item.get("signal_snapshot"), dict) else {}
+            contract = _phase4.final_action_contract_from_snapshot(snapshot)
+            side = _phase4._target_side_from_ratio(contract.get("target_lots"))
+            if side in {"long", "short"}:
+                sides.add(side)
+    return {
+        "tickers": sorted(tickers),
+        "sides": sorted(sides),
+        "evidence_pack_id": candidate.get("evidence_pack_id"),
+    }
+
+
+def learned_vs_unlearned_trade_performance(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> Dict[str, Any]:
+    try:
+        pairs = _phase4._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    except sqlite3.Error:
+        pairs = []
+    recommendation_lookup = _phase4._recommendations_by_id(
+        cursor,
+        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+    )
+    learned_pairs: List[Dict[str, Any]] = []
+    unlearned_pairs: List[Dict[str, Any]] = []
+    reason_counts: Counter = Counter()
+    missing_recommendations = 0
+    for pair in pairs:
+        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+        if not recommendation:
+            missing_recommendations += 1
+            unlearned_pairs.append(dict(pair))
+            continue
+        tags, effects = _phase4._learning_attribution_from_recommendation(recommendation)
+        mechanisms = _phase4._learning_mechanisms_from_recommendation(recommendation)
+        item = dict(pair)
+        item["learning_tags"] = tags
+        item["learning_effects"] = effects
+        item["learning_mechanisms"] = mechanisms
+        if tags and effects:
+            learned_pairs.append(item)
+            reason_counts.update(tags)
+        else:
+            unlearned_pairs.append(item)
+    return {
+        "status": "ok" if pairs else "no_completed_round_trips",
+        "cutoff_trading_date": trading_date,
+        "learned": _phase4._trade_pair_performance_summary(learned_pairs),
+        "unlearned": _phase4._trade_pair_performance_summary(unlearned_pairs),
+        "learned_reason_counts": _phase4._sorted_counter_dict(reason_counts),
+        "learned_effect_counts": _phase4.learning_effect_counts(learned_pairs),
+        "learned_effect_summary": _phase4.summarize_pairs_by_learning_effect(learned_pairs),
+        "learning_mechanism_counts": _phase4.learning_mechanism_counts(learned_pairs),
+        "learning_mechanism_summary": _phase4.summarize_pairs_by_learning_mechanism(learned_pairs),
+        "missing_open_recommendations": missing_recommendations,
+    }
+
+
+def learned_effect_underperformance_groups(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    min_samples: int,
+    min_gap: float,
+    allow_self_loss_demote_without_benchmark: bool = True,
+    min_self_loss_net_pnl: float = -1000.0,
+) -> List[Dict[str, Any]]:
+    try:
+        pairs = _phase4._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    except sqlite3.Error:
+        return []
+    recommendation_lookup = _phase4._recommendations_by_id(
+        cursor,
+        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+    )
+    groups: Dict[Tuple[str, str, str, str, str, str], Dict[str, List[Dict[str, Any]]]] = defaultdict(
+        lambda: {"learned_effect": [], "benchmark": []}
+    )
+    tracked_effects = ("alpha_release", "risk_suppression", "evidence_rejection")
+    for pair in pairs:
+        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+        snapshot = _phase4._recommendation_snapshot(recommendation or {})
+        ticker = str(pair.get("ticker") or "").upper()
+        side = str(pair.get("side") or "").lower()
+        combo = _phase4._signal_combo_from_snapshot(snapshot)
+        expected_days = _phase4._expected_horizon_days(snapshot, side)
+        horizon = _phase4._horizon_class(expected_days, snapshot)
+        regime = _phase4._market_regime(snapshot)
+        template = _phase4._setup_type(side, combo, snapshot)
+        key = (ticker, side, template, horizon, regime)
+        item = dict(pair)
+        item["setup_type"] = template
+        item["signal_combo"] = combo
+        if recommendation:
+            tags, effects = _phase4._learning_attribution_from_recommendation(recommendation)
+            item["learning_tags"] = tags
+            item["learning_effects"] = effects
+            scoped_effects = [str(effect) for effect in effects or [] if effect in tracked_effects]
+            if tags and scoped_effects:
+                for effect in scoped_effects:
+                    groups[(*key, effect)]["learned_effect"].append(item)
+                continue
+        for effect in tracked_effects:
+            groups[(*key, effect)]["benchmark"].append(item)
+
+    underperforming: List[Dict[str, Any]] = []
+    for (ticker, side, template, horizon, regime, effect), rows in groups.items():
+        learned_rows = rows["learned_effect"]
+        benchmark_rows = rows["benchmark"]
+        learned_summary = _phase4._trade_pair_performance_summary(learned_rows)
+        benchmark_summary = _phase4._trade_pair_performance_summary(benchmark_rows)
+        learned_trades = _phase4._safe_int(learned_summary.get("total_trades"))
+        benchmark_trades = _phase4._safe_int(benchmark_summary.get("total_trades"))
+        learned_pnl = _phase4._safe_float(learned_summary.get("net_pnl"))
+        benchmark_pnl = _phase4._safe_float(benchmark_summary.get("net_pnl"))
+        if learned_trades < min_samples:
+            continue
+        comparison_status = "same_scope_benchmark_underperformed"
+        if benchmark_trades < min_samples:
+            if not allow_self_loss_demote_without_benchmark:
+                continue
+            if learned_pnl > min_self_loss_net_pnl:
+                continue
+            comparison_status = "same_scope_self_loss_without_benchmark"
+        elif learned_pnl + min_gap >= benchmark_pnl:
+            continue
+        underperforming.append(
+            {
+                "ticker": ticker,
+                "side": side,
+                "setup_type": template,
+                "horizon_class": horizon,
+                "market_regime": regime,
+                "learning_effect": effect,
+                "comparison_status": comparison_status,
+                "learned_effect": learned_summary,
+                "benchmark": benchmark_summary,
+                "learned_effect_trades": learned_trades,
+                "benchmark_trades": benchmark_trades,
+                "learned_effect_net_pnl": learned_pnl,
+                "benchmark_net_pnl": benchmark_pnl,
+            }
+        )
+    underperforming.sort(
+        key=lambda item: (
+            _phase4._safe_float(item.get("learned_effect_net_pnl"))
+            - _phase4._safe_float(item.get("benchmark_net_pnl")),
+            -_phase4._safe_int(item.get("learned_effect_trades")),
+        )
+    )
+    return underperforming
+
+
+def causal_rule_validation_summary(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> Dict[str, Any]:
+    cursor.execute(
+        """
+        SELECT rule_validation_status, COUNT(*) AS cnt
+        FROM causal_review_candidate
+        WHERE config_id = ?
+        GROUP BY rule_validation_status
+        """,
+        (config_id,),
+    )
+    status_counts = {
+        str(row["rule_validation_status"] or "unknown"): int(row["cnt"] or 0)
+        for row in cursor.fetchall()
+    }
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM adaptive_policy_state
+        WHERE config_id = ?
+          AND policy_type = 'causal_review_rule'
+          AND active = 1
+          AND (valid_until IS NULL OR valid_until >= ?)
+        """,
+        (config_id, trading_date),
+    )
+    row = cursor.fetchone()
+    return {
+        "candidate_status_counts": status_counts,
+        "active_causal_rule_count": int(row["cnt"] or 0) if row else 0,
+    }
+
+
+def _directional_consensus_from_snapshot(snapshot: Dict[str, Any], neutral_analyst: str) -> Dict[str, Any]:
+    counts: Counter = Counter()
+    supporters: List[str] = []
+    for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+        if analyst == neutral_analyst:
+            continue
+        signal = str(payload.get("signal") or "Neutral")
+        if signal not in {"Bullish", "Bearish"}:
+            continue
+        confidence = max(
+            _phase4._safe_float(payload.get("effective_confidence")),
+            _phase4._safe_float(payload.get("confidence")),
+        )
+        if confidence < 0.45:
+            continue
+        counts[signal] += 1
+        supporters.append(f"{analyst}:{signal}")
+    if not counts:
+        return {"signal": "Neutral", "support_count": 0, "supporters": []}
+    signal, support_count = counts.most_common(1)[0]
+    return {"signal": signal, "support_count": int(support_count), "supporters": supporters}
+
+
+def neutral_counterfactual_tracking_summary(
+    cursor: sqlite3.Cursor,
+    *,
+    cfg: Dict[str, Any] | None = None,
+    config_id: str,
+    trading_date: str,
+    recommendations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    by_ticker: Dict[str, float] = {}
+    try:
+        cursor.execute(
+            """
+            SELECT ticker, SUM(daily_pnl) AS pnl
+            FROM ticker_daily_pnl tdp
+            JOIN portfolio p ON tdp.portfolio_id = p.id
+            WHERE p.config_id = ?
+              AND substr(tdp.trading_date, 1, 10) = ?
+            GROUP BY ticker
+            """,
+            (config_id, trading_date),
+        )
+        by_ticker = {str(row["ticker"] or "").upper(): _phase4._safe_float(row["pnl"]) for row in cursor.fetchall()}
+    except sqlite3.Error:
+        by_ticker = {}
+
+    observations: List[Dict[str, Any]] = []
+    missed_opportunity = 0
+    reasonable_avoidance = 0
+    for recommendation in recommendations:
+        snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
+        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
+        ticker_pnl = by_ticker.get(ticker, 0.0)
+        for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+            if str(payload.get("signal") or "Neutral") != "Neutral":
+                continue
+            consensus = _directional_consensus_from_snapshot(snapshot, analyst)
+            counterfactual_side = consensus.get("signal")
+            if counterfactual_side not in {"Bullish", "Bearish"} or _phase4._safe_int(consensus.get("support_count")) <= 0:
+                continue
+            counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
+            classification = (
+                "missed_opportunity" if counterfactual_pnl > 0
+                else "reasonable_avoidance" if counterfactual_pnl < 0
+                else "neutral_unresolved"
+            )
+            if classification == "missed_opportunity":
+                missed_opportunity += 1
+            elif classification == "reasonable_avoidance":
+                reasonable_avoidance += 1
+            observations.append(
+                {
+                    "ticker": ticker,
+                    "recommendation_id": recommendation.get("id"),
+                    "analyst": analyst,
+                    "counterfactual_side": counterfactual_side,
+                    "support_count": _phase4._safe_int(consensus.get("support_count")),
+                    "counterfactual_pnl": counterfactual_pnl,
+                    "classification": classification,
+                }
+            )
+
+    total_counterfactual_pnl = sum(_phase4._safe_float(item.get("counterfactual_pnl")) for item in observations)
+    account_cfg = (((cfg or {}).get("signal_quality") or {}).get("neutral_accountability") or {})
+    forward_days = max(0, int(account_cfg.get("counterfactual_forward_days", 0) or 0))
+    forward_dates: List[str] = []
+    forward_by_ticker: Dict[str, float] = {}
+    if forward_days > 0:
+        try:
+            cursor.execute(
+                """
+                SELECT DISTINCT substr(ds.trading_date, 1, 10) AS trading_day
+                FROM daily_settlement ds
+                JOIN portfolio p ON ds.portfolio_id = p.id
+                WHERE p.config_id = ?
+                  AND substr(ds.trading_date, 1, 10) > ?
+                ORDER BY trading_day
+                LIMIT ?
+                """,
+                (config_id, trading_date, forward_days),
+            )
+            forward_dates = [str(row["trading_day"]) for row in cursor.fetchall() if row["trading_day"]]
+            if forward_dates:
+                placeholders = ",".join("?" for _ in forward_dates)
+                cursor.execute(
+                    f"""
+                    SELECT ticker, SUM(daily_pnl) AS pnl
+                    FROM ticker_daily_pnl tdp
+                    JOIN portfolio p ON tdp.portfolio_id = p.id
+                    WHERE p.config_id = ?
+                      AND substr(tdp.trading_date, 1, 10) IN ({placeholders})
+                    GROUP BY ticker
+                    """,
+                    [config_id, *forward_dates],
+                )
+                forward_by_ticker = {
+                    str(row["ticker"] or "").upper(): _phase4._safe_float(row["pnl"])
+                    for row in cursor.fetchall()
+                }
+        except sqlite3.Error:
+            forward_dates = []
+            forward_by_ticker = {}
+
+    forward_observations: List[Dict[str, Any]] = []
+    forward_missed = 0
+    forward_avoided = 0
+    if forward_by_ticker:
+        for recommendation in recommendations:
+            snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
+            ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
+            ticker_pnl = forward_by_ticker.get(ticker, 0.0)
+            for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+                if str(payload.get("signal") or "Neutral") != "Neutral":
+                    continue
+                consensus = _directional_consensus_from_snapshot(snapshot, analyst)
+                counterfactual_side = consensus.get("signal")
+                if counterfactual_side not in {"Bullish", "Bearish"} or _phase4._safe_int(consensus.get("support_count")) <= 0:
+                    continue
+                counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
+                classification = (
+                    "missed_opportunity" if counterfactual_pnl > 0
+                    else "reasonable_avoidance" if counterfactual_pnl < 0
+                    else "neutral_unresolved"
+                )
+                if classification == "missed_opportunity":
+                    forward_missed += 1
+                elif classification == "reasonable_avoidance":
+                    forward_avoided += 1
+                forward_observations.append(
+                    {
+                        "ticker": ticker,
+                        "recommendation_id": recommendation.get("id"),
+                        "analyst": analyst,
+                        "counterfactual_side": counterfactual_side,
+                        "support_count": _phase4._safe_int(consensus.get("support_count")),
+                        "counterfactual_pnl": counterfactual_pnl,
+                        "classification": classification,
+                        "window_trading_dates": forward_dates,
+                    }
+                )
+    total_forward_counterfactual_pnl = sum(
+        _phase4._safe_float(item.get("counterfactual_pnl")) for item in forward_observations
+    )
+    return {
+        "observation_count": len(observations),
+        "missed_opportunity_count": missed_opportunity,
+        "reasonable_avoidance_count": reasonable_avoidance,
+        "total_counterfactual_pnl": total_counterfactual_pnl,
+        "examples": observations[:12],
+        "forward_window_days": forward_days,
+        "forward_window_dates": forward_dates,
+        "forward_status": "applied" if forward_dates else "pending_future_settlements" if forward_days > 0 else "disabled",
+        "forward_observation_count": len(forward_observations),
+        "forward_missed_opportunity_count": forward_missed,
+        "forward_reasonable_avoidance_count": forward_avoided,
+        "forward_total_counterfactual_pnl": total_forward_counterfactual_pnl,
+        "forward_examples": forward_observations[:12],
+    }
 
 
 def _write_historical_learning_snapshot_report(
@@ -125,12 +554,12 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    learned_vs_unlearned = _phase4._learned_vs_unlearned_trade_performance(
+    learned_vs_unlearned = learned_vs_unlearned_trade_performance(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
     )
-    causal_rule_validation = _phase4._causal_rule_validation_summary(
+    causal_rule_validation = causal_rule_validation_summary(
         cursor,
         config_id=config_id,
         trading_date=trading_date,
@@ -160,7 +589,7 @@ def _write_historical_learning_snapshot_report(
         item["signal_snapshot"] = _phase4._recommendation_snapshot(item)
         neutral_recommendations.append(item)
     neutral_accountability = build_neutral_accountability_summary(neutral_recommendations, cfg)
-    neutral_accountability["counterfactual_tracking"] = _phase4._neutral_counterfactual_tracking_summary(
+    neutral_accountability["counterfactual_tracking"] = neutral_counterfactual_tracking_summary(
         cursor,
         cfg=cfg,
         config_id=config_id,

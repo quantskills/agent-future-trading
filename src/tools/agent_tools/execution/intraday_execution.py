@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from graph.schema import BasePriceSource, MorningExecutionBasis
+from tools.common.contracts import sanitize_execution_contract
 
 
 _BUY_LIKE_ACTIONS = {"open_long", "close_short"}
@@ -150,7 +151,7 @@ def select_intraday_execution(
     normalized_execution_bars = _normalize_bars(execution_bars, cutoff_datetime=cutoff_datetime)
     min_volume = float(config.get("min_execution_volume", 0) or 0)
     execution_contract = (
-        decision_context.get("execution_contract")
+        sanitize_execution_contract(decision_context.get("execution_contract"))
         if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
@@ -339,7 +340,7 @@ def select_intraday_execution(
 
 def _execution_profile_from_context(decision_context: Dict[str, Any]) -> str:
     execution_contract = (
-        decision_context.get("execution_contract")
+        sanitize_execution_contract(decision_context.get("execution_contract"))
         if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )

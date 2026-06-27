@@ -16,6 +16,7 @@ from agents.control_team.protocol_governor import ProtocolGovernor, protocol_gov
 from llm.prompt import (
     ACTION_VALUE_USAGE_BOUNDARY,
     CONTROL_GOVERNANCE_OUTPUT_BOUNDARY,
+    SYSTEM_FACT_ENTRY_BOUNDARY,
     build_futures_commodity_news_prompt,
     build_futures_fundamental_prompt,
     build_futures_technical_prompt,
@@ -147,6 +148,33 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                     f"Phase4 reviewer may only write daily transaction reports, not {name}",
                 )
 
+    def test_control_audits_do_not_write_business_tables(self):
+        control_roots = [
+            SRC_ROOT / "tools" / "agent_tools" / "control",
+        ]
+        write_prefixes = ("INSERT INTO", "UPDATE ", "DELETE FROM", "DROP TABLE", "ALTER TABLE")
+        allowed_literal_files = {"contract_coverage_audit.py"}
+        offenders = []
+        for root in control_roots:
+            for path in root.rglob("*.py"):
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func = node.func
+                    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+                    if name not in {"execute", "executemany", "executescript"}:
+                        continue
+                    first_arg = node.args[0] if node.args else None
+                    if not isinstance(first_arg, ast.Constant) or not isinstance(first_arg.value, str):
+                        continue
+                    sql = first_arg.value.strip().upper()
+                    if any(sql.startswith(prefix) for prefix in write_prefixes):
+                        if path.name in allowed_literal_files:
+                            continue
+                        offenders.append(f"{path.relative_to(SRC_ROOT).as_posix()}:{node.lineno}:{sql[:80]}")
+        self.assertEqual([], offenders, f"control audits must remain read-only business fact consumers: {offenders}")
+
     def test_phase4_review_module_does_not_define_research_memory_writers(self):
         reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
         writer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
@@ -211,6 +239,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("def _insert_learning_event", writer_text)
         self.assertIn("def _write_adaptive_policy_state", writer_text)
         self.assertIn("def _write_capital_deployment_state", writer_text)
+        self.assertIn("def _insert_researcher_llm_note", writer_text)
         snapshot_report_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_snapshot_reports.py"
         snapshot_report_text = snapshot_report_path.read_text(encoding="utf-8-sig")
         self.assertIn("def _write_historical_learning_snapshot_report", snapshot_report_text)
@@ -363,12 +392,19 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("CONTROL-GOVERNANCE BOUNDARY", CONTROL_GOVERNANCE_OUTPUT_BOUNDARY)
         self.assertIn("audit metadata only", CONTROL_GOVERNANCE_OUTPUT_BOUNDARY)
         self.assertIn("Do not transform control-governance metadata into authority_type", CONTROL_GOVERNANCE_OUTPUT_BOUNDARY)
+        self.assertIn("SYSTEM FACT ENTRY BOUNDARY", SYSTEM_FACT_ENTRY_BOUNDARY)
+        self.assertIn("system_fact_entry_boundary", SYSTEM_FACT_ENTRY_BOUNDARY)
+        self.assertIn("authorized writer", SYSTEM_FACT_ENTRY_BOUNDARY)
+        self.assertIn("They must not write business facts or guess DB", SYSTEM_FACT_ENTRY_BOUNDARY)
+        self.assertIn("columns", SYSTEM_FACT_ENTRY_BOUNDARY)
 
         researcher_review = build_researcher_causal_review_prompt("{}")
         researcher_exploration = build_researcher_exploratory_prompt(trading_date="2025-03-03", episodes_json="[]")
 
         self.assertIn("Control-governance metadata can support chain-health audit only", researcher_review)
         self.assertIn("chain-health audit inputs only", researcher_exploration)
+        self.assertIn("SYSTEM FACT ENTRY BOUNDARY", researcher_review)
+        self.assertIn("SYSTEM FACT ENTRY BOUNDARY", researcher_exploration)
 
     def test_central_prompt_boundary_keeps_action_value_usage_scoped_by_agent(self):
         self.assertIn("ACTION-VALUE USAGE BOUNDARY", ACTION_VALUE_USAGE_BOUNDARY)
@@ -436,7 +472,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         text = config_path.read_text(encoding="utf-8")
         self.assertIn("researcher_causal_review:", text)
         self.assertNotIn("reviewer_causal_review:", text)
-        self.assertIn("phase4_must_report_missed_opportunity:", text)
+        self.assertNotIn("phase4_must_report_missed_opportunity:", text)
         self.assertNotIn("reviewer_must_attribute_missed_opportunity:", text)
 
         research_learning_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_learning.py"
@@ -445,6 +481,25 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         research_writers_text = research_writers_path.read_text(encoding="utf-8")
         self.assertNotIn('get("reviewer_causal_review")', research_learning_text)
         self.assertNotIn('get("reviewer_causal_review")', research_writers_text)
+
+    def test_research_learning_uses_research_memory_writer_for_research_tables(self):
+        research_learning_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_learning.py"
+        writer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
+        learning_text = research_learning_path.read_text(encoding="utf-8-sig")
+        writer_text = writer_path.read_text(encoding="utf-8-sig")
+        forbidden_sql = (
+            "INSERT INTO adaptive_policy_state",
+            "INSERT INTO researcher_llm_notes",
+            "DELETE FROM alpha_setup_action_value",
+            "DELETE FROM alpha_setup_profile",
+            "DELETE FROM alpha_setup_sample",
+        )
+        for token in forbidden_sql:
+            self.assertNotIn(token, learning_text, f"research_learning must route {token} through research_memory_writers")
+            self.assertIn(token, writer_text, f"research_memory_writers must own {token}")
+        self.assertIn("research_memory_writers.upsert_alpha_setup_policy_state", learning_text)
+        self.assertIn("research_memory_writers.insert_researcher_llm_note", learning_text)
+        self.assertIn("research_memory_writers.reset_alpha_setup_memory", learning_text)
 
     def test_unified_field_semantics_uses_current_settlement_and_researcher_notes(self):
         semantics_path = SRC_ROOT.parent / "docs" / "unified_field_semantics.md"

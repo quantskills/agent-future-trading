@@ -53,6 +53,14 @@ from tools.common.runtime_setup import (
     load_portfolio_config,
     resolve_net_exposure_config,
 )
+from tools.common.contracts import (
+    execution_contract_from_snapshot,
+    final_action_contract_from_snapshot,
+    final_contract_execution_fields_from_snapshot,
+    final_entry_authority_from_snapshot,
+    sanitize_execution_contract,
+    validate_final_action_contract,
+)
 from tools.agent_tools.execution.execution_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
@@ -286,58 +294,12 @@ def _record_execution_translation_context(
 
 
 def _execution_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        return {}
-    final_contract = _final_action_contract_from_snapshot(snapshot)
-    if not isinstance(final_contract, dict) or not final_contract:
-        return {}
-    plan_keys = {
-        "execution_profile",
-        "trigger_source",
-        "entry_trigger",
-        "invalidation",
-        "valid_until",
-        "requires_intraday_confirmation",
-        "can_execute_without_intraday_trigger",
-        "authority_type",
-        "max_allowed_margin_ratio",
-        "reason_codes",
-        "execution_action_value_preference",
-        "analyst_execution_roles",
-    }
-    return {key: final_contract.get(key) for key in plan_keys if key in final_contract}
+    return execution_contract_from_snapshot(snapshot)
 
 
 def _final_contract_execution_fields(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Return only the final contract fields Phase2 artifacts may mirror."""
-    final_contract = _final_action_contract_from_snapshot(snapshot)
-    if not isinstance(final_contract, dict) or not final_contract:
-        return {}
-    allowed_keys = {
-        "contract_version",
-        "contract_type",
-        "ticker",
-        "underlying_code",
-        "contract_code",
-        "final_action",
-        "current_lots",
-        "target_lots",
-        "lots_delta",
-        "entry_trigger",
-        "invalidation",
-        "invalidation_condition",
-        "requires_intraday_confirmation",
-        "can_execute_without_intraday_trigger",
-        "execution_profile",
-        "execution_requirement",
-        "trigger_source",
-        "authority_type",
-        "authority_decision",
-        "reason_codes",
-        "single_source_of_trade_truth",
-        "candidate_sources_do_not_bypass_contract",
-    }
-    return {key: final_contract.get(key) for key in allowed_keys if key in final_contract}
+    return final_contract_execution_fields_from_snapshot(snapshot)
 
 
 def _recommendation_source_type(recommendation: Dict[str, Any]) -> str:
@@ -356,27 +318,7 @@ def _raw_action_lots_allowed_source(recommendation: Dict[str, Any]) -> bool:
 
 
 def _final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        return {}
-    contract = _final_action_contract_from_snapshot(snapshot)
-    if not isinstance(contract, dict) or not contract:
-        return {}
-    reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else []
-    return {
-        "authority_type": contract.get("authority_type") or "not_applicable",
-        "authority_decision": contract.get("authority_decision") or "not_applicable",
-        "max_allowed_margin_ratio": contract.get("max_allowed_margin_ratio"),
-        "reason_codes": list(reason_codes),
-        "open_action_evidence": bool(contract.get("open_action_evidence")),
-        "strong_current_evidence": bool(contract.get("strong_current_evidence")),
-        "watch_for_trigger_block": bool(contract.get("watch_for_trigger_block")),
-        "conditional_trigger_authority": bool(contract.get("conditional_trigger_authority")),
-        "requires_intraday_confirmation": bool(contract.get("requires_intraday_confirmation")),
-        "can_execute_without_intraday_trigger": bool(contract.get("can_execute_without_intraday_trigger")),
-        "negative_profile": bool(contract.get("negative_profile")),
-        "tradeable_state": bool(contract.get("tradeable_state")),
-        "weak_conflict_probe": bool(contract.get("weak_conflict_probe")),
-    }
+    return final_entry_authority_from_snapshot(snapshot)
 
 
 def _authority_signature(authority: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -739,7 +681,7 @@ def _resolve_phase2_execution_basis(
         return morning_price_context, None
     decision_context = _decision_context_from_recommendation(recommendation, cfg)
     execution_contract = (
-        decision_context.get("execution_contract")
+        sanitize_execution_contract(decision_context.get("execution_contract"))
         if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
@@ -1037,12 +979,7 @@ def _cap_target_lots_by_abs_limit(target_lots: int, abs_limit: int) -> int:
 
 
 def _final_action_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        return {}
-    contract = snapshot.get("final_action_contract")
-    if isinstance(contract, dict) and contract:
-        return contract
-    return {}
+    return final_action_contract_from_snapshot(snapshot)
 
 
 def _contract_type_allows_strategy_translation(contract: Dict[str, Any]) -> bool:
@@ -1094,9 +1031,6 @@ def _translate_pre_open_recommendation_to_order(
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
     if isinstance(signal_snapshot, dict):
-        final_contract = signal_snapshot.get("final_action_contract")
-        if isinstance(final_contract, dict) and not isinstance(snapshot.get("final_action_contract"), dict):
-            snapshot["final_action_contract"] = dict(final_contract)
         market_confirmation = signal_snapshot.get("market_confirmation")
         if isinstance(market_confirmation, dict) and not isinstance(snapshot.get("market_confirmation"), dict):
             snapshot["market_confirmation"] = dict(market_confirmation)
@@ -1146,6 +1080,31 @@ def _translate_pre_open_recommendation_to_order(
     current_lots = int(getattr(current_position, "shares", 0) or 0)
     contract_code = getattr(current_position, "contract_code", None) or recommendation.get("contract_code")
     final_action_contract = _final_action_contract_from_snapshot(snapshot)
+    final_action_contract_errors = validate_final_action_contract(final_action_contract) if final_action_contract else []
+    if _is_strategy_recommendation(recommendation) and final_action_contract_errors:
+        add_rewrite_reason(
+            snapshot,
+            "invalid_final_action_contract:" + "|".join(final_action_contract_errors),
+        )
+        _ensure_phase2_execution(snapshot)["pm_plan_validation"] = {
+            "passed": False,
+            "reason": "invalid_final_action_contract",
+            "validation_errors": final_action_contract_errors,
+            "current_lots": int(current_lots),
+            "target_lots_after_validation": int(current_lots),
+            "business_boundary": "Trader can only execute a structurally valid PM final_action_contract",
+        }
+        return FuturesDecision(
+            ticker=ticker,
+            action=FuturesAction.HOLD,
+            lots=0,
+            price=current_price,
+            settle_price=current_price,
+            margin_rate=float(contract_info["margin_rate_long"]),
+            contract_multiplier=multiplier,
+            contract_code=contract_code,
+            justification=f"{ticker} invalid PM final_action_contract; converted to HOLD.",
+        )
 
     if (
         _is_strategy_recommendation(recommendation)

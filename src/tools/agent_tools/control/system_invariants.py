@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from database.artifact_store import load_externalized_json
+from tools.agent_tools.control.db_schema_contract import audit_db_schema_contract
 from tools.agent_tools.control.schemas import ProtocolCheckResult
 from tools.agent_tools.control.unified_field_audit import find_forbidden_artifact_field_keys
 from tools.agent_tools.execution.order_semantics import (
@@ -138,6 +139,38 @@ RELEASE_BLOCK_DIAGNOSTIC_FORBIDDEN_FIELDS = {
     "target_lots",
     "target_margin_ratio_estimate",
     "target_position_ratio",
+}
+PM_EXPLANATION_FIELDS = {
+    "capital_allocation_reason",
+    "learning_adjustment_summary",
+    "learning_used",
+    "opportunity_rank",
+    "opportunity_score",
+    "opportunity_score_components",
+    "position_sizing_result",
+}
+TRADE_INTENT_FIELDS = {
+    "action",
+    "can_execute_without_intraday_trigger",
+    "current_lots",
+    "entry_trigger",
+    "execution_profile",
+    "final_action",
+    "lots",
+    "lots_delta",
+    "requires_intraday_confirmation",
+    "target_lots",
+}
+ARTIFACT_PHASE_BOUNDARY_ERROR_PREFIXES = {
+    "pm_artifact_forbidden_downstream_field",
+    "auditor_artifact_forbidden_contract_mutation",
+    "trader_artifact_forbidden_pm_explanation",
+    "transaction_audit_payload_forbidden_pm_contract_mirror",
+    "accountant_artifact_forbidden_learning_field",
+    "accountant_artifact_forbidden_trade_action_mutation",
+    "reviewer_artifact_forbidden_action_value_write",
+    "reviewer_artifact_forbidden_research_state_write",
+    "researcher_artifact_forbidden_trade_fact_mutation",
 }
 UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES = {
     "unified_field_artifact_forbidden_field",
@@ -288,6 +321,10 @@ ERROR_CATEGORY_PREFIXES = {
         "recommendation_top_level_action_lots_mismatch_final_action_contract",
         "strategy_recommendation_non_strategy_final_action_contract",
         "opportunity_ranking_field_used_in_execution_trade_intent",
+        "pm_artifact_forbidden_downstream_field",
+        "auditor_artifact_forbidden_contract_mutation",
+        "trader_artifact_forbidden_pm_explanation",
+        "transaction_audit_payload_forbidden_pm_contract_mirror",
     },
     "trader_trigger_parity": {
         "open_transaction_without_trigger",
@@ -321,10 +358,18 @@ ERROR_CATEGORY_PREFIXES = {
     },
     "structured_io": {
         "unified_field_artifact_forbidden_field",
+        "accountant_artifact_forbidden_learning_field",
+        "accountant_artifact_forbidden_trade_action_mutation",
+        "reviewer_artifact_forbidden_action_value_write",
+        "reviewer_artifact_forbidden_research_state_write",
+        "researcher_artifact_forbidden_trade_fact_mutation",
     },
     "data_time_boundary": {
         "incomplete_trading_day_phase",
         "future_dated_learning_used",
+        "schema_missing_required_table",
+        "schema_missing_required_column",
+        "schema_missing_date_column",
     },
 }
 
@@ -563,6 +608,8 @@ def _has_invariant_records(conn: sqlite3.Connection) -> bool:
         "futures_intraday_decision",
         "alpha_setup_action_value",
         "adaptive_policy_state",
+        "daily_settlement",
+        "researcher_llm_notes",
         "trading_day_phase",
     ):
         if not _table_exists(conn, table_name):
@@ -750,6 +797,73 @@ def _load_adaptive_policy_states(
     return values
 
 
+def _load_daily_settlements(
+    conn: sqlite3.Connection,
+    *,
+    config_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not _table_exists(conn, "daily_settlement"):
+        return []
+    if not _table_exists(conn, "portfolio"):
+        return []
+    date_sql, params = _date_filter_sql("ds", start_date, end_date)
+    rows = conn.execute(
+        f"""
+        SELECT ds.*
+        FROM daily_settlement ds
+        JOIN portfolio p ON ds.portfolio_id = p.id
+        WHERE p.config_id = ?{date_sql}
+        ORDER BY ds.trading_date ASC
+        """,
+        (config_id, *params),
+    ).fetchall()
+    values: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key in ("positions_snapshot", "artifact_payload", "payload_json"):
+            if key in item:
+                item[key] = _safe_json(item.get(key))
+        values.append(item)
+    return values
+
+
+def _load_researcher_llm_notes(
+    conn: sqlite3.Connection,
+    *,
+    config_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not _table_exists(conn, "researcher_llm_notes"):
+        return []
+    params: List[Any] = [config_id]
+    date_parts: List[str] = []
+    if start_date:
+        date_parts.append("(trading_date IS NULL OR substr(trading_date, 1, 10) >= ?)")
+        params.append(start_date)
+    if end_date:
+        date_parts.append("(trading_date IS NULL OR substr(trading_date, 1, 10) <= ?)")
+        params.append(end_date)
+    date_sql = (" AND " + " AND ".join(date_parts)) if date_parts else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM researcher_llm_notes
+        WHERE config_id = ?{date_sql}
+        ORDER BY trading_date ASC, created_at ASC
+        """,
+        tuple(params),
+    ).fetchall()
+    values: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = _safe_json(item.get("payload_json") or item.get("payload"))
+        values.append(item)
+    return values
+
+
 def _load_trading_day_phases(
     conn: sqlite3.Connection,
     *,
@@ -796,10 +910,8 @@ def _is_open_transaction(transaction: Dict[str, Any]) -> bool:
 
 
 def _transaction_contract(transaction: Dict[str, Any], recommendation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    payload = _dict(transaction.get("audit_payload"))
-    contract = _dict(payload.get("final_action_contract"))
-    if contract:
-        return contract
+    # Transaction payloads may carry execution audit summaries, but the complete
+    # PM decision contract remains a recommendation fact.
     return _contract_from_recommendation(recommendation or {})
 
 
@@ -1415,6 +1527,159 @@ def _audit_unified_field_artifacts(
                 )
 
 
+def _node_field_hits(value: Any, fields: set[str]) -> List[str]:
+    hits: List[str] = []
+    for path, node in _iter_nested_dicts(value):
+        for field in fields:
+            if field in node:
+                hits.append(f"{path}.{field}" if path else field)
+    return sorted(set(hits))
+
+
+def _audit_artifact_phase_boundaries(
+    recommendations: Dict[str, Dict[str, Any]],
+    transactions: List[Dict[str, Any]],
+    daily_settlements: List[Dict[str, Any]],
+    action_values: List[Dict[str, Any]],
+    adaptive_policy_states: List[Dict[str, Any]],
+    researcher_llm_notes: List[Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    """Check persisted artifact stage boundaries from mechanism_multiagents.md."""
+    pm_forbidden_downstream_fields = {
+        "daily_settlement",
+        "daily_settlement_pnl",
+        "execution_result",
+        "execution_learning_trace",
+        "phase4_validation",
+        "settlement_result",
+    }
+    auditor_mutation_fields = {
+        "modified_final_action_contract",
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "strategy_memory",
+        "adaptive_policy_state",
+    }
+    transaction_forbidden_fields = PM_EXPLANATION_FIELDS | {"final_action_contract"}
+    accountant_forbidden_learning_fields = (
+        PM_EXPLANATION_FIELDS
+        | {
+            "action_value",
+            "adaptive_policy_state",
+            "alpha_setup_action_value",
+            "learning_used",
+            "llm_notes",
+            "raw_prompt",
+            "raw_response",
+            "researcher_llm_notes",
+        }
+    )
+    accountant_forbidden_trade_mutation_fields = {
+        "final_action_contract",
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "target_lots",
+        "lots_delta",
+        "final_action",
+    }
+    reviewer_forbidden_action_value_fields = {
+        "action_value",
+        "alpha_setup_action_value",
+        "final_action_value",
+        "write_action_value",
+    }
+    reviewer_forbidden_research_state_fields = {
+        "adaptive_policy_state",
+        "capital_deployment_state",
+        "research_state_write",
+        "strategy_memory",
+    }
+    researcher_forbidden_trade_fact_mutation_fields = {
+        "accountant_adjustment",
+        "adjust_daily_settlement",
+        "adjust_pnl",
+        "amended_execution_result",
+        "modified_final_action_contract",
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "settlement_override",
+        "trade_fact_mutation",
+    }
+
+    for recommendation_id, recommendation in recommendations.items():
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
+        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        for artifact_name in ("signal_snapshot", "audit_payload"):
+            artifact = _dict(recommendation.get(artifact_name))
+            if not artifact:
+                continue
+            pm_hits = _node_field_hits(_dict(artifact.get("final_action_contract")), pm_forbidden_downstream_fields)
+            if pm_hits:
+                errors.append(f"pm_artifact_forbidden_downstream_field:{label}:{artifact_name}:{pm_hits}")
+            audit_hits = _node_field_hits(_dict(artifact.get("audit_verdict") or artifact.get("audit_payload") or artifact.get("audit")), auditor_mutation_fields)
+            if audit_hits:
+                errors.append(f"auditor_artifact_forbidden_contract_mutation:{label}:{artifact_name}:{audit_hits}")
+            phase2_sections = {
+                "phase2_execution": _dict(artifact.get("phase2_execution")),
+                "execution_result": _dict(artifact.get("execution_result")),
+                "execution_translation": _dict(artifact.get("execution_translation")),
+            }
+            for section_name, section in phase2_sections.items():
+                hits = _node_field_hits(section, PM_EXPLANATION_FIELDS | {"final_action_contract"})
+                if hits:
+                    errors.append(f"trader_artifact_forbidden_pm_explanation:{label}:{artifact_name}.{section_name}:{hits}")
+            phase4_section = _dict(artifact.get("phase4_review") or artifact.get("phase4_validation") or artifact.get("reviewer_artifact"))
+            action_hits = _node_field_hits(phase4_section, reviewer_forbidden_action_value_fields)
+            if action_hits:
+                errors.append(f"reviewer_artifact_forbidden_action_value_write:{label}:{artifact_name}:phase4:{action_hits}")
+            state_hits = _node_field_hits(phase4_section, reviewer_forbidden_research_state_fields)
+            if state_hits:
+                errors.append(f"reviewer_artifact_forbidden_research_state_write:{label}:{artifact_name}:phase4:{state_hits}")
+
+    for tx in transactions:
+        label = f"{tx.get('trading_date')}:{tx.get('ticker')}:{tx.get('id')}"
+        payload = _dict(tx.get("audit_payload"))
+        hits = _node_field_hits(payload, transaction_forbidden_fields)
+        if hits:
+            errors.append(f"transaction_audit_payload_forbidden_pm_contract_mirror:{label}:{hits}")
+
+    for row in daily_settlements:
+        label = f"{row.get('trading_date')}:{row.get('portfolio_id') or row.get('id')}"
+        payload = {
+            key: value
+            for key, value in row.items()
+            if isinstance(value, (dict, list))
+        }
+        learning_hits = _node_field_hits(payload, accountant_forbidden_learning_fields)
+        if learning_hits:
+            errors.append(f"accountant_artifact_forbidden_learning_field:{label}:{learning_hits}")
+        mutation_hits = _node_field_hits(payload, accountant_forbidden_trade_mutation_fields)
+        if mutation_hits:
+            errors.append(f"accountant_artifact_forbidden_trade_action_mutation:{label}:{mutation_hits}")
+
+    for row in action_values:
+        label = f"{row.get('last_sample_date')}:{row.get('ticker')}:{row.get('id')}"
+        payload = _dict(row.get("payload"))
+        hits = _node_field_hits(payload, researcher_forbidden_trade_fact_mutation_fields)
+        if hits:
+            errors.append(f"researcher_artifact_forbidden_trade_fact_mutation:{label}:alpha_setup_action_value:{hits}")
+
+    for row in adaptive_policy_states:
+        label = f"{row.get('trading_date')}:{row.get('ticker')}:{row.get('id')}"
+        payload = _dict(row.get("payload"))
+        hits = _node_field_hits(payload, researcher_forbidden_trade_fact_mutation_fields)
+        if hits:
+            errors.append(f"researcher_artifact_forbidden_trade_fact_mutation:{label}:adaptive_policy_state:{hits}")
+
+    for row in researcher_llm_notes:
+        label = f"{row.get('trading_date')}:{row.get('ticker') or '*'}:{row.get('id')}"
+        payload = _dict(row.get("payload"))
+        hits = _node_field_hits(payload, researcher_forbidden_trade_fact_mutation_fields)
+        if hits:
+            errors.append(f"researcher_artifact_forbidden_trade_fact_mutation:{label}:researcher_llm_notes:{hits}")
+
+
 def _audit_action_evidence_trigger_consistency(
     recommendations: Dict[str, Dict[str, Any]],
     errors: List[str],
@@ -1725,10 +1990,10 @@ def _audit_intraday_triggers(
         if _transaction_source_type(tx, recommendation) != STRATEGY_SOURCE_TYPE:
             continue
         payload = _dict(tx.get("audit_payload"))
-        contract = _dict(payload.get("final_action_contract"))
         execution_requirement = _lower(
-            contract.get("execution_requirement")
-            or _nested_value(payload, "trade_contract_audit", "execution_requirement")
+            _nested_value(payload, "trade_contract_audit", "execution_requirement")
+            or _nested_value(recommendation or {}, "signal_snapshot", "final_action_contract", "execution_requirement")
+            or _nested_value(recommendation or {}, "audit_payload", "final_action_contract", "execution_requirement")
         )
         if execution_requirement and execution_requirement != "intraday_trigger_required":
             continue
@@ -2029,11 +2294,30 @@ def audit_system_invariants(
             )
         metadata["config_id"] = resolved_config_id
         metadata["db_path"] = str(db_path)
+        schema_report = audit_db_schema_contract(db_path)
+        if not schema_report.ok:
+            schema_errors = list(schema_report.errors)
+            categories = categorize_invariant_errors(schema_errors)
+            return InvariantAuditReport(
+                ok=False,
+                errors=schema_errors,
+                warnings=list(schema_report.warnings),
+                counts={},
+                metadata={
+                    **metadata,
+                    "schema_contract": dict(schema_report.metadata),
+                    "error_categories": categories,
+                    "failed_categories": sorted(categories),
+                    "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                },
+            )
         recommendations = _load_recommendations(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         transactions = _load_transactions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         intraday_decisions = _load_intraday_decisions(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         action_values = _load_action_values(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         adaptive_policy_states = _load_adaptive_policy_states(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
+        daily_settlements = _load_daily_settlements(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
+        researcher_llm_notes = _load_researcher_llm_notes(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
         trading_day_phases = _load_trading_day_phases(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
     finally:
         conn.close()
@@ -2047,6 +2331,15 @@ def audit_system_invariants(
         errors,
     )
     _audit_recommendation_final_contract_consistency(recommendations, errors)
+    _audit_artifact_phase_boundaries(
+        recommendations,
+        transactions,
+        daily_settlements,
+        action_values,
+        adaptive_policy_states,
+        researcher_llm_notes,
+        errors,
+    )
     _audit_opportunity_ranking_boundary(recommendations, errors, transactions)
     _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
     _audit_unified_field_artifacts(recommendations, errors)
@@ -2067,6 +2360,8 @@ def audit_system_invariants(
         "intraday_decisions": len(intraday_decisions),
         "action_values": len(action_values),
         "adaptive_policy_states": len(adaptive_policy_states),
+        "daily_settlements": len(daily_settlements),
+        "researcher_llm_notes": len(researcher_llm_notes),
         "trading_day_phases": len(trading_day_phases),
     }
     metadata["audit_boundary"] = (

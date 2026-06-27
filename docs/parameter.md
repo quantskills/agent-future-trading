@@ -17,8 +17,7 @@ smoke test 用于确认两类事情：第一，代码、数据、LLM、账务、
 
 - `dev.yaml:position_budget_policy`：真实开仓最低保证金、probe/normal/deployable/exceptional 分层。
 - `dev.yaml:capital_utilization_control`：合格机会的资金释放目标，不能突破 20%。
-- `portfolio_policy_catalog.yaml:portfolio_manager / market_confirmation / alpha_setup_ev_fusion / holding_rebalance_control`：机会分层、市场确认、正负期望、持仓生命周期。运行时由 `config_normalizer.py` 展开到 PM 读取的配置形状。旧 `block/cap/probe/reduction` 字段是兼容输入和动作倾向，不是独立交易权限。
-- `portfolio_policy_catalog.yaml:gatekeeping_policy`：统一门控语义说明。旧 `block/cap/probe` 字段必须先经 `reason_effects.py` 解释为硬风险、软风险标签、学习调整或释放信号，再由 PM 最终出口统一仲裁；不能把多层软限制叠乘成无交易，也不能让释放信号绕过硬风险。
+- `portfolio_policy_catalog.yaml:portfolio_manager / market_confirmation / alpha_setup_ev_fusion / holding_rebalance_control`：机会分层、市场确认、正负期望、持仓生命周期。运行时由 `config_normalizer.py` 展开到 PM 读取的配置形状。旧 `block/cap/probe/reduction` 字段是兼容输入和动作倾向，不是独立交易权限；门控语义不再作为独立 YAML 参数维护，必须先经 `reason_effects.py` 解释，再由 PM 授权事实入口统一仲裁。
 - `analyst_prior_profiles.yaml`：中期方向背景与日频交易时机的冷启动先验；会展开到旧字段 `sector_weights / strategic_view_weights`，但只能辅助排序和上下文解释，不能被解释成静态加权开仓规则，也不能直接生成 open/add/scale 权限。
 - `execution_exit_policy_catalog.yaml`：ATR 止损、probe time stop、趋势仓 time stop。
 - `learning_policy_catalog.yaml`：学习、记忆、Neutral 追责、action-value 和保留周期。只能基于足够样本微调，不能把少数亏损写成死规则；`learning_gatekeeping_policy` 明确学习结果是 open/hold/exit/execution 的动作偏好，不是直接交易命令。学习侧的 `cap/probe/block` 只能影响同作用域偏好、确认要求或保护动作，不能绕过 PM/Auditor/Trader。
@@ -47,5 +46,5 @@ smoke test 用于确认两类事情：第一，代码、数据、LLM、账务、
 
 - 学习明细保留 90 天或约 60 个交易日。
 - 聚合经验保留 180 天，只保留 active 或近期更新状态。
-- 自动清理只在 Phase4/Researcher 之后执行，不能在 Phase1/PM 决策前执行。
+- 自动清理只在 Researcher 学习完成后执行，不能在 Phase1/PM 决策前执行。
 - 交易事实永不自动清理；如果用户手动删除全部回测记录，必须先检查是否删干净，再决定能否重新跑。

@@ -98,6 +98,32 @@ decisions. Use it only to explain whether the multi-agent chain is healthy and
 whether PM/Auditor/Trader/Researcher artifacts are trustworthy.
 """
 
+SYSTEM_FACT_ENTRY_BOUNDARY = """
+=== SYSTEM FACT ENTRY BOUNDARY ===
+
+system_fact_entry_boundary means that a structured fact becomes official only
+through its authorized writer. DB rows, artifacts, and payloads are carriers of
+that fact, not separate fact sources.
+
+- Analyst LLM output can become prediction evidence only through the analyst
+  structured output path. It must not write lots, margin, final_action, or trade
+  authority.
+- PM is the only strategy trade-fact writer for final_action_contract.
+- Trader may execute the audited final_action_contract, but Trader / Phase2 and
+  transaction-audit artifacts must keep only execution facts and necessary
+  execution summaries. They must not mirror the full PM object or PM learning,
+  ranking, sizing, or capital-allocation explanations.
+- Accountant writes only settlement facts.
+- Reviewer writes only Phase4 validation, transaction log, factual attribution,
+  and research input material.
+- Researcher writes only structured future-learning facts after Phase4. Research
+  evidence may reference the PM contract, but must not rewrite same-day PM,
+  Trader, Accountant, or Reviewer facts.
+- Control audits and pre-backtest checks read authorized facts by schema
+  contract and field semantics. They must not write business facts or guess DB
+  columns.
+"""
+
 ACTION_VALUE_USAGE_BOUNDARY = """
 === ACTION-VALUE USAGE BOUNDARY ===
 
@@ -140,6 +166,27 @@ retrieval_key, and usage_boundary:
   explicitly proves exact real state and real episode/reward support.
 """
 
+ARTIFACT_PHASE_BOUNDARY = """
+=== ARTIFACT PHASE BOUNDARY ===
+
+artifact_phase_boundary is a persistence boundary, not a new trade contract.
+PM recommendation artifact may preserve the full final_action_contract and PM
+decision explanations. Downstream artifacts must not mirror that full PM object:
+- Trader / Phase2 and transaction-audit artifacts may keep execution facts,
+  trigger facts, execution_result, execution_learning_trace, and execution-field
+  summaries only. They must not store PM learning, opportunity_rank,
+  opportunity_score, position_sizing_result, capital_allocation_reason, or a
+  full final_action_contract mirror as their own output.
+- Accountant artifacts may keep成交、费用、保证金、结算价、权益和持仓事实 only.
+  They must not contain learning, LLM, PM ranking, or trade-action rewrite fields.
+- Reviewer artifacts may keep Phase4 validation, transaction logs, factual
+  attribution, upstream references, and research input material. They must not
+  write final action-value or research state.
+- Researcher artifacts may keep structured research outputs only. They must not
+  rewrite same-day final_action_contract, execution_result, daily_settlement,
+  commission, margin, account equity, or PnL.
+"""
+
 # DEPRECATED: static legacy prompt. Runtime futures technical analysis uses
 # build_futures_technical_prompt(), which receives already-prepared evidence
 # from the technical analyst. Keep this constant for backward compatibility.
@@ -180,27 +227,6 @@ Focus on factors that impact futures prices:
 For commodity_news, use horizon_class="event_short", expected_horizon_days=1-3,
 setup_type="news_event_setup" when the event is meaningful, and action_name="open"
 only as research semantics when the current event trigger is already confirmed.
-
-""" + ANALYST_OUTPUT_FORMAT
-
-# LEGACY: not part of the current China-futures main chain.
-MACROECONOMIC_PROMPT = """
-You are senior macroeconomic analyst, conduct a comprehensive evaluation of current macroeconomic conditions.
-
-Here are the macroeconomic indicators of past periods:
-{economic_indicators}
-
-""" + ANALYST_OUTPUT_FORMAT
-
-# LEGACY: not part of the current China-futures main chain.
-POLICY_PROMPT = """
-You are a policy analyst. Evaluate the given news related to fiscal and monetary policy, and classify their short-term (6-month) economic impact.
-
-Here are the fiscal policy:
-{fiscal_policy}
-
-Here are the monetary policy:
-{monetary_policy}
 
 """ + ANALYST_OUTPUT_FORMAT
 
@@ -579,7 +605,9 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "and protocol-governor only for audit. "
         "Control-governance metadata can support chain-health audit only; it cannot become market alpha, "
         "an action-preference reward, or a direct PM/Trader instruction. "
-        "Separate lessons by technical setup family, fundamental factor group, news catalyst class, market regime, "
+        + SYSTEM_FACT_ENTRY_BOUNDARY
+        + ARTIFACT_PHASE_BOUNDARY
+        + "Separate lessons by technical setup family, fundamental factor group, news catalyst class, market regime, "
         "and execution timing quality so downstream agents use lane-scoped action-value rather than broad ticker bias. "
         "Preserve hard constraints: no lookahead, no product blacklist, no breaking the 20% total margin cap.\n"
         + evidence_json
@@ -604,5 +632,7 @@ def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str
         "what current trigger is required, what execution confirmation PM should encode into final_action_contract for Trader, and how Researcher will validate same-scope outcomes. "
         "Protocol-governor, cost, tool-access, and preflight findings are chain-health audit inputs only; "
         "do not convert them into alpha, hard trade bans, or unconditional sizing rules.\n"
+        + SYSTEM_FACT_ENTRY_BOUNDARY
+        + ARTIFACT_PHASE_BOUNDARY
         + episodes_json
     )

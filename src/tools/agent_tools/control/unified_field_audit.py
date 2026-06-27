@@ -9,6 +9,7 @@ fail fast if any old semantic field leaks back into production paths.
 """
 
 import ast
+import re
 from pathlib import Path
 from typing import Any, Iterable, List, Sequence, Tuple
 
@@ -74,6 +75,28 @@ RUNTIME_FIELD_ALLOWED_FILES = {
     Path("tools/agent_tools/control/unified_field_audit.py"),
 }
 
+LEGACY_FIELD_LOCATION_ALLOWED_FILES = {
+    Path("docs/release_baseline_2026-06-17.md"),
+    Path("docs/work_log.md"),
+    Path("src/database/sqlite_setup.py"),
+    Path("src/tools/agent_tools/control/contract_coverage_audit.py"),
+    Path("src/tools/agent_tools/control/unified_field_audit.py"),
+    Path("src/tests/test_system_invariant_audit.py"),
+    Path("src/tests/test_unified_field_migration.py"),
+}
+
+LEGACY_FIELD_LOCATION_SCAN_SUFFIXES = {".py", ".yaml", ".yml", ".md"}
+
+LEGACY_FIELD_LOCATION_EXCLUDED_PARTS = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "assets",
+    "logs",
+}
+
 
 def iter_runtime_field_files(
     src_root: str | Path,
@@ -121,6 +144,58 @@ def scan_runtime_field_usage(
             if any(_field_key_matches_token(key, token) for token in token_set):
                 offenders.append(f"{rel}:{key}")
     return offenders, checked_files
+
+
+def scan_legacy_field_token_locations(
+    repo_root: str | Path,
+    *,
+    tokens: Iterable[str] = FORBIDDEN_RUNTIME_FIELD_TOKENS,
+    allowed_files: Iterable[Path] = LEGACY_FIELD_LOCATION_ALLOWED_FILES,
+) -> tuple[List[str], int, int]:
+    """Return legacy field-token mentions outside the explicit allowlist.
+
+    This is stricter than `scan_runtime_field_usage`: it scans active text files
+    for old field names anywhere, then permits them only in migration code,
+    control/audit rule lists, negative tests, and archived history. The goal is
+    not to parse business semantics here; it is to make old-field survival
+    locations explicit and reviewable.
+    """
+    repo_root = Path(repo_root)
+    token_set = set(tokens)
+    allowed = {Path(item) for item in allowed_files}
+    offenders: List[str] = []
+    occurrence_count = 0
+    checked_files = 0
+    for path in _iter_legacy_field_text_files(repo_root):
+        checked_files += 1
+        rel = path.relative_to(repo_root)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for line_no, line in enumerate(text.splitlines(), 1):
+            for token in sorted(token_set):
+                if not _line_contains_legacy_token(line, token):
+                    continue
+                occurrence_count += 1
+                if rel not in allowed:
+                    offenders.append(f"{rel}:{line_no}:{token}")
+    return offenders, checked_files, occurrence_count
+
+
+def _iter_legacy_field_text_files(repo_root: Path) -> Iterable[Path]:
+    for path in repo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in LEGACY_FIELD_LOCATION_SCAN_SUFFIXES:
+            continue
+        if any(part in LEGACY_FIELD_LOCATION_EXCLUDED_PARTS for part in path.parts):
+            continue
+        yield path
+
+
+def _line_contains_legacy_token(line: str, token: str) -> bool:
+    if token.endswith("_"):
+        return token in line
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
+    return re.search(pattern, line) is not None
 
 
 def _structured_field_keys(path: Path) -> set[str]:

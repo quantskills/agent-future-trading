@@ -9,7 +9,7 @@ learning_gatekeeping_policy:
   # PM 必须结合当日证据和确定性工具输出写入 final_action_contract；
   # Auditor 只审合约，Trader 只执行审过的合约。
   # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
-  # 交易出口仍由 final_action_contract 统一落地。
+  # 策略交易事实仍只能通过 PM 授权事实入口写入 final_action_contract。
   # Researcher 写入的 action-value 必须带 consumer_scope 与 usage_boundary：
   # pm_learning 给 PM open/hold/exit/execution 评分和合约解释；
   # analyst_calibration 只给分析师安全 signal_calibration；
@@ -21,13 +21,6 @@ learning_gatekeeping_policy:
   # 并优先使用顶层字段，payload 只作为历史兼容 fallback。
   # PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard；
   # 不能只按初始 preferred_side 取学习，否则学习本身无法纠偏方向排序。
-  action_value_role: action_preference_not_trade_authority
-  policy_action_role: soft_adjustment_reason_code
-  can_create_trade_authority_directly: false
-  same_scope_required_for_sizing: true
-  sector_fallback_role: prior_only_not_open_seed
-  hard_risk_override_allowed: false
-  action_dimensions: [open, hold, exit, execution]
   research_output_contract_version: agentquant.research_action_value.v1
   analyst_allowed_action_value_view: signal_calibration_only
   learning_consumer_scopes:
@@ -45,7 +38,6 @@ learning_gatekeeping_policy:
     - same_ticker_side
     - weak_prior
   similar_sql_rag_role: weak_prior_not_trade_authority
-  counterfactual_memory_role: observation_only_not_trade_authority
   forbidden_cross_action_uses:
     - exit_as_open_amplifier
     - execution_changes_direction
@@ -67,12 +59,6 @@ opportunity_ranking_learning_policy:
     - opportunity_rank
     - capital_allocation_reason
     - learning_adjustment_summary
-  score_component_role:
-    positive_learning: episode_weighted_alpha_promotion
-    negative_learning: episode_weighted_rank_reduction_not_block
-    execution_profile_learning: trigger_and_execution_quality_preference
-    recent_tail_loss_penalty: recent_failure_offsets_stale_positive_learning
-  researcher_output_role: ranking_preference_not_trade_authority
   allowed_policy_effects:
     - adjust_pm_opportunity_score
     - adjust_capital_allocation_priority
@@ -82,17 +68,14 @@ opportunity_ranking_learning_policy:
     - change_trader_lots
     - change_trader_direction
     - bypass_final_action_contract
-  evaluation_buckets:
-    high_score_min: 0.65
-    low_score_max: 0.45
   min_samples_for_ranking_preference: 3
   valid_days: 10
 
 strategy_memory:
-  # 数据库驱动的策略记忆，Phase4 写入，下一交易日读取。
+  # 数据库驱动的策略记忆，由 researcher_learning.py / research_memory_writers 在 Phase4 验证后写入，
+  # 下一交易日由 PM 通过 decision_memory_retrieval 读取。
   enabled: true
-  # 写入后只影响未来交易日。
-  update_on_phase4: true
+  # 写入后只影响未来交易日；Phase4 复盘完成本身不刷新 strategy_memory。
   source: attribution_auto
   lookback_trades: 30
   expires_after_days: 30
@@ -133,7 +116,7 @@ learning:
     # Alpha Setup 档案层：把历史交易、未交易机会、执行结果沉淀为“品种/方向/周期/市场状态/setup/数据组合”的未来可用记忆。
     # 不是品种黑名单，也不是硬规则；candidate/watchlist 只能提示分析，protected/deployable
     # 也必须先经当日证据、PM 合约化、Auditor 审合约、Trader 执行合约和 20% 总保证金上限。
-    # max_position_impact 是学习侧建议影响上限，不是最终仓位参数；最终 margin/lots 仍由 PM 资金出口决定。
+    # max_position_impact 是学习侧建议影响上限，不是最终仓位参数；最终 margin/lots 仍由 PM 授权事实入口决定。
     enabled: true
     lookback_days: 90
     valid_days: 35
@@ -361,12 +344,6 @@ learning:
   researcher_causal_review:
     enabled: true
     use_llm: true
-    run_after_phase4_settlement: true
-    evidence_pack_no_lookahead: true
-    separate_pre_trade_evidence_and_post_trade_outcome: true
-    write_raw_llm_to_notes_only: true
-    rule_engine_required_for_apply: true
-    prohibit_direct_llm_trade_authority: true
 
 analyst_business_quality:
   enabled: true
@@ -387,22 +364,11 @@ analyst_business_quality:
 signal_quality:
   # Neutral 合法，但必须说明原因、缺口、冲突和转向条件。
   neutral_accountability:
-    enabled: true
-    allow_neutral_signal: true
-    require_neutral_reason: true
     required_neutral_fields:
       - neutral_reason
       - missing_evidence
       - conflicting_factors
       - would_change_view_if
-    allowed_neutral_reasons:
-      - insufficient_evidence
-      - factor_conflict
-      - data_missing
-      - range_bound
-      - horizon_conflict
-      - reward_risk_insufficient
-    phase4_must_report_missed_opportunity: true
     # Neutral 追责进入结构化学习。
     write_structured_learning: true
     # 后续窗口只在未来已结算后回填。
@@ -438,9 +404,9 @@ learning_context:
       max_chars: 420
 
 learning_retention:
-  # 自动清理只发生在 Phase4/Researcher 完成后；交易事实永不自动清理。
+  # 自动清理只发生在 Researcher 学习完成后；交易事实永不自动清理。
   enabled: true
-  run_after_phase4: true
+  run_after_researcher_learning: true
   detail_retention_days: 90
   aggregate_retention_days: 180
   max_detail_rows_per_config: 50000

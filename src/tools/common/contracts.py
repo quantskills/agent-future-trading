@@ -51,12 +51,338 @@ REQUIRED_TRADE_RESEARCH_FIELDS = [
     "invalidation_level",
 ]
 
+PM_EXPLANATION_FIELDS = {
+    "capital_allocation_reason",
+    "learning_adjustment_summary",
+    "learning_used",
+    "opportunity_rank",
+    "opportunity_score",
+    "opportunity_score_components",
+    "position_sizing_result",
+}
+
+TRADE_AUTHORITY_FIELDS = {
+    "final_action",
+    "target_lots",
+    "lots_delta",
+    "current_lots",
+    "target_position_ratio",
+    "final_action_contract",
+}
+
+RESEARCH_LEARNING_FIELDS = {
+    "alpha_setup_action_value",
+    "alpha_setup_profile",
+    "adaptive_policy_state",
+    "strategy_memory",
+    "researcher_llm_notes",
+    "capital_deployment_state",
+    "provisional_policy_state",
+    "config_learning_overlay",
+    "action_value",
+}
+
+EXECUTION_ARTIFACT_CONTAINERS = (
+    "execution_translation",
+    "execution_result",
+    "phase2_execution",
+)
+
+EXECUTION_CONTRACT_KEYS = {
+    "execution_profile",
+    "trigger_source",
+    "entry_trigger",
+    "invalidation",
+    "valid_until",
+    "requires_intraday_confirmation",
+    "can_execute_without_intraday_trigger",
+    "authority_type",
+    "max_allowed_margin_ratio",
+    "reason_codes",
+    "execution_action_value_preference",
+    "analyst_execution_roles",
+}
+
+FINAL_CONTRACT_EXECUTION_FIELD_KEYS = {
+    "contract_version",
+    "contract_type",
+    "ticker",
+    "underlying_code",
+    "contract_code",
+    "final_action",
+    "current_lots",
+    "target_lots",
+    "lots_delta",
+    "entry_trigger",
+    "invalidation",
+    "invalidation_condition",
+    "requires_intraday_confirmation",
+    "can_execute_without_intraday_trigger",
+    "execution_profile",
+    "execution_requirement",
+    "trigger_source",
+    "authority_type",
+    "authority_decision",
+    "reason_codes",
+    "single_source_of_trade_truth",
+    "candidate_sources_do_not_bypass_contract",
+}
+
+FINAL_ACTION_CONTRACT_REQUIRED_FIELDS = (
+    "current_lots",
+    "target_lots",
+    "lots_delta",
+    "final_action",
+)
+
 
 def date_text(value: Any) -> str:
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d")
     text = str(value or "")
     return text[:10] if len(text) >= 10 else text
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def final_action_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the PM final_action_contract without exposing mutable ownership."""
+    if not isinstance(snapshot, dict):
+        return {}
+    contract = snapshot.get("final_action_contract")
+    if isinstance(contract, dict) and contract:
+        return dict(contract)
+    return {}
+
+
+def validate_final_action_contract(contract: Dict[str, Any]) -> List[str]:
+    """Validate the PM contract fields consumed by downstream deterministic code."""
+    if not isinstance(contract, dict) or not contract:
+        return ["missing_final_action_contract"]
+
+    errors: List[str] = []
+    for field in FINAL_ACTION_CONTRACT_REQUIRED_FIELDS:
+        if field not in contract:
+            errors.append(f"missing_final_action_contract_{field}")
+
+    current_lots = _safe_int(contract.get("current_lots"))
+    target_lots = _safe_int(contract.get("target_lots"))
+    lots_delta = _safe_int(contract.get("lots_delta"))
+    if "current_lots" in contract and current_lots is None:
+        errors.append("invalid_final_action_contract_current_lots")
+    if "target_lots" in contract and target_lots is None:
+        errors.append("invalid_final_action_contract_target_lots")
+    if "lots_delta" in contract and lots_delta is None:
+        errors.append("invalid_final_action_contract_lots_delta")
+    if current_lots is not None and target_lots is not None and lots_delta is not None:
+        if lots_delta != target_lots - current_lots:
+            errors.append(
+                "final_action_contract_lots_delta_mismatch:"
+                f"current={current_lots}:target={target_lots}:delta={lots_delta}"
+            )
+
+    if "final_action" in contract and not str(contract.get("final_action") or "").strip():
+        errors.append("invalid_final_action_contract_final_action")
+    return errors
+
+
+def execution_contract_from_final_action_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract only execution-rule fields; this is not a second trade contract."""
+    if not isinstance(contract, dict) or not contract:
+        return {}
+    return {key: contract.get(key) for key in EXECUTION_CONTRACT_KEYS if key in contract}
+
+
+def execution_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return execution_contract_from_final_action_contract(final_action_contract_from_snapshot(snapshot))
+
+
+def sanitize_execution_contract(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only execution-rule fields from an execution summary payload."""
+    if not isinstance(value, dict) or not value:
+        return {}
+    return {key: value.get(key) for key in EXECUTION_CONTRACT_KEYS if key in value}
+
+
+def final_contract_execution_fields(contract: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the final contract fields a Phase2 artifact may summarize."""
+    if not isinstance(contract, dict) or not contract:
+        return {}
+    return {key: contract.get(key) for key in FINAL_CONTRACT_EXECUTION_FIELD_KEYS if key in contract}
+
+
+def final_contract_execution_fields_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return final_contract_execution_fields(final_action_contract_from_snapshot(snapshot))
+
+
+def final_entry_authority_from_final_action_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(contract, dict) or not contract:
+        return {}
+    reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else []
+    return {
+        "authority_type": contract.get("authority_type") or "not_applicable",
+        "authority_decision": contract.get("authority_decision") or "not_applicable",
+        "max_allowed_margin_ratio": contract.get("max_allowed_margin_ratio"),
+        "reason_codes": list(reason_codes),
+        "open_action_evidence": bool(contract.get("open_action_evidence")),
+        "strong_current_evidence": bool(contract.get("strong_current_evidence")),
+        "watch_for_trigger_block": bool(contract.get("watch_for_trigger_block")),
+        "conditional_trigger_authority": bool(contract.get("conditional_trigger_authority")),
+        "requires_intraday_confirmation": bool(contract.get("requires_intraday_confirmation")),
+        "can_execute_without_intraday_trigger": bool(contract.get("can_execute_without_intraday_trigger")),
+        "negative_profile": bool(contract.get("negative_profile")),
+        "tradeable_state": bool(contract.get("tradeable_state")),
+        "weak_conflict_probe": bool(contract.get("weak_conflict_probe")),
+    }
+
+
+def final_entry_authority_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return final_entry_authority_from_final_action_contract(final_action_contract_from_snapshot(snapshot))
+
+
+def _iter_nested_dicts(value: Any, prefix: str = ""):
+    if isinstance(value, dict):
+        yield prefix, value
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_nested_dicts(child, child_prefix)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            yield from _iter_nested_dicts(child, child_prefix)
+
+
+def execution_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return execution payload paths that persist PM explanation fields."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    for container_name in EXECUTION_ARTIFACT_CONTAINERS:
+        container = payload.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for path, node in _iter_nested_dicts(container):
+            fields = sorted((PM_EXPLANATION_FIELDS | {"final_action_contract"}).intersection(node.keys()))
+            if fields:
+                violations.append(f"{container_name}:{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_execution_artifact_boundary(payload: Dict[str, Any]) -> None:
+    """Fail fast if an execution artifact tries to persist PM decision facts."""
+    violations = execution_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"execution_artifact_forbidden_pm_fields:{violations}")
+
+
+def pm_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return PM artifact paths that persist downstream execution or settlement facts."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    forbidden = {
+        "execution_result",
+        "execution_learning_trace",
+        "daily_settlement",
+        "settlement_result",
+        "researcher_llm_notes",
+        "alpha_setup_action_value",
+        "adaptive_policy_state",
+    }
+    for path, node in _iter_nested_dicts(payload):
+        fields = sorted(forbidden.intersection(node.keys()))
+        if fields:
+            violations.append(f"{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_pm_artifact_boundary(payload: Dict[str, Any]) -> None:
+    violations = pm_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"pm_artifact_forbidden_downstream_fields:{violations}")
+
+
+def accountant_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return settlement artifact paths that persist learning or trade-authority fields."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    forbidden = PM_EXPLANATION_FIELDS | RESEARCH_LEARNING_FIELDS | {
+        "llm_prompt",
+        "llm_response",
+        "raw_prompt",
+        "raw_response",
+        "final_action_contract",
+        "final_action",
+        "target_lots",
+        "lots_delta",
+    }
+    for path, node in _iter_nested_dicts(payload):
+        fields = sorted(forbidden.intersection(node.keys()))
+        if fields:
+            violations.append(f"{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_accountant_artifact_boundary(payload: Dict[str, Any]) -> None:
+    violations = accountant_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"accountant_artifact_forbidden_trade_or_learning_fields:{violations}")
+
+
+def reviewer_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return Phase4 artifact paths that write research facts or mutate trade facts."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    forbidden = RESEARCH_LEARNING_FIELDS | {
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "modified_final_action_contract",
+        "modified_execution_result",
+        "modified_daily_settlement",
+        "write_action_value",
+        "final_action_value",
+    }
+    for path, node in _iter_nested_dicts(payload):
+        fields = sorted(forbidden.intersection(node.keys()))
+        if fields:
+            violations.append(f"{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_reviewer_artifact_boundary(payload: Dict[str, Any]) -> None:
+    violations = reviewer_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"reviewer_artifact_forbidden_research_or_mutation_fields:{violations}")
+
+
+def researcher_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return researcher artifact paths that mutate same-day trading facts."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    forbidden = {
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "modified_final_action_contract",
+        "modified_execution_result",
+        "modified_daily_settlement",
+        "trade_instruction",
+        "trader_permission",
+        "accounting_adjustment",
+    }
+    for path, node in _iter_nested_dicts(payload):
+        fields = sorted(forbidden.intersection(node.keys()))
+        if fields:
+            violations.append(f"{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_researcher_artifact_boundary(payload: Dict[str, Any]) -> None:
+    violations = researcher_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"researcher_artifact_forbidden_trade_fact_mutation:{violations}")
 
 
 def build_artifact_header(

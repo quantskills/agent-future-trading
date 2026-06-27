@@ -101,7 +101,7 @@
 ### 9. 回测与模拟盘运行方式
 
 - 回测由 `run/backtest.py` 逐交易日调用 `proposal.py`、`order.py`、`settlement.py`、`validate_phase_flow.py`。
-- 回测开始前会先运行只读版本级 `control/contract_coverage_audit.py`，再运行 `control/pre_backtest_acceptance.py`；每个交易日完成后会先运行累计 `control/system_invariant_audit.py`，再运行累计 `control/mechanism_effectiveness_audit.py`。机制有效性审计按交易生命周期场景判断：新开仓/加仓学习应进入 score/rank 并影响唯一合约；条件监控应有盘中触发或未触发结果；持仓、减仓、退出学习应落到目标手数下降、退出/减仓动作或明确继续持有解释。如果出现契约覆盖缺口、非策略 hard error、字段语义冲突、唯一合约冲突、未完成交易日、账务/阶段不一致，或机制断链 hard_fail，回测会停在出错当天，不能把后续盈亏当策略结论。若机制有效性报告只有 diagnostic，如高 rank 亏损或资金利用率偏低，则不停止回测，进入策略表现分析。
+- 回测开始前统一运行 `src/run/pre_backtest_test.py`；每个交易日完成后统一运行累计 `src/run/backtest_daily_test.py`。前者编排回测前结构测试、协议预检、契约覆盖和回测前验收；后者编排每日结构测试、系统不变量和机制有效性审计。机制有效性审计按交易生命周期场景判断：新开仓/加仓学习应进入 score/rank 并影响唯一合约；条件监控应有盘中触发或未触发结果；持仓、减仓、退出学习应落到目标手数下降、退出/减仓动作或明确继续持有解释。如果出现契约覆盖缺口、非策略 hard error、字段语义冲突、唯一合约冲突、未完成交易日、账务/阶段不一致，或机制断链 hard_fail，回测会停在出错当天，不能把后续盈亏当策略结论。若机制有效性报告只有 diagnostic，如高 rank 亏损或资金利用率偏低，则不停止回测，进入策略表现分析。
 - 单日策略生成运行 Phase1；单日交易执行运行 `order.py`；日终结算运行 `settlement.py`；复盘验收运行 `validate_phase_flow.py`。
 - 模拟盘/模拟交易可让交易员以循环模式等待盘中触发，按配置间隔检查，直到触发成交或到收盘前后完成最终处理。
 - 回测和模拟盘共享交易、结算、手续费、滑点、换约、完整日志和研究输出持久化机制。

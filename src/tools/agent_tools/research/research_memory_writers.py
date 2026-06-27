@@ -7,8 +7,18 @@ state are written only through this module and the researcher learning entrypoin
 
 from __future__ import annotations
 
+import sqlite3
+import uuid
+from typing import Any, Dict, Mapping, Optional
+
 from tools.agent_tools.research import phase4_review as _phase4
-from tools.agent_tools.research.learning_contract import build_event_memory_contract
+from tools.agent_tools.research import research_snapshot_reports as _research_snapshots
+from tools.agent_tools.research.learning_contract import (
+    CONTRACT_KEY,
+    attach_or_upgrade_next_round_memory_contract,
+    build_event_memory_contract,
+)
+from tools.common.contracts import validate_researcher_artifact_boundary
 
 # Reuse Phase4 deterministic parsing/report helpers without letting Phase4 own
 # research persistence entrypoints.
@@ -16,6 +26,224 @@ for _name in dir(_phase4):
     if _name.startswith("__"):
         continue
     globals().setdefault(_name, getattr(_phase4, _name))
+
+_causal_candidate_scope = _research_snapshots.causal_candidate_scope
+_learned_vs_unlearned_trade_performance = _research_snapshots.learned_vs_unlearned_trade_performance
+_learned_effect_underperformance_groups = _research_snapshots.learned_effect_underperformance_groups
+_causal_rule_validation_summary = _research_snapshots.causal_rule_validation_summary
+_neutral_counterfactual_tracking_summary = _research_snapshots.neutral_counterfactual_tracking_summary
+
+
+def _json_dumps(value: Any) -> str:
+    if isinstance(value, dict):
+        validate_researcher_artifact_boundary(value)
+    elif isinstance(value, list):
+        validate_researcher_artifact_boundary({"research_payload": value})
+    return _phase4._json_dumps(value)
+
+
+def build_policy_memory_payload(
+    *,
+    policy_type: str,
+    policy_action: str,
+    reason: str,
+    scope: Dict[str, Any],
+    evidence: Dict[str, Any],
+    multiplier: float = 1.0,
+    maturity_state: str = "validated_policy",
+    status: str = "applied",
+) -> Dict[str, Any]:
+    """Create future policy-memory payloads from the researcher writer boundary."""
+    action = str(policy_action or "").lower()
+    is_protect = action in {"protect", "allow"}
+    is_reduce = action in {"cap", "reduce", "block", "demote", "probe_only", "weak_block"}
+    sample_count = _safe_int((evidence or {}).get("sample_count") or (evidence or {}).get("total_trades"), 0)
+    confidence = _safe_float((evidence or {}).get("confidence_score"), 0.0)
+    if not confidence:
+        confidence = _confidence_from_summary(evidence or {})
+    if is_protect:
+        pm_condition = (
+            f"May support protected/deployable sizing in this scope only if today's signal, "
+            f"market confirmation, horizon, and invalidation boundary agree; multiplier={multiplier:.2f}."
+        )
+        position_authority = "pm_auditor_conditioned"
+        max_impact = "may_support_alpha_scaling_inside_20pct_cap"
+    elif is_reduce:
+        pm_condition = (
+            f"Cap, reduce, or probe-only same-scope exposure until fresh evidence repairs the setup; "
+            f"multiplier={multiplier:.2f}."
+        )
+        position_authority = "risk_reduction_conditioned"
+        max_impact = "may_reduce_or_cap_only_through_pm_auditor"
+    else:
+        pm_condition = "Use as diagnostic strategy memory; no direct sizing impact without separate validation."
+        position_authority = "analysis_prior_only"
+        max_impact = "no_direct_position_impact"
+    return attach_or_upgrade_next_round_memory_contract(
+        {
+            **dict(evidence or {}),
+            "source": policy_type,
+            "policy_type": policy_type,
+            "policy_action": action,
+            "reason": reason,
+            "multiplier": multiplier,
+            "evidence": evidence or {},
+        },
+        memory_type=policy_type,
+        maturity_state=maturity_state,
+        status=status,
+        scope=scope,
+        usable_memory=[
+            reason,
+            f"policy_action={action}; multiplier={multiplier:.2f}; sample_count={sample_count}",
+        ],
+        analysis_strategy_updates=[
+            "Use the policy as same-scope strategy memory, not a product-wide shortcut.",
+            "Before citing it, compare today's data drivers, signal template, horizon, and market regime.",
+        ],
+        trading_strategy_updates=[
+            pm_condition,
+            "Never use this policy to override hard risk limits, auditor, or current-day evidence.",
+        ],
+        pm_action_conditions=[pm_condition],
+        invalidates_when=[
+            "Today's same-scope data contradicts the remembered setup.",
+            "The policy validity window has expired or the ticker/side/template/horizon/regime no longer match.",
+            "A new/add-on trade lacks explicit current confirmation and invalidation boundary.",
+        ],
+        validation_plan=[
+            "Refresh same-scope sample count, win rate, net PnL, and benchmark comparison after future settlements.",
+        ],
+        position_authority=position_authority,
+        max_position_impact=max_impact,
+        sample_count=sample_count,
+        confidence_score=confidence,
+    )
+
+
+def _policy_contract_payload(
+    *,
+    policy_type: str,
+    policy_action: str,
+    reason: str,
+    scope: Dict[str, Any],
+    evidence: Dict[str, Any],
+    multiplier: float = 1.0,
+    maturity_state: str = "validated_policy",
+    status: str = "applied",
+) -> Dict[str, Any]:
+    return build_policy_memory_payload(
+        policy_type=policy_type,
+        policy_action=policy_action,
+        reason=reason,
+        scope=scope,
+        evidence=evidence,
+        multiplier=multiplier,
+        maturity_state=maturity_state,
+        status=status,
+    )
+
+
+def _loss_template_policy_payload(
+    *,
+    reason: str,
+    scope: Dict[str, Any],
+    evidence: Dict[str, Any],
+    multiplier: float,
+    maturity_state: str = "validated_loss_template_policy",
+) -> Dict[str, Any]:
+    sample_count = _safe_int(evidence.get("sample_count") or evidence.get("total_trades"), 0)
+    confidence = _safe_float(evidence.get("confidence_score"), 0.0) or _confidence_from_summary(evidence)
+    return attach_or_upgrade_next_round_memory_contract(
+        {
+            **dict(evidence or {}),
+            "source": "loss_template_policy",
+            "policy_type": "loss_template_policy",
+            "policy_action": "cap",
+            "reason": reason,
+            "multiplier": multiplier,
+            "evidence": evidence,
+            "strategy_update_goal": "turn repeated attribution into next-round position discipline",
+        },
+        memory_type="loss_template_policy",
+        maturity_state=maturity_state,
+        status="applied",
+        scope=scope,
+        usable_memory=[
+            reason,
+            f"same-scope loss template; sample_count={sample_count}; multiplier={multiplier:.2f}",
+            f"failure_family={evidence.get('failure_family') or 'unknown'}; data_combo={_compact_text(evidence.get('data_combo') or '', 160)}",
+        ],
+        analysis_strategy_updates=[
+            *(
+                (evidence.get("failure_family_actions") or {}).get("analysis", [])
+                if isinstance(evidence.get("failure_family_actions"), dict)
+                else []
+            ),
+            "For the same scope, analysts must explicitly compare today's data drivers against the loss template before raising confidence.",
+            "If the same weak data mix repeats, downgrade conviction or name the new evidence that invalidates the old loss pattern.",
+        ],
+        trading_strategy_updates=[
+            *(
+                (evidence.get("failure_family_actions") or {}).get("trading", [])
+                if isinstance(evidence.get("failure_family_actions"), dict)
+                else []
+            ),
+            "PM/Auditor may cap to probe size when the same-scope loss template repeats without fresh confirmation.",
+            "The cap is not a product ban: if today's trigger, horizon, market state, and invalidation boundary improve, record the contradiction and allow normal review.",
+        ],
+        pm_action_conditions=[
+            "Apply only when ticker, side, template, horizon, and market regime still match.",
+            "Require current-day confirmation and explicit invalidation before any same-scope new/add-on position.",
+            "If an existing same-scope position is adverse and current evidence fails, prefer reduce/exit over position_matched.",
+        ],
+        invalidates_when=[
+            "Future same-scope samples repair expectancy or show positive net PnL.",
+            "Today's data drivers, market regime, or horizon no longer match the loss template.",
+            "A fresh trigger plus explicit stop/invalidation boundary is present and passes PM/Auditor review.",
+        ],
+        validation_plan=[
+            "Track future same-scope trades, no-trade counterfactuals, capped decisions, and realized PnL before extending validity.",
+        ],
+        position_authority="risk_reduction_conditioned",
+        max_position_impact="may_reduce_or_cap_only_through_pm_auditor",
+        sample_count=sample_count,
+        confidence_score=confidence,
+    )
+
+
+def _contextual_rule_policy_payload(
+    *,
+    rule_group: str,
+    reason: str,
+    rules: Dict[str, Any],
+    maturity_state: str,
+    scope: Dict[str, Any],
+    evidence: Dict[str, Any],
+    policy_action: str = "calibrate",
+    multiplier: float = 1.0,
+) -> Dict[str, Any]:
+    payload = build_policy_memory_payload(
+        policy_type=f"contextual_rule_calibration:{rule_group}",
+        policy_action="diagnostic" if policy_action == "calibrate" else policy_action,
+        reason=reason,
+        multiplier=multiplier,
+        maturity_state=maturity_state,
+        scope=scope,
+        evidence={
+            **(evidence or {}),
+            "rule_group": rule_group,
+            "rule_adjustments": rules,
+        },
+    )
+    payload["rule_group"] = rule_group
+    payload["rule_adjustments"] = {rule_group: rules}
+    payload["rule_validation_status"] = "validated_rule_applied"
+    payload["calibration_boundary"] = (
+        "This is a context-scoped weak-parameter adjustment. It cannot override the 20% margin cap, "
+        "settlement/accounting checks, no-lookahead gates, limit-lock/expiry business rules, or the need for current evidence."
+    )
+    return payload
 
 
 def _insert_learning_event(
@@ -64,6 +292,358 @@ def _insert_learning_event(
         ),
     )
     return event_id
+
+
+def _insert_researcher_learning_completion_event(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> str:
+    event_id = f"researcher_learning_completed:{config_id}:{trading_date}"
+    cursor.execute(
+        '''
+        INSERT INTO learning_event_log (
+            id, config_id, trading_date, event_type, agent, scope_type, scope_key,
+            evidence_json, action_json, verifier, created_at, status
+        ) VALUES (?, ?, ?, 'researcher_learning_completed', 'researcher', 'trading_day', ?, ?, ?, 'deterministic_researcher_entry', datetime('now'), 'applied')
+        ''',
+        (
+            event_id,
+            config_id,
+            trading_date,
+            trading_date,
+            "{}",
+            "{}",
+        ),
+    )
+    return event_id
+
+
+def _insert_causal_review_candidate(
+    cursor: sqlite3.Cursor,
+    *,
+    candidate_id: str,
+    config_id: str,
+    trading_date: str,
+    evidence_pack_id: str,
+    candidate_type: str,
+    confidence_score: float,
+    rule_validation_status: str,
+    created_at: str,
+    valid_until: str,
+    payload_json: str,
+    ticker: str = "*",
+    side: str = "*",
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO causal_review_candidate (
+            id, config_id, trading_date, evidence_pack_id, ticker, side,
+            candidate_type, confidence_score, rule_validation_status,
+            created_at, valid_until, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            candidate_id,
+            config_id,
+            trading_date,
+            evidence_pack_id,
+            ticker,
+            side,
+            candidate_type,
+            confidence_score,
+            rule_validation_status,
+            created_at,
+            valid_until,
+            payload_json,
+        ),
+    )
+
+
+def _insert_exploratory_hypothesis(
+    cursor: sqlite3.Cursor,
+    *,
+    hypothesis_id: str,
+    config_id: str,
+    trading_date: str,
+    scope_type: str,
+    scope_key: str,
+    ticker: str,
+    sector: str,
+    side: str,
+    horizon_class: str,
+    market_regime: str,
+    hypothesis_text: str,
+    evidence_summary: str,
+    suggested_use: str,
+    confidence_score: float,
+    sample_count: int,
+    status: str,
+    created_at: str,
+    valid_until: str,
+    payload_json: str,
+    payload_artifact_path: Optional[str],
+    payload_sha256: Optional[str],
+    payload_size: Optional[int],
+    payload_summary_json: Optional[str],
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO exploratory_hypothesis (
+            id, config_id, trading_date, scope_type, scope_key, ticker, sector,
+            side, horizon_class, market_regime, hypothesis_text,
+            evidence_summary, suggested_use, confidence_score, sample_count,
+            status, created_at, valid_until, payload_json,
+            payload_artifact_path, payload_sha256, payload_size, payload_summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hypothesis_id,
+            config_id,
+            trading_date,
+            scope_type,
+            scope_key,
+            ticker,
+            sector,
+            side,
+            horizon_class,
+            market_regime,
+            hypothesis_text,
+            evidence_summary,
+            suggested_use,
+            confidence_score,
+            sample_count,
+            status,
+            created_at,
+            valid_until,
+            payload_json,
+            payload_artifact_path,
+            payload_sha256,
+            payload_size,
+            payload_summary_json,
+        ),
+    )
+
+
+def _upsert_alpha_setup_sample(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
+    cursor.execute(
+        """
+        INSERT INTO alpha_setup_sample (
+            id, config_id, trading_date, ticker, side, sector, horizon_class,
+            market_regime, setup_type, data_combo, scope_key, source_type,
+            recommendation_id, action_taken, pm_action, auditor_decision,
+            trader_status, target_lots, executed_lots, net_pnl, commission,
+            holding_days, outcome_label, setup_quality_score, opportunity_state,
+            evidence_json, result_json, created_at, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(config_id, trading_date, ticker, side, setup_type, source_type, recommendation_id)
+        DO UPDATE SET
+            sector=excluded.sector,
+            horizon_class=excluded.horizon_class,
+            market_regime=excluded.market_regime,
+            data_combo=excluded.data_combo,
+            scope_key=excluded.scope_key,
+            action_taken=excluded.action_taken,
+            pm_action=excluded.pm_action,
+            auditor_decision=excluded.auditor_decision,
+            trader_status=excluded.trader_status,
+            target_lots=excluded.target_lots,
+            executed_lots=excluded.executed_lots,
+            net_pnl=excluded.net_pnl,
+            commission=excluded.commission,
+            holding_days=excluded.holding_days,
+            outcome_label=excluded.outcome_label,
+            setup_quality_score=excluded.setup_quality_score,
+            opportunity_state=excluded.opportunity_state,
+            evidence_json=excluded.evidence_json,
+            result_json=excluded.result_json,
+            payload_json=excluded.payload_json
+        """,
+        (
+            record.get("id"),
+            record.get("config_id"),
+            record.get("trading_date"),
+            record.get("ticker"),
+            record.get("side"),
+            record.get("sector"),
+            record.get("horizon_class"),
+            record.get("market_regime"),
+            record.get("setup_type"),
+            record.get("data_combo"),
+            record.get("scope_key"),
+            record.get("source_type"),
+            record.get("recommendation_id"),
+            record.get("action_taken"),
+            record.get("pm_action"),
+            record.get("auditor_decision"),
+            record.get("trader_status"),
+            record.get("target_lots"),
+            record.get("executed_lots"),
+            record.get("net_pnl"),
+            record.get("commission"),
+            record.get("holding_days"),
+            record.get("outcome_label"),
+            record.get("setup_quality_score"),
+            record.get("opportunity_state"),
+            record.get("evidence_json"),
+            record.get("result_json"),
+            record.get("created_at"),
+            record.get("payload_json"),
+        ),
+    )
+
+
+def _upsert_alpha_setup_profile(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
+    cursor.execute(
+        """
+        INSERT INTO alpha_setup_profile (
+            id, config_id, ticker, side, sector, horizon_class, market_regime,
+            setup_type, data_combo, scope_key, lifecycle_state, profile_state_hint,
+            sample_count, trade_count, no_trade_count, win_count, loss_count,
+            gross_profit, gross_loss, net_pnl, total_commission, profit_factor,
+            win_rate, max_loss, avg_holding_days, confidence_score,
+            max_position_impact, last_sample_date, created_at, updated_at,
+            valid_until, active, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(config_id, scope_key)
+        DO UPDATE SET
+            ticker=excluded.ticker,
+            side=excluded.side,
+            sector=excluded.sector,
+            horizon_class=excluded.horizon_class,
+            market_regime=excluded.market_regime,
+            setup_type=excluded.setup_type,
+            data_combo=excluded.data_combo,
+            lifecycle_state=excluded.lifecycle_state,
+            profile_state_hint=excluded.profile_state_hint,
+            sample_count=excluded.sample_count,
+            trade_count=excluded.trade_count,
+            no_trade_count=excluded.no_trade_count,
+            win_count=excluded.win_count,
+            loss_count=excluded.loss_count,
+            gross_profit=excluded.gross_profit,
+            gross_loss=excluded.gross_loss,
+            net_pnl=excluded.net_pnl,
+            total_commission=excluded.total_commission,
+            profit_factor=excluded.profit_factor,
+            win_rate=excluded.win_rate,
+            max_loss=excluded.max_loss,
+            avg_holding_days=excluded.avg_holding_days,
+            confidence_score=excluded.confidence_score,
+            max_position_impact=excluded.max_position_impact,
+            last_sample_date=excluded.last_sample_date,
+            updated_at=excluded.updated_at,
+            valid_until=excluded.valid_until,
+            active=1,
+            payload_json=excluded.payload_json
+        """,
+        (
+            record.get("id"),
+            record.get("config_id"),
+            record.get("ticker"),
+            record.get("side"),
+            record.get("sector"),
+            record.get("horizon_class"),
+            record.get("market_regime"),
+            record.get("setup_type"),
+            record.get("data_combo"),
+            record.get("scope_key"),
+            record.get("lifecycle_state"),
+            record.get("profile_state_hint"),
+            record.get("sample_count"),
+            record.get("trade_count"),
+            record.get("no_trade_count"),
+            record.get("win_count"),
+            record.get("loss_count"),
+            record.get("gross_profit"),
+            record.get("gross_loss"),
+            record.get("net_pnl"),
+            record.get("total_commission"),
+            record.get("profit_factor"),
+            record.get("win_rate"),
+            record.get("max_loss"),
+            record.get("avg_holding_days"),
+            record.get("confidence_score"),
+            record.get("max_position_impact"),
+            record.get("last_sample_date"),
+            record.get("created_at"),
+            record.get("updated_at"),
+            record.get("valid_until"),
+            record.get("payload_json"),
+        ),
+    )
+
+
+def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
+    cursor.execute(
+        """
+        INSERT INTO alpha_setup_action_value (
+            id, config_id, scope_key, ticker, side, horizon_class, market_regime,
+            setup_type, data_combo, action_name, sample_count, reward_sum,
+            reward_mean, win_rate, confidence_score, action_preference,
+            reward_source, evidence_scope, action_value_lane,
+            consumer_scope, learning_lane, retrieval_key,
+            fallback_retrieval_key, execution_retrieval_key,
+            max_position_impact, last_sample_date, created_at, updated_at,
+            valid_until, active, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(config_id, scope_key, action_name)
+        DO UPDATE SET
+            sample_count=excluded.sample_count,
+            reward_sum=excluded.reward_sum,
+            reward_mean=excluded.reward_mean,
+            win_rate=excluded.win_rate,
+            confidence_score=excluded.confidence_score,
+            action_preference=excluded.action_preference,
+            reward_source=excluded.reward_source,
+            evidence_scope=excluded.evidence_scope,
+            action_value_lane=excluded.action_value_lane,
+            consumer_scope=excluded.consumer_scope,
+            learning_lane=excluded.learning_lane,
+            retrieval_key=excluded.retrieval_key,
+            fallback_retrieval_key=excluded.fallback_retrieval_key,
+            execution_retrieval_key=excluded.execution_retrieval_key,
+            max_position_impact=excluded.max_position_impact,
+            last_sample_date=excluded.last_sample_date,
+            updated_at=excluded.updated_at,
+            valid_until=excluded.valid_until,
+            active=1,
+            payload_json=excluded.payload_json
+        """,
+        (
+            record.get("id"),
+            record.get("config_id"),
+            record.get("scope_key"),
+            record.get("ticker"),
+            record.get("side"),
+            record.get("horizon_class"),
+            record.get("market_regime"),
+            record.get("setup_type"),
+            record.get("data_combo"),
+            record.get("action_name"),
+            record.get("sample_count"),
+            record.get("reward_sum"),
+            record.get("reward_mean"),
+            record.get("win_rate"),
+            record.get("confidence_score"),
+            record.get("action_preference"),
+            record.get("reward_source"),
+            record.get("evidence_scope"),
+            record.get("action_value_lane"),
+            record.get("consumer_scope"),
+            record.get("learning_lane"),
+            record.get("retrieval_key"),
+            record.get("fallback_retrieval_key"),
+            record.get("execution_retrieval_key"),
+            record.get("max_position_impact"),
+            record.get("last_sample_date"),
+            record.get("created_at"),
+            record.get("updated_at"),
+            record.get("valid_until"),
+            record.get("payload_json"),
+        ),
+    )
 
 
 def _insert_contextual_rule_calibration(
@@ -4714,8 +5294,158 @@ def _export_template_prior(
     }
     path.write_text(_json_dumps(payload), encoding="utf-8")
     return str(path)
+
+
+def _upsert_alpha_setup_policy_state(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    ticker: str,
+    side: str,
+    horizon_class: str,
+    market_regime: str,
+    policy_type: str,
+    policy_action: str,
+    multiplier: float,
+    confidence_score: float,
+    sample_count: int,
+    reason: str,
+    source_event_id: str,
+    created_at: str,
+    valid_until: str,
+    payload_json: str,
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO adaptive_policy_state (
+            id, config_id, ticker, side, setup_type, horizon_class, market_regime,
+            policy_type, policy_action, multiplier, confidence_score, sample_count,
+            reason, source_event_id, created_at, valid_until, payload_json, active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type)
+        DO UPDATE SET
+            policy_action=excluded.policy_action,
+            multiplier=excluded.multiplier,
+            confidence_score=CASE
+                WHEN adaptive_policy_state.confidence_score > excluded.confidence_score
+                THEN adaptive_policy_state.confidence_score
+                ELSE excluded.confidence_score
+            END,
+            sample_count=CASE
+                WHEN adaptive_policy_state.sample_count > excluded.sample_count
+                THEN adaptive_policy_state.sample_count
+                ELSE excluded.sample_count
+            END,
+            reason=excluded.reason,
+            source_event_id=excluded.source_event_id,
+            created_at=excluded.created_at,
+            valid_until=excluded.valid_until,
+            payload_json=excluded.payload_json,
+            active=1
+        """,
+        (
+            str(uuid.uuid4()),
+            config_id,
+            ticker,
+            side,
+            "*",
+            horizon_class,
+            market_regime,
+            policy_type,
+            policy_action,
+            multiplier,
+            confidence_score,
+            sample_count,
+            reason,
+            source_event_id,
+            created_at,
+            valid_until,
+            payload_json,
+        ),
+    )
+
+
+def _insert_researcher_llm_note(
+    cursor: sqlite3.Cursor,
+    *,
+    note_id: str,
+    config_id: str,
+    trading_date: str,
+    evidence_pack_id: str,
+    ticker: str,
+    raw_prompt: str,
+    raw_response: str,
+    created_at: str,
+    payload_json: str,
+    raw_prompt_artifact_path: Optional[str],
+    raw_prompt_sha256: Optional[str],
+    raw_prompt_size: Optional[int],
+    raw_prompt_summary_json: Optional[str],
+    raw_response_artifact_path: Optional[str],
+    raw_response_sha256: Optional[str],
+    raw_response_size: Optional[int],
+    raw_response_summary_json: Optional[str],
+    payload_artifact_path: Optional[str],
+    payload_sha256: Optional[str],
+    payload_size: Optional[int],
+    payload_summary_json: Optional[str],
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO researcher_llm_notes (
+            id, config_id, trading_date, evidence_pack_id, ticker,
+            raw_prompt, raw_response, created_at, payload_json,
+            raw_prompt_artifact_path, raw_prompt_sha256,
+            raw_prompt_size, raw_prompt_summary_json,
+            raw_response_artifact_path, raw_response_sha256,
+            raw_response_size, raw_response_summary_json,
+            payload_artifact_path, payload_sha256,
+            payload_size, payload_summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            note_id,
+            config_id,
+            trading_date,
+            evidence_pack_id,
+            ticker,
+            raw_prompt,
+            raw_response,
+            created_at,
+            payload_json,
+            raw_prompt_artifact_path,
+            raw_prompt_sha256,
+            raw_prompt_size,
+            raw_prompt_summary_json,
+            raw_response_artifact_path,
+            raw_response_sha256,
+            raw_response_size,
+            raw_response_summary_json,
+            payload_artifact_path,
+            payload_sha256,
+            payload_size,
+            payload_summary_json,
+        ),
+    )
+
+
+def _reset_alpha_setup_memory(cursor: sqlite3.Cursor, *, config_id: str) -> None:
+    cursor.execute("DELETE FROM alpha_setup_action_value WHERE config_id = ?", (config_id,))
+    cursor.execute("DELETE FROM alpha_setup_profile WHERE config_id = ?", (config_id,))
+    cursor.execute("DELETE FROM alpha_setup_sample WHERE config_id = ?", (config_id,))
+
+
 ensure_research_learning_schema = _ensure_research_learning_schema
 insert_learning_event = _insert_learning_event
+insert_researcher_learning_completion_event = _insert_researcher_learning_completion_event
+insert_causal_review_candidate = _insert_causal_review_candidate
+insert_exploratory_hypothesis = _insert_exploratory_hypothesis
+upsert_alpha_setup_sample = _upsert_alpha_setup_sample
+upsert_alpha_setup_profile = _upsert_alpha_setup_profile
+upsert_alpha_setup_action_value = _upsert_alpha_setup_action_value
+upsert_alpha_setup_policy_state = _upsert_alpha_setup_policy_state
+insert_researcher_llm_note = _insert_researcher_llm_note
+reset_alpha_setup_memory = _reset_alpha_setup_memory
 write_signal_context_history = _write_signal_context_history
 write_strategy_memory_history = _write_strategy_memory_history
 write_template_and_analyst_learning = _write_template_and_analyst_learning

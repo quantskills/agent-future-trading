@@ -24,7 +24,7 @@ from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
 from tools.common.contracts import attach_snapshot_contract, validate_artifact_header
-from database.artifact_store import load_externalized_json
+from database.artifact_store import load_externalized_json, load_externalized_text
 from tools.agent_tools.research.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
 from tools.agent_tools.analysis.dynamic_weights import calibrate_weights_by_signal_history
 from tools.agent_tools.analysis.learning_context import (
@@ -56,11 +56,13 @@ from tools.agent_tools.research.alpha_setup import (
 )
 from tools.agent_tools.research.phase4_review import (
     _horizon_class,
-    _learned_vs_unlearned_trade_performance,
-    _neutral_counterfactual_tracking_summary,
     _validate_phase1_signal_persistence,
 )
-from tools.agent_tools.research.research_snapshot_reports import _write_historical_learning_snapshot_report
+from tools.agent_tools.research.research_snapshot_reports import (
+    _write_historical_learning_snapshot_report,
+    learned_vs_unlearned_trade_performance,
+    neutral_counterfactual_tracking_summary,
+)
 from tools.agent_tools.research.research_memory_writers import (
     _export_template_prior,
     _backfill_neutral_forward_counterfactual_tracking,
@@ -204,42 +206,10 @@ class _ActionValueLearningDB(_FakeLearningDB):
         return []
 
     def get_alpha_setup_action_values(self, **kwargs):
-        return [
-            {
-                "id": "av-exit",
-                "scope_key": "SR|long|flat|unknown|fundamental_timing_setup|exit",
-                "ticker": "SR",
-                "side": "long",
-                "horizon_class": "flat",
-                "market_regime": "unknown",
-                "setup_type": "fundamental_timing_setup",
-                "data_combo": "technical+fundamental+news",
-                "action_name": "exit",
-                "sample_count": 1,
-                "reward_sum": 235.0,
-                "reward_mean": 235.0,
-                "win_rate": 1.0,
-                "confidence_score": 0.3,
-                "action_preference": "positive_candidate_exit",
-                "max_position_impact": 0.0,
-                "payload": {
-                    "research_output_contract_version": "agentquant.research_action_value.v1",
-                    "action_value_lane": "exit",
-                    "action_preference": "positive_candidate_exit",
-                    "signal_calibration": {
-                        "usable_by": ["analysis_team"],
-                        "source_action_value_lane": "exit",
-                        "source_quality": "partial_real_state",
-                        "calibration_bias": "questions_same_side_continuation",
-                        "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
-                        "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
-                    },
-                },
-            }
-        ]
+        raise AssertionError("analyst learning context must not read trade-decision action-values")
 
     def get_similar_alpha_setup_action_values(self, **kwargs):
-        return []
+        raise AssertionError("analyst learning context must not read similar trade-decision action-values")
 
 
 class _FallbackLearningDB:
@@ -499,7 +469,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(db.budgets[0]["hypothesis_count"], 1)
         self.assertGreater(db.budgets[0]["total_context_chars"], db.budgets[0]["selected_chars"])
 
-    def test_learning_context_limits_action_values_to_signal_calibration_for_analysts(self):
+    def test_learning_context_does_not_read_trade_decision_action_values_for_analysts(self):
         db = _ActionValueLearningDB()
         context = build_learning_context(
             db=db,
@@ -527,22 +497,16 @@ class ReviewerLearningContextTest(unittest.TestCase):
             horizon_class="flat",
         )
 
-        self.assertIn("Analysts may use only the signal_calibration part", context["text"])
-        self.assertIn("no trade authority/lots/margin/direction override", context["text"])
-        self.assertIn("lane=exit", context["text"])
-        self.assertIn("signal_calibration_bias=questions_same_side_continuation", context["text"])
+        self.assertEqual(context["analyst_calibration_items"], [])
+        self.assertEqual(context["memory_trace"]["selected_counts"]["alpha_setup_action_value"], 0)
+        self.assertNotIn("Alpha setup action-value priors", context["text"])
+        self.assertNotIn("Analysts may use only the signal_calibration part", context["text"])
+        self.assertNotIn("lane=exit", context["text"])
+        self.assertNotIn("signal_calibration_bias=questions_same_side_continuation", context["text"])
         self.assertNotIn("positive_candidate_exit", context["text"])
         self.assertNotIn("reward_mean=", context["text"])
         self.assertNotIn("reward_sum=", context["text"])
         self.assertNotIn("hint=", context["text"])
-        trace_item = context["alpha_setup_action_values"][0]
-        self.assertEqual(trace_item["action_value_lane"], "exit")
-        self.assertIn("analysis_team", trace_item["signal_calibration"]["usable_by"])
-        self.assertIn("trade_authority", trace_item["signal_calibration"]["forbidden_effects"])
-        self.assertNotIn("action_preference", trace_item)
-        self.assertNotIn("reward_sum", trace_item)
-        self.assertNotIn("reward_mean", trace_item)
-        self.assertNotIn("source_action_preference", trace_item["signal_calibration"])
 
     def test_config_overlay_uses_allowlist(self):
         config = apply_config_learning_overlay(
@@ -1376,10 +1340,21 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn("pm_action_conditions", contract)
         self.assertEqual(payload["entry_timing_hint"], "wait for price confirmation")
         self.assertEqual(payload["agent_name"], "researcher")
-        cursor.execute("SELECT raw_prompt FROM researcher_llm_notes WHERE config_id='cfg'")
+        cursor.execute(
+            """
+            SELECT raw_prompt, raw_prompt_artifact_path, raw_prompt_sha256
+            FROM researcher_llm_notes
+            WHERE config_id='cfg'
+            """
+        )
         note = dict(cursor.fetchone())
-        self.assertIn("AgentQuant Researcher", note["raw_prompt"])
-        self.assertNotIn("AgentQuant Reviewer acting as a research memory curator", note["raw_prompt"])
+        raw_prompt = load_externalized_text(
+            note["raw_prompt"],
+            note["raw_prompt_artifact_path"],
+            note["raw_prompt_sha256"],
+        )
+        self.assertIn("AgentQuant Researcher", raw_prompt)
+        self.assertNotIn("AgentQuant Reviewer acting as a research memory curator", raw_prompt)
         self.assertEqual(payload["invalidation_condition"], "breakout fails before close")
         conn.close()
 
@@ -2983,7 +2958,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ],
             )
 
-            summary = _learned_vs_unlearned_trade_performance(
+            summary = learned_vs_unlearned_trade_performance(
                 cursor,
                 config_id="cfg",
                 trading_date="2025-02-06",
@@ -3822,7 +3797,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
             cursor.execute("INSERT INTO ticker_daily_pnl VALUES (?, ?, ?, ?)", ("p1", "2025-02-10", "ZZ", 1200.0))
 
-            summary = _neutral_counterfactual_tracking_summary(
+            summary = neutral_counterfactual_tracking_summary(
                 cursor,
                 config_id="cfg",
                 trading_date="2025-02-10",
@@ -3899,7 +3874,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ],
             )
 
-            summary = _neutral_counterfactual_tracking_summary(
+            summary = neutral_counterfactual_tracking_summary(
                 cursor,
                 cfg={"signal_quality": {"neutral_accountability": {"counterfactual_forward_days": 3}}},
                 config_id="cfg",

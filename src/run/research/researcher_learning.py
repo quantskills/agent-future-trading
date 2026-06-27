@@ -22,6 +22,7 @@ from tools.agent_tools.research.phase4_review import (
     _normalize_date,
     _validate_recommendation_execution_audit,
 )
+from tools.agent_tools.research import research_memory_writers
 from tools.agent_tools.research.research_snapshot_reports import _write_historical_learning_snapshot_report
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
@@ -135,21 +136,10 @@ def main() -> None:
             learning_summary=learning_summary,
         )
         learning_summary["historical_learning_snapshot_report"] = researcher_snapshot_paths
-        cursor.execute(
-            """
-            INSERT INTO learning_event_log (
-                id, config_id, trading_date, event_type, agent, scope_type, scope_key,
-                evidence_json, action_json, verifier, created_at, status
-            ) VALUES (?, ?, ?, 'researcher_learning_completed', 'researcher', 'trading_day', ?, ?, ?, 'deterministic_researcher_entry', datetime('now'), 'applied')
-            """,
-            (
-                f"researcher_learning_completed:{config_id}:{trading_date}",
-                config_id,
-                trading_date,
-                trading_date,
-                "{}",
-                "{}",
-            ),
+        research_memory_writers.insert_researcher_learning_completion_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
         )
         conn.commit()
         logger.info(f"Researcher learning persisted: {learning_summary}")

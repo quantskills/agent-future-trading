@@ -42,6 +42,7 @@ from util.futures_audit import (
     extract_signal_lifecycle,
     infer_no_trade_reason,
     set_execution_result,
+    validate_execution_artifact_boundary,
 )
 from util.logger import logger
 
@@ -1395,6 +1396,7 @@ class FuturesExecutionEngine:
         for key, value in additions.items():
             if value is not None:
                 payload[key] = value
+        validate_execution_artifact_boundary(payload)
         return payload
 
     def _attach_margin_audit(self, transaction: FuturesTransaction, portfolio) -> None:
@@ -1429,6 +1431,7 @@ class FuturesExecutionEngine:
             "execution_phase": self._enum_value(transaction.execution_phase),
             "source_type": self._enum_value(transaction.source_type),
         }
+        validate_execution_artifact_boundary(transaction.audit_payload)
 
     def _business_rule_warning(self, audit_payload: Any) -> Optional[str]:
         if not isinstance(audit_payload, dict):

@@ -111,6 +111,7 @@ from util.futures_audit import (
     infer_no_trade_reason,
     normalize_no_trade_reason,
     set_execution_result,
+    validate_execution_artifact_boundary,
 )
 from util.config_normalizer import normalize_config
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
@@ -10918,7 +10919,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
             cfg["_config_parameter_roles"]["signal_quality"],
             "learning_policy_catalog_runtime_expanded",
         )
-        self.assertTrue(cfg["signal_quality"]["neutral_accountability"]["enabled"])
+        self.assertIn("required_neutral_fields", cfg["signal_quality"]["neutral_accountability"])
         self.assertEqual(cfg["signal_quality"]["neutral_accountability"]["counterfactual_forward_days"], 3)
         self.assertIn("data_factor_policy", cfg["_config_catalogs_loaded"])
         self.assertEqual(
@@ -10964,6 +10965,139 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
             - settlement_row["previous_account_equity"]
         )
         self.assertAlmostEqual(equity_change, _expected_settlement_equity_change(settlement_row))
+
+    def test_accountant_fixed_sample_settlement_formulas_cover_pnl_fee_margin_and_equity(self):
+        engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
+        reference_portfolio = Portfolio(
+            id="portfolio-settlement-sample",
+            cashflow=100000.0,
+            account_equity=112000.0,
+            cash_available=100000.0,
+            margin_used=12000.0,
+            margin_available=100000.0,
+            margin_ratio=12000.0 / 112000.0,
+            positions={
+                "BU": Position(
+                    shares=2,
+                    value=60000.0,
+                    entry_price=2950.0,
+                    entry_date="2025-03-02",
+                    contract_code="bu2506",
+                    settle_price=3000.0,
+                    margin_used=6000.0,
+                    margin_rate=0.1,
+                    contract_multiplier=10.0,
+                    realized_pnl=100.0,
+                ),
+                "M": Position(
+                    shares=1,
+                    value=50000.0,
+                    entry_price=4920.0,
+                    entry_date="2025-03-02",
+                    contract_code="m2505",
+                    settle_price=5000.0,
+                    margin_used=6000.0,
+                    margin_rate=0.12,
+                    contract_multiplier=10.0,
+                ),
+            },
+        )
+        ledgers = {
+            "BU": {
+                "starting_realized_pnl": 100.0,
+                "realized_from_cost_today": 0.0,
+                "breakdown": {
+                    "holding_pnl": 0.0,
+                    "new_position_pnl": 0.0,
+                    "close_pnl": 0.0,
+                    "commission": 20.0,
+                },
+                "batches": [
+                    {
+                        "origin": "overnight",
+                        "side": "long",
+                        "lots": 2,
+                        "daily_reference_price": 3000.0,
+                        "position_entry_price": 2950.0,
+                        "position_entry_date": "2025-03-02",
+                        "contract_code": "bu2506",
+                        "contract_multiplier": 10.0,
+                        "margin_rate": 0.1,
+                    }
+                ],
+            },
+            "RB": {
+                "starting_realized_pnl": 0.0,
+                "realized_from_cost_today": 0.0,
+                "breakdown": {
+                    "holding_pnl": 0.0,
+                    "new_position_pnl": 0.0,
+                    "close_pnl": 0.0,
+                    "commission": 5.0,
+                },
+                "batches": [
+                    {
+                        "origin": "today",
+                        "side": "long",
+                        "lots": 1,
+                        "daily_reference_price": 4000.0,
+                        "position_entry_price": 4000.0,
+                        "position_entry_date": "2025-03-03",
+                        "contract_code": "rb2505",
+                        "contract_multiplier": 10.0,
+                        "margin_rate": 0.1,
+                    }
+                ],
+            },
+            "M": {
+                "starting_realized_pnl": 0.0,
+                "realized_from_cost_today": 1000.0,
+                "breakdown": {
+                    "holding_pnl": 0.0,
+                    "new_position_pnl": 0.0,
+                    "close_pnl": 1000.0,
+                    "commission": 7.0,
+                },
+                "batches": [],
+            },
+        }
+        settle_prices = {
+            "bu2506": 3100.0,
+            "rb2505": 4020.0,
+        }
+
+        summary = engine._finalize_ledgers(
+            reference_portfolio=reference_portfolio,
+            ledgers=ledgers,
+            settle_prices=settle_prices,
+            trading_date=datetime(2025, 3, 3),
+        )
+
+        self.assertAlmostEqual(summary["daily_pnl"], 3200.0)
+        self.assertAlmostEqual(summary["commission"], 32.0)
+        self.assertAlmostEqual(summary["previous_margin"], 12000.0)
+        self.assertAlmostEqual(summary["current_margin"], 10220.0)
+        self.assertAlmostEqual(summary["previous_account_equity"], 112000.0)
+        self.assertAlmostEqual(summary["current_account_equity"], 115168.0)
+        self.assertAlmostEqual(summary["cash_available"], 104948.0)
+        self.assertAlmostEqual(summary["reserved_margin"], 10220.0)
+        self.assertAlmostEqual(summary["portfolio"].cashflow, 104948.0)
+        self.assertAlmostEqual(summary["portfolio"].account_equity, 115168.0)
+        self.assertAlmostEqual(summary["portfolio"].margin_used, 10220.0)
+        self.assertAlmostEqual(summary["portfolio"].margin_ratio, 10220.0 / 115168.0)
+        self.assertAlmostEqual(summary["positions_detail"]["BU"]["holding_pnl"], 2000.0)
+        self.assertAlmostEqual(summary["positions_detail"]["BU"]["commission"], 20.0)
+        self.assertAlmostEqual(summary["positions_detail"]["BU"]["total_pnl"], 2000.0)
+        self.assertEqual(summary["positions_detail"]["BU"]["lots"], 2)
+        self.assertAlmostEqual(summary["positions_detail"]["RB"]["new_position_pnl"], 200.0)
+        self.assertAlmostEqual(summary["positions_detail"]["RB"]["commission"], 5.0)
+        self.assertAlmostEqual(summary["positions_detail"]["RB"]["total_pnl"], 200.0)
+        self.assertEqual(summary["positions_detail"]["RB"]["lots"], 1)
+        self.assertAlmostEqual(summary["positions_detail"]["M"]["close_pnl"], 1000.0)
+        self.assertAlmostEqual(summary["positions_detail"]["M"]["commission"], 7.0)
+        self.assertAlmostEqual(summary["positions_detail"]["M"]["total_pnl"], 1000.0)
+        self.assertEqual(summary["positions_detail"]["M"]["lots"], 0)
+        self.assertNotIn("M", summary["portfolio"].positions)
 
     def test_phase2_execution_moves_margin_between_cash_and_reserved_margin(self):
         engine = FuturesExecutionEngine({"execution": {}}, db=None)
@@ -11378,6 +11512,25 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertNotIn("position_sizing_result", audit)
         self.assertNotIn("capital_allocation_reason", audit)
         self.assertIn("transaction execution audit only", audit["audit_boundary"])
+
+    def test_execution_artifact_boundary_rejects_pm_explanation_fields_before_persist(self):
+        payload = {
+            "trade_contract_audit": {
+                "final_action": "open_real",
+                "current_lots": 0,
+                "target_lots": -2,
+                "lots_delta": -2,
+            },
+            "phase2_execution": {
+                "pm_plan_validation": {
+                    "target_lots": -2,
+                    "position_sizing_result": {"target_lots": -2},
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "execution_artifact_forbidden_pm_fields"):
+            validate_execution_artifact_boundary(payload)
 
     def test_transaction_audit_does_not_backfill_execution_profile_from_pm_draft(self):
         snapshot = {

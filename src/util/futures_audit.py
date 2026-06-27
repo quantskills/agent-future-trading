@@ -4,6 +4,15 @@ from collections import Counter
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
+from tools.common.contracts import (
+    EXECUTION_ARTIFACT_CONTAINERS,
+    PM_EXPLANATION_FIELDS,
+    execution_artifact_boundary_violations,
+    execution_contract_from_snapshot,
+    final_action_contract_from_snapshot,
+    sanitize_execution_contract,
+    validate_execution_artifact_boundary as enforce_execution_artifact_boundary,
+)
 
 ERROR_NO_TRADE_REASONS = {
     "missing_execution_basis",
@@ -277,13 +286,11 @@ def build_execution_learning_trace(
     turn_into_memory: Optional[bool] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     execution_translation = snapshot.get("execution_translation") if isinstance(snapshot.get("execution_translation"), dict) else {}
-    execution_contract = (
-        execution_translation.get("execution_contract")
-        if isinstance(execution_translation.get("execution_contract"), dict)
-        else {}
-    )
+    execution_contract = execution_contract_from_snapshot(snapshot)
+    if not execution_contract and isinstance(execution_translation.get("execution_contract"), dict):
+        execution_contract = sanitize_execution_contract(execution_translation.get("execution_contract") or {})
     ticker = (
         snapshot.get("ticker")
         or snapshot.get("underlying_code")
@@ -444,7 +451,7 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 def infer_target_lots(recommendation: Dict[str, Any]) -> int:
     snapshot = recommendation.get("signal_snapshot")
     if isinstance(snapshot, dict):
-        contract = snapshot.get("final_action_contract")
+        contract = final_action_contract_from_snapshot(snapshot)
         if isinstance(contract, dict) and contract.get("target_lots") is not None:
             return int(contract.get("target_lots") or 0)
 
@@ -639,6 +646,27 @@ def _first_non_empty(*values: Any) -> Any:
     return None
 
 
+def _iter_nested_dicts(value: Any, prefix: str = ""):
+    if isinstance(value, dict):
+        yield prefix, value
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            yield from _iter_nested_dicts(child, child_prefix)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            yield from _iter_nested_dicts(child, child_prefix)
+
+
+def _execution_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    return execution_artifact_boundary_violations(payload if isinstance(payload, dict) else {})
+
+
+def validate_execution_artifact_boundary(payload: Dict[str, Any]) -> None:
+    """Fail fast if execution artifacts try to persist PM decision facts."""
+    enforce_execution_artifact_boundary(payload if isinstance(payload, dict) else {})
+
+
 def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, Any], authority: Dict[str, Any]) -> Dict[str, Any]:
     phase2_execution = (
         snapshot.get("phase2_execution")
@@ -698,7 +726,7 @@ def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     translation = snapshot.get("execution_translation")
     result = snapshot.get("execution_result")
     phase2_execution = snapshot.get("phase2_execution")
-    contract = _first_dict(snapshot.get("final_action_contract"))
+    contract = final_action_contract_from_snapshot(snapshot)
     authority = contract
     if contract:
         payload["trade_contract_audit"] = _build_trade_contract_audit(snapshot, contract, authority)
@@ -708,6 +736,7 @@ def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         payload["execution_result"] = deepcopy(result)
     if isinstance(phase2_execution, dict):
         payload["phase2_execution"] = deepcopy(phase2_execution)
+    validate_execution_artifact_boundary(payload)
     return payload
 
 

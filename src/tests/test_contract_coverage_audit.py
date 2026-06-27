@@ -37,6 +37,10 @@ def _write_minimal_covered_repo(root: Path) -> None:
                     "consumer_scope=pm_learning",
                     "consumer_scope=analyst_calibration",
                     "consumer_scope=trader_execution_learning",
+                    "SYSTEM_FACT_ENTRY_BOUNDARY",
+                    "system_fact_entry_boundary",
+                    "ARTIFACT_PHASE_BOUNDARY",
+                    "artifact_phase_boundary",
                     "learning_lane",
                     "retrieval_key",
                     "opportunity_score_components",
@@ -53,13 +57,14 @@ def _write_minimal_covered_repo(root: Path) -> None:
                 "learning_consumer_scopes",
                 "pm_allowed_consumer_scope",
                 "trader_direct_research_consumption_allowed",
+                "授权事实入口",
             ]
         ),
     )
     _append_text(
         root,
         "src/config/portfolio_policy_catalog.yaml",
-        "consumer_scope=pm_learning\nTrader 不读研究记录",
+        "consumer_scope=pm_learning\nTrader 不读研究记录\n授权事实入口",
     )
 
     _append_text(
@@ -79,6 +84,7 @@ def _write_minimal_covered_repo(root: Path) -> None:
             [
                 "action_evidence_contract",
                 "final_action_contract",
+                "artifact_phase_boundary",
                 "alpha_setup_action_value",
                 "execution_learning_trace",
                 "opportunity_score_components",

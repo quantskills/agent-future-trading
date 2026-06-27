@@ -39,6 +39,7 @@ from util.learning_attribution import (
 )
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
+from tools.common.contracts import final_action_contract_from_snapshot, validate_reviewer_artifact_boundary
 from tools.agent_tools.research.learning_contract import (
     CONTRACT_KEY,
     attach_or_upgrade_next_round_memory_contract,
@@ -485,7 +486,7 @@ def _collect_recommendation_quality_warnings(recommendations: List[Dict[str, Any
         if not isinstance(snapshot, dict):
             continue
         ticker = recommendation.get("underlying_code") or recommendation.get("ticker")
-        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        contract = final_action_contract_from_snapshot(snapshot)
         reasons = contract.get("reason_codes") or contract.get("risk_flags") or []
         if reasons:
             warnings.append(f"{ticker}: strategy controls recorded: {reasons}")
@@ -719,7 +720,7 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     snapshot = _recommendation_snapshot(recommendation)
     confirmation = _market_confirmation(snapshot)
     execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     position_budget = snapshot.get("position_budget_policy") if isinstance(snapshot.get("position_budget_policy"), dict) else {}
     final_trade_authority = contract
     ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
@@ -1572,7 +1573,7 @@ def _build_daily_transaction_report(
                 lines.append("")
                 lines.append("  【融合决策依据】")
                 lines.append(f"  {justification}")
-            contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+            contract = final_action_contract_from_snapshot(snapshot)
             control_notes = contract.get("reason_codes") or []
             if control_notes:
                 lines.append(f"  【控制规则】{control_notes}")
@@ -1612,7 +1613,7 @@ def _build_daily_transaction_report(
         reason_category = categorize_no_trade_reason(reason)
         snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
         combo = _signal_combo_from_snapshot(snapshot) if isinstance(snapshot, dict) else ["Neutral", "Neutral", "Neutral"]
-        contract = snapshot.get("final_action_contract") if isinstance(snapshot, dict) and isinstance(snapshot.get("final_action_contract"), dict) else {}
+        contract = final_action_contract_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
         direction = _recommendation_direction(recommendation, snapshot if isinstance(snapshot, dict) else {})
         lines.append(
             f"  {ticker} - 融合方向={direction}; 未交易原因={reason}; "
@@ -1909,7 +1910,7 @@ def _recommendation_snapshot(recommendation: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _final_action_contract_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     if not contract:
         return {}
     return {
@@ -1932,7 +1933,7 @@ def _market_regime(snapshot: Dict[str, Any]) -> str:
     explicit = _first_analyst_field(snapshot, "market_regime")
     if explicit:
         return str(explicit)
-    contract = snapshot.get("final_action_contract")
+    contract = final_action_contract_from_snapshot(snapshot)
     if isinstance(contract, dict) and contract.get("market_regime") not in (None, "", "unknown"):
         return str(contract.get("market_regime"))
     technical = snapshot.get("technical")
@@ -2105,7 +2106,7 @@ def _action_name(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> st
 
 
 def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     target_lots = contract.get("target_lots") if isinstance(contract, dict) else None
     if target_lots is not None:
         side = _target_side_from_ratio(target_lots)
@@ -2362,7 +2363,7 @@ def _scorecard_side_row(snapshot: Dict[str, Any], side: str = "") -> Dict[str, A
 
 def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
     scorecard_side = _scorecard_side_row(snapshot, side)
-    final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    final_contract = final_action_contract_from_snapshot(snapshot)
     evidence_used = final_contract.get("evidence_used") if isinstance(final_contract.get("evidence_used"), dict) else {}
     learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
     active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
@@ -2614,159 +2615,6 @@ def _counterfactual_reversal_stats(
     }
 
 
-def _policy_contract_payload(
-    *,
-    policy_type: str,
-    policy_action: str,
-    reason: str,
-    scope: Dict[str, Any],
-    evidence: Dict[str, Any],
-    multiplier: float = 1.0,
-    maturity_state: str = "validated_policy",
-    status: str = "applied",
-) -> Dict[str, Any]:
-    """Create adaptive-policy payload that is usable as next-round strategy memory."""
-    action = str(policy_action or "").lower()
-    is_protect = action in {"protect", "allow"}
-    is_reduce = action in {"cap", "reduce", "block", "demote", "probe_only", "weak_block"}
-    sample_count = _safe_int(evidence.get("sample_count") or evidence.get("total_trades"), 0)
-    confidence = _safe_float(evidence.get("confidence_score"), 0.0)
-    if not confidence:
-        confidence = _confidence_from_summary(evidence)
-    if is_protect:
-        pm_condition = (
-            f"May support protected/deployable sizing in this scope only if today's signal, "
-            f"market confirmation, horizon, and invalidation boundary agree; multiplier={multiplier:.2f}."
-        )
-        position_authority = "pm_auditor_conditioned"
-        max_impact = "may_support_alpha_scaling_inside_20pct_cap"
-    elif is_reduce:
-        pm_condition = (
-            f"Cap, reduce, or probe-only same-scope exposure until fresh evidence repairs the setup; "
-            f"multiplier={multiplier:.2f}."
-        )
-        position_authority = "risk_reduction_conditioned"
-        max_impact = "may_reduce_or_cap_only_through_pm_auditor"
-    else:
-        pm_condition = "Use as diagnostic strategy memory; no direct sizing impact without separate validation."
-        position_authority = "analysis_prior_only"
-        max_impact = "no_direct_position_impact"
-    return attach_or_upgrade_next_round_memory_contract(
-        {
-            **dict(evidence or {}),
-            "source": policy_type,
-            "policy_type": policy_type,
-            "policy_action": action,
-            "reason": reason,
-            "multiplier": multiplier,
-            "evidence": evidence,
-        },
-        memory_type=policy_type,
-        maturity_state=maturity_state,
-        status=status,
-        scope=scope,
-        usable_memory=[
-            reason,
-            f"policy_action={action}; multiplier={multiplier:.2f}; sample_count={sample_count}",
-        ],
-        analysis_strategy_updates=[
-            "Use the policy as same-scope strategy memory, not a product-wide shortcut.",
-            "Before citing it, compare today's data drivers, signal template, horizon, and market regime.",
-        ],
-        trading_strategy_updates=[
-            pm_condition,
-            "Never use this policy to override hard risk limits, auditor, or current-day evidence.",
-        ],
-        pm_action_conditions=[pm_condition],
-        invalidates_when=[
-            "Today's same-scope data contradicts the remembered setup.",
-            "The policy validity window has expired or the ticker/side/template/horizon/regime no longer match.",
-            "A new/add-on trade lacks explicit current confirmation and invalidation boundary.",
-        ],
-        validation_plan=[
-            "Refresh same-scope sample count, win rate, net PnL, and benchmark comparison after future settlements.",
-        ],
-        position_authority=position_authority,
-        max_position_impact=max_impact,
-        sample_count=sample_count,
-        confidence_score=confidence,
-    )
-
-
-def _loss_template_policy_payload(
-    *,
-    reason: str,
-    scope: Dict[str, Any],
-    evidence: Dict[str, Any],
-    multiplier: float,
-    maturity_state: str = "validated_loss_template_policy",
-) -> Dict[str, Any]:
-    """Create a bounded policy for repeated loss templates.
-
-    This is deliberately narrower than a blacklist: it can only cap/probe the
-    same ticker/side/template/horizon/regime after current-day evidence still
-    looks comparable.
-    """
-    sample_count = _safe_int(evidence.get("sample_count") or evidence.get("total_trades"), 0)
-    confidence = _safe_float(evidence.get("confidence_score"), 0.0) or _confidence_from_summary(evidence)
-    return attach_or_upgrade_next_round_memory_contract(
-        {
-            **dict(evidence or {}),
-            "source": "loss_template_policy",
-            "policy_type": "loss_template_policy",
-            "policy_action": "cap",
-            "reason": reason,
-            "multiplier": multiplier,
-            "evidence": evidence,
-            "strategy_update_goal": "turn repeated attribution into next-round position discipline",
-        },
-        memory_type="loss_template_policy",
-        maturity_state=maturity_state,
-        status="applied",
-        scope=scope,
-        usable_memory=[
-            reason,
-            f"same-scope loss template; sample_count={sample_count}; multiplier={multiplier:.2f}",
-            f"failure_family={evidence.get('failure_family') or 'unknown'}; data_combo={_compact_text(evidence.get('data_combo') or '', 160)}",
-        ],
-        analysis_strategy_updates=[
-            *(
-                (evidence.get("failure_family_actions") or {}).get("analysis", [])
-                if isinstance(evidence.get("failure_family_actions"), dict)
-                else []
-            ),
-            "For the same scope, analysts must explicitly compare today's data drivers against the loss template before raising confidence.",
-            "If the same weak data mix repeats, downgrade conviction or name the new evidence that invalidates the old loss pattern.",
-        ],
-        trading_strategy_updates=[
-            *(
-                (evidence.get("failure_family_actions") or {}).get("trading", [])
-                if isinstance(evidence.get("failure_family_actions"), dict)
-                else []
-            ),
-            "PM/Auditor may cap to probe size when the same-scope loss template repeats without fresh confirmation.",
-            "The cap is not a product ban: if today's trigger, horizon, market state, and invalidation boundary improve, record the contradiction and allow normal review.",
-        ],
-        pm_action_conditions=[
-            "Apply only when ticker, side, template, horizon, and market regime still match.",
-            "Require current-day confirmation and explicit invalidation before any same-scope new/add-on position.",
-            "If an existing same-scope position is adverse and current evidence fails, prefer reduce/exit over position_matched.",
-        ],
-        invalidates_when=[
-            "Future same-scope samples repair expectancy or show positive net PnL.",
-            "Today's data drivers, market regime, or horizon no longer match the loss template.",
-            "A fresh trigger plus explicit stop/invalidation boundary is present and passes PM/Auditor review.",
-        ],
-        validation_plan=[
-            "Track future same-scope trades, no-trade counterfactuals, capped decisions, and realized PnL before extending validity.",
-        ],
-        position_authority="risk_reduction_conditioned",
-        max_position_impact="may_reduce_or_cap_only_through_pm_auditor",
-        sample_count=sample_count,
-        confidence_score=confidence,
-    )
-
-
 def _profit_factor(pairs: List[Dict[str, Any]]) -> float:
     wins = sum(max(0.0, _safe_float(item.get("net_pnl"))) for item in pairs)
     losses = abs(sum(min(0.0, _safe_float(item.get("net_pnl"))) for item in pairs))
@@ -2959,7 +2807,7 @@ def _candidate_side_from_snapshot(snapshot: Dict[str, Any]) -> str:
         return "long"
     if short_votes > long_votes and short_votes > 0:
         return "short"
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     side = _target_side_from_ratio(contract.get("target_lots"))
     return side if side in {"long", "short"} else "flat"
 
@@ -3093,70 +2941,6 @@ def _causal_error_flags(payload: Dict[str, Any]) -> List[str]:
     return [name for name in names if bool(payload.get(name))]
 
 
-def _causal_candidate_scope(
-    cursor: sqlite3.Cursor,
-    *,
-    config_id: str,
-    candidate: Dict[str, Any],
-) -> Dict[str, Any]:
-    tickers = {
-        str(candidate.get("ticker") or "").upper()
-        for _ in [0]
-        if str(candidate.get("ticker") or "*") not in {"", "*"}
-    }
-    sides = {
-        str(candidate.get("side") or "").lower()
-        for _ in [0]
-        if str(candidate.get("side") or "*") not in {"", "*"}
-    }
-    try:
-        cursor.execute(
-            """
-            SELECT payload_json, payload_artifact_path, payload_sha256
-            FROM researcher_llm_notes
-            WHERE config_id = ?
-              AND evidence_pack_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (config_id, candidate.get("evidence_pack_id")),
-        )
-        row = cursor.fetchone()
-    except sqlite3.Error:
-        row = None
-    evidence = (
-        load_externalized_json(
-            row["payload_json"],
-            row["payload_artifact_path"] if "payload_artifact_path" in row.keys() else None,
-            row["payload_sha256"] if "payload_sha256" in row.keys() else None,
-        )
-        if row
-        else {}
-    )
-    for item in (evidence or {}).get("pre_trade_evidence") or []:
-        if not isinstance(item, dict):
-            continue
-        ticker = str(item.get("ticker") or "").upper()
-        if ticker:
-            tickers.add(ticker)
-        action = str(item.get("action") or "").lower()
-        if "long" in action:
-            sides.add("long")
-        elif "short" in action:
-            sides.add("short")
-        else:
-            snapshot = item.get("signal_snapshot") if isinstance(item.get("signal_snapshot"), dict) else {}
-            contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-            side = _target_side_from_ratio(contract.get("target_lots"))
-            if side in {"long", "short"}:
-                sides.add(side)
-    return {
-        "tickers": sorted(tickers),
-        "sides": sorted(sides),
-        "evidence_pack_id": candidate.get("evidence_pack_id"),
-    }
-
-
 def _causal_rule_validation_decision(
     *,
     candidate_payload: Dict[str, Any],
@@ -3243,7 +3027,7 @@ def _with_policy_performance_columns(payload: Dict[str, Any], summary: Dict[str,
 
 def _learning_attribution_from_recommendation(recommendation: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     snapshot = _recommendation_snapshot(recommendation or {})
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
     reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
     return (
@@ -3258,7 +3042,7 @@ def _learning_mechanisms_from_recommendation(
     infer_from_full_trace: bool = True,
 ) -> List[str]:
     snapshot = _recommendation_snapshot(recommendation or {})
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
     diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
     reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
     return learning_mechanisms_from_context(
@@ -3271,221 +3055,6 @@ def _learning_mechanisms_from_recommendation(
 def _learning_tags_from_recommendation(recommendation: Dict[str, Any]) -> List[str]:
     tags, _effects = _learning_attribution_from_recommendation(recommendation)
     return tags
-
-
-def _learned_vs_unlearned_trade_performance(
-    cursor: sqlite3.Cursor,
-    *,
-    config_id: str,
-    trading_date: str,
-) -> Dict[str, Any]:
-    try:
-        pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
-    except sqlite3.Error:
-        pairs = []
-    recommendation_lookup = _recommendations_by_id(
-        cursor,
-        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
-    )
-    learned_pairs: List[Dict[str, Any]] = []
-    unlearned_pairs: List[Dict[str, Any]] = []
-    reason_counts: Counter = Counter()
-    missing_recommendations = 0
-    for pair in pairs:
-        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
-        if not recommendation:
-            missing_recommendations += 1
-            unlearned_pairs.append(dict(pair))
-            continue
-        tags, effects = _learning_attribution_from_recommendation(recommendation)
-        mechanisms = _learning_mechanisms_from_recommendation(recommendation)
-        item = dict(pair)
-        item["learning_tags"] = tags
-        item["learning_effects"] = effects
-        item["learning_mechanisms"] = mechanisms
-        if tags and effects:
-            learned_pairs.append(item)
-            reason_counts.update(tags)
-        else:
-            unlearned_pairs.append(item)
-    return {
-        "status": "ok" if pairs else "no_completed_round_trips",
-        "cutoff_trading_date": trading_date,
-        "learned": _trade_pair_performance_summary(learned_pairs),
-        "unlearned": _trade_pair_performance_summary(unlearned_pairs),
-        "learned_reason_counts": _sorted_counter_dict(reason_counts),
-        "learned_effect_counts": learning_effect_counts(learned_pairs),
-        "learned_effect_summary": summarize_pairs_by_learning_effect(learned_pairs),
-        "learning_mechanism_counts": learning_mechanism_counts(learned_pairs),
-        "learning_mechanism_summary": summarize_pairs_by_learning_mechanism(learned_pairs),
-        "missing_open_recommendations": missing_recommendations,
-    }
-
-
-def _learned_effect_underperformance_groups(
-    cursor: sqlite3.Cursor,
-    *,
-    config_id: str,
-    trading_date: str,
-    min_samples: int,
-    min_gap: float,
-    allow_self_loss_demote_without_benchmark: bool = True,
-    min_self_loss_net_pnl: float = -1000.0,
-) -> List[Dict[str, Any]]:
-    try:
-        pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
-    except sqlite3.Error:
-        return []
-    recommendation_lookup = _recommendations_by_id(
-        cursor,
-        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
-    )
-    groups: Dict[Tuple[str, str, str, str, str, str], Dict[str, List[Dict[str, Any]]]] = defaultdict(
-        lambda: {"learned_effect": [], "benchmark": []}
-    )
-    tracked_effects = ("alpha_release", "risk_suppression", "evidence_rejection")
-    for pair in pairs:
-        recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
-        snapshot = _recommendation_snapshot(recommendation or {})
-        ticker = str(pair.get("ticker") or "").upper()
-        side = str(pair.get("side") or "").lower()
-        combo = _signal_combo_from_snapshot(snapshot)
-        expected_days = _expected_horizon_days(snapshot, side)
-        horizon = _horizon_class(expected_days, snapshot)
-        regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
-        key = (ticker, side, template, horizon, regime)
-        item = dict(pair)
-        item["setup_type"] = template
-        item["signal_combo"] = combo
-        if recommendation:
-            tags, effects = _learning_attribution_from_recommendation(recommendation)
-            item["learning_tags"] = tags
-            item["learning_effects"] = effects
-            scoped_effects = [str(effect) for effect in effects or [] if effect in tracked_effects]
-            if tags and scoped_effects:
-                for effect in scoped_effects:
-                    groups[(*key, effect)]["learned_effect"].append(item)
-                continue
-        for effect in tracked_effects:
-            groups[(*key, effect)]["benchmark"].append(item)
-
-    underperforming: List[Dict[str, Any]] = []
-    for (ticker, side, template, horizon, regime, effect), rows in groups.items():
-        learned_rows = rows["learned_effect"]
-        benchmark_rows = rows["benchmark"]
-        learned_summary = _trade_pair_performance_summary(learned_rows)
-        benchmark_summary = _trade_pair_performance_summary(benchmark_rows)
-        learned_trades = _safe_int(learned_summary.get("total_trades"))
-        benchmark_trades = _safe_int(benchmark_summary.get("total_trades"))
-        learned_pnl = _safe_float(learned_summary.get("net_pnl"))
-        benchmark_pnl = _safe_float(benchmark_summary.get("net_pnl"))
-        if learned_trades < min_samples:
-            continue
-        comparison_status = "same_scope_benchmark_underperformed"
-        if benchmark_trades < min_samples:
-            if not allow_self_loss_demote_without_benchmark:
-                continue
-            if learned_pnl > min_self_loss_net_pnl:
-                continue
-            comparison_status = "same_scope_self_loss_without_benchmark"
-        elif learned_pnl + min_gap >= benchmark_pnl:
-            continue
-        underperforming.append(
-            {
-                "ticker": ticker,
-                "side": side,
-                "setup_type": template,
-                "horizon_class": horizon,
-                "market_regime": regime,
-                "learning_effect": effect,
-                "comparison_status": comparison_status,
-                "learned_effect": learned_summary,
-                "benchmark": benchmark_summary,
-                "learned_effect_trades": learned_trades,
-                "benchmark_trades": benchmark_trades,
-                "learned_effect_net_pnl": learned_pnl,
-                "benchmark_net_pnl": benchmark_pnl,
-            }
-        )
-    underperforming.sort(
-        key=lambda item: (
-            _safe_float(item.get("learned_effect_net_pnl")) - _safe_float(item.get("benchmark_net_pnl")),
-            -_safe_int(item.get("learned_effect_trades")),
-        )
-    )
-    return underperforming
-
-
-def _causal_rule_validation_summary(
-    cursor: sqlite3.Cursor,
-    *,
-    config_id: str,
-    trading_date: str,
-) -> Dict[str, Any]:
-    cursor.execute(
-        """
-        SELECT rule_validation_status, COUNT(*) AS cnt
-        FROM causal_review_candidate
-        WHERE config_id = ?
-        GROUP BY rule_validation_status
-        """,
-        (config_id,),
-    )
-    status_counts = {
-        str(row["rule_validation_status"] or "unknown"): int(row["cnt"] or 0)
-        for row in cursor.fetchall()
-    }
-    cursor.execute(
-        """
-        SELECT COUNT(*) AS cnt
-        FROM adaptive_policy_state
-        WHERE config_id = ?
-          AND policy_type = 'causal_review_rule'
-          AND active = 1
-          AND (valid_until IS NULL OR valid_until >= ?)
-        """,
-        (config_id, trading_date),
-    )
-    row = cursor.fetchone()
-    return {
-        "candidate_status_counts": status_counts,
-        "active_causal_rule_count": int(row["cnt"] or 0) if row else 0,
-    }
-
-
-def _contextual_rule_policy_payload(
-    *,
-    rule_group: str,
-    reason: str,
-    rules: Dict[str, Any],
-    maturity_state: str,
-    scope: Dict[str, Any],
-    evidence: Dict[str, Any],
-    policy_action: str = "calibrate",
-    multiplier: float = 1.0,
-) -> Dict[str, Any]:
-    payload = _policy_contract_payload(
-        policy_type=f"contextual_rule_calibration:{rule_group}",
-        policy_action="diagnostic" if policy_action == "calibrate" else policy_action,
-        reason=reason,
-        multiplier=multiplier,
-        maturity_state=maturity_state,
-        scope=scope,
-        evidence={
-            **(evidence or {}),
-            "rule_group": rule_group,
-            "rule_adjustments": rules,
-        },
-    )
-    payload["rule_group"] = rule_group
-    payload["rule_adjustments"] = {rule_group: rules}
-    payload["rule_validation_status"] = "validated_rule_applied"
-    payload["calibration_boundary"] = (
-        "This is a context-scoped weak-parameter adjustment. It cannot override the 20% margin cap, "
-        "settlement/accounting checks, no-lookahead gates, limit-lock/expiry business rules, or the need for current evidence."
-    )
-    return payload
 
 
 def _technical_calibration_rules_from_performance(
@@ -3515,183 +3084,6 @@ def _technical_calibration_rules_from_performance(
             "bollinger_std_multiplier": 0.97,
         }
     return {}
-
-
-def _neutral_counterfactual_tracking_summary(
-    cursor: sqlite3.Cursor,
-    *,
-    cfg: Dict[str, Any] | None = None,
-    config_id: str,
-    trading_date: str,
-    recommendations: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    by_ticker: Dict[str, float] = {}
-    try:
-        cursor.execute(
-            """
-            SELECT ticker, SUM(daily_pnl) AS pnl
-            FROM ticker_daily_pnl tdp
-            JOIN portfolio p ON tdp.portfolio_id = p.id
-            WHERE p.config_id = ?
-              AND substr(tdp.trading_date, 1, 10) = ?
-            GROUP BY ticker
-            """,
-            (config_id, trading_date),
-        )
-        by_ticker = {str(row["ticker"] or "").upper(): _safe_float(row["pnl"]) for row in cursor.fetchall()}
-    except sqlite3.Error:
-        by_ticker = {}
-
-    observations: List[Dict[str, Any]] = []
-    missed_opportunity = 0
-    reasonable_avoidance = 0
-    for recommendation in recommendations:
-        snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
-        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-        ticker_pnl = by_ticker.get(ticker, 0.0)
-        for analyst, payload in _analyst_payloads(snapshot).items():
-            if str(payload.get("signal") or "Neutral") != "Neutral":
-                continue
-            consensus = _directional_consensus_from_snapshot(snapshot, analyst)
-            counterfactual_side = consensus.get("signal")
-            if counterfactual_side not in {"Bullish", "Bearish"} or _safe_int(consensus.get("support_count")) <= 0:
-                continue
-            counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
-            classification = "missed_opportunity" if counterfactual_pnl > 0 else "reasonable_avoidance" if counterfactual_pnl < 0 else "neutral_unresolved"
-            if classification == "missed_opportunity":
-                missed_opportunity += 1
-            elif classification == "reasonable_avoidance":
-                reasonable_avoidance += 1
-            observations.append(
-                {
-                    "ticker": ticker,
-                    "recommendation_id": recommendation.get("id"),
-                    "analyst": analyst,
-                    "counterfactual_side": counterfactual_side,
-                    "support_count": _safe_int(consensus.get("support_count")),
-                    "counterfactual_pnl": counterfactual_pnl,
-                    "classification": classification,
-                }
-            )
-
-    total_counterfactual_pnl = sum(_safe_float(item.get("counterfactual_pnl")) for item in observations)
-    account_cfg = (((cfg or {}).get("signal_quality") or {}).get("neutral_accountability") or {})
-    forward_days = max(0, int(account_cfg.get("counterfactual_forward_days", 0) or 0))
-    forward_dates: List[str] = []
-    forward_by_ticker: Dict[str, float] = {}
-    if forward_days > 0:
-        try:
-            cursor.execute(
-                """
-                SELECT DISTINCT substr(ds.trading_date, 1, 10) AS trading_day
-                FROM daily_settlement ds
-                JOIN portfolio p ON ds.portfolio_id = p.id
-                WHERE p.config_id = ?
-                  AND substr(ds.trading_date, 1, 10) > ?
-                ORDER BY trading_day
-                LIMIT ?
-                """,
-                (config_id, trading_date, forward_days),
-            )
-            forward_dates = [str(row["trading_day"]) for row in cursor.fetchall() if row["trading_day"]]
-            if forward_dates:
-                placeholders = ",".join("?" for _ in forward_dates)
-                cursor.execute(
-                    f"""
-                    SELECT ticker, SUM(daily_pnl) AS pnl
-                    FROM ticker_daily_pnl tdp
-                    JOIN portfolio p ON tdp.portfolio_id = p.id
-                    WHERE p.config_id = ?
-                      AND substr(tdp.trading_date, 1, 10) IN ({placeholders})
-                    GROUP BY ticker
-                    """,
-                    [config_id, *forward_dates],
-                )
-                forward_by_ticker = {
-                    str(row["ticker"] or "").upper(): _safe_float(row["pnl"])
-                    for row in cursor.fetchall()
-                }
-        except sqlite3.Error:
-            forward_dates = []
-            forward_by_ticker = {}
-
-    forward_observations: List[Dict[str, Any]] = []
-    forward_missed = 0
-    forward_avoided = 0
-    if forward_by_ticker:
-        for recommendation in recommendations:
-            snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
-            ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-            ticker_pnl = forward_by_ticker.get(ticker, 0.0)
-            for analyst, payload in _analyst_payloads(snapshot).items():
-                if str(payload.get("signal") or "Neutral") != "Neutral":
-                    continue
-                consensus = _directional_consensus_from_snapshot(snapshot, analyst)
-                counterfactual_side = consensus.get("signal")
-                if counterfactual_side not in {"Bullish", "Bearish"} or _safe_int(consensus.get("support_count")) <= 0:
-                    continue
-                counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
-                classification = (
-                    "missed_opportunity" if counterfactual_pnl > 0
-                    else "reasonable_avoidance" if counterfactual_pnl < 0
-                    else "neutral_unresolved"
-                )
-                if classification == "missed_opportunity":
-                    forward_missed += 1
-                elif classification == "reasonable_avoidance":
-                    forward_avoided += 1
-                forward_observations.append(
-                    {
-                        "ticker": ticker,
-                        "recommendation_id": recommendation.get("id"),
-                        "analyst": analyst,
-                        "counterfactual_side": counterfactual_side,
-                        "support_count": _safe_int(consensus.get("support_count")),
-                        "counterfactual_pnl": counterfactual_pnl,
-                        "classification": classification,
-                        "window_trading_dates": forward_dates,
-                    }
-                )
-    total_forward_counterfactual_pnl = sum(_safe_float(item.get("counterfactual_pnl")) for item in forward_observations)
-    summary = {
-        "observation_count": len(observations),
-        "missed_opportunity_count": missed_opportunity,
-        "reasonable_avoidance_count": reasonable_avoidance,
-        "total_counterfactual_pnl": total_counterfactual_pnl,
-        "examples": observations[:12],
-        "forward_window_days": forward_days,
-        "forward_window_dates": forward_dates,
-        "forward_status": "applied" if forward_dates else "pending_future_settlements" if forward_days > 0 else "disabled",
-        "forward_observation_count": len(forward_observations),
-        "forward_missed_opportunity_count": forward_missed,
-        "forward_reasonable_avoidance_count": forward_avoided,
-        "forward_total_counterfactual_pnl": total_forward_counterfactual_pnl,
-        "forward_examples": forward_observations[:12],
-    }
-    return summary
-
-
-def _directional_consensus_from_snapshot(snapshot: Dict[str, Any], neutral_analyst: str) -> Dict[str, Any]:
-    counts: Counter = Counter()
-    supporters: List[str] = []
-    for analyst, payload in _analyst_payloads(snapshot).items():
-        if analyst == neutral_analyst:
-            continue
-        signal = str(payload.get("signal") or "Neutral")
-        if signal not in {"Bullish", "Bearish"}:
-            continue
-        confidence = max(
-            _safe_float(payload.get("effective_confidence")),
-            _safe_float(payload.get("confidence")),
-        )
-        if confidence < 0.45:
-            continue
-        counts[signal] += 1
-        supporters.append(f"{analyst}:{signal}")
-    if not counts:
-        return {"signal": "Neutral", "support_count": 0, "supporters": []}
-    signal, support_count = counts.most_common(1)[0]
-    return {"signal": signal, "support_count": int(support_count), "supporters": supporters}
 
 
 def _neutral_accountability_digest_text(
@@ -4142,32 +3534,31 @@ def run_phase4_review(
             logger.error(error)
 
         phase4_status = "failed" if errors else "completed"
-        logger.write_daily_summary(
-            trading_date,
-            _build_summary_payload(
-                cfg=cfg,
-                trading_date=trading_date,
-                phase1=phase1,
-                phase2=phase2,
-                phase3=phase3,
-                phase4_status=phase4_status,
-                strategy_count=len(strategy_recommendations),
-                rollover_count=len(rollover_recommendations),
-                phase1_transaction_count=len(phase1_transactions),
-                phase2_transaction_count=len(phase2_transactions),
-                no_trade_reason_counter=no_trade_reason_counter,
-                settlement_row=settlement_row,
-                warnings=warnings,
-                errors=errors,
-                market_confirmation_quality=market_confirmation_quality,
-                capital_deployment_state=capital_preview,
-                neutral_accountability=neutral_accountability_preview,
-                extra_audit={
-                    "signal_persistence": signal_persistence_audit,
-                    "signal_data_lineage": data_lineage_audit,
-                },
-            ),
+        summary_payload = _build_summary_payload(
+            cfg=cfg,
+            trading_date=trading_date,
+            phase1=phase1,
+            phase2=phase2,
+            phase3=phase3,
+            phase4_status=phase4_status,
+            strategy_count=len(strategy_recommendations),
+            rollover_count=len(rollover_recommendations),
+            phase1_transaction_count=len(phase1_transactions),
+            phase2_transaction_count=len(phase2_transactions),
+            no_trade_reason_counter=no_trade_reason_counter,
+            settlement_row=settlement_row,
+            warnings=warnings,
+            errors=errors,
+            market_confirmation_quality=market_confirmation_quality,
+            capital_deployment_state=capital_preview,
+            neutral_accountability=neutral_accountability_preview,
+            extra_audit={
+                "signal_persistence": signal_persistence_audit,
+                "signal_data_lineage": data_lineage_audit,
+            },
         )
+        validate_reviewer_artifact_boundary(summary_payload)
+        logger.write_daily_summary(trading_date, summary_payload)
 
         if errors:
             try:

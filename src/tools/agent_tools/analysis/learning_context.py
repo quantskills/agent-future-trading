@@ -296,7 +296,6 @@ def _build_memory_trace(
     max_items: int,
     max_chars: int,
     alpha_setup_items: Optional[List[Dict[str, Any]]] = None,
-    alpha_action_value_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     selected_digest_items = [item for item in items if str(item.get("id") or "") in set(selected_ids)]
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
@@ -307,7 +306,6 @@ def _build_memory_trace(
         ("no_trade_opportunity_memory", no_trade_items, 4),
         ("exploratory_hypothesis", hypothesis_items, 4),
         ("alpha_setup_profile", alpha_setup_items or [], 4),
-        ("alpha_setup_action_value", alpha_action_value_items or [], 4),
     ):
         for item in collection[:limit]:
             refs.append(_memory_trace_ref(item, memory_type))
@@ -327,7 +325,7 @@ def _build_memory_trace(
             "no_trade_opportunity": len(no_trade_lines),
             "exploratory_hypothesis": len(hypothesis_lines),
             "alpha_setup_profile": len(alpha_setup_items or []),
-            "alpha_setup_action_value": len(alpha_action_value_items or []),
+            "alpha_setup_action_value": 0,
         },
         "hypothesis_status_counts": dict(hypothesis_status_counts),
         "candidate_hypothesis_count": int(hypothesis_status_counts.get("candidate", 0)),
@@ -562,9 +560,7 @@ def build_learning_context(
     no_trade_items: List[Dict[str, Any]] = []
     hypothesis_items: List[Dict[str, Any]] = []
     alpha_setup_items: List[Dict[str, Any]] = []
-    alpha_action_value_items: List[Dict[str, Any]] = []
     alpha_setup_lines: List[str] = []
-    alpha_action_value_lines: List[str] = []
     if exploration_enabled:
         episode_limit = int(exploration_cfg.get("max_episode_items", 3))
         no_trade_limit = int(exploration_cfg.get("max_no_trade_items", 3))
@@ -765,8 +761,6 @@ def build_learning_context(
         if bool(alpha_cfg.get("enabled", True)):
             alpha_limit = int(alpha_cfg.get("max_items", 3) or 3)
             alpha_chars = int(alpha_cfg.get("max_chars", max(300, remaining_chars // 3)) or 300)
-            action_limit = int(alpha_cfg.get("max_action_value_items", max(3, alpha_limit)) or max(3, alpha_limit))
-            action_chars = int(alpha_cfg.get("max_action_value_chars", max(300, alpha_chars)) or max(300, alpha_chars))
             try:
                 if hasattr(db, "get_alpha_setup_profiles"):
                     alpha_setup_items = db.get_alpha_setup_profiles(
@@ -796,62 +790,6 @@ def build_learning_context(
             except Exception as exc:
                 logger.warning(f"{ticker}: alpha setup profile retrieval skipped: {exc}")
                 alpha_setup_items = []
-            try:
-                if hasattr(db, "get_alpha_setup_action_values"):
-                    alpha_action_value_items = db.get_alpha_setup_action_values(
-                        config_id=config_id,
-                        ticker=str(ticker or "").upper(),
-                        horizon_class=horizon,
-                        market_regime=market_regime,
-                        trading_date=trading_date,
-                        limit=max(action_limit * 2, action_limit),
-                    )
-                    if (
-                        not alpha_action_value_items
-                        and allow_cross_ticker_sector_fallback
-                        and sector
-                        and sector != "*"
-                    ):
-                        alpha_action_value_items = db.get_alpha_setup_action_values(
-                            config_id=config_id,
-                            ticker="*",
-                            horizon_class=horizon,
-                            market_regime=market_regime,
-                            trading_date=trading_date,
-                            limit=max(action_limit * 2, action_limit),
-                        )
-            except Exception as exc:
-                logger.warning(f"{ticker}: alpha setup action-value retrieval skipped: {exc}")
-                alpha_action_value_items = []
-            try:
-                if hasattr(db, "get_similar_alpha_setup_action_values"):
-                    similar_items = db.get_similar_alpha_setup_action_values(
-                        config_id=config_id,
-                        ticker=str(ticker or "").upper(),
-                        sector=sector,
-                        horizon_class=horizon,
-                        market_regime=market_regime,
-                        trading_date=trading_date,
-                        limit=max(action_limit * 2, action_limit),
-                    )
-                    if similar_items:
-                        existing_keys = {
-                            (
-                                str(item.get("scope_key") or ""),
-                                str(item.get("action_name") or ""),
-                            )
-                            for item in alpha_action_value_items
-                        }
-                        for item in similar_items:
-                            key = (
-                                str(item.get("scope_key") or ""),
-                                str(item.get("action_name") or ""),
-                            )
-                            if key not in existing_keys:
-                                alpha_action_value_items.append(item)
-                                existing_keys.add(key)
-            except Exception as exc:
-                logger.warning(f"{ticker}: similar alpha setup action-value retrieval skipped: {exc}")
             raw_alpha_lines = [f"- {profile_prompt_line(item)}" for item in alpha_setup_items]
             alpha_setup_lines, alpha_setup_dropped = _budget_plain_lines(
                 raw_alpha_lines,
@@ -859,15 +797,6 @@ def build_learning_context(
                 max_items=alpha_limit,
             )
             dropped += alpha_setup_dropped
-            raw_action_value_lines = [
-                f"- {analyst_signal_calibration_prompt_line(item)}" for item in alpha_action_value_items
-            ]
-            alpha_action_value_lines, action_value_dropped = _budget_plain_lines(
-                raw_action_value_lines,
-                max_chars=action_chars,
-                max_items=action_limit,
-            )
-            dropped += action_value_dropped
 
     try:
         if hasattr(db, "save_learning_context_budget"):
@@ -875,7 +804,6 @@ def build_learning_context(
             episode_chars_used = sum(len(line) + 1 for line in episode_lines)
             hypothesis_chars_used = sum(len(line) + 1 for line in hypothesis_lines)
             alpha_setup_chars_used = sum(len(line) + 1 for line in alpha_setup_lines)
-            alpha_action_value_chars_used = sum(len(line) + 1 for line in alpha_action_value_lines)
             db.save_learning_context_budget(
                 config_id=config_id,
                 trading_date=trading_date,
@@ -892,7 +820,6 @@ def build_learning_context(
                     + sum(len(line) + 1 for line in no_trade_lines)
                     + hypothesis_chars_used
                     + alpha_setup_chars_used
-                    + alpha_action_value_chars_used
                 ),
                 dropped_count=dropped,
                 max_items=max_items,
@@ -907,7 +834,6 @@ def build_learning_context(
         and not no_trade_lines
         and not hypothesis_lines
         and not alpha_setup_lines
-        and not alpha_action_value_lines
     ):
         memory_trace = _build_memory_trace(
             analyst=analyst_key,
@@ -922,7 +848,6 @@ def build_learning_context(
             no_trade_items=[],
             hypothesis_items=[],
             alpha_setup_items=[],
-            alpha_action_value_items=[],
             lines=[],
             episode_lines=[],
             no_trade_lines=[],
@@ -939,7 +864,7 @@ def build_learning_context(
             "no_trade_opportunity_items": [],
             "hypothesis_items": [],
             "alpha_setup_items": [],
-            "alpha_setup_action_values": [],
+            "analyst_calibration_items": [],
             "selected_ids": [],
             "horizon_class": horizon,
             "requested_horizon_class": horizon,
@@ -989,7 +914,7 @@ def build_learning_context(
         )
         text_parts.extend(hypothesis_lines)
     if alpha_setup_lines:
-        text_parts.append("Alpha setup profiles and action-value priors:")
+        text_parts.append("Alpha setup profiles:")
         text_parts.append(
             "These profiles summarize same-scope setup outcomes. Deployable/protected profiles may support "
             "controlled opportunity recognition only with today's trigger, invalidation, PM, Auditor, Trader, "
@@ -997,15 +922,6 @@ def build_learning_context(
             "not product bans."
         )
         text_parts.extend(alpha_setup_lines)
-    if alpha_action_value_lines:
-        text_parts.append("Alpha setup action-value priors:")
-        text_parts.append(
-            "These rows summarize same-scope action outcomes after costs. Analysts may use only the "
-            "signal_calibration part to question evidence quality and setup reliability. Do not convert "
-            "open/hold/exit/execution preferences into trade authority, lots, margin, direction changes, "
-            "or PM/Trader decisions."
-        )
-        text_parts.extend(alpha_action_value_lines)
     text = "\n".join(text_parts) + "\n"
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
     memory_trace = _build_memory_trace(
@@ -1021,7 +937,6 @@ def build_learning_context(
         no_trade_items=no_trade_items,
         hypothesis_items=hypothesis_items,
         alpha_setup_items=alpha_setup_items,
-        alpha_action_value_items=alpha_action_value_items,
         lines=lines,
         episode_lines=episode_lines,
         no_trade_lines=no_trade_lines,
@@ -1038,9 +953,7 @@ def build_learning_context(
         "no_trade_opportunity_items": no_trade_items,
         "hypothesis_items": hypothesis_items,
         "alpha_setup_items": [compact_profile_for_trace(item) for item in alpha_setup_items],
-        "alpha_setup_action_values": [
-            compact_action_value_for_analyst_trace(item) for item in alpha_action_value_items
-        ],
+        "analyst_calibration_items": [],
         "selected_ids": selected_ids,
         "horizon_class": horizon,
         "requested_horizon_class": horizon,

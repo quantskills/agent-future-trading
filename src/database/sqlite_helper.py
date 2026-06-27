@@ -19,6 +19,11 @@ from database.sqlite_setup import (
     _json_artifact_columns,
     _text_artifact_columns,
 )
+from tools.common.contracts import (
+    validate_accountant_artifact_boundary,
+    validate_execution_artifact_boundary,
+    validate_pm_artifact_boundary,
+)
 from util.logger import logger
 from tools.agent_tools.research.learning_contract import attach_or_upgrade_next_round_memory_contract
 
@@ -442,7 +447,11 @@ class SQLiteDB(BaseDB):
         return min(1.0, sample_score + win_score + pnl_score)
 
     def _learning_retention_enabled(self, retention_config: Optional[Dict[str, Any]]) -> bool:
-        return bool(retention_config and retention_config.get("enabled") and retention_config.get("run_after_phase4", True))
+        return bool(
+            retention_config
+            and retention_config.get("enabled")
+            and retention_config.get("run_after_researcher_learning", True)
+        )
 
     def _table_columns(self, cursor: sqlite3.Cursor, table_name: str) -> set[str]:
         if not self._table_exists(cursor, table_name):
@@ -514,7 +523,7 @@ class SQLiteDB(BaseDB):
         trading_date,
         retention_config: Optional[Dict[str, Any]],
     ) -> Dict[str, int]:
-        """Clean short-lived learning details after Phase4 without touching trade facts."""
+        """Clean short-lived learning details after researcher learning without touching trade facts."""
         if not self._learning_retention_enabled(retention_config):
             return {}
         trading_day = self._normalize_trading_day_value(trading_date)
@@ -1529,6 +1538,8 @@ class SQLiteDB(BaseDB):
         conn = None
         try:
             recommendation_dict = self._model_to_dict(recommendation)
+            validate_pm_artifact_boundary(recommendation_dict.get("signal_snapshot") or {})
+            validate_pm_artifact_boundary(recommendation_dict.get("audit_payload") or {})
             recommendation_id = recommendation_dict.get("id") or str(uuid.uuid4())
             created_at = recommendation_dict.get("created_at") or datetime.now(timezone.utc).isoformat()
             config_id = recommendation_dict.get("config_id")
@@ -1720,6 +1731,13 @@ class SQLiteDB(BaseDB):
                 params.append(warning_message)
 
             if signal_snapshot is not None:
+                if any(
+                    key in signal_snapshot
+                    for key in ("execution_translation", "execution_result", "phase2_execution")
+                ):
+                    validate_execution_artifact_boundary(signal_snapshot)
+                else:
+                    validate_pm_artifact_boundary(signal_snapshot)
                 snapshot_ext = externalize_json_for_db(
                     signal_snapshot,
                     category="recommendation",
@@ -1744,6 +1762,13 @@ class SQLiteDB(BaseDB):
                 ])
 
             if audit_payload is not None:
+                if any(
+                    key in audit_payload
+                    for key in ("execution_translation", "execution_result", "phase2_execution")
+                ):
+                    validate_execution_artifact_boundary(audit_payload)
+                else:
+                    validate_pm_artifact_boundary(audit_payload)
                 audit_ext = externalize_json_for_db(
                     audit_payload,
                     category="recommendation",
@@ -1870,6 +1895,7 @@ class SQLiteDB(BaseDB):
         conn = None
         try:
             transaction_dict = self._model_to_dict(transaction)
+            validate_execution_artifact_boundary(transaction_dict.get("audit_payload") or {})
             transaction_id = transaction_dict.get("id") or str(uuid.uuid4())
             created_at = transaction_dict.get("created_at") or datetime.now(timezone.utc).isoformat()
             execution_price = transaction_dict.get("execution_price", transaction_dict.get("price"))
@@ -2627,7 +2653,7 @@ class SQLiteDB(BaseDB):
         trading_date=None,
         param_prefix: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return active reviewer-learned config overlays that are valid today."""
+        """Return active researcher-learned config overlays that are valid today."""
         conn = None
         try:
             conn = self._get_connection()
@@ -2738,7 +2764,7 @@ class SQLiteDB(BaseDB):
         market_regime: Optional[str] = None,
         trading_date=None,
     ) -> List[Dict[str, Any]]:
-        """Read reviewer-learned soft policy state for auditor and PM controls."""
+        """Read researcher-learned policy state for PM and analyst-safe calibration."""
         conn = None
         try:
             conn = self._get_connection()
@@ -4102,6 +4128,17 @@ class SQLiteDB(BaseDB):
         """Save a daily settlement record."""
         conn = None
         try:
+            settlement_payload = {
+                "trading_date": getattr(settlement, "trading_date", None),
+                "previous_balance": getattr(settlement, "previous_balance", None),
+                "current_balance": getattr(settlement, "current_balance", None),
+                "previous_margin": getattr(settlement, "previous_margin", None),
+                "current_margin": getattr(settlement, "current_margin", None),
+                "daily_pnl": getattr(settlement, "daily_pnl", None),
+                "commission": getattr(settlement, "commission", None),
+                "positions_snapshot": getattr(settlement, "positions_detail", None),
+            }
+            validate_accountant_artifact_boundary(settlement_payload)
             conn = self._get_connection()
             cursor = conn.cursor()
 

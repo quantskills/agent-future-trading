@@ -1,21 +1,10 @@
-﻿# AgentQuant 期货回测、模拟盘与实盘复刻配置。
-# 本文件只保留可运行参数；机制说明见 docs/mechanism_*.md。
-# 硬约束、交易宇宙、数据源和 LLM 路由由本文件人工控制。
-# 日度弱参和学习结果由 Researcher 写入数据库 overlay/state，不自动改写本文件。
-# 最新业务主线：分析师定义品种化 state 与当前预测证据，Researcher 输出带 usage_boundary 的
-# open/hold/exit/execution action-value；分析师只读 analyst_calibration 安全摘要，PM 通过
-# decision_memory_retrieval 只读 consumer_scope=pm_learning 的结构化研究成果。
-# Trader 不读研究库，不读 action-value；Trader 只读审计通过的 final_action_contract 里的
-# execution_profile、entry_trigger 和盘中触发授权，并按合约执行。
-# 分析师输出里的“如果/等待/确认后才交易”属于 pending 条件，必须结构化为
-# watch_for_trigger + trigger_valid=false。它不是即时交易授权；若同时具备
-# setup_quality_ok、明确方向、entry_trigger 和 invalidation_present，PM 只能把它写入
-# 同一张 final_action_contract 的条件监控 probe，Trader 只盘中检查触发，不能自创方向/手数。
-# 只有当前触发已经成立且有失效边界时，才可进入 tradeable_candidate 或即时 probe/开仓候选。
-# PM 还会把所有候选写入 opportunity_score / opportunity_rank / capital_allocation_reason：
-# 这些字段驱动 PM 的全市场资金部署 pass，并回写同一张 final_action_contract；
-# 它们不是第二张交易合约，也不给 Trader 新权限。Trader 仍只执行合约里的 target_lots/lots_delta。
-# 被 PM 资金队列入选的 probe 仍按现有 probe 资金边界执行；未入选候选必须留下可复盘原因。
+﻿# AgentQuant 主配置：回测、模拟盘和实盘复刻共用。
+# 本文件只保存运行参数；机制说明见 docs/mechanism_*.md。
+# 硬约束、交易宇宙、运行加速、数据源索引和 LLM 路由由本文件人工维护。
+# 学习结果写入数据库 overlay/state，不自动改写本 YAML。
+# 交易动作只能来自 PM 的 final_action_contract；交易员只执行审计通过的合约。
+# 研究学习只能影响未来交易日，不能修改当天事实或回写本文件。
+#
 # 资金参数保护区：
 #   - position_budget_policy
 #   - risk_control
@@ -24,15 +13,13 @@
 #   - capital_utilization_control
 # 未经明确要求，不要借配置整理、学习机制或门控优化修改这些参数值。
 # 组合总保证金硬上限为 20%；真实新开仓最低保证金由 position_budget_policy 控制。
-# 干净删库重跑前，建议先在 src 目录初始化主库和评估库。
 
 # ---------------------------------------------------------------------------
 # 0. Catalog 索引
 # ---------------------------------------------------------------------------
 
 config_catalogs:
-  # 辅助 YAML 目录。运行时由 config_normalizer.py 展开成业务代码读取的配置形状。
-  # 这里索引事实表、数据源、冷启动先验和策略边界；学习结果写数据库，不回写 YAML。
+  # 辅助 YAML 目录；运行时由 config_normalizer.py 展开为业务代码读取的配置形状。
   execution_commission: execution_commission_catalog.yaml
   execution_slippage: execution_slippage_catalog.yaml
   execution_exit_policy: execution_exit_policy_catalog.yaml
@@ -46,7 +33,7 @@ config_catalogs:
 # ---------------------------------------------------------------------------
 
 runtime:
-  # 只加速工程流程，不改变交易策略、账务、学习写回或四阶段顺序。
+  # 工程加速配置；不改变交易策略、账务、学习写回或四阶段顺序。
   phase1:
     # 只并行 Phase1 分析师读数与 LLM 分析；PM 之后仍顺序执行。
     enable_analysis_parallelism: true
@@ -73,11 +60,8 @@ runtime:
 # ---------------------------------------------------------------------------
 
 control_governance:
-  # 控制组只做多智能体协议、工具权限、成本与回测前健康审计。
-  # 它不是 PM、Auditor、Trader 或 Researcher，也不是新的交易门控。
-  # 任何 control_governance 输出都不能创建/否决交易权限，不能改 lots/margin_ratio。
-  # system_invariant_audit 检查违规；mechanism_effectiveness_audit 只读检查学习/排名/合约/退出链路是否接通。
-  # mechanism hard_fail 会阻止策略收益评价；diagnostic 只进入策略分析，不停止回测。
+  # 控制组只做协议、工具权限、成本和回测前健康审计。
+  # 控制输出不能创建交易权限、否决交易权限、改手数、改保证金或写业务事实。
   enabled: true
   protocol_governor:
     enabled: true
@@ -120,9 +104,7 @@ market_type: "china_futures"
 max_total_margin_ratio: 0.20
 
 position_budget_policy:
-  # 用户已调资金参数，属于核心保护区。
-  # 所有学习、软门控和 alpha release 只能决定进入哪一层，不能自动改这些数值。
-  # 仓位预算按“保证金占用”管理，而不是只看名义仓位比例。
+  # 核心资金保护区。仓位预算按保证金占用管理；学习只能影响分层选择，不能改这些数值。
   enabled: true
   basis: margin
   capital_base: account_equity
@@ -131,10 +113,10 @@ position_budget_policy:
   min_real_trade_margin_ratio: 0.008
   min_real_trade_margin_abs: 40000
   apply_min_to_new_entries_only: true
-  # 这里的 authority 指 final_action_contract 授权，不是第二张交易合约。
+  # authority 指 final_action_contract 授权，不是第二张交易合约。
   require_final_trade_authority: true
   block_below_min_when_cannot_scale: true
-  # 以下是冷启动资金分层。学习机制只校准进入哪一层，不突破 20% 硬上限。
+  # 冷启动资金分层；任何分层都不能突破 20% 总保证金硬上限。
   probe_margin_ratio: 0.008
   probe_margin_max_ratio: 0.015
   normal_trade_margin_ratio: 0.030
@@ -146,9 +128,7 @@ position_budget_policy:
   max_single_ticker_margin_ratio: 0.130
 
 analyst_weight_policy:
-  # 该配置块只表达“分析师冷启动先验”。
-  # 它只辅助中期背景、冷启动排序和适用性解释；最终开仓/加仓权限必须来自
-  # PM 的 action evidence router，不能由静态权重直接生成。
+  # 分析师冷启动先验：只辅助背景、排序和适用性解释，不生成交易权限。
   enabled: true
   mode: evidence_router
   static_weights_mode: prior_only
@@ -157,14 +137,12 @@ analyst_weight_policy:
   strategic_profile: sector_strategic_view
   trade_timing_profile: daily_trade_timing
   dynamic_overlay: database_only
-  # 方向观点不能开仓；watch_for_trigger 本身不能开仓。
-  # 干净的条件机会只能由 PM 写入 final_action_contract 条件监控合约后交给 Trader 盘中检查。
+  # 方向观点和 watch_for_trigger 不能直接开仓；条件机会必须先由 PM 写入合约。
   strategic_view_cannot_open_position: true
   watch_for_trigger_cannot_open_position: true
 
 risk_control:
-  # 用户已调资金参数，属于核心保护区。
-  # 按账户权益 / 初始资金划分风险状态。
+  # 核心资金保护区：按账户权益 / 初始资金划分风险状态。
   warning_ratio: 0.70
   danger_ratio: 0.50
   emergency_ratio: 0.30
@@ -182,8 +160,7 @@ risk_control:
     danger: 0.05
 
 net_exposure_control:
-  # 用户已调资金参数，属于核心保护区。
-  # 限制组合多空净方向暴露。
+  # 核心资金保护区：限制组合多空净方向暴露。
   max_net_exposure: 0.50
   # 仅已验证强机会可临时使用更高净敞口。
   strong_opportunity_max_net_exposure: 2.00
@@ -202,13 +179,11 @@ net_exposure_control:
 # 5. 审计、回撤与学习频率控制
 # ---------------------------------------------------------------------------
 
-
 # 审计、交易频率、品种表现和短期亏损控制由 portfolio_policy_catalog.yaml 展开：
 #   trade_auditor / trade_frequency_control / ticker_performance_control / ticker_loss_control。
 
 drawdown_control:
-  # 用户已调资金参数，属于核心保护区。
-  # 账户回撤分层控制：警戒压缩风险，硬保护进入冷静与恢复试探。
+  # 核心资金保护区：账户回撤分层控制。
   enabled: true
   # 账户级最大回撤预算：7% 警戒压缩，10% 硬保护；不改变 20% 总保证金上限。
   warning_drawdown: 0.07
@@ -235,8 +210,7 @@ drawdown_control:
 #   strategy_memory / learning / analyst_business_quality / signal_quality / learning_context / learning_retention。
 
 capital_utilization_control:
-  # 用户已调资金参数，属于核心保护区。
-  # 资金目标按保证金比例计算；只向高质量机会释放，不用弱信号硬凑仓位。
+  # 核心资金保护区：资金目标按保证金比例计算，只向高质量机会释放。
   enabled: true
   target_margin_ratio_min: 0.08
   target_margin_ratio_max: 0.12
@@ -245,8 +219,7 @@ capital_utilization_control:
   strong_opportunity_target_margin_ratio_max: 0.20
   strong_opportunity_target_margin_ratio_confirmed: 0.18
   max_margin_ratio_after_scaling: 0.20
-  # 前置软风险标签先进入 PM 统一仲裁：弱证据不能被资金利用率硬凑仓位；
-  # 但同作用域高质量学习证据 + 当日确认 + 止损/失效边界达标时，仍可继续 alpha release。
+  # 软风险标签先进入 PM 仲裁；资金利用率不能把弱证据硬凑成仓位。
   respect_pre_control_soft_limits: true
   # 资金补足只释放给确认度合格的方向；0.60 与市场确认弱模板门槛保持一致。
   min_confirmation_score_for_scaling: 0.60
@@ -256,7 +229,7 @@ capital_utilization_control:
   min_recent_win_rate_for_scaling: 0.50
   min_recent_total_pnl_for_scaling: 0
   scale_only_when_recent_pnl_positive: false
-  # protected/allow 可解除部分软 cap，但仍需市场确认和硬风控。
+  # protected/allow 只解除部分软 cap；仍需市场确认和硬风控。
   allow_memory_protected_scaling: true
   allow_recovering_template_scaling: false
   # protected 不降低当天 market confirmation 门槛。
@@ -289,7 +262,7 @@ capital_utilization_control:
   exceptional_validated_max_fraction_of_remaining_capacity: 0.95
   exceptional_confirmation_allocation_power: 1.00
   allow_probe_above_observation_target: true
-  # 名义仓位上限只作配置回退；运行时仓位事实仍以 final_action_contract 和保证金预算为准。
+  # 名义仓位上限只作回退；运行事实以 final_action_contract 和保证金预算为准。
   strong_opportunity_max_position_ratio_multiplier: 20.0
   strong_opportunity_max_position_ratio_cap: 2.00
   allow_confirmed_same_side_add_on: true
@@ -303,7 +276,7 @@ capital_utilization_control:
 # ---------------------------------------------------------------------------
 
 execution:
-  # 手续费、滑点和退场冷启动策略由 execution_*_catalog.yaml 展开。
+  # 手续费、滑点和退场策略由 execution_*_catalog.yaml 展开。
 
   limit_lock:
     # 只用已知涨跌停字段做成交保护，避免未来信息污染。
@@ -367,7 +340,7 @@ tickers:
   - ZN
 
 planner_mode: false
-# 旧 LLM 规划器已退出固定工作流；该值只能为 false，真实回测固定使用 workflow_analysts。
+# 旧 LLM 规划器已退出固定工作流；该值只能为 false。
 
 workflow_analysts:
   - commodity_news
@@ -375,7 +348,7 @@ workflow_analysts:
   - technical
 
 analyst_llm:
-  # 分析师默认继承主模型。
+  # 分析师 LLM 路由；默认继承主模型。
   mode: cloud_only
   # null 表示继承 llm.model。
   # cloud_model: "claude-opus-4-6-1"
@@ -391,7 +364,7 @@ analyst_llm:
   cap_stale_fundamental_confidence: 0.30
 
 llm:
-  # 主 LLM 路由。只通过注释/取消注释 provider/model 两行切换网关与模型。
+  # 主 LLM 路由。切换网关时只改 provider/model 和对应网关配置块。
   # 不要把 API key 写入配置文件。
   #
   # ===== 当前启用：CodexOpenAI 网关 / GPT-5.5 / medium reasoning =====
@@ -405,7 +378,7 @@ llm:
   # model: "claude-opus-4-6-1"
 
   temperature: null
-  # 控制 LLM 并发数；不跳过、不降级、不改变 prompt。
+  # 只控制并发；不跳过、不降级、不改变 prompt。
   max_concurrent_calls: 4
   structured_output_method: "json_mode"
   failure_policy:
@@ -417,7 +390,7 @@ llm:
 
   # ===== CodexOpenAI 网关配置块：当前启用 =====
   # API key 在 D:\research\AgentQuant\.env 的 CODEX_OPENAI_API_KEY。
-  # 网关地址来自当前 AgentQuant .env 与配置共识：不要改成 D:\research\Codex 旧示例里的地址。
+  # 网关地址来自当前 AgentQuant .env 与配置共识。
   codex_openai:
     base_url: "http://47.74.0.65"
     reasoning_effort: "medium"
@@ -427,7 +400,7 @@ llm:
   # ===== TQXAI 网关配置块：完整保留，当前停用 =====
   # API key 在 D:\research\AgentQuant\.env 的 TQX_LLM_API_KEY。
   # claude-opus-4-6-1 支持 TQXAI OpenAI-compatible chat，但不接受 OpenAI reasoning_effort。
-  # 如需切回 TQXAI，取消注释 provider/model 两行和下面整个 tqxai 配置块。
+  # 如需切回 TQXAI，取消注释 provider/model 两行和下面 tqxai 配置块。
   # tqxai:
   #   base_url: "https://llm.tqx.ai"
   #   reasoning_effort: null

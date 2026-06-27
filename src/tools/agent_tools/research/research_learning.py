@@ -1094,7 +1094,7 @@ def _write_alpha_setup_policy_state(
             skipped += 1
             continue
 
-        payload = reviewer._policy_contract_payload(
+        payload = research_memory_writers.build_policy_memory_payload(
             policy_type=policy_type,
             policy_action=policy_action,
             reason=reason,
@@ -1126,53 +1126,23 @@ def _write_alpha_setup_policy_state(
             },
             status="applied",
         )
-        cursor.execute(
-            """
-            INSERT INTO adaptive_policy_state (
-                id, config_id, ticker, side, setup_type, horizon_class, market_regime,
-                policy_type, policy_action, multiplier, confidence_score, sample_count,
-                reason, source_event_id, created_at, valid_until, payload_json, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(config_id, ticker, side, setup_type, horizon_class, market_regime, policy_type)
-            DO UPDATE SET
-                policy_action=excluded.policy_action,
-                multiplier=excluded.multiplier,
-                confidence_score=CASE
-                    WHEN adaptive_policy_state.confidence_score > excluded.confidence_score
-                    THEN adaptive_policy_state.confidence_score
-                    ELSE excluded.confidence_score
-                END,
-                sample_count=CASE
-                    WHEN adaptive_policy_state.sample_count > excluded.sample_count
-                    THEN adaptive_policy_state.sample_count
-                    ELSE excluded.sample_count
-                END,
-                reason=excluded.reason,
-                source_event_id=excluded.source_event_id,
-                created_at=excluded.created_at,
-                valid_until=excluded.valid_until,
-                payload_json=excluded.payload_json,
-                active=1
-            """,
-            (
-                str(uuid.uuid4()),
-                config_id,
-                ticker,
-                side,
-                "*",
-                scope["horizon_class"],
-                scope["market_regime"],
-                policy_type,
-                policy_action,
-                multiplier,
-                confidence,
-                sample_count,
-                reason,
-                event_id,
-                now,
-                valid_until,
-                reviewer._json_dumps(payload),
-            ),
+        research_memory_writers.upsert_alpha_setup_policy_state(
+            cursor,
+            config_id=config_id,
+            ticker=ticker,
+            side=side,
+            horizon_class=scope["horizon_class"],
+            market_regime=scope["market_regime"],
+            policy_type=policy_type,
+            policy_action=policy_action,
+            multiplier=multiplier,
+            confidence_score=confidence,
+            sample_count=sample_count,
+            reason=reason,
+            source_event_id=event_id,
+            created_at=now,
+            valid_until=valid_until,
+            payload_json=reviewer._json_dumps(payload),
         )
         inserted += 1
         by_type[policy_type] += 1
@@ -1253,9 +1223,7 @@ def backfill_alpha_setup_profiles_from_history(
         bounds.append(str(end_date)[:10])
 
     if reset:
-        cursor.execute("DELETE FROM alpha_setup_action_value WHERE config_id = ?", (config_id,))
-        cursor.execute("DELETE FROM alpha_setup_profile WHERE config_id = ?", (config_id,))
-        cursor.execute("DELETE FROM alpha_setup_sample WHERE config_id = ?", (config_id,))
+        research_memory_writers.reset_alpha_setup_memory(cursor, config_id=config_id)
 
     cursor.execute(
         f"""
@@ -1396,67 +1364,46 @@ def run_researcher_causal_review(
         config_id=config_id,
         trading_date=trading_date,
     )
-    cursor.execute(
-        """
-        INSERT INTO researcher_llm_notes (
-            id, config_id, trading_date, evidence_pack_id, ticker,
-            raw_prompt, raw_response, created_at, payload_json,
-            raw_prompt_artifact_path, raw_prompt_sha256,
-            raw_prompt_size, raw_prompt_summary_json,
-            raw_response_artifact_path, raw_response_sha256,
-            raw_response_size, raw_response_summary_json,
-            payload_artifact_path, payload_sha256,
-            payload_size, payload_summary_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            note_id,
-            config_id,
-            trading_date,
-            evidence["evidence_pack_id"],
-            "*",
-            prompt_ext.inline_value,
-            response_ext.inline_value,
-            reviewer._utc_now(),
-            payload_ext.inline_value,
-            prompt_ext.artifact_path,
-            prompt_ext.sha256,
-            prompt_ext.size_bytes,
-            prompt_ext.summary_json,
-            response_ext.artifact_path,
-            response_ext.sha256,
-            response_ext.size_bytes,
-            response_ext.summary_json,
-            payload_ext.artifact_path,
-            payload_ext.sha256,
-            payload_ext.size_bytes,
-            payload_ext.summary_json,
-        ),
+    research_memory_writers.insert_researcher_llm_note(
+        cursor,
+        note_id=note_id,
+        config_id=config_id,
+        trading_date=trading_date,
+        evidence_pack_id=evidence["evidence_pack_id"],
+        ticker="*",
+        raw_prompt=prompt_ext.inline_value,
+        raw_response=response_ext.inline_value,
+        created_at=reviewer._utc_now(),
+        payload_json=payload_ext.inline_value,
+        raw_prompt_artifact_path=prompt_ext.artifact_path,
+        raw_prompt_sha256=prompt_ext.sha256,
+        raw_prompt_size=prompt_ext.size_bytes,
+        raw_prompt_summary_json=prompt_ext.summary_json,
+        raw_response_artifact_path=response_ext.artifact_path,
+        raw_response_sha256=response_ext.sha256,
+        raw_response_size=response_ext.size_bytes,
+        raw_response_summary_json=response_ext.summary_json,
+        payload_artifact_path=payload_ext.artifact_path,
+        payload_sha256=payload_ext.sha256,
+        payload_size=payload_ext.size_bytes,
+        payload_summary_json=payload_ext.summary_json,
     )
     candidate_payload = output.model_dump() if hasattr(output, "model_dump") else {}
     candidate_payload["agent_name"] = "researcher"
-    cursor.execute(
-        """
-        INSERT INTO causal_review_candidate (
-            id, config_id, trading_date, evidence_pack_id, ticker, side,
-            candidate_type, confidence_score, rule_validation_status,
-            created_at, valid_until, payload_json
-        ) VALUES (?, ?, ?, ?, '*', '*', ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            str(uuid.uuid4()),
-            config_id,
-            trading_date,
-            evidence["evidence_pack_id"],
-            "post_trade_causal_research",
-            reviewer._safe_float(candidate_payload.get("confidence_score"), 0.0),
-            "notes_only_pending_rule_validation",
-            reviewer._utc_now(),
-            (
-                datetime.strptime(str(trading_date)[:10], "%Y-%m-%d") + timedelta(days=10)
-            ).strftime("%Y-%m-%d"),
-            reviewer._json_dumps(candidate_payload),
-        ),
+    research_memory_writers.insert_causal_review_candidate(
+        cursor,
+        candidate_id=str(uuid.uuid4()),
+        config_id=config_id,
+        trading_date=trading_date,
+        evidence_pack_id=evidence["evidence_pack_id"],
+        candidate_type="post_trade_causal_research",
+        confidence_score=reviewer._safe_float(candidate_payload.get("confidence_score"), 0.0),
+        rule_validation_status="notes_only_pending_rule_validation",
+        created_at=reviewer._utc_now(),
+        valid_until=(
+            datetime.strptime(str(trading_date)[:10], "%Y-%m-%d") + timedelta(days=10)
+        ).strftime("%Y-%m-%d"),
+        payload_json=reviewer._json_dumps(candidate_payload),
     )
     return 1
 
@@ -1554,41 +1501,29 @@ def write_exploratory_hypotheses(
         config_id=config_id,
         trading_date=trading_date,
     )
-    cursor.execute(
-        """
-        INSERT INTO researcher_llm_notes (
-            id, config_id, trading_date, evidence_pack_id, ticker,
-            raw_prompt, raw_response, created_at, payload_json,
-            raw_prompt_artifact_path, raw_prompt_sha256,
-            raw_prompt_size, raw_prompt_summary_json,
-            raw_response_artifact_path, raw_response_sha256,
-            raw_response_size, raw_response_summary_json,
-            payload_artifact_path, payload_sha256,
-            payload_size, payload_summary_json
-        ) VALUES (?, ?, ?, ?, '*', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            note_id,
-            config_id,
-            trading_date,
-            f"exploratory:{note_id}",
-            prompt_ext.inline_value,
-            response_ext.inline_value,
-            reviewer._utc_now(),
-            payload_ext.inline_value,
-            prompt_ext.artifact_path,
-            prompt_ext.sha256,
-            prompt_ext.size_bytes,
-            prompt_ext.summary_json,
-            response_ext.artifact_path,
-            response_ext.sha256,
-            response_ext.size_bytes,
-            response_ext.summary_json,
-            payload_ext.artifact_path,
-            payload_ext.sha256,
-            payload_ext.size_bytes,
-            payload_ext.summary_json,
-        ),
+    research_memory_writers.insert_researcher_llm_note(
+        cursor,
+        note_id=note_id,
+        config_id=config_id,
+        trading_date=trading_date,
+        evidence_pack_id=f"exploratory:{note_id}",
+        ticker="*",
+        raw_prompt=prompt_ext.inline_value,
+        raw_response=response_ext.inline_value,
+        created_at=reviewer._utc_now(),
+        payload_json=payload_ext.inline_value,
+        raw_prompt_artifact_path=prompt_ext.artifact_path,
+        raw_prompt_sha256=prompt_ext.sha256,
+        raw_prompt_size=prompt_ext.size_bytes,
+        raw_prompt_summary_json=prompt_ext.summary_json,
+        raw_response_artifact_path=response_ext.artifact_path,
+        raw_response_sha256=response_ext.sha256,
+        raw_response_size=response_ext.size_bytes,
+        raw_response_summary_json=response_ext.summary_json,
+        payload_artifact_path=payload_ext.artifact_path,
+        payload_sha256=payload_ext.sha256,
+        payload_size=payload_ext.size_bytes,
+        payload_summary_json=payload_ext.summary_json,
     )
 
     valid_days = int(research_cfg.get("valid_days", learning_cfg.get("memory_expires_after_days", 30)) or 30)
@@ -1680,39 +1615,31 @@ def write_exploratory_hypotheses(
             config_id=config_id,
             trading_date=trading_date,
         )
-        cursor.execute(
-            """
-            INSERT INTO exploratory_hypothesis (
-                id, config_id, trading_date, scope_type, scope_key, ticker, sector,
-                side, horizon_class, market_regime, hypothesis_text,
-                evidence_summary, suggested_use, confidence_score, sample_count,
-                status, created_at, valid_until, payload_json,
-                payload_artifact_path, payload_sha256, payload_size, payload_summary_json
-            ) VALUES (?, ?, ?, 'research', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                hypothesis_id,
-                config_id,
-                trading_date,
-                f"{ticker}:{sector}:{side}:{horizon}:{regime}",
-                ticker,
-                sector,
-                side,
-                horizon,
-                regime,
-                text,
-                str(payload.get("evidence_summary") or ""),
-                suggested_use,
-                confidence,
-                len(episodes),
-                now,
-                valid_until,
-                hypothesis_ext.inline_value,
-                hypothesis_ext.artifact_path,
-                hypothesis_ext.sha256,
-                hypothesis_ext.size_bytes,
-                hypothesis_ext.summary_json,
-            ),
+        research_memory_writers.insert_exploratory_hypothesis(
+            cursor,
+            hypothesis_id=hypothesis_id,
+            config_id=config_id,
+            trading_date=trading_date,
+            scope_type="research",
+            scope_key=f"{ticker}:{sector}:{side}:{horizon}:{regime}",
+            ticker=ticker,
+            sector=sector,
+            side=side,
+            horizon_class=horizon,
+            market_regime=regime,
+            hypothesis_text=text,
+            evidence_summary=str(payload.get("evidence_summary") or ""),
+            suggested_use=suggested_use,
+            confidence_score=confidence,
+            sample_count=len(episodes),
+            status="candidate",
+            created_at=now,
+            valid_until=valid_until,
+            payload_json=hypothesis_ext.inline_value,
+            payload_artifact_path=hypothesis_ext.artifact_path,
+            payload_sha256=hypothesis_ext.sha256,
+            payload_size=hypothesis_ext.size_bytes,
+            payload_summary_json=hypothesis_ext.summary_json,
         )
         rows += 1
     return {"rows": rows, "status": "applied" if rows else "no_hypotheses", "episode_count": len(episodes)}

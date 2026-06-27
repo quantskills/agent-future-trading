@@ -446,10 +446,8 @@ signal_collection_contract
 推荐命令：
 
 ```powershell
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\contract_coverage_audit.py --repo-root . --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py --config src\config\dev.yaml --local-db --check-llm-auth --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.py --config src\config\dev.yaml --local-db --json
 ```
 
 `contract_coverage_audit` 是版本级只读闸门，固定检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键智能体边界有 producer-to-consumer 保真测试。它不读收益、不写 DB、不改交易。
@@ -493,10 +491,8 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 ```powershell
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m compileall src
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m unittest
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\contract_coverage_audit.py --repo-root . --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\pre_backtest_acceptance.py --config src\config\dev.yaml --check-llm-auth --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\system_invariant_audit.py --config src\config\dev.yaml --local-db --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_effectiveness_audit.py --config src\config\dev.yaml --local-db --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py --config src\config\dev.yaml --local-db --check-llm-auth --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.py --config src\config\dev.yaml --local-db --json
 ```
 
 关键测试入口：
@@ -538,7 +534,8 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\control\mechanism_eff
 - `src/tools/common/`：跨智能体公共基础能力；
 - `src/llm/prompt.py`：集中提示词和 prompt builder；
 - `src/run/backtest.py`：回测主入口；
-- `src/run/control/`：控制组命令入口；
+- `src/run/pre_backtest_test.py`：回测前测试和控制检查总入口；
+- `src/run/backtest_daily_test.py`：每日回测后测试和控制检查总入口；
 - `src/run/research/researcher_learning.py`：研究学习入口；
 - `src/tests/`：确定性测试和回归测试。
 

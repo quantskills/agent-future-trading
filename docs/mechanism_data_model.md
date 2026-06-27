@@ -1,6 +1,6 @@
 # AgentQuant 数据与模型调用机制
 
-更新时间：2026-06-25
+更新时间：2026-06-27
 
 本文档记录 AgentQuant 当前数据入口、模型调用边界、结构化输出要求和回测验收要求。它和 `docs/mechanism_multiagents.md`、`docs/unified_field_semantics.md` 共同约束代码、提示词、工具和审计。
 
@@ -22,6 +22,8 @@
 5. 缓存只减少重复读取，不改变数据可见性。
 6. 数据缺口必须显式记录，不能把“没数据”伪造成 Bullish/Bearish。
 7. 学习记录必须保留当时使用的数据依据、字段、质量状态和 no-lookahead 状态。
+8. 回测前硬数据覆盖只针对交易必须依赖的 PandaAI 市场数据：交易日窗口、交易宇宙内每个品种的日线行情、开收盘价、官方结算价和主力合约映射必须可取；缺任一项属于非策略 hard error。
+9. Finoview 基本面数据和本地新闻不要求每日齐全。它们按真实更新频率进入数据质量、证据强弱、缺失证据和降级理由；不能因为某品种某日没有基本面或新闻更新而阻断回测。
 
 ## 二、模型调用原则
 
@@ -169,7 +171,33 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 `opportunity_rank` 和 `opportunity_score` 只用于投资组合经理资金部署解释，不是交易员执行权限。
 
-## 七、验收要求
+## 七、系统事实载体契约
+
+系统事实指已经被授权事实入口正式写入 DB、artifact 或 payload，且作为下游可信事实被消费的结构化结果。DB、artifact 和 payload 只是事实载体，不是新的事实来源；同一类事实必须服从同一个授权写入口和同一套字段语义。
+
+控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 `src/tools/agent_tools/control/db_schema_contract.py` 和 `docs/unified_field_semantics.md` 检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
+
+| 事实载体 | 保存的系统事实 | 标准日期字段 | 授权写入口 | 允许保存 | 禁止保存或改写 |
+|---|---|---|---|---|---|
+| 分析师报告 artifact / `action_evidence_contract` / `artifact_json` | 盘前预测证据事实 | `trading_date` | 技术面分析师、基本面分析师、期货新闻面分析师 | 方向、触发、证据强弱、缺失、冲突、失效边界、数据可见性 | 手数、仓位、最终交易动作、`final_action_contract` |
+| 信号收集 artifact / `signal_collection_contract` | 统一结构化证据事实 | `trading_date` | 信号收集员 | 来源引用、逐条证据、方向汇总、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 历史学习结论、score/rank、仓位、手数、交易动作、`final_action_contract` |
+| `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实 | `trading_date` | 投资组合经理；换月/强平运营入口 | PM 策略路径可保存完整 `final_action_contract`、`signal_snapshot`、审计结果；运营路径只保存运营动作事实 | Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；运营推荐伪装成 PM 策略评分 |
+| `futures_intraday_decision` / Phase2 `features_json` | 盘中触发和执行判断事实 | `trading_date` | 交易员执行入口 | 触发是否成立、执行摘要、盘中行情、执行原因、成交/未成交依据 | 完整 `final_action_contract` 镜像、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` |
+| `futures_transactions` / transaction `audit_payload` | 交易员执行事实 | `trading_date` | 交易员成交写入入口 | 成交/未成交、动作、手数、品种、执行审计摘要、执行结果 | 完整 PM 合约镜像、PM 学习解释、PM 排名、PM 资金部署理由、研究记录 |
+| `daily_settlement` / `ticker_daily_pnl` | 会计师结算事实 | `trading_date` | 会计师结算入口 | PnL、手续费、保证金、权益、持仓快照、分品种盈亏 | 学习字段、LLM 字段、交易授权、研究结论 |
+| `trading_day_phase` | 阶段状态事实 | `trading_date` | 四阶段运行脚本 | Phase1/2/3/4 的 started/completed/failed 状态和消息 | 研究表写入、学习刷新、策略记忆 retention 清理 |
+| 复盘日志 artifact / Phase4 payload | 复盘事实和事实归因 | `trading_date` | 复盘员 Phase4 入口 | 链路验收、交易日志、事实归因、上游事实 ID/path 或必要摘要 | 写 action-value、写策略记忆、改推荐、改成交、改结算 |
+| `alpha_setup_action_value` | 交易决策类和校准类结构化研究成果 | `last_sample_date` | 研究员学习入口 / `research_memory_writers` | action-value、消费边界、奖励来源、证据作用域、PM 合约作为学习证据 | 修改当天 PM 合约、成交、结算或复盘事实 |
+| `adaptive_policy_state` | 未来可用的结构化研究状态 | `source_trading_date` | 研究员学习入口 / `research_memory_writers` | 研究状态、策略校准状态、来源交易日、研究 payload | 交易员直接读取下单或放宽触发；Phase4 自动刷新 |
+| `researcher_llm_notes` | 研究员 LLM 研究 notes | `trading_date` | 研究员学习入口 | 研究输入、研究输出、结构化研究 payload、raw prompt/response | 当天交易指令、手数、成交、结算改写 |
+
+`execution_contract` 只能作为交易员触发/执行配置摘要使用，不是第二张交易合约。它只能从已审计的 `final_action_contract` 中抽取执行规则字段，例如 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes`、`execution_action_value_preference` 和 `analyst_execution_roles`；不得携带 `target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。交易员执行动作和手数摘要只能来自已审计 `final_action_contract` 的必要执行字段摘要，不能由 `execution_contract` 单独授权。
+
+Transaction audit payload 可以保存交易员执行事实和执行审计摘要，不能保存完整 PM 合约副本。需要追溯上游来源时，只能记录 `recommendation_id`、上游 artifact path 或必要执行摘要。
+
+研究员可以在研究学习事实中保存完整 PM 合约作为上游证据，用于未来分析与决策策略迭代；该保存只能发生在研究员学习入口，不能发生在 Phase4 复盘入口，也不能反向修改当天推荐、成交、结算、复盘或阶段状态。
+
+## 八、验收要求
 
 回测前必须检查：
 
@@ -180,7 +208,9 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 - `no_final_action_authority`；
 - 投资组合经理不调用 LLM；
 - 交易员不读研究库或研究记录下单；
-- 研究员输出必须结构化。
+- 研究员输出必须结构化；
+- 回测区间内交易宇宙每个品种的 PandaAI 日线行情、开收盘价、官方结算价和主力合约映射必须通过硬覆盖检查；
+- 基本面和新闻只检查可见性、时间边界和质量降级，不做每日齐全硬拦。
 
 回测中每日必须检查：
 

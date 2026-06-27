@@ -1,24 +1,9 @@
 ﻿# PM 与市场确认策略目录。
 # 由 config_normalizer.py 展开到 market_confirmation / directional_override_control / portfolio_manager。
 # 这些是冷启动业务策略，不是交易所事实；任何学习校准都不能突破 20% 总保证金硬上限。
-
-gatekeeping_policy:
-  # 统一门控语义，不是新增一套交易权限。
-  # block/cap/probe 只允许作为 reason code 或软风险标签出现，业务上必须先被 reason_effects.py
-  # 解释为 hard_block / soft_limit / learning_adjustment / release_signal，再由 PM 在唯一出口仲裁。
-  # 统一出口主线：所有 scorecard、action-value、lifecycle 和 learning 信号只生成 action candidate；
-  # 最终交易事实只能来自 final_action_contract。
-  mode: pm_final_authority_arbiter
-  final_authority_fields: [authority_type, lots_delta, margin_ratio, reason_codes, authority_decision]
-  hard_risk_role: must_block
-  soft_risk_role: tag_then_pm_arbitrate
-  release_signal_role: may_release_soft_risk_only_with_current_evidence
-  auditor_role: hard_risk_and_exit_consistency_only
-  trader_role: execute_authorized_plan_only
-  legacy_block_cap_fields_are_trade_authority: false
-  soft_risk_tags_do_not_compound_to_zero: true
-  release_signals_cannot_override_hard_risk: true
-  preserve_user_budget_parameters: true
+# 门控机制不是可调 YAML 参数：block/cap/probe 只允许作为 reason code 或软风险标签出现，
+# 必须先经 reason_effects.py 解释，再由 PM 授权事实入口仲裁；最终交易事实只能来自
+# final_action_contract。完整机制边界见 docs/mechanism_multiagents.md。
 
 market_confirmation:
   # 用 PandaAI 扩展数据确认、缩放或阻断 Phase1 目标方向。
@@ -108,7 +93,7 @@ trade_auditor:
 
 trade_frequency_control:
   # 通用历史样本保护。这里产生的是 reason code / soft risk tag，
-  # 业务上先经 reason_effects.py 归类为软风险或学习调整，再由 PM 唯一出口仲裁。
+  # 业务上先经 reason_effects.py 归类为软风险或学习调整，再由 PM 授权事实入口仲裁。
   # 它们不能单独成为真实开仓依据，也不能单独永久封杀交易。
   enabled: true
   lookback_trades: 20

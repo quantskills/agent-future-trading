@@ -374,14 +374,14 @@ def calibrate_signal_with_learning_context(
     """
     context = dict(learning_context or {})
     alpha_profiles = list(context.get("alpha_setup_items") or [])
-    alpha_action_values = [
+    analyst_calibration_items = [
         safe_row
-        for row in list(context.get("alpha_setup_action_values") or [])
+        for row in list(context.get("analyst_calibration_items") or [])
         if isinstance(row, Mapping)
         for safe_row in [_analyst_safe_action_value_row(row)]
         if safe_row is not None
     ]
-    rows: List[Mapping[str, Any]] = [row for row in alpha_profiles + alpha_action_values if isinstance(row, Mapping)]
+    rows: List[Mapping[str, Any]] = [row for row in alpha_profiles + analyst_calibration_items if isinstance(row, Mapping)]
 
     matched = _matching_rows(rows, signal, ticker)
     broad = _broad_matching_rows(rows, signal, ticker)

@@ -1,6 +1,5 @@
 ﻿import json
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +17,29 @@ from tools.agent_tools.control.system_invariants import audit_system_invariants
 
 def _dumps(value):
     return json.dumps(value, ensure_ascii=False)
+
+
+def _transaction_audit_payload(payload):
+    contract = payload.get("final_action_contract") if isinstance(payload, dict) else {}
+    audit = payload.get("trade_contract_audit") if isinstance(payload, dict) else {}
+    result = {
+        "trade_contract_audit": {
+            "single_source_of_trade_truth": bool((audit or {}).get("single_source_of_trade_truth", True)),
+            "candidate_sources_do_not_bypass_contract": bool((audit or {}).get("candidate_sources_do_not_bypass_contract", True)),
+            "execution_requirement": (audit or {}).get("execution_requirement") or (contract or {}).get("execution_requirement"),
+            "final_action": (contract or {}).get("final_action"),
+            "current_lots": (contract or {}).get("current_lots"),
+            "target_lots": (contract or {}).get("target_lots"),
+            "lots_delta": (contract or {}).get("lots_delta"),
+        }
+    }
+    translation = payload.get("execution_translation") if isinstance(payload, dict) else None
+    if isinstance(translation, dict):
+        result["execution_translation"] = translation
+    phase2 = payload.get("phase2_execution") if isinstance(payload, dict) else None
+    if isinstance(phase2, dict):
+        result["phase2_execution"] = phase2
+    return result
 
 
 class SystemInvariantAuditRegressionTest(unittest.TestCase):
@@ -87,6 +109,23 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     features_json TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE portfolio (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    current_balance REAL DEFAULT 0
+                );
+                CREATE TABLE daily_settlement (
+                    id TEXT PRIMARY KEY,
+                    portfolio_id TEXT NOT NULL,
+                    trading_date TEXT NOT NULL,
+                    daily_pnl REAL DEFAULT 0,
+                    commission REAL DEFAULT 0,
+                    current_balance REAL DEFAULT 0,
+                    current_margin REAL DEFAULT 0,
+                    margin_ratio REAL DEFAULT 0,
+                    positions_snapshot TEXT,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE alpha_setup_action_value (
                     id TEXT PRIMARY KEY,
                     config_id TEXT NOT NULL,
@@ -120,6 +159,38 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     active INTEGER DEFAULT 1,
                     payload_json TEXT
                 );
+                CREATE TABLE adaptive_policy_state (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    ticker TEXT,
+                    side TEXT,
+                    setup_type TEXT,
+                    horizon_class TEXT,
+                    market_regime TEXT,
+                    policy_type TEXT,
+                    policy_action TEXT,
+                    multiplier REAL DEFAULT 1,
+                    confidence_score REAL DEFAULT 0,
+                    sample_count INTEGER DEFAULT 0,
+                    reason TEXT,
+                    source_event_id TEXT,
+                    source_trading_date TEXT,
+                    valid_until TEXT,
+                    active INTEGER DEFAULT 1,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE researcher_llm_notes (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    trading_date TEXT NOT NULL,
+                    evidence_pack_id TEXT,
+                    ticker TEXT,
+                    raw_prompt TEXT,
+                    raw_response TEXT,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE trading_day_phase (
                     id TEXT PRIMARY KEY,
                     config_id TEXT NOT NULL,
@@ -135,6 +206,10 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 "INSERT INTO config(id, exp_name, updated_at, tickers, llm_model, llm_provider) VALUES (?, ?, ?, ?, ?, ?)",
                 ("cfg", "agentquant-test", datetime.utcnow().isoformat(), _dumps(["RB"]), "fake", "fake"),
+            )
+            conn.execute(
+                "INSERT INTO portfolio(id, config_id, current_balance) VALUES (?, ?, ?)",
+                ("pf", "cfg", 1000000.0),
             )
             conn.commit()
         finally:
@@ -255,6 +330,49 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     1,
                     _dumps({"action_preference": "positive_candidate_open", "amplification_scope_quality": "exact_real_state", "reward_source": "trade_episode"}),
                 ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_system_invariant_audit_reports_schema_contract_errors_without_sql_crash(self):
+        db_path = self._make_db()
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DROP TABLE researcher_llm_notes")
+            conn.execute(
+                """
+                CREATE TABLE researcher_llm_notes (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT NOT NULL,
+                    source_trading_date TEXT,
+                    ticker TEXT,
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertIn(
+            "schema_missing_required_column:researcher_llm_notes:trading_date",
+            report.errors,
+            report.to_dict(),
+        )
+        self.assertIn("data_time_boundary", report.metadata["failed_categories"])
+
+    def _mutate_recommendation_payload(self, db_path: Path, mutator):
+        conn = sqlite3.connect(db_path)
+        try:
+            payload = json.loads(conn.execute("SELECT signal_snapshot FROM futures_recommendation WHERE id='rec1'").fetchone()[0])
+            mutator(payload)
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(payload), _dumps(payload)),
             )
             conn.commit()
         finally:
@@ -749,7 +867,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 SET ticker=?, action=?, lots=?, trading_date=?, audit_payload=?
                 WHERE id='tx1'
                 """,
-                ("M", "close_long", 4, "2025-03-06", _dumps(payload)),
+                ("M", "close_long", 4, "2025-03-06", _dumps(_transaction_audit_payload(payload))),
             )
             conn.execute(
                 """
@@ -1146,7 +1264,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
             )
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1202,7 +1320,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
             )
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1253,7 +1371,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
             )
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1274,7 +1392,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "final_action_contract": {"final_action": "wait", "authority_type": "watchlist_only"},
                 "trade_contract_audit": {"single_source_of_trade_truth": True, "candidate_sources_do_not_bypass_contract": True},
             }
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(bad_payload),))
+            conn.execute(
+                "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                (_dumps(bad_payload), _dumps(bad_payload)),
+            )
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(bad_payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1437,6 +1559,190 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             any(error.startswith("opportunity_ranking_field_used_in_execution_trade_intent") for error in report.errors),
             report.to_dict(),
         )
+        self.assertTrue(
+            any(error.startswith("transaction_audit_payload_forbidden_pm_contract_mirror") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_pm_artifact_downstream_fact(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["final_action_contract"]["execution_result"] = {"status": "filled"}
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_artifact_forbidden_downstream_field") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_auditor_artifact_contract_mutation(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["audit_verdict"] = {
+                "verdict": "pass",
+                "new_final_action_contract": {"final_action": "open_real", "target_lots": -9},
+            }
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("auditor_artifact_forbidden_contract_mutation") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_trader_artifact_pm_explanation_fields(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["phase2_execution"] = {
+                "pm_plan_validation": {
+                    "target_lots": -2,
+                    "position_sizing_result": {"capital_allocation_reason": "ranked first"},
+                }
+            }
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("trader_artifact_forbidden_pm_explanation") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_accountant_artifact_learning_and_trade_mutation(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO daily_settlement(
+                    id, portfolio_id, trading_date, daily_pnl, commission, current_balance,
+                    current_margin, margin_ratio, positions_snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "set1",
+                    "pf",
+                    "2025-03-03",
+                    100.0,
+                    10.0,
+                    1000100.0,
+                    6600.0,
+                    0.0066,
+                    _dumps(
+                        {
+                            "positions": [],
+                            "learning_used": {"alpha_setup_action_values": []},
+                            "final_action_contract": {"target_lots": -2},
+                        }
+                    ),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("accountant_artifact_forbidden_learning_field") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(
+            any(error.startswith("accountant_artifact_forbidden_trade_action_mutation") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_reviewer_artifact_research_write(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["phase4_review"] = {
+                "validation_status": "completed",
+                "alpha_setup_action_value": {"action_preference": "positive_candidate_open"},
+                "adaptive_policy_state": {"policy_type": "open_amplification"},
+            }
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("reviewer_artifact_forbidden_action_value_write") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(
+            any(error.startswith("reviewer_artifact_forbidden_research_state_write") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_researcher_artifact_trade_fact_mutation(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE alpha_setup_action_value SET payload_json=? WHERE id='av1'",
+                (_dumps({"trade_fact_mutation": {"modified_final_action_contract": {"target_lots": -9}}}),),
+            )
+            conn.execute(
+                """
+                INSERT INTO adaptive_policy_state(
+                    id, config_id, ticker, side, policy_type, source_trading_date, active, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "aps1",
+                    "cfg",
+                    "RB",
+                    "short",
+                    "analyst_calibration",
+                    "2025-03-03",
+                    1,
+                    _dumps({"settlement_override": {"daily_pnl": 999.0}}),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO researcher_llm_notes(id, config_id, trading_date, evidence_pack_id, ticker, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "note1",
+                    "cfg",
+                    "2025-03-03",
+                    "pack1",
+                    "RB",
+                    _dumps({"rewritten_final_action_contract": {"target_lots": -9}}),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertGreaterEqual(
+            sum(error.startswith("researcher_artifact_forbidden_trade_fact_mutation") for error in report.errors),
+            3,
+            report.to_dict(),
+        )
 
     def test_system_invariant_audit_allows_conditional_trigger_probe_after_intraday_confirmation(self):
         db_path = self._make_db()
@@ -1466,7 +1772,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
             )
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1503,7 +1809,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "execution_translation": {"intraday_execution": {"trigger_passed": False}},
             }
             conn.execute("DELETE FROM futures_intraday_decision WHERE id='intra1'")
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1539,7 +1845,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
-            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(payload),))
+            conn.execute("UPDATE futures_transactions SET audit_payload=? WHERE id='tx1'", (_dumps(_transaction_audit_payload(payload)),))
             conn.commit()
         finally:
             conn.close()
@@ -1597,6 +1903,81 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
+    def test_transaction_payload_final_contract_is_not_authoritative_source(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        recommendation_contract = {
+            "contract_version": "agentquant.final_action.v1",
+            "ticker": "BU",
+            "contract_type": "strategy",
+            "final_action": "hold",
+            "current_lots": -10,
+            "target_lots": -10,
+            "lots_delta": 0,
+            "authority_type": "not_applicable",
+            "reason_codes": ["position_matched"],
+            "execution_requirement": "position_management_or_wait",
+            "single_source_of_trade_truth": True,
+            "candidate_sources_do_not_bypass_contract": True,
+        }
+        recommendation_payload = {
+            "final_action_contract": recommendation_contract,
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+                "final_action": "hold",
+                "current_lots": -10,
+                "target_lots": -10,
+                "lots_delta": 0,
+            },
+        }
+        rogue_transaction_payload = {
+            "final_action_contract": {
+                "contract_version": "agentquant.final_action.v1",
+                "ticker": "BU",
+                "contract_type": "strategy",
+                "final_action": "exit",
+                "current_lots": -10,
+                "target_lots": 0,
+                "lots_delta": 10,
+                "authority_type": "not_applicable",
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+            },
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+                "final_action": "exit",
+                "current_lots": -10,
+                "target_lots": 0,
+                "lots_delta": 10,
+            },
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE futures_recommendation SET underlying_code=?, action=?, lots=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
+                ("BU", "hold", 0, _dumps(recommendation_payload), _dumps(recommendation_payload)),
+            )
+            conn.execute(
+                "UPDATE futures_transactions SET ticker=?, action=?, lots=?, audit_payload=? WHERE id='tx1'",
+                ("BU", "close_short", 10, _dumps(rogue_transaction_payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("transaction_not_derived_from_final_action_contract") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(
+            any(error.startswith("transaction_audit_payload_forbidden_pm_contract_mirror") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_accepts_reduce_transaction_from_contract_delta(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -1633,7 +2014,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             )
             conn.execute(
                 "UPDATE futures_transactions SET ticker=?, action=?, lots=?, audit_payload=? WHERE id='tx1'",
-                ("BU", "close_short", 3, _dumps(payload)),
+                ("BU", "close_short", 3, _dumps(_transaction_audit_payload(payload))),
             )
             conn.commit()
         finally:
@@ -1678,7 +2059,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             )
             conn.execute(
                 "UPDATE futures_transactions SET ticker=?, action=?, lots=?, audit_payload=? WHERE id='tx1'",
-                ("ZN", "close_short", 4, _dumps(payload)),
+                ("ZN", "close_short", 4, _dumps(_transaction_audit_payload(payload))),
             )
             conn.commit()
         finally:
@@ -2667,7 +3048,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             conn.execute(
                 """
-                CREATE TABLE adaptive_policy_state (
+                CREATE TABLE IF NOT EXISTS adaptive_policy_state (
                     id TEXT PRIMARY KEY,
                     config_id TEXT NOT NULL,
                     ticker TEXT NOT NULL,
@@ -2745,7 +3126,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         try:
             conn.execute(
                 """
-                CREATE TABLE adaptive_policy_state (
+                CREATE TABLE IF NOT EXISTS adaptive_policy_state (
                     id TEXT PRIMARY KEY,
                     config_id TEXT NOT NULL,
                     ticker TEXT NOT NULL,
@@ -2825,25 +3206,9 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(SRC_ROOT / "run" / "control" / "system_invariant_audit.py"),
-                "--config",
-                str(SRC_ROOT / "config" / "dev.yaml"),
-                "--config-id",
-                "cfg",
-                "--db-path",
-                str(db_path),
-                "--json",
-            ],
-            cwd=str(PROJECT_ROOT),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
-        self.assertIn("intraday_trigger_audit_mirror_mismatch", completed.stdout)
+        report = audit_system_invariants(db_path=db_path, config_id="cfg")
+        self.assertFalse(report.ok, report.to_dict())
+        self.assertIn("intraday_trigger_audit_mirror_mismatch", "\n".join(report.errors))
 
 
 if __name__ == "__main__":

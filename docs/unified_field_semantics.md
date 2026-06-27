@@ -290,6 +290,8 @@
 | `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / PM 学习审计 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
+| `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 抽取的触发/执行配置摘要，不是第二张交易合约。只能包含 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes`、`execution_action_value_preference`、`analyst_execution_roles` 等执行规则字段；不得包含 `target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
+| `final_contract_execution_fields` | Trader Phase2 执行学习上下文 / 执行摘要 | 从已审计 `final_action_contract` 抽取的执行必要字段摘要，可用于记录执行来源和复盘追溯；不是第二张交易合约，不能携带 PM 学习、排名、资金部署解释。 |
 | `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |

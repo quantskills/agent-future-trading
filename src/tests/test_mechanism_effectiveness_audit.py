@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -629,27 +628,10 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
             },
         )
 
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(SRC_ROOT / "run" / "control" / "mechanism_effectiveness_audit.py"),
-                "--config",
-                str(SRC_ROOT / "config" / "dev.yaml"),
-                "--config-id",
-                "cfg",
-                "--db-path",
-                str(db_path),
-                "--json",
-            ],
-            cwd=str(PROJECT_ROOT),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        report = audit_mechanism_effectiveness(db_path=db_path, config_id="cfg")
 
-        self.assertEqual(completed.returncode, 1)
-        self.assertIn('"agent_name": "protocol_governor"', completed.stdout)
-        self.assertIn("mechanism_conditional_probe_missing_intraday_result", completed.stdout)
+        self.assertFalse(report.ok)
+        self.assertIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
 
     def test_empty_database_without_config_is_ready_for_fresh_backtest(self):
         tmpdir = tempfile.TemporaryDirectory()

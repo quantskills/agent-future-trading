@@ -8,9 +8,11 @@ strategy profitability, read trade records, write the database, or modify any
 contract.
 """
 
+import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+import sys
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 
@@ -235,14 +237,14 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         consumers=(
             _rule(
                 "src/tools/agent_tools/control/system_invariants.py",
-                ("transaction_audit_payload", "opportunity_ranking_field_used_in_execution_trade_intent"),
-                "system invariant audit reads runtime artifacts and rejects PM explanation fields in execution intent",
+                ("_audit_artifact_phase_boundaries", "artifact_forbidden"),
+                "system invariant audit reads runtime artifacts and rejects cross-stage artifact boundary violations",
             ),
         ),
         audits=(
             _rule(
                 "docs/mechanism_multiagents.md",
-                ("artifact 保存边界", "Phase2 artifact"),
+                ("artifact 保存边界", "PM recommendation artifact", "Researcher artifact"),
                 "mechanism document fixes per-stage artifact persistence boundaries",
             ),
         ),
@@ -257,15 +259,24 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 ("test_system_invariant_audit_rejects_transaction_payload_pm_explanation_trade_intent",),
                 "system invariant tests reject old transaction audit payload PM explanation mirrors",
             ),
+            _rule(
+                "src/tests/test_system_invariant_audit.py",
+                (
+                    "test_system_invariant_audit_rejects_pm_artifact_downstream_fact",
+                    "test_system_invariant_audit_rejects_accountant_artifact_learning_and_trade_mutation",
+                    "test_system_invariant_audit_rejects_researcher_artifact_trade_fact_mutation",
+                ),
+                "system invariant tests cover PM, Auditor, Trader, Accountant, Reviewer, and Researcher artifact boundaries",
+            ),
         ),
     ),
     ContractCoverageSpec(
         contract="alpha_setup_action_value",
         producers=(
             _rule(
-                "src/tools/agent_tools/research/alpha_setup.py",
-                ("upsert_alpha_setup_sample_and_profile", "INSERT INTO alpha_setup_action_value"),
-                "Researcher writes structured action-value rows",
+                "src/tools/agent_tools/research/research_memory_writers.py",
+                ("upsert_alpha_setup_action_value", "INSERT INTO alpha_setup_action_value"),
+                "Researcher writes structured action-value rows through the authorized research writer",
             ),
             _rule(
                 "src/database/sqlite_setup.py",
@@ -661,7 +672,7 @@ def _iter_python_files(repo_root: Path) -> Iterable[Path]:
         return []
     excluded = {
         "src/tools/agent_tools/control/contract_coverage_audit.py",
-        "src/run/control/contract_coverage_audit.py",
+        "src/run/pre_backtest_test.py",
     }
     candidates: List[Path] = []
     for path in src_root.rglob("*.py"):
@@ -732,7 +743,7 @@ def _scan_bare_writes(repo_root: Path) -> List[str]:
 def _scan_alpha_setup_action_value_insert_paths(repo_root: Path) -> List[str]:
     errors: List[str] = []
     allowed = {
-        "src/tools/agent_tools/research/alpha_setup.py",
+        "src/tools/agent_tools/research/research_memory_writers.py",
         "src/database/sqlite_setup.py",
     }
     pattern = "INSERT INTO alpha_setup_action_value"
@@ -799,12 +810,18 @@ def _scan_config_prompt_alignment(repo_root: Path) -> List[str]:
             "learning_consumer_scopes",
             "pm_allowed_consumer_scope",
             "trader_direct_research_consumption_allowed",
+            "授权事实入口",
         ),
         "src/config/portfolio_policy_catalog.yaml": (
             "consumer_scope=pm_learning",
             "Trader 不读研究记录",
+            "授权事实入口",
         ),
         "src/llm/prompt.py": (
+            "SYSTEM_FACT_ENTRY_BOUNDARY",
+            "system_fact_entry_boundary",
+            "ARTIFACT_PHASE_BOUNDARY",
+            "artifact_phase_boundary",
             "consumer_scope=pm_learning",
             "consumer_scope=trader_execution_learning",
             "consumer_scope=analyst_calibration",
@@ -861,7 +878,32 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
     )
 
 
-def dumps_contract_coverage_report(report: ContractCoverageAuditReport) -> str:
+def dumps_contract_coverage_report(report: ContractCoverageAuditReport, *, ensure_ascii: bool = False) -> str:
     import json
 
-    return json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+    return json.dumps(report.to_dict(), ensure_ascii=ensure_ascii, indent=2)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run read-only contract coverage audit.")
+    parser.add_argument(
+        "--repo-root",
+        default=str(Path(__file__).resolve().parents[4]),
+        help="AgentQuant repository root. Defaults to this script's repository.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print JSON report.")
+    args = parser.parse_args(argv)
+
+    report = audit_contract_coverage(args.repo_root)
+    if args.json:
+        print(dumps_contract_coverage_report(report, ensure_ascii=True))
+    else:
+        status = "ok" if report.ok else "failed"
+        print(f"contract_coverage_audit:{status}")
+        for error in report.errors:
+            print(error)
+    return 0 if report.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

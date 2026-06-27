@@ -159,8 +159,6 @@ def _apply_portfolio_policy_catalog(
     cfg.setdefault("_config_parameter_roles", {})
     roles = cfg["_config_parameter_roles"]
     if isinstance(roles, dict):
-        if isinstance(payload.get("gatekeeping_policy"), Mapping):
-            roles["portfolio_policy.gatekeeping_policy"] = "pm_final_authority_arbiter_semantics_not_parallel_trade_authority"
         roles["market_confirmation"] = "portfolio_policy_catalog_runtime_expanded"
         roles["directional_override_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["portfolio_manager"] = "portfolio_policy_catalog_runtime_expanded"

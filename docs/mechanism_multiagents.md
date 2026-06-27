@@ -150,6 +150,67 @@ Phase4 完成后，研究学习单独运行：
 
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
 
+## 五、系统事实统一入口
+
+系统事实指已经被系统正式写入 DB、artifact 或 payload，且作为下游可信事实并消费的结构化结果。系统事实不是智能体的内部推理过程，也不是展示用自由文本；一旦进入 DB、artifact 或 payload，下游就必须能判断它属于哪一类事实、由谁产生、谁能消费、谁不能改写。
+
+事实入口指某类系统事实被正式写入 DB、artifact 或 payload，并被下游允许消费的唯一授权写入点。入口是从系统治理角度命名的：虽然具体动作是智能体把结果写出去，但对整个系统来说，是该类事实进入后续流程的唯一入口。
+
+统一规则：
+
+- 每类系统事实只有一个授权事实入口。
+- DB、artifact、payload 只是同一事实入口下的不同持久化载体，不是三套事实来源。
+- 如果同一事实需要同时写入 DB、artifact 和 payload，必须由同一个授权入口统一写入。
+- 下游可以记录上游事实的 ID、路径或必要摘要，用于追溯来源；但不能把上游完整对象复制成自己的事实输出。
+- 控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 DB schema 契约和字段语义表检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
+- 任何模块绕过授权事实入口写入、复制或改写其他智能体事实，都属于非策略 hard error。
+
+| 系统事实类型 | 唯一授权事实入口 | 允许写入的事实 | 只能读不能写的模块 | 禁止行为 |
+|---|---|---|---|---|
+| 预测证据事实 | 技术面分析师、基本面分析师、期货新闻面分析师的分析师输出入口 | `AnalystSignal`、`action_evidence_contract`、方向、触发、证据强弱、失效边界、数据质量 | 信号收集员、投资组合经理、审计员、复盘员、研究员、控制审计 | 写手数、仓位、最终交易动作、`final_action_contract` |
+| 信号收集事实 | `signal_collector` 信号收集员输出入口 | `signal_collection_contract`、来源引用、逐条证据、共识/冲突、缺失、风险、失效边界 | 投资组合经理、审计员、复盘员、研究员、控制审计 | 写历史学习结论、score/rank、手数、交易动作、`final_action_contract` |
+| 策略交易事实 | `portfolio_manager` 投资组合经理唯一合约写入入口 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、`capital_allocation_reason` | 审计员、交易员、会计师、复盘员、研究员、控制审计 | 由非 PM 模块新建、复制成第二套、改写或补写交易合约 |
+| 审计事实 | `auditor` 审计员审计结果写入入口 | `audit_verdict`、hard/soft risk reasons、只读审计 payload | 投资组合经理、交易员、复盘员、控制审计 | 改方向、改手数、新建合约、直接消费研究记忆改交易权限 |
+| 执行事实 | `trader` 交易员执行结果写入入口 | 成交/未成交、触发事实、`execution_result`、`execution_learning_trace`、执行必要字段摘要 | 会计师、复盘员、研究员、控制审计 | 保存完整 PM 合约镜像、保存 PM 学习/排名/资金解释字段、读取研究库下单 |
+| 结算事实 | `accountant` 会计师结算写入入口 | `daily_settlement`、PnL、手续费、滑点、保证金、权益、持仓状态 | 复盘员、研究员、控制审计 | 用 LLM、学习或复盘改账；写交易动作或研究学习字段 |
+| 复盘事实 | `reviewer` 复盘员 Phase4 写入入口 | Phase4 验收、完整交易日志、事实归因、研究输入材料、上游引用 | 研究员、控制审计 | 下单、调仓、写最终 action-value、写研究状态、触发研究员 LLM |
+| 研究学习事实 | `researcher` 研究员学习写入入口 | 结构化研究信息、分析师校准类研究、交易决策类 action-value、profile、state、执行学习 | 分析师、`decision_memory_retrieval`、投资组合经理、控制审计 | 修改当天合约、成交、结算、PnL、交易员权限；把自由文本当下游研究结论 |
+| 控制治理事实 | 协议管理员和控制审计报告入口 | 契约覆盖、系统不变量、机制断链、schema 契约、回测前/每日非策略风险报告 | 开发者、回测闸门 | 生成交易动作、改手数、写业务表、评价策略收益为 pass/fail |
+
+事实入口到代码落点的收口目标如下。该表是后续代码扫描和改造的施工表；如果当前代码与该表不一致，以本表为目标收敛，但不得为满足表格新增重复事实或第二套字段语义。
+
+| 系统事实类型 | 授权入口 | DB 表 | artifact / payload 载体 | 后续代码收口目标 |
+|---|---|---|---|---|
+| 预测证据事实 | 分析师结构化输出入口 | 分析师信号/上下文相关表 | 分析师报告 artifact、`action_evidence_contract`、`artifact_json` | 分析师输出统一经过结构化证据构造与校验；禁止分析师 artifact 或 payload 携带手数、仓位或最终交易动作。 |
+| 信号收集事实 | `signal_collector` 信号收集员输出入口 | 信号收集或推荐前上下文记录 | `signal_collection_contract`、来源引用、证据摘要 payload | 信号收集员只聚合分析师正式输出；禁止读取研究库、写 score/rank、写手数或生成交易合约。 |
+| 策略交易事实 | `portfolio_manager` 投资组合经理推荐/合约写入入口 | `futures_recommendation` | PM recommendation artifact、`signal_snapshot`、`final_action_contract` payload | 完整 `final_action_contract` 只能由 PM 推荐写入路径产生；其他阶段只能引用 `recommendation_id`、路径或执行必要摘要。 |
+| 审计事实 | `auditor` 审计结果写入入口 | 推荐记录中的审计结果或审计 payload 载体 | `audit_verdict`、`audit_payload`、risk reasons | 审计员只写审计结论和风险原因；不得写新合约、改目标手数或直接消费研究记忆改交易权限。 |
+| 执行事实 | `trader` 交易员执行写入入口 | `futures_transactions`、`futures_intraday_decision` | `execution_result`、`execution_learning_trace`、Phase2 execution artifact、transaction audit payload | Phase2 和 transaction payload 只能保存执行事实、触发事实和执行必要摘要；禁止镜像完整 PM 合约、PM 学习、排名或资金解释字段。 |
+| 结算事实 | `accountant` 会计师结算写入入口 | `daily_settlement`、持仓/组合结算相关表 | settlement payload、positions snapshot、结算日志 | 结算只能由成交、结算价、费用、保证金和持仓事实计算；禁止学习、LLM 或复盘改账。 |
+| 复盘事实 | `reviewer` 复盘员 Phase4 写入入口 | `trading_day_phase`、复盘日志索引或相关只读记录 | Phase4 review artifact、完整交易日志、事实归因、研究输入材料 | 复盘只验证 Phase1-3 和写事实归因；禁止写 action-value、研究状态或触发研究员 LLM。 |
+| 研究学习事实 | `researcher_learning.py` 和 `research_memory_writers` | `alpha_setup_action_value`、`alpha_setup_profile`、`adaptive_policy_state`、`researcher_llm_notes` | research artifact、action-value payload、profile/state payload、研究员 LLM notes | 研究写入统一由研究员学习入口和研究写入工具承担；只能影响未来交易日，不得修改当天交易、执行、结算或复盘事实。 |
+| 控制治理事实 | 控制组只读审计入口 | 不写业务表；只读核心运行表 | 契约覆盖报告、系统不变量报告、机制审计报告、schema 契约报告 | 控制审计只能按 DB schema 契约和字段语义表读取标准事实；禁止手写猜字段、写业务表、生成交易动作或评价收益为 pass/fail。 |
+
+事实入口与载体关系固定为：
+
+```text
+授权智能体 / 授权工具
+        |
+        v
+唯一事实入口
+        |
+        |-- DB 表记录
+        |-- artifact 文件
+        |-- payload / payload_json / signal_snapshot / audit_payload 等结构化容器
+        |
+        v
+下游只读消费
+```
+
+同一事实可以有多种载体，但不能有多个入口。例如完整 `final_action_contract` 可以在 PM recommendation DB 记录、PM recommendation artifact 或 PM payload 中保存；但它不能被交易员 Phase2 artifact、transaction audit payload、复盘 artifact 或研究 artifact 复制成自己的事实输出。下游如需追溯来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径、摘要字段或执行必要字段摘要。
+
+事实入口边界不改变多智能体底层逻辑：LLM 仍用于分析师和研究员形成结构化预测证据或结构化研究成果；学习仍通过研究员输出、分析师校准和投资组合经理记忆读取影响未来分析与决策；投资组合经理仍是唯一策略交易合约签发者；交易员仍按合约执行。事实入口边界只禁止旁路写入、重复复制和跨阶段改写，不是交易门控，也不能因为没有副本而压死交易。
+
 ### 工具目录边界
 
 工具目录按功能边界分类，不按智能体名字分类：
@@ -168,7 +229,7 @@ Phase4 完成后，研究学习单独运行：
 - 禁止新增 `*_tools`、`pm_*`、`trader_*`、`reviewer_tools`、`researcher_tools` 这类泛称或角色名工具。
 - 跨多类智能体共享、且不表达业务动作权限的基础 helper 才能放入 `src/tools/common`。
 
-## 五、投资组合经理工具契约
+## 六、投资组合经理工具契约
 
 ### `decision_memory_retrieval`
 
@@ -252,7 +313,7 @@ Phase4 完成后，研究学习单独运行：
 
 投资组合经理使用三个工具输出后，仍由投资组合经理自己决定 `final_action`，并把 `current_lots/target_lots/lots_delta/final_action` 写入唯一 `final_action_contract`。
 
-## 六、完整链路图
+## 七、完整链路图
 
 ```text
 行情 / 基本面 / 新闻 / 历史价格
@@ -349,7 +410,7 @@ Phase4 完成后，研究学习单独运行：
                            不调 LLM
 ```
 
-## 七、研究信息消费边界
+## 八、研究信息消费边界
 
 ### 直接消费研究信息
 
@@ -373,7 +434,7 @@ Phase4 完成后，研究学习单独运行：
 
 研究员输出给下游的内容必须是结构化研究信息，并按直接或间接消费边界使用；持久化到研究库只是保存方式。自由文本可以解释研究原因，但不能成为下游直接消费的研究结论。
 
-## 八、artifact 保存边界
+## 九、artifact 保存边界
 
 智能体输入输出定义的是业务事实；artifact 是这些事实的持久化载体。artifact 可以引用上游记录，但不能把上游完整对象无差别复制成下游自己的输出。每个阶段落盘前必须遵守以下边界：
 
@@ -395,7 +456,7 @@ Phase4 完成后，研究学习单独运行：
 - `system_invariant_audit.py` 必须检查执行 artifact 中是否出现 PM 排名、学习或资金解释字段与交易意图字段同节点混用；出现时属于非策略 hard error。
 - `contract_coverage_audit.py` 必须覆盖 artifact 阶段边界的 producer、consumer、audit 和 test。
 
-## 九、关键字段契约
+## 十、关键字段契约
 
 ### 分析师到信号收集员
 
@@ -450,7 +511,7 @@ Phase4 完成后，研究学习单独运行：
 
 交易员只能从审计通过后的 `final_action_contract.current_lots/target_lots/lots_delta/final_action` 和合约内 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 执行策略单。`opportunity_rank/opportunity_score/learning_used` 不是交易员权限，研究库、action-value、`strategy_memory`、`adaptive_policy_state` 也不是交易员触发放宽权限。
 
-## 十、提示词契约
+## 十一、提示词契约
 
 提示词是智能体契约的一部分。AgentQuant 的提示词集中在 `src/llm/prompt.py` 管理；涉及智能体输入、输出、禁止项、字段语义、LLM 权限边界的改造，必须同步检查和更新提示词。
 
@@ -473,7 +534,7 @@ Phase4 完成后，研究学习单独运行：
 
 不调用 LLM 的智能体和工具不得新增提示词入口；若代码仍保留旧提示词，改造时必须删除。
 
-## 十一、生命周期场景
+## 十二、生命周期场景
 
 投资组合经理生成合约时必须按交易生命周期解释：
 
@@ -487,17 +548,19 @@ Phase4 完成后，研究学习单独运行：
 
 减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。开仓/加仓和资金部署场景必须保留 score/rank/资金理由。
 
-## 十二、回测前后验收
+## 十三、回测前后验收
 
-回测前：
+回测前统一运行 `src/run/pre_backtest_test.py`。该总入口只负责编排测试和控制检查，具体测试文件仍位于 `src/tests/test_*.py`，控制逻辑仍位于 `src/tools/agent_tools/control/`。回测前必须覆盖：
 
-- `contract_coverage_audit.py` 检查核心契约是否有 producer、consumer、audit、test、字段表和配置/提示词/机制文档覆盖；
-- `pre_backtest_acceptance.py` 检查唯一合约、字段语义、账务、阶段和执行不变量。
+- 结构测试：事实入口、artifact 边界、字段迁移和智能体权限；
+- 协议预检：配置、环境、能力卡和 LLM 权限；
+- 契约覆盖：核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖；
+- 回测前验收：唯一合约、字段语义、DB schema、账务、阶段和执行不变量。
 
-回测中每日：
+回测中每日统一运行 `src/run/backtest_daily_test.py`。该总入口按累计交易日窗口编排每日结构测试、系统不变量和机制有效性检查：
 
-- `system_invariant_audit.py` 检查真实运行记录是否违反系统不变量；
-- `mechanism_effectiveness_audit.py` 按生命周期场景检查学习、评分、排名、合约、执行、复盘是否接通。
+- 系统不变量检查真实运行记录是否违反字段、artifact、事实入口、账务、阶段和执行边界；
+- 机制有效性检查学习、评分、排名、合约、执行、复盘是否按生命周期场景接通。
 
 版本闸门稳定标记：
 

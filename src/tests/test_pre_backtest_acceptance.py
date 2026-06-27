@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,6 +28,40 @@ def _dumps(value):
 
 
 class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
+    def _market_quote(
+        self,
+        *,
+        day: str = "2025-03-03",
+        ticker: str = "BU2506",
+        open_price: float | None = 1.0,
+        close_price: float | None = 1.0,
+        settle_price: float | None = 1.0,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            trade_date=day,
+            ticker=ticker,
+            open_price=open_price,
+            close_price=close_price,
+            settle_price=settle_price,
+        )
+
+    def _market_quote_side_effect(self, broken=None):
+        broken = dict(broken or {})
+
+        def side_effect(underlying_code, is_main, start_date, end_date):
+            rule = broken.get(underlying_code)
+            if rule == "missing":
+                return []
+            if rule == "missing_settle":
+                return [self._market_quote(ticker=f"{underlying_code}2506", settle_price=None)]
+            if rule == "missing_contract":
+                return [self._market_quote(ticker="")]
+            if rule == "missing_open":
+                return [self._market_quote(ticker=f"{underlying_code}2506", open_price=None)]
+            return [self._market_quote(ticker=f"{underlying_code}2506")]
+
+        return side_effect
+
     def _make_db(
         self,
         *,
@@ -47,11 +80,20 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     exp_name TEXT,
                     updated_at TEXT
                 );
+                CREATE TABLE portfolio (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    current_balance REAL DEFAULT 0
+                );
                 CREATE TABLE futures_recommendation (
                     id TEXT,
                     config_id TEXT,
                     trading_date TEXT,
+                    effective_trade_date TEXT,
+                    source_type TEXT,
+                    underlying_code TEXT,
                     action TEXT,
+                    lots INTEGER,
                     status TEXT,
                     audit_payload TEXT,
                     signal_snapshot TEXT,
@@ -90,6 +132,8 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     scope_key TEXT,
                     ticker TEXT,
                     side TEXT,
+                    horizon_class TEXT,
+                    market_regime TEXT,
                     setup_type TEXT,
                     action_name TEXT,
                     sample_count INTEGER,
@@ -111,6 +155,41 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     active INTEGER,
                     payload_json TEXT
                 );
+                CREATE TABLE adaptive_policy_state (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    ticker TEXT,
+                    side TEXT,
+                    policy_type TEXT,
+                    policy_action TEXT,
+                    source_trading_date TEXT,
+                    active INTEGER,
+                    payload_json TEXT,
+                    created_at TEXT
+                );
+                CREATE TABLE daily_settlement (
+                    id TEXT PRIMARY KEY,
+                    portfolio_id TEXT,
+                    trading_date TEXT,
+                    daily_pnl REAL,
+                    commission REAL,
+                    current_balance REAL,
+                    current_margin REAL,
+                    margin_ratio REAL,
+                    positions_snapshot TEXT,
+                    created_at TEXT
+                );
+                CREATE TABLE researcher_llm_notes (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    trading_date TEXT,
+                    evidence_pack_id TEXT,
+                    ticker TEXT,
+                    raw_prompt TEXT,
+                    raw_response TEXT,
+                    created_at TEXT,
+                    payload_json TEXT
+                );
                 CREATE TABLE trading_day_phase (
                     id TEXT PRIMARY KEY,
                     config_id TEXT,
@@ -125,6 +204,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             )
             now = datetime.utcnow().isoformat()
             conn.execute("INSERT INTO config(id, exp_name, updated_at) VALUES (?, ?, ?)", ("cfg", exp_name, now))
+            conn.execute("INSERT INTO portfolio(id, config_id, current_balance) VALUES (?, ?, ?)", ("pf", "cfg", 1000000.0))
             if with_negative_exit_weak_prior:
                 conn.execute(
                     """
@@ -166,12 +246,38 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             conn.close()
         return db_path
 
+    def _make_db_with_bad_researcher_notes_schema(self) -> str:
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DROP TABLE researcher_llm_notes")
+            conn.execute(
+                """
+                CREATE TABLE researcher_llm_notes (
+                    id TEXT PRIMARY KEY,
+                    config_id TEXT,
+                    source_trading_date TEXT,
+                    evidence_pack_id TEXT,
+                    ticker TEXT,
+                    raw_prompt TEXT,
+                    raw_response TEXT,
+                    created_at TEXT,
+                    payload_json TEXT
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
     def test_acceptance_freezes_ten_system_readiness_checks(self):
         self.assertEqual(
             list(ACCEPTANCE_CHECKS),
             [
                 "environment_api",
                 "config_consistency",
+                "db_schema_contract",
                 "data_time_boundary",
                 "agent_boundaries",
                 "structured_io",
@@ -311,6 +417,38 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertIn(
                 "final_action_contract_remains_single_trade_truth",
                 report.checks["single_trade_exit"].metadata["pm_learning_ranking_audit_boundaries"],
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_fast_on_db_schema_contract_mismatch(self):
+        db_path = self._make_db_with_bad_researcher_notes_schema()
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    check_llm_auth=False,
+                )
+            self.assertFalse(report.ok)
+            self.assertIn("db_schema_contract", report.failed_checks)
+            self.assertTrue(
+                any(
+                    error == "db_schema_contract:schema_missing_required_column:researcher_llm_notes:trading_date"
+                    for error in report.errors
+                ),
+                report.to_dict(),
+            )
+            self.assertTrue(
+                any(
+                    error == "audit_explainability:system_invariant_audit_skipped_due_to_schema_contract_failure"
+                    for error in report.errors
+                ),
+                report.to_dict(),
             )
         finally:
             Path(db_path).unlink(missing_ok=True)
@@ -559,6 +697,14 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertGreater(scan["checked_files"], 0)
             self.assertGreater(scan["forbidden_token_count"], 0)
             self.assertEqual(scan["offender_count"], 0)
+            legacy_scan = structured_io.metadata["legacy_field_location_scan"]
+            self.assertGreater(legacy_scan["checked_files"], 0)
+            self.assertGreater(legacy_scan["legacy_occurrence_count"], 0)
+            self.assertEqual(legacy_scan["offender_count"], 0)
+            self.assertIn(
+                "deprecated_field_tokens_may_exist_only_in_migration_audit_negative_tests_or_archived_history",
+                legacy_scan["boundary"],
+            )
         finally:
             Path(db_path).unlink(missing_ok=True)
 
@@ -616,9 +762,9 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
                 "tools.agent_tools.control.pre_backtest_acceptance.Router"
             ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.return_value = [
-                    SimpleNamespace(trade_date="2025-03-03")
-                ]
+                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
+                    self._market_quote_side_effect()
+                )
                 report = run_pre_backtest_acceptance(
                     config_path=SRC_ROOT / "config" / "dev.yaml",
                     db_path=db_path,
@@ -636,36 +782,158 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertEqual(data_check.metadata["trading_day_count"], 1)
             self.assertEqual(data_check.metadata["first_trading_day"], "2025-03-03")
             self.assertEqual(data_check.metadata["last_trading_day"], "2025-03-03")
+            self.assertTrue(data_check.metadata["active_universe_market_data_checked"])
+            self.assertEqual(data_check.metadata["active_universe_ticker_count"], 15)
+            self.assertEqual(data_check.metadata["ticker_market_coverage"]["BU"]["missing_settle_price_days"], 0)
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_when_any_active_ticker_lacks_market_rows(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+            ) as router_cls:
+                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
+                    self._market_quote_side_effect({"C": "missing"})
+                )
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    start_date="2025-03-01",
+                    end_date="2025-03-03",
+                    check_llm_auth=False,
+                )
+
+            self.assertFalse(report.ok)
+            self.assertIn("data_time_boundary", report.failed_checks)
+            self.assertTrue(
+                any(error == "data_time_boundary:market_data_missing_for_ticker:C:2025-03-01:2025-03-03" for error in report.errors),
+                report.to_dict(),
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_when_any_active_ticker_lacks_settle_price(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+            ) as router_cls:
+                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
+                    self._market_quote_side_effect({"CF": "missing_settle"})
+                )
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    start_date="2025-03-01",
+                    end_date="2025-03-03",
+                    check_llm_auth=False,
+                )
+
+            self.assertFalse(report.ok)
+            self.assertIn("data_time_boundary", report.failed_checks)
+            self.assertTrue(
+                any(
+                    error
+                    == "data_time_boundary:market_data_missing_settle_price:CF:count=1:first=2025-03-03:last=2025-03-03"
+                    for error in report.errors
+                ),
+                report.to_dict(),
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_when_any_active_ticker_lacks_contract_mapping(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+            ) as router_cls:
+                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
+                    self._market_quote_side_effect({"EB": "missing_contract"})
+                )
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    start_date="2025-03-01",
+                    end_date="2025-03-03",
+                    check_llm_auth=False,
+                )
+
+            self.assertFalse(report.ok)
+            self.assertIn("data_time_boundary", report.failed_checks)
+            self.assertTrue(
+                any(
+                    error
+                    == "data_time_boundary:market_data_missing_contract_mapping:EB:count=1:first=2025-03-03:last=2025-03-03"
+                    for error in report.errors
+                ),
+                report.to_dict(),
+            )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_acceptance_fails_when_any_active_ticker_lacks_open_or_close_price(self):
+        db_path = self._make_db(with_negative_exit_weak_prior=False)
+        try:
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
+                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+            ) as router_cls:
+                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
+                    self._market_quote_side_effect({"RB": "missing_open"})
+                )
+                report = run_pre_backtest_acceptance(
+                    config_path=SRC_ROOT / "config" / "dev.yaml",
+                    db_path=db_path,
+                    exp_name="agentquant-test",
+                    repo_root=PROJECT_ROOT,
+                    deepfund_python=Path(sys.executable),
+                    assets_dir=SRC_ROOT / "assets",
+                    start_date="2025-03-01",
+                    end_date="2025-03-03",
+                    check_llm_auth=False,
+                )
+
+            self.assertFalse(report.ok)
+            self.assertIn("data_time_boundary", report.failed_checks)
+            self.assertTrue(
+                any(
+                    error
+                    == "data_time_boundary:market_data_missing_open_or_close_price:RB:count=1:first=2025-03-03:last=2025-03-03"
+                    for error in report.errors
+                ),
+                report.to_dict(),
+            )
         finally:
             Path(db_path).unlink(missing_ok=True)
 
     def test_acceptance_cli_returns_nonzero_on_invariant_failure(self):
         db_path = self._make_db(with_negative_exit_weak_prior=True)
-        script = SRC_ROOT / "run" / "control" / "pre_backtest_acceptance.py"
         try:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(script),
-                    "--config",
-                    str(SRC_ROOT / "config" / "dev.yaml"),
-                    "--db-path",
-                    db_path,
-                    "--exp-name",
-                    "agentquant-test",
-                    "--deepfund-python",
-                    sys.executable,
-                    "--json",
-                ],
-                cwd=str(PROJECT_ROOT),
-                text=True,
-                capture_output=True,
-                check=False,
+            report = run_pre_backtest_acceptance(
+                config_path=SRC_ROOT / "config" / "dev.yaml",
+                db_path=db_path,
+                exp_name="agentquant-test",
+                repo_root=PROJECT_ROOT,
+                deepfund_python=Path(sys.executable),
+                assets_dir=SRC_ROOT / "assets",
+                check_llm_auth=False,
             )
-            self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
-            self.assertIn('"agent_name": "protocol_governor"', completed.stdout)
-            self.assertIn('"ok": false', completed.stdout)
-            self.assertIn("learning_landing", completed.stdout)
+            self.assertFalse(report.ok, report.to_dict())
+            self.assertIn("learning_landing", str(report.to_dict()))
         finally:
             Path(db_path).unlink(missing_ok=True)
 

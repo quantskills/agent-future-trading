@@ -3,28 +3,50 @@ from __future__ import annotations
 import unittest
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = SRC_ROOT.parent
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from database.sqlite_setup import _ensure_reviewer_learning_schema
 from tools.agent_tools.control.unified_field_audit import (
     iter_runtime_field_files,
+    scan_legacy_field_token_locations,
     scan_runtime_field_usage,
 )
 
 
 def _iter_runtime_files():
-    yield from iter_runtime_field_files(PROJECT_ROOT)
+    yield from iter_runtime_field_files(SRC_ROOT)
 
 
 class UnifiedFieldMigrationTests(unittest.TestCase):
     def test_forbidden_runtime_field_tokens_are_absent(self):
-        offenders, _checked_files = scan_runtime_field_usage(PROJECT_ROOT)
+        offenders, _checked_files = scan_runtime_field_usage(SRC_ROOT)
         self.assertEqual([], offenders)
+
+    def test_legacy_field_tokens_only_exist_in_explicit_allowlist(self):
+        offenders, checked_files, occurrence_count = scan_legacy_field_token_locations(PROJECT_ROOT)
+        self.assertGreater(checked_files, 0)
+        self.assertGreater(occurrence_count, 0)
+        self.assertEqual([], offenders)
+
+    def test_legacy_field_location_scan_rejects_active_runtime_mentions(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            bad_file = repo / "src" / "agents" / "decision_team" / "bad_runtime.py"
+            bad_file.parent.mkdir(parents=True, exist_ok=True)
+            bad_file.write_text("payload = {'target_lots_estimate': 3}\n", encoding="utf-8")
+
+            offenders, checked_files, occurrence_count = scan_legacy_field_token_locations(repo)
+
+        self.assertGreater(checked_files, 0)
+        self.assertGreater(occurrence_count, 0)
+        self.assertEqual(["src\\agents\\decision_team\\bad_runtime.py:1:target_lots_estimate"], offenders)
 
     def test_reviewer_learning_schema_drops_legacy_field_columns(self):
         conn = sqlite3.connect(":memory:")

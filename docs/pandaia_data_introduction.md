@@ -128,7 +128,7 @@ BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN
 
 ## 七、回测前后的检查口径
 
-回测前 `pre_backtest_acceptance.py` 会检查数据、配置、字段语义、协议边界和本地库状态。回测过程中 `system_invariant_audit.py` 会逐日累计检查唯一合约、字段语义、未完成交易日、策略单与运营单分账、交易员执行是否只来自最终合约；随后 `mechanism_effectiveness_audit.py` 按生命周期场景只读检查 action-value、投资组合经理 score/rank、唯一合约、条件 probe、持仓保护、减仓和退出链路是否真正接通。PandaAI 数据缺口可以作为 warning 降级，但若导致未来函数、账务错误、交易合约冲突或机制断链 hard_fail，必须停止；若只是 diagnostic，则进入策略效果分析。
+回测前 `src/run/pre_backtest_test.py` 会统一编排回测前结构测试、协议预检、契约覆盖和回测前验收，检查数据、配置、字段语义、协议边界和本地库状态。回测过程中 `src/run/backtest_daily_test.py` 会逐日累计编排每日结构测试、系统不变量和机制有效性审计，检查唯一合约、字段语义、未完成交易日、策略单与运营单分账、交易员执行是否只来自最终合约，并按生命周期场景只读检查 action-value、投资组合经理 score/rank、唯一合约、条件 probe、持仓保护、减仓和退出链路是否真正接通。PandaAI 数据缺口可以作为 warning 降级，但若导致未来函数、账务错误、交易合约冲突或机制断链 hard_fail，必须停止；若只是 diagnostic，则进入策略效果分析。
 
 ## 八、当前限制
 
@@ -150,7 +150,6 @@ src/agents/execution_team/trader.py
 src/agents/execution_team/accountant.py
 src/run/order.py
 src/run/settlement.py
-src/run/control/pre_backtest_acceptance.py
-src/run/control/system_invariant_audit.py
-src/run/control/mechanism_effectiveness_audit.py
+src/run/pre_backtest_test.py
+src/run/backtest_daily_test.py
 ```
