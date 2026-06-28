@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -115,7 +115,7 @@ def _signal_combo(snapshot: Dict[str, Any]) -> str:
     )
 
 
-def _trade_auditor(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _pm_risk_gate(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     audit = snapshot.get("active_opportunity_audit")
     if isinstance(audit, dict):
         decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
@@ -270,11 +270,9 @@ def _attach_open_recommendation_context(
                 snapshot = {}
         item["signal_combo"] = _signal_combo(snapshot)
         item["market_confirmation"] = snapshot.get("market_confirmation") if isinstance(snapshot, dict) else None
-        auditor = _trade_auditor(snapshot)
-        item["trade_auditor"] = auditor
-        item["decision_planner"] = auditor
-        item["trade_auditor_decision"] = auditor.get("decision", "none") if auditor else "none"
-        item["planner_decision"] = item["trade_auditor_decision"]
+        risk_gate = _pm_risk_gate(snapshot)
+        item["pm_risk_gate"] = risk_gate
+        item["pm_risk_gate_decision"] = risk_gate.get("decision", "none") if risk_gate else "none"
         rebalance_summary = _rebalance_summary_from_snapshot(snapshot)
         ranking_context = _opportunity_ranking_context(snapshot)
         item.update(ranking_context)
@@ -312,8 +310,8 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
     market_scores: List[float] = []
     market_feature_counts: Counter = Counter()
     market_confirmation_count = 0
-    trade_auditor_decision_counts: Counter = Counter()
-    trade_auditor_reason_counts: Counter = Counter()
+    pm_risk_gate_decision_counts: Counter = Counter()
+    pm_risk_gate_reason_counts: Counter = Counter()
     rebalance_action_counts: Counter = Counter()
     rebalance_reason_counts: Counter = Counter()
     rebalance_control_reason_counts: Counter = Counter()
@@ -383,11 +381,11 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
                 _safe_float(rebalance_summary.get("turnover_notional_estimate"))
             )
 
-        auditor = _trade_auditor(snapshot)
+        auditor = _pm_risk_gate(snapshot)
         if auditor:
-            trade_auditor_decision_counts[str(auditor.get("decision") or "unknown")] += 1
+            pm_risk_gate_decision_counts[str(auditor.get("decision") or "unknown")] += 1
             for reason in auditor.get("reasons") or []:
-                trade_auditor_reason_counts[str(reason)] += 1
+                pm_risk_gate_reason_counts[str(reason)] += 1
 
         execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
         no_trade_reason = execution_result.get("no_trade_reason")
@@ -413,10 +411,8 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
         "control_reason_counts": dict(control_reason_counts.most_common()),
         "no_trade_reason_counts": dict(no_trade_reason_counts.most_common()),
         "market_feature_counts": dict(market_feature_counts.most_common()),
-        "trade_auditor_decision_counts": dict(trade_auditor_decision_counts.most_common()),
-        "trade_auditor_reason_counts": dict(trade_auditor_reason_counts.most_common()),
-        "planner_decision_counts": dict(trade_auditor_decision_counts.most_common()),
-        "planner_reason_counts": dict(trade_auditor_reason_counts.most_common()),
+        "pm_risk_gate_decision_counts": dict(pm_risk_gate_decision_counts.most_common()),
+        "pm_risk_gate_reason_counts": dict(pm_risk_gate_reason_counts.most_common()),
         "rebalance_action_counts": dict(rebalance_action_counts.most_common()),
         "rebalance_reason_counts": dict(rebalance_reason_counts.most_common()),
         "rebalance_control_reason_counts": dict(rebalance_control_reason_counts.most_common()),
@@ -800,13 +796,13 @@ def _write_markdown_legacy(path: Path, payload: Dict[str, Any]) -> None:
         "",
         _format_table(["特征", "次数"], _top_counter_rows(diagnostics["market_feature_counts"])),
         "",
-        "### Trade auditor 决策分布",
+        "### PM risk gate 决策分布",
         "",
-        _format_table(["决策", "次数"], _top_counter_rows(diagnostics.get("trade_auditor_decision_counts", {}))),
+        _format_table(["决策", "次数"], _top_counter_rows(diagnostics.get("pm_risk_gate_decision_counts", {}))),
         "",
-        "### Trade auditor 原因分布",
+        "### PM risk gate 原因分布",
         "",
-        _format_table(["原因", "次数"], _top_counter_rows(diagnostics.get("trade_auditor_reason_counts", {}))),
+        _format_table(["原因", "次数"], _top_counter_rows(diagnostics.get("pm_risk_gate_reason_counts", {}))),
         "",
         "### Finoview 因子归因覆盖",
         "",
@@ -822,18 +818,18 @@ def _write_markdown_legacy(path: Path, payload: Dict[str, Any]) -> None:
             ],
         ),
         "",
-        "## Trade auditor 后交易表现",
+        "## PM risk gate 后交易表现",
         "",
         _format_table(
-            ["trade auditor 决策", "交易对数", "胜率", "净 PnL"],
+            ["pm risk gate 决策", "交易对数", "胜率", "净 PnL"],
             [
                 [
-                    row.get("trade_auditor_decision", row.get("planner_decision")),
+                    row.get("pm_risk_gate_decision"),
                     row["total_trades"],
                     f"{row['win_rate']:.2%}",
                     f"{row['total_pnl']:.2f}",
                 ]
-                for row in payload.get("by_trade_auditor_decision", payload.get("by_planner_decision", []))
+                for row in payload.get("by_pm_risk_gate_decision", [])
             ],
         ),
         "",
@@ -1037,9 +1033,9 @@ def _write_markdown(path: Path, payload: Dict[str, Any]) -> None:
         "",
         "### Auditor 决策",
         "",
-        _format_table(["决策", "交易对", "胜率", "净 PnL", "平均 PnL"], _performance_rows(payload.get("by_trade_auditor_decision", []), ["trade_auditor_decision"])),
+        _format_table(["决策", "交易对", "胜率", "净 PnL", "平均 PnL"], _performance_rows(payload.get("by_pm_risk_gate_decision", []), ["pm_risk_gate_decision"])),
         "",
-        _format_table(["原因", "次数"], _top_counter_rows(diagnostics.get("trade_auditor_reason_counts", {}))),
+        _format_table(["原因", "次数"], _top_counter_rows(diagnostics.get("pm_risk_gate_reason_counts", {}))),
         "",
         "## 条件组合",
         "",
@@ -1289,14 +1285,14 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "",
         _format_table(["Factor Group", "Count"], _top_counter_rows(diagnostics.get("finoview_factor_group_counts", {}))),
         "",
-        "### Trade Auditor",
+        "### PM Risk Gate",
         "",
         _format_table(
             ["Decision", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
-            _performance_rows(payload.get("by_trade_auditor_decision", []), ["trade_auditor_decision"]),
+            _performance_rows(payload.get("by_pm_risk_gate_decision", []), ["pm_risk_gate_decision"]),
         ),
         "",
-        _format_table(["Reason", "Count"], _top_counter_rows(diagnostics.get("trade_auditor_reason_counts", {}))),
+        _format_table(["Reason", "Count"], _top_counter_rows(diagnostics.get("pm_risk_gate_reason_counts", {}))),
         "",
         "## Conditional Setups",
         "",
@@ -1408,8 +1404,7 @@ def build_attribution_report(
     strategy_only_overall = summarize_trade_pairs(strategy_only_pairs)
     by_ticker_side = _group_summary(strategy_only_pairs, ["ticker", "side"])
     by_signal_combo = _group_summary(strategy_only_pairs, ["signal_combo"])
-    by_trade_auditor_decision = _group_summary(strategy_only_pairs, ["trade_auditor_decision"])
-    by_planner_decision = by_trade_auditor_decision
+    by_pm_risk_gate_decision = _group_summary(strategy_only_pairs, ["pm_risk_gate_decision"])
     by_ticker_side_signal_combo = _group_summary(strategy_only_pairs, ["ticker", "side", "signal_combo"])
     by_opportunity_score_bucket = _group_summary(strategy_only_pairs, ["opportunity_score_bucket"])
     by_opportunity_rank = _group_summary(strategy_only_pairs, ["opportunity_rank"])
@@ -1464,8 +1459,7 @@ def build_attribution_report(
         "strategy_only_overall": strategy_only_overall,
         "by_ticker_side": by_ticker_side,
         "by_signal_combo": by_signal_combo,
-        "by_trade_auditor_decision": by_trade_auditor_decision,
-        "by_planner_decision": by_planner_decision,
+        "by_pm_risk_gate_decision": by_pm_risk_gate_decision,
         "by_ticker_side_signal_combo": by_ticker_side_signal_combo,
         "by_opportunity_score_bucket": by_opportunity_score_bucket,
         "by_opportunity_rank": by_opportunity_rank,

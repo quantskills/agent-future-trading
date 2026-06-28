@@ -2,6 +2,8 @@
 # 由 config_normalizer.py 展开到 strategy_memory / learning / analyst_business_quality /
 # signal_quality / learning_context / learning_retention。
 # 运行时学习结果写数据库 overlay/state；LLM 不直接改写本 YAML。
+# 本文件中 strategy_memory 是历史兼容的数据库记忆入口名，不是交易权限字段；
+# 只能由 Researcher 写入未来学习，再由 PM 通过 decision_memory_retrieval 消费。
 
 learning_gatekeeping_policy:
   # 学习结果服务 action preference，不直接下交易命令。
@@ -72,10 +74,12 @@ opportunity_ranking_learning_policy:
   valid_days: 10
 
 strategy_memory:
-  # 数据库驱动的策略记忆，由 researcher_learning.py / research_memory_writers 在 Phase4 验证后写入，
-  # 下一交易日由 PM 通过 decision_memory_retrieval 读取。
+  # 历史兼容名称：数据库驱动的策略记忆，不是 Trader/Auditor/Reviewer 可直接消费的交易权限。
+  # 只能由 researcher_learning.py / research_memory_writers 在 Phase4 验证后写入未来学习，
+  # 下一交易日只能由 PM 通过 decision_memory_retrieval 读取。
   enabled: true
   # 写入后只影响未来交易日；Phase4 复盘完成本身不刷新 strategy_memory。
+  # PM 仍必须结合当日证据、失效边界、资金预算、Auditor 审计和 final_action_contract 仲裁。
   source: attribution_auto
   lookback_trades: 30
   expires_after_days: 30
@@ -312,7 +316,8 @@ learning:
     min_counterfactual_pnl: 1000
     valid_days: 10
   exploratory_research:
-    # Researcher 在 Phase4 后生成作用域假设；验证前只作候选先验。
+    # Researcher 在 Phase4 后可调用 LLM 生成作用域假设；验证前只作候选先验。
+    # 这些假设不能改当天合约、成交、结算或交易员权限。
     enabled: true
     use_llm: true
     min_episode_samples: 2
@@ -342,6 +347,7 @@ learning:
       cap_multiplier: 0.40
       valid_days: 10
   researcher_causal_review:
+    # Researcher 因果复盘可调用 LLM；输出必须落到结构化研究字段，只影响未来交易日。
     enabled: true
     use_llm: true
 

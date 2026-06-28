@@ -1,4 +1,4 @@
-﻿# AgentQuant 主配置：回测、模拟盘和实盘复刻共用。
+# AgentQuant 主配置：回测、模拟盘和实盘复刻共用。
 # 本文件只保存运行参数；机制说明见 docs/mechanism_*.md。
 # 硬约束、交易宇宙、运行加速、数据源索引和 LLM 路由由本文件人工维护。
 # 学习结果写入数据库 overlay/state，不自动改写本 YAML。
@@ -176,11 +176,11 @@ net_exposure_control:
 #   market_confirmation。
 
 # ---------------------------------------------------------------------------
-# 5. 审计、回撤与学习频率控制
+# 5. PM 内部风险门、回撤与学习频率控制
 # ---------------------------------------------------------------------------
 
-# 审计、交易频率、品种表现和短期亏损控制由 portfolio_policy_catalog.yaml 展开：
-#   trade_auditor / trade_frequency_control / ticker_performance_control / ticker_loss_control。
+# PM 内部风险门、交易频率、品种表现和短期亏损控制由 portfolio_policy_catalog.yaml 展开：
+#   pm_risk_gate / trade_frequency_control / ticker_performance_control / ticker_loss_control。
 
 drawdown_control:
   # 核心资金保护区：账户回撤分层控制。
@@ -319,7 +319,7 @@ audit:
   log_technical_price_window: true
 
 # ---------------------------------------------------------------------------
-# 8. 交易宇宙、智能体与 LLM 路由
+# 8. 交易宇宙、启用分析师与 LLM 路由
 # ---------------------------------------------------------------------------
 
 tickers:
@@ -343,12 +343,17 @@ planner_mode: false
 # 旧 LLM 规划器已退出固定工作流；该值只能为 false。
 
 workflow_analysts:
+  # Phase1 启用分析师清单，可按需要保留 1/2/3 个：
+  # commodity_news / fundamental / technical。
+  # 该清单只决定哪些分析师生成结构化预测证据；下游固定链路仍是
+  # signal_collector -> PM -> Auditor -> Trader -> Accountant -> Reviewer -> Researcher。
   - commodity_news
   - fundamental
   - technical
 
 analyst_llm:
-  # 分析师 LLM 路由；默认继承主模型。
+  # 只给启用的分析师使用的 LLM 路由；默认继承主模型。
+  # PM、signal_collector、Auditor、Trader、Accountant、Reviewer、Protocol Governor 不因本配置调用 LLM。
   mode: cloud_only
   # null 表示继承 llm.model。
   # cloud_model: "claude-opus-4-6-1"
@@ -364,7 +369,8 @@ analyst_llm:
   cap_stale_fundamental_confidence: 0.30
 
 llm:
-  # 主 LLM 路由。切换网关时只改 provider/model 和对应网关配置块。
+  # 主 LLM 路由。只服务被机制允许调用 LLM 的角色：分析师和 Phase4 后研究员。
+  # 切换网关时只改 provider/model 和对应网关配置块。
   # 不要把 API key 写入配置文件。
   #
   # ===== 当前启用：CodexOpenAI 网关 / GPT-5.5 / medium reasoning =====
@@ -406,4 +412,3 @@ llm:
   #   reasoning_effort: null
   #   api_key_env: "TQX_LLM_API_KEY"
   #   api_key_env_fallbacks: []
-

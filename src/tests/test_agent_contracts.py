@@ -1,4 +1,4 @@
-﻿import json
+import json
 import sys
 import tempfile
 import unittest
@@ -15,18 +15,18 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.analysis.quality import apply_trade_research_contract
-from tools.agent_tools.analysis.quality import build_technical_context
-from tools.agent_tools.analysis.quality import parse_fundamental_factors
-from tools.agent_tools.analysis.quality import summarize_news_events
+from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
+from tools.agent_tools.analysis.analyst_quality import build_technical_context
+from tools.agent_tools.analysis.analyst_quality import parse_fundamental_factors
+from tools.agent_tools.analysis.analyst_quality import summarize_news_events
 from agents.analysis_team.technical import (
     _validate_pre_open_price_window,
     get_adx_signal,
     get_mean_reversion_signal,
 )
 from apis.router import Router
-from tools.agent_tools.analysis.signal_fusion import build_opportunity_scorecard
-from tools.agent_tools.decision.invalidation_policy import _has_structured_invalidation_condition
+from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
 from tools.common.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
@@ -58,8 +58,8 @@ class AgentContractFixtureTest(unittest.TestCase):
             "ExecutionArtifact",
             "SettlementArtifact",
             "ReviewerAttributionArtifact",
-            "ReviewerLearningArtifact",
-            "CausalReviewCandidateArtifact",
+            "Phase4ValidationArtifact",
+            "ResearchInputMaterial",
         }
         seen_agents = set()
         seen_artifact_types = set()

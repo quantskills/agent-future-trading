@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import sys
 from pathlib import Path
 
@@ -218,7 +218,7 @@ def print_evaluation_summary(metrics: dict, config_id: str, exp_name: str):
     print("-" * 80)
 
     print("【学习与审计验收】")
-    print(f"  Trade auditor决策分布: {metrics.get('trade_auditor_decision_counts', {})}")
+    print(f"  PM risk gate决策分布: {metrics.get('pm_risk_gate_decision_counts', {})}")
     print(f"  Protected/Deployable净PnL: {metrics.get('protected_deployable_template_net_pnl', 0):>15,.2f}")
     print(f"  Weak-block模板净PnL:       {metrics.get('weak_block_template_net_pnl', 0):>15,.2f}")
     print(f"  生效overlay行数:           {metrics.get('learning_overlay_effective_rows', 0)}")

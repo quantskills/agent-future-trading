@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +9,7 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.contract_coverage_audit import (
+from tools.agent_tools.control.pg_contract_coverage_audit import (
     ACTIVE_DOC_PATHS,
     CONTRACT_SPECS,
     audit_contract_coverage,
@@ -74,7 +74,7 @@ def _write_minimal_covered_repo(root: Path) -> None:
     )
     _append_text(
         root,
-        "src/tools/agent_tools/decision/decision_memory_retrieval.py",
+        "src/tools/agent_tools/decision/pm_decision_memory_retrieval.py",
         'consumer_scope="pm_learning"\n_consumer_scope\nnon_pm_learning_scope',
     )
     _append_text(

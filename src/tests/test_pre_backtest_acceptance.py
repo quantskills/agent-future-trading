@@ -15,7 +15,7 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.pre_backtest_acceptance import (
+from tools.agent_tools.control.pg_pre_backtest_acceptance import (
     ACCEPTANCE_CHECKS,
     INVARIANT_TO_CHECK,
     INVARIANT_TO_CHECKS,
@@ -336,7 +336,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         )
 
     def test_acceptance_invariant_mapping_reuses_system_audit_categories(self):
-        from tools.agent_tools.control.system_invariants import ERROR_CATEGORY_PREFIXES
+        from tools.agent_tools.control.pg_system_invariants import ERROR_CATEGORY_PREFIXES
 
         for category, prefixes in ERROR_CATEGORY_PREFIXES.items():
             for prefix in prefixes:
@@ -731,7 +731,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.return_value = []
                 report = run_pre_backtest_acceptance(
@@ -760,7 +760,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
                     self._market_quote_side_effect()
@@ -792,7 +792,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
                     self._market_quote_side_effect({"C": "missing"})
@@ -822,7 +822,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
                     self._market_quote_side_effect({"CF": "missing_settle"})
@@ -856,7 +856,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
                     self._market_quote_side_effect({"EB": "missing_contract"})
@@ -890,7 +890,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
             with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pre_backtest_acceptance.Router"
+                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
             ) as router_cls:
                 router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
                     self._market_quote_side_effect({"RB": "missing_open"})

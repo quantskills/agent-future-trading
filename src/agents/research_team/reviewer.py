@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """Phase4 reviewer agent.
 
@@ -11,7 +11,7 @@ or rewrite LLM weights.
 from typing import Any, Dict
 
 from graph.schema import TradingPhase
-from tools.agent_tools.research.phase4_review import run_phase4_review
+from tools.agent_tools.research.reviewer_phase4_review import run_phase4_review
 from util.logger import logger
 
 

@@ -13,7 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from database.sqlite_setup import _ensure_reviewer_learning_schema
-from tools.agent_tools.control.unified_field_audit import (
+from tools.agent_tools.control.pg_unified_field_audit import (
     iter_runtime_field_files,
     scan_legacy_field_token_locations,
     scan_runtime_field_usage,

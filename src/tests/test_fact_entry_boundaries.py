@@ -16,6 +16,7 @@ from tools.common.contracts import (
     validate_execution_artifact_boundary,
     validate_final_action_contract,
     validate_pm_artifact_boundary,
+    validate_auditor_artifact_boundary,
     validate_researcher_artifact_boundary,
     validate_reviewer_artifact_boundary,
 )
@@ -151,6 +152,22 @@ class FactEntryBoundaryTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
             validate_pm_artifact_boundary({"execution_result": {"status": "filled"}})
+
+        validate_auditor_artifact_boundary(
+            {
+                "producer": "auditor",
+                "audit_verdict": "approve",
+                "audit_reason_codes": [],
+                "contract_summary": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "auditor_artifact_forbidden_contract_mutation"):
+            validate_auditor_artifact_boundary({"new_final_action_contract": {"target_lots": 9}})
 
         validate_accountant_artifact_boundary(
             {
@@ -414,14 +431,107 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertNotIn('snapshot.get("final_action_contract")', audit_source)
         self.assertNotIn('snapshot["final_action_contract"]', audit_source)
 
-        reviewer_source = _read("tools/agent_tools/research/phase4_review.py")
+        reviewer_source = _read("tools/agent_tools/research/reviewer_phase4_review.py")
         self.assertIn("from tools.common.contracts import final_action_contract_from_snapshot", reviewer_source)
         self.assertIn("contract = final_action_contract_from_snapshot(snapshot)", reviewer_source)
         self.assertNotIn('snapshot.get("final_action_contract")', reviewer_source)
         self.assertNotIn('snapshot["final_action_contract"]', reviewer_source)
 
+    def test_independent_auditor_and_pm_risk_gate_are_separate(self):
+        auditor_source = _read("agents/decision_team/auditor.py")
+        pm_risk_gate_source = _read("tools/agent_tools/decision/pm_risk_gate.py")
+        portfolio_manager_source = _read("agents/decision_team/portfolio_manager.py")
+        trader_source = _read("agents/execution_team/trader.py")
+
+        self.assertIn("class Auditor", auditor_source)
+        self.assertIn("audit_verdict", auditor_source)
+        self.assertIn("validate_auditor_artifact_boundary", auditor_source)
+        self.assertNotIn("class PMRiskGate", auditor_source)
+        self.assertNotIn("PMRiskGateInput", auditor_source)
+        retired_risk_gate_name = "trade" + "_auditor"
+        retired_planner_name = "decision" + "_planner"
+        self.assertNotIn(retired_risk_gate_name, auditor_source)
+        self.assertNotIn(retired_planner_name, auditor_source)
+        self.assertIn("class PMRiskGate", pm_risk_gate_source)
+        self.assertIn("internal non-LLM risk gate", pm_risk_gate_source)
+        self.assertNotIn("agent_name=\"auditor\"", pm_risk_gate_source)
+        self.assertIn("from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput", portfolio_manager_source)
+        self.assertNotIn("from agents.decision_team.auditor import PMRiskGate", portfolio_manager_source)
+        self.assertIn("_auditor_verdict_allows_strategy_execution", trader_source)
+        self.assertIn("auditor_verdict_not_approved", trader_source)
+        self.assertIn("from agents.decision_team.auditor import audit_verdict_allows_trader", trader_source)
+
+    def test_current_source_does_not_use_retired_pm_risk_gate_or_planner_names(self):
+        retired_risk_gate_name = "trade" + "_auditor"
+        retired_risk_gate_class = "Trade" + "Auditor"
+        retired_planner_name = "decision" + "_planner"
+        retired_planner_field = "planner" + "_decision"
+        retired_pm_llm_mirror = "portfolio" + "_manager" + "_llm"
+        for path in _production_python_files():
+            text = path.read_text(encoding="utf-8-sig")
+            rel = path.relative_to(SRC_ROOT).as_posix()
+            self.assertNotIn(retired_risk_gate_name, text, rel)
+            self.assertNotIn(retired_risk_gate_class, text, rel)
+            self.assertNotIn(retired_planner_name, text, rel)
+            self.assertNotIn(retired_planner_field, text, rel)
+            self.assertNotIn(retired_pm_llm_mirror, text, rel)
+
+    def test_execution_audit_payload_preserves_independent_auditor_summary(self):
+        from util.futures_audit import build_audit_payload
+
+        payload = build_audit_payload(
+            {
+                "final_action_contract": {
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                    "final_action": "wait",
+                },
+                "auditor": {
+                    "producer": "auditor",
+                    "audit_status": "approved",
+                    "audit_verdict": "approve",
+                    "audit_reason_codes": [],
+                    "audited_at": "2025-03-03T00:00:00+00:00",
+                },
+                "execution_result": {"status": "skipped", "no_trade_reason": "position_matched"},
+            }
+        )
+        self.assertEqual(payload["independent_auditor"]["producer"], "auditor")
+        self.assertEqual(payload["independent_auditor"]["audit_verdict"], "approve")
+        self.assertNotIn("final_action_contract", payload["independent_auditor"])
+
+    def test_auditor_does_not_modify_pm_contract(self):
+        from agents.decision_team.auditor import audit_futures_recommendation
+
+        contract = {
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
+            "final_action": "open_probe",
+            "invalidation_condition": {"type": "stop"},
+            "target_margin_ratio_estimate": 0.01,
+        }
+        recommendation = {
+            "id": "rec-1",
+            "config_id": "cfg",
+            "source_type": "strategy",
+            "underlying_code": "BU",
+            "trading_date": "2025-03-03",
+            "effective_trade_date": "2025-03-03",
+            "signal_snapshot": {"final_action_contract": dict(contract)},
+        }
+        output = audit_futures_recommendation(
+            recommendation=recommendation,
+            full_config={"auditor": {"enabled": True}, "max_total_margin_ratio": 0.20},
+        )
+        self.assertEqual(output.audit_verdict, "approve")
+        self.assertEqual(recommendation["signal_snapshot"]["final_action_contract"], contract)
+        self.assertEqual(output.audit_payload["producer"], "auditor")
+        self.assertTrue(output.audit_payload["boundary"]["auditor_does_not_modify_final_action_contract"])
+
     def test_execution_payload_writers_enforce_artifact_boundary(self):
-        futures_execution_source = _read("tools/agent_tools/execution/futures_execution.py")
+        futures_execution_source = _read("tools/agent_tools/execution/trader_futures_execution.py")
         self.assertIn("validate_execution_artifact_boundary(payload)", futures_execution_source)
         self.assertIn("validate_execution_artifact_boundary(transaction.audit_payload)", futures_execution_source)
 
@@ -430,14 +540,14 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertIn("validate_execution_artifact_boundary(transaction_dict.get(\"audit_payload\") or {})", sqlite_source)
         self.assertIn("validate_accountant_artifact_boundary(settlement_payload)", sqlite_source)
 
-        phase4_source = _read("tools/agent_tools/research/phase4_review.py")
+        phase4_source = _read("tools/agent_tools/research/reviewer_phase4_review.py")
         self.assertIn("validate_reviewer_artifact_boundary(summary_payload)", phase4_source)
 
         research_writer_source = _read("tools/agent_tools/research/research_memory_writers.py")
         self.assertIn("validate_researcher_artifact_boundary(value)", research_writer_source)
 
     def test_phase4_reviewer_does_not_define_research_policy_payload_builders(self):
-        phase4_source = _read("tools/agent_tools/research/phase4_review.py")
+        phase4_source = _read("tools/agent_tools/research/reviewer_phase4_review.py")
         self.assertNotIn("def _policy_contract_payload(", phase4_source)
         self.assertNotIn("def _loss_template_policy_payload(", phase4_source)
         self.assertNotIn("def _contextual_rule_policy_payload(", phase4_source)
@@ -465,7 +575,7 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertIn("def neutral_counterfactual_tracking_summary(", research_snapshot_source)
 
     def test_analyst_learning_context_uses_calibration_items_not_trade_action_values(self):
-        learning_context_source = _read("tools/agent_tools/analysis/learning_context.py")
+        learning_context_source = _read("tools/agent_tools/analysis/analyst_learning_context.py")
         analyst_calibration_source = _read("tools/agent_tools/analysis/analyst_learning_calibration.py")
         self.assertIn("\"analyst_calibration_items\": []", learning_context_source)
         self.assertIn("context.get(\"analyst_calibration_items\")", analyst_calibration_source)
@@ -484,7 +594,7 @@ class FactEntryBoundaryTest(unittest.TestCase):
             "database/interface.py",
             "database/sqlite_helper.py",
             "database/sqlite_setup.py",
-            "tools/agent_tools/execution/futures_settlement.py",
+            "tools/agent_tools/execution/accountant_futures_settlement.py",
             "run/settlement.py",
         }
         for path in _production_python_files():
@@ -500,7 +610,7 @@ class FactEntryBoundaryTest(unittest.TestCase):
     def test_research_learning_facts_are_written_through_research_memory_writers(self):
         research_learning_source = _read("tools/agent_tools/research/research_learning.py")
         researcher_entry_source = _read("run/research/researcher_learning.py")
-        alpha_setup_source = _read("tools/agent_tools/research/alpha_setup.py")
+        alpha_setup_source = _read("tools/common/alpha_setup.py")
 
         forbidden_direct_writes = [
             "INSERT INTO causal_review_candidate",

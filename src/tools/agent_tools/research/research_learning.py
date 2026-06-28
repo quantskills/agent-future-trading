@@ -21,14 +21,15 @@ from llm.prompt import (
     build_researcher_causal_review_prompt,
     build_researcher_exploratory_prompt,
 )
-from tools.agent_tools.research.learning_contract import CONTRACT_KEY, build_next_round_memory_contract
-from tools.agent_tools.research.alpha_setup import (
+from tools.common.learning_contract import CONTRACT_KEY, build_next_round_memory_contract
+from tools.common.alpha_setup import (
     build_scope_key as build_alpha_setup_scope_key,
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
+from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot
 from tools.agent_tools.research import research_memory_writers
-from tools.agent_tools.execution.order_semantics import recommendation_intent_from_lots
+from tools.common.order_semantics import recommendation_intent_from_lots
 from util.futures_audit import categorize_no_trade_reason
 from util.logger import logger
 
@@ -84,11 +85,7 @@ class ExploratoryHypothesisLLMOutput(BaseModel):
         return self.researcher_note
 
 
-def _reviewer_helpers():
-    # Imported lazily to keep the Phase4 reviewer module from owning LLM calls.
-    from tools.agent_tools.research import phase4_review
-
-    return phase4_review
+from tools.agent_tools.research import research_review_helpers as _review_helpers
 
 
 def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -103,7 +100,6 @@ def _build_causal_evidence_pack(
     settlement_row: Optional[Dict[str, Any]],
     no_trade_reason_counter: Counter,
 ) -> Dict[str, Any]:
-    reviewer = _reviewer_helpers()
     return {
         "agent_name": "researcher",
         "evidence_pack_id": str(uuid.uuid4()),
@@ -115,14 +111,14 @@ def _build_causal_evidence_pack(
                 "ticker": row.get("underlying_code"),
                 "action": row.get("action"),
                 "lots": row.get("lots"),
-                "signal_snapshot": _learning_safe_snapshot(reviewer._recommendation_snapshot(row)),
+                "signal_snapshot": _learning_safe_snapshot(_review_helpers._recommendation_snapshot(row)),
             }
             for row in strategy_recommendations
         ],
         "post_trade_outcome": {
-            "daily_pnl": reviewer._safe_float((settlement_row or {}).get("daily_pnl")),
-            "commission": reviewer._safe_float((settlement_row or {}).get("commission")),
-            "current_margin_ratio": reviewer._safe_float((settlement_row or {}).get("margin_ratio")),
+            "daily_pnl": _review_helpers._safe_float((settlement_row or {}).get("daily_pnl")),
+            "commission": _review_helpers._safe_float((settlement_row or {}).get("commission")),
+            "current_margin_ratio": _review_helpers._safe_float((settlement_row or {}).get("margin_ratio")),
             "no_trade_reasons": dict(no_trade_reason_counter),
             "no_trade_reason_categories": _no_trade_reason_category_counts(no_trade_reason_counter),
         },
@@ -289,10 +285,9 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
 def _counterfactual_result_value(item: Any) -> float:
     if not isinstance(item, dict):
         return 0.0
-    reviewer = _reviewer_helpers()
-    return reviewer._safe_float(
+    return _review_helpers._safe_float(
         item.get("counterfactual_pnl"),
-        reviewer._safe_float(item.get("pnl"), reviewer._safe_float(item.get("reward"))),
+        _review_helpers._safe_float(item.get("pnl"), _review_helpers._safe_float(item.get("reward"))),
     )
 
 
@@ -320,14 +315,13 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
     future action preference but cannot grant direct real-budget authority.
     """
 
-    reviewer = _reviewer_helpers()
     learning_cfg = cfg.get("learning", {}) or {}
     profile_cfg = learning_cfg.get("alpha_setup_profile", {}) or {}
     if not bool(profile_cfg.get("enabled", True)):
         return {"rows": 0, "status": "disabled"}
 
     trading_day = str(trading_date)[:10]
-    max_rows = max(1, reviewer._safe_int(profile_cfg.get("max_counterfactual_no_trade_samples_per_day"), 40))
+    max_rows = max(1, _review_helpers._safe_int(profile_cfg.get("max_counterfactual_no_trade_samples_per_day"), 40))
     try:
         cursor.execute(
             """
@@ -362,7 +356,7 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
         side = str(row.get("side") or "").lower()
         if not ticker or side not in {"long", "short"}:
             continue
-        results = reviewer._json_loads(row.get("counterfactual_results_json")) or []
+        results = _review_helpers._json_loads(row.get("counterfactual_results_json")) or []
         selected_result = _latest_counterfactual_result(results)
         if not selected_result:
             continue
@@ -374,7 +368,7 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
         setup_type = str(row.get("setup_type") or "")
         signal_combo = row.get("signal_combo")
         if isinstance(signal_combo, str):
-            parsed_combo = reviewer._json_loads(signal_combo)
+            parsed_combo = _review_helpers._json_loads(signal_combo)
             combo_items = parsed_combo if isinstance(parsed_combo, list) else [signal_combo]
         elif isinstance(signal_combo, list):
             combo_items = signal_combo
@@ -399,7 +393,7 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
         sample = {
             "ticker": ticker,
             "side": side,
-            "sector": row.get("sector") or reviewer._sector_for_ticker(cfg, ticker),
+            "sector": row.get("sector") or _review_helpers._sector_for_ticker(cfg, ticker),
             "horizon_class": horizon,
             "market_regime": regime,
             "setup_type": setup_type,
@@ -412,12 +406,12 @@ def _write_counterfactual_no_trade_alpha_setup_samples(
             "pm_action": "counterfactual_counterfactual_open",
             "auditor_decision": "not_executed_counterfactual",
             "trader_status": "counterfactual_not_executed",
-            "target_lots": reviewer._safe_int(row.get("counterfactual_lots"), reviewer._safe_int(row.get("candidate_lots"), 1)),
+            "target_lots": _review_helpers._safe_int(row.get("counterfactual_lots"), _review_helpers._safe_int(row.get("candidate_lots"), 1)),
             "current_lots": 0,
             "executed_lots": 0,
             "net_pnl": counterfactual_pnl,
             "commission": 0.0,
-            "holding_days": reviewer._safe_int(selected_result.get("horizon_days")),
+            "holding_days": _review_helpers._safe_int(selected_result.get("horizon_days")),
             "outcome_label": "profit" if counterfactual_pnl > 0 else "loss" if counterfactual_pnl < 0 else "flat_or_no_trade",
             "setup_quality_score": 0.0,
             "opportunity_state": row.get("opportunity_state") or "watch_for_trigger",
@@ -480,7 +474,6 @@ def write_alpha_setup_profiles(
     strategy_recommendations: List[Dict[str, Any]],
     transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    reviewer = _reviewer_helpers()
     learning_cfg = cfg.get("learning", {}) or {}
     profile_cfg = learning_cfg.get("alpha_setup_profile", {}) or {}
     if not bool(profile_cfg.get("enabled", True)):
@@ -496,29 +489,29 @@ def write_alpha_setup_profiles(
         trading_date=trading_date,
     )
     for recommendation in strategy_recommendations:
-        snapshot = reviewer._recommendation_snapshot(recommendation)
+        snapshot = _review_helpers._recommendation_snapshot(recommendation)
         final_contract = _dict_or_empty(snapshot.get("final_action_contract"))
         if not final_contract:
             continue
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
         if not ticker:
             continue
-        side = reviewer._recommendation_side(recommendation, snapshot)
+        side = _review_helpers._recommendation_side(recommendation, snapshot)
         if side not in {"long", "short"}:
-            target_lots_for_side = reviewer._safe_int(final_contract.get("target_lots"))
+            target_lots_for_side = _review_helpers._safe_int(final_contract.get("target_lots"))
             preferred = "long" if target_lots_for_side > 0 else "short" if target_lots_for_side < 0 else "flat"
             side = preferred if preferred in {"long", "short"} else "flat"
         if side not in {"long", "short"}:
             continue
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
-        combo = reviewer._signal_combo_from_snapshot(snapshot)
-        horizon = reviewer._horizon_class(reviewer._expected_horizon_days(snapshot, side), snapshot)
-        regime = reviewer._market_regime(snapshot)
-        template = reviewer._setup_type(side, combo, snapshot)
-        data_usage = reviewer.data_usage_from_snapshot(snapshot)
-        data_combo = reviewer._data_combo_key(data_usage)
-        analyst_payloads = reviewer._analyst_payloads(snapshot)
+        combo = _review_helpers._signal_combo_from_snapshot(snapshot)
+        horizon = _review_helpers._horizon_class(_review_helpers._expected_horizon_days(snapshot, side), snapshot)
+        regime = _review_helpers._market_regime(snapshot)
+        template = _review_helpers._setup_type(side, combo, snapshot)
+        data_usage = data_usage_from_snapshot(snapshot)
+        data_combo = _review_helpers._data_combo_key(data_usage)
+        analyst_payloads = _review_helpers._analyst_payloads(snapshot)
         action_contracts: Dict[str, Any] = {}
         learning_scopes: Dict[str, Any] = {}
         if isinstance(analyst_payloads, dict):
@@ -549,45 +542,45 @@ def write_alpha_setup_profiles(
                     scope_tags.append(f"{analyst_name}:{key}:{value}")
         if scope_tags:
             data_combo = f"{data_combo}|evidence:{'|'.join(sorted(set(scope_tags))[:8])}"
-        opportunity_type = reviewer._primary_opportunity_type(snapshot, side)
-        opportunity_state = reviewer._primary_opportunity_state(snapshot, side)
-        opportunity_contract_summary = reviewer._opportunity_contract_summary(snapshot)
+        opportunity_type = _review_helpers._primary_opportunity_type(snapshot, side)
+        opportunity_state = _review_helpers._primary_opportunity_state(snapshot, side)
+        opportunity_contract_summary = _review_helpers._opportunity_contract_summary(snapshot)
         setup_type = infer_setup_type(
             snapshot=snapshot,
             setup_type=template,
             opportunity_type=opportunity_type,
             opportunity_state=opportunity_state,
         )
-        sector = reviewer._sector_for_ticker(cfg, ticker)
-        target_lots = reviewer._safe_int(final_contract.get("target_lots"))
-        current_lots = reviewer._safe_int(final_contract.get("current_lots"), 0)
+        sector = _review_helpers._sector_for_ticker(cfg, ticker)
+        target_lots = _review_helpers._safe_int(final_contract.get("target_lots"))
+        current_lots = _review_helpers._safe_int(final_contract.get("current_lots"), 0)
         contract_intent = recommendation_intent_from_lots(
             current_lots=current_lots,
             target_lots=target_lots,
         )
         contract_action_taken = str(contract_intent.get("action") or "hold")
-        executed_lots = sum(abs(reviewer._safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
-        tx_daily_pnl = sum(reviewer._safe_float(tx.get("daily_pnl")) for tx in txs if isinstance(tx, dict))
-        tx_commission = sum(reviewer._safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
+        executed_lots = sum(abs(_review_helpers._safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
+        tx_daily_pnl = sum(_review_helpers._safe_float(tx.get("daily_pnl")) for tx in txs if isinstance(tx, dict))
+        tx_commission = sum(_review_helpers._safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
         ticker_outcome = _ticker_daily_outcome(
             cursor,
             config_id=config_id,
             trading_date=trading_date,
             ticker=ticker,
         )
-        outcome_lots = reviewer._safe_int(ticker_outcome.get("abs_lots"))
+        outcome_lots = _review_helpers._safe_int(ticker_outcome.get("abs_lots"))
         realized_pnl = (
-            reviewer._safe_float(ticker_outcome.get("daily_pnl"))
+            _review_helpers._safe_float(ticker_outcome.get("daily_pnl"))
             if ticker_outcome.get("row_count")
             else tx_daily_pnl
         )
         commission = (
-            reviewer._safe_float(ticker_outcome.get("commission"))
+            _review_helpers._safe_float(ticker_outcome.get("commission"))
             if ticker_outcome.get("row_count")
             else tx_commission
         )
         executed_lots = max(executed_lots, outcome_lots)
-        execution_result = reviewer._execution_result_from_snapshot(snapshot)
+        execution_result = _review_helpers._execution_result_from_snapshot(snapshot)
         source_type = "trade" if executed_lots > 0 or ticker_outcome.get("row_count") else "no_trade"
         outcome_label = "profit" if realized_pnl - commission > 0 else "loss" if realized_pnl - commission < 0 else "flat_or_no_trade"
         scorecard: Dict[str, Any] = {}
@@ -629,18 +622,18 @@ def write_alpha_setup_profiles(
             "current_lots": current_lots,
             "executed_lots": executed_lots,
             "net_pnl": (
-                reviewer._safe_float(episode_net_pnl)
+                _review_helpers._safe_float(episode_net_pnl)
                 if episode_net_pnl is not None and source_type == "trade"
                 else realized_pnl
             ),
             "commission": 0.0 if episode_net_pnl is not None and source_type == "trade" else commission,
             "holding_days": (
-                reviewer._safe_int(episode_sample.get("holding_days"))
+                _review_helpers._safe_int(episode_sample.get("holding_days"))
                 if episode_sample and source_type == "trade"
                 else 0
             ),
             "outcome_label": outcome_label,
-            "setup_quality_score": reviewer._safe_float(side_scorecard.get("max_setup_quality")),
+            "setup_quality_score": _review_helpers._safe_float(side_scorecard.get("max_setup_quality")),
             "opportunity_state": opportunity_state,
             "evidence": {
                 "analyst_payloads": analyst_payloads,
@@ -789,9 +782,9 @@ def write_alpha_setup_profiles(
         trading_date=trading_date,
     )
     if counterfactual_summary.get("rows"):
-        rows += reviewer._safe_int(counterfactual_summary.get("rows"))
+        rows += _review_helpers._safe_int(counterfactual_summary.get("rows"))
         for key, value in (counterfactual_summary.get("lifecycle_counts") or {}).items():
-            lifecycle_counts[str(key)] += reviewer._safe_int(value)
+            lifecycle_counts[str(key)] += _review_helpers._safe_int(value)
         samples.extend(counterfactual_summary.get("sample_preview") or [])
     return {
         "rows": rows,
@@ -957,7 +950,6 @@ def _write_alpha_setup_policy_state(
     not use future data, and does not create product blacklists.
     """
 
-    reviewer = _reviewer_helpers()
     learning_cfg = cfg.get("learning", {}) or {}
     profile_cfg = learning_cfg.get("alpha_setup_profile", {}) or {}
     policy_cfg = learning_cfg.get("alpha_setup_policy_state", {}) or {}
@@ -973,14 +965,14 @@ def _write_alpha_setup_policy_state(
         )
         or 10
     )
-    valid_until = reviewer._valid_until(trading_day, valid_days)
-    now = reviewer._utc_now()
-    max_rows = max(1, reviewer._safe_int(policy_cfg.get("max_rows_per_day"), 12))
-    min_candidate_net_pnl = reviewer._safe_float(policy_cfg.get("min_candidate_net_pnl"), 1000.0)
-    min_candidate_confidence = reviewer._safe_float(policy_cfg.get("min_candidate_confidence"), 0.30)
-    min_candidate_trade_count = max(1, reviewer._safe_int(policy_cfg.get("min_candidate_trade_count"), 1))
-    cap_multiplier = max(0.0, min(1.0, reviewer._safe_float(policy_cfg.get("cap_multiplier"), 0.50)))
-    probe_multiplier = max(0.0, min(1.0, reviewer._safe_float(policy_cfg.get("probe_multiplier"), 0.75)))
+    valid_until = _review_helpers._valid_until(trading_day, valid_days)
+    now = _review_helpers._utc_now()
+    max_rows = max(1, _review_helpers._safe_int(policy_cfg.get("max_rows_per_day"), 12))
+    min_candidate_net_pnl = _review_helpers._safe_float(policy_cfg.get("min_candidate_net_pnl"), 1000.0)
+    min_candidate_confidence = _review_helpers._safe_float(policy_cfg.get("min_candidate_confidence"), 0.30)
+    min_candidate_trade_count = max(1, _review_helpers._safe_int(policy_cfg.get("min_candidate_trade_count"), 1))
+    cap_multiplier = max(0.0, min(1.0, _review_helpers._safe_float(policy_cfg.get("cap_multiplier"), 0.50)))
+    probe_multiplier = max(0.0, min(1.0, _review_helpers._safe_float(policy_cfg.get("probe_multiplier"), 0.75)))
 
     cursor.execute(
         """
@@ -1024,13 +1016,13 @@ def _write_alpha_setup_policy_state(
             skipped += 1
             continue
         state = str(profile.get("lifecycle_state") or "candidate").lower()
-        sample_count = reviewer._safe_int(profile.get("sample_count"))
-        trade_count = reviewer._safe_int(profile.get("trade_count"))
-        net_pnl = reviewer._safe_float(profile.get("net_pnl"))
-        win_rate = reviewer._safe_float(profile.get("win_rate"))
-        profit_factor = reviewer._safe_float(profile.get("profit_factor"))
-        confidence = reviewer._safe_float(profile.get("confidence_score"))
-        max_position_impact = reviewer._safe_float(profile.get("max_position_impact"))
+        sample_count = _review_helpers._safe_int(profile.get("sample_count"))
+        trade_count = _review_helpers._safe_int(profile.get("trade_count"))
+        net_pnl = _review_helpers._safe_float(profile.get("net_pnl"))
+        win_rate = _review_helpers._safe_float(profile.get("win_rate"))
+        profit_factor = _review_helpers._safe_float(profile.get("profit_factor"))
+        confidence = _review_helpers._safe_float(profile.get("confidence_score"))
+        max_position_impact = _review_helpers._safe_float(profile.get("max_position_impact"))
         scope = {
             "ticker": ticker,
             "side": side,
@@ -1050,8 +1042,8 @@ def _write_alpha_setup_policy_state(
             "win_rate": win_rate,
             "profit_factor": profit_factor,
             "net_pnl": net_pnl,
-            "max_loss": reviewer._safe_float(profile.get("max_loss")),
-            "avg_holding_days": reviewer._safe_float(profile.get("avg_holding_days")),
+            "max_loss": _review_helpers._safe_float(profile.get("max_loss")),
+            "avg_holding_days": _review_helpers._safe_float(profile.get("avg_holding_days")),
             "confidence_score": confidence,
             "max_position_impact": max_position_impact,
             "same_scope_required": True,
@@ -1142,7 +1134,7 @@ def _write_alpha_setup_policy_state(
             source_event_id=event_id,
             created_at=now,
             valid_until=valid_until,
-            payload_json=reviewer._json_dumps(payload),
+            payload_json=_review_helpers._json_dumps(payload),
         )
         inserted += 1
         by_type[policy_type] += 1
@@ -1211,7 +1203,6 @@ def backfill_alpha_setup_profiles_from_history(
     already-settled history as same-scope setup evidence.
     """
 
-    reviewer = _reviewer_helpers()
     research_memory_writers.ensure_research_learning_schema(cursor)
     bounds: List[Any] = [config_id]
     where_parts = ["config_id = ?", "source_type = 'strategy'"]
@@ -1249,7 +1240,7 @@ def backfill_alpha_setup_profiles_from_history(
             config_id=config_id,
             trading_date=trading_date,
         )
-        grouped_transactions = reviewer._group_transactions_by_recommendation(transactions)
+        grouped_transactions = _review_helpers._group_transactions_by_recommendation(transactions)
         result = write_alpha_setup_profiles(
             cursor,
             cfg=cfg,
@@ -1306,7 +1297,6 @@ def run_researcher_causal_review(
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
 ) -> int:
-    reviewer = _reviewer_helpers()
     learning_cfg = cfg.get("learning", {}) or {}
     review_cfg = learning_cfg.get("researcher_causal_review") or {}
     if not bool(review_cfg.get("enabled", False)):
@@ -1319,7 +1309,7 @@ def run_researcher_causal_review(
         no_trade_reason_counter=no_trade_reason_counter,
     )
     prompt = build_researcher_causal_review_prompt(
-        reviewer._json_dumps(evidence)[:12000]
+        _review_helpers._json_dumps(evidence)[:12000]
     )
     raw_response = ""
     output = CausalReviewLLMOutput()
@@ -1332,7 +1322,7 @@ def run_researcher_causal_review(
                 llm_config=cfg.get("llm", {}),
                 pydantic_model=CausalReviewLLMOutput,
             )
-            raw_response = reviewer._json_dumps(output.model_dump())
+            raw_response = _review_helpers._json_dumps(output.model_dump())
         except Exception as exc:
             raw_response = f"llm_causal_research_failed: {exc}"
             logger.warning(f"Researcher LLM causal review failed on {trading_date}: {exc}")
@@ -1373,7 +1363,7 @@ def run_researcher_causal_review(
         ticker="*",
         raw_prompt=prompt_ext.inline_value,
         raw_response=response_ext.inline_value,
-        created_at=reviewer._utc_now(),
+        created_at=_review_helpers._utc_now(),
         payload_json=payload_ext.inline_value,
         raw_prompt_artifact_path=prompt_ext.artifact_path,
         raw_prompt_sha256=prompt_ext.sha256,
@@ -1397,13 +1387,13 @@ def run_researcher_causal_review(
         trading_date=trading_date,
         evidence_pack_id=evidence["evidence_pack_id"],
         candidate_type="post_trade_causal_research",
-        confidence_score=reviewer._safe_float(candidate_payload.get("confidence_score"), 0.0),
+        confidence_score=_review_helpers._safe_float(candidate_payload.get("confidence_score"), 0.0),
         rule_validation_status="notes_only_pending_rule_validation",
-        created_at=reviewer._utc_now(),
+        created_at=_review_helpers._utc_now(),
         valid_until=(
             datetime.strptime(str(trading_date)[:10], "%Y-%m-%d") + timedelta(days=10)
         ).strftime("%Y-%m-%d"),
-        payload_json=reviewer._json_dumps(candidate_payload),
+        payload_json=_review_helpers._json_dumps(candidate_payload),
     )
     return 1
 
@@ -1438,7 +1428,6 @@ def write_exploratory_hypotheses(
     config_id: str,
     trading_date: str,
 ) -> Dict[str, Any]:
-    reviewer = _reviewer_helpers()
     learning_cfg = cfg.get("learning", {}) or {}
     research_cfg = learning_cfg.get("exploratory_research", {}) or {}
     if not bool(research_cfg.get("enabled", True)):
@@ -1455,7 +1444,7 @@ def write_exploratory_hypotheses(
 
     prompt = build_researcher_exploratory_prompt(
         trading_date=trading_date,
-        episodes_json=reviewer._json_dumps({"trading_date": trading_date, "episodes": episodes})[:12000],
+        episodes_json=_review_helpers._json_dumps({"trading_date": trading_date, "episodes": episodes})[:12000],
     )
     output = ExploratoryHypothesisLLMOutput()
     raw_response = ""
@@ -1468,7 +1457,7 @@ def write_exploratory_hypotheses(
                 llm_config=cfg.get("llm", {}),
                 pydantic_model=ExploratoryHypothesisLLMOutput,
             )
-            raw_response = reviewer._json_dumps(output.model_dump())
+            raw_response = _review_helpers._json_dumps(output.model_dump())
         except Exception as exc:
             raw_response = f"llm_exploratory_research_failed: {exc}"
             logger.warning(f"Researcher exploratory research failed on {trading_date}: {exc}")
@@ -1510,7 +1499,7 @@ def write_exploratory_hypotheses(
         ticker="*",
         raw_prompt=prompt_ext.inline_value,
         raw_response=response_ext.inline_value,
-        created_at=reviewer._utc_now(),
+        created_at=_review_helpers._utc_now(),
         payload_json=payload_ext.inline_value,
         raw_prompt_artifact_path=prompt_ext.artifact_path,
         raw_prompt_sha256=prompt_ext.sha256,
@@ -1527,8 +1516,8 @@ def write_exploratory_hypotheses(
     )
 
     valid_days = int(research_cfg.get("valid_days", learning_cfg.get("memory_expires_after_days", 30)) or 30)
-    valid_until = reviewer._valid_until(trading_date, valid_days)
-    now = reviewer._utc_now()
+    valid_until = _review_helpers._valid_until(trading_date, valid_days)
+    now = _review_helpers._utc_now()
     max_hypotheses = int(research_cfg.get("max_hypotheses_per_day", 5) or 5)
     rows = 0
     for item in (output.hypotheses or [])[:max_hypotheses]:
@@ -1536,7 +1525,7 @@ def write_exploratory_hypotheses(
         text = str(payload.get("hypothesis_text") or "").strip()
         if not text:
             continue
-        confidence = max(0.0, min(1.0, reviewer._safe_float(payload.get("confidence_score"), 0.0)))
+        confidence = max(0.0, min(1.0, _review_helpers._safe_float(payload.get("confidence_score"), 0.0)))
         ticker = str(payload.get("ticker") or "*").upper()
         sector = str(payload.get("sector") or "*")
         side = str(payload.get("side") or "*").lower()

@@ -1,4 +1,4 @@
-﻿"""Accountant agent for futures Phase3 daily settlement.
+"""Accountant agent for futures Phase3 daily settlement.
 
 The accountant owns the daily settlement role: it verifies Phase2 completion,
 runs the futures settlement tool, persists the official portfolio, writes daily
@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 from graph.schema import TradingPhase
-from tools.agent_tools.execution.futures_settlement import FuturesDailySettlement
+from tools.agent_tools.execution.accountant_futures_settlement import FuturesDailySettlement
 from tools.common.runtime_setup import ensure_seed_settled_portfolio, load_portfolio_config
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db

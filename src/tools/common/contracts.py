@@ -324,6 +324,49 @@ def validate_pm_artifact_boundary(payload: Dict[str, Any]) -> None:
         raise ValueError(f"pm_artifact_forbidden_downstream_fields:{violations}")
 
 
+def auditor_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
+    """Return Auditor artifact paths that try to mutate PM trade authority."""
+    violations: List[str] = []
+    payload = payload if isinstance(payload, dict) else {}
+    mutation_fields = {
+        "final_action_contract",
+        "new_final_action_contract",
+        "rewritten_final_action_contract",
+        "modified_final_action_contract",
+        "new_final_action",
+        "new_target_lots",
+        "modified_target_lots",
+        "new_lots_delta",
+        "modified_lots_delta",
+        "trade_instruction",
+        "trader_permission",
+    }
+    trade_authority_summary_fields = {
+        "final_action",
+        "current_lots",
+        "target_lots",
+        "lots_delta",
+    }
+    for path, node in _iter_nested_dicts(payload):
+        fields = _present_forbidden_fields(node, mutation_fields)
+        if path != "contract_summary":
+            fields.extend(
+                field
+                for field in _present_forbidden_fields(node, trade_authority_summary_fields)
+                if field not in fields
+            )
+        fields.extend(field for field in _fact_object_forbidden_fields(node, RESEARCH_LEARNING_FIELDS) if field not in fields)
+        if fields:
+            violations.append(f"{path or '<root>'}:{fields}")
+    return violations
+
+
+def validate_auditor_artifact_boundary(payload: Dict[str, Any]) -> None:
+    violations = auditor_artifact_boundary_violations(payload)
+    if violations:
+        raise ValueError(f"auditor_artifact_forbidden_contract_mutation:{violations}")
+
+
 def accountant_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     """Return settlement artifact paths that persist learning or trade-authority fields."""
     violations: List[str] = []

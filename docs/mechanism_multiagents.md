@@ -85,7 +85,7 @@ AgentQuant 的交易运行框架固定为四个交易阶段，研究学习在 Ph
 
 | 阶段 | 现实含义 | 运行脚本 | 运行的智能体/主流程 | 输出 |
 |---|---|---|---|---|
-| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：`technical` 技术面分析师、`fundamental` 基本面分析师、`commodity_news` 期货新闻面分析师、`signal_collector` 信号收集员、`portfolio_manager` 投资组合经理 | `final_action_contract`、策略推荐 |
+| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：`technical` 技术面分析师、`fundamental` 基本面分析师、`commodity_news` 期货新闻面分析师、`signal_collector` 信号收集员、`portfolio_manager` 投资组合经理、`auditor` 审计员 | `final_action_contract`、`audit_verdict`、策略推荐 |
 | Phase2 | 开盘后/盘中执行 | `src/run/order.py` | `trader` 交易员 | 成交/未成交、`execution_result`、`futures_transactions` |
 | Phase3 | 收盘后结算 | `src/run/settlement.py` | `accountant` 会计师 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 |
 | Phase4 | 收盘后复盘验收 | `src/run/validate_phase_flow.py` | `reviewer` 复盘员 | Phase4 验收、完整交易日志、事实归因、研究输入材料 |
@@ -456,7 +456,7 @@ Phase4 完成后，研究学习单独运行：
 - 交易员仍然读取审计通过后的 `final_action_contract` 执行，但 Phase2 artifact 不能把完整 PM 合约复制成自己的输出。
 - 下游 artifact 如需说明来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径或执行字段摘要，而不是复制 PM 的学习、排名和资金解释字段。
 - `system_invariant_audit.py` 必须检查执行 artifact 中是否出现 PM 排名、学习或资金解释字段与交易意图字段同节点混用；出现时属于非策略 hard error。
-- `contract_coverage_audit.py` 必须覆盖 artifact 阶段边界的 producer、consumer、audit 和 test。
+- `pg_contract_coverage_audit.py` 必须覆盖 artifact 阶段边界的 producer、consumer、audit 和 test。
 
 ## 十、关键字段契约
 
@@ -557,12 +557,14 @@ Phase4 完成后，研究学习单独运行：
 - 结构测试：事实入口、artifact 边界、字段迁移和智能体权限；
 - 协议预检：配置、环境、能力卡和 LLM 权限；
 - 契约覆盖：核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖；
-- 回测前验收：唯一合约、字段语义、DB schema、账务、阶段和执行不变量。
+- 回测前验收：唯一合约、字段语义、DB schema、账务、阶段和执行不变量；
+- 静态规则测试：PM 状态转换、分析师 LLM 输出落地、会计结算公式、系统不变量样例和机制有效性样例。
 
-回测中每日统一运行 `src/run/backtest_daily_test.py`。该总入口按累计交易日窗口编排每日结构测试、系统不变量和机制有效性检查：
+回测中每日统一运行 `src/run/backtest_daily_test.py`。该总入口不再重复运行静态结构测试；它只读取已生成的 DB、artifact 和 payload，按累计交易日窗口执行真实产物审计：
 
 - 系统不变量检查真实运行记录是否违反字段、artifact、事实入口、账务、阶段和执行边界；
-- 机制有效性检查学习、评分、排名、合约、执行、复盘是否按生命周期场景接通。
+- 机制有效性检查真实学习、评分、排名、合约、执行、复盘是否按生命周期场景接通；
+- 不依赖真实回测产物的规则、转换、schema、权限和公式测试全部前置到 `pre_backtest_test.py`。
 
 版本闸门稳定标记：
 

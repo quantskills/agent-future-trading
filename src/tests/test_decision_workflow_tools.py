@@ -10,10 +10,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.decision.decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.opportunity_ranking import rank_opportunities
-from tools.agent_tools.decision.position_sizing import build_position_sizing_result
-from tools.agent_tools.decision.signal_evidence_collection import build_signal_collection_contract
+from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
+from tools.agent_tools.decision.pm_opportunity_ranking import rank_opportunities
+from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
+from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
 class FakeMemoryDB:
@@ -176,6 +176,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
     def test_portfolio_manager_no_llm_call_site_remains(self):
         text = (PROJECT_ROOT / "src" / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8")
         prompt_text = (PROJECT_ROOT / "src" / "llm" / "prompt.py").read_text(encoding="utf-8")
+        retired_pm_llm_mirror = "portfolio" + "_manager" + "_llm"
         forbidden = (
             "agent_call(",
             "FUTURES_PORTFOLIO_PROMPT",
@@ -184,11 +185,11 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             "MULTI_ANALYST_LOGIC",
             "build_pm_action_evidence_prompt",
             "llm_audit_metadata",
+            retired_pm_llm_mirror,
         )
         for token in forbidden:
             self.assertNotIn(token, text)
             self.assertNotIn(token, prompt_text)
-        self.assertIn('"mode": "disabled"', text)
 
 
 if __name__ == "__main__":

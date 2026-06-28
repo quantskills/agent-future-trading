@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import hashlib
 import sqlite3
@@ -23,7 +23,7 @@ from evaluation import (
 )
 from evaluation.evaluation import calculate_learning_usage_metrics, calculate_optimization_acceptance_metrics
 from run import plot_config
-from agents.decision_team.auditor import TradeAuditor, TradeAuditorInput
+from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput
 from apis.router import Router
 from database.sqlite_helper import SQLiteDB
 from database.evaluation_helper import EvaluationHelper
@@ -74,20 +74,20 @@ from agents.execution_team.trader import (
     _final_action_contract_from_snapshot,
     _setup_execution_learning_context,
 )
-from tools.agent_tools.analysis.quality import (
+from tools.agent_tools.analysis.analyst_quality import (
     apply_trade_research_contract,
     build_technical_context,
     summarize_news_events,
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
-from tools.agent_tools.analysis.signal_fusion import build_opportunity_scorecard
-from tools.agent_tools.decision.decision_memory_retrieval import retrieve_pm_memory
+from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
-from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
-from tools.agent_tools.execution.futures_settlement import FuturesDailySettlement
-from tools.agent_tools.execution.intraday_execution import select_intraday_execution
-from tools.agent_tools.execution.entry_timing import phase2_entry_audit
-from tools.agent_tools.research.phase4_review import (
+from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
+from tools.agent_tools.execution.accountant_futures_settlement import FuturesDailySettlement
+from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
+from tools.agent_tools.execution.trader_entry_timing import phase2_entry_audit
+from tools.agent_tools.research.reviewer_phase4_review import (
     _apply_net_exposure_review,
     _build_daily_transaction_report,
     _build_capital_deployment_diagnostics,
@@ -99,8 +99,8 @@ from tools.agent_tools.research.phase4_review import (
     _execution_result_from_snapshot,
     _validate_recommendation_execution_audit,
 )
-from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
-from tools.agent_tools.decision.capital_allocator import adaptive_policy_record
+from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.agent_tools.decision.pm_capital_allocator import adaptive_policy_record
 from util.futures_audit import (
     build_audit_payload,
     build_execution_learning_trace,
@@ -118,14 +118,14 @@ from util.config_normalizer import normalize_config
 from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
 from util.trading_calendar import get_previous_trading_day, map_datetime_to_futures_trading_day
 from run.validate_phase_flow import _expected_settlement_balance_change
-from tools.agent_tools.research.phase4_review import _expected_settlement_equity_change
-from tools.agent_tools.execution.execution_exit_policy import evaluate_exit_policy
-from tools.agent_tools.execution.order_semantics import (
+from tools.agent_tools.research.research_review_helpers import _expected_settlement_equity_change
+from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
+from tools.common.order_semantics import (
     build_lot_intent_consistency,
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
 )
-from tools.agent_tools.decision.reason_effects import reason_effect_summary
+from tools.agent_tools.decision.pm_reason_effects import reason_effect_summary
 from apis.pandaai import PandaAIAPI
 from graph.workflow import AgentWorkflow
 
@@ -951,7 +951,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             analyst="technical",
             ticker="RB",
             learning_context={
-                "alpha_setup_action_values": [
+                "analyst_calibration_items": [
                     {
                         "ticker": "RB",
                         "side": "long",
@@ -1012,7 +1012,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             analyst="fundamental",
             ticker="J",
             learning_context={
-                "alpha_setup_action_values": [
+                "analyst_calibration_items": [
                     {
                         "ticker": "J",
                         "side": "short",
@@ -1138,7 +1138,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             analyst="commodity_news",
             ticker="BU",
             learning_context={
-                "alpha_setup_action_values": [
+                "analyst_calibration_items": [
                     {
                         "ticker": "BU",
                         "side": "long",
@@ -2333,7 +2333,7 @@ class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
                 trading_date=datetime(2025, 1, 6),
             )
 
-    @patch("tools.agent_tools.execution.futures_settlement.get_next_trading_day")
+    @patch("tools.agent_tools.execution.accountant_futures_settlement.get_next_trading_day")
     def test_rollover_detected_after_settlement_is_scheduled_for_next_trading_day(self, mock_next_day):
         mock_next_day.return_value = datetime(2025, 3, 4)
         engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
@@ -2379,7 +2379,7 @@ class FuturesAuditRegressionTest(unittest.TestCase):
         self.assertEqual(classify_no_trade_reasons(["weak_ticker_side_quality_gate"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["news_only_directional_trade"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["strategy_memory_weak_block"]), "expected")
-        self.assertEqual(classify_no_trade_reasons(["decision_planner_block"]), "expected")
+        self.assertEqual(classify_no_trade_reasons(["pm_risk_gate_block"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["intraday_opening_range_incomplete"]), "expected")
         self.assertEqual(classify_no_trade_reasons(["neutral_signal_no_trade", "missing_previous_close"]), "error")
         self.assertEqual(classify_no_trade_reasons([]), "unknown")
@@ -2403,17 +2403,17 @@ class FuturesAuditRegressionTest(unittest.TestCase):
             "missing_previous_close",
         )
 
-    def test_legacy_decision_planner_reason_is_canonicalized(self):
-        self.assertEqual(normalize_no_trade_reason("decision_planner_block"), "trade_auditor_block")
-        snapshot = {"execution_result": {"no_trade_reason": "decision_planner_block"}}
-        self.assertEqual(infer_no_trade_reason(snapshot), "trade_auditor_block")
+    def test_pm_risk_gate_reason_is_canonicalized(self):
+        self.assertEqual(normalize_no_trade_reason("pm_risk_gate_block"), "pm_risk_gate_block")
+        snapshot = {"execution_result": {"no_trade_reason": "pm_risk_gate_block"}}
+        self.assertEqual(infer_no_trade_reason(snapshot), "pm_risk_gate_block")
 
 
-class TradeAuditorRegressionTest(unittest.TestCase):
+class PMRiskGateRegressionTest(unittest.TestCase):
     def _auditor(self):
-        return TradeAuditor(
+        return PMRiskGate(
             {
-                "trade_auditor": {
+                "pm_risk_gate": {
                     "enabled": True,
                     "policy_version": "test_v1",
                     "learning_mode": "audit_only",
@@ -2519,7 +2519,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_cold_start_reduces_without_blocking(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 signal_combo=["Neutral", "Neutral", "Neutral"],
                 raw_position_ratio=0.10,
@@ -2535,7 +2535,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_severe_ticker_side_performance_limits_new_exposure_to_probe(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="TA",
                 signal_combo=["Bearish", "Neutral", "Bearish"],
                 raw_position_ratio=-0.12,
@@ -2557,7 +2557,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_weak_combo_with_strong_confirmation_is_allowed(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 signal_combo=["Bullish", "Bullish", "Neutral"],
                 raw_position_ratio=0.10,
@@ -2588,7 +2588,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_conflicted_strong_confirmation_probe_is_reduced_not_blocked(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="BU",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bullish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
@@ -2620,7 +2620,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_protected_ticker_side_weak_combo_reduces_instead_of_blocks(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="BU",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bullish", "confidence": 0.55, "metadata": {"tradeability": "medium"}},
@@ -2649,10 +2649,10 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         config = self._auditor().full_config
         config["trade_frequency_control"]["weak_signal_combos"] = [["Bullish", "Neutral", "Neutral"]]
         config["market_confirmation"]["conflicted_probe_min_confirmation_score"] = 0.90
-        auditor = TradeAuditor(config)
+        auditor = PMRiskGate(config)
 
         output = auditor.plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bullish", "confidence": 0.55, "metadata": {"tradeability": "medium"}},
@@ -2686,12 +2686,12 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertIn("cold_start_weak_combo_block", output.reasons)
         self.assertEqual(
             output.diagnostics.get("research_memory_boundary"),
-            "auditor_does_not_consume_research_records",
+            "RiskGate_does_not_consume_research_records",
         )
 
     def test_weak_ticker_side_rule_limits_latest_bad_p_long_template_to_probe(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="P",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bearish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
@@ -2728,7 +2728,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_news_only_directional_trade_limits_when_core_opposes(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bearish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
@@ -2764,7 +2764,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_strategy_memory_weak_block_limits_new_exposure_to_probe(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bullish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
@@ -2800,7 +2800,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertNotIn("strategy_memory_weak_block", output.reasons)
         self.assertEqual(
             output.diagnostics.get("research_memory_boundary"),
-            "auditor_does_not_consume_research_records",
+            "RiskGate_does_not_consume_research_records",
         )
         self.assertGreater(output.position_ratio_multiplier, 0.0)
 
@@ -2813,9 +2813,9 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                 "pm_soft_risk_reasons": ["side_performance_block"],
             }
         }
-        auditor = TradeAuditor(config)
+        auditor = PMRiskGate(config)
         output = auditor.plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="TA",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bearish", "confidence": 0.65, "horizon_class": "short", "market_regime": "trend"},
@@ -2838,13 +2838,13 @@ class TradeAuditorRegressionTest(unittest.TestCase):
                         "setup_type": "*",
                         "horizon_class": "short",
                         "market_regime": "trend",
-                        "policy_type": "contextual_rule_calibration:trade_auditor",
+                        "policy_type": "contextual_rule_calibration:pm_risk_gate",
                         "policy_action": "calibrate",
                         "confidence_score": 0.55,
                         "sample_count": 2,
                         "payload": {
                             "rule_adjustments": {
-                                "trade_auditor": {
+                                "pm_risk_gate": {
                                     "soften_hard_block_reasons": ["side_performance_block"]
                                 }
                             }
@@ -2860,16 +2860,16 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         self.assertNotIn("contextual_rule_calibration", output.reasons)
         self.assertEqual(
             output.diagnostics.get("research_memory_boundary"),
-            "auditor_does_not_consume_research_records",
+            "RiskGate_does_not_consume_research_records",
         )
 
     def test_single_high_quality_analyst_support_is_probe_not_block(self):
         config = self._auditor().full_config
-        config["trade_auditor"]["quality_gate"]["allow_single_high_quality_probe"] = True
-        auditor = TradeAuditor(config)
+        config["pm_risk_gate"]["quality_gate"]["allow_single_high_quality_probe"] = True
+        auditor = PMRiskGate(config)
 
         output = auditor.plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="SR",
                 analyst_signals=[
                     {
@@ -2904,10 +2904,10 @@ class TradeAuditorRegressionTest(unittest.TestCase):
         config = self._auditor().full_config
         config["market_confirmation"]["quality_gate_block_weak_signal"] = False
         config["market_confirmation"]["block_weak_conflicting_signal"] = False
-        auditor = TradeAuditor(config)
+        auditor = PMRiskGate(config)
 
         output = auditor.plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="PB",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bullish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
@@ -3077,7 +3077,7 @@ class TradeAuditorRegressionTest(unittest.TestCase):
 
     def test_low_quality_news_driver_is_probe_capped_not_hard_blocked(self):
         output = self._auditor().plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="M",
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Neutral", "confidence": 0.45, "metadata": {"tradeability": "medium"}},
@@ -3179,7 +3179,7 @@ class ValidationRegressionTest(unittest.TestCase):
             },
             {
                 "source_type": "strategy",
-                "signal_snapshot": {"execution_result": {"no_trade_reason": "trade_auditor_block"}},
+                "signal_snapshot": {"execution_result": {"no_trade_reason": "pm_risk_gate_block"}},
             },
         ]
 
@@ -3427,7 +3427,7 @@ class ValidationRegressionTest(unittest.TestCase):
                                 }
                             }
                         },
-                        "trade_auditor": {"decision": "allow", "reasons": ["trade_auditor_allow"]},
+                        "pm_risk_gate": {"decision": "allow", "reasons": ["pm_risk_gate_allow"]},
                     },
                 },
             },
@@ -3459,7 +3459,7 @@ class ValidationRegressionTest(unittest.TestCase):
                         "current_lots": 0,
                         "lots_delta": -3,
                         "lots_delta_abs": 0,
-                        "reason_codes": "trade_auditor_block",
+                        "reason_codes": "pm_risk_gate_block",
                         "final_action": "wait",
                         "reason_codes": ["analyst_quality_low_tradeability"],
                         "authority_type": "block",
@@ -3469,7 +3469,7 @@ class ValidationRegressionTest(unittest.TestCase):
                         "reason_codes": ["analyst_quality_low_tradeability"],
                     },
                     "market_confirmation": {"confirmation_score": 0.40},
-                    "execution_result": {"no_trade_reason": "trade_auditor_block"},
+                    "execution_result": {"no_trade_reason": "pm_risk_gate_block"},
                 },
             },
         ]
@@ -3499,7 +3499,7 @@ class ValidationRegressionTest(unittest.TestCase):
                 {
                     "position_matched": 1,
                     "intraday_trigger_not_met": 1,
-                    "trade_auditor_block": 1,
+                    "pm_risk_gate_block": 1,
                 }
             ),
         )
@@ -3507,11 +3507,11 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(diagnostics["primary_category"], "execution_timing_gate")
         self.assertEqual(diagnostics["category_counts"]["position_already_matched"], 1)
         self.assertEqual(diagnostics["category_counts"]["execution_timing_gate"], 1)
-        self.assertEqual(diagnostics["category_counts"]["auditor_suppression"], 1)
+        self.assertEqual(diagnostics["category_counts"]["pm_risk_gate_suppression"], 1)
         self.assertEqual(diagnostics["directional_candidate_count"], 3)
         self.assertEqual(diagnostics["blocked_directional_candidate_count"], 3)
         self.assertEqual(diagnostics["capital_path_stage_counts"]["execution_timing"], 1)
-        self.assertEqual(diagnostics["capital_path_stage_counts"]["hard_or_auditor_block"], 1)
+        self.assertEqual(diagnostics["capital_path_stage_counts"]["hard_or_pm_risk_gate_block"], 1)
         self.assertIn("capital_path_cases", diagnostics)
         self.assertEqual(diagnostics["alpha_release_candidate_count"], 1)
         self.assertEqual(diagnostics["alpha_release_candidates"][0]["ticker"], "BU")
@@ -3520,7 +3520,7 @@ class ValidationRegressionTest(unittest.TestCase):
             diagnostics["alpha_release_candidates"][0]["alpha_release_requirements"]["stop_protected"]
         )
         self.assertEqual(diagnostics["execution_gate_candidates"][0]["ticker"], "RB")
-        self.assertEqual(diagnostics["auditor_suppression_cases"][0]["ticker"], "M")
+        self.assertEqual(diagnostics["pm_risk_gate_suppression_cases"][0]["ticker"], "M")
         self.assertEqual(
             diagnostics["parameter_review"][0]["scope"],
             "execution.intraday_confirmation",
@@ -5801,7 +5801,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(values[0]["action_value_lane"], "open")
 
     def test_direct_alpha_setup_action_value_requires_complete_state_for_exact_quality(self):
-        from tools.agent_tools.research.alpha_setup import upsert_alpha_setup_sample_and_profile
+        from tools.common.alpha_setup import upsert_alpha_setup_sample_and_profile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = SQLiteDB()
@@ -6786,13 +6786,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertTrue(detail["requires_authority"])
         self.assertEqual(detail["decision"], "watchlist_only")
-        self.assertIn("pm_watch_for_trigger_probe_cap", detail["weak_markers"])
-        self.assertIn("pm_watch_for_trigger_probe_cap", detail["reason_effects"]["soft_limits"])
+        self.assertNotIn("pm_watch_for_trigger_probe_cap", detail["weak_markers"])
+        self.assertIn("pm_watch_for_trigger_probe_cap", detail["reason_effects"]["candidate_reasons"])
+        self.assertNotIn("pm_watch_for_trigger_probe_cap", detail["reason_effects"]["soft_limits"])
         self.assertFalse(detail["reason_effects"]["hard_zero"])
 
     def test_reason_effect_summary_separates_hard_soft_learning_and_release(self):
         summary = reason_effect_summary([
-            "trade_auditor_block",
+            "pm_risk_gate_block",
             "market_confirmation_quality_gate",
             "adaptive_policy_cap",
             "qualified_positive_expectancy",
@@ -6800,13 +6801,25 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "hold_exit_action_value_protection",
         ])
 
-        self.assertIn("trade_auditor_block", summary["hard_blocks"])
+        self.assertIn("pm_risk_gate_block", summary["hard_blocks"])
         self.assertIn("market_confirmation_quality_gate", summary["soft_limits"])
         self.assertIn("adaptive_policy_cap", summary["learning_adjustments"])
         self.assertIn("qualified_positive_expectancy", summary["release_signals"])
         self.assertIn("positive_open_action_value_seed", summary["release_signals"])
         self.assertIn("hold_exit_action_value_protection", summary["learning_adjustments"])
         self.assertTrue(summary["hard_zero"])
+        candidate_summary = reason_effect_summary([
+            "pm_watch_for_trigger_probe_cap",
+            "scorecard_current_tradeable_probe_seed",
+            "conditional_monitor_probe_seed",
+            "conditional_trigger_authority",
+        ])
+        self.assertIn("pm_watch_for_trigger_probe_cap", candidate_summary["candidate_reasons"])
+        self.assertIn("scorecard_current_tradeable_probe_seed", candidate_summary["candidate_reasons"])
+        self.assertIn("conditional_monitor_probe_seed", candidate_summary["candidate_reasons"])
+        self.assertIn("conditional_trigger_authority", candidate_summary["release_signals"])
+        self.assertNotIn("pm_watch_for_trigger_probe_cap", candidate_summary["soft_limits"])
+        self.assertFalse(candidate_summary["unknown_trade_effects"])
 
     def test_learning_policy_blocks_are_soft_not_hard_risk(self):
         summary = reason_effect_summary([
@@ -6956,7 +6969,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(release_allowed)
         self.assertEqual(release_detail["decision"], "watchlist_only")
         self.assertEqual(release_detail["authority_type"], "watchlist_only")
-        self.assertIn("pm_watch_for_trigger_probe_cap", release_detail["reason_effects"]["soft_limits"])
+        self.assertIn("pm_watch_for_trigger_probe_cap", release_detail["reason_effects"]["candidate_reasons"])
+        self.assertNotIn("pm_watch_for_trigger_probe_cap", release_detail["reason_effects"]["soft_limits"])
         self.assertTrue(release_detail["watch_for_trigger_semantic_block"])
         self.assertFalse(strong_allowed)
         self.assertEqual(strong_detail["authority_type"], "watchlist_only")
@@ -7324,7 +7338,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         allowed, detail = _final_contract_authority(
             control_reasons=[
                 "alpha_setup_ev_fusion",
-                "trade_auditor_block",
+                "pm_risk_gate_block",
                 "real_probe_positive_or_strong_confirmation_release",
                 "qualified_positive_expectancy",
             ],
@@ -7346,7 +7360,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertTrue(detail["hard_zero"])
-        self.assertIn("trade_auditor_block", detail["reason_effects"]["hard_blocks"])
+        self.assertIn("pm_risk_gate_block", detail["reason_effects"]["hard_blocks"])
         self.assertIn("qualified_positive_expectancy", detail["reason_effects"]["release_signals"])
         self.assertEqual(detail["authority_type"], "watchlist_only")
 
@@ -10910,13 +10924,13 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
 
         self.assertTrue(cfg["market_confirmation"]["enabled"])
         self.assertTrue(cfg["portfolio_manager"]["holding_rebalance_control"]["enabled"])
-        self.assertTrue(cfg["trade_auditor"]["enabled"])
+        self.assertTrue(cfg["pm_risk_gate"]["enabled"])
         self.assertTrue(cfg["trade_frequency_control"]["enabled"])
         self.assertTrue(cfg["ticker_performance_control"]["enabled"])
         self.assertTrue(cfg["ticker_loss_control"]["enabled"])
         self.assertTrue(cfg["dynamic_weights"]["enabled"])
         self.assertEqual(
-            cfg["_config_parameter_roles"]["trade_auditor"],
+            cfg["_config_parameter_roles"]["pm_risk_gate"],
             "portfolio_policy_catalog_runtime_expanded",
         )
         self.assertEqual(
@@ -10962,7 +10976,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
 
         raw_dev = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         for moved_key in (
-            "trade_auditor",
+            "pm_risk_gate",
             "trade_frequency_control",
             "ticker_performance_control",
             "ticker_loss_control",
@@ -13647,4 +13661,3 @@ class EvaluationRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

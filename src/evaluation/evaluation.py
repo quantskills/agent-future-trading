@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 import json
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from database.artifact_store import load_externalized_json
 from database.sqlite_setup import DB_PATH
-from tools.agent_tools.research.neutral_accountability import build_neutral_accountability_summary
+from tools.common.neutral_accountability import build_neutral_accountability_summary
 from util.learning_attribution import (
     learning_effect_counts,
     learning_effects_from_context,
@@ -147,7 +147,7 @@ def calculate_optimization_acceptance_metrics(
         "capital_alpha_release_candidate_count": 0,
         "capital_parameter_review_counts": {},
         "capital_diagnostic_action_counts": {},
-        "trade_auditor_decision_counts": {},
+        "pm_risk_gate_decision_counts": {},
         "protected_deployable_template_net_pnl": 0.0,
         "weak_block_template_net_pnl": 0.0,
         "learning_overlay_effective_rows": 0,
@@ -410,7 +410,7 @@ def calculate_optimization_acceptance_metrics(
                         validation_ok += 1
                 if isinstance(contract.get("strategy_controls"), str):
                     free_text_violations += 1
-            metrics["trade_auditor_decision_counts"] = decision_counts
+            metrics["pm_risk_gate_decision_counts"] = decision_counts
             metrics["artifact_contract_validation_pass_rate"] = (
                 validation_ok / validation_total if validation_total else 1.0
             )

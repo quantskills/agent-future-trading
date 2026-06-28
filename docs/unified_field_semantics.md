@@ -331,14 +331,13 @@
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
-| `audit_verdict` | Auditor 输出 / final contract 附属审计 | 审计结论对象。 |
-| `approved` | `audit_verdict` | 合约是否通过审计。 |
-| `decision` | `audit_verdict` | approve、block、reduce_only、probe_only。 |
-| `hard_blocks` | `audit_verdict` | 硬阻断原因。 |
-| `soft_controls` | `audit_verdict` | 软控制原因。 |
+| `audit_verdict` | Auditor 输出 / recommendation `audit_payload` / signal snapshot auditor 摘要 | 独立审计员对 PM 已签 `final_action_contract` 的审计裁决；只允许 `approve`、`approve_with_warning`、`block`、`require_review`。 |
+| `audit_status` | Auditor 输出 / recommendation `audit_payload` / signal snapshot auditor 摘要 | 审计状态，如 `approved`、`blocked`。 |
+| `hard_risk_reasons` | Auditor 输出 | 合约字段、保证金、价格、数据质量等硬阻断原因；不能改合约。 |
+| `soft_risk_reasons` | Auditor 输出 | 警告或降级说明；不能直接改方向或手数。 |
 | `audit_reason_codes` | `audit_verdict` | 审计原因代码。 |
 | `warning_message` | 审计 / 执行 | 警告信息。 |
-| `audit_payload` | 数据库存储 | 审计 payload 容器；不能替代 `audit_verdict`。 |
+| `audit_payload` | 数据库存储 | 审计 payload 容器；Phase1 保存独立 Auditor 事实，Phase2 execution audit 可保留 `independent_auditor` 摘要，但不能改写 PM 合约。 |
 | `intraday_audit` | 早盘执行上下文 | 盘中执行审计 payload。 |
 
 ## 9. Trader 执行字段：`execution_result`
@@ -565,7 +564,7 @@
 | `strategy_only_trade_pairs` | 归因报告 | 仅策略交易对列表；分析师、PM、Auditor 归因和弱边建议必须使用它。 |
 | `by_ticker_side` | 归因报告 | 按品种和方向统计的策略交易对表现。 |
 | `by_signal_combo` | 归因报告 | 按分析师信号组合统计的策略交易对表现。 |
-| `by_trade_auditor_decision` | 归因报告 | 按审计/最终合约决策统计的策略交易对表现。 |
+| `by_pm_risk_gate_decision` | 归因报告 | 按 PM 内部风险门和最终合约决策统计的策略交易对表现；不是独立 Auditor 裁决，也不表示审计员改写 PM 合约。 |
 | `by_ticker_side_signal_combo` | 归因报告 | 按品种、方向、分析师信号组合统计的策略交易对表现。 |
 | `by_opportunity_learning_component` | 归因报告 | 按 `positive_learning/negative_learning/execution_profile_learning/recent_tail_loss_penalty` 及其正/负/零/缺失 bucket 统计策略交易对表现；只用于评估 PM 学习评分是否有效，不生成交易权限。 |
 | `learning_component` | `by_opportunity_learning_component` | 被统计的 PM 学习评分分项名称。 |

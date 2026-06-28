@@ -1,4 +1,4 @@
-﻿# PM 与市场确认策略目录。
+# PM 与市场确认策略目录。
 # 由 config_normalizer.py 展开到 market_confirmation / directional_override_control / portfolio_manager。
 # 这些是冷启动业务策略，不是交易所事实；任何学习校准都不能突破 20% 总保证金硬上限。
 # 门控机制不是可调 YAML 参数：block/cap/probe 只允许作为 reason code 或软风险标签出现，
@@ -38,8 +38,9 @@ directional_override_control:
   min_short_edge: 0.08
   short_probe_max_ratio: 0.015
 
-trade_auditor:
-  # 交易计划审计策略：不调用 LLM，不下单，只做质量审核。
+pm_risk_gate:
+  # PM 内部交易计划质量/风险门：不调用 LLM、不下单、不生成独立审计事实。
+  # 它只在 PM 签发 final_action_contract 前做降级或阻断；独立 Auditor 仍只审 PM 已签合约。
   enabled: true
   mode: deterministic
   use_llm: false
@@ -87,6 +88,18 @@ trade_auditor:
     max_position_ratio_multiplier: 0.65
     block_weak_combo_new_entries: true
     block_conflict_confirmation_below: 0.60
+
+auditor:
+  # 独立审计员：位于 PM 与 Trader 之间，只审 PM 已签 final_action_contract。
+  # Auditor 不调用 LLM、不读取研究库、不改方向、不改手数、不新建合约。
+  enabled: true
+  mode: deterministic
+  use_llm: false
+  policy_version: deterministic_v1
+  approve_with_warning_allowed: true
+  require_valid_final_action_contract: true
+  require_invalidation_for_new_exposure: true
+  trader_requires_approved_verdict: true
   audit:
     write_to_signal_snapshot: true
     log_decision_reasons: true
@@ -469,5 +482,3 @@ portfolio_manager:
 
   # sector_weights 与 strategic_view_weights 由 analyst_prior_profiles.yaml 展开。
   # 日频交易用 trade_timing 权重；中期方向背景用 strategic_view 权重。
-
-

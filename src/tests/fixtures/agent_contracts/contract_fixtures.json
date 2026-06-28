@@ -155,8 +155,11 @@
       "validation_errors": []
     },
     "payload": {
-      "decision": "probe_only",
-      "reasons": ["business_quality_probe_only"]
+      "audit_status": "approved",
+      "audit_verdict": "approve_with_warning",
+      "audit_reason_codes": ["soft_business_quality_warning"],
+      "hard_risk_reasons": [],
+      "soft_risk_reasons": ["soft_business_quality_warning"]
     }
   },
   {
@@ -232,7 +235,7 @@
     }
   },
   {
-    "artifact_type": "ReviewerLearningArtifact",
+    "artifact_type": "Phase4ValidationArtifact",
     "header": {
       "contract_version": "agentquant.reviewer.v1",
       "agent_name": "reviewer",
@@ -243,20 +246,20 @@
       "evidence_pack_id": "review-fixture",
       "data_cutoff": "post_settlement",
       "no_lookahead_status": "ok",
-      "determinism_mode": "deterministic_with_llm_candidate_notes",
+      "determinism_mode": "deterministic",
       "llm_provider": "",
       "llm_model": "",
       "source_artifacts": ["settlement-fixture"],
       "validation_errors": []
     },
     "payload": {
-      "template_state": "protected",
-      "sample_count": 4,
-      "valid_until": "2025-02-01"
+      "phase4_status": "completed",
+      "transaction_log_written": true,
+      "researcher_learning_triggered": false
     }
   },
   {
-    "artifact_type": "CausalReviewCandidateArtifact",
+    "artifact_type": "ResearchInputMaterial",
     "header": {
       "contract_version": "agentquant.reviewer.v1",
       "agent_name": "reviewer",
@@ -267,18 +270,18 @@
       "evidence_pack_id": "causal-review-fixture",
       "data_cutoff": "post_settlement",
       "no_lookahead_status": "ok",
-      "determinism_mode": "deterministic_with_llm_candidate_notes",
-      "llm_provider": "fixture",
-      "llm_model": "fixture-model",
+      "determinism_mode": "deterministic",
+      "llm_provider": "",
+      "llm_model": "",
       "source_artifacts": ["AnalystSignalArtifact:BU", "PMDecisionArtifact:BU", "SettlementArtifact:*"],
       "validation_errors": []
     },
     "payload": {
-      "candidate_type": "post_trade_causal_review",
-      "direction_error_weight": 0.0,
-      "entry_error_weight": 0.2,
-      "exit_error_weight": 0.1,
-      "rule_engine_status": "notes_only"
+      "material_type": "post_trade_research_input",
+      "direction_fact": "matched",
+      "entry_fact": "late_entry",
+      "exit_fact": "not_applicable",
+      "future_learning_written": false
     }
   }
 ]

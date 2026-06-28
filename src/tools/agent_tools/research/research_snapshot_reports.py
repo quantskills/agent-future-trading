@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """Read-only research snapshot reports produced by the researcher learning entry."""
 
@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from graph.schema import RecommendationSourceType
-from tools.agent_tools.research.neutral_accountability import build_neutral_accountability_summary
-from tools.agent_tools.research import phase4_review as _phase4
+from tools.common.neutral_accountability import build_neutral_accountability_summary
+from tools.agent_tools.research import research_review_helpers as _review_helpers
 from util.logger import logger
 
 
@@ -50,7 +50,7 @@ def causal_candidate_scope(
     except sqlite3.Error:
         row = None
     evidence = (
-        _phase4.load_externalized_json(
+        _review_helpers.load_externalized_json(
             row["payload_json"],
             row["payload_artifact_path"] if "payload_artifact_path" in row.keys() else None,
             row["payload_sha256"] if "payload_sha256" in row.keys() else None,
@@ -71,8 +71,8 @@ def causal_candidate_scope(
             sides.add("short")
         else:
             snapshot = item.get("signal_snapshot") if isinstance(item.get("signal_snapshot"), dict) else {}
-            contract = _phase4.final_action_contract_from_snapshot(snapshot)
-            side = _phase4._target_side_from_ratio(contract.get("target_lots"))
+            contract = _review_helpers.final_action_contract_from_snapshot(snapshot)
+            side = _review_helpers._target_side_from_ratio(contract.get("target_lots"))
             if side in {"long", "short"}:
                 sides.add(side)
     return {
@@ -89,10 +89,10 @@ def learned_vs_unlearned_trade_performance(
     trading_date: str,
 ) -> Dict[str, Any]:
     try:
-        pairs = _phase4._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+        pairs = _review_helpers._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
     except sqlite3.Error:
         pairs = []
-    recommendation_lookup = _phase4._recommendations_by_id(
+    recommendation_lookup = _review_helpers._recommendations_by_id(
         cursor,
         [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
     )
@@ -106,8 +106,8 @@ def learned_vs_unlearned_trade_performance(
             missing_recommendations += 1
             unlearned_pairs.append(dict(pair))
             continue
-        tags, effects = _phase4._learning_attribution_from_recommendation(recommendation)
-        mechanisms = _phase4._learning_mechanisms_from_recommendation(recommendation)
+        tags, effects = _review_helpers._learning_attribution_from_recommendation(recommendation)
+        mechanisms = _review_helpers._learning_mechanisms_from_recommendation(recommendation)
         item = dict(pair)
         item["learning_tags"] = tags
         item["learning_effects"] = effects
@@ -120,13 +120,13 @@ def learned_vs_unlearned_trade_performance(
     return {
         "status": "ok" if pairs else "no_completed_round_trips",
         "cutoff_trading_date": trading_date,
-        "learned": _phase4._trade_pair_performance_summary(learned_pairs),
-        "unlearned": _phase4._trade_pair_performance_summary(unlearned_pairs),
-        "learned_reason_counts": _phase4._sorted_counter_dict(reason_counts),
-        "learned_effect_counts": _phase4.learning_effect_counts(learned_pairs),
-        "learned_effect_summary": _phase4.summarize_pairs_by_learning_effect(learned_pairs),
-        "learning_mechanism_counts": _phase4.learning_mechanism_counts(learned_pairs),
-        "learning_mechanism_summary": _phase4.summarize_pairs_by_learning_mechanism(learned_pairs),
+        "learned": _review_helpers._trade_pair_performance_summary(learned_pairs),
+        "unlearned": _review_helpers._trade_pair_performance_summary(unlearned_pairs),
+        "learned_reason_counts": _review_helpers._sorted_counter_dict(reason_counts),
+        "learned_effect_counts": _review_helpers.learning_effect_counts(learned_pairs),
+        "learned_effect_summary": _review_helpers.summarize_pairs_by_learning_effect(learned_pairs),
+        "learning_mechanism_counts": _review_helpers.learning_mechanism_counts(learned_pairs),
+        "learning_mechanism_summary": _review_helpers.summarize_pairs_by_learning_mechanism(learned_pairs),
         "missing_open_recommendations": missing_recommendations,
     }
 
@@ -142,10 +142,10 @@ def learned_effect_underperformance_groups(
     min_self_loss_net_pnl: float = -1000.0,
 ) -> List[Dict[str, Any]]:
     try:
-        pairs = _phase4._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+        pairs = _review_helpers._completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
     except sqlite3.Error:
         return []
-    recommendation_lookup = _phase4._recommendations_by_id(
+    recommendation_lookup = _review_helpers._recommendations_by_id(
         cursor,
         [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
     )
@@ -155,20 +155,20 @@ def learned_effect_underperformance_groups(
     tracked_effects = ("alpha_release", "risk_suppression", "evidence_rejection")
     for pair in pairs:
         recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
-        snapshot = _phase4._recommendation_snapshot(recommendation or {})
+        snapshot = _review_helpers._recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        combo = _phase4._signal_combo_from_snapshot(snapshot)
-        expected_days = _phase4._expected_horizon_days(snapshot, side)
-        horizon = _phase4._horizon_class(expected_days, snapshot)
-        regime = _phase4._market_regime(snapshot)
-        template = _phase4._setup_type(side, combo, snapshot)
+        combo = _review_helpers._signal_combo_from_snapshot(snapshot)
+        expected_days = _review_helpers._expected_horizon_days(snapshot, side)
+        horizon = _review_helpers._horizon_class(expected_days, snapshot)
+        regime = _review_helpers._market_regime(snapshot)
+        template = _review_helpers._setup_type(side, combo, snapshot)
         key = (ticker, side, template, horizon, regime)
         item = dict(pair)
         item["setup_type"] = template
         item["signal_combo"] = combo
         if recommendation:
-            tags, effects = _phase4._learning_attribution_from_recommendation(recommendation)
+            tags, effects = _review_helpers._learning_attribution_from_recommendation(recommendation)
             item["learning_tags"] = tags
             item["learning_effects"] = effects
             scoped_effects = [str(effect) for effect in effects or [] if effect in tracked_effects]
@@ -183,12 +183,12 @@ def learned_effect_underperformance_groups(
     for (ticker, side, template, horizon, regime, effect), rows in groups.items():
         learned_rows = rows["learned_effect"]
         benchmark_rows = rows["benchmark"]
-        learned_summary = _phase4._trade_pair_performance_summary(learned_rows)
-        benchmark_summary = _phase4._trade_pair_performance_summary(benchmark_rows)
-        learned_trades = _phase4._safe_int(learned_summary.get("total_trades"))
-        benchmark_trades = _phase4._safe_int(benchmark_summary.get("total_trades"))
-        learned_pnl = _phase4._safe_float(learned_summary.get("net_pnl"))
-        benchmark_pnl = _phase4._safe_float(benchmark_summary.get("net_pnl"))
+        learned_summary = _review_helpers._trade_pair_performance_summary(learned_rows)
+        benchmark_summary = _review_helpers._trade_pair_performance_summary(benchmark_rows)
+        learned_trades = _review_helpers._safe_int(learned_summary.get("total_trades"))
+        benchmark_trades = _review_helpers._safe_int(benchmark_summary.get("total_trades"))
+        learned_pnl = _review_helpers._safe_float(learned_summary.get("net_pnl"))
+        benchmark_pnl = _review_helpers._safe_float(benchmark_summary.get("net_pnl"))
         if learned_trades < min_samples:
             continue
         comparison_status = "same_scope_benchmark_underperformed"
@@ -219,9 +219,9 @@ def learned_effect_underperformance_groups(
         )
     underperforming.sort(
         key=lambda item: (
-            _phase4._safe_float(item.get("learned_effect_net_pnl"))
-            - _phase4._safe_float(item.get("benchmark_net_pnl")),
-            -_phase4._safe_int(item.get("learned_effect_trades")),
+            _review_helpers._safe_float(item.get("learned_effect_net_pnl"))
+            - _review_helpers._safe_float(item.get("benchmark_net_pnl")),
+            -_review_helpers._safe_int(item.get("learned_effect_trades")),
         )
     )
     return underperforming
@@ -267,15 +267,15 @@ def causal_rule_validation_summary(
 def _directional_consensus_from_snapshot(snapshot: Dict[str, Any], neutral_analyst: str) -> Dict[str, Any]:
     counts: Counter = Counter()
     supporters: List[str] = []
-    for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+    for analyst, payload in _review_helpers._analyst_payloads(snapshot).items():
         if analyst == neutral_analyst:
             continue
         signal = str(payload.get("signal") or "Neutral")
         if signal not in {"Bullish", "Bearish"}:
             continue
         confidence = max(
-            _phase4._safe_float(payload.get("effective_confidence")),
-            _phase4._safe_float(payload.get("confidence")),
+            _review_helpers._safe_float(payload.get("effective_confidence")),
+            _review_helpers._safe_float(payload.get("confidence")),
         )
         if confidence < 0.45:
             continue
@@ -308,7 +308,7 @@ def neutral_counterfactual_tracking_summary(
             """,
             (config_id, trading_date),
         )
-        by_ticker = {str(row["ticker"] or "").upper(): _phase4._safe_float(row["pnl"]) for row in cursor.fetchall()}
+        by_ticker = {str(row["ticker"] or "").upper(): _review_helpers._safe_float(row["pnl"]) for row in cursor.fetchall()}
     except sqlite3.Error:
         by_ticker = {}
 
@@ -319,12 +319,12 @@ def neutral_counterfactual_tracking_summary(
         snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
         ticker_pnl = by_ticker.get(ticker, 0.0)
-        for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+        for analyst, payload in _review_helpers._analyst_payloads(snapshot).items():
             if str(payload.get("signal") or "Neutral") != "Neutral":
                 continue
             consensus = _directional_consensus_from_snapshot(snapshot, analyst)
             counterfactual_side = consensus.get("signal")
-            if counterfactual_side not in {"Bullish", "Bearish"} or _phase4._safe_int(consensus.get("support_count")) <= 0:
+            if counterfactual_side not in {"Bullish", "Bearish"} or _review_helpers._safe_int(consensus.get("support_count")) <= 0:
                 continue
             counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
             classification = (
@@ -342,13 +342,13 @@ def neutral_counterfactual_tracking_summary(
                     "recommendation_id": recommendation.get("id"),
                     "analyst": analyst,
                     "counterfactual_side": counterfactual_side,
-                    "support_count": _phase4._safe_int(consensus.get("support_count")),
+                    "support_count": _review_helpers._safe_int(consensus.get("support_count")),
                     "counterfactual_pnl": counterfactual_pnl,
                     "classification": classification,
                 }
             )
 
-    total_counterfactual_pnl = sum(_phase4._safe_float(item.get("counterfactual_pnl")) for item in observations)
+    total_counterfactual_pnl = sum(_review_helpers._safe_float(item.get("counterfactual_pnl")) for item in observations)
     account_cfg = (((cfg or {}).get("signal_quality") or {}).get("neutral_accountability") or {})
     forward_days = max(0, int(account_cfg.get("counterfactual_forward_days", 0) or 0))
     forward_dates: List[str] = []
@@ -382,7 +382,7 @@ def neutral_counterfactual_tracking_summary(
                     [config_id, *forward_dates],
                 )
                 forward_by_ticker = {
-                    str(row["ticker"] or "").upper(): _phase4._safe_float(row["pnl"])
+                    str(row["ticker"] or "").upper(): _review_helpers._safe_float(row["pnl"])
                     for row in cursor.fetchall()
                 }
         except sqlite3.Error:
@@ -397,12 +397,12 @@ def neutral_counterfactual_tracking_summary(
             snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
             ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
             ticker_pnl = forward_by_ticker.get(ticker, 0.0)
-            for analyst, payload in _phase4._analyst_payloads(snapshot).items():
+            for analyst, payload in _review_helpers._analyst_payloads(snapshot).items():
                 if str(payload.get("signal") or "Neutral") != "Neutral":
                     continue
                 consensus = _directional_consensus_from_snapshot(snapshot, analyst)
                 counterfactual_side = consensus.get("signal")
-                if counterfactual_side not in {"Bullish", "Bearish"} or _phase4._safe_int(consensus.get("support_count")) <= 0:
+                if counterfactual_side not in {"Bullish", "Bearish"} or _review_helpers._safe_int(consensus.get("support_count")) <= 0:
                     continue
                 counterfactual_pnl = ticker_pnl if counterfactual_side == "Bullish" else -ticker_pnl
                 classification = (
@@ -420,14 +420,14 @@ def neutral_counterfactual_tracking_summary(
                         "recommendation_id": recommendation.get("id"),
                         "analyst": analyst,
                         "counterfactual_side": counterfactual_side,
-                        "support_count": _phase4._safe_int(consensus.get("support_count")),
+                        "support_count": _review_helpers._safe_int(consensus.get("support_count")),
                         "counterfactual_pnl": counterfactual_pnl,
                         "classification": classification,
                         "window_trading_dates": forward_dates,
                     }
                 )
     total_forward_counterfactual_pnl = sum(
-        _phase4._safe_float(item.get("counterfactual_pnl")) for item in forward_observations
+        _review_helpers._safe_float(item.get("counterfactual_pnl")) for item in forward_observations
     )
     return {
         "observation_count": len(observations),
@@ -469,7 +469,7 @@ def _write_historical_learning_snapshot_report(
         "config_id = ? AND sample_count > 0 "
         "AND (valid_until IS NULL OR valid_until >= ?)"
     )
-    positive_templates = _phase4._report_rows(
+    positive_templates = _review_helpers._report_rows(
         cursor,
         f'''
         SELECT *
@@ -482,7 +482,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    weak_templates = _phase4._report_rows(
+    weak_templates = _review_helpers._report_rows(
         cursor,
         f'''
         SELECT *
@@ -494,7 +494,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    analyst_digests = _phase4._report_rows(
+    analyst_digests = _review_helpers._report_rows(
         cursor,
         '''
         SELECT *
@@ -506,7 +506,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    overlays = _phase4._report_rows(
+    overlays = _review_helpers._report_rows(
         cursor,
         '''
         SELECT *
@@ -518,7 +518,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    historical_adaptive_policy_snapshot = _phase4._report_rows(
+    historical_adaptive_policy_snapshot = _review_helpers._report_rows(
         cursor,
         '''
         SELECT *
@@ -531,7 +531,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    historical_capital_deployment_rows = _phase4._report_rows(
+    historical_capital_deployment_rows = _review_helpers._report_rows(
         cursor,
         '''
         SELECT *
@@ -542,7 +542,7 @@ def _write_historical_learning_snapshot_report(
         ''',
         (config_id, trading_date),
     )
-    events = _phase4._report_rows(
+    events = _review_helpers._report_rows(
         cursor,
         '''
         SELECT *
@@ -571,7 +571,7 @@ def _write_historical_learning_snapshot_report(
         if {"signal_snapshot_artifact_path", "signal_snapshot_sha256"}.issubset(recommendation_columns)
         else ""
     )
-    neutral_rows = _phase4._report_rows(
+    neutral_rows = _review_helpers._report_rows(
         cursor,
         f'''
         SELECT id, underlying_code, signal_snapshot{snapshot_artifact_cols}
@@ -586,7 +586,7 @@ def _write_historical_learning_snapshot_report(
     neutral_recommendations = []
     for row in neutral_rows:
         item = dict(row)
-        item["signal_snapshot"] = _phase4._recommendation_snapshot(item)
+        item["signal_snapshot"] = _review_helpers._recommendation_snapshot(item)
         neutral_recommendations.append(item)
     neutral_accountability = build_neutral_accountability_summary(neutral_recommendations, cfg)
     neutral_accountability["counterfactual_tracking"] = neutral_counterfactual_tracking_summary(
@@ -625,7 +625,7 @@ def _write_historical_learning_snapshot_report(
         "learned_vs_unlearned_performance": learned_vs_unlearned,
         "neutral_accountability": neutral_accountability,
         "learning_events": events,
-        "written_at": _phase4._utc_now(),
+        "written_at": _review_helpers._utc_now(),
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -649,13 +649,13 @@ def _write_historical_learning_snapshot_report(
         [
             "",
             "## Historical Capital Deployment Snapshot",
-            f"- current_margin_ratio: {_phase4._percent(capital_state.get('current_margin_ratio'))}",
-            f"- target_margin_ratio_min: {_phase4._percent(capital_state.get('target_margin_ratio_min'))}",
-            f"- target_margin_ratio_max: {_phase4._percent(capital_state.get('target_margin_ratio_max'))}",
+            f"- current_margin_ratio: {_review_helpers._percent(capital_state.get('current_margin_ratio'))}",
+            f"- target_margin_ratio_min: {_review_helpers._percent(capital_state.get('target_margin_ratio_min'))}",
+            f"- target_margin_ratio_max: {_review_helpers._percent(capital_state.get('target_margin_ratio_max'))}",
             f"- reason_bucket: {capital_state.get('reason_bucket', 'unknown')}",
         ]
     )
-    deployment_plan = _phase4._json_loads(capital_state.get("deployment_plan_json")) or {}
+    deployment_plan = _review_helpers._json_loads(capital_state.get("deployment_plan_json")) or {}
     diagnostics = deployment_plan.get("diagnostics") if isinstance(deployment_plan, dict) else {}
     if isinstance(diagnostics, dict) and diagnostics:
         lines.extend(
@@ -680,8 +680,8 @@ def _write_historical_learning_snapshot_report(
             lines.extend(
                 (
                     f"  - {item.get('ticker')}/{item.get('side')}: "
-                    f"confirm={_phase4._percent(item.get('confirmation_score'))}, "
-                    f"target={_phase4._percent(item.get('target_position_ratio'))}, "
+                    f"confirm={_review_helpers._percent(item.get('confirmation_score'))}, "
+                    f"target={_review_helpers._percent(item.get('target_position_ratio'))}, "
                     f"memory={item.get('memory_state') or 'none'}, "
                     f"auditor={item.get('auditor_decision') or 'none'}"
                 )
@@ -696,25 +696,25 @@ def _write_historical_learning_snapshot_report(
         ]
     )
     lines.extend(["", "## Learned vs Unlearned Trade Performance"])
-    lines.append(_phase4._trade_performance_report_line("learned", learned_vs_unlearned.get("learned") or {}))
-    lines.append(_phase4._trade_performance_report_line("unlearned", learned_vs_unlearned.get("unlearned") or {}))
+    lines.append(_review_helpers._trade_performance_report_line("learned", learned_vs_unlearned.get("learned") or {}))
+    lines.append(_review_helpers._trade_performance_report_line("unlearned", learned_vs_unlearned.get("unlearned") or {}))
     lines.append(f"- learned_reason_counts: {learned_vs_unlearned.get('learned_reason_counts', {})}")
     lines.append(f"- learned_effect_counts: {learned_vs_unlearned.get('learned_effect_counts', {})}")
     effect_summary = learned_vs_unlearned.get("learned_effect_summary") or {}
     if isinstance(effect_summary, dict):
         for effect, effect_payload in effect_summary.items():
-            lines.append(_phase4._trade_performance_report_line(f"effect:{effect}", effect_payload))
+            lines.append(_review_helpers._trade_performance_report_line(f"effect:{effect}", effect_payload))
     mechanism_summary = learned_vs_unlearned.get("learning_mechanism_summary") or {}
     lines.append(f"- learning_mechanism_counts: {learned_vs_unlearned.get('learning_mechanism_counts', {})}")
     if isinstance(mechanism_summary, dict):
         for mechanism, mechanism_payload in mechanism_summary.items():
-            lines.append(_phase4._trade_performance_report_line(f"mechanism:{mechanism}", mechanism_payload))
+            lines.append(_review_helpers._trade_performance_report_line(f"mechanism:{mechanism}", mechanism_payload))
     lines.append(f"- sample_status: {learned_vs_unlearned.get('status', 'unknown')}")
     lines.extend(["", "## Neutral Accountability"])
     lines.extend(
         [
-            f"- neutral_ratio: {_phase4._percent(neutral_accountability.get('neutral_ratio'))}",
-            f"- accountability_complete_rate: {_phase4._percent(neutral_accountability.get('accountability_complete_rate'))}",
+            f"- neutral_ratio: {_review_helpers._percent(neutral_accountability.get('neutral_ratio'))}",
+            f"- accountability_complete_rate: {_review_helpers._percent(neutral_accountability.get('accountability_complete_rate'))}",
             f"- category_counts: {neutral_accountability.get('category_counts', {})}",
             f"- missing_field_counts: {neutral_accountability.get('missing_field_counts', {})}",
         ]
@@ -726,7 +726,7 @@ def _write_historical_learning_snapshot_report(
                 f"- counterfactual_observation_count: {counterfactual_tracking.get('observation_count', 0)}",
                 f"- counterfactual_missed_opportunity_count: {counterfactual_tracking.get('missed_opportunity_count', 0)}",
                 f"- counterfactual_reasonable_avoidance_count: {counterfactual_tracking.get('reasonable_avoidance_count', 0)}",
-                f"- total_counterfactual_pnl: {_phase4._signed_money(counterfactual_tracking.get('total_counterfactual_pnl'))}",
+                f"- total_counterfactual_pnl: {_review_helpers._signed_money(counterfactual_tracking.get('total_counterfactual_pnl'))}",
             ]
         )
     examples = neutral_accountability.get("examples") or []
@@ -741,16 +741,16 @@ def _write_historical_learning_snapshot_report(
             if isinstance(item, dict)
         )
     lines.extend(["", "## Positive Templates"])
-    lines.extend([_phase4._template_report_line(row) for row in positive_templates] or ["- none"])
+    lines.extend([_review_helpers._template_report_line(row) for row in positive_templates] or ["- none"])
     lines.extend(["", "## Failed Templates"])
-    lines.extend([_phase4._template_report_line(row) for row in weak_templates] or ["- none"])
+    lines.extend([_review_helpers._template_report_line(row) for row in weak_templates] or ["- none"])
     lines.extend(["", "## Historical Adaptive Policy Snapshot"])
     lines.extend(
         [
             (
                 f"- {row.get('ticker')}/{row.get('side')}/{row.get('horizon_class')}: "
                 f"{row.get('policy_action')} multiplier={row.get('multiplier')} "
-                f"confidence={_phase4._percent(row.get('confidence_score'))} reason={row.get('reason')}"
+                f"confidence={_review_helpers._percent(row.get('confidence_score'))} reason={row.get('reason')}"
             )
             for row in historical_adaptive_policy_snapshot
         ]

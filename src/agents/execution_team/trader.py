@@ -36,18 +36,18 @@ from graph.schema import (
     RecommendationStatus,
     TradingPhase,
 )
-from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
-from tools.agent_tools.execution.intraday_execution import (
+from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
+from tools.agent_tools.execution.trader_intraday_execution import (
     intraday_confirmation_enabled,
     resolve_intraday_execution_basis,
 )
-from tools.agent_tools.execution.entry_timing import phase2_entry_audit
-from tools.agent_tools.execution.execution_simulator import execution_price_basis
-from tools.agent_tools.execution.order_semantics import (
+from tools.agent_tools.execution.trader_entry_timing import phase2_entry_audit
+from tools.agent_tools.execution.trader_execution_simulator import execution_price_basis
+from tools.common.order_semantics import (
     build_lot_intent_consistency,
     phase2_order_intent_from_lots,
 )
-from tools.agent_tools.decision.position_lifecycle import cap_signed_lots_by_abs_limit
+from tools.common.position_lifecycle import cap_signed_lots_by_abs_limit
 from tools.common.runtime_setup import (
     ensure_seed_settled_portfolio,
     load_portfolio_config,
@@ -61,7 +61,8 @@ from tools.common.contracts import (
     sanitize_execution_contract,
     validate_final_action_contract,
 )
-from tools.agent_tools.execution.execution_exit_policy import evaluate_exit_policy
+from agents.decision_team.auditor import audit_verdict_allows_trader
+from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.futures_audit import (
@@ -308,6 +309,34 @@ def _recommendation_source_type(recommendation: Dict[str, Any]) -> str:
 
 def _is_strategy_recommendation(recommendation: Dict[str, Any]) -> bool:
     return _recommendation_source_type(recommendation) == RecommendationSourceType.STRATEGY.value
+
+
+def _auditor_payload(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    payload = recommendation.get("audit_payload") if isinstance(recommendation.get("audit_payload"), dict) else {}
+    if isinstance(payload, dict) and (payload.get("producer") == "auditor" or payload.get("audit_verdict")):
+        return payload
+    independent = payload.get("independent_auditor") if isinstance(payload, dict) else {}
+    if isinstance(independent, dict) and independent:
+        return independent
+    snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
+    auditor = snapshot.get("auditor") if isinstance(snapshot.get("auditor"), dict) else {}
+    return auditor if isinstance(auditor, dict) else {}
+
+
+def _auditor_verdict_allows_strategy_execution(recommendation: Dict[str, Any]) -> bool:
+    return audit_verdict_allows_trader(_auditor_payload(recommendation))
+
+
+def _audit_verdict_summary(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _auditor_payload(recommendation)
+    return {
+        "producer": payload.get("producer"),
+        "audit_status": payload.get("audit_status"),
+        "audit_verdict": payload.get("audit_verdict"),
+        "audit_reason_codes": list(payload.get("audit_reason_codes") or []),
+        "audited_by": payload.get("audited_by"),
+        "audited_at": payload.get("audited_at"),
+    }
 
 
 def _raw_action_lots_allowed_source(recommendation: Dict[str, Any]) -> bool:
@@ -982,6 +1011,20 @@ def _final_action_contract_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, 
     return final_action_contract_from_snapshot(snapshot)
 
 
+def _merge_recommendation_signal_snapshot(
+    snapshot: Dict[str, Any],
+    recommendation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Seed a Phase2 work snapshot from the PM recommendation artifact."""
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    signal_snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation, dict) else {}
+    if isinstance(signal_snapshot, dict):
+        for key, value in signal_snapshot.items():
+            snapshot.setdefault(key, value)
+    return snapshot
+
+
 def _contract_type_allows_strategy_translation(contract: Dict[str, Any]) -> bool:
     contract_type = str(contract.get("contract_type") or "strategy").strip().lower()
     return contract_type in {"", "strategy"}
@@ -1028,6 +1071,7 @@ def _translate_pre_open_recommendation_to_order(
     morning_price_context,
     snapshot: Dict[str, Any],
 ) -> FuturesDecision:
+    snapshot = _merge_recommendation_signal_snapshot(snapshot, recommendation)
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
     if isinstance(signal_snapshot, dict):
@@ -1736,6 +1780,48 @@ def _process_strategy_recommendations(
         summary["checked"] += 1
         ticker = recommendation["underlying_code"]
         audit_snapshot = ensure_signal_snapshot(recommendation.get("signal_snapshot"))
+        if not _auditor_verdict_allows_strategy_execution(recommendation):
+            no_trade_reason = "auditor_verdict_not_approved"
+            translation = ensure_execution_translation(audit_snapshot)
+            translation["auditor_verdict"] = _audit_verdict_summary(recommendation)
+            translation["execution_block"] = no_trade_reason
+            _record_phase2_state(
+                audit_snapshot,
+                mode=runtime_mode,
+                status="skipped_auditor_not_approved",
+                recommendation=recommendation,
+                cutoff_datetime=cutoff_datetime,
+                finalize_untriggered=finalize_untriggered,
+                loop_iteration=loop_iteration,
+                reason=no_trade_reason,
+            )
+            set_execution_result(
+                audit_snapshot,
+                outcome="skipped",
+                status=RecommendationStatus.SKIPPED.value,
+                transaction_count=0,
+                no_trade_reason=no_trade_reason,
+                warning_message="Independent Auditor did not approve this PM contract.",
+            )
+            _attach_setup_execution_learning(
+                audit_snapshot,
+                status="skipped_auditor_not_approved",
+                reason=no_trade_reason,
+            )
+            db.update_futures_recommendation_status(
+                recommendation["id"],
+                RecommendationStatus.SKIPPED,
+                warning_message="Independent Auditor did not approve this PM contract.",
+                signal_snapshot=audit_snapshot,
+                audit_payload=build_audit_payload(audit_snapshot),
+            )
+            logger.warning(
+                f"Strategy execution skipped {ticker}: independent Auditor verdict not approved "
+                f"{_audit_verdict_summary(recommendation)}"
+            )
+            summary["skipped"] += 1
+            summary["no_trade_reasons"][no_trade_reason] += 1
+            continue
         morning_price_context = router.resolve_morning_execution_base_price(
             underlying_code=ticker,
             trading_date=cfg["trading_date"],

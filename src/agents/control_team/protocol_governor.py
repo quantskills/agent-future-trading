@@ -11,23 +11,23 @@ action-preference landing auditable before expensive backtests or simulation.
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from tools.agent_tools.control.action_preference_audit import audit_action_preference_landing
-from tools.agent_tools.control.agent_cards import build_default_agent_cards, validate_agent_capability
-from tools.agent_tools.control.artifact_lineage import (
+from tools.agent_tools.control.pg_action_preference_audit import audit_action_preference_landing
+from tools.agent_tools.control.pg_agent_cards import build_default_agent_cards, validate_agent_capability
+from tools.agent_tools.control.pg_artifact_lineage import (
     build_protocol_artifact_header,
     validate_protocol_artifact,
 )
-from tools.agent_tools.control.cost_budget_audit import CostBudgetLimits, audit_cost_budget
-from tools.agent_tools.control.exploration_audit import classify_exploration_intent, summarize_exploration_intents
-from tools.agent_tools.control.memory_quality import classify_memory_payload
-from tools.agent_tools.control.mechanism_effectiveness_audit import audit_mechanism_effectiveness
-from tools.agent_tools.control.parity import compare_contract_interpretation
-from tools.agent_tools.control.pre_backtest_acceptance import run_pre_backtest_acceptance
-from tools.agent_tools.control.preflight import run_preflight_checks
-from tools.agent_tools.control.schemas import AgentCapabilityCard, ProtocolCheckResult, TaskLifecycleEvent
-from tools.agent_tools.control.system_invariants import audit_system_invariants
-from tools.agent_tools.control.task_lifecycle import create_lifecycle_event, validate_lifecycle_sequence
-from tools.agent_tools.control.tool_access_policy import (
+from tools.agent_tools.control.pg_cost_budget_audit import CostBudgetLimits, audit_cost_budget
+from tools.agent_tools.control.pg_exploration_audit import classify_exploration_intent, summarize_exploration_intents
+from tools.agent_tools.control.pg_memory_quality import classify_memory_payload
+from tools.agent_tools.control.pg_mechanism_effectiveness_audit import audit_mechanism_effectiveness
+from tools.agent_tools.control.pg_parity import compare_contract_interpretation
+from tools.agent_tools.control.pg_pre_backtest_acceptance import run_pre_backtest_acceptance
+from tools.agent_tools.control.pg_preflight import run_preflight_checks
+from tools.agent_tools.control.pg_schemas import AgentCapabilityCard, ProtocolCheckResult, TaskLifecycleEvent
+from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
+from tools.agent_tools.control.pg_task_lifecycle import create_lifecycle_event, validate_lifecycle_sequence
+from tools.agent_tools.control.pg_tool_access_policy import (
     ToolAccessPolicy,
     audit_tool_access,
     build_default_tool_access_policy,

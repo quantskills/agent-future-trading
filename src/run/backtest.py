@@ -169,6 +169,23 @@ def run_pre_backtest_test(config_arg: str, start_date: str, end_date: str, local
     return run_command(command, os.environ.copy())
 
 
+def reset_existing_config_if_requested(config: dict, reset_config: bool, local_db: bool) -> None:
+    """Delete the old config before pre-backtest checks when the run is explicitly reset."""
+    if not reset_config:
+        return
+    from util.db_helper import db_initialize, get_db
+
+    db_initialize(use_local_db=local_db)
+    db = get_db()
+    exp_name = str(config.get("exp_name") or "")
+    config_id = db.get_config_id_by_name(exp_name)
+    if not config_id:
+        return
+    print(f"[backtest] Resetting existing config before pre_backtest_test.py: {config_id[:8]}...")
+    if not db.delete_config_and_portfolios(config_id):
+        raise RuntimeError(f"Failed to reset existing config before pre-backtest checks: {config_id}")
+
+
 def run_backtest_daily_test(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
     command = [
         sys.executable,
@@ -216,6 +233,8 @@ def main() -> int:
         raise ValueError("backtest.py currently supports china_futures only.")
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
+
+    reset_existing_config_if_requested(config, args.reset_config, args.local_db)
 
     pre_backtest_return_code = run_pre_backtest_test(
         config_arg,

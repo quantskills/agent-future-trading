@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import tempfile
 import unittest
 import ast
@@ -23,9 +23,9 @@ from llm.prompt import (
     build_researcher_causal_review_prompt,
     build_researcher_exploratory_prompt,
 )
-from tools.agent_tools.control.agent_cards import build_default_agent_cards
-from tools.agent_tools.control.artifact_lineage import build_protocol_artifact_header
-from tools.agent_tools.control.cost_budget_audit import CostBudgetLimits, assert_cost_audit_is_non_trading
+from tools.agent_tools.control.pg_agent_cards import build_default_agent_cards
+from tools.agent_tools.control.pg_artifact_lineage import build_protocol_artifact_header
+from tools.agent_tools.control.pg_cost_budget_audit import CostBudgetLimits, assert_cost_audit_is_non_trading
 
 
 class ProtocolGovernorRegressionTest(unittest.TestCase):
@@ -77,7 +77,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                     self.assertNotIn(name, llm_call_names, f"{agent_name} calls LLM entrypoint: {name}")
 
     def test_reviewer_does_not_dispatch_researcher_learning(self):
-        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py"
         tree = ast.parse(reviewer_path.read_text(encoding="utf-8-sig"), filename=str(reviewer_path))
         forbidden_names = {
             "researcher_agent",
@@ -99,7 +99,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                 self.assertNotIn(name, forbidden_names, f"phase4 reviewer calls forbidden callable: {name}")
 
     def test_reviewer_phase4_main_does_not_write_research_memory(self):
-        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py"
         tree = ast.parse(reviewer_path.read_text(encoding="utf-8-sig"), filename=str(reviewer_path))
         reviewer_text = reviewer_path.read_text(encoding="utf-8-sig")
         self.assertNotIn("memory_config=", reviewer_text)
@@ -153,7 +153,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             SRC_ROOT / "tools" / "agent_tools" / "control",
         ]
         write_prefixes = ("INSERT INTO", "UPDATE ", "DELETE FROM", "DROP TABLE", "ALTER TABLE")
-        allowed_literal_files = {"contract_coverage_audit.py"}
+        allowed_literal_files = {"pg_contract_coverage_audit.py"}
         offenders = []
         for root in control_roots:
             for path in root.rglob("*.py"):
@@ -176,7 +176,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertEqual([], offenders, f"control audits must remain read-only business fact consumers: {offenders}")
 
     def test_phase4_review_module_does_not_define_research_memory_writers(self):
-        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py"
+        reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py"
         writer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
         reviewer_text = reviewer_path.read_text(encoding="utf-8-sig")
         writer_text = writer_path.read_text(encoding="utf-8-sig")
@@ -243,6 +243,20 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         snapshot_report_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_snapshot_reports.py"
         snapshot_report_text = snapshot_report_path.read_text(encoding="utf-8-sig")
         self.assertIn("def _write_historical_learning_snapshot_report", snapshot_report_text)
+
+    def test_researcher_tools_do_not_import_reviewer_main_tool(self):
+        research_root = SRC_ROOT / "tools" / "agent_tools" / "research"
+        helper_text = (research_root / "research_review_helpers.py").read_text(encoding="utf-8-sig")
+        self.assertNotIn("reviewer_phase4_review", helper_text)
+
+        for filename in ("research_memory_writers.py", "research_snapshot_reports.py"):
+            source = (research_root / filename).read_text(encoding="utf-8-sig")
+            self.assertNotIn(
+                "reviewer_phase4_review",
+                source,
+                f"{filename} must depend on research_review_helpers, not the Reviewer main tool",
+            )
+            self.assertIn("research_review_helpers", source)
 
     def test_phase_completion_has_no_learning_side_effects(self):
         db_path = SRC_ROOT / "database" / "sqlite_helper.py"
@@ -323,7 +337,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         )
         for token in forbidden:
             self.assertNotIn(token, text, f"auditor must not consume research memory token {token}")
-        self.assertIn("auditor_does_not_consume_research_records", text)
+        self.assertIn("research_memory_not_consumed", text)
 
     def test_trader_reads_execution_profile_only_through_final_contract(self):
         cards = build_default_agent_cards()
@@ -341,7 +355,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
     def test_trader_execution_layer_has_no_research_memory_entrypoint(self):
         trader_text = (SRC_ROOT / "agents" / "execution_team" / "trader.py").read_text(encoding="utf-8-sig")
-        intraday_text = (SRC_ROOT / "tools" / "agent_tools" / "execution" / "intraday_execution.py").read_text(encoding="utf-8-sig")
+        intraday_text = (SRC_ROOT / "tools" / "agent_tools" / "execution" / "trader_intraday_execution.py").read_text(encoding="utf-8-sig")
         forbidden = (
             "strategy_memory=",
             "adaptive_policy_state=",
@@ -539,6 +553,8 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertFalse(cards["trader"].may_create_trade_authority)
         self.assertTrue(cards["researcher"].may_write_future_learning)
         self.assertFalse(cards["researcher"].may_create_trade_authority)
+        self.assertFalse(cards["reviewer"].may_write_future_learning)
+        self.assertNotIn("ReviewerLearningArtifact", cards["reviewer"].writes)
         self.assertFalse(cards["technical"].may_create_trade_authority)
 
     def test_task_lifecycle_validates_order_and_task_scope(self):
@@ -693,7 +709,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                 "tqxai": {"api_key_env": "TQX_LLM_API_KEY", "api_key_env_fallbacks": []},
             }
             with patch.dict("os.environ", {"TQX_LLM_API_KEY": "bad-token"}, clear=False), patch(
-                "tools.agent_tools.control.preflight.get_model",
+                "tools.agent_tools.control.pg_preflight.get_model",
                 side_effect=RuntimeError("Error code: 401 - Invalid token"),
             ):
                 result = self.governor.run_preflight(
@@ -779,7 +795,7 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             tool_events=[
                 {
                     "agent_name": "technical",
-                    "tool": "tools.agent_tools.analysis.quality.apply_trade_research_contract",
+                    "tool": "tools.agent_tools.analysis.analyst_quality.apply_trade_research_contract",
                 }
             ],
         )
@@ -845,23 +861,23 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             [
                 {
                     "agent_name": "technical",
-                    "tool": "tools.agent_tools.analysis.quality.apply_trade_research_contract",
+                    "tool": "tools.agent_tools.analysis.analyst_quality.apply_trade_research_contract",
                 },
                 {
                     "agent_name": "portfolio_manager",
-                    "tool": "tools.agent_tools.decision.capital_deployment_policy.allocate_position",
+                    "tool": "tools.agent_tools.decision.pm_capital_deployment_policy.allocate_position",
                 },
                 {
                     "agent_name": "trader",
-                    "tool": "tools.agent_tools.execution.intraday_execution.check_intraday_trigger",
+                    "tool": "tools.agent_tools.execution.trader_intraday_execution.check_intraday_trigger",
                 },
                 {
                     "agent_name": "researcher",
-                    "tool": "tools.agent_tools.research.alpha_setup.upsert_alpha_setup_action_value",
+                    "tool": "tools.common.alpha_setup.upsert_alpha_setup_action_value",
                 },
                 {
                     "agent_name": "protocol_governor",
-                    "tool": "tools.agent_tools.control.cost_budget_audit.audit_cost_budget",
+                    "tool": "tools.agent_tools.control.pg_cost_budget_audit.audit_cost_budget",
                 },
             ]
         )
@@ -889,21 +905,21 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             [
                 {
                     "agent_name": "trader",
-                    "tool": "tools.agent_tools.decision.capital_deployment_policy.allocate_position",
+                    "tool": "tools.agent_tools.decision.pm_capital_deployment_policy.allocate_position",
                 },
                 {
                     "agent_name": "protocol_governor",
-                    "tool": "tools.agent_tools.execution.intraday_execution.check_intraday_trigger",
+                    "tool": "tools.agent_tools.execution.trader_intraday_execution.check_intraday_trigger",
                 },
             ]
         )
         self.assertFalse(result.ok)
         self.assertIn(
-            "tool_access_denied:trader:decision:tools.agent_tools.decision.capital_deployment_policy.allocate_position",
+            "tool_access_denied:trader:decision:tools.agent_tools.decision.pm_capital_deployment_policy.allocate_position",
             result.errors,
         )
         self.assertIn(
-            "tool_access_denied:protocol_governor:execution:tools.agent_tools.execution.intraday_execution.check_intraday_trigger",
+            "tool_access_denied:protocol_governor:execution:tools.agent_tools.execution.trader_intraday_execution.check_intraday_trigger",
             result.errors,
         )
 

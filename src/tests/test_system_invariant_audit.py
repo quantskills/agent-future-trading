@@ -1,4 +1,4 @@
-﻿import json
+import json
 import sqlite3
 import sys
 import tempfile
@@ -12,11 +12,36 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.system_invariants import audit_system_invariants
+from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
 
 
 def _dumps(value):
     return json.dumps(value, ensure_ascii=False)
+
+
+def _auditor_approval_payload():
+    return {
+        "producer": "auditor",
+        "agent_name": "auditor",
+        "contract_version": "agentquant.audit_verdict.v1",
+        "audit_verdict": "approve",
+        "hard_risk_reasons": [],
+        "soft_risk_reasons": [],
+        "audited_by": "auditor",
+        "boundary": {
+            "auditor_does_not_modify_final_action_contract": True,
+            "auditor_does_not_create_trade_authority": True,
+            "trader_requires_approved_audit_verdict": True,
+        },
+    }
+
+
+def _with_auditor_approval(payload):
+    result = dict(payload or {})
+    auditor = _auditor_approval_payload()
+    result.setdefault("auditor", dict(auditor))
+    result["independent_auditor"] = dict(auditor)
+    return result
 
 
 def _transaction_audit_payload(payload):
@@ -39,6 +64,9 @@ def _transaction_audit_payload(payload):
     phase2 = payload.get("phase2_execution") if isinstance(payload, dict) else None
     if isinstance(phase2, dict):
         result["phase2_execution"] = phase2
+    independent_auditor = payload.get("independent_auditor") if isinstance(payload, dict) else None
+    if isinstance(independent_auditor, dict):
+        result["independent_auditor"] = dict(independent_auditor)
     return result
 
 
@@ -266,6 +294,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
             "execution_translation": {"intraday_execution": {"trigger_passed": True}},
         }
+        payload = _with_auditor_approval(payload)
         transaction_payload = {
             "trade_contract_audit": {
                 "single_source_of_trade_truth": True,
@@ -405,8 +434,8 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         production_files = [
             SRC_ROOT / "util" / "futures_audit.py",
             SRC_ROOT / "agents" / "execution_team" / "trader.py",
-            SRC_ROOT / "tools" / "agent_tools" / "execution" / "futures_execution.py",
-            SRC_ROOT / "tools" / "agent_tools" / "research" / "phase4_review.py",
+            SRC_ROOT / "tools" / "agent_tools" / "execution" / "trader_futures_execution.py",
+            SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py",
         ]
 
         for path in production_files:
@@ -587,6 +616,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
             }
         }
+        payload = _with_auditor_approval(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -648,6 +678,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
             }
         }
+        payload = _with_auditor_approval(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -849,6 +880,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "lots_delta": -4,
             },
         }
+        payload = _with_auditor_approval(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -1260,6 +1292,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
+            payload = _with_auditor_approval(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
@@ -1316,6 +1349,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
+            payload = _with_auditor_approval(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
@@ -2006,6 +2040,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "lots_delta": 3,
             },
         }
+        payload = _with_auditor_approval(payload)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
@@ -2051,6 +2086,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "lots_delta": 4,
             },
         }
+        payload = _with_auditor_approval(payload)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
@@ -2686,6 +2722,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "candidate_sources_do_not_bypass_contract": True,
                 },
             }
+            payload = _with_auditor_approval(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET trading_date=?, effective_trade_date=?, action=?, lots=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 ("2025-03-04", "2025-03-04", "close_short", 1, _dumps(payload), _dumps(payload)),

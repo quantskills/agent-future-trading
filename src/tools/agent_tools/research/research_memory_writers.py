@@ -1,31 +1,45 @@
-﻿"""Research memory writer entrypoints used by researcher learning.
+"""Research memory writer entrypoints used by researcher learning.
 
-This module owns future-learning persistence. The Phase4 reviewer module may
-provide deterministic read-only helpers, but research tables and future policy
-state are written only through this module and the researcher learning entrypoint.
+This module owns future-learning persistence. Reviewer/Researcher shared
+read-only helpers live in research_review_helpers; research tables and future
+policy state are written only through this module and the researcher learning
+entrypoint.
 """
 
 from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from tools.agent_tools.research import phase4_review as _phase4
+from database.artifact_store import externalize_json_for_db
+from graph.schema import RecommendationSourceType
+from tools.agent_tools.research import research_review_helpers as _review_helpers
 from tools.agent_tools.research import research_snapshot_reports as _research_snapshots
-from tools.agent_tools.research.learning_contract import (
+from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot, compact_data_usage_notes
+from tools.common.learning_contract import (
     CONTRACT_KEY,
     attach_or_upgrade_next_round_memory_contract,
+    attach_next_round_memory_contract,
+    build_next_round_memory_contract,
     build_event_memory_contract,
 )
 from tools.common.contracts import validate_researcher_artifact_boundary
+from util.futures_audit import (
+    build_execution_learning_trace,
+    categorize_no_trade_reason,
+    infer_no_trade_reason,
+    normalize_no_trade_reason,
+)
+from util.futures_trade_pairs import summarize_trade_pairs
 
-# Reuse Phase4 deterministic parsing/report helpers without letting Phase4 own
-# research persistence entrypoints.
-for _name in dir(_phase4):
-    if _name.startswith("__"):
-        continue
-    globals().setdefault(_name, getattr(_phase4, _name))
+# Reuse deterministic parsing/report helpers without depending on the Reviewer
+# main tool or letting Phase4 own research persistence entrypoints.
+for _name in _review_helpers.EXPORTED_RESEARCH_REVIEW_HELPERS:
+    globals().setdefault(_name, getattr(_review_helpers, _name))
 
 _causal_candidate_scope = _research_snapshots.causal_candidate_scope
 _learned_vs_unlearned_trade_performance = _research_snapshots.learned_vs_unlearned_trade_performance
@@ -39,7 +53,7 @@ def _json_dumps(value: Any) -> str:
         validate_researcher_artifact_boundary(value)
     elif isinstance(value, list):
         validate_researcher_artifact_boundary({"research_payload": value})
-    return _phase4._json_dumps(value)
+    return _review_helpers._json_dumps(value)
 
 
 def build_policy_memory_payload(

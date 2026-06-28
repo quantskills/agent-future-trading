@@ -1,4 +1,4 @@
-﻿from typing import Dict, Any
+from typing import Dict, Any
 from langgraph.graph import StateGraph, START, END
 from typing import Callable
 from typing import List, Tuple
@@ -17,15 +17,16 @@ from graph.schema import (
 )
 from graph.constants import AgentKey, Signal
 from agents.registry import AgentRegistry
-from tools.agent_tools.execution.futures_execution import FuturesExecutionEngine
-from tools.agent_tools.analysis.quality import write_analyst_report
-from tools.agent_tools.analysis.data_usage import prefetch_local_daily_data, prefetch_pandaai_daily_data
+from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
+from tools.agent_tools.analysis.analyst_quality import write_analyst_report
+from tools.agent_tools.analysis.analyst_data_usage import prefetch_local_daily_data, prefetch_pandaai_daily_data
 from apis.contract_info_cache import FuturesContractInfoCache
 from util.db_helper import get_db
 from util.logger import logger
 from time import perf_counter
 from apis.router import APISource, Router
-from tools.agent_tools.analysis.learning_context import clear_learning_context_cache
+from tools.agent_tools.analysis.analyst_learning_context import clear_learning_context_cache
+from agents.decision_team.auditor import audit_futures_recommendation
 
 class AgentWorkflow:
     """Trading Decision Workflow."""
@@ -508,6 +509,53 @@ class AgentWorkflow:
                 lots=recommendation.lots,
                 signal_snapshot=snapshot,
             )
+
+    def _audit_phase1_strategy_recommendations(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
+        """Run the independent Auditor after PM capital deployment finalizes contracts."""
+        for ticker, recommendation in generated:
+            source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+            if recommendation.status == RecommendationStatus.SKIPPED:
+                continue
+            if source_type != RecommendationSourceType.STRATEGY.value:
+                continue
+            recommendation_dict = recommendation.model_dump() if hasattr(recommendation, "model_dump") else dict(recommendation)
+            audit_output = audit_futures_recommendation(
+                recommendation=recommendation_dict,
+                full_config=self.config,
+                account_state={
+                    "account_equity": getattr(self.init_portfolio, "account_equity", None),
+                    "cashflow": getattr(self.init_portfolio, "cashflow", None),
+                    "margin_used": getattr(self.init_portfolio, "margin_used", None),
+                    "margin_ratio": getattr(self.init_portfolio, "margin_ratio", None),
+                },
+            )
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            snapshot["auditor"] = {
+                "producer": "auditor",
+                "audit_status": audit_output.audit_status,
+                "audit_verdict": audit_output.audit_verdict,
+                "audit_reason_codes": list(audit_output.audit_reason_codes),
+                "audited_at": audit_output.audited_at,
+                "independent_auditor_agent": True,
+                "pm_risk_gate_is_not_auditor": True,
+            }
+            recommendation.signal_snapshot = snapshot
+            recommendation.audit_payload = audit_output.audit_payload
+            if audit_output.audit_verdict in {"block", "require_review"}:
+                logger.warning(
+                    f"{ticker}: independent Auditor blocked PM contract: "
+                    f"reasons={audit_output.audit_reason_codes}"
+                )
+            updated = self.db.update_futures_recommendation_status(
+                recommendation.id,
+                recommendation.status,
+                action=recommendation.action,
+                lots=recommendation.lots,
+                signal_snapshot=snapshot,
+                audit_payload=audit_output.audit_payload,
+            )
+            if not updated:
+                raise RuntimeError(f"Failed to save Auditor verdict for {ticker}")
 
     def _write_daily_opportunity_ranks(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         """Compatibility wrapper for tests and older callers.
@@ -1208,6 +1256,7 @@ class AgentWorkflow:
 
         self._validate_phase1_signal_persistence(portfolio, self.tickers)
         self._apply_daily_capital_deployment(generated_recommendations)
+        self._audit_phase1_strategy_recommendations(generated_recommendations)
         portfolio = phase1_planning_portfolio
         for _, recommendation in generated_recommendations:
             if recommendation.status != RecommendationStatus.SKIPPED:

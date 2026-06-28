@@ -145,7 +145,8 @@ def _apply_portfolio_policy_catalog(
         "market_confirmation",
         "directional_override_control",
         "portfolio_manager",
-        "trade_auditor",
+        "pm_risk_gate",
+        "auditor",
         "trade_frequency_control",
         "ticker_performance_control",
         "ticker_loss_control",
@@ -162,7 +163,8 @@ def _apply_portfolio_policy_catalog(
         roles["market_confirmation"] = "portfolio_policy_catalog_runtime_expanded"
         roles["directional_override_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["portfolio_manager"] = "portfolio_policy_catalog_runtime_expanded"
-        roles["trade_auditor"] = "portfolio_policy_catalog_runtime_expanded"
+        roles["pm_risk_gate"] = "portfolio_policy_catalog_runtime_expanded"
+        roles["auditor"] = "portfolio_policy_catalog_runtime_expanded"
         roles["trade_frequency_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["ticker_performance_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["ticker_loss_control"] = "portfolio_policy_catalog_runtime_expanded"

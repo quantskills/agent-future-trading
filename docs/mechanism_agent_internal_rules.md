@@ -352,12 +352,12 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 |---|---|---|---|---|
 | 1 | 读取标准输入 | `signal_evidence_collection.build_signal_collection_contract`、账户/持仓/行情读取入口 | 只读 `signal_collection_contract`、账户、持仓、合约、市场数据 | 直接查研究 DB；读取上游内部草稿 |
 | 2 | 硬门控预检 | `reason_effects.reason_effect_summary`、`hard_risk_rules`、`invalidation_policy` | 先检查未来函数、合约非法、价格异常、保证金硬风险、必需字段缺失、失效边界缺失 | 在硬门控未通过前放大、加仓或释放真实开仓 |
-| 3 | 持仓处理通道 | PM 持仓处理函数、`position_lifecycle`、持仓风险规则 | 对已有仓位先判断 `hold/add/scale/reduce/exit`，保护退出和风险处置优先 | 用新开仓规则误杀持仓，或用新开仓信号覆盖退出 |
-| 4 | 新开仓候选处理通道 | PM 机会状态函数、`invalidation_policy`、`capital_deployment_policy` | 对无仓或反手后的新机会判断 `no_opportunity/watch_for_trigger/probe_candidate/tradeable_candidate` | 把 `watch_for_trigger` 直接清成普通 `wait/0`，或直接成交 |
+| 3 | 持仓处理通道 | `pm_position_transition`、`position_lifecycle`、持仓风险规则 | 对已有仓位先判断 `hold/add/scale/reduce/exit`，保护退出和风险处置优先 | 用新开仓规则误杀持仓，或用新开仓信号覆盖退出 |
+| 4 | 新开仓候选处理通道 | `pm_state_transition`、`invalidation_policy`、`capital_deployment_policy` | 对无仓或反手后的新机会判断 `no_opportunity/watch_for_trigger/probe_candidate/tradeable_candidate` | 把 `watch_for_trigger` 直接清成普通 `wait/0`，或直接成交 |
 | 5 | 学习和排序 | `decision_memory_retrieval.retrieve_pm_memory`、`opportunity_ranking.rank_opportunities` | 只用有效摘要、action-value、剔除原因和 ranking 结果调整优先级 | 让 rank 或学习记录绕过当前证据、失效边界和硬门控 |
 | 6 | 资金和手数 | `position_sizing.build_position_sizing_result`、`capital_deployment_policy`、PM 资金规则 | 用资金预算、风险上限、最小可交易单位计算 `target_lots`、`target_position_ratio`、`lots_delta` | 让分析师、信号收集员、审计员或研究员决定手数 |
-| 7 | 最终合约签发 | PM `final_action_contract` 构造入口 | PM 统一写 `final_action_contract`，包括动作、手数、触发、失效、资金理由、reason code | 分散写多个交易合约，或让 Trader/Reviewer 补签合约 |
-| 8 | 合约自检 | `tools.common.contracts` 合约解析/执行摘要和 PM 自检 | 校验 `lots_delta = target_lots - current_lots`、动作与手数一致、条件触发字段一致 | 带不一致合约进入审计员或交易员 |
+| 7 | 最终合约签发 | `pm_contract_builder` 和 PM 推荐事实写入口 | PM 统一写 `final_action_contract`，包括动作、手数、触发、失效、资金理由、reason code | 分散写多个交易合约，或让 Trader/Reviewer 补签合约 |
+| 8 | 合约自检 | `pm_contract_self_check`、`tools.common.contracts` 合约解析/执行摘要 | 校验 `lots_delta = target_lots - current_lots`、动作与手数一致、条件触发字段一致 | 带不一致合约进入审计员或交易员 |
 
 顺序硬规则：
 
@@ -384,7 +384,7 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | 硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破 |
 | 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control / net_exposure_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling`、`max_net_exposure`、`strong_opportunity_max_net_exposure` | 只作为账户级风险边界；不能创建交易机会 |
 | 市场确认和冲突降级 | `src/config/portfolio_policy_catalog.yaml: market_confirmation` | `min_confirmation_score_for_new_entry`、`quality_gate_cap_multiplier`、`conflict_cap_multiplier`、`data_gap_cap_multiplier` | 只确认、降级或阻断当前机会；不能替代分析师 setup 或 PM 合约 |
-| 审计质量门槛 | `src/config/portfolio_policy_catalog.yaml: trade_auditor` | `quality_gate.*`、`cold_start.*`、`attribution_feedback.*` | 只影响审计裁决；审计员不能直接改 PM 手数 |
+| PM 内部风险门槛 | `src/config/portfolio_policy_catalog.yaml: pm_risk_gate` | `quality_gate.*`、`cold_start.*`、`attribution_feedback.*` | 只影响 PM 签约前的风险降级或阻断；不是独立审计员写入口，不能让审计员直接改 PM 手数 |
 
 配置硬规则：
 
@@ -812,19 +812,21 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 
 ### 13.1 测试映射表
 
-所有测试逻辑必须放在 `src/tests/test_*.py`；运行编排脚本只放在 `src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py`。内部转换、字段边界、权限边界和固定公式只在回测前检测；每日回测后只检测真实运行产物、系统不变量和机制接通情况。新增内部状态流转或边界规则时，必须补下表对应测试，不能只改代码。
+所有测试逻辑必须放在 `src/tests/test_*.py`；运行编排脚本只放在 `src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py`。内部转换、字段边界、权限边界、固定公式、系统不变量样例和机制有效性样例都在回测前一次性检测；每日回测后只读取真实 DB、artifact、payload，检查真实运行产物、系统不变量和机制接通情况。新增内部状态流转或边界规则时，必须补下表对应测试，不能只改代码。
 
 | 关键规则 | 覆盖测试文件 | 回测前总入口 | 每日回测后总入口 |
 |---|---|---|---|
 | 事实入口、artifact/payload 边界、业务模块不能绕写核心事实 | `src/tests/test_fact_entry_boundaries.py` | `pre_backtest_test.py` | 不进入 |
 | 合格 `watch_for_trigger` 必须进入条件触发合约，不能被清成普通 `wait/0` | `src/tests/test_pm_watch_for_trigger_release.py` | `pre_backtest_test.py` | 不进入 |
-| PM、Trader、Reviewer、Audit 的合约读取和执行摘要边界 | `src/tests/test_fact_entry_boundaries.py`、`src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | `backtest_daily_test.py` 只检测真实产物 |
+| PM 状态转换矩阵：`watch_for_trigger/probe_candidate/tradeable_candidate/open_real/add/scale/reduce/exit` | `src/tests/test_pm_state_transition_matrix.py` | `pre_backtest_test.py` | 不进入 |
+| 分析师 LLM 输出落地：结构化字段可表达 setup/触发/失效，但不能落地手数、仓位或最终动作 | `src/tests/test_analyst_output_landing.py` | `pre_backtest_test.py` | 不进入 |
+| PM、Trader、Reviewer、Audit 的合约读取和执行摘要边界 | `src/tests/test_fact_entry_boundaries.py`、`src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 audit，不跑 unittest |
 | Accountant 手续费、保证金、权益、PnL 固定公式 | `src/tests/test_accountant_settlement_formulas.py` | `pre_backtest_test.py` | 不进入 |
 | 契约覆盖：producer、consumer、audit、test、文档、字段、配置、提示词对齐 | `src/tests/test_contract_coverage_audit.py` | `pre_backtest_test.py` | 不进入 |
 | 回测前 DB schema、硬数据、配置和环境验收 | `src/tests/test_pre_backtest_acceptance.py` | `pre_backtest_test.py` | 不进入 |
 | 协议管理员能力卡、LLM 边界、planner 封存、工具权限 | `src/tests/test_protocol_governor.py` | `pre_backtest_test.py` | 不进入 |
-| 每日系统不变量：字段越界、交易事实错位、artifact 污染、条件触发执行一致性 | `src/tests/test_system_invariant_audit.py` | 不进入 | `backtest_daily_test.py` |
-| 机制有效性：学习链路、PM 学习消费、研究反馈是否接通 | `src/tests/test_mechanism_effectiveness_audit.py` | 不进入 | `backtest_daily_test.py` |
+| 系统不变量样例：字段越界、交易事实错位、artifact 污染、条件触发执行一致性 | `src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 `system_invariant_audit` |
+| 机制有效性样例：学习链路、PM 学习消费、研究反馈是否接通 | `src/tests/test_mechanism_effectiveness_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 `mechanism_effectiveness_audit` |
 | Reviewer 不写学习、Researcher 只写未来学习 | `src/tests/test_reviewer_learning.py`、`src/tests/test_fact_entry_boundaries.py` | 相关单测按需运行 | 由日后新增时纳入 |
 | 统一字段迁移和旧字段残留 | `src/tests/test_unified_field_migration.py`、`src/tests/test_evaluation_unified_semantics.py` | 相关单测按需运行 | 不进入 |
 | 市场确认和硬交易规则 | `src/tests/test_market_confirmation.py`、`src/tests/test_futures_market_rules.py` | 相关单测按需运行 | 不进入 |
@@ -836,6 +838,10 @@ src/run/pre_backtest_test.py
 -> test_fact_entry_boundaries
 -> test_accountant_settlement_formulas
 -> test_pm_watch_for_trigger_release
+-> test_pm_state_transition_matrix
+-> test_analyst_output_landing
+-> test_system_invariant_audit
+-> test_mechanism_effectiveness_audit
 -> test_contract_coverage_audit
 -> test_pre_backtest_acceptance
 -> test_protocol_governor
@@ -844,8 +850,6 @@ src/run/pre_backtest_test.py
 -> pre_backtest_acceptance
 
 src/run/backtest_daily_test.py
--> test_system_invariant_audit
--> test_mechanism_effectiveness_audit
 -> system_invariant_audit
 -> mechanism_effectiveness_audit
 ```
@@ -853,7 +857,7 @@ src/run/backtest_daily_test.py
 测试硬规则：
 
 1. 新增测试文件必须命名为 `src/tests/test_*.py`。
-2. 回测前必须跑的测试，加入 `src/run/pre_backtest_test.py`。
-3. 每个交易日后必须跑的测试，加入 `src/run/backtest_daily_test.py`。
+2. 回测前必须跑的静态/样例测试，加入 `src/run/pre_backtest_test.py`。
+3. 每个交易日后需要读取真实产物的 audit，加入 `src/run/backtest_daily_test.py`；不要把可静态证明的 unittest 放进每日入口。
 4. 测试文件负责断言规则；运行脚本只负责编排，不能写业务测试逻辑。
 5. 任何会影响交易状态流转、reason code 语义、配置门控或 LLM 输出落地的修改，必须同时更新本映射表。

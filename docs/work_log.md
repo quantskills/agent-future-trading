@@ -1,8 +1,8 @@
-# AgentQuant 工作日志
+﻿# AgentQuant 工作日志
 
 本文件是基于当前系统状态重整后的短版开发索引。保留按天划分的结构，只记录仍能解释现有代码、配置、字段、智能体边界和回测前验收的修改。已被后续重构覆盖的中间补丁、旧字段口径、旧工具名、旧运行入口和纯讨论内容不再保留。
 
-字段语义以 `docs/unified_field_semantics.md` 为准；智能体工作流、权限边界、事实入口和 artifact 边界以 `docs/mechanism_multiagents.md` 为准；数据载体与 DB schema 口径以 `docs/mechanism_data_model.md` 为准。
+字段语义以 `docs/unified_field_semantics.md` 为准；智能体工作流、权限边界、事实入口和 artifact 边界以 `docs/mechanism_multiagents.md` 为准；数据载体与 DB schema 口径以 `docs/mechanism_data_model.md` 为准；智能体内部转换规则以 `docs/mechanism_agent_internal_rules.md` 为准。
 
 每条只保留：修改了什么、为什么改。
 
@@ -176,12 +176,50 @@
 
 （11）修正 artifact 边界检查器的事实对象语义。修改：`tools/common/contracts.py`、事实入口结构测试和机制/数据模型文档。原因：字段名本身不等于系统事实；数字计数、字符串状态、错误摘要、空列表和上游引用不是事实对象。PM、Trader、Accountant、Reviewer、Researcher 的 artifact 边界统一按“本阶段禁止字段 + 非空 dict/list 事实对象”判断，避免把研究来源摘要误判为研究事实越界。
 
+==========2026年06月28日==========
+
+（1）收口智能体内部转换中的 reason code 语义和 Trader 输入读取。修改：`reason_effects`、PM、Trader、`test_pm_watch_for_trigger_release`、`test_phase_flow_regression`。原因：候选类 reason code 只能保留观察、条件触发或排序资格，不能再被当成软阻断或弱理由清零；释放类 reason code 仍必须通过 PM 最终权限、硬门控和审计。Trader 的 Phase2 转换函数同步从 PM 推荐的标准 `signal_snapshot` 补齐工作快照，避免正确 PM 合约因调用方传入空 snapshot 被错误翻译成 hold。
+
+（2）对齐 PM 内部风险门、Reviewer 能力卡和分析师提示词口径。修改：PM 内部风险门命名、能力卡、契约 fixture、`prompt.py`、配置注释和字段语义表。原因：PM 签约前风险门不再冒充独立审计员，不再写旧 planner 与 PM-LLM 生产镜像；Reviewer 只产出复盘事实和研究输入材料，不写未来学习；分析师提示词不再要求输出 `action_name` 交易动作名。
+
+（3）恢复独立审计员链路并清零旧审计命名。修改：`auditor.py`、PM 内部风险门工具、workflow、Trader、审计 payload、系统不变量、配置、文档和测试。原因：严格执行“PM 签唯一合约 -> 独立 Auditor 审合约 -> Trader 只执行审过合约”；PM 签约前风险门只是 PM 内部工具，不是智能体；自动回测在显式 `--reset-config` 时先清旧配置数据再跑回测前总门，避免旧产物被误当成新链路失败。
+
+（4）落地 PM 内部转换工具链和回测前矩阵测试。修改：`pm_state_transition.py`、`pm_position_transition.py`、`pm_contract_builder.py`、`pm_contract_self_check.py`、PM 调用点、分析师输出落地校验、`pre_backtest_test.py` 和机制文档。原因：PM 仍是唯一合约签发者，但状态转换、持仓转换、合约构造和自检改为决策工具链；分析师 LLM 输出只能落到结构化证据，不能落地手数、仓位或最终动作。
+
+（5）重整回测前与每日回测后检测分层。修改：`pre_backtest_test.py`、`backtest_daily_test.py`、`test_system_invariant_audit.py`、`mechanism_agent_internal_rules.md`、`mechanism_multiagents.md`、`mechanism_future_trade.md`。原因：规则、转换、schema、权限、公式和样例审计全部前置到回测前；每日回测后只读真实 DB/artifact/payload 做动态产物审计，避免重复跑静态测试。
+
+（6）统一分析团队工具命名。修改：`src/tools/agent_tools/analysis/` 下工具统一改为 `analyst_*.py`，并同步分析师、PM、workflow、API、研究复盘、契约覆盖和测试引用。原因：分析团队工具目录只放分析团队工具，文件名必须体现所属智能体和工具作用，避免后续跨团队误接。
+
+（7）统一协议管理员工具命名。修改：`src/tools/agent_tools/control/` 下工具统一改为 `pg_*.py`，并同步协议管理员、回测前/每日检测入口、控制审计内部依赖、测试和机制文档引用。原因：控制目录是协议管理员和治理检测工具目录，文件名必须体现 `protocol governor` 归属，避免被误认成业务智能体工具。
+
+（8）统一决策团队中 PM 专用工具命名。修改：`src/tools/agent_tools/decision/` 下 PM 专用工具改为 `pm_*.py`，包括资金分配、资金部署、决策记忆、失效边界、机会排序、手数计算、reason code、硬风险、风险控制和上下文规则校准工具；同步 PM、分析师技术校准入口、决策工具内部依赖、测试和文档引用。原因：决策目录属于信号收集员、PM、Auditor 共同团队；本轮只改 PM 口径工具，共用或非 PM 归属工具暂不改名。
+
+（9）迁移跨阶段共用持仓生命周期工具。修改：`position_lifecycle.py` 从 `src/tools/agent_tools/decision/` 移到 `src/tools/common/`，并同步 PM、Trader 和 PM 决策工具引用。原因：该工具被 PM 与 Trader 直接共用，不属于单一决策智能体专用工具，应按 common 工具“功能名、不加智能体前缀”管理。
+
+（10）迁移决策团队共用信号证据集合工具。修改：`signal_evidence_collection.py` 从 `src/tools/agent_tools/decision/` 移到 `src/tools/common/`，并同步信号收集员、PM、契约覆盖和测试引用。原因：该工具由信号收集员和 PM 直接共用，不属于单一智能体专用工具，应按 common 工具“功能名、不加智能体前缀”管理。
+
+（11）统一执行团队工具命名和共用工具归属。修改：`src/tools/agent_tools/execution/` 下 Trader 直接专用工具改为 `trader_*.py`，Accountant 直接专用结算工具改为 `accountant_futures_settlement.py`；跨 PM/Trader/Research/Control 共用的 `order_semantics.py` 移到 `src/tools/common/`；Trader 执行引擎佣金工具改为 `src/tools/agent_tools/execution/trade_futures_commission.py`；执行和结算共用的 `futures_market_rules.py` 移到 `src/tools/common/`；同步 Trader、Accountant、PM、workflow、研究、控制审计、契约覆盖和测试引用。原因：execution 目录保留执行团队直接或交易执行链工具；跨阶段语义和市场规则归 common。
+
+（12）迁移跨团队自适应策略安全过滤工具。修改：`adaptive_policy_safety.py` 从 `src/tools/agent_tools/research/` 移到 `src/tools/common/`，并同步分析师学习校准、PM 决策记忆/资金/规则校准、控制审计和测试引用。原因：该工具被分析师、PM 决策工具和控制审计共同读取，不属于复盘员或研究员专用工具，应按 common 工具管理。
+
+（13）迁移跨团队 alpha setup 机制工具。修改：`alpha_setup.py` 从 `src/tools/agent_tools/research/` 移到 `src/tools/common/`，并同步研究员学习、分析师学习上下文、PM trace、协议权限和测试引用。原因：该工具由 Researcher 写学习事实，同时被分析师和 PM 读取安全摘要，不属于复盘员或研究员单一专用工具，应按 common 工具管理。
+
+（14）迁移跨团队学习合约工具。修改：`learning_contract.py` 从 `src/tools/agent_tools/research/` 移到 `src/tools/common/`，并同步 DB helper、alpha setup、分析师学习上下文、Phase4、研究学习、研究写入器和测试引用。原因：该工具定义 next-round memory contract，被分析、研究和数据库写入共同使用，不属于研究团队单一专用工具。
+
+（15）迁移跨团队 neutral 责任诊断工具。修改：`neutral_accountability.py` 从 `src/tools/agent_tools/research/` 移到 `src/tools/common/`，并同步 Phase4、研究快照、评估模块和测试引用。原因：该工具被复盘、研究报告、研究写入和评估共同使用，不属于复盘员或研究员单一专用工具。
+
+（16）统一复盘员 Phase4 主工具命名。修改：`phase4_review.py` 改为 `reviewer_phase4_review.py`，并同步 Reviewer、研究学习入口、研究报告、研究写入、运行校验、契约覆盖和测试引用。原因：该文件主入口由复盘员直接使用，按研究团队工具命名体现 Reviewer 归属；artifact 阶段字段 `phase4_review` 不变。
+
+（17）迁移 template prior 冷启动加载工具。修改：`template_prior.py` 从 `src/tools/agent_tools/research/` 移到 `src/tools/common/`，并同步研究初始化运行脚本和测试引用。原因：该工具只负责显式加载冷启动研究种子，被运行入口和测试使用，不属于复盘员或研究员单一专用工具。
+
+（18）拆出研究团队内部复用 helper，切断 Researcher 对 Reviewer 主工具的反向依赖。修改：新增 `research_review_helpers.py`，让 `reviewer_phase4_review.py`、`research_memory_writers.py`、`research_snapshot_reports.py` 依赖该 helper；研究 writer 改为显式导入自身需要的基础依赖；补 `test_protocol_governor` 结构测试。原因：Reviewer 主工具只保留 Phase4 主流程和复盘报告，Researcher 不再从 Reviewer 主工具偷用格式化、快照解析、统计和报告 rows helper。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。
 
 （2）每日回测后总门：`src/run/backtest_daily_test.py`。
 
-（3）结构测试重点：事实入口、合约解析、artifact 边界、结算公式、研究写入、控制组只读。
+（3）结构测试重点：事实入口、合约解析、artifact 边界、结算公式、研究写入、控制组只读、PM 状态转换、分析师输出落地。
 
-（4）回测前验收只检查系统可运行性、字段/schema/权限/硬数据/边界，不评价策略收益。
+（4）回测前验收只检查系统可运行性、字段/schema/权限/硬数据/边界和确定性转换规则，不评价策略收益。

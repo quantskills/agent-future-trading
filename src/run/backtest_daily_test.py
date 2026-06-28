@@ -1,7 +1,10 @@
-"""Run all daily post-backtest tests and control checks.
+"""Run daily post-backtest runtime artifact checks.
 
-Test logic lives in src/tests/test_*.py. Control logic lives in
-tools/agent_tools/control. This script only orchestrates the daily backtest gate.
+Static rule, boundary, schema, and conversion tests live in
+src/tests/test_*.py and are orchestrated by src/run/pre_backtest_test.py before
+the backtest starts. This script only reads the DB/artifacts produced by the
+current backtest window and runs runtime audits that cannot be proven before
+the day has actually executed.
 """
 
 from __future__ import annotations
@@ -9,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import unittest
 from pathlib import Path
 
 import yaml
@@ -21,15 +23,9 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.mechanism_effectiveness_audit import audit_mechanism_effectiveness
-from tools.agent_tools.control.system_invariants import audit_system_invariants
+from tools.agent_tools.control.pg_mechanism_effectiveness_audit import audit_mechanism_effectiveness
+from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
 from util.config_normalizer import normalize_config
-
-
-BACKTEST_DAILY_TEST_MODULES = [
-    "tests.test_system_invariant_audit",
-    "tests.test_mechanism_effectiveness_audit",
-]
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,26 +56,12 @@ def _load_config(config_path: Path) -> dict:
     return normalize_config(raw, config_path)
 
 
-def _run_unittest_modules(modules: list[str]) -> dict:
-    suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    errors = [f"{case}: {message}" for case, message in result.errors]
-    failures = [f"{case}: {message}" for case, message in result.failures]
-    return {
-        "ok": result.wasSuccessful(),
-        "tests_run": result.testsRun,
-        "errors": errors,
-        "failures": failures,
-    }
-
-
 def main() -> int:
     args = parse_args()
     config_path = _resolve_config_path(args.config)
     cfg = _load_config(config_path)
     db_path = Path(args.db_path) if args.db_path else SRC_ROOT / "assets" / "agentquant.db"
 
-    unittest_report = _run_unittest_modules(BACKTEST_DAILY_TEST_MODULES)
     invariant_report = audit_system_invariants(
         db_path=db_path,
         config_id=args.config_id,
@@ -98,14 +80,14 @@ def main() -> int:
     report = {
         "agent_name": "protocol_governor",
         "contract_version": "agentquant.backtest_daily_test.v1",
-        "ok": bool(
-            unittest_report.get("ok")
-            and invariant_report.get("ok")
-            and mechanism_report.get("ok")
-        ),
-        "unittest": unittest_report,
+        "ok": bool(invariant_report.get("ok") and mechanism_report.get("ok")),
         "system_invariants": invariant_report,
         "mechanism_effectiveness": mechanism_report,
+        "metadata": {
+            "runtime_only": True,
+            "static_tests_moved_to": "src/run/pre_backtest_test.py",
+            "daily_boundary": "reads_real_backtest_db_artifacts_and_payloads_only",
+        },
     }
 
     if args.json:
@@ -113,7 +95,7 @@ def main() -> int:
     else:
         print("AgentQuant daily backtest test gate")
         print(f"  ok: {report['ok']}")
-        for key in ("unittest", "system_invariants", "mechanism_effectiveness"):
+        for key in ("system_invariants", "mechanism_effectiveness"):
             section = report[key]
             print(f"  {key}: ok={section.get('ok')}")
             for error in section.get("errors") or section.get("failures") or section.get("hard_failures") or []:

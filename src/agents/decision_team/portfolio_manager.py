@@ -16,16 +16,15 @@ from graph.schema import (
     TradingPhase,
 )
 from apis.contract_info_cache import FuturesContractInfoCache
-from agents.decision_team.auditor import TradeAuditor, TradeAuditorInput
 from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
-from tools.agent_tools.analysis.dynamic_weights import DynamicWeightCalculator, calibrate_weights_by_signal_history
-from tools.agent_tools.analysis.learning_context import apply_config_learning_overlay
-from tools.agent_tools.analysis.market_confirmation import MarketConfirmationEngine
-from tools.agent_tools.analysis.business_quality import summarize_business_quality
-from tools.agent_tools.analysis.data_usage import build_pm_data_quality_summary, write_daily_data_quality_summary
-from tools.agent_tools.execution.order_semantics import (
+from tools.agent_tools.analysis.analyst_dynamic_weights import DynamicWeightCalculator, calibrate_weights_by_signal_history
+from tools.agent_tools.analysis.analyst_learning_context import apply_config_learning_overlay
+from tools.agent_tools.analysis.analyst_market_confirmation import MarketConfirmationEngine
+from tools.agent_tools.analysis.analyst_business_quality import summarize_business_quality
+from tools.agent_tools.analysis.analyst_data_usage import build_pm_data_quality_summary, write_daily_data_quality_summary
+from tools.common.order_semantics import (
     build_lot_intent_consistency,
     recommendation_intent_from_lots,
 )
@@ -34,44 +33,53 @@ from tools.common.contracts import (
     build_internal_message_contract,
     validate_internal_message_contract,
 )
-from tools.agent_tools.decision.capital_allocator import (
+from tools.agent_tools.decision.pm_capital_allocator import (
     conflicting_weak_memory_record as _capital_conflicting_weak_memory_record,
     strategy_memory_record as _capital_strategy_memory_record,
 )
-from tools.agent_tools.decision.contextual_rule_calibration import apply_pm_contextual_calibration
-from tools.agent_tools.decision.position_lifecycle import (
+from tools.agent_tools.decision.pm_contextual_rule_calibration import apply_pm_contextual_calibration
+from tools.common.position_lifecycle import (
     apply_trade_plan_multiplier as _position_apply_trade_plan_multiplier,
     is_new_or_increasing_exposure as _position_is_new_or_increasing_exposure,
     same_sign as _position_same_sign,
     scale_signed_ratio as _position_scale_signed_ratio,
     target_side_from_ratio as _position_target_side_from_ratio,
 )
-from tools.agent_tools.decision.capital_deployment_policy import (
+from tools.agent_tools.decision.pm_capital_deployment_policy import (
     _apply_capital_utilization_control,
 )
-from tools.agent_tools.decision.invalidation_policy import (
+from tools.agent_tools.decision.pm_invalidation_policy import (
     _apply_pretrade_invalidation_control,
     _has_explicit_stop_protection,
     _has_structured_invalidation_condition,
 )
-from tools.agent_tools.decision.reason_effects import (
+from tools.agent_tools.decision.pm_reason_effects import (
     is_hard_zero_reason as _reason_effect_is_hard_zero,
     reason_effect_summary,
     requires_watchlist_reason,
     soft_limit_can_release_probe,
 )
-from tools.agent_tools.decision.risk_controls import business_quality_position_gate
-from tools.agent_tools.decision.decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.opportunity_ranking import rank_opportunities
-from tools.agent_tools.decision.position_sizing import build_position_sizing_result
-from tools.agent_tools.decision.signal_evidence_collection import build_signal_collection_contract
-from tools.agent_tools.analysis.signal_fusion import (
+from tools.agent_tools.decision.pm_risk_controls import business_quality_position_gate
+from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
+from tools.agent_tools.decision.pm_opportunity_ranking import rank_opportunities
+from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
+from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput
+from tools.agent_tools.decision.pm_contract_builder import (
+    build_final_action_contract as _pm_tool_build_final_action_contract,
+)
+from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
+from tools.agent_tools.decision.pm_position_transition import (
+    final_action_from_lots as _pm_tool_final_action_from_lots,
+)
+from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
+from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.agent_tools.analysis.analyst_signal_fusion import (
     analyst_signal_combo as _fusion_analyst_signal_combo,
     build_opportunity_scorecard,
     build_horizon_scope,
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
-from tools.agent_tools.research.alpha_setup import compact_profile_for_trace
+from tools.common.alpha_setup import compact_profile_for_trace
 
 class RiskLevel(Enum):
     """Risk level classification for futures portfolio control."""
@@ -634,7 +642,7 @@ def _is_controlled_probe_reason(reason: str) -> bool:
         "market_confirmation_conflict",
         "weak_signal_combo_probe_cap",
         "side_performance_probe_cap",
-        "trade_auditor_soft_probe_floor",
+        "pm_risk_gate_soft_probe_floor",
         "missing_pretrade_invalidation",
         "alpha_setup_ev_fusion",
         "fast_candidate_alpha_probe",
@@ -926,20 +934,11 @@ def _final_action_from_lots(
     target_lots: int,
     final_entry_authority: dict | None = None,
 ) -> str:
-    current = int(current_lots or 0)
-    target = int(target_lots or 0)
-    if current == target:
-        return "hold" if current else "wait"
-    if current == 0 and target != 0:
-        authority_type = str((final_entry_authority or {}).get("authority_type") or "").lower()
-        if authority_type == "real_budget_entry":
-            return "open_real"
-        return "open_probe"
-    if target == 0 and current != 0:
-        return "exit"
-    if (current > 0 and target > 0) or (current < 0 and target < 0):
-        return "scale" if abs(target) > abs(current) else "reduce"
-    return "exit"
+    return _pm_tool_final_action_from_lots(
+        current_lots=current_lots,
+        target_lots=target_lots,
+        final_entry_authority=final_entry_authority,
+    )
 
 
 def _build_final_action_contract(
@@ -961,201 +960,27 @@ def _build_final_action_contract(
     alpha_setup_action_values: list | None,
     execution_contract_fields: dict | None = None,
 ) -> dict:
-    diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
-    scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
-    execution_contract_payload = dict(execution_contract_fields) if isinstance(execution_contract_fields, dict) else {}
-    target_side = "long" if int(target_lots or 0) > 0 else "short" if int(target_lots or 0) < 0 else "flat"
-    scorecard_side = scorecard.get(target_side) if target_side in {"long", "short"} and isinstance(scorecard.get(target_side), dict) else {}
-    if not scorecard_side:
-        preferred_side = str(scorecard.get("preferred_side") or "").lower()
-        scorecard_side = (
-            scorecard.get(preferred_side)
-            if preferred_side in {"long", "short"} and isinstance(scorecard.get(preferred_side), dict)
-            else {}
-        )
-    authority = final_entry_authority if isinstance(final_entry_authority, dict) else {}
-    final_action = _final_action_from_lots(
+    return _pm_tool_build_final_action_contract(
+        ticker=ticker,
         current_lots=current_lots,
         target_lots=target_lots,
-        final_entry_authority=authority,
+        position_ratio=position_ratio,
+        margin_required=margin_required,
+        account_equity=account_equity,
+        lots_to_trade=lots_to_trade,
+        lots_to_trade_reason=lots_to_trade_reason,
+        recommendation_intent=recommendation_intent,
+        final_entry_authority=final_entry_authority,
+        control_reasons=control_reasons,
+        control_diagnostics=control_diagnostics,
+        opportunity_scorecard=opportunity_scorecard,
+        market_confirmation=market_confirmation,
+        alpha_setup_action_values=alpha_setup_action_values,
+        execution_contract_fields=execution_contract_fields,
+        select_learning_trace_action_values=_select_learning_trace_action_values,
+        safe_float=_safe_float,
+        futures_action_cls=FuturesAction,
     )
-    candidates: list[dict] = []
-    scorecard_seed = diagnostics.get("scorecard_current_tradeable_probe_seed")
-    if isinstance(scorecard_seed, dict):
-        candidates.append({
-            "action": "open_probe",
-            "source": "opportunity_scorecard",
-            "status": scorecard_seed.get("status") or (
-                "applied" if "scorecard_current_tradeable_probe_seed" in control_reasons else "candidate"
-            ),
-            "side": scorecard_seed.get("side"),
-            "ratio": scorecard_seed.get("ratio"),
-            "scorecard_state": (
-                (scorecard_seed.get("scorecard") or {}).get("final_state")
-                if isinstance(scorecard_seed.get("scorecard"), dict)
-                else None
-            ),
-        })
-    conditional_monitor_seed = diagnostics.get("conditional_monitor_probe_seed")
-    if isinstance(conditional_monitor_seed, dict):
-        candidates.append({
-            "action": "conditional_probe",
-            "source": "conditional_monitor",
-            "status": conditional_monitor_seed.get("status") or "candidate",
-            "side": conditional_monitor_seed.get("side"),
-            "ratio": conditional_monitor_seed.get("ratio"),
-            "requires_intraday_confirmation": bool(
-                conditional_monitor_seed.get("requires_intraday_confirmation")
-            ),
-            "scorecard_state": (
-                (conditional_monitor_seed.get("scorecard") or {}).get("final_state")
-                if isinstance(conditional_monitor_seed.get("scorecard"), dict)
-                else None
-            ),
-        })
-    learned_seed = diagnostics.get("positive_open_action_value_seed")
-    if isinstance(learned_seed, dict):
-        candidates.append({
-            "action": "open_probe" if final_action == "open_probe" else "open_real",
-            "source": "alpha_setup_action_value",
-            "status": "applied" if "positive_open_action_value_seed" in control_reasons else "candidate",
-            "side": learned_seed.get("target_side"),
-            "ratio": learned_seed.get("seed_position_ratio"),
-            "reward_mean": (
-                (learned_seed.get("selected_action_value") or {}).get("reward_mean")
-                if isinstance(learned_seed.get("selected_action_value"), dict)
-                else None
-            ),
-        })
-    winning = diagnostics.get("winning_template_continuation")
-    if isinstance(winning, dict) and winning.get("decision"):
-        candidates.append({
-            "action": "exit" if winning.get("protective_exit") else "reduce",
-            "source": "hold_exit_profit_protection",
-            "status": "applied" if final_action in {"reduce", "exit"} else "candidate",
-            "decision": winning.get("decision"),
-            "pnl_ratio": winning.get("pnl_ratio"),
-            "confirmation_score": winning.get("confirmation_score"),
-        })
-    lifecycle = diagnostics.get("holding_rebalance_control")
-    if isinstance(lifecycle, dict) and lifecycle.get("decision"):
-        candidates.append({
-            "action": final_action,
-            "source": "position_lifecycle",
-            "status": "applied",
-            "decision": lifecycle.get("decision"),
-            "classification": lifecycle.get("lifecycle_classification"),
-        })
-
-    selected_action_values = _select_learning_trace_action_values(alpha_setup_action_values, limit=10)
-
-    margin_ratio_estimate = (
-        float(margin_required or 0.0) / max(float(account_equity or 0.0), 1.0)
-    )
-    reason_codes = {str(item) for item in (control_reasons or []) if item}
-    if lots_to_trade_reason:
-        reason_codes.add(str(lots_to_trade_reason))
-    reason_codes.update(str(item) for item in (authority.get("reason_codes") or []) if item)
-    execution_fields = {
-        key: execution_contract_payload.get(key)
-        for key in (
-            "execution_profile",
-            "trigger_source",
-            "entry_trigger",
-            "invalidation",
-            "valid_until",
-            "requires_intraday_confirmation",
-            "can_execute_without_intraday_trigger",
-            "execution_action_value_preference",
-            "analyst_execution_roles",
-        )
-        if key in execution_contract_payload
-    }
-    return {
-        "contract_version": _FINAL_ACTION_CONTRACT_VERSION,
-        "ticker": ticker,
-        "final_action": final_action,
-        "current_lots": int(current_lots or 0),
-        "target_lots": int(target_lots or 0),
-        "lots_delta": int((target_lots or 0) - (current_lots or 0)),
-        "lots_delta_abs": abs(int((target_lots or 0) - (current_lots or 0))),
-        "target_position_ratio": float(position_ratio or 0.0),
-        "target_margin_ratio_estimate": margin_ratio_estimate,
-        "authority_type": authority.get("authority_type") or "not_applicable",
-        "authority_decision": authority.get("decision") or "not_applicable",
-        "requires_authority": bool(authority.get("requires_authority")),
-        "open_action_evidence": bool(authority.get("open_action_evidence")),
-        "strong_current_evidence": bool(authority.get("strong_current_evidence")),
-        "watch_for_trigger_block": bool(authority.get("watch_for_trigger_block")),
-        "conditional_trigger_authority": bool(authority.get("conditional_trigger_authority")),
-        "negative_profile": bool(authority.get("negative_profile")),
-        "tradeable_state": bool(authority.get("tradeable_state")),
-        "weak_conflict_probe": bool(authority.get("weak_conflict_probe")),
-        "max_allowed_margin_ratio": float(_safe_float(authority.get("max_allowed_margin_ratio"), 0.0)),
-        "reason_codes": sorted(reason_codes),
-        "recommendation_intent": recommendation_intent,
-        "action_candidates": candidates,
-        "evidence_used": {
-            "scorecard_preferred_side": scorecard.get("preferred_side"),
-            "scorecard_state": scorecard_side.get("final_state"),
-            "scorecard_score": scorecard_side.get("score"),
-            "opportunity_score": scorecard_side.get("opportunity_score", scorecard_side.get("score")),
-            "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
-            "opportunity_rank": scorecard_side.get("opportunity_rank"),
-            "capital_allocation_reason": scorecard_side.get("capital_allocation_reason"),
-            "market_confirmation_score": (
-                _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
-                if isinstance(market_confirmation, dict)
-                else 0.0
-            ),
-            "market_confirmation_conflicts": (
-                (market_confirmation or {}).get("conflicts")
-                if isinstance(market_confirmation, dict)
-                else None
-            ),
-        },
-        "learning_used": {
-            "alpha_setup_action_values": selected_action_values,
-            "positive_open_seed": diagnostics.get("positive_open_action_value_seed") if isinstance(diagnostics.get("positive_open_action_value_seed"), dict) else {},
-            "alpha_setup_ev_fusion": diagnostics.get("alpha_setup_ev_fusion") if isinstance(diagnostics.get("alpha_setup_ev_fusion"), dict) else {},
-            "capital_utilization_learning": (
-                diagnostics.get("capital_utilization_learning")
-                if isinstance(diagnostics.get("capital_utilization_learning"), dict)
-                else {}
-            ),
-            "capital_utilization_target": (
-                diagnostics.get("capital_utilization_target")
-                if isinstance(diagnostics.get("capital_utilization_target"), dict)
-                else {}
-            ),
-            "memory_state": (
-                ((diagnostics.get("capital_utilization_learning") or {}).get("protected_memory") or {}).get("memory_state")
-                if isinstance(diagnostics.get("capital_utilization_learning"), dict)
-                and isinstance((diagnostics.get("capital_utilization_learning") or {}).get("protected_memory"), dict)
-                else ""
-            ),
-            "learning_adjustment_summary": scorecard_side.get("learning_adjustment_summary") or {},
-        },
-        "risk_flags": sorted(reason_codes),
-        **execution_fields,
-        "execution_profile": execution_contract_payload.get("execution_profile"),
-        "execution_requirement": (
-            "intraday_trigger_required"
-            if final_action in {"open_probe", "open_real", "scale"}
-            else "position_management_or_wait"
-        ),
-        "consistency": build_lot_intent_consistency(
-            current_lots=int(current_lots or 0),
-            target_lots=int(target_lots or 0),
-            action=FuturesAction(str(recommendation_intent.get("action") or FuturesAction.HOLD.value)),
-            lots=int(recommendation_intent.get("lots") or 0),
-            mode="final_action_contract",
-        ),
-        "single_source_of_trade_truth": True,
-        "candidate_sources_do_not_bypass_contract": True,
-    }
-
-
 def _release_block_category(primary_reason: str, reason_summary: dict) -> str:
     reason = str(primary_reason or "").lower()
     if reason_summary.get("hard_blocks"):
@@ -1327,7 +1152,7 @@ def _build_release_block_diagnostics(
         },
         "release_ladder_diagnostics": _build_release_ladder_diagnostics(full_config),
         "next_evidence_needed": {
-            "hard_risk_or_authority": ["remove_hard_block_or_wait_for_auditor_clearance"],
+            "hard_risk_or_authority": ["remove_hard_block_or_wait_for_pm_risk_gate_clearance"],
             "watchlist_or_watch_for_trigger": ["current_tradeable_candidate_evidence"],
             "current_confirmation_missing": ["current_price_or_volume_confirmation"],
             "invalidation_missing": ["explicit_invalidation_or_stop_boundary"],
@@ -1649,7 +1474,7 @@ def _probe_like_control_reason_present(reasons: list[str]) -> bool:
         "pm_watch_for_trigger_probe_cap",
         "horizon_consistency_probe_cap",
         "scorecard_current_tradeable_probe_seed",
-        "trade_auditor_soft_probe_floor",
+        "pm_risk_gate_soft_probe_floor",
         "fast_candidate_alpha_probe",
         "soft_block_converted_to_probe_only",
     }
@@ -1884,7 +1709,7 @@ _MINIMUM_REAL_PROBE_SOFT_REASONS = {
     "market_confirmation_quality_gate",
     "weak_signal_combo_probe_cap",
     "side_performance_probe_cap",
-    "trade_auditor_soft_probe_floor",
+    "pm_risk_gate_soft_probe_floor",
     "controlled_probe_below_min_entry_kept",
     "fast_candidate_alpha_probe",
     "qualified_positive_expectancy",
@@ -2160,7 +1985,6 @@ def _qualified_analyst_tradeable_probe_candidate(
 
 _FINAL_ACTION_AUTHORITY_WEAK_REASONS = {
     "alpha_setup_open_action_value_missing",
-    "pm_watch_for_trigger_probe_cap",
     "single_high_quality_probe_only",
     "horizon_consistency_probe_cap",
     "market_confirmation_quality_gate",
@@ -2169,8 +1993,7 @@ _FINAL_ACTION_AUTHORITY_WEAK_REASONS = {
     "side_performance_probe_cap",
     "business_quality_probe_only",
     "business_quality_observe_or_block",
-    "scorecard_current_tradeable_probe_seed",
-    "trade_auditor_soft_probe_floor",
+    "pm_risk_gate_soft_probe_floor",
     "controlled_probe_below_min_entry_kept",
     "unknown_alpha_probe",
 }
@@ -2390,6 +2213,7 @@ def _final_contract_authority(
             weak_markers
             + hard_blocks
             + list(reason_effects.get("hard_blocks") or [])
+            + list(reason_effects.get("candidate_reasons") or [])
             + list(reason_effects.get("soft_limits") or [])
             + list(reason_effects.get("learning_adjustments") or [])
             + list(reason_effects.get("release_signals") or [])
@@ -4795,7 +4619,7 @@ def _learning_to_position_trace(
     control_reasons: list,
     holding_diagnostics: dict,
     market_confirmation: dict,
-    auditor_payload: dict | None,
+    pm_risk_gate_payload: dict | None,
     analyst_signals: list,
     opportunity_scorecard: dict | None = None,
     alpha_setup_profiles: list | None = None,
@@ -4870,7 +4694,7 @@ def _learning_to_position_trace(
             "requires_today_signal_market_state_and_invalidation": True,
         },
         "holding_lifecycle": holding_diagnostics if isinstance(holding_diagnostics, dict) else {},
-        "auditor_decision": auditor_payload or {},
+        "pm_risk_gate_decision": pm_risk_gate_payload or {},
         "trader_execution_pending": True,
         "future_outcome_pending_phase4": True,
         "anti_overfit_guardrail": {
@@ -5065,7 +4889,7 @@ def _build_pm_landing_consistency_audit(
     adaptive_policy_state: list | None,
     alpha_setup_profiles: list | None,
     alpha_setup_action_values: list | None,
-    auditor_payload: dict | None,
+    pm_risk_gate_payload: dict | None,
     control_reasons: list,
     margin_required: float,
     margin_available: float,
@@ -5117,11 +4941,11 @@ def _build_pm_landing_consistency_audit(
         consistency_flags.append("high_quality_scorecard_missing_invalidation")
     if lots_to_trade > 0 and margin_required > margin_available:
         consistency_flags.append("pre_execution_margin_insufficient")
-    auditor_decision = None
-    if isinstance(auditor_payload, dict):
-        auditor_decision = auditor_payload.get("decision") or auditor_payload.get("action")
-    if auditor_decision and str(auditor_decision).lower() in {"block", "scale_down", "reduce_only"}:
-        consistency_flags.append(f"auditor_{str(auditor_decision).lower()}")
+    pm_risk_gate_decision = None
+    if isinstance(pm_risk_gate_payload, dict):
+        pm_risk_gate_decision = pm_risk_gate_payload.get("decision") or pm_risk_gate_payload.get("action")
+    if pm_risk_gate_decision and str(pm_risk_gate_decision).lower() in {"block", "scale_down", "reduce_only"}:
+        consistency_flags.append(f"pm_risk_gate_{str(pm_risk_gate_decision).lower()}")
     analyst_setup_summary = {}
     for signal in analyst_signals or []:
         agent = str(getattr(signal, "agent_name", "") or "unknown")
@@ -5177,7 +5001,7 @@ def _build_pm_landing_consistency_audit(
             "alpha_setup_action_preference_counts": action_value_trace.get("action_preference_counts", {}),
             "money_decision_trace_required": True,
         },
-        "auditor_alignment": auditor_payload or {},
+        "pm_risk_gate_alignment": pm_risk_gate_payload or {},
         "trader_pre_execution_feasibility": {
             "margin_required": float(margin_required or 0.0),
             "margin_available": float(margin_available or 0.0),
@@ -9965,58 +9789,58 @@ def portfolio_agent_futures(state: FundState):
     control_notes.extend(bq_notes)
     control_diagnostics.update(bq_diagnostics)
     control_block_reason = None
-    auditor_output = None
+    pm_risk_gate_output = None
     strategy_memory = {}
     adaptive_policy_state = list(early_adaptive_policy_state or [])
     provisional_policy_state = []
-    trade_auditor = TradeAuditor(full_config)
+    pm_risk_gate = PMRiskGate(full_config)
 
-    if trade_auditor.enabled:
-        auditor_config = full_config.get("trade_auditor") or full_config.get("decision_planner", {}) or {}
-        feedback_config = auditor_config.get("attribution_feedback", {}) or {}
+    if pm_risk_gate.enabled:
+        pm_risk_gate_config = full_config.get("pm_risk_gate") or {}
+        feedback_config = pm_risk_gate_config.get("attribution_feedback", {}) or {}
         legacy_trade_config = full_config.get("trade_frequency_control", {}) or {}
-        auditor_lookback = int(
+        pm_risk_gate_lookback = int(
             feedback_config.get(
                 "lookback_trades",
                 legacy_trade_config.get("lookback_trades", 30),
             )
         )
-        auditor_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
+        pm_risk_gate_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
         recent_side_performance = {}
         recent_conditional_performance = {}
-        if db and config_id and auditor_side in {"long", "short"}:
+        if db and config_id and pm_risk_gate_side in {"long", "short"}:
             decision_horizon = _resolve_decision_horizon(
                 analyst_signals,
-                1 if auditor_side == "long" else -1,
+                1 if pm_risk_gate_side == "long" else -1,
             )
-            market_regime_key = _market_regime_from_signals(analyst_signals, auditor_side)
+            market_regime_key = _market_regime_from_signals(analyst_signals, pm_risk_gate_side)
             setup_type_key = _setup_type_from_signals(
-                auditor_side,
+                pm_risk_gate_side,
                 analyst_signals,
                 signal_combo,
             )
             recent_side_performance = db.get_futures_trade_pair_performance(
                 config_id=config_id,
                 ticker=ticker,
-                side=auditor_side,
+                side=pm_risk_gate_side,
                 trading_date=trading_date,
-                lookback_trades=auditor_lookback,
+                lookback_trades=pm_risk_gate_lookback,
             )
             if hasattr(db, "get_futures_conditional_trade_performance"):
                 recent_conditional_performance = db.get_futures_conditional_trade_performance(
                     config_id=config_id,
                     ticker=ticker,
-                    side=auditor_side,
+                    side=pm_risk_gate_side,
                     trading_date=trading_date,
                     signal_combo=list(signal_combo),
-                    lookback_trades=auditor_lookback,
+                    lookback_trades=pm_risk_gate_lookback,
                     include_rollover=False,
                 )
-            auditor_memory_result = retrieve_pm_memory(
+            pm_risk_gate_memory_result = retrieve_pm_memory(
                 db=db,
                 config_id=config_id,
                 ticker=ticker,
-                side=auditor_side,
+                side=pm_risk_gate_side,
                 horizon_class=decision_horizon,
                 market_regime=market_regime_key,
                 setup_type=setup_type_key,
@@ -10028,19 +9852,19 @@ def portfolio_agent_futures(state: FundState):
                 include_provisional_policy_state=True,
                 limit=12,
             )
-            strategy_memory = auditor_memory_result.get("strategy_memory") or {}
-            adaptive_policy_state = auditor_memory_result.get("adaptive_policy_state") or []
-            adaptive_policy_safety_trace = auditor_memory_result.get("adaptive_policy_safety_trace") or adaptive_policy_safety_trace
-            provisional_policy_state = auditor_memory_result.get("provisional_policy_state") or []
+            strategy_memory = pm_risk_gate_memory_result.get("strategy_memory") or {}
+            adaptive_policy_state = pm_risk_gate_memory_result.get("adaptive_policy_state") or []
+            adaptive_policy_safety_trace = pm_risk_gate_memory_result.get("adaptive_policy_safety_trace") or adaptive_policy_safety_trace
+            provisional_policy_state = pm_risk_gate_memory_result.get("provisional_policy_state") or []
             pm_learning_audit["decision_memory_retrieval_policy"] = {
                 "tool": "decision_memory_retrieval",
-                "side": auditor_side,
+                "side": pm_risk_gate_side,
                 "horizon_class": decision_horizon,
                 "market_regime": market_regime_key,
                 "setup_type": setup_type_key,
-                "effective_memory_summary": auditor_memory_result.get("effective_memory_summary") or {},
-                "retrieval_attempts": auditor_memory_result.get("retrieval_attempts") or [],
-                "rejected_or_downgraded": auditor_memory_result.get("rejected_or_downgraded") or [],
+                "effective_memory_summary": pm_risk_gate_memory_result.get("effective_memory_summary") or {},
+                "retrieval_attempts": pm_risk_gate_memory_result.get("retrieval_attempts") or [],
+                "rejected_or_downgraded": pm_risk_gate_memory_result.get("rejected_or_downgraded") or [],
             }
             opportunity_scorecard = build_opportunity_scorecard(
                 ticker=ticker,
@@ -10074,7 +9898,7 @@ def portfolio_agent_futures(state: FundState):
             signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
             for signal in analyst_signals
         ]
-        auditor_input = TradeAuditorInput(
+        pm_risk_gate_input = PMRiskGateInput(
             ticker=ticker,
             trading_date=trading_date,
             config_id=config_id,
@@ -10082,7 +9906,7 @@ def portfolio_agent_futures(state: FundState):
             signal_combo=list(signal_combo),
             raw_long_score=long_scores,
             raw_short_score=short_scores,
-            raw_target_side=auditor_side,
+            raw_target_side=pm_risk_gate_side,
             raw_position_ratio=position_risk.optimal_position_ratio,
             current_position_ratio=current_ticker_exposure,
             signal_strength=signal_strength,
@@ -10094,21 +9918,21 @@ def portfolio_agent_futures(state: FundState):
             risk_level=risk_level.value,
             full_config=full_config,
         )
-        auditor_output = trade_auditor.plan(auditor_input)
+        pm_risk_gate_output = pm_risk_gate.plan(pm_risk_gate_input)
         before_ratio = position_risk.optimal_position_ratio
-        if auditor_output.decision == "block":
+        if pm_risk_gate_output.decision == "block":
             if _same_sign(before_ratio, current_ticker_exposure):
                 position_risk.optimal_position_ratio = current_ticker_exposure
             else:
                 position_risk.optimal_position_ratio = 0.0
-            control_reasons.extend(auditor_output.reasons)
-            control_reasons.append("trade_auditor_block")
-            control_notes.extend(auditor_output.notes)
+            control_reasons.extend(pm_risk_gate_output.reasons)
+            control_reasons.append("pm_risk_gate_block")
+            control_notes.extend(pm_risk_gate_output.notes)
             control_notes.append(
-                f"trade auditor blocked new {auditor_output.target_side} exposure: "
+                f"trade pm risk gate blocked new {pm_risk_gate_output.target_side} exposure: "
                 f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
             )
-        elif auditor_output.decision == "reduce_only":
+        elif pm_risk_gate_output.decision == "reduce_only":
             if abs(current_ticker_exposure) > 1e-12 and _same_sign(before_ratio, current_ticker_exposure):
                 position_risk.optimal_position_ratio = min(
                     abs(before_ratio),
@@ -10116,30 +9940,30 @@ def portfolio_agent_futures(state: FundState):
                 ) * (1.0 if current_ticker_exposure > 0 else -1.0)
             else:
                 position_risk.optimal_position_ratio = 0.0
-            control_reasons.extend(auditor_output.reasons)
-            control_reasons.append("trade_auditor_reduce_only")
-            control_notes.extend(auditor_output.notes)
+            control_reasons.extend(pm_risk_gate_output.reasons)
+            control_reasons.append("pm_risk_gate_reduce_only")
+            control_notes.extend(pm_risk_gate_output.notes)
             control_notes.append(
-                f"trade auditor reduce-only {auditor_output.target_side}: "
+                f"trade pm risk gate reduce-only {pm_risk_gate_output.target_side}: "
                 f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
             )
-        elif auditor_output.decision in {"reduce", "scale_down", "probe_only"}:
+        elif pm_risk_gate_output.decision in {"reduce", "scale_down", "probe_only"}:
             position_risk.optimal_position_ratio = _apply_trade_plan_multiplier(
                 target_ratio=position_risk.optimal_position_ratio,
                 current_ratio=current_ticker_exposure,
-                multiplier=auditor_output.position_ratio_multiplier,
+                multiplier=pm_risk_gate_output.position_ratio_multiplier,
             )
             if (
-                auditor_output.decision in {"scale_down", "probe_only"}
+                pm_risk_gate_output.decision in {"scale_down", "probe_only"}
                 and abs(position_risk.optimal_position_ratio) <= 1e-12
                 and abs(before_ratio) > 1e-12
                 and abs(current_ticker_exposure) <= 1e-12
             ):
-                audit_cfg = (auditor_config.get("quality_gate") or {}) if isinstance(auditor_config, dict) else {}
+                audit_cfg = (pm_risk_gate_config.get("quality_gate") or {}) if isinstance(pm_risk_gate_config, dict) else {}
                 floor_ratio = max(0.0, _safe_float(audit_cfg.get("soft_probe_floor_ratio"), 0.005))
                 cap_ratio = max(floor_ratio, _safe_float(audit_cfg.get("soft_probe_max_ratio"), 0.010))
                 floor_candidate = _probe_ratio_from_soft_gate(
-                    side=auditor_output.target_side,
+                    side=pm_risk_gate_output.target_side,
                     current_ratio=current_ticker_exposure,
                     raw_ratio=before_ratio,
                     cap_ratio=cap_ratio,
@@ -10147,27 +9971,26 @@ def portfolio_agent_futures(state: FundState):
                 )
                 if abs(floor_candidate) > 1e-12:
                     position_risk.optimal_position_ratio = floor_candidate
-                    control_reasons.append("trade_auditor_soft_probe_floor")
+                    control_reasons.append("pm_risk_gate_soft_probe_floor")
                     control_notes.append(
-                        f"trade auditor soft {auditor_output.decision} retained real probe floor: "
+                        f"trade pm risk gate soft {pm_risk_gate_output.decision} retained real probe floor: "
                         f"{before_ratio:.2%}->{floor_candidate:.2%}"
                     )
-            control_reasons.extend(auditor_output.reasons)
+            control_reasons.extend(pm_risk_gate_output.reasons)
             if abs(position_risk.optimal_position_ratio) <= 1e-12 and abs(before_ratio) > 1e-12:
-                control_reasons.append("trade_auditor_scale_to_zero")
-            control_notes.extend(auditor_output.notes)
+                control_reasons.append("pm_risk_gate_scale_to_zero")
+            control_notes.extend(pm_risk_gate_output.notes)
             control_notes.append(
-                f"trade auditor {auditor_output.decision} {auditor_output.target_side} ratio "
+                f"trade pm risk gate {pm_risk_gate_output.decision} {pm_risk_gate_output.target_side} ratio "
                 f"{before_ratio:.2%}->{position_risk.optimal_position_ratio:.2%}"
             )
         else:
-            control_reasons.extend(auditor_output.reasons)
-            control_notes.extend(auditor_output.notes)
-        auditor_payload = (
-            auditor_output.model_dump() if hasattr(auditor_output, "model_dump") else dict(auditor_output)
+            control_reasons.extend(pm_risk_gate_output.reasons)
+            control_notes.extend(pm_risk_gate_output.notes)
+        pm_risk_gate_payload = (
+            pm_risk_gate_output.model_dump() if hasattr(pm_risk_gate_output, "model_dump") else dict(pm_risk_gate_output)
         )
-        control_diagnostics["trade_auditor"] = auditor_payload
-        control_diagnostics["decision_planner"] = auditor_payload
+        control_diagnostics["pm_risk_gate"] = pm_risk_gate_payload
     else:
         position_risk.optimal_position_ratio, reasons, notes = _apply_market_confirmation_control(
             position_ratio=position_risk.optimal_position_ratio,
@@ -11054,6 +10877,12 @@ def portfolio_agent_futures(state: FundState):
         "source_contract_count": len(signal_collection_contract.get("source_contracts") or []),
         "collector_decision_boundary": signal_collection_contract.get("collector_decision_boundary"),
     }
+    pm_contract_self_check = check_final_action_contract(final_action_contract)
+    plan_snapshot["pm_contract_self_check"] = pm_contract_self_check
+    if not pm_contract_self_check.get("ok"):
+        raise ValueError(
+            f"pm_final_action_contract_self_check_failed:{pm_contract_self_check.get('errors')}"
+        )
     plan_snapshot["release_block_diagnostics"] = _build_release_block_diagnostics(
         ticker=ticker,
         final_action_contract=final_action_contract,
@@ -11111,18 +10940,6 @@ def portfolio_agent_futures(state: FundState):
         for row in (adaptive_policy_state or [])
         if str(row.get("policy_type") or "") == "tail_loss_sentinel"
     ]
-    if target_lots == 0:
-        pm_decision_state = "no_opportunity"
-    elif alpha_protect_records:
-        pm_decision_state = "tradeable_candidate"
-    elif abs(target_lots) < abs(current_lots):
-        pm_decision_state = "risk_reduction_candidate"
-    elif current_lots == 0 and target_lots != 0:
-        pm_decision_state = "probe_candidate"
-    elif abs(target_lots) > abs(current_lots):
-        pm_decision_state = "probe_candidate"
-    else:
-        pm_decision_state = "watch_for_trigger"
     scorecard_target_side = _target_side_from_ratio(position_risk.optimal_position_ratio)
     scorecard_side = (
         opportunity_scorecard.get(scorecard_target_side)
@@ -11130,9 +10947,12 @@ def portfolio_agent_futures(state: FundState):
         else {}
     )
     scorecard_state = str(scorecard_side.get("final_state") or "").lower()
-    if scorecard_state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger", "no_opportunity"}:
-        if pm_decision_state not in {"risk_reduction_candidate", "no_opportunity"}:
-            pm_decision_state = scorecard_state
+    pm_decision_state = classify_pm_decision_state(
+        current_lots=current_lots,
+        target_lots=target_lots,
+        scorecard_state=scorecard_state,
+        has_alpha_protect_records=bool(alpha_protect_records),
+    )
     plan_snapshot["pm_decision_state"] = pm_decision_state
     plan_snapshot["research_memory_maturity"] = {
         "candidate_hypothesis_count": pm_learning_audit.get("candidate_hypothesis_count", 0),
@@ -11149,20 +10969,13 @@ def portfolio_agent_futures(state: FundState):
                 "candidate_hypotheses_not_counted_as_position_support"
             )
         control_diagnostics["exploratory_learning_context"] = pm_learning_audit
-    plan_snapshot["portfolio_manager_llm"] = {
-        "mode": "disabled",
-        "provider": "",
-        "model": "",
-        "reason": "portfolio_manager_does_not_call_llm",
-    }
-    if auditor_output:
-        auditor_payload = (
-            auditor_output.model_dump() if hasattr(auditor_output, "model_dump") else dict(auditor_output)
+    if pm_risk_gate_output:
+        pm_risk_gate_payload = (
+            pm_risk_gate_output.model_dump() if hasattr(pm_risk_gate_output, "model_dump") else dict(pm_risk_gate_output)
         )
-        plan_snapshot["trade_auditor"] = auditor_payload
-        plan_snapshot["decision_planner"] = auditor_payload
+        plan_snapshot["pm_risk_gate"] = pm_risk_gate_payload
     else:
-        auditor_payload = None
+        pm_risk_gate_payload = None
     plan_snapshot["loss_template_research_trace"] = {
         "adaptive_policy_scope": _adaptive_policy_trace(adaptive_policy_state),
         "adaptive_policy_safety": adaptive_policy_safety_trace,
@@ -11191,7 +11004,7 @@ def portfolio_agent_futures(state: FundState):
         control_reasons=control_reasons,
         holding_diagnostics=holding_diagnostics,
         market_confirmation=market_confirmation,
-        auditor_payload=auditor_payload,
+        pm_risk_gate_payload=pm_risk_gate_payload,
         analyst_signals=analyst_signals,
         opportunity_scorecard=opportunity_scorecard,
         alpha_setup_profiles=alpha_setup_profiles,
@@ -11212,7 +11025,7 @@ def portfolio_agent_futures(state: FundState):
         adaptive_policy_state=adaptive_policy_state,
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=alpha_setup_action_values,
-        auditor_payload=auditor_payload,
+        pm_risk_gate_payload=pm_risk_gate_payload,
         control_reasons=control_reasons,
         margin_required=margin_required,
         margin_available=margin_available,
@@ -11415,12 +11228,3 @@ def calculate_position_ratio_with_balance(
         final_ratio = 0
 
     return final_ratio, direction
-
-
-
-
-
-
-
-
-

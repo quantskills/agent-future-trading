@@ -12,7 +12,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from tools.agent_tools.research.template_prior import load_template_prior_if_enabled
+from tools.common.template_prior import load_template_prior_if_enabled
 from tools.common.runtime_setup import load_portfolio_config
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db

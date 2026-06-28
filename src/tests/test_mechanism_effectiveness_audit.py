@@ -11,7 +11,7 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.mechanism_effectiveness_audit import audit_mechanism_effectiveness
+from tools.agent_tools.control.pg_mechanism_effectiveness_audit import audit_mechanism_effectiveness
 
 
 def _dumps(value):

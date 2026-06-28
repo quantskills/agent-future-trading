@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from util.trading_calendar import get_previous_trading_day
-from tools.agent_tools.analysis.data_usage import read_finoview_feather_cached, read_text_cached
+from tools.agent_tools.analysis.analyst_data_usage import read_finoview_feather_cached, read_text_cached
 
 try:
     import pandas as pd
@@ -1126,7 +1126,7 @@ class Router():
 
         self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
         try:
-            from tools.agent_tools.analysis.finoview_factors import (
+            from tools.agent_tools.analysis.analyst_finoview_factors import (
                 build_factor_attribution_payload,
                 build_factor_catalog,
                 build_factor_snapshot,

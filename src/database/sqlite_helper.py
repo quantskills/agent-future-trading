@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 import json
 import uuid
 import threading
@@ -20,18 +20,34 @@ from database.sqlite_setup import (
     _text_artifact_columns,
 )
 from tools.common.contracts import (
+    validate_auditor_artifact_boundary,
     validate_accountant_artifact_boundary,
     validate_execution_artifact_boundary,
     validate_pm_artifact_boundary,
 )
 from util.logger import logger
-from tools.agent_tools.research.learning_contract import attach_or_upgrade_next_round_memory_contract
+from tools.common.learning_contract import attach_or_upgrade_next_round_memory_contract
 
 class SQLiteDB(BaseDB):
     def __init__(self):
         self.db_path = DB_PATH
         self._runtime_schema_ready = False
         self._runtime_schema_lock = threading.Lock()
+
+    @staticmethod
+    def _validate_recommendation_audit_payload(audit_payload: Dict[str, Any]) -> None:
+        if not isinstance(audit_payload, dict) or not audit_payload:
+            return
+        if any(
+            key in audit_payload
+            for key in ("execution_translation", "execution_result", "phase2_execution")
+        ):
+            validate_execution_artifact_boundary(audit_payload)
+            return
+        if str(audit_payload.get("producer") or audit_payload.get("agent_name") or "") == "auditor":
+            validate_auditor_artifact_boundary(audit_payload)
+            return
+        validate_pm_artifact_boundary(audit_payload)
 
     def _get_connection(self):
         """Get a database connection with row factory."""
@@ -1539,7 +1555,7 @@ class SQLiteDB(BaseDB):
         try:
             recommendation_dict = self._model_to_dict(recommendation)
             validate_pm_artifact_boundary(recommendation_dict.get("signal_snapshot") or {})
-            validate_pm_artifact_boundary(recommendation_dict.get("audit_payload") or {})
+            self._validate_recommendation_audit_payload(recommendation_dict.get("audit_payload") or {})
             recommendation_id = recommendation_dict.get("id") or str(uuid.uuid4())
             created_at = recommendation_dict.get("created_at") or datetime.now(timezone.utc).isoformat()
             config_id = recommendation_dict.get("config_id")
@@ -1762,13 +1778,7 @@ class SQLiteDB(BaseDB):
                 ])
 
             if audit_payload is not None:
-                if any(
-                    key in audit_payload
-                    for key in ("execution_translation", "execution_result", "phase2_execution")
-                ):
-                    validate_execution_artifact_boundary(audit_payload)
-                else:
-                    validate_pm_artifact_boundary(audit_payload)
+                self._validate_recommendation_audit_payload(audit_payload)
                 audit_ext = externalize_json_for_db(
                     audit_payload,
                     category="recommendation",
@@ -2496,7 +2506,7 @@ class SQLiteDB(BaseDB):
                 item_combo = self._signal_combo_from_snapshot(snapshot)
                 item["signal_combo"] = list(item_combo)
                 item["market_confirmation"] = snapshot.get("market_confirmation") if isinstance(snapshot, dict) else None
-                item["decision_planner"] = self._decision_planner_from_snapshot(snapshot)
+                item["pm_risk_gate"] = self._pm_risk_gate_from_snapshot(snapshot)
                 if normalized_combo is not None and item_combo != normalized_combo:
                     continue
                 matched_pairs.append(item)
@@ -3913,7 +3923,7 @@ class SQLiteDB(BaseDB):
             else signal_value("company_news"),
         )
 
-    def _decision_planner_from_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def _pm_risk_gate_from_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         audit = snapshot.get("active_opportunity_audit")
         if isinstance(audit, dict):
             decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}

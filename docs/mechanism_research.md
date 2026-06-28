@@ -206,15 +206,15 @@ signal_collection_contract
 
 回测前应确认：
 
-- `contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖。
+- `pg_contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖。
 - 研究员 -> 投资组合经理的 action-value 边界必须通过 `decision_memory_retrieval` 保真测试，证明真实 canonical 记录不会丢失 `id/action_preference/reward_source/evidence_scope/action_value_lane/reward`，也不会被空壳 trace 或空历史覆盖。
 - 投资组合经理不直接调用研究库读取函数；研究消费入口只保留 `decision_memory_retrieval`。
 - 审计员输入不含 `strategy_memory` 或 `adaptive_policy_state`。
 - 交易员执行入口不含研究库、action-value、`strategy_memory` 或 `adaptive_policy_state` 消费权限。
 - 复盘员不调用 LLM、不触发研究员学习、不写最终 action-value。
-- `pre_backtest_acceptance.py` 通过。
+- `pg_pre_backtest_acceptance.py` 通过。
 - `system_invariant_audit.py` 对现有库没有 hard error。
-- `mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。
+- `pg_mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。
 - 字段语义表仍是唯一字段来源。
 - 未完成交易日不会进入学习。
 - 策略单、rollover、forced_risk 按 `source_type` 分账。

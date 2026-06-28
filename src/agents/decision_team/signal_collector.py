@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from graph.schema import FundState
-from tools.agent_tools.decision.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
 def signal_collector_agent(state: FundState):

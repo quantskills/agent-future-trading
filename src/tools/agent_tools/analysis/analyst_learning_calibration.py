@@ -1,4 +1,4 @@
-"""Evidence calibration from past research records for analyst signals.
+﻿"""Evidence calibration from past research records for analyst signals.
 
 This module turns bounded learning context into analyst-side evidence quality
 adjustments. It must not create trade authority, sizing authority, or PM bypasses.
@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.research.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 
 
 _DIRECTION_BY_SIDE = {

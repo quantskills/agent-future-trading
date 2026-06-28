@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -10,8 +10,8 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.analysis.finoview_factors import _latest_visible_row
-from tools.agent_tools.analysis.market_confirmation import MarketConfirmationEngine, score_pandaai_extra_records
+from tools.agent_tools.analysis.analyst_finoview_factors import _latest_visible_row
+from tools.agent_tools.analysis.analyst_market_confirmation import MarketConfirmationEngine, score_pandaai_extra_records
 
 
 class _SnapshotRouter:
@@ -109,7 +109,7 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         }
 
         with patch(
-            "tools.agent_tools.analysis.market_confirmation.get_previous_trading_day",
+            "tools.agent_tools.analysis.analyst_market_confirmation.get_previous_trading_day",
             return_value=datetime(2025, 1, 3),
         ):
             result = MarketConfirmationEngine(_config(), router=_SnapshotRouter(snapshot)).evaluate(
@@ -148,7 +148,7 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         router = _SnapshotRouter(snapshot)
 
         with patch(
-            "tools.agent_tools.analysis.market_confirmation.get_previous_trading_day",
+            "tools.agent_tools.analysis.analyst_market_confirmation.get_previous_trading_day",
             return_value=datetime(2025, 1, 3),
         ) as previous_day:
             result = MarketConfirmationEngine(_config(), router=router).evaluate(
@@ -177,7 +177,7 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         }
 
         with patch(
-            "tools.agent_tools.analysis.market_confirmation.get_previous_trading_day",
+            "tools.agent_tools.analysis.analyst_market_confirmation.get_previous_trading_day",
             return_value=datetime(2025, 1, 3),
         ):
             result = MarketConfirmationEngine(_config(), router=_SnapshotRouter(snapshot)).evaluate(
@@ -231,7 +231,7 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         }
 
         with patch(
-            "tools.agent_tools.analysis.market_confirmation.get_previous_trading_day",
+            "tools.agent_tools.analysis.analyst_market_confirmation.get_previous_trading_day",
             return_value=datetime(2025, 1, 3),
         ):
             result = MarketConfirmationEngine(_config(), router=_SnapshotRouter(snapshot)).evaluate(

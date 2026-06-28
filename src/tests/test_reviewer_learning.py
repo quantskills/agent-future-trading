@@ -1,4 +1,4 @@
-﻿import json
+import json
 import sqlite3
 import sys
 import tempfile
@@ -12,7 +12,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agents.decision_team.auditor import TradeAuditor, TradeAuditorInput
+from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput
 from agents.decision_team.portfolio_manager import (
     _apply_capital_utilization_control,
     _quality_aware_fusion_context,
@@ -22,23 +22,23 @@ from agents.decision_team.portfolio_manager import (
 from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_strategy_memory_schema
 from graph.constants import Signal
 from graph.schema import AnalystSignal
-from tools.agent_tools.analysis.business_quality import apply_business_quality_enrichment
+from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
 from tools.common.contracts import attach_snapshot_contract, validate_artifact_header
 from database.artifact_store import load_externalized_json, load_externalized_text
-from tools.agent_tools.research.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
-from tools.agent_tools.analysis.dynamic_weights import calibrate_weights_by_signal_history
-from tools.agent_tools.analysis.learning_context import (
+from tools.common.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
+from tools.agent_tools.analysis.analyst_dynamic_weights import calibrate_weights_by_signal_history
+from tools.agent_tools.analysis.analyst_learning_context import (
     apply_config_learning_overlay,
     build_learning_context,
     clear_learning_context_cache,
 )
-from tools.agent_tools.analysis.technical_parameter_calibration import apply_technical_parameter_calibration
-from tools.agent_tools.research.learning_contract import CONTRACT_KEY
-from tools.agent_tools.research.neutral_accountability import (
+from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
+from tools.common.learning_contract import CONTRACT_KEY
+from tools.common.neutral_accountability import (
     build_neutral_accountability_summary,
     classify_neutral_signal,
 )
-from tools.agent_tools.analysis.quality import build_technical_context, apply_signal_quality_gate
+from tools.agent_tools.analysis.analyst_quality import build_technical_context, apply_signal_quality_gate
 from tools.agent_tools.research.research_learning import (
     CausalReviewLLMOutput,
     ExploratoryHypothesisItem,
@@ -49,12 +49,12 @@ from tools.agent_tools.research.research_learning import (
     write_alpha_setup_profiles,
     write_exploratory_hypotheses,
 )
-from tools.agent_tools.research.alpha_setup import (
+from tools.common.alpha_setup import (
     _action_preference_from_stats,
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
-from tools.agent_tools.research.phase4_review import (
+from tools.agent_tools.research.reviewer_phase4_review import (
     _horizon_class,
     _validate_phase1_signal_persistence,
 )
@@ -80,7 +80,7 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_trade_episode_memory,
     _write_validated_causal_policy_rules,
 )
-from tools.agent_tools.decision.capital_allocator import enriched_policy_evidence
+from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
 
 
 class _FakeLearningDB:
@@ -1435,9 +1435,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
 
 class AdaptivePolicyAuditorTest(unittest.TestCase):
     def test_auditor_ignores_reviewer_adaptive_cap(self):
-        auditor = TradeAuditor(
+        auditor = PMRiskGate(
             {
-                "trade_auditor": {
+                "pm_risk_gate": {
                     "enabled": True,
                     "policy_version": "test",
                     "quality_gate": {"enabled": False},
@@ -1448,7 +1448,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             }
         )
         output = auditor.plan(
-            TradeAuditorInput(
+            PMRiskGateInput(
                 ticker="BU",
                 raw_position_ratio=0.10,
                 current_position_ratio=0.0,
@@ -1470,7 +1470,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
         self.assertNotIn("adaptive_policy_cap", output.reasons)
         self.assertEqual(
             output.diagnostics.get("research_memory_boundary"),
-            "auditor_does_not_consume_research_records",
+            "RiskGate_does_not_consume_research_records",
         )
 
     def test_learning_overlay_cannot_raise_portfolio_hard_margin_cap(self):
@@ -6138,4 +6138,3 @@ class ReviewerDynamicWeightsRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

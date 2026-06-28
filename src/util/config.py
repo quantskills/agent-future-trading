@@ -43,10 +43,6 @@ class ConfigParser:
         cfg = normalize_config(cfg, self.config_path)
         cfg['trading_date'] = datetime.strptime(self.trading_date, '%Y-%m-%d')
         cfg['planner_mode'] = cfg.get('planner_mode', False)
-        if 'trade_auditor' not in cfg and 'decision_planner' in cfg:
-            cfg['trade_auditor'] = cfg.get('decision_planner')
-        if 'decision_planner' not in cfg and 'trade_auditor' in cfg:
-            cfg['decision_planner'] = cfg.get('trade_auditor')
         cfg['workflow_analysts'] = [
             'commodity_news' if analyst == 'company_news' else analyst
             for analyst in cfg.get('workflow_analysts', [])

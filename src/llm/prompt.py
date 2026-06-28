@@ -13,7 +13,7 @@ Output format:
 - setup_type: one of trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / fundamental_timing_setup / news_event_setup / data_unavailable_no_trade / unknown
 - price_percentile: 0.0-1.0 when inferable, otherwise null
 - entry_trigger: concrete current trigger fact or pending trigger condition
-- action_name: open / hold / exit / reduce / execution / unknown; this is research/action-value semantics only and not trade authority
+- do not output action_name; action_name is reserved for Researcher action-value records, not analyst evidence
 - invalidation_level: price level when inferable, otherwise null
 - atr_stop_distance: ATR stop distance when inferable, otherwise null
 - add_allowed: true only when this is a verified add-on signal
@@ -35,7 +35,7 @@ Output format:
 - similar_past_cases: list of relevant research-learning cases when available
 - do_not_trade_reason: concise reason if this should not be traded
 - evidence_role: entry_timing / direction_context / event_catalyst / risk_context / execution_context.
-  risk_context is an evidence role, not a separate agent and not trade authority; PM and Auditor decide permission, while Trader only checks intraday trigger and executes final_action_contract after audit_verdict/trade_contract_audit approval.
+  risk_context is an evidence role, not a separate agent and not trade authority; PM signs the contract, independent Auditor decides audit_verdict, while Trader only checks intraday trigger and executes the approved final_action_contract. trade_contract_audit is an execution audit mirror, not an approval source.
 - direction_context: directional background, separated from entry timing
 - trend_direction: technical trend direction when applicable
 - entry_timing_signal: technical or event timing classification when applicable
@@ -143,7 +143,7 @@ retrieval_key, and usage_boundary:
 - execution action-value may inform PM's execution_profile; execution lane
   action-value inside consumer_scope=pm_learning may inform PM's
   execution_profile and trigger-method preference before PM writes
-  final_action_contract with audit_verdict/trade_contract_audit. Trader may read
+  final_action_contract with independent audit_verdict approval. Trader may read
   only final_action_contract execution fields / execution_profile plus intraday
   data. consumer_scope=trader_execution_learning is an execution trace scope
   emitted by Trader for Reviewer/Researcher, not a Trader research-consumption
@@ -225,8 +225,9 @@ Focus on factors that impact futures prices:
 - Cost drivers (raw materials, energy, transportation)
 
 For commodity_news, use horizon_class="event_short", expected_horizon_days=1-3,
-setup_type="news_event_setup" when the event is meaningful, and action_name="open"
-only as research semantics when the current event trigger is already confirmed.
+setup_type="news_event_setup" when the event is meaningful, and use
+opportunity_state plus entry_trigger/current confirmation fields to describe
+whether it is only watchable or currently triggerable.
 
 """ + ANALYST_OUTPUT_FORMAT
 
@@ -343,7 +344,7 @@ Return these explicit fields in addition to signal/confidence/justification:
 - trend_stage: improving_fundamental_anchor / weakening_fundamental_anchor / mixed / unknown
 - price_percentile: null unless the supplied data can support it
 - setup_type: fundamental_timing_setup / data_unavailable_no_trade / unknown
-- action_name: open / hold / exit / reduce / unknown; research semantics only
+- do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - entry_trigger: short-timing condition needed to make the fundamental thesis tradable
 - invalidation_level: null unless an explicit price invalidation level is inferable
 
@@ -458,7 +459,7 @@ Output format:
 - trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
 - price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
 - setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / data_unavailable_no_trade
-- action_name: open / hold / exit / reduce / execution / unknown; research semantics only
+- do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - invalidation_level: nearest concrete invalidation price if inferable, otherwise null
 - opportunity_type: trend_continuation / reversal / range_breakout / short_timing / probe / no_trade
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
@@ -601,7 +602,7 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "cool or invalidate stale positive memories, and when exit/hold behavior rather than "
         "entry selection caused the result. "
         "Each lesson must state who may use it: analysts only via signal_calibration, "
-        "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract execution fields after audit_verdict/trade_contract_audit approval, "
+        "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract execution fields after independent audit_verdict approval; trade_contract_audit is an execution audit mirror, "
         "and protocol-governor only for audit. "
         "Control-governance metadata can support chain-health audit only; it cannot become market alpha, "
         "an action-preference reward, or a direct PM/Trader instruction. "

@@ -175,13 +175,13 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 系统事实指已经被授权事实入口正式写入 DB、artifact 或 payload，且作为下游可信事实被消费的结构化结果。DB、artifact 和 payload 只是事实载体，不是新的事实来源；同一类事实必须服从同一个授权写入口和同一套字段语义。
 
-控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 `src/tools/agent_tools/control/db_schema_contract.py` 和 `docs/unified_field_semantics.md` 检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
+控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 `src/tools/agent_tools/control/pg_db_schema_contract.py` 和 `docs/unified_field_semantics.md` 检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
 
 | 事实载体 | 保存的系统事实 | 标准日期字段 | 授权写入口 | 允许保存 | 禁止保存或改写 |
 |---|---|---|---|---|---|
 | 分析师报告 artifact / `action_evidence_contract` / `artifact_json` | 盘前预测证据事实 | `trading_date` | 技术面分析师、基本面分析师、期货新闻面分析师 | 方向、触发、证据强弱、缺失、冲突、失效边界、数据可见性 | 手数、仓位、最终交易动作、`final_action_contract` |
 | 信号收集 artifact / `signal_collection_contract` | 统一结构化证据事实 | `trading_date` | 信号收集员 | 来源引用、逐条证据、方向汇总、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 历史学习结论、score/rank、仓位、手数、交易动作、`final_action_contract` |
-| `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实 | `trading_date` | 投资组合经理；换月/强平运营入口 | PM 策略路径可保存完整 `final_action_contract`、`signal_snapshot`、审计结果；运营路径只保存运营动作事实 | Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；运营推荐伪装成 PM 策略评分 |
+| `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实；独立 Auditor 审计事实载体 | `trading_date` | 投资组合经理写 PM 合约；独立 Auditor 写 `audit_payload` / auditor 摘要；换月/强平运营入口写运营事实 | PM 策略路径可保存完整 `final_action_contract`、`signal_snapshot`；Auditor 只能保存 `audit_verdict`、hard/soft risk reasons 和只读审计 payload；运营路径只保存运营动作事实 | Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；Auditor 改方向/改手数/新建合约；运营推荐伪装成 PM 策略评分 |
 | `futures_intraday_decision` / Phase2 `features_json` | 盘中触发和执行判断事实 | `trading_date` | 交易员执行入口 | 触发是否成立、执行摘要、盘中行情、执行原因、成交/未成交依据 | 完整 `final_action_contract` 镜像、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` |
 | `futures_transactions` / transaction `audit_payload` | 交易员执行事实 | `trading_date` | 交易员成交写入入口 | 成交/未成交、动作、手数、品种、执行审计摘要、执行结果 | 完整 PM 合约镜像、PM 学习解释、PM 排名、PM 资金部署理由、研究记录 |
 | `daily_settlement` / `ticker_daily_pnl` | 会计师结算事实 | `trading_date` | 会计师结算入口 | PnL、手续费、保证金、权益、持仓快照、分品种盈亏 | 学习字段、LLM 字段、交易授权、研究结论 |

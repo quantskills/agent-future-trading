@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
@@ -56,12 +56,10 @@ EXPECTED_NO_TRADE_REASONS = {
     "fundamental_anchor_rebalance_cap",
     "horizon_consistency_requires_short_timing",
     "reverse_requires_stronger_evidence",
-    "decision_planner_block",
-    "decision_planner_reduce_to_zero",
-    "trade_auditor_block",
-    "trade_auditor_reduce_to_zero",
-    "trade_auditor_scale_to_zero",
-    "trade_auditor_reduce_only",
+    "pm_risk_gate_block",
+    "pm_risk_gate_scale_to_zero",
+    "pm_risk_gate_reduce_only",
+    "auditor_verdict_not_approved",
     "soft_block_converted_to_probe_only",
     "business_quality_observe_or_block",
     "business_quality_probe_only",
@@ -94,11 +92,7 @@ EXPECTED_NO_TRADE_REASONS = {
     "near_expiry_new_entry_block",
 }
 
-LEGACY_NO_TRADE_REASON_ALIASES = {
-    "decision_planner_block": "trade_auditor_block",
-    "decision_planner_reduce_to_zero": "trade_auditor_reduce_to_zero",
-    "trade_auditor_reduce_to_zero": "trade_auditor_scale_to_zero",
-}
+LEGACY_NO_TRADE_REASON_ALIASES = {}
 
 NO_TRADE_REASON_CATEGORY_LABELS = {
     "signal": "信号",
@@ -150,9 +144,10 @@ NO_TRADE_REASON_CATEGORY_MAP = {
     "capital_utilization_guard": "risk",
     "minimum_new_entry_threshold": "risk",
     "minimum_rebalance_threshold": "risk",
-    "trade_auditor_block": "risk",
-    "trade_auditor_scale_to_zero": "risk",
-    "trade_auditor_reduce_only": "risk",
+    "pm_risk_gate_block": "risk",
+    "pm_risk_gate_scale_to_zero": "risk",
+    "pm_risk_gate_reduce_only": "risk",
+    "auditor_verdict_not_approved": "risk",
     "soft_block_converted_to_probe_only": "risk",
     "atr_trailing_stop_long": "risk",
     "atr_trailing_stop_short": "risk",
@@ -726,10 +721,19 @@ def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     translation = snapshot.get("execution_translation")
     result = snapshot.get("execution_result")
     phase2_execution = snapshot.get("phase2_execution")
+    auditor = snapshot.get("auditor")
     contract = final_action_contract_from_snapshot(snapshot)
     authority = contract
     if contract:
         payload["trade_contract_audit"] = _build_trade_contract_audit(snapshot, contract, authority)
+    if isinstance(auditor, dict):
+        payload["independent_auditor"] = {
+            "producer": auditor.get("producer") or "auditor",
+            "audit_status": auditor.get("audit_status"),
+            "audit_verdict": auditor.get("audit_verdict"),
+            "audit_reason_codes": list(auditor.get("audit_reason_codes") or []),
+            "audited_at": auditor.get("audited_at"),
+        }
     if isinstance(translation, dict):
         payload["execution_translation"] = deepcopy(translation)
     if isinstance(result, dict):
@@ -844,4 +848,3 @@ def _release_margin(current_margin_used: float, closed_lots: int, previous_lots:
     if previous_lots <= 0:
         return current_margin_used
     return current_margin_used * (closed_lots / previous_lots)
-

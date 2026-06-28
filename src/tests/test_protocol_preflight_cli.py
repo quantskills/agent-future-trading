@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from llm.inference import llm_audit_metadata
 from llm.provider import Provider
 from run.pre_backtest_test import _load_config, _run_protocol_preflight
-from tools.agent_tools.control.preflight import run_llm_preflight_check
+from tools.agent_tools.control.pg_preflight import run_llm_preflight_check
 
 
 class ProtocolPreflightCliRegressionTest(unittest.TestCase):
@@ -223,6 +223,42 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             "2025-03-10",
             True,
         )
+        resolve_days.assert_not_called()
+
+    def test_backtest_reset_clears_existing_config_before_pre_backtest_gate(self):
+        import run.backtest as backtest
+
+        argv = [
+            "backtest.py",
+            "--config",
+            str(SRC_ROOT / "config" / "dev.yaml"),
+            "--start-date",
+            "2025-03-01",
+            "--end-date",
+            "2025-03-10",
+            "--local-db",
+            "--reset-config",
+        ]
+        calls = []
+
+        def fake_reset(_config, _reset_config, _local_db):
+            calls.append("reset")
+
+        def fake_pre_gate(*_args, **_kwargs):
+            calls.append("pre_gate")
+            return 1
+
+        with patch.object(sys, "argv", argv), patch.object(
+            backtest,
+            "load_yaml_config",
+            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
+        ), patch.object(backtest, "reset_existing_config_if_requested", side_effect=fake_reset), patch.object(
+            backtest, "run_pre_backtest_test", side_effect=fake_pre_gate
+        ), patch.object(backtest, "resolve_trading_days") as resolve_days:
+            result = backtest.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, ["reset", "pre_gate"])
         resolve_days.assert_not_called()
 
     def test_backtest_main_stops_on_first_daily_gate_failure(self):

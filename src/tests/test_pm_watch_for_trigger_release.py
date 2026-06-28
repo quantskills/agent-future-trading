@@ -12,9 +12,33 @@ from agents.decision_team.portfolio_manager import (
     _conditional_monitor_probe_seed_plan,
     _final_contract_authority,
 )
+from tools.agent_tools.decision.pm_reason_effects import reason_effect_summary
 
 
 class PMWatchForTriggerReleaseTest(unittest.TestCase):
+    def test_reason_codes_keep_candidate_release_and_soft_limit_effects_separate(self):
+        summary = reason_effect_summary([
+            "pm_watch_for_trigger_probe_cap",
+            "scorecard_current_tradeable_probe_seed",
+            "conditional_monitor_probe_seed",
+            "conditional_trigger_authority",
+            "horizon_consistency_probe_cap",
+        ])
+
+        self.assertEqual(
+            set(summary["candidate_reasons"]),
+            {
+                "pm_watch_for_trigger_probe_cap",
+                "scorecard_current_tradeable_probe_seed",
+                "conditional_monitor_probe_seed",
+            },
+        )
+        self.assertIn("conditional_trigger_authority", summary["release_signals"])
+        self.assertIn("horizon_consistency_probe_cap", summary["soft_limits"])
+        self.assertNotIn("pm_watch_for_trigger_probe_cap", summary["soft_limits"])
+        self.assertNotIn("scorecard_current_tradeable_probe_seed", summary["soft_limits"])
+        self.assertFalse(summary["unknown_trade_effects"])
+
     def _conditional_diagnostics(self) -> dict:
         return {
             "conditional_monitor_probe_seed": {
