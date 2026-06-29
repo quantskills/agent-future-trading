@@ -21,6 +21,7 @@ from tools.common.order_semantics import (
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
 )
+from tools.common.final_action_semantics import is_conditional_monitor_contract
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
 
 
@@ -1786,11 +1787,7 @@ def _audit_action_evidence_trigger_consistency(
 
 
 def _contract_has_conditional_trigger_authority(contract: Dict[str, Any]) -> bool:
-    return bool(
-        contract.get("conditional_trigger_authority")
-        and contract.get("requires_intraday_confirmation")
-        and not contract.get("can_execute_without_intraday_trigger")
-    )
+    return is_conditional_monitor_contract(contract)
 
 
 def _active_opportunity_has_explicit_rejection(
@@ -1967,9 +1964,7 @@ def _audit_open_transactions(
                 "pm_text_no_trade_blocks_new_entry",
             }
             conditional_trigger_contract = bool(
-                contract.get("conditional_trigger_authority")
-                and contract.get("requires_intraday_confirmation")
-                and not contract.get("can_execute_without_intraday_trigger")
+                is_conditional_monitor_contract(contract)
                 and not authority.get("watch_for_trigger_block")
             )
             if conditional_trigger_contract:

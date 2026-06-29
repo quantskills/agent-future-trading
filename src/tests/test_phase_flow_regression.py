@@ -12377,7 +12377,11 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             final_action="open_probe",
             authority_type="exploration_probe",
             current_evidence=False,
-            reason_codes=["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+            reason_codes=[
+                "pm_watch_for_trigger_probe_cap",
+                "real_probe_qualification_not_met",
+                "conditional_trigger_authority",
+            ],
         )
         contract.update(
             {

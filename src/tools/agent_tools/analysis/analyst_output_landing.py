@@ -6,24 +6,9 @@ does not contain PM-only sizing, final action, or trade-authority fields.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, List
 
-
-FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS = {
-    "final_action",
-    "final_action_contract",
-    "target_lots",
-    "current_lots",
-    "lots_delta",
-    "lots_delta_abs",
-    "target_position_ratio",
-    "target_margin_ratio",
-    "margin_required",
-    "authority_type",
-    "audit_verdict",
-    "capital_allocation_reason",
-    "opportunity_rank",
-}
+from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
 
 
 ALLOWED_STRUCTURAL_KEYS = {
@@ -71,6 +56,8 @@ def analyst_output_landing_violations(signal: Any) -> List[str]:
     metadata = getattr(signal, "metadata", None)
     contract = metadata.get("action_evidence_contract") if isinstance(metadata, dict) else None
     if isinstance(contract, dict):
+        for hit in _walk_forbidden(contract, path="action_evidence_contract"):
+            violations.append(f"analyst_output_forbidden_trade_authority_field:{hit}")
         state = str(contract.get("opportunity_state") or getattr(signal, "opportunity_state", "") or "").strip().lower()
         trigger_valid = bool(contract.get("trigger_valid"))
         invalidation_present = bool(contract.get("invalidation_present"))

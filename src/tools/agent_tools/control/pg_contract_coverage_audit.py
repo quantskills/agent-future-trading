@@ -185,6 +185,11 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
+                "src/tools/common/final_action_semantics.py",
+                ("classify_final_action_contract", "authority_allows_entry", "requires_intraday_result"),
+                "shared deterministic state machine interprets the final contract lifecycle for all downstream agents",
+            ),
+            _rule(
                 "src/agents/execution_team/trader.py",
                 ("_final_action_contract_from_snapshot", "missing_final_action_contract"),
                 "Trader executes only the final contract",
@@ -197,12 +202,22 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
+                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
+                ("is_conditional_monitor_contract", "mechanism_conditional_probe_missing_intraday_result"),
+                "mechanism audit uses the shared semantics for conditional monitor requirements",
+            ),
+            _rule(
                 "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("recommendation_final_action_contract", "transaction_not_derived_from_final_action_contract"),
-                "daily audit checks the single trade truth",
+                ("recommendation_final_action_contract", "transaction_not_derived_from_final_action_contract", "is_conditional_monitor_contract"),
+                "daily audit checks the single trade truth through shared final-action semantics",
             ),
         ),
         tests=(
+            _rule(
+                "src/tests/test_final_action_semantics.py",
+                ("test_conditional_monitor_with_soft_limit_reaches_intraday_check",),
+                "shared semantics tests cover conditional monitor, soft limit, execution, accounting, review, research, and protocol states",
+            ),
             _rule(
                 "src/tests/test_phase_flow_regression.py",
                 ("test_final_action_contract_is_single_structured_trade_truth",),

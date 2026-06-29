@@ -40,6 +40,7 @@ from util.learning_attribution import (
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.common.contracts import final_action_contract_from_snapshot, validate_reviewer_artifact_boundary
+from tools.common.final_action_semantics import derive_review_expectation
 from tools.common.learning_contract import (
     CONTRACT_KEY,
     attach_or_upgrade_next_round_memory_contract,
@@ -88,6 +89,27 @@ def _fetchone(cursor, query: str, params: tuple):
     cursor.execute(query, params)
     row = cursor.fetchone()
     return dict(row) if row else None
+
+
+def _final_action_semantic_summary(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    lifecycle_counts: Counter = Counter()
+    intraday_required = 0
+    for recommendation in recommendations:
+        snapshot = _review_helpers._json_loads(recommendation.get("signal_snapshot")) or {}
+        if not isinstance(snapshot, dict):
+            continue
+        contract = final_action_contract_from_snapshot(snapshot)
+        execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
+        semantic_state = derive_review_expectation(contract, execution_result)
+        lifecycle_counts[str(semantic_state.get("lifecycle_state") or "unknown")] += 1
+        if semantic_state.get("requires_intraday_result"):
+            intraday_required += 1
+    return {
+        "contract": "final_action_semantics.reviewer_summary.v1",
+        "lifecycle_counts": dict(sorted(lifecycle_counts.items())),
+        "intraday_result_required_count": intraday_required,
+        "reviewer_does_not_modify_trade_facts": True,
+    }
 
 
 def _position_exposures(positions: Dict[str, Any], account_equity: float) -> tuple[float, Dict[str, float]]:
@@ -1407,6 +1429,7 @@ def run_phase4_review(
             extra_audit={
                 "signal_persistence": signal_persistence_audit,
                 "signal_data_lineage": data_lineage_audit,
+                "final_action_semantics": _final_action_semantic_summary(strategy_recommendations),
             },
         )
         validate_reviewer_artifact_boundary(summary_payload)

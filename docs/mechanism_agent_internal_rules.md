@@ -91,6 +91,8 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 
 `reason_codes` 只解释状态流转原因，不能代替状态、动作或手数。每个 reason code 必须只属于一类；同一个 code 不能前面表示“候选”，后面又表示“阻断”。新增或修改 reason code 时，必须同步到共享分类逻辑和测试。
 
+共享分类逻辑固定为 `src/tools/common/final_action_semantics.py`。各智能体不得在本地维护与它相反的 hard/soft/candidate/release/diagnostic 分类；PM、Auditor、Trader、Reviewer、Researcher 和 Protocol Governor 对同一张 `final_action_contract` 的生命周期解释必须来自这个状态机。
+
 | 类别 | 含义 | 允许效果 | 禁止效果 | 典型例子 |
 |---|---|---|---|---|
 | 候选 | 说明机会可进入观察、试探或条件触发评估 | 进入 PM 后续判断；保留条件触发、probe 或排序资格 | 直接阻断、直接成交、直接生成手数 | `pm_watch_for_trigger_probe_cap`、`scorecard_current_tradeable_probe_seed`、`conditional_monitor_probe_seed` |
@@ -120,6 +122,7 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 7. 一个 code 不得同时出现在两个类别；如果业务含义变化，必须新增 code，不能复用旧 code。
 8. code 的真实效力以共享分类逻辑为准，PM、Auditor、Trader、Reviewer 和审计器不能各自维护一套相反解释。
 9. 所有带交易效果的新 code 必须同时具备：类别、允许效果、禁止效果、至少一个结构测试。
+10. `real_probe_qualification_not_met` 固定属于软降级，不属于硬阻断；带该 code 的条件监控合约仍必须进入 Trader 盘中检查，未触发也必须写 `futures_intraday_decision`。
 
 ## 三、全局内部转换规则
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
+from tools.common.final_action_semantics import is_conditional_monitor_contract
 
 
 STRATEGY_SOURCE_TYPE = "strategy"
@@ -642,14 +643,7 @@ def _hold_exit_landed_in_position(contract: Dict[str, Any]) -> bool:
 
 
 def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:
-    return bool(
-        contract.get("conditional_trigger_authority")
-        or _lower(contract.get("final_action")) in CONDITIONAL_FINAL_ACTIONS
-        or (
-            contract.get("requires_intraday_confirmation")
-            and not contract.get("can_execute_without_intraday_trigger")
-        )
-    )
+    return is_conditional_monitor_contract(contract)
 
 
 def _has_intraday_decision(intraday_decisions: Iterable[Dict[str, Any]], recommendation_id: str) -> bool:

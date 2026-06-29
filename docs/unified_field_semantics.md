@@ -14,6 +14,8 @@
 - 换月、强平、回放、反事实观察不是策略交易，必须用 `source_type != strategy` 分账，不能污染策略 action-value。
 - `payload`、`payload_json`、`artifact_json`、`signal_snapshot`、`evidence_json`、`result_json`、`features_json` 等只允许作为结构化容器；容器里的业务字段必须属于本文字段，不能形成第二套语义。
 
+共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓和退出。
+
 ## 1. 通用消息与 artifact 字段
 
 | 字段 | 放置位置 | 含义 |
@@ -296,6 +298,8 @@
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
+| `final_action_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/final_action_semantics.py` 生成的只读语义解释结果；用于统一生命周期、执行权限、盘中结果要求和 reason code 分类，不是第二张合约，不创建交易权限。 |
+| `semantic_state` | Auditor / Reviewer / Researcher 只读摘要 | 对同一张 `final_action_contract` 的生命周期解释，如 `conditional_monitor`、`open`、`increase`、`decrease`、`exit`、`ordinary_hold`、`hard_block`；不得包含改手数、改方向或新合约字段。 |
 | `scorecard_current_tradeable_probe_seed` | `final_action_contract.reason_codes` / PM 诊断 | PM scorecard 将当前可交易候选释放为受控 probe 的原因代码；只适用于 `probe_candidate` / `tradeable_candidate` 或当前触发已成立的候选，不能用于 `watch_for_trigger` 条件监控。 |
 | `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
 | `risk_controls` | `final_action_contract` | 风险控制项。 |

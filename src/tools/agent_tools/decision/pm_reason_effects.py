@@ -210,7 +210,6 @@ WATCHLIST_REQUIRED_REASONS = {
     "final_action_contract_watch_for_trigger_probe_block",
     "final_contract_authority_probe_lacks_current_evidence",
     "daily_tradeability_watchlist_only",
-    "real_probe_qualification_not_met",
 }
 
 

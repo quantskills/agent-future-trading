@@ -509,6 +509,9 @@ class FactEntryBoundaryTest(unittest.TestCase):
             "target_lots": 1,
             "lots_delta": 1,
             "final_action": "open_probe",
+            "authority_type": "real_budget_entry",
+            "open_action_evidence": True,
+            "strong_current_evidence": True,
             "invalidation_condition": {"type": "stop"},
             "target_margin_ratio_estimate": 0.01,
         }
@@ -529,6 +532,8 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertEqual(recommendation["signal_snapshot"]["final_action_contract"], contract)
         self.assertEqual(output.audit_payload["producer"], "auditor")
         self.assertTrue(output.audit_payload["boundary"]["auditor_does_not_modify_final_action_contract"])
+        self.assertEqual(output.audit_payload["semantic_state"]["lifecycle_state"], "open")
+        self.assertFalse(output.audit_payload["semantic_state"]["requires_intraday_result"])
 
     def test_execution_payload_writers_enforce_artifact_boundary(self):
         futures_execution_source = _read("tools/agent_tools/execution/trader_futures_execution.py")

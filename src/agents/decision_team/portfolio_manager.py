@@ -33,6 +33,10 @@ from tools.common.contracts import (
     build_internal_message_contract,
     validate_internal_message_contract,
 )
+from tools.common.final_action_semantics import (
+    authority_allows_entry as _semantic_authority_allows_entry,
+    is_conditional_monitor_contract,
+)
 from tools.agent_tools.decision.pm_capital_allocator import (
     conflicting_weak_memory_record as _capital_conflicting_weak_memory_record,
     strategy_memory_record as _capital_strategy_memory_record,
@@ -777,12 +781,7 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
     if authority_type == "exploration_probe":
         if bool(final_entry_authority.get("watch_for_trigger_block")):
             return "final_action_contract_watch_for_trigger_probe_block"
-        conditional_trigger_authority = bool(
-            final_entry_authority.get("conditional_trigger_authority")
-            and final_entry_authority.get("requires_intraday_confirmation")
-            and not final_entry_authority.get("can_execute_without_intraday_trigger")
-        )
-        if conditional_trigger_authority:
+        if is_conditional_monitor_contract(final_entry_authority):
             return None
         hard_watchlist_codes = {
             "pm_text_no_trade_blocks_new_entry",
@@ -790,19 +789,10 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
             "pm_text_watchlist_only_blocks_new_entry",
             "watch_for_trigger_cannot_open_position",
             "daily_tradeability_watchlist_only",
-            "real_probe_qualification_not_met",
         }
         if reason_codes & hard_watchlist_codes:
             return "final_contract_authority_watchlist_only"
-        current_evidence = bool(
-            final_entry_authority.get("open_action_evidence")
-            or final_entry_authority.get("strong_current_evidence")
-            or final_entry_authority.get("technical_confirmation")
-            or final_entry_authority.get("event_catalyst_confirmation")
-            or final_entry_authority.get("executable_setup_confirmation")
-            or final_entry_authority.get("market_confirmation")
-        )
-        if not current_evidence:
+        if not _semantic_authority_allows_entry(final_entry_authority):
             return "final_contract_authority_probe_lacks_current_evidence"
         return None
     return "final_contract_authority_not_met"

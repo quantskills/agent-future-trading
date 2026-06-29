@@ -17,6 +17,7 @@ from tools.common.contracts import (
     validate_auditor_artifact_boundary,
     validate_final_action_contract,
 )
+from tools.common.final_action_semantics import derive_protocol_semantic_checks
 
 
 APPROVED_AUDIT_VERDICTS = {"approve", "approve_with_warning"}
@@ -220,6 +221,19 @@ class Auditor:
                 "lots_delta": contract.get("lots_delta"),
                 "requires_intraday_confirmation": contract.get("requires_intraday_confirmation"),
                 "can_execute_without_intraday_trigger": contract.get("can_execute_without_intraday_trigger"),
+            },
+            "semantic_state": {
+                key: value
+                for key, value in derive_protocol_semantic_checks(contract).items()
+                if key
+                in {
+                    "contract",
+                    "lifecycle_state",
+                    "requires_intraday_result",
+                    "hard_block_reasons",
+                    "soft_limit_reasons",
+                    "semantic_errors",
+                }
             },
         }
         validate_auditor_artifact_boundary(audit_payload)

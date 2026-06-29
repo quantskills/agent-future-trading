@@ -150,6 +150,8 @@ Phase4 完成后，研究学习单独运行：
 
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
 
+`src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发和已触发成交。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
+
 ## 五、系统事实统一入口
 
 系统事实指已经被系统正式写入 DB、artifact 或 payload，且作为下游可信事实并消费的结构化结果。系统事实不是智能体的内部推理过程，也不是展示用自由文本；一旦进入 DB、artifact 或 payload，下游就必须能判断它属于哪一类事实、由谁产生、谁能消费、谁不能改写。
@@ -223,6 +225,7 @@ Phase4 完成后，研究学习单独运行：
 - `src/tools/agent_tools/research`：研究侧业务工具，例如复盘学习、action-value、profile、state 和结构化研究信息持久化。
 - `src/tools/agent_tools/control`：控制侧治理工具，例如契约覆盖、系统不变量、机制审计、能力卡、工具权限。
 - `src/tools/common`：跨智能体公共基础能力，例如 `contracts.py` 和 `runtime_setup.py`。它们不属于任一智能体，不调用 LLM，不生成策略判断、score/rank、手数、交易动作或 `final_action_contract`。
+- `src/tools/common/final_action_semantics.py`：跨智能体确定性语义状态机，只解释已存在字段，不签发合约、不下单、不入账、不写研究。
 - `src/util`：更底层的通用基础设施，例如日志、数据库 helper、文本清洗、配置归一化、通用期货审计函数。
 
 命名规则：

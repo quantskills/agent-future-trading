@@ -61,6 +61,7 @@ from tools.common.contracts import (
     sanitize_execution_contract,
     validate_final_action_contract,
 )
+from tools.common.final_action_semantics import authority_allows_entry
 from agents.decision_team.auditor import audit_verdict_allows_trader
 from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
@@ -418,39 +419,7 @@ def _requires_entry_authority(current_lots: int, target_lots: int) -> bool:
 
 
 def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
-    authority_type = str((authority or {}).get("authority_type") or "")
-    if authority_type == "real_budget_entry":
-        return bool(authority.get("open_action_evidence") and authority.get("strong_current_evidence"))
-    if authority_type == "exploration_probe":
-        if bool(authority.get("watch_for_trigger_block")):
-            return False
-        reason_codes = {str(item or "") for item in (authority.get("reason_codes") or [])}
-        hard_watchlist_codes = {
-            "pm_text_no_trade_blocks_new_entry",
-            "pm_text_no_entry_trigger_blocks_new_entry",
-            "pm_text_watchlist_only_blocks_new_entry",
-            "watch_for_trigger_cannot_open_position",
-            "daily_tradeability_watchlist_only",
-            "real_probe_qualification_not_met",
-        }
-        if reason_codes & hard_watchlist_codes:
-            return False
-        conditional_trigger_authority = bool(
-            authority.get("conditional_trigger_authority")
-            and authority.get("requires_intraday_confirmation")
-            and not authority.get("can_execute_without_intraday_trigger")
-        )
-        if conditional_trigger_authority:
-            return True
-        return bool(
-            authority.get("open_action_evidence")
-            or authority.get("strong_current_evidence")
-            or authority.get("technical_confirmation")
-            or authority.get("event_catalyst_confirmation")
-            or authority.get("executable_setup_confirmation")
-            or authority.get("market_confirmation")
-        )
-    return False
+    return authority_allows_entry(authority)
 
 
 def _target_lots_without_new_entry(current_lots: int, target_lots: int) -> int:

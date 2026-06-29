@@ -22,6 +22,7 @@ from llm.prompt import (
     build_researcher_exploratory_prompt,
 )
 from tools.common.learning_contract import CONTRACT_KEY, build_next_round_memory_contract
+from tools.common.final_action_semantics import derive_research_fact_state
 from tools.common.alpha_setup import (
     build_scope_key as build_alpha_setup_scope_key,
     infer_setup_type,
@@ -234,6 +235,7 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
             if final_contract.get(key) not in (None, "", [])
         }
     )
+    semantic_state = derive_research_fact_state(final_contract, execution_result)
 
     has_trader_feedback = bool(phase2 or setup_learning or intraday_selection or execution_result)
     if not has_trader_feedback:
@@ -274,6 +276,7 @@ def _execution_learning_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any
         "setup_execution_learning": setup_learning,
         "intraday_selection": intraday_selection,
         "execution_result": execution_result,
+        "semantic_state": semantic_state,
         "trigger_checked": bool(intraday_selection.get("trigger_checked")),
         "trigger_passed": bool(intraday_selection.get("trigger_passed")),
         "price_chase_check": intraday_selection.get("price_chase_check"),

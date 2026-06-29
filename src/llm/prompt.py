@@ -63,7 +63,7 @@ Output format:
 - current_evidence_conflict: list of current evidence against this view
 - metadata.action_evidence_contract: structured open/hold/exit/execution evidence contract for PM and later Researcher review; it is not a Trader instruction
 - metadata.learning_scope: setup/factor/catalyst scope for future lane-scoped action-value learning
-- Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
+- Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, final_action_contract, final_action, authority_type, reason_codes, conditional_trigger_authority, requires_intraday_confirmation, can_execute_without_intraday_trigger, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
 
 Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
 - neutral_reason

@@ -214,6 +214,14 @@
 
 （18）拆出研究团队内部复用 helper，切断 Researcher 对 Reviewer 主工具的反向依赖。修改：新增 `research_review_helpers.py`，让 `reviewer_phase4_review.py`、`research_memory_writers.py`、`research_snapshot_reports.py` 依赖该 helper；研究 writer 改为显式导入自身需要的基础依赖；补 `test_protocol_governor` 结构测试。原因：Reviewer 主工具只保留 Phase4 主流程和复盘报告，Researcher 不再从 Reviewer 主工具偷用格式化、快照解析、统计和报告 rows helper。
 
+==========2026年06月29日==========
+
+（1）新增 `src/tools/common/final_action_semantics.py` 统一交易语义状态机。修改：共享工具、PM、Trader、Auditor、Reviewer、Researcher、Protocol Governor、分析师落地校验、契约覆盖和测试。原因：消除 11 个智能体对同一字段、状态和 reason code 的解释漂移，固定条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发和已触发成交的唯一解释。
+
+（2）修复条件监控合约被 Trader 误判硬阻断。修改：`real_probe_qualification_not_met` 固定为软降级，Trader/PM/PG 改用共享语义解释器，条件监控合约必须进入盘中检查，未触发也必须写 `futures_intraday_decision`。原因：此前 PM 已签条件监控，但 Trader 本地 hard list 把软降级当阻断，导致每日机制检查报 `mechanism_conditional_probe_missing_intraday_result`。
+
+（3）修复 Phase1 加速测试假 DB 与独立 Auditor 状态写回接口不一致。修改：`src/tests/test_phase1_acceleration.py`。原因：全量单测中 workflow 已按独立 Auditor 链路调用 `update_futures_recommendation_status`，测试假 DB 缺少该接口会造成夹具断裂，无法用全量测试干净判断回测前系统状态。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

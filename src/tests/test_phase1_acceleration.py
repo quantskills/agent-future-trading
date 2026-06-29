@@ -63,6 +63,15 @@ class _FakeDB:
         self.saved_recommendations.append(recommendation)
         return f"rec-{recommendation.underlying_code}"
 
+    def update_futures_recommendation_status(self, recommendation_id, status, **kwargs):
+        for recommendation in self.saved_recommendations:
+            if getattr(recommendation, "id", None) == recommendation_id:
+                recommendation.status = status
+                for key, value in kwargs.items():
+                    setattr(recommendation, key, value)
+                break
+        return True
+
 
 class _FakeRouter:
     def __init__(self, *args, **kwargs):
