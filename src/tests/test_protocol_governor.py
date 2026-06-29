@@ -2,6 +2,8 @@ import sys
 import tempfile
 import unittest
 import ast
+import json
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -514,6 +516,99 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("research_memory_writers.upsert_alpha_setup_policy_state", learning_text)
         self.assertIn("research_memory_writers.insert_researcher_llm_note", learning_text)
         self.assertIn("research_memory_writers.reset_alpha_setup_memory", learning_text)
+
+    def test_research_memory_writer_neutral_accountability_runtime_path(self):
+        from tools.agent_tools.research import research_memory_writers
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE learning_event_log (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                evidence_json TEXT,
+                action_json TEXT,
+                verifier TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE analyst_learning_digest (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                analyst TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                sector TEXT NOT NULL,
+                horizon_class TEXT NOT NULL,
+                market_regime TEXT NOT NULL,
+                digest_text TEXT NOT NULL,
+                confidence_score REAL DEFAULT 0,
+                sample_count INTEGER DEFAULT 0,
+                source_event_id TEXT,
+                created_at TEXT NOT NULL,
+                valid_until TEXT,
+                accepted INTEGER DEFAULT 1,
+                payload_json TEXT
+            )
+            """
+        )
+        snapshot = {
+            "technical": {
+                "signal": "Neutral",
+                "neutral_reason": "conflicting indicators",
+                "missing_evidence": ["volume confirmation"],
+                "conflicting_factors": ["range_bound"],
+                "would_change_view_if": "breakout confirms",
+                "metadata": {"risk_flags": ["conflicting_indicators"]},
+            }
+        }
+        summary = research_memory_writers.write_neutral_accountability_state(
+            cursor,
+            cfg={
+                "learning": {"memory_expires_after_days": 30},
+                "signal_quality": {
+                    "neutral_accountability": {
+                        "write_structured_learning": True,
+                        "counterfactual_forward_days": 0,
+                    }
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-03",
+            strategy_recommendations=[
+                {
+                    "id": "rec-neutral",
+                    "config_id": "cfg",
+                    "trading_date": "2025-03-03",
+                    "source_type": "strategy",
+                    "underlying_code": "BU",
+                    "created_at": "2025-03-03T00:00:00",
+                    "signal_snapshot": json.dumps(snapshot),
+                }
+            ],
+        )
+        self.assertEqual(summary["neutral_count"], 1)
+        self.assertEqual(summary["structured_learning_rows"], 1)
+        cursor.execute("SELECT event_type FROM learning_event_log ORDER BY event_type")
+        self.assertEqual(
+            [row["event_type"] for row in cursor.fetchall()],
+            ["neutral_accountability_digest", "neutral_accountability_review"],
+        )
+        cursor.execute("SELECT analyst, sample_count FROM analyst_learning_digest")
+        digest = cursor.fetchone()
+        self.assertEqual(digest["analyst"], "technical")
+        self.assertEqual(digest["sample_count"], 1)
+        conn.close()
 
     def test_unified_field_semantics_uses_current_settlement_and_researcher_notes(self):
         semantics_path = SRC_ROOT.parent / "docs" / "unified_field_semantics.md"

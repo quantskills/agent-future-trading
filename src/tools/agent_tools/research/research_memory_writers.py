@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
+from apis.contract_info_cache import FuturesContractInfoCache
 from database.artifact_store import externalize_json_for_db
 from graph.schema import RecommendationSourceType
 from tools.agent_tools.research import research_review_helpers as _review_helpers
@@ -35,6 +36,8 @@ from util.futures_audit import (
     normalize_no_trade_reason,
 )
 from util.futures_trade_pairs import summarize_trade_pairs
+from util.logger import logger
+from tools.common.neutral_accountability import build_neutral_accountability_summary
 
 # Reuse deterministic parsing/report helpers without depending on the Reviewer
 # main tool or letting Phase4 own research persistence entrypoints.

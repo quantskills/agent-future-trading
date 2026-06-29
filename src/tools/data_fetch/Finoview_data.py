@@ -934,7 +934,7 @@ class Finoview_data():
             # 压榨厂：菜粕：库存：中国（周）
             'rm_factory_stock': ["ID01030576",2061928],
             # 菜粕：产量：中国（周）
-            # 'rm_yield':["ID01362972",2061885],
+            'rm_yield':["ID01362972",2061885],
             # =============================================================================
             #           #RU（天然橡胶）
             # ============================================================================
@@ -1383,8 +1383,8 @@ class Finoview_data():
 
 
 if __name__=='__main__':
-    Cookie = "SF_cookie_61=11832316; SF_cookie_62=14459019; SF_cookie_67=25742814; __itrace_wid=436cdce3-93ae-46b7-1d1f-6e95f18cf8be; __userview__=6h9b7d61hb7d5b1g11a3g69c; asid=e0ab599f-2b8b-4547-b23d-1efbe79f0133; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2245965%22%2C%22first_id%22%3A%2219ddcca16092148-0d64ecd38ad9dd-34393134-1821369-19ddcca160a1a60%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTlkZGNjYTE2MDkyMTQ4LTBkNjRlY2QzOGFkOWRkLTM0MzkzMTM0LTE4MjEzNjktMTlkZGNjYTE2MGExYTYwIiwiJGlkZW50aXR5X2xvZ2luX2lkIjoiNDU5NjUifQ%3D%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%24identity_login_id%22%2C%22value%22%3A%2245965%22%7D%2C%22%24device_id%22%3A%2219ddcca16092148-0d64ecd38ad9dd-34393134-1821369-19ddcca160a1a60%22%7D"
-    token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJwaG9uZSI6InBob25lIiwiaWQiOiI0NTk2NSIsInRpbWUiOjE3Nzc1MjU3NTg5MTUsInR5cGUiOjJ9.E_dkjDh7-zwpxSdsiT2YMWScgft_9ti7aXjE8IJ4kYI'
+    Cookie = "asid=94142046-7226-488e-9bca-c715dc1166a0; fs_token_cookie=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJwaG9uZSI6InBob25lIiwiaWQiOiI0NTk2NSIsInRpbWUiOjE3ODI2OTU0NTMwOTksInR5cGUiOjJ9.D2HLtNmK930CqTPjKZo7I3M3OK45F6YMNgOErDejCus; fs_userid=45965; SF_cookie_61=11832316; SF_cookie_62=14459019; SF_cookie_67=25742814; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2245965%22%2C%22first_id%22%3A%2219e060cf208978-0f018b8da90d22-26061e51-1821369-19e060cf2092c2d%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTllMDYwY2YyMDg5NzgtMGYwMThiOGRhOTBkMjItMjYwNjFlNTEtMTgyMTM2OS0xOWUwNjBjZjIwOTJjMmQiLCIkaWRlbnRpdHlfbG9naW5faWQiOiI0NTk2NSJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%24identity_login_id%22%2C%22value%22%3A%2245965%22%7D%2C%22%24device_id%22%3A%2219e060cf208978-0f018b8da90d22-26061e51-1821369-19e060cf2092c2d%22%7D"
+    token = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJwaG9uZSI6InBob25lIiwiaWQiOiI0NTk2NSIsInRpbWUiOjE3ODI2OTU0NTMwOTksInR5cGUiOjJ9.D2HLtNmK930CqTPjKZo7I3M3OK45F6YMNgOErDejCus'
 
     finoview_data = Finoview_data(Cookie,token)    
 
