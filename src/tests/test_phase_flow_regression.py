@@ -10913,9 +10913,21 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
                 "execution_commission",
                 "execution_exit_policy",
                 "execution_slippage",
+                "evidence_fusion_policy",
                 "learning_policy",
                 "portfolio_policy",
+                "product_price_behavior_profiles",
             },
+        )
+        self.assertIn("product_price_behavior_profiles", cfg)
+        self.assertEqual(
+            cfg["_config_parameter_roles"]["product_price_behavior_profiles"],
+            "cold_start_analyst_differentiation_profile_only_not_trade_authority",
+        )
+        self.assertIn("evidence_fusion_policy", cfg)
+        self.assertEqual(
+            cfg["_config_parameter_roles"]["evidence_fusion_policy"],
+            "multidimensional_prediction_evidence_fusion_only_not_trade_authority",
         )
         self.assertEqual(cfg["max_total_margin_ratio"], 0.20)
         self.assertEqual(cfg["position_budget_policy"]["hard_max_total_margin_ratio"], 0.20)

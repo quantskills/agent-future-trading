@@ -1,0 +1,58 @@
+version: agentquant.evidence_fusion_policy.v1
+semantic_role: multidimensional_prediction_evidence_fusion_only_not_trade_authority
+
+analyst_evidence_strength_scale:
+  strong_threshold: 0.78
+  medium_threshold: 0.58
+  weak_threshold: 0.01
+
+evidence_freshness_decay:
+  fresh_threshold: 0.78
+  usable_threshold: 0.50
+  stale_threshold: 0.01
+
+cross_analyst_conflict_rules:
+  conflict_when_both_long_and_short_present: true
+  dominant_opposing_strength_labels: [strong, medium]
+  conflict_is_not_hard_block: true
+  conflict_requires_pm_explanation: true
+
+dominant_opposing_evidence_rules:
+  preserve_opposing_analyst: true
+  preserve_strength_and_freshness: true
+  preserve_conflict_reasons: true
+  no_trade_authority: true
+
+confirmation_requirement_rules:
+  preserve_analyst_requirements: true
+  technical_false_breakout_requires_follow_through: true
+  fundamental_anchor_requires_price_or_technical_timing: true
+  news_event_requires_price_reaction_and_fresh_catalyst: true
+
+product_profile_fusion_rules:
+  product_profile_evidence_is_context_only: true
+  pm_reads_only_via_signal_collection_contract: true
+  auditor_trader_accountant_direct_read_forbidden: true
+
+pm_scorecard_fusion_weights:
+  fusion_consensus: 0.08
+  fusion_conflict_penalty: 0.10
+  fusion_missing_evidence_penalty: 0.06
+  fusion_confirmation_discipline: 0.04
+
+reviewer_fusion_attribution_rules:
+  labels:
+    - fusion_not_recorded
+    - fusion_conflict_handled
+    - fusion_conflict_unresolved
+    - multi_evidence_consensus_supported
+    - fusion_neutral_or_single_source
+
+researcher_fusion_learning_rules:
+  write_as_future_learning_context_only: true
+  learning_targets:
+    - conflict_downgrade
+    - multi_evidence_consensus_release
+    - news_impact_decay
+    - product_profile_false_breakout
+  cannot_rewrite_same_day_trade_facts: true

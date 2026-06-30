@@ -27,6 +27,8 @@ config_catalogs:
   portfolio_policy: portfolio_policy_catalog.yaml
   learning_policy: learning_policy_catalog.yaml
   data_factor_policy: data_factor_policy_catalog.yaml
+  product_price_behavior_profiles: product_price_behavior_profiles.yaml
+  evidence_fusion_policy: evidence_fusion_policy_catalog.yaml
 
 # ---------------------------------------------------------------------------
 # 1. 运行加速与数据预取

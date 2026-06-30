@@ -20,6 +20,12 @@ from tools.agent_tools.analysis.analyst_business_quality import apply_business_q
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_news_data_usage
+from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
+    apply_profile_usage_to_signal,
+    build_profile_usage_contract,
+    format_profile_for_commodity_news,
+    get_product_price_behavior_profile,
+)
 
 # thresholds
 thresholds = {
@@ -137,6 +143,9 @@ def commodity_news_agent(state: FundState):
         logger.error(message)
         raise RuntimeError(message)
 
+    product_profile = get_product_price_behavior_profile(ticker, full_config)
+    product_profile_usage = build_profile_usage_contract(ticker, "commodity_news", product_profile)
+
     db = get_db()
     logger.log_agent_status(agent_name, ticker, "Fetching commodity news")
 
@@ -162,12 +171,15 @@ def commodity_news_agent(state: FundState):
             pre_open_only=pre_open_only,
             info_cutoff=info_cutoff,
         )
+        signal = apply_profile_usage_to_signal(signal, product_profile_usage)
         prompt = (
             f"{ticker} local futures news unavailable before {trading_date}; "
-            "deterministic no_trade artifact produced."
+            "deterministic no_trade artifact produced.\n"
+            + format_profile_for_commodity_news(ticker, product_profile)
         )
         report_sections = {
             "Data Usage Summary": signal.metadata.get("data_usage_summary"),
+            "Product Price Behavior Profile": product_profile_usage,
             "Reason": "local_futures_news_unavailable",
         }
         if save_outputs:
@@ -199,6 +211,7 @@ def commodity_news_agent(state: FundState):
 
     news_dict = [item.model_dump_json() for item in commodity_news]
     news_context = summarize_news_events(commodity_news, ticker, trading_date=trading_date)
+    news_context["product_profile_evidence"] = product_profile_usage
     llm_path = llm_path_label(full_config, "commodity_news")
     analyst_llm_config = get_analyst_llm_config(full_config, "commodity_news")
     instrument_context = FUTURES_INSTRUMENT_CONTEXT.get(
@@ -220,6 +233,7 @@ def commodity_news_agent(state: FundState):
         instrument_context=instrument_context,
         news=news_dict,
         news_summary=format_news_summary_for_prompt(news_context),
+        product_profile_context=format_profile_for_commodity_news(ticker, product_profile),
         llm_path=llm_path,
         learning_context_text=learning_context.get("text", ""),
     )
@@ -249,6 +263,7 @@ def commodity_news_agent(state: FundState):
         **(getattr(signal, "metadata", {}) or {}),
         "llm_path": llm_path,
         "news_context": news_context,
+        "product_profile_evidence": product_profile_usage,
         "data_usage_summary": data_usage_summary,
         "cloud_model": analyst_llm_config.get("cloud_model"),
         "reviewer_learning_context": {
@@ -265,6 +280,11 @@ def commodity_news_agent(state: FundState):
                 "event_regime": news_context.get("event_regime"),
                 "tradeability": news_context.get("tradeability"),
                 "risk_flags": news_context.get("risk_flags"),
+            },
+            "product_profile_evidence": {
+                "product_profile_id": product_profile_usage.get("product_profile_id"),
+                "profile_role": product_profile_usage.get("profile_role"),
+                "profile_learning_interaction": product_profile_usage.get("profile_learning_interaction"),
             },
             "neutral_to_opportunity_required": True,
             "position_authority_boundary": "news_signal_requires_pm_auditor_trader_confirmation",
@@ -285,6 +305,7 @@ def commodity_news_agent(state: FundState):
         trading_date=trading_date,
         ticker=ticker,
     )
+    signal = apply_profile_usage_to_signal(signal, product_profile_usage)
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
@@ -306,6 +327,7 @@ def commodity_news_agent(state: FundState):
         "Relevance Score": news_context.get("relevance_score"),
         "Data Usage Summary": data_usage_summary,
         "Risk Flags": news_context.get("risk_flags"),
+        "Product Price Behavior Profile": product_profile_usage,
     }
     if save_outputs:
         report_path = write_analyst_report(

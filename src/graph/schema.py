@@ -57,6 +57,14 @@ class AnalystSignal(BaseModel):
         description="Whether this signal must be confirmed by fundamental evidence before scaling",
     )
     evidence_quality: str = Field(default="unknown", description="high / medium / low / unknown")
+    evidence_strength: str = Field(default="unknown", description="strong / medium / weak / unknown analyst evidence strength")
+    evidence_freshness: str = Field(default="unknown", description="fresh / usable / stale / unknown evidence freshness")
+    evidence_decay_risk: str = Field(default="unknown", description="low / medium / high / unknown risk that evidence decays before execution")
+    confirmation_requirements: List[str] = Field(default_factory=list, description="Required confirmations before PM can treat evidence as actionable")
+    technical_false_breakout_risk: str = Field(default="not_applicable", description="Technical false-breakout risk label")
+    fundamental_opposition_strength: str = Field(default="not_applicable", description="Strength of opposing fundamental evidence")
+    news_impact_window: str = Field(default="", description="Commodity-news catalyst impact window")
+    one_off_event_risk: str = Field(default="not_applicable", description="News one-off event risk label")
     business_quality_score: float = Field(default=0.0, description="Business-quality score from 0.0 to 1.0")
     primary_business_driver: str = Field(default="", description="Primary business driver behind the signal")
     secondary_confirmation: str = Field(default="", description="Secondary confirmation chain")
@@ -164,6 +172,7 @@ class AnalystSignal(BaseModel):
         "factor_focus",
         "current_evidence_conflict",
         "setup_quality_notes",
+        "confirmation_requirements",
         mode="before",
     )
     @classmethod

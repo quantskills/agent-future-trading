@@ -14,6 +14,7 @@ from tools.common.contracts import (
     validate_internal_message_contract,
     validate_trade_research_contract,
 )
+from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
 from tools.agent_tools.analysis.analyst_market_confirmation import score_pandaai_extra_records
 from tools.agent_tools.analysis.analyst_output_landing import apply_analyst_output_landing_check
 from util.logger import logger
@@ -1494,6 +1495,29 @@ def apply_trade_research_contract(
     execution_contract["trigger_valid"] = bool(signal.trigger_valid)
     execution_contract["current_trigger_confirmed"] = bool(current_trigger_confirmed)
     action_evidence_contract["execution"] = execution_contract
+    fusion_evidence = build_analyst_fusion_evidence(
+        signal,
+        {**dict(quality_context or {}), "action_evidence_contract": action_evidence_contract},
+        analyst=analyst,
+        ticker=ticker,
+    )
+    action_evidence_contract["fusion_evidence"] = fusion_evidence
+    action_evidence_contract["evidence_strength"] = fusion_evidence.get("evidence_strength")
+    action_evidence_contract["evidence_freshness"] = fusion_evidence.get("evidence_freshness")
+    action_evidence_contract["evidence_decay_risk"] = fusion_evidence.get("evidence_decay_risk")
+    action_evidence_contract["confirmation_requirements"] = fusion_evidence.get("confirmation_requirements") or []
+    action_evidence_contract["technical_false_breakout_risk"] = fusion_evidence.get("technical_false_breakout_risk")
+    action_evidence_contract["fundamental_opposition_strength"] = fusion_evidence.get("fundamental_opposition_strength")
+    action_evidence_contract["news_impact_window"] = fusion_evidence.get("news_impact_window")
+    action_evidence_contract["one_off_event_risk"] = fusion_evidence.get("one_off_event_risk")
+    signal.evidence_strength = str(fusion_evidence.get("evidence_strength") or "unknown")
+    signal.evidence_freshness = str(fusion_evidence.get("evidence_freshness") or "unknown")
+    signal.evidence_decay_risk = str(fusion_evidence.get("evidence_decay_risk") or "unknown")
+    signal.confirmation_requirements = list(fusion_evidence.get("confirmation_requirements") or [])
+    signal.technical_false_breakout_risk = str(fusion_evidence.get("technical_false_breakout_risk") or "not_applicable")
+    signal.fundamental_opposition_strength = str(fusion_evidence.get("fundamental_opposition_strength") or "not_applicable")
+    signal.news_impact_window = str(fusion_evidence.get("news_impact_window") or "")
+    signal.one_off_event_risk = str(fusion_evidence.get("one_off_event_risk") or "not_applicable")
     product_context = {
         "ticker": str(ticker or ""),
         "sector": str(quality_context.get("sector") or ""),
@@ -1568,6 +1592,7 @@ def apply_trade_research_contract(
         "opportunity_state_notes": state_notes,
         "opportunity_state": opportunity_state,
         "learning_impact_summary": learning_impact_summary,
+        "fusion_evidence": fusion_evidence,
         "setup_quality": {
             "score": signal.setup_quality_score,
             "entry_quality": signal.entry_quality,

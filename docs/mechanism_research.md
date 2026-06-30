@@ -41,6 +41,10 @@ Phase1 投资组合经理 final_action_contract
 
 `template_prior` 是冷启动研究种子，只能通过 `src/run/research/load_template_prior.py` 显式加载。它不属于 Phase1 盘前策略生成，不由 `proposal.py` 自动写入研究记忆，也不能使用当天或未来交易结果。
 
+`product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究，下一交易日由 `learning_context` 和 `analyst_learning_calibration` 进入 `technical`、`fundamental`、`commodity_news` 的证据判断；静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
+
+`evidence_fusion_policy_catalog.yaml` 是多维证据融合预测协议配置，不是研究库，不随回测自动改写。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval` 和 `opportunity_ranking` 消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
+
 ## 二、Phase4 与研究学习分工
 
 复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、合约、成交、结算是否一致，完整交易日志是否输出，字段语义和阶段状态是否可审计。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。
@@ -64,6 +68,7 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 | `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
 | `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
 | `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | 投资组合经理经 `decision_memory_retrieval` 消费后写入未来合约执行字段 | 只能影响未来 `final_action_contract.execution_profile/entry_trigger`，不改方向、不改手数；交易员不直接读取 |
+| `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 间接消费 | 只影响未来证据解释、排序分项和冲突处理偏好；不创建交易权限，不改当天事实 |
 
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
@@ -119,9 +124,17 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 - `entry_trigger`；
 - `opportunity_state`；
 - `data_usage_summary`；
-- `no_lookahead_status`。
+- `no_lookahead_status`；
+- `fusion_evidence`；
+- `evidence_strength`；
+- `evidence_freshness`；
+- `evidence_decay_risk`；
+- `confirmation_requirements`；
+- 本专业特殊融合字段：技术面 `technical_false_breakout_risk`，基本面 `fundamental_opposition_strength`，新闻面 `news_impact_window` 和 `one_off_event_risk`。
 
 `setup_quality_ok=true` 只表示形态值得关注，不代表当前触发成立。`trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。等待确认必须落到 `watch_for_trigger + trigger_valid=false`，不能写成自由文本后再被下游误读。
+
+分析师的 `fusion_evidence` 只服务预测证据质量。它让 signal_collector 保真收集证据强弱、时效、一致性、冲突、确认需求和缺失证据；不能写入手数、保证金、reason code、authority type、`opportunity_score`、`opportunity_rank` 或 `final_action_contract`。
 
 ## 六、投资组合经理如何使用研究成果
 
@@ -145,6 +158,19 @@ signal_collection_contract
 -> position_sizing.position_sizing_result
 -> portfolio_manager.final_action_contract
 ```
+
+多维证据融合学习进入 PM 的固定链路是：
+
+```text
+Reviewer fusion_attribution_label
+-> Researcher evidence_fusion_attribution
+-> 下一交易日 decision_memory_retrieval / analyst_learning_calibration
+-> signal_collection_contract.evidence_fusion
+-> opportunity_ranking.pm_fusion_diagnostics
+-> portfolio_manager.final_action_contract.evidence_used.pm_fusion_diagnostics
+```
+
+这条链只改变未来预测证据解释、PM 排序分项和冲突处理说明，不改变当天成交、结算或交易员执行权限。
 
 研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
 

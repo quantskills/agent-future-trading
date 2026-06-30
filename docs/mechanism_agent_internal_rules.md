@@ -153,9 +153,9 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | LLM 智能体 | 输出契约 | 必须覆盖的结构化字段 | 自由文本允许范围 | 禁止 |
 |---|---|---|---|---|
-| 技术面分析师 | `action_evidence_contract` | `signal`、`opportunity_state`、`setup_type`、`entry_trigger`、`trigger_valid/current_trigger_confirmed`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`conflict_analysis` | 解释价格形态、触发依据、失效位和不确定性 | 输出手数、仓位、PM rank、资金理由、`final_action_contract` |
-| 基本面分析师 | `action_evidence_contract` | `signal`、`opportunity_state`、`setup_type`、`fundamental_driver`、`driver_direction`、`driver_freshness`、`setup_quality_ok`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary` | 解释供需、库存、利润、基差、季节性和驱动持续性 | 输出手数、仓位、交易动作、资金部署 |
-| 期货新闻面分析师 | `action_evidence_contract` | `signal`、`opportunity_state`、`event_type`、`event_direction`、`impact_window`、`catalyst_quality`、`event_priced_in`、`entry_trigger`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary` | 解释新闻事件、政策冲击、影响窗口、是否已兑现 | 把新闻方向直接写成交易动作或手数 |
+| 技术面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`entry_trigger`、`trigger_valid/current_trigger_confirmed`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`conflict_analysis`、`product_profile_id`、`profile_fields_used`、`evidence_strength`、`evidence_freshness`、`technical_false_breakout_risk` | 解释价格形态、触发依据、失效位、品种趋势惯性、波动纪律、假突破风险和不确定性 | 输出手数、仓位、PM rank、资金理由、`final_action_contract` |
+| 基本面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`fundamental_driver`、`driver_direction`、`driver_freshness`、`setup_quality_ok`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`confirmation_requirements`、`evidence_strength`、`evidence_freshness`、`fundamental_opposition_strength` | 解释供需、库存、利润、基差、季节性、商品驱动优先级、驱动持续性和反向压制强度 | 输出手数、仓位、交易动作、资金部署 |
+| 期货新闻面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`event_type`、`event_direction`、`impact_window`、`catalyst_quality`、`event_priced_in`、`entry_trigger`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`news_catalyst_priority`、`news_impact_window`、`one_off_event_risk` | 解释新闻事件、政策冲击、影响窗口、是否已兑现、该品种事件催化价值和一次性冲击风险 | 把新闻方向直接写成交易动作或手数 |
 | 研究员 | 结构化研究成果 | `research_domain`、`sample_scope`、`source_trading_date/trading_date`、`setup_type/profile`、`action_value` 或 `policy_state`、`confidence`、`validity_window`、`evidence_scope`、`excluded_reason` | 解释因果、冲突、反事实、不确定性和未来适用条件 | 修改当天合约、成交、结算、PnL；直接给 Trader 执行规则 |
 
 落地硬规则：
@@ -165,6 +165,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 3. 提示词可以鼓励充分推理，但必须要求模型把结论写入结构化字段。
 4. 解析器不能从自由文本中猜手数、动作、rank、资金理由或交易权限。
 5. 新增 LLM 输出字段前，必须先登记字段语义，再补提示词检查和结构测试。
+6. `product_profile_evidence` 是分析层字段。三类分析师必须读取 `analyst_product_price_behavior_profile.py` 生成的商品差异化框架，但只能把它用于证据强调、setup 分类、确认要求、季节窗口和假突破风险识别；不能从 profile 推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
+7. `fusion_evidence` 是分析层预测证据字段。三类分析师必须把证据强弱、时效、冲突、确认需求、缺失证据和本专业风险落入该字段；不能从它推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
 
 ---
 
@@ -180,9 +182,13 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 ```text
 盘前可见数据
+-> product_price_behavior_profile 冷启动分析框架
 -> LLM 专业推理
 -> action_evidence_contract
+-> fusion_evidence
 ```
+
+商品差异化分析协议固定为：三类分析师通过 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 读取 `src/config/product_price_behavior_profiles.yaml`；profile 与 `learning_context`、`analyst_learning_calibration` 同时进入提示词。静态 profile 只提供冷启动品种分析框架，动态学习只通过 `learning_context` 和分析师校准摘要影响当日证据，不在回测中改写 YAML。
 
 分析师可以调用 LLM 做多维信息理解、冲突分析、反事实推理、不确定性判断和价格走势预测解释；但正式输出只能是结构化预测证据，不能是手数、仓位、保证金、排名或最终交易动作。
 
@@ -194,6 +200,9 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 等待触发 | `opportunity_state=watch_for_trigger`、`entry_trigger` | 直接成交 |
 | 失效边界 | `invalidation_present`、`invalidation_condition` | 无边界开仓 |
 | 证据冲突 | `conflict_analysis`、`conflicting_evidence` | 强行给方向 |
+| 证据强弱和时效 | `fusion_evidence.evidence_strength`、`fusion_evidence.evidence_freshness`、`fusion_evidence.evidence_decay_risk` | PM score、rank、手数 |
+| 跨专业确认需求 | `fusion_evidence.confirmation_requirements` | Trader 触发权限 |
+| 本专业特殊风险 | `technical_false_breakout_risk` / `fundamental_opposition_strength` / `news_impact_window` / `one_off_event_risk` | 审计阻断或交易动作 |
 | 数据缺口 | `data_usage_summary`、`missing_data`、`data_quality` | 伪造证据 |
 | 不确定性 | `uncertainty`、`confidence` | 交易授权 |
 
@@ -276,7 +285,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | 输入内容 | 输出落点 | 规则 |
 |---|---|---|
-| 分析师原始结构化证据 | `source_contracts` | 保留来源分析师、原 `action_evidence_contract`、来源记录 ID |
+| 分析师原始结构化证据 | `source_contracts` | 保留来源分析师、原 `action_evidence_contract`、`product_profile_evidence`、来源记录 ID |
 | 每条证据的方向和状态 | `evidence_items` | 保留 `side`、`signal`、`opportunity_state`，不能改写 |
 | 触发信息 | `trigger_status`、`evidence_items.trigger_*` | 汇总触发状态，但不生成执行权限 |
 | setup 信息 | `setup_types`、`evidence_items.setup_*` | 只收集，不判断能否开仓 |
@@ -284,6 +293,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 冲突证据 | `opposing_analysts`、`evidence_conflict_level`、`current_evidence_conflict` | 必须显式保留，不能吞掉 |
 | 缺失和数据质量 | `missing_evidence`、`data_quality_flags` | 必须显式保留，不能当作方向证据 |
 | 证据强弱摘要 | `evidence_strength` | 只能来自分析师置信度和证据质量，不是 PM score/rank |
+| 商品差异化 profile 使用痕迹 | `source_contracts.product_profile_evidence`、`evidence_items.product_profile_id` | 只保真传递，不重新解释、不评分、不生成交易动作 |
+| 多维融合证据 | `source_contracts.fusion_evidence`、`evidence_items.fusion_evidence`、`evidence_fusion` | 只保真汇总证据强弱、时效、一致性、冲突、确认需求和缺失证据，不生成 PM score/rank、不生成交易动作 |
 
 ### 5.2 聚合状态规则
 
@@ -308,6 +319,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 - 标记方向一致、方向冲突、触发缺失、数据缺口；
 - 输出统一证据包；
 - 汇总 `dominant_side`、`side_consensus`、`trigger_status`、`evidence_strength`、`evidence_conflict_level`；
+- 汇总 `evidence_fusion`、`evidence_strength_by_analyst`、`evidence_freshness_by_analyst`、`cross_analyst_conflicts`、`dominant_opposing_evidence`、`confirmation_requirements`；
 - 保留强候选 `tradeable_candidate`，供 PM 后续判断正常交易、加仓或放大。
 
 禁止：
@@ -339,11 +351,13 @@ PM 内部必须拆成五层：
 
 | 输入 | PM 可以做 | PM 不能做 |
 |---|---|---|
-| `signal_collection_contract` | 读取方向、触发、setup、失效边界、冲突、缺失、证据强弱 | 重新解释分析师自由文本 |
+| `signal_collection_contract` | 读取方向、触发、setup、失效边界、冲突、缺失、证据强弱、`evidence_fusion` | 重新解释分析师自由文本 |
 | 账户、持仓、合约、保证金 | 计算当前手数、风险、可用预算 | 伪造成交或结算 |
 | `decision_memory_retrieval` 输出 | 读取有效 action-value、profile、剔除原因、学习摘要 | 直接查研究 DB 原始记录 |
 | `opportunity_ranking` 输出 | 排序、解释资金优先级 | 让 rank 替代 `target_lots` |
 | `position_sizing` 输出 | 计算目标手数建议 | 让 sizing 工具签最终合约 |
+
+PM 必须通过 `src/tools/common/evidence_fusion_semantics.py` 把 `signal_collection_contract.evidence_fusion` 转成 `pm_fusion_diagnostics`。PM 只能把该诊断写入 `opportunity_scorecard` 分项和 `final_action_contract.evidence_used.pm_fusion_diagnostics`，并在 `pm_conflict_resolution` 解释主要冲突、反向证据和必要确认。PM 不能因为融合工具存在而调用 LLM、绕过 `decision_memory_retrieval`、跳过资金/风险计算或让融合分项直接生成 `target_lots`。
 
 PM 只能消费结构化字段。任何未结构化落地的文本，只能作为解释背景，不能成为交易权限。
 

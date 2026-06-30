@@ -41,6 +41,7 @@ from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.common.contracts import final_action_contract_from_snapshot, validate_reviewer_artifact_boundary
 from tools.common.final_action_semantics import derive_review_expectation
+from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from tools.common.learning_contract import (
     CONTRACT_KEY,
     attach_or_upgrade_next_round_memory_contract,
@@ -116,6 +117,33 @@ def _final_action_semantic_summary(recommendations: List[Dict[str, Any]]) -> Dic
         "historical_learning_influenced_contract_counts": dict(sorted(memory_influenced_counts.items())),
         "pm_memory_consumption_error_count": memory_error_count,
         "intraday_result_required_count": intraday_required,
+        "reviewer_does_not_modify_trade_facts": True,
+        "reviewer_writes_action_value": False,
+    }
+
+
+def _fusion_attribution_summary(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    label_counts: Counter = Counter()
+    conflict_count = 0
+    consensus_count = 0
+    for recommendation in recommendations:
+        raw_snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation, dict) else {}
+        snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else _review_helpers._recommendation_snapshot(recommendation)
+        if not isinstance(snapshot, dict):
+            continue
+        contract = final_action_contract_from_snapshot(snapshot)
+        attribution = build_reviewer_fusion_attribution({"final_action_contract": contract})
+        label = str(attribution.get("fusion_attribution_label") or "fusion_not_recorded")
+        label_counts[label] += 1
+        diagnostics = attribution.get("pm_fusion_diagnostics") if isinstance(attribution.get("pm_fusion_diagnostics"), dict) else {}
+        conflict_count += int(diagnostics.get("cross_analyst_conflict_count") or 0)
+        if float(diagnostics.get("multi_evidence_consensus_score") or 0.0) >= 0.58:
+            consensus_count += 1
+    return {
+        "contract": "evidence_fusion_semantics.reviewer_summary.v1",
+        "fusion_attribution_label_counts": dict(sorted(label_counts.items())),
+        "cross_analyst_conflict_count": conflict_count,
+        "multi_evidence_consensus_supported_count": consensus_count,
         "reviewer_does_not_modify_trade_facts": True,
         "reviewer_writes_action_value": False,
     }
@@ -1439,6 +1467,7 @@ def run_phase4_review(
                 "signal_persistence": signal_persistence_audit,
                 "signal_data_lineage": data_lineage_audit,
                 "final_action_semantics": _final_action_semantic_summary(strategy_recommendations),
+                "evidence_fusion_semantics": _fusion_attribution_summary(strategy_recommendations),
             },
         )
         validate_reviewer_artifact_boundary(summary_payload)

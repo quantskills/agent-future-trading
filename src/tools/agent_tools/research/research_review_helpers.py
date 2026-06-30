@@ -27,6 +27,7 @@ from util.learning_attribution import (
     summarize_pairs_by_learning_mechanism,
 )
 from tools.common.contracts import final_action_contract_from_snapshot
+from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from tools.common.learning_contract import CONTRACT_KEY
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
@@ -878,6 +879,7 @@ def _final_action_contract_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     return {
         "final_action_contract": contract,
+        "fusion_attribution": build_reviewer_fusion_attribution({"final_action_contract": contract}),
         "source": "final_action_contract",
         "not_pm_draft": True,
     }
@@ -1358,6 +1360,7 @@ def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict
             if isinstance(scorecard_side.get("learning_adjustment_summary"), dict)
             else learning_used.get("learning_adjustment_summary") if isinstance(learning_used.get("learning_adjustment_summary"), dict) else {}
         ),
+        "fusion_attribution": build_reviewer_fusion_attribution({"final_action_contract": final_contract}),
         "not_trade_authority": True,
         "learning_use": "review_ranking_effectiveness_not_trade_command",
     }

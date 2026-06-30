@@ -234,6 +234,10 @@
 
 （5）锁住 Trader、Accountant、三类分析师和 signal_collector 的非记忆解释边界。修改：分析师输出落地测试、信号收集测试、事实入口边界测试和决策工具测试。原因：Trader 只继承 PM 合约学习解释、不读 action-value；Accountant 只读成交、持仓、结算价、费用、保证金和权益；分析师不能输出合约、手数、保证金、reason code 或 authority type；signal_collector 只保真收集证据，不读 action-value、不生成交易动作。
 
+（6）建立三类分析师商品差异化分析协议。修改：新增 `src/config/product_price_behavior_profiles.yaml` 和 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py`，同步三类分析师入口、提示词、`signal_collection_contract` 保真传递、能力卡、契约覆盖、统一字段语义、机制文档和回测前测试。原因：technical、fundamental、commodity_news 必须按不同期货品种的价格行为、趋势惯性、波动特征、产业链确认、季节窗口、假突破风险和适用 setup 做差异化分析；该 profile 只作为冷启动分析框架，动态学习通过 `learning_context` 与 `analyst_learning_calibration` 叠加，不创建交易权限、不改 PM/Auditor/Trader/Accountant 边界。
+
+（7）建立多维证据融合预测协议。修改：新增 `src/config/evidence_fusion_policy_catalog.yaml` 和 `src/tools/common/evidence_fusion_semantics.py`，同步三类分析师落地、`signal_collection_contract`、PM 评分和唯一合约、Auditor 审核、Reviewer 归因、Researcher 未来学习、协议管理员能力卡/契约覆盖、统一字段语义、机制文档、提示词和回测前测试。原因：technical、fundamental、commodity_news 必须把技术、基本面、新闻、商品 profile、历史学习和执行反馈形成的预测证据强弱、时效、一致性、冲突、确认需求和缺失证据结构化传给 PM；signal_collector 只保真汇总，PM 只把融合诊断作为 scorecard 分项和合约解释，Auditor 只审 PM 是否解释主要冲突，Trader/Accountant 不读取融合证据改执行或结算。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

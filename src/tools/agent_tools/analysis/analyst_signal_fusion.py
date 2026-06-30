@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Iterable, Mapping
 
+from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
+
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
@@ -716,6 +718,7 @@ def build_opportunity_scorecard(
     adaptive_policy_state: Iterable[Mapping[str, Any]] | None = None,
     alpha_setup_profiles: Iterable[Mapping[str, Any]] | None = None,
     alpha_setup_action_values: Iterable[Mapping[str, Any]] | None = None,
+    signal_collection_contract: Mapping[str, Any] | None = None,
     decision_date: Any = None,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -753,6 +756,9 @@ def build_opportunity_scorecard(
     )
     confirmation = market_confirmation or {}
     data_quality = data_quality_summary or {}
+    pm_fusion_diagnostics = build_pm_fusion_diagnostics(signal_collection_contract)
+    fusion_adjustment = _safe_float(pm_fusion_diagnostics.get("fusion_score_adjustment"), 0.0)
+    fusion_consensus = _safe_float(pm_fusion_diagnostics.get("multi_evidence_consensus_score"), 0.0)
     confirmation_score = _safe_float(confirmation.get("confirmation_score"), 0.0)
     confirmation_features = _as_list(confirmation.get("features"))
     confirmation_conflicts = _as_list(confirmation.get("conflicts"))
@@ -877,6 +883,8 @@ def build_opportunity_scorecard(
             "negative_learning": -abs(_score_weight(cfg, "negative_learning", 0.16)) * negative_learning_signal,
             "execution_profile_learning": _score_weight(cfg, "execution_profile_learning", 0.10) * execution_profile_signal,
             "recent_tail_loss_penalty": -abs(_score_weight(cfg, "recent_tail_loss_penalty", 0.18)) * recent_tail_loss_signal,
+            "fusion_consensus": _score_weight(cfg, "fusion_consensus", 0.08) * fusion_consensus,
+            "fusion_conflict_adjustment": fusion_adjustment,
         }
         score = sum(score_components.values())
         side_profiles = alpha_profiles_by_side.get(side, [])
@@ -946,6 +954,12 @@ def build_opportunity_scorecard(
             gating_failures.append("weak_market_confirmation")
         if capped_profiles:
             gating_failures.append("same_scope_alpha_setup_capped_or_rejected")
+        if (
+            pm_fusion_diagnostics.get("requires_pm_conflict_resolution")
+            and pm_fusion_diagnostics.get("dominant_opposing_evidence_count", 0)
+            and score < tradeable_threshold
+        ):
+            gating_failures.append("dominant_opposing_evidence_requires_pm_resolution")
 
         technical_opposes = _technical_opposes_side(signals, side, technical_opposition_min_confidence)
         single_tradeable_blocking_failures = {
@@ -1085,6 +1099,25 @@ def build_opportunity_scorecard(
                 capped_profiles=capped_profiles,
             ),
             "gating_failures": gating_failures,
+            "pm_fusion_diagnostics": pm_fusion_diagnostics,
+            "pm_conflict_resolution": {
+                "handled": not bool(pm_fusion_diagnostics.get("requires_pm_conflict_resolution"))
+                or final_state in {"watch_for_trigger", "no_opportunity", "probe_candidate"},
+                "resolution_effect": (
+                    "downgrade_or_monitor"
+                    if pm_fusion_diagnostics.get("requires_pm_conflict_resolution")
+                    and final_state in {"watch_for_trigger", "probe_candidate"}
+                    else "no_material_conflict"
+                    if not pm_fusion_diagnostics.get("requires_pm_conflict_resolution")
+                    else "tradeable_requires_auditor_review"
+                ),
+                "confirmation_requirements_addressed": bool(
+                    not pm_fusion_diagnostics.get("requires_pm_confirmation_explanation")
+                    or confirmation_score >= weak_confirmation_threshold
+                    or final_state in {"watch_for_trigger", "no_opportunity"}
+                ),
+                "no_trade_authority": True,
+            },
         }
         side_rows[side]["conditional_monitor_candidate"] = bool(
             final_state == "watch_for_trigger"

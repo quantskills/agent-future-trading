@@ -18,6 +18,7 @@ from tools.common.contracts import (
     validate_final_action_contract,
 )
 from tools.common.final_action_semantics import audit_pm_memory_consumption, derive_protocol_semantic_checks
+from tools.common.evidence_fusion_semantics import audit_pm_fusion_explanation
 
 
 APPROVED_AUDIT_VERDICTS = {"approve", "approve_with_warning"}
@@ -171,6 +172,10 @@ class Auditor:
             else:
                 soft_reasons.append(reason)
 
+        fusion_explanation_audit = audit_pm_fusion_explanation(contract)
+        hard_reasons.extend(str(reason) for reason in (fusion_explanation_audit.get("errors") or []))
+        soft_reasons.extend(str(reason) for reason in (fusion_explanation_audit.get("warnings") or []))
+
         if _is_new_or_increasing_exposure(contract):
             if not contract.get("invalidation_condition") and not contract.get("invalidation"):
                 hard_reasons.append("missing_invalidation_condition")
@@ -245,6 +250,7 @@ class Auditor:
                 }
             },
             "pm_memory_consumption_audit": memory_consumption_audit,
+            "pm_fusion_explanation_audit": fusion_explanation_audit,
         }
         validate_auditor_artifact_boundary(audit_payload)
         return AuditorOutput(

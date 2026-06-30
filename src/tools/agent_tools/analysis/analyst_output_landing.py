@@ -23,6 +23,8 @@ ALLOWED_STRUCTURAL_KEYS = {
     "state_permissions",
     "learning_scope",
     "execution",
+    "product_profile_evidence",
+    "fusion_evidence",
 }
 
 

@@ -1,0 +1,286 @@
+version: agentquant.product_price_behavior_profiles.v1
+profile_contract_version: agentquant.analyst_product_price_behavior_profile.v1
+required_tickers:
+  - BU
+  - C
+  - CF
+  - EB
+  - HC
+  - I
+  - J
+  - M
+  - MA
+  - P
+  - PB
+  - RB
+  - SR
+  - TA
+  - ZN
+authority_boundary:
+  profile_role: analysis_evidence_context_only
+  static_profile_mode: cold_start_analysis_frame
+  dynamic_learning_overlay: learning_context_and_analyst_learning_calibration
+  yaml_runtime_mutation: forbidden
+  forbidden_consumers:
+    - auditor
+    - trader
+    - accountant
+  forbidden_trade_fields:
+    - final_action
+    - final_action_contract
+    - target_lots
+    - current_lots
+    - lots_delta
+    - lots_delta_abs
+    - target_position_ratio
+    - target_margin_ratio
+    - margin_required
+    - authority_type
+    - audit_verdict
+    - capital_allocation_reason
+    - opportunity_rank
+    - conditional_trigger_authority
+    - requires_intraday_confirmation
+    - can_execute_without_intraday_trigger
+    - reason_codes
+profiles:
+  BU:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: BU
+    sector: energy_chemicals
+    product_context: Asphalt futures; refinery feedstock cost, road construction demand, inventory, crude oil and seasonal paving drive price behavior.
+    price_behavior: Cost-chain sensitive with sharp trend bursts when crude oil, refinery margins, and road demand align.
+    trend_inertia: medium
+    volatility_profile: high
+    false_breakout_risk: high
+    preferred_setups: [cost_chain_trend, inventory_draw_trend, seasonal_demand_pullback]
+    caution_setups: [thin_volume_breakout, crude_noise_reversal, late_season_chase]
+    confirmation_requirements: [crude_cost_alignment, asphalt_inventory_confirmation, refinery_margin_or_operating_rate_confirmation, price_volume_confirmation]
+    fundamental_driver_priority: [crude_cost, refinery_margin, inventory, road_construction_demand, operating_rate]
+    news_catalyst_priority: [crude_policy_shock, refinery_disruption, transport_or_weather_disruption, infrastructure_demand_policy]
+    seasonal_event_window: [spring_paving_restart, summer_rain_disruption, autumn_paving_peak, winter_demand_fade]
+    invalid_profile_use: [treat_crude_move_as_direct_trade_authority, ignore_inventory_confirmation]
+  C:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: C
+    sector: agriculture
+    product_context: Corn futures; domestic supply, feed demand, imports, reserves, harvest pressure, and policy timing drive price behavior.
+    price_behavior: Seasonal and policy-sensitive; trends require crop, inventory, and feed-demand confirmation.
+    trend_inertia: medium
+    volatility_profile: medium
+    false_breakout_risk: medium
+    preferred_setups: [seasonal_inventory_trend, feed_demand_confirmation, policy_supply_shock]
+    caution_setups: [harvest_pressure_false_breakout, import_headline_chase, low_volume_range_break]
+    confirmation_requirements: [crop_or_weather_confirmation, feed_demand_confirmation, inventory_confirmation, import_policy_confirmation]
+    fundamental_driver_priority: [crop_progress, feed_demand, inventory, import_arrivals, reserve_policy]
+    news_catalyst_priority: [weather_risk, import_policy_change, reserve_auction, disease_feed_demand_shock]
+    seasonal_event_window: [spring_planting, summer_weather, autumn_harvest, winter_stocking]
+    invalid_profile_use: [apply_industrial_cost_chain_logic, ignore_harvest_window]
+  CF:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: CF
+    sector: agriculture_textile
+    product_context: Cotton futures; planting/weather, ginning, import quota, textile orders, yarn margins, and inventory drive price behavior.
+    price_behavior: Event and demand-chain sensitive with frequent false starts around policy and weather headlines.
+    trend_inertia: medium
+    volatility_profile: medium_high
+    false_breakout_risk: high
+    preferred_setups: [weather_supply_trend, textile_demand_pullback, policy_import_quota_shock]
+    caution_setups: [headline_without_textile_confirmation, late_weather_chase, warehouse_receipt_noise]
+    confirmation_requirements: [weather_or_crop_confirmation, textile_order_confirmation, inventory_or_warehouse_confirmation, price_volume_confirmation]
+    fundamental_driver_priority: [weather_crop_condition, textile_demand, import_quota, inventory, yarn_margin]
+    news_catalyst_priority: [weather_shock, policy_quota_change, textile_order_shift, global_cotton_report]
+    seasonal_event_window: [planting_window, weather_pollination_window, harvest_ginning_window, textile_restock_window]
+    invalid_profile_use: [trade_weather_headline_without_price_confirmation, ignore_textile_chain]
+  EB:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: EB
+    sector: energy_chemicals
+    product_context: Styrene futures; benzene/ethylene cost, operating rate, port inventory, downstream ABS/PS/EPS demand, and import margins drive price behavior.
+    price_behavior: High beta to chemical cost chain and inventory; reversals appear when margins and downstream demand diverge.
+    trend_inertia: medium
+    volatility_profile: high
+    false_breakout_risk: high
+    preferred_setups: [cost_inventory_alignment, downstream_restock_trend, margin_repair_pullback]
+    caution_setups: [cost_only_breakout, port_stock_divergence, downstream_margin_conflict]
+    confirmation_requirements: [benzene_cost_alignment, port_inventory_confirmation, downstream_operating_rate_confirmation, margin_confirmation]
+    fundamental_driver_priority: [benzene_cost, port_inventory, operating_rate, downstream_profit, import_margin]
+    news_catalyst_priority: [plant_outage, import_disruption, crude_aromatics_shock, downstream_policy_or_demand_shift]
+    seasonal_event_window: [spring_restock, maintenance_season, summer_demand_watch, year_end_inventory_adjustment]
+    invalid_profile_use: [ignore_downstream_confirmation, treat_cost_rally_as_finished_setup]
+  HC:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: HC
+    sector: ferrous
+    product_context: Hot-rolled coil futures; steel demand, blast furnace output, inventory, margins, export orders, and macro construction/manufacturing demand drive price behavior.
+    price_behavior: Trend-following when demand, inventory, and raw material cost align; policy and macro shifts can cause gap reversals.
+    trend_inertia: medium_high
+    volatility_profile: medium
+    false_breakout_risk: medium
+    preferred_setups: [demand_inventory_trend, margin_repair_trend, export_order_catalyst]
+    caution_setups: [raw_material_only_move, policy_noise_breakout, weak_inventory_confirmation]
+    confirmation_requirements: [steel_inventory_confirmation, downstream_demand_confirmation, mill_margin_confirmation, raw_material_alignment]
+    fundamental_driver_priority: [steel_demand, inventory, mill_margin, production, raw_material_cost]
+    news_catalyst_priority: [property_or_infrastructure_policy, production_restriction, export_policy, raw_material_supply_shock]
+    seasonal_event_window: [spring_construction_restart, summer_offseason, autumn_peak_demand, winter_policy_output_cut]
+    invalid_profile_use: [ignore_steel_inventory, use_agriculture_weather_logic]
+  I:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: I
+    sector: ferrous
+    product_context: Iron ore futures; steel output, port inventory, shipments, steel margins, macro demand, and policy restriction drive price behavior.
+    price_behavior: Strong trend inertia during synchronized steel production and shipment cycles; policy risk can abruptly cap rallies.
+    trend_inertia: high
+    volatility_profile: high
+    false_breakout_risk: medium_high
+    preferred_setups: [port_inventory_draw_trend, steel_margin_output_trend, shipment_disruption_breakout]
+    caution_setups: [policy_cap_rally, steel_margin_divergence, high_inventory_breakout]
+    confirmation_requirements: [port_inventory_confirmation, steel_output_confirmation, shipment_confirmation, steel_margin_confirmation]
+    fundamental_driver_priority: [port_inventory, steel_production, shipments, steel_margin, macro_demand]
+    news_catalyst_priority: [mine_disruption, production_restriction, property_policy, port_logistics_disruption]
+    seasonal_event_window: [spring_steel_restock, cyclone_supply_window, autumn_demand_peak, winter_output_restriction]
+    invalid_profile_use: [ignore_policy_cap, trade_price_breakout_without_steel_chain]
+  J:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: J
+    sector: ferrous
+    product_context: Coke futures; coking coal cost, coke margins, steel mill demand, inventories, environmental policy, and output restrictions drive price behavior.
+    price_behavior: Margin and policy-cycle sensitive; large moves need coke-coal-steel confirmation.
+    trend_inertia: medium_high
+    volatility_profile: high
+    false_breakout_risk: medium_high
+    preferred_setups: [margin_repair_trend, steel_demand_coke_draw, policy_output_shock]
+    caution_setups: [coal_cost_only_chase, steel_margin_conflict, policy_headline_without_execution]
+    confirmation_requirements: [coke_inventory_confirmation, steel_mill_demand_confirmation, coke_margin_confirmation, coal_cost_alignment]
+    fundamental_driver_priority: [coke_margin, steel_demand, coking_coal_cost, inventory, operating_rate]
+    news_catalyst_priority: [environmental_output_policy, mine_safety_policy, steel_output_policy, logistics_disruption]
+    seasonal_event_window: [spring_restock, summer_policy_window, autumn_steel_peak, winter_environmental_restriction]
+    invalid_profile_use: [ignore_steel_demand, treat_policy_headline_as_fill_permission]
+  M:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: M
+    sector: agriculture_oilseed
+    product_context: Soymeal futures; soybean imports, crush margins, feed demand, inventories, US/South America crop weather, and FX drive price behavior.
+    price_behavior: Global crop and domestic feed-demand sensitive; trends need import/crush/inventory confirmation.
+    trend_inertia: medium
+    volatility_profile: medium_high
+    false_breakout_risk: medium
+    preferred_setups: [global_crop_supply_trend, feed_demand_inventory_draw, crush_margin_confirmation]
+    caution_setups: [weather_headline_chase, soybean_arrival_divergence, weak_feed_demand_breakout]
+    confirmation_requirements: [global_crop_confirmation, soybean_arrival_confirmation, crush_margin_confirmation, feed_demand_or_inventory_confirmation]
+    fundamental_driver_priority: [global_crop_weather, soybean_import_arrivals, crush_margin, meal_inventory, feed_demand]
+    news_catalyst_priority: [usda_report, south_america_weather, trade_policy, disease_feed_demand_shock]
+    seasonal_event_window: [us_planting_weather, us_pollination, south_america_weather, domestic_feed_restock]
+    invalid_profile_use: [ignore_global_crop_calendar, trade_weather_noise_without_inventory_context]
+  MA:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: MA
+    sector: energy_chemicals
+    product_context: Methanol futures; coal cost, operating rate, port inventory, MTO demand, import arrivals, and regional logistics drive price behavior.
+    price_behavior: Regional and inventory-driven with cost-chain anchors; false breakouts appear when MTO demand or port stocks diverge.
+    trend_inertia: medium
+    volatility_profile: high
+    false_breakout_risk: high
+    preferred_setups: [coal_cost_inventory_alignment, mto_demand_restock, import_disruption_trend]
+    caution_setups: [coal_cost_only_breakout, port_inventory_divergence, mto_margin_conflict]
+    confirmation_requirements: [coal_cost_alignment, port_inventory_confirmation, mto_operating_rate_confirmation, import_arrival_confirmation]
+    fundamental_driver_priority: [coal_cost, port_inventory, mto_demand, operating_rate, import_arrivals]
+    news_catalyst_priority: [coal_policy_shock, plant_outage, import_logistics_disruption, downstream_mto_change]
+    seasonal_event_window: [spring_restock, maintenance_season, summer_energy_policy, winter_gas_coal_constraint]
+    invalid_profile_use: [ignore_port_inventory, treat_cost_move_as_sufficient_setup]
+  P:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: P
+    sector: agriculture_oil
+    product_context: Palm oil futures; Malaysian/Indonesian production, exports, biodiesel policy, vegetable oil spread, inventories, and FX drive price behavior.
+    price_behavior: Weather and policy sensitive with high sensitivity to export and biodiesel changes.
+    trend_inertia: medium_high
+    volatility_profile: high
+    false_breakout_risk: medium_high
+    preferred_setups: [export_inventory_trend, biodiesel_policy_shock, vegoil_spread_confirmation]
+    caution_setups: [export_headline_without_inventory, weather_noise_chase, soybean_oil_spread_conflict]
+    confirmation_requirements: [malaysia_inventory_confirmation, export_confirmation, biodiesel_policy_confirmation, vegoil_spread_confirmation]
+    fundamental_driver_priority: [malaysia_inventory, export_demand, biodiesel_policy, production_weather, vegoil_spread]
+    news_catalyst_priority: [export_policy, biodiesel_policy, weather_risk, cargo_surveyor_data]
+    seasonal_event_window: [ramadan_demand, production_low_season, peak_production, biodiesel_policy_window]
+    invalid_profile_use: [ignore_vegoil_spread, treat_single_export_headline_as_authority]
+  PB:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: PB
+    sector: nonferrous
+    product_context: Lead futures; smelter output, recycled lead, battery demand, inventories, treatment charge, and macro risk drive price behavior.
+    price_behavior: Inventory and recycling-cycle sensitive; range behavior is common unless inventory and battery demand align.
+    trend_inertia: medium
+    volatility_profile: medium
+    false_breakout_risk: high
+    preferred_setups: [inventory_draw_range_break, battery_demand_trend, recycled_supply_disruption]
+    caution_setups: [macro_only_breakout, inventory_divergence, low_liquidity_chase]
+    confirmation_requirements: [exchange_inventory_confirmation, battery_demand_confirmation, recycled_lead_supply_confirmation, macro_risk_alignment]
+    fundamental_driver_priority: [inventory, battery_demand, recycled_supply, smelter_output, treatment_charge]
+    news_catalyst_priority: [environmental_inspection, battery_policy, smelter_disruption, macro_risk_shift]
+    seasonal_event_window: [battery_replacement_peak, environmental_policy_window, year_end_inventory_adjustment]
+    invalid_profile_use: [ignore_recycled_supply, apply_high_inertia_iron_ore_logic]
+  RB:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: RB
+    sector: ferrous
+    product_context: Rebar futures; construction demand, steel output, inventories, mill margins, raw materials, and property/infrastructure policy drive price behavior.
+    price_behavior: Demand-and-inventory trend product; false breakouts occur when construction demand or inventory draw is missing.
+    trend_inertia: medium_high
+    volatility_profile: medium
+    false_breakout_risk: medium_high
+    preferred_setups: [construction_demand_inventory_trend, mill_margin_repair, raw_material_alignment_pullback]
+    caution_setups: [policy_headline_without_demand, raw_material_only_move, offseason_breakout]
+    confirmation_requirements: [rebar_inventory_confirmation, construction_demand_confirmation, mill_margin_confirmation, raw_material_alignment]
+    fundamental_driver_priority: [construction_demand, inventory, mill_margin, steel_output, raw_material_cost]
+    news_catalyst_priority: [property_policy, infrastructure_policy, production_restriction, raw_material_supply_shock]
+    seasonal_event_window: [spring_construction_restart, summer_rain_offseason, autumn_peak_demand, winter_output_cut]
+    invalid_profile_use: [ignore_construction_season, trade_policy_noise_without_inventory_confirmation]
+  SR:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: SR
+    sector: agriculture_soft
+    product_context: Sugar futures; domestic production, import margins, global raw sugar, weather, sales pace, and policy quota drive price behavior.
+    price_behavior: Seasonal supply and import-margin sensitive; global raw sugar can lead but domestic confirmation is required.
+    trend_inertia: medium
+    volatility_profile: medium_high
+    false_breakout_risk: medium_high
+    preferred_setups: [crushing_season_supply_trend, import_margin_arbitrage, global_raw_sugar_confirmation]
+    caution_setups: [raw_sugar_only_chase, quota_policy_noise, sales_pace_divergence]
+    confirmation_requirements: [domestic_production_confirmation, sales_rate_confirmation, import_margin_confirmation, raw_sugar_confirmation]
+    fundamental_driver_priority: [domestic_production, sales_rate, import_margin, raw_sugar_price, weather]
+    news_catalyst_priority: [weather_crop_risk, import_quota_policy, brazil_india_supply_news, freight_or_fx_shock]
+    seasonal_event_window: [crushing_start, peak_crushing, sales_pace_window, import_quota_window]
+    invalid_profile_use: [ignore_domestic_sales, treat_global_raw_sugar_as_direct_authority]
+  TA:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: TA
+    sector: energy_chemicals
+    product_context: PTA futures; PX/naphtha cost, PTA processing fee, operating rate, polyester demand, inventory, and crude oil drive price behavior.
+    price_behavior: Cost-chain and polyester-demand sensitive; trends require PX/PTA/polyester chain confirmation.
+    trend_inertia: medium
+    volatility_profile: high
+    false_breakout_risk: high
+    preferred_setups: [px_cost_processing_fee_alignment, polyester_demand_restock, inventory_draw_trend]
+    caution_setups: [crude_only_breakout, polyester_inventory_conflict, processing_fee_extreme_reversal]
+    confirmation_requirements: [px_cost_confirmation, pta_processing_fee_confirmation, polyester_operating_rate_confirmation, inventory_confirmation]
+    fundamental_driver_priority: [px_cost, processing_fee, pta_inventory, polyester_operating_rate, downstream_profit]
+    news_catalyst_priority: [px_or_pta_plant_outage, crude_aromatics_shock, polyester_demand_policy, import_export_disruption]
+    seasonal_event_window: [spring_polyester_restock, maintenance_season, summer_textile_watch, autumn_textile_peak]
+    invalid_profile_use: [ignore_polyester_confirmation, treat_crude_move_as_sufficient_setup]
+  ZN:
+    product_profile_version: agentquant.product_price_behavior.v1
+    ticker: ZN
+    sector: nonferrous
+    product_context: Zinc futures; mine supply, smelter output, treatment charge, exchange/social inventory, galvanizing demand, and macro risk drive price behavior.
+    price_behavior: Inventory and mine-supply sensitive; macro risk shifts can dominate short-term direction.
+    trend_inertia: medium_high
+    volatility_profile: medium_high
+    false_breakout_risk: medium
+    preferred_setups: [inventory_draw_trend, mine_supply_tc_squeeze, galvanizing_demand_confirmation]
+    caution_setups: [macro_only_breakout, inventory_divergence, tc_signal_without_demand]
+    confirmation_requirements: [exchange_or_social_inventory_confirmation, treatment_charge_confirmation, galvanizing_demand_confirmation, macro_risk_alignment]
+    fundamental_driver_priority: [inventory, treatment_charge, mine_supply, smelter_output, galvanizing_demand]
+    news_catalyst_priority: [mine_disruption, smelter_policy, macro_liquidity_shift, downstream_demand_policy]
+    seasonal_event_window: [spring_downstream_restart, summer_power_policy, autumn_demand_peak, year_end_inventory_adjustment]
+    invalid_profile_use: [ignore_inventory_confirmation, apply_ferrous_construction_logic_directly]

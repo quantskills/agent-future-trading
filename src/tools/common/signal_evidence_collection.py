@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Iterable, Mapping
 
+from tools.common.evidence_fusion_semantics import build_signal_collection_fusion_summary
+
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
@@ -172,6 +174,22 @@ def build_signal_collection_contract(
                 "condition": _text(contract.get("invalidation_condition", getattr(signal, "invalidation_condition", ""))),
                 "level": contract.get("invalidation_level", getattr(signal, "invalidation_level", None)),
             })
+        product_profile_evidence = (
+            contract.get("product_profile_evidence")
+            if isinstance(contract.get("product_profile_evidence"), Mapping)
+            else _metadata(signal).get("product_profile_evidence")
+        )
+        product_profile_evidence = (
+            dict(product_profile_evidence)
+            if isinstance(product_profile_evidence, Mapping)
+            else {}
+        )
+        fusion_evidence = (
+            contract.get("fusion_evidence")
+            if isinstance(contract.get("fusion_evidence"), Mapping)
+            else _metadata(signal).get("fusion_evidence")
+        )
+        fusion_evidence = dict(fusion_evidence) if isinstance(fusion_evidence, Mapping) else {}
 
         item = {
             "analyst": agent,
@@ -190,12 +208,21 @@ def build_signal_collection_contract(
             "evidence_quality": _text(contract.get("evidence_quality", getattr(signal, "evidence_quality", "")), "unknown"),
             "current_evidence_conflict": _list(contract.get("current_evidence_conflict", getattr(signal, "current_evidence_conflict", []))),
             "missing_evidence": _list(contract.get("missing_evidence", getattr(signal, "missing_evidence", []))),
+            "fusion_evidence": fusion_evidence,
+            "evidence_strength": _text(fusion_evidence.get("evidence_strength") or contract.get("evidence_strength")),
+            "evidence_freshness": _text(fusion_evidence.get("evidence_freshness")),
+            "confirmation_requirements": _list(fusion_evidence.get("confirmation_requirements") or contract.get("confirmation_requirements")),
+            "product_profile_id": _text(product_profile_evidence.get("product_profile_id")),
+            "product_profile_used": _bool(product_profile_evidence.get("product_profile_used")),
+            "product_profile_analysis_boundary": _text(product_profile_evidence.get("profile_analysis_boundary")),
             "source_contract_index": len(source_contracts),
         }
         evidence_items.append(item)
         source_contracts.append({
             "analyst": agent,
             "action_evidence_contract": contract,
+            "product_profile_evidence": product_profile_evidence,
+            "fusion_evidence": fusion_evidence,
             "signal_record_id": _metadata(signal).get("signal_record_id"),
         })
 
@@ -235,6 +262,11 @@ def build_signal_collection_contract(
         if trigger_states.get("valid_unconfirmed")
         else "watch_for_trigger"
     )
+    fusion_summary = build_signal_collection_fusion_summary(
+        evidence_items,
+        dominant_side=dominant_side,
+    )
+    merged_missing_evidence = sorted(set(missing_evidence) | set(fusion_summary.get("missing_evidence") or []))
 
     return {
         "contract_version": "agentquant.signal_collection.v1",
@@ -244,18 +276,26 @@ def build_signal_collection_contract(
         "evidence_items": evidence_items,
         "dominant_side": dominant_side,
         "side_consensus": consensus,
+        "evidence_alignment_state": fusion_summary.get("evidence_alignment_state"),
+        "direction_alignment": fusion_summary.get("direction_alignment"),
         "trigger_status": aggregate_trigger,
         "supporting_analysts": sorted(set(supporting)),
         "opposing_analysts": sorted(set(opposing)),
         "neutral_analysts": sorted(set(neutral)),
         "evidence_strength": strength,
+        "evidence_strength_by_analyst": fusion_summary.get("evidence_strength_by_analyst") or {},
+        "evidence_freshness_by_analyst": fusion_summary.get("evidence_freshness_by_analyst") or {},
         "evidence_conflict_level": conflict_level,
-        "missing_evidence": sorted(set(missing_evidence)),
+        "cross_analyst_conflicts": fusion_summary.get("cross_analyst_conflicts") or [],
+        "dominant_opposing_evidence": fusion_summary.get("dominant_opposing_evidence") or [],
+        "confirmation_requirements": fusion_summary.get("confirmation_requirements") or [],
+        "multi_evidence_consensus_score": fusion_summary.get("multi_evidence_consensus_score"),
+        "missing_evidence": merged_missing_evidence,
         "data_quality_flags": sorted(set(data_quality_flags)),
         "setup_types": sorted(set(setup_types)),
         "horizon_scope": sorted(set(horizons)),
         "invalidation_summary": invalidation_summary,
+        "evidence_fusion": fusion_summary,
         "collector_decision_boundary": "no_trade_authority",
         "no_trade_authority": True,
     }
-

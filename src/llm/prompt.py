@@ -62,7 +62,11 @@ Output format:
 - factor_focus: list of factor/setup/catalyst groups that define learning scope
 - current_evidence_conflict: list of current evidence against this view
 - metadata.action_evidence_contract: structured lifecycle evidence contract for PM and later Researcher review; it is not a Trader instruction
+- metadata.action_evidence_contract.fusion_evidence: structured multi-evidence fusion fields for prediction quality only. Include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, missing_evidence, current_evidence_conflict, and analyst-specific fields: technical_false_breakout_risk for technical, fundamental_opposition_strength for fundamental, news_impact_window and one_off_event_risk for commodity_news.
 - metadata.learning_scope: setup/factor/catalyst scope for future lane-scoped action-value learning
+- metadata.product_profile_evidence: product-specific analysis frame usage; include product_profile_id, product_profile_version, product_profile_used, profile_fields_used, profile_supported_evidence, profile_conflicting_evidence, profile_missing_evidence, profile_assumption_status, profile_relevance_score, profile_learning_interaction, profile_invalid_use_flags, and profile_analysis_boundary
+- Product price behavior profile is a cold-start analysis frame only. It may change evidence emphasis, confirmation discipline, setup classification, and false-breakout caution. It must not create trade authority, lots, margin, reason_codes, final_action, or final_action_contract.
+- Evidence fusion is a prediction-evidence protocol only. It lets signal_collector preserve evidence strength, freshness, alignment, conflicts, confirmation needs, missing evidence, and product-profile evidence for PM scoring. It must not create opportunity_score, opportunity_rank, lots, margin, reason_codes, authority_type, final_action, or final_action_contract.
 - Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, final_action_contract, final_action, authority_type, reason_codes, conditional_trigger_authority, requires_intraday_confirmation, can_execute_without_intraday_trigger, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
 
 Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
@@ -399,6 +403,7 @@ def build_futures_technical_prompt(
     signal_results_compact: Mapping[str, str],
     gap_analysis: Any = "N/A",
     technical_summary: str = "",
+    product_profile_context: str = "",
     features: Optional[Mapping[str, Any]] = None,
     llm_path: str = "cloud_only",
 ) -> str:
@@ -422,6 +427,9 @@ GAP_DETAIL: {gap_analysis}
 
     if technical_summary:
         prompt += "\n" + str(technical_summary)
+
+    if product_profile_context:
+        prompt += "\n" + str(product_profile_context)
 
     if features:
         prompt += f"""
@@ -482,6 +490,7 @@ Output format:
 - justification: explain the market regime, the bullish evidence, the bearish evidence, conflicts, and why the setup is or is not tradable
 - metadata: include tradeability, market_regime, indicator_votes, risk_flags, and llm_path
 - metadata.action_evidence_contract.open must state whether technical timing is current and what confirmation/invalidation PM should read
+- metadata.action_evidence_contract.fusion_evidence must state evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, and technical_false_breakout_risk. It is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank
 - metadata.learning_scope must include setup_family, market_regime, sector_alignment, and main indicator family
 
 Provide a concise, well-reasoned futures technical view.
@@ -493,6 +502,7 @@ def build_futures_fundamental_prompt(
     *,
     ticker: str,
     fundamentals: str,
+    product_profile_context: str = "",
     learning_context_text: str = "",
 ) -> str:
     """Build the runtime China-futures fundamental analyst prompt."""
@@ -500,6 +510,8 @@ def build_futures_fundamental_prompt(
         ticker=ticker,
         fundamentals=fundamentals,
     )
+    if product_profile_context:
+        prompt += "\n\n" + str(product_profile_context)
     prompt += (
         "\n\nTrade research contract fields to fill when possible:\n"
         "Your first objective is to turn fundamentals into a tradable setup when current evidence supports it; "
@@ -517,6 +529,7 @@ def build_futures_fundamental_prompt(
         "- current_evidence_conflict: current evidence contradicting the direction\n"
         "- evidence_role: direction_context unless a current short trigger is explicitly present\n"
         "- metadata.action_evidence_contract.open: fundamental evidence cannot create trade authority alone; state required technical/market confirmation\n"
+        "- metadata.action_evidence_contract.fusion_evidence: include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, and fundamental_opposition_strength; it is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank\n"
         "- metadata.learning_scope: include primary/supporting/risk factor groups for future action-value learning\n"
         "- learning_impact_summary: explain historical support, historical contradiction, today's confirmed evidence, missing confirmation, and opportunity_state_reason\n"
         "- factor_calibration_summary: list effective_factors, stale_or_conflicting_factors, factors_requiring_price_confirmation, and factor_calibration_reason\n"
@@ -542,6 +555,7 @@ def build_futures_commodity_news_prompt(
     instrument_context: str,
     news: Any,
     news_summary: str = "",
+    product_profile_context: str = "",
     llm_path: str = "cloud_only",
     learning_context_text: str = "",
 ) -> str:
@@ -552,6 +566,8 @@ def build_futures_commodity_news_prompt(
         news=news,
     )
     prompt += news_summary or ""
+    if product_profile_context:
+        prompt += "\n\n" + str(product_profile_context)
     prompt += (
         f"\n\n=== LLM Path ===\n{llm_path}\n"
         "Return metadata with event_types, event_strength, tradeability, risk_flags, and llm_path. "
@@ -563,6 +579,7 @@ def build_futures_commodity_news_prompt(
         "News can identify an event opportunity, but it must say what current confirmation is needed "
         "before PM can treat it as tradeable.\n"
         "metadata.action_evidence_contract.open must state event_window_days, current_confirmation, and whether price reaction is required. "
+        "metadata.action_evidence_contract.fusion_evidence must include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, news_impact_window, and one_off_event_risk; it is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank. "
         "metadata.learning_scope must include catalyst_classification and event_regime.\n"
         "Fill learning_impact_summary with historical support/contradiction, today's confirmed event evidence, missing confirmation, and opportunity_state_reason. "
         "Fill event_calibration_summary with effective_catalysts, background_noise, impact_window_assessment, price_volume_confirmation_required, and event_calibration_reason. "

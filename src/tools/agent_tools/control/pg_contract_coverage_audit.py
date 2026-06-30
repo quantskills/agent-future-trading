@@ -175,6 +175,113 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
     ),
     ContractCoverageSpec(
+        contract="product_profile_evidence",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py",
+                ("build_profile_usage_contract", "apply_profile_usage_to_signal", "analysis_evidence_only_no_trade_authority"),
+                "analysis-side profile tool builds product-specific evidence usage traces without trade authority",
+            ),
+            _rule(
+                "src/agents/analysis_team/technical.py",
+                ("get_product_price_behavior_profile", "product_profile_evidence"),
+                "technical analyst consumes the product profile and emits profile evidence",
+            ),
+            _rule(
+                "src/agents/analysis_team/fundamental.py",
+                ("get_product_price_behavior_profile", "product_profile_evidence"),
+                "fundamental analyst consumes the product profile and emits profile evidence",
+            ),
+            _rule(
+                "src/agents/analysis_team/commodity_news.py",
+                ("get_product_price_behavior_profile", "product_profile_evidence"),
+                "commodity-news analyst consumes the product profile and emits profile evidence",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/tools/common/signal_evidence_collection.py",
+                ("product_profile_evidence", "product_profile_analysis_boundary"),
+                "signal collector preserves profile evidence without interpreting it as trade authority",
+            ),
+        ),
+        audits=(
+            _rule(
+                "docs/unified_field_semantics.md",
+                ("product_profile_evidence", "analyst_product_price_behavior_profile.py"),
+                "field semantics define product profile evidence and its analysis-only boundary",
+            ),
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("product_profile_evidence", "analyst_product_price_behavior_profile.py"),
+                "multi-agent mechanism document fixes direct consumer boundaries",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_analyst_product_price_behavior_profile.py",
+                ("test_profile_catalog_covers_all_backtest_tickers", "test_signal_collector_preserves_profile_evidence"),
+                "profile protocol tests cover catalog completeness, prompt usage, collector preservation, and forbidden direct consumers",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
+        contract="evidence_fusion",
+        producers=(
+            _rule(
+                "src/tools/common/evidence_fusion_semantics.py",
+                ("build_analyst_fusion_evidence", "build_signal_collection_fusion_summary", "agentquant.evidence_fusion.v1"),
+                "shared deterministic evidence-fusion semantics build analyst, signal-collector, PM, reviewer, and auditor summaries",
+            ),
+            _rule(
+                "src/tools/agent_tools/analysis/analyst_quality.py",
+                ("build_analyst_fusion_evidence", "fusion_evidence"),
+                "analyst landing attaches fusion evidence to action_evidence_contract without trade authority",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/tools/common/signal_evidence_collection.py",
+                ("build_signal_collection_fusion_summary", "evidence_fusion"),
+                "signal collector preserves and summarizes fusion evidence without deciding trades",
+            ),
+            _rule(
+                "src/tools/agent_tools/analysis/analyst_signal_fusion.py",
+                ("build_pm_fusion_diagnostics", "pm_fusion_diagnostics"),
+                "PM scorecard consumes signal-collection fusion diagnostics as scorecard evidence",
+            ),
+            _rule(
+                "src/tools/agent_tools/decision/pm_contract_builder.py",
+                ("pm_fusion_diagnostics", "pm_conflict_resolution"),
+                "PM final contract preserves fusion diagnostics for downstream audit and review",
+            ),
+        ),
+        audits=(
+            _rule(
+                "src/agents/decision_team/auditor.py",
+                ("audit_pm_fusion_explanation", "pm_fusion_explanation_audit"),
+                "Auditor checks PM fusion explanation from the contract only",
+            ),
+            _rule(
+                "src/tools/agent_tools/research/reviewer_phase4_review.py",
+                ("evidence_fusion_semantics", "_fusion_attribution_summary"),
+                "Reviewer emits read-only fusion attribution summary",
+            ),
+            _rule(
+                "docs/unified_field_semantics.md",
+                ("evidence_fusion", "pm_fusion_diagnostics"),
+                "field semantics register fusion evidence and boundary",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_evidence_fusion_semantics.py",
+                ("test_signal_collector_outputs_fusion_without_trade_authority", "test_pm_scorecard_and_auditor_preserve_fusion_boundary"),
+                "fusion protocol tests cover analyst fields, collector preservation, PM diagnostics, auditor boundary, and reviewer learning labels",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="final_action_contract",
         producers=(
             _rule(

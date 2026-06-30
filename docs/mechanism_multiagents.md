@@ -136,12 +136,12 @@ Phase4 完成后，研究学习单独运行：
 
 | 角色 | 输入 | 输出 | 是否调用 LLM | 禁止输出 | 下游如何消费 |
 |---|---|---|---|---|---|
-| `technical` 技术面分析师 | 行情、技术指标、技术学习校准、数据截止时间 | `AnalystSignal`、`action_evidence_contract`、技术方向、触发、失效边界、证据强弱 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据；投资组合经理不直接把技术文本当交易权限 |
-| `fundamental` 基本面分析师 | 库存、仓单、基差、供需、产业数据、基本面学习校准 | `AnalystSignal`、`action_evidence_contract`、基本面方向、驱动、数据质量、失效边界 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
-| `commodity_news` 期货新闻面分析师 | 新闻、事件、政策、舆情、新闻学习校准 | `AnalystSignal`、`action_evidence_contract`、事件方向、催化质量、时效、确认条件 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
-| `signal_collector` 信号收集员 | 三类分析师的结构化预测证据 | `signal_collection_contract`：统一结构化预测证据包，至少包含来源引用、逐条证据、方向、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 否 | 历史学习结论、score/rank、仓位比例、手数、交易动作、`final_action_contract` | 投资组合经理读取盘前统一结构化预测证据包 |
-| `portfolio_manager` 投资组合经理 | `signal_collection_contract`、账户、持仓、合约信息、市场确认、投资组合经理工具输出、资金与风控配置 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、资金部署理由 | 否 | LLM 自由判断、第二套交易计划、绕过审计员的交易权限 | 审计员只审这张合约；交易员只执行这张合约 |
-| `auditor` 审计员 | 投资组合经理的 `final_action_contract`、账户、持仓、保证金、数据质量、硬风险边界 | `audit_verdict`、hard/soft risk reasons、审计 payload | 否 | 改手数、改方向、新建合约、生成交易动作 | 投资组合经理记录审计结果；交易员只执行审过的合约 |
+| `technical` 技术面分析师 | 行情、技术指标、商品价格行为 profile、技术学习校准、数据截止时间 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、技术方向、触发、失效边界、证据强弱、假突破风险 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据；投资组合经理不直接把技术文本当交易权限 |
+| `fundamental` 基本面分析师 | 库存、仓单、基差、供需、产业数据、商品价格行为 profile、基本面学习校准 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、基本面方向、驱动、数据质量、反向压制、失效边界 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
+| `commodity_news` 期货新闻面分析师 | 新闻、事件、政策、舆情、商品价格行为 profile、新闻学习校准 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、事件方向、催化质量、时效、确认条件、一次性冲击风险 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
+| `signal_collector` 信号收集员 | 三类分析师的结构化预测证据、`product_profile_evidence` 和 `fusion_evidence` | `signal_collection_contract`：统一结构化预测证据包，至少包含来源引用、逐条证据、方向、触发状态、证据强弱、时效、一致性、冲突、确认需求、缺失、风险、失效边界、profile 使用痕迹和 `evidence_fusion` | 否 | 历史学习结论、score/rank、仓位比例、手数、交易动作、`final_action_contract` | 投资组合经理读取盘前统一结构化预测证据包 |
+| `portfolio_manager` 投资组合经理 | `signal_collection_contract`、`evidence_fusion`、账户、持仓、合约信息、市场确认、投资组合经理工具输出、资金与风控配置 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、资金部署理由、`pm_fusion_diagnostics`、`pm_conflict_resolution` | 否 | LLM 自由判断、第二套交易计划、绕过审计员的交易权限 | 审计员只审这张合约；交易员只执行这张合约 |
+| `auditor` 审计员 | 投资组合经理的 `final_action_contract`、`pm_fusion_diagnostics`、账户、持仓、保证金、数据质量、硬风险边界 | `audit_verdict`、hard/soft risk reasons、审计 payload、`pm_fusion_explanation_audit` | 否 | 重新融合证据、改手数、改方向、新建合约、生成交易动作 | 投资组合经理记录审计结果；交易员只执行审过的合约 |
 | `trader` 交易员 | 审计通过的 `final_action_contract`、合约化执行触发规则、盘中行情、执行配置 | 成交/未成交、`execution_result`、`execution_learning_trace` | 否 | 改投资组合经理方向、改投资组合经理手数、直接读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发 | 复盘员/研究员读取执行事实 |
 | `accountant` 会计师 | 成交、持仓、结算价、手续费、滑点、保证金率、合约乘数 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | LLM 调账、学习改账、交易动作 | 复盘员使用结算事实 |
 | `reviewer` 复盘员 | 推荐、合约、成交、结算、执行结果、阶段状态、投资组合经理学习使用痕迹 | Phase4 验收、交易日志、事实归因、学习输入材料 | 否 | 下单、调仓、写最终 action-value | 研究员消费复盘事实 |
@@ -151,6 +151,10 @@ Phase4 完成后，研究学习单独运行：
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
 
 `src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期和交易生命周期记忆语义的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发、已触发成交，以及该合约必须读取的 `action_value_lane` 和 `memory_side_role`。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
+
+`src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的商品差异化分析协议工具。它读取 `src/config/product_price_behavior_profiles.yaml`，把每个品种的趋势惯性、波动特征、产业链确认、季节窗口、假突破风险和适用 setup 格式化给 `technical`、`fundamental`、`commodity_news`，并落成 `product_profile_evidence`。它只改变分析证据层的证据强调与确认纪律；PM 只通过 `signal_collection_contract` 把它当证据上下文读取，Auditor、Trader、Accountant 不直接读取、不解释、不执行该 profile。
+
+`src/tools/common/evidence_fusion_semantics.py` 是多维证据融合预测协议的确定性解释工具。它把三类分析师的技术、基本面、新闻、商品 profile、历史校准和执行反馈相关字段整理为 `fusion_evidence`、`evidence_fusion`、`pm_fusion_diagnostics` 和复盘 `fusion_attribution_label`。它不调用 LLM、不签 `final_action_contract`、不输出手数、不下单、不入账、不直接写 action-value。PM 只能把它作为 `opportunity_scorecard` 的证据分项和合约解释来源；Auditor 只审 PM 是否解释主要冲突和必要确认；Trader、Accountant 不读取该工具。
 
 ## 五、系统事实统一入口
 
@@ -219,13 +223,14 @@ Phase4 完成后，研究学习单独运行：
 
 工具目录按功能边界分类，不按智能体名字分类：
 
-- `src/tools/agent_tools/analysis`：分析侧业务工具，例如分析师证据质量、学习校准和信号融合。
+- `src/tools/agent_tools/analysis`：分析侧业务工具，例如分析师证据质量、学习校准、商品差异化 profile 和信号融合。
 - `src/tools/agent_tools/decision`：决策侧业务工具，例如信号证据收集、记忆读取、机会排序、手数计算、资金部署、失效边界。
 - `src/tools/agent_tools/execution`：执行侧业务工具，例如盘中触发、成交模拟、执行退出规则。
 - `src/tools/agent_tools/research`：研究侧业务工具，例如复盘学习、action-value、profile、state 和结构化研究信息持久化。
 - `src/tools/agent_tools/control`：控制侧治理工具，例如契约覆盖、系统不变量、机制审计、能力卡、工具权限。
 - `src/tools/common`：跨智能体公共基础能力，例如 `contracts.py` 和 `runtime_setup.py`。它们不属于任一智能体，不调用 LLM，不生成策略判断、score/rank、手数、交易动作或 `final_action_contract`。
-- `src/tools/common/final_action_semantics.py`：跨智能体确定性语义状态机，只解释已存在字段，不签发合约、不下单、不入账、不写研究。
+- `src/tools/common/final_action_semantics.py`：跨智能体确定性交易语义状态机，只解释已存在交易字段，不签发合约、不下单、不入账、不写研究。
+- `src/tools/common/evidence_fusion_semantics.py`：跨分析师和决策链的多维预测证据解释工具，只解释证据强弱、时效、一致性、冲突、确认需求和复盘归因，不签发合约、不生成手数、不下单、不入账。
 - `src/util`：更底层的通用基础设施，例如日志、数据库 helper、文本清洗、配置归一化、通用期货审计函数。
 
 命名规则：
@@ -473,6 +478,8 @@ Phase4 完成后，研究学习单独运行：
 - `entry_trigger`、`invalidation_present`、`invalidation_condition`；
 - `setup_type`、`setup_quality_ok`、`horizon_class`、`market_regime`；
 - `evidence_quality`、`missing_evidence`、`current_evidence_conflict`；
+- `fusion_evidence`、`evidence_strength`、`evidence_freshness`、`evidence_decay_risk`、`confirmation_requirements`；
+- 技术面必须补 `technical_false_breakout_risk`；基本面必须补 `fundamental_opposition_strength`；新闻面必须补 `news_impact_window` 和 `one_off_event_risk`；
 - `data_usage_summary`、`no_lookahead_status`。
 
 `setup_quality_ok=true` 只表示形态值得关注，不代表当前触发成立。`trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。
@@ -488,6 +495,8 @@ Phase4 完成后，研究学习单独运行：
 - `trigger_status`；
 - `supporting_analysts`、`opposing_analysts`、`neutral_analysts`；
 - `evidence_strength`、`evidence_conflict_level`；
+- `evidence_fusion`、`evidence_strength_by_analyst`、`evidence_freshness_by_analyst`；
+- `evidence_alignment_state`、`direction_alignment`、`cross_analyst_conflicts`、`dominant_opposing_evidence`、`confirmation_requirements`、`multi_evidence_consensus_score`；
 - `missing_evidence`、`data_quality_flags`；
 - `setup_types`、`horizon_scope`；
 - `invalidation_summary`；

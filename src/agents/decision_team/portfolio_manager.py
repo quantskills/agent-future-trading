@@ -9508,6 +9508,7 @@ def portfolio_agent_futures(state: FundState):
         adaptive_policy_state=early_adaptive_policy_state,
         alpha_setup_profiles=alpha_setup_profiles,
         alpha_setup_action_values=alpha_setup_action_values,
+        signal_collection_contract=signal_collection_contract,
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
@@ -9652,6 +9653,7 @@ def portfolio_agent_futures(state: FundState):
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
                     alpha_setup_action_values=alpha_setup_action_values,
+                    signal_collection_contract=signal_collection_contract,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
@@ -9736,6 +9738,7 @@ def portfolio_agent_futures(state: FundState):
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
                     alpha_setup_action_values=alpha_setup_action_values,
+                    signal_collection_contract=signal_collection_contract,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
@@ -10000,6 +10003,7 @@ def portfolio_agent_futures(state: FundState):
                 adaptive_policy_state=adaptive_policy_state,
                 alpha_setup_profiles=alpha_setup_profiles,
                 alpha_setup_action_values=alpha_setup_action_values,
+                signal_collection_contract=signal_collection_contract,
                 decision_date=trading_date,
                 config=opportunity_scorecard_cfg,
             )

@@ -27,6 +27,8 @@ def normalize_config(config: Mapping[str, Any] | None, config_path: str | Path |
     loaded_catalogs: Dict[str, str] = {}
     _apply_analyst_weight_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_data_factor_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
+    _apply_product_price_behavior_profiles(cfg, catalogs, base_path, loaded_catalogs)
+    _apply_evidence_fusion_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_portfolio_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_learning_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_execution_catalogs(cfg, catalogs, base_path, loaded_catalogs)
@@ -127,6 +129,49 @@ def _apply_data_factor_policy_catalog(
         roles["fundamental_quality_control"] = "data_factor_policy_catalog_runtime_expanded"
         roles["pandaai_extra_data"] = "data_factor_policy_catalog_runtime_expanded"
         roles["factor_data"] = "data_factor_policy_catalog_runtime_expanded"
+
+
+def _apply_product_price_behavior_profiles(
+    cfg: Dict[str, Any],
+    catalogs: Mapping[str, Any],
+    base_path: Path | None,
+    loaded_catalogs: Dict[str, str],
+) -> None:
+    ref = catalogs.get("product_price_behavior_profiles")
+    if not ref:
+        return
+    payload = _load_catalog(ref, base_path)
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, Mapping):
+        raise ValueError("product price behavior profile catalog must contain profiles")
+    cfg["product_price_behavior_profiles"] = payload
+    loaded_catalogs["product_price_behavior_profiles"] = str(_resolve_catalog_path(ref, base_path))
+    cfg.setdefault("_config_parameter_roles", {})
+    roles = cfg["_config_parameter_roles"]
+    if isinstance(roles, dict):
+        roles["product_price_behavior_profiles"] = (
+            "cold_start_analyst_differentiation_profile_only_not_trade_authority"
+        )
+
+
+def _apply_evidence_fusion_policy_catalog(
+    cfg: Dict[str, Any],
+    catalogs: Mapping[str, Any],
+    base_path: Path | None,
+    loaded_catalogs: Dict[str, str],
+) -> None:
+    ref = catalogs.get("evidence_fusion_policy")
+    if not ref:
+        return
+    payload = _load_catalog(ref, base_path)
+    cfg["evidence_fusion_policy"] = payload
+    loaded_catalogs["evidence_fusion_policy"] = str(_resolve_catalog_path(ref, base_path))
+    cfg.setdefault("_config_parameter_roles", {})
+    roles = cfg["_config_parameter_roles"]
+    if isinstance(roles, dict):
+        roles["evidence_fusion_policy"] = (
+            "multidimensional_prediction_evidence_fusion_only_not_trade_authority"
+        )
 
 
 def _apply_portfolio_policy_catalog(

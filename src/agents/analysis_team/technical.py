@@ -35,6 +35,12 @@ from tools.agent_tools.analysis.analyst_learning_calibration import (
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_technical_data_usage
 from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
+from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
+    apply_profile_usage_to_signal,
+    build_profile_usage_contract,
+    format_profile_for_technical,
+    get_product_price_behavior_profile,
+)
 
 def format_signal_compact(signal: Signal) -> str:
     """
@@ -328,6 +334,9 @@ def technical_agent(state: FundState):
     }
 
     technical_context = build_technical_context(ticker, signal_results, features)
+    product_profile = get_product_price_behavior_profile(ticker, full_config)
+    product_profile_usage = build_profile_usage_contract(ticker, "technical", product_profile)
+    technical_context["product_profile_evidence"] = product_profile_usage
 
     llm_path = llm_path_label(full_config, "technical")
 
@@ -343,6 +352,7 @@ def technical_agent(state: FundState):
         signal_results_compact=signal_results_compact,
         gap_analysis=signal_results.get("gap_analysis", "N/A"),
         technical_summary=format_technical_summary_for_prompt(technical_context),
+        product_profile_context=format_profile_for_technical(ticker, product_profile),
         features=features,
         llm_path=llm_path,
     )
@@ -406,6 +416,7 @@ def technical_agent(state: FundState):
         **(getattr(signal, "metadata", {}) or {}),
         "llm_path": llm_path,
         "technical_context": technical_context,
+        "product_profile_evidence": product_profile_usage,
         "indicators_used": list(signal_results.keys()),
         "adaptive_params": adaptive_params,
         "technical_parameter_calibration": technical_calibration_diag,
@@ -423,6 +434,11 @@ def technical_agent(state: FundState):
                 "market_regime": technical_context.get("market_regime"),
                 "tradeability": technical_context.get("tradeability"),
                 "technical_parameter_calibration": technical_calibration_diag,
+            },
+            "product_profile_evidence": {
+                "product_profile_id": product_profile_usage.get("product_profile_id"),
+                "profile_role": product_profile_usage.get("profile_role"),
+                "profile_learning_interaction": product_profile_usage.get("profile_learning_interaction"),
             },
             "neutral_to_opportunity_required": True,
             "position_authority_boundary": "signal_requires_pm_auditor_trader_confirmation",
@@ -443,6 +459,7 @@ def technical_agent(state: FundState):
         trading_date=trading_date,
         ticker=ticker,
     )
+    signal = apply_profile_usage_to_signal(signal, product_profile_usage)
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
         f"latest_price_data_date={latest_price_data_date}; "
@@ -463,6 +480,7 @@ def technical_agent(state: FundState):
         },
         "Data Usage Summary": data_usage_summary,
         "Technical Parameter Calibration": technical_calibration_diag,
+        "Product Price Behavior Profile": product_profile_usage,
         "Structured Technical Context": technical_context,
     }
     if save_outputs:

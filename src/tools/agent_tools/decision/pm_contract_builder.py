@@ -206,6 +206,8 @@ def build_final_action_contract(
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
             "opportunity_rank": scorecard_side.get("opportunity_rank"),
             "capital_allocation_reason": scorecard_side.get("capital_allocation_reason"),
+            "pm_fusion_diagnostics": scorecard_side.get("pm_fusion_diagnostics") or {},
+            "pm_conflict_resolution": scorecard_side.get("pm_conflict_resolution") or {},
             "market_confirmation_score": (
                 coerce_float((market_confirmation or {}).get("confirmation_score"), 0.0)
                 if isinstance(market_confirmation, dict)

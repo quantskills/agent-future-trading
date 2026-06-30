@@ -29,6 +29,7 @@ from tools.common.learning_contract import (
     build_event_memory_contract,
 )
 from tools.common.contracts import validate_researcher_artifact_boundary
+from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from util.futures_audit import (
     build_execution_learning_trace,
     categorize_no_trade_reason,
@@ -1000,6 +1001,28 @@ def _write_opportunity_ranking_learning_events(
             evidence=evidence,
             action=action,
             status="candidate",
+        )
+        fusion_attribution = build_reviewer_fusion_attribution(snapshot)
+        _insert_learning_event(
+            cursor,
+            config_id=config_id,
+            trading_date=trading_date,
+            event_type="evidence_fusion_attribution",
+            scope_type="ticker_side",
+            scope_key=f"{ticker}:{side}",
+            evidence={
+                "recommendation_id": recommendation.get("id"),
+                "ticker": ticker,
+                "side": side,
+                "fusion_attribution_label": fusion_attribution.get("fusion_attribution_label"),
+                "pm_fusion_diagnostics": fusion_attribution.get("pm_fusion_diagnostics") or {},
+                "pm_conflict_resolution": fusion_attribution.get("pm_conflict_resolution") or {},
+            },
+            action={
+                "consumer_scope": "future_analyst_and_pm_fusion_learning",
+                "does_not_modify_same_day_trade_facts": True,
+                "does_not_create_trade_authority": True,
+            },
         )
         inserted += 1
     return inserted

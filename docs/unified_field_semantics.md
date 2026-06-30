@@ -16,6 +16,10 @@
 
 共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓和退出。
 
+分析师差异化分析协议：`src/config/product_price_behavior_profiles.yaml` 是三类分析师的商品价格行为冷启动配置；`src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的确定性读取与格式化工具。它只服务 `technical`、`fundamental`、`commodity_news` 的证据分析，输出 `product_profile_evidence`，用于区分品种价格行为、趋势惯性、波动阈值、产业链确认、季节窗口、假突破风险和适合的 setup。它不调用 LLM，不读研究库，不签合约，不下单，不入账，不写研究；PM 只能从 `signal_collection_contract` 读取它作为证据上下文，Auditor、Trader、Accountant 不直接读取或解释该 profile。
+
+多维证据融合预测协议：`src/config/evidence_fusion_policy_catalog.yaml` 是证据融合冷启动策略目录；`src/tools/common/evidence_fusion_semantics.py` 是跨分析师、信号收集、PM 评分、Auditor 审核、Reviewer 归因和 Researcher 学习上下文的确定性解释工具。它只解释技术、基本面、新闻、商品 profile、历史学习上下文和执行反馈形成的预测证据强弱、时效、一致性、冲突、确认需求和缺失证据；不调用 LLM，不签合约，不下单，不入账，不直接写 action-value。Trader 和 Accountant 不读取该工具，也不能用融合证据改执行或结算。
+
 ## 1. 通用消息与 artifact 字段
 
 | 字段 | 放置位置 | 含义 |
@@ -89,6 +93,33 @@
 | `raw_response` | Researcher LLM notes | 研究员 LLM 原始 response。 |
 | `data_cutoff` | 分析师 / PM / artifact | 数据截止点，用于防未来函数。 |
 | `data_usage_summary` | 分析师证据 / 复盘 / 研究 | 本次分析使用的数据来源、日期范围、缺失情况、新鲜度。 |
+| `product_price_behavior_profiles` | config catalog | 三类分析师商品差异化分析冷启动配置；不随回测自动改写，不创建交易权限。 |
+| `product_price_behavior_profile` | 分析师输入上下文 | 单品种价格行为分析框架，定义趋势惯性、波动、确认要求、季节窗口和假突破风险；只用于证据分析。 |
+| `product_profile_evidence` | 分析师 `metadata` / `action_evidence_contract` / `signal_collection_contract.source_contracts` | 分析师实际使用商品差异化 profile 的结构化痕迹；只能说明证据强调与确认纪律，不能包含手数、保证金、reason code 或最终交易动作。 |
+| `product_profile_id` | `product_profile_evidence` / `action_evidence_contract.learning_scope` / `signal_collection_contract.evidence_items` | 品种 profile 的稳定 ID，格式为 profile version 加 ticker；用于复盘和研究识别分析框架来源。 |
+| `product_profile_version` | `product_profile_evidence` | 品种 profile 版本。 |
+| `product_profile_used` | `product_profile_evidence` / `action_evidence_contract.learning_scope` | 本次分析是否使用了商品差异化 profile。 |
+| `profile_fields_used` | `product_profile_evidence` | 分析师本次使用的 profile 字段集合。 |
+| `profile_supported_evidence` | `product_profile_evidence` | 当前证据支持 profile 预期行为的部分。 |
+| `profile_conflicting_evidence` | `product_profile_evidence` | 当前证据与 profile 预期行为冲突的部分。 |
+| `profile_missing_evidence` | `product_profile_evidence` | 使用该 profile 时仍缺失的确认项。 |
+| `profile_assumption_status` | `product_profile_evidence` | profile 假设在当前日证据下的状态。 |
+| `profile_relevance_score` | `product_profile_evidence` | profile 对本次分析的相关性评分；不是机会评分或交易排序。 |
+| `profile_learning_interaction` | `product_profile_evidence` | 静态 profile 与动态 `learning_context` / `analyst_learning_calibration` 的关系说明。 |
+| `profile_invalid_use_flags` | `product_profile_evidence` | 本次分析中被识别的 profile 错用风险，如把成本变化当直接交易权限。 |
+| `profile_analysis_boundary` | `product_profile_evidence` | 固定为分析证据边界，声明该 profile 不创建交易权限。 |
+| `evidence_fusion_policy` | config catalog | 多维证据融合预测协议配置；只定义证据强弱、时效、冲突、确认需求、profile 融合和复盘学习口径，不创建交易权限。 |
+| `evidence_fusion_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/evidence_fusion_semantics.py` 生成的只读融合语义解释；不签合约、不下单、不入账、不写当天交易事实。 |
+| `fusion_evidence` | 分析师 `metadata.action_evidence_contract` / `signal_collection_contract.source_contracts` | 单个分析师的多维证据融合字段包，说明证据强弱、时效、冲突、缺失和确认需求；不是交易合约。 |
+| `evidence_strength_score` | `fusion_evidence` / `evidence_fusion` | 预测证据强度的 0-1 确定性评分；可被 PM 用于排序分项，不能直接授权交易。 |
+| `evidence_freshness` | `fusion_evidence` / `evidence_fusion` | 预测证据时效标签，如 fresh、usable、stale、unknown。 |
+| `evidence_freshness_score` | `fusion_evidence` | 预测证据时效 0-1 评分。 |
+| `evidence_decay_risk` | `fusion_evidence` | 证据失效风险，供分析师和 PM 判断是否需要更多确认。 |
+| `technical_false_breakout_risk` | 技术面 `fusion_evidence` | 技术信号假突破风险；只能影响确认纪律和 PM 排序分项。 |
+| `fundamental_opposition_strength` | 基本面 `fusion_evidence` | 基本面对当前方向的反向压制强度；不能直接阻断交易，必须由 PM 在合约里解释。 |
+| `news_impact_window` | 新闻面 `fusion_evidence` | 新闻催化有效窗口；不是 Trader 触发权限。 |
+| `one_off_event_risk` | 新闻面 `fusion_evidence` | 新闻是否属于一次性冲击或噪音风险。 |
+| `fusion_boundary` | `fusion_evidence` / `evidence_fusion` | 融合字段权限边界；固定说明其不创建 score/rank/手数/交易动作。 |
 | `no_lookahead_status` | 数据派生 artifact | 未来函数检查状态。 |
 | `source_artifacts` | 所有 artifact | 上游 artifact ID 或来源说明。 |
 | `validation_errors` | 所有合约 / artifact | 结构或语义校验错误。 |
@@ -209,6 +240,17 @@
 | `sample_state` | trade research contract | 研究样本状态，只用于研究分层。 |
 | `maturity` | trade research contract | 研究成熟度。 |
 | `product_context` | trade research contract | 品种业务上下文。 |
+| `price_behavior` | product price behavior profile | 品种价格行为摘要，如成本链敏感、库存驱动、季节/政策敏感；只用于分析框架。 |
+| `trend_inertia` | product price behavior profile | 品种趋势惯性分层；技术分析用它调整趋势确认纪律，不是开仓权限。 |
+| `volatility_profile` | product price behavior profile | 品种常态波动特征；分析师用它调整风险和触发质量要求。 |
+| `false_breakout_risk` | product price behavior profile | 品种假突破风险分层；用于要求额外确认。 |
+| `preferred_setups` | product price behavior profile | 该品种更适合关注的 setup 家族；不是 PM 排序结果。 |
+| `caution_setups` | product price behavior profile | 该品种需要降级或额外确认的 setup 家族。 |
+| `confirmation_requirements` | product price behavior profile / `product_profile_evidence` / `fusion_evidence` / `signal_collection_contract` | 该品种或当前融合证据必须优先寻找的确认项，如库存、成本链、下游需求、季节窗口、价格量能确认；不是交易授权。 |
+| `fundamental_driver_priority` | product price behavior profile | 基本面分析师的驱动优先级；只影响证据排序，不影响 PM 权限。 |
+| `news_catalyst_priority` | product price behavior profile | 新闻分析师的催化优先级；只影响事件筛选，不影响 Trader 触发。 |
+| `seasonal_event_window` | product price behavior profile | 该品种需要关注的季节或事件窗口。 |
+| `invalid_profile_use` | product price behavior profile | 明确禁止的 profile 使用方式。 |
 
 ### 3.1 信号收集员结构化证据包字段：`signal_collection_contract`
 
@@ -217,6 +259,9 @@
 | `signal_collection_contract` | `signal_collector` 输出 / PM 输入 | 信号收集员给投资组合经理的盘前统一结构化预测证据包；不是交易合约，不能包含手数、仓位比例或最终交易动作。 |
 | `source_contracts` | `signal_collection_contract` | 被收集的上游分析师 `action_evidence_contract` 引用列表。 |
 | `evidence_items` | `signal_collection_contract` | 逐条结构化证据明细，必须保留来源分析师、来源字段和证据含义，不能只写汇总文字。 |
+| `product_profile_id` | `signal_collection_contract.evidence_items` | collector 保真传递的分析师商品 profile 来源 ID；不是交易权限。 |
+| `product_profile_used` | `signal_collection_contract.evidence_items` | collector 保真传递的 profile 使用状态；collector 不解释、不评分。 |
+| `product_profile_analysis_boundary` | `signal_collection_contract.evidence_items` | collector 保真传递的 profile 边界声明；固定为分析证据边界。 |
 | `dominant_side` | `signal_collection_contract` | 盘前结构化预测证据汇总后的主方向，如 long、short、flat、mixed；不是交易授权。 |
 | `side_consensus` | `signal_collection_contract` | 三类分析师在方向上的一致性或分歧状态。 |
 | `trigger_status` | `signal_collection_contract` | 由 `trigger_valid`、`current_trigger_confirmed`、`entry_trigger` 汇总出的当前触发状态；不是交易员执行权限。 |
@@ -224,6 +269,14 @@
 | `opposing_analysts` | `signal_collection_contract` | 反对 `dominant_side` 或给出反向证据的分析师列表。 |
 | `neutral_analysts` | `signal_collection_contract` | 无明确方向或只给背景证据的分析师列表。 |
 | `evidence_strength` | `signal_collection_contract` | 盘前预测证据强弱汇总，来源于分析师置信度、证据质量和触发状态；不能替代 `opportunity_score`。 |
+| `evidence_fusion` | `signal_collection_contract` | 信号收集员保真生成的多维证据融合汇总，包含强弱、时效、一致性、冲突、确认需求和缺失证据；不是 PM score/rank。 |
+| `evidence_strength_by_analyst` | `signal_collection_contract.evidence_fusion` | 按 technical、fundamental、commodity_news 分开的证据强度标签。 |
+| `evidence_freshness_by_analyst` | `signal_collection_contract.evidence_fusion` | 按分析师分开的证据时效标签。 |
+| `evidence_alignment_state` | `signal_collection_contract.evidence_fusion` | 三类预测证据的一致性状态，如 aligned、conflicted、single_source、no_direction。 |
+| `direction_alignment` | `signal_collection_contract.evidence_fusion` | `evidence_alignment_state` 的兼容字段；只能表达方向一致性，不表达交易授权。 |
+| `cross_analyst_conflicts` | `signal_collection_contract.evidence_fusion` | 三类分析师之间或同日证据内部的结构化冲突列表。 |
+| `dominant_opposing_evidence` | `signal_collection_contract.evidence_fusion` | 针对主方向的反向证据摘要；PM 必须解释，Auditor 只审 PM 是否解释。 |
+| `multi_evidence_consensus_score` | `signal_collection_contract.evidence_fusion` / PM scorecard | 多维证据一致性评分；只作为 PM `opportunity_score_components` 分项，不能替代最终合约。 |
 | `evidence_conflict_level` | `signal_collection_contract` | 盘前预测证据冲突程度汇总，来源于 `current_evidence_conflict`、反向证据和分析师分歧。 |
 | `data_quality_flags` | `signal_collection_contract` | 数据新鲜度、缺失、前视风险和质量问题标记。 |
 | `setup_types` | `signal_collection_contract` | 从上游分析师证据收集到的 `setup_type` 列表。 |
@@ -302,6 +355,9 @@
 | `semantic_state` | Auditor / Reviewer / Researcher 只读摘要 | 对同一张 `final_action_contract` 的生命周期解释，如 `conditional_monitor`、`open`、`increase`、`decrease`、`exit`、`ordinary_hold`、`hard_block`；不得包含改手数、改方向或新合约字段。 |
 | `scorecard_current_tradeable_probe_seed` | `final_action_contract.reason_codes` / PM 诊断 | PM scorecard 将当前可交易候选释放为受控 probe 的原因代码；只适用于 `probe_candidate` / `tradeable_candidate` 或当前触发已成立的候选，不能用于 `watch_for_trigger` 条件监控。 |
 | `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
+| `pm_fusion_diagnostics` | PM scorecard / `final_action_contract.evidence_used` / Auditor / Reviewer | PM 从 `signal_collection_contract.evidence_fusion` 派生的融合诊断，记录共识分、冲突数量、反向证据数量、缺失证据、确认需求和 score 调整；不是第二合约。 |
+| `pm_conflict_resolution` | PM scorecard / `final_action_contract.evidence_used` / Auditor / Reviewer | PM 对主要冲突、反向证据和确认需求的解释结果；Auditor 只审是否存在且自洽，不重新融合证据、不改方向手数。 |
+| `fusion_score_adjustment` | `pm_fusion_diagnostics` / `opportunity_score_components` | 由融合证据冲突、缺失和共识形成的 PM 排序分项调整；不能单独创建交易机会。 |
 | `risk_controls` | `final_action_contract` | 风险控制项。 |
 | `capital_controls` | `final_action_contract` | 资金控制项。 |
 | `margin_ratio` | `final_action_contract` / 组合 / 结算 | 目标或当前保证金比例。 |
@@ -318,6 +374,8 @@
 | `recent_tail_loss_penalty` | `opportunity_score_components` | 近期同作用域大亏或 tail-loss episode 对排序的惩罚分项，可抵消旧正向学习，防止失效 alpha 继续被抬分；不等于硬风险 block。 |
 | `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。 |
 | `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。 |
+| `fusion_attribution_label` | Reviewer 归因 / Researcher 学习输入 | 复盘员对 PM 融合证据处理结果的只读标签，如 fusion_conflict_handled、fusion_conflict_unresolved、multi_evidence_consensus_supported；只供未来学习，不改当天事实。 |
+| `evidence_fusion_attribution` | Researcher learning event | 研究员基于复盘事实写入的未来融合学习上下文；只服务下一交易日分析师校准和 PM 排序，不创建当天交易权限。 |
 | `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。 |
 | `learning_adjustment_summary` | 分析师证据 / PM scorecard / `final_action_contract.learning_used` / Researcher / 复盘评估 | 历史学习如何影响本次证据、评分或资金排序；不能直接改变 Trader 方向或手数。 |
 | `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |

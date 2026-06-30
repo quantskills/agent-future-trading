@@ -34,6 +34,8 @@ PRE_BACKTEST_TEST_MODULES = [
     "tests.test_pm_watch_for_trigger_release",
     "tests.test_pm_state_transition_matrix",
     "tests.test_analyst_output_landing",
+    "tests.test_analyst_product_price_behavior_profile",
+    "tests.test_evidence_fusion_semantics",
     "tests.test_system_invariant_audit",
     "tests.test_mechanism_effectiveness_audit",
     "tests.test_contract_coverage_audit",
