@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
-from tools.common.final_action_semantics import is_conditional_monitor_contract
+from tools.common.final_action_semantics import derive_memory_requirements, is_conditional_monitor_contract
 
 
 STRATEGY_SOURCE_TYPE = "strategy"
@@ -411,6 +411,10 @@ def _row_consumer_scope(row: Dict[str, Any]) -> str:
     return _lower(_payload_or_row_value(row, "consumer_scope", "learning_consumer_scope") or "pm_learning")
 
 
+def _row_memory_side_role(row: Dict[str, Any]) -> str:
+    return _lower(_payload_or_row_value(row, "memory_side_role"))
+
+
 def _row_has_reward(row: Dict[str, Any]) -> bool:
     return (
         _payload_or_row_value(row, "reward_sum") is not None
@@ -433,6 +437,24 @@ def _row_has_pm_canonical_fields(row: Dict[str, Any]) -> bool:
         and _row_lane(row)
         and _row_has_reward(row)
     )
+
+
+def _lane_matches_requirement(row: Dict[str, Any], lane: str) -> bool:
+    row_lane = _row_lane(row)
+    required = _lower(lane)
+    if not required:
+        return True
+    if required == "conditional_monitor":
+        return row_lane in {"conditional_monitor", "open", "hold"}
+    if required == "open":
+        return row_lane in {"open", "add", "increase"}
+    if required == "hold":
+        return row_lane in {"hold", "exit", "reduce", "open"}
+    if required == "reduce":
+        return row_lane in {"reduce", "exit", "hold"}
+    if required == "exit":
+        return row_lane in {"exit", "reduce", "hold", "open"}
+    return row_lane == required
 
 
 def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -500,10 +522,17 @@ def _prior_real_action_values(
     ticker: str,
     side: str,
     decision_date: str,
+    lane: str = "",
+    memory_side_role: str = "",
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for row in action_values:
         if not _matches_action_value_scope(row, ticker=ticker, side=side, decision_date=decision_date):
+            continue
+        if not _lane_matches_requirement(row, lane):
+            continue
+        row_role = _row_memory_side_role(row)
+        if row_role and memory_side_role and row_role != _lower(memory_side_role):
             continue
         preference = _row_preference(row)
         if preference not in ACTION_PREFERENCE_VALUES:
@@ -514,6 +543,26 @@ def _prior_real_action_values(
             continue
         rows.append(row)
     return rows
+
+
+def _dedupe_action_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    fallback = 0
+    for row in rows:
+        key = (
+            str(row.get("id") or _payload_or_row_value(row, "id") or f"row-{fallback}"),
+            str(row.get("scope_key") or _payload_or_row_value(row, "scope_key") or ""),
+            str(row.get("side") or _payload_or_row_value(row, "side") or ""),
+            _row_lane(row),
+            _row_preference(row),
+        )
+        fallback += 1
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
 
 
 def _contract_rows_include_prior(contract_rows: Iterable[Dict[str, Any]], prior_rows: Iterable[Dict[str, Any]]) -> bool:
@@ -695,7 +744,35 @@ def _audit_recommendation_mechanisms(
         day = _date10(recommendation.get("trading_date") or recommendation.get("effective_trade_date"))
         label = f"{day}:{ticker}:{recommendation_id}"
         side = _recommendation_side(recommendation, contract)
-        prior_rows = _prior_real_action_values(action_values, ticker=ticker, side=side, decision_date=day)
+        memory_requirements = derive_memory_requirements(contract)
+        required_memory = [
+            item for item in (memory_requirements.get("required_pm_memory") or [])
+            if isinstance(item, dict) and item.get("must_land_in_pm_contract")
+        ]
+        if not required_memory and side in {"long", "short"}:
+            required_memory = [{
+                "side": side,
+                "lane": "",
+                "memory_side_role": "",
+                "must_land_in_pm_contract": True,
+            }]
+        prior_rows_by_requirement: List[Dict[str, Any]] = []
+        for requirement in required_memory:
+            req_side = _lower(requirement.get("side")) or side
+            if req_side not in {"long", "short"}:
+                continue
+            req_lane = _lower(requirement.get("lane") or requirement.get("learning_lane"))
+            req_role = _lower(requirement.get("memory_side_role"))
+            requirement_prior_rows = _prior_real_action_values(
+                action_values,
+                ticker=ticker,
+                side=req_side,
+                decision_date=day,
+                lane=req_lane,
+                memory_side_role=req_role,
+            )
+            prior_rows_by_requirement.extend(requirement_prior_rows)
+        prior_rows = _dedupe_action_rows(prior_rows_by_requirement)
         contract_rows = _contract_action_value_rows(contract)
         components = _learning_components(contract)
         components_nonzero = _learning_components_nonzero(components)

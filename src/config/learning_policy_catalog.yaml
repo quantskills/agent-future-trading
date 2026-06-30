@@ -12,8 +12,8 @@ learning_gatekeeping_policy:
   # Auditor 只审合约，Trader 只执行审过的合约。
   # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
   # 策略交易事实仍只能通过 PM 授权事实入口写入 final_action_contract。
-  # Researcher 写入的 action-value 必须带 consumer_scope 与 usage_boundary：
-  # pm_learning 给 PM open/hold/exit/execution 评分和合约解释；
+  # Researcher 写入的 action-value 必须带 consumer_scope、memory_side_role 与 usage_boundary：
+  # pm_learning 给 PM open/add/hold/reduce/exit/conditional_monitor/execution 评分和合约解释；
   # analyst_calibration 只给分析师安全 signal_calibration；
   # trader_execution_learning 是 Trader 输出给复盘/研究的执行学习 trace scope；
   # Trader 不读取研究库，执行学习必须先由 PM 合约化为 execution_profile / entry_trigger。
@@ -21,8 +21,10 @@ learning_gatekeeping_policy:
   # 按 exact state -> same ticker/side/horizon -> same ticker/side -> weak prior
   # 读取 consumer_scope=pm_learning 的 canonical action-value / episode 行，
   # 并优先使用顶层字段，payload 只作为历史兼容 fallback。
-  # PM 必须对 long/short 候选侧分别读取真实 action-value 后再重建 scorecard；
-  # 不能只按初始 preferred_side 取学习，否则学习本身无法纠偏方向排序。
+  # PM 必须按 final_action_semantics 的交易生命周期读取记忆：
+  # open 读 target_side；add/scale 读 target_side 与 current_position_side；
+  # reduce/exit/hold 读 current_position_side；conditional_monitor 读 trigger_side。
+  # 不能只按初始 preferred_side 或目标机会方向取学习，否则退出/持仓生命周期会丢失。
   research_output_contract_version: agentquant.research_action_value.v1
   analyst_allowed_action_value_view: signal_calibration_only
   learning_consumer_scopes:
@@ -31,7 +33,8 @@ learning_gatekeeping_policy:
     trader_execution_learning: execution_trace_for_research_only
     research_diagnostics: protocol_and_human_review_only
   pm_allowed_consumer_scope: pm_learning
-  pm_allowed_action_value_lanes: [open, hold, exit, execution]
+  pm_allowed_action_value_lanes: [open, add, hold, reduce, exit, conditional_monitor, execution]
+  pm_allowed_memory_side_roles: [target_side, current_position_side, trigger_side, historical_sample_side]
   analyst_allowed_consumer_scope: analyst_calibration
   trader_direct_research_consumption_allowed: false
   pm_action_value_retrieval_order:
@@ -151,7 +154,7 @@ learning:
     # negative_revalidate / negative_hold_revalidate / tail_loss_protect。
     # 这些偏好写入数据库，
     # 由 PM 在下一交易日结合当前证据仲裁，不回写 YAML。
-    # open/hold/exit/execution 必须分账：open 正收益不能来自 exit/execution，
+    # open/add/hold/reduce/exit/conditional_monitor/execution 必须分账：open 正收益不能来自 exit/execution，
     # exit/reduce 正收益不能反向支持开仓放大；execution 只能先影响 PM 写入未来
     # final_action_contract.execution_profile / entry_trigger，再由 Trader 执行合约化触发规则。
     enabled: true

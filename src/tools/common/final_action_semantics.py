@@ -20,6 +20,15 @@ DECREASE_ACTIONS = {"reduce", "trim", "decrease", "reduce_position", "scale_down
 EXIT_ACTIONS = {"exit", "close", "close_long", "close_short", "close_position", "risk_exit", "flatten"}
 TRADE_ACTIONS = OPEN_ACTIONS | INCREASE_ACTIONS | DECREASE_ACTIONS | EXIT_ACTIONS | CONDITIONAL_ACTIONS
 
+MEMORY_LANES = {"open", "add", "hold", "reduce", "exit", "execution", "conditional_monitor"}
+PM_MEMORY_LANES = {"open", "hold", "reduce", "exit", "conditional_monitor"}
+MEMORY_SIDE_ROLES = {
+    "target_side",
+    "current_position_side",
+    "trigger_side",
+    "historical_sample_side",
+}
+
 DIRECT_AUTHORITY_TYPES = {"real_budget_entry", "scale", "add", "reduce", "exit", "risk_exit"}
 PROBE_AUTHORITY_TYPES = {"exploration_probe"}
 BLOCKING_AUTHORITY_TYPES = {"", "watchlist_only", "no_trade", "not_applicable", "analysis_or_watchlist_only"}
@@ -222,6 +231,36 @@ def _dedupe(values: Iterable[Any] | None) -> list[str]:
     return sorted({text for text in (_clean(item) for item in (values or [])) if text})
 
 
+def _side_from_lots(value: int) -> str:
+    if value > 0:
+        return "long"
+    if value < 0:
+        return "short"
+    return ""
+
+
+def _compact_requirement(
+    *,
+    lane: str,
+    side: str,
+    side_role: str,
+    must_land: bool,
+    reason: str,
+) -> dict[str, Any]:
+    lane_value = _clean(lane)
+    side_value = _clean(side)
+    role_value = _clean(side_role)
+    return {
+        "lane": lane_value,
+        "learning_lane": lane_value,
+        "action_value_lane": lane_value,
+        "side": side_value,
+        "memory_side_role": role_value,
+        "must_land_in_pm_contract": bool(must_land),
+        "reason": _clean(reason),
+    }
+
+
 def reason_codes_from(value: Any) -> list[str]:
     if isinstance(value, Mapping):
         raw = value.get("reason_codes")
@@ -390,8 +429,372 @@ def classify_final_action_contract(contract: Mapping[str, Any] | None) -> dict[s
     }
 
 
+def _infer_memory_lifecycle(contract: Mapping[str, Any], semantics: Mapping[str, Any]) -> str:
+    action = _clean(semantics.get("action") or contract.get("final_action"))
+    current_lots = _int(semantics.get("current_lots"), 0)
+    target_lots = _int(semantics.get("target_lots"), current_lots)
+    lots_delta = _int(semantics.get("lots_delta"), target_lots - current_lots)
+    if is_conditional_monitor_contract(contract):
+        return "conditional_monitor"
+    if action in OPEN_ACTIONS:
+        return "open"
+    if action in INCREASE_ACTIONS:
+        return "increase"
+    if action in DECREASE_ACTIONS:
+        return "decrease"
+    if action in EXIT_ACTIONS:
+        return "exit"
+    if action in NO_TRADE_ACTIONS:
+        if current_lots and target_lots == current_lots:
+            return "ordinary_hold"
+        if current_lots and target_lots == 0:
+            return "exit"
+        return "ordinary_hold"
+    if lots_delta:
+        current_side = _side_from_lots(current_lots)
+        target_side = _side_from_lots(target_lots)
+        if current_lots and target_lots == 0:
+            return "exit"
+        if current_side and target_side == current_side and abs(target_lots) < abs(current_lots):
+            return "decrease"
+        if current_side and target_side == current_side and abs(target_lots) > abs(current_lots):
+            return "increase"
+        if target_side:
+            return "open"
+    return _clean(semantics.get("lifecycle_state") or "ordinary_hold")
+
+
+def derive_memory_requirements(contract: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the PM memory lanes and side roles required by this contract.
+
+    The contract lifecycle determines what ``side`` means.  For new risk it is
+    the target side; for position management it is the current position side; for
+    conditional monitoring it is the trigger side.  This function is read-only:
+    it does not fetch memory, sign a contract, trade, account, or write research.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    semantics = classify_final_action_contract(contract)
+    current_lots = int(semantics.get("current_lots") or 0)
+    target_lots = int(semantics.get("target_lots") or 0)
+    current_side = _side_from_lots(current_lots)
+    target_side = _side_from_lots(target_lots)
+    action = _clean(semantics.get("action"))
+    lifecycle = _infer_memory_lifecycle(contract, semantics)
+    requirements: list[dict[str, Any]] = []
+    audit_only: list[dict[str, Any]] = []
+
+    if lifecycle == "conditional_monitor":
+        trigger_side = target_side or current_side or _clean(contract.get("side"))
+        if trigger_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="conditional_monitor",
+                    side=trigger_side,
+                    side_role="trigger_side",
+                    must_land=True,
+                    reason="conditional_monitor_trigger_side_memory",
+                )
+            )
+            audit_only.append(
+                _compact_requirement(
+                    lane="open",
+                    side=trigger_side,
+                    side_role="trigger_side",
+                    must_land=False,
+                    reason="conditional_monitor_open_context",
+                )
+            )
+    elif lifecycle == "open":
+        if target_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="open",
+                    side=target_side,
+                    side_role="target_side",
+                    must_land=True,
+                    reason="new_open_target_side_memory",
+                )
+            )
+    elif lifecycle == "increase":
+        if target_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="add",
+                    side=target_side,
+                    side_role="target_side",
+                    must_land=True,
+                    reason="increase_target_side_add_memory",
+                )
+            )
+            requirements.append(
+                _compact_requirement(
+                    lane="open",
+                    side=target_side,
+                    side_role="target_side",
+                    must_land=True,
+                    reason="increase_target_side_open_memory",
+                )
+            )
+        if current_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="hold",
+                    side=current_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="increase_current_position_hold_memory",
+                )
+            )
+    elif lifecycle == "decrease":
+        managed_side = current_side or target_side
+        if managed_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="reduce",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="decrease_current_position_reduce_memory",
+                )
+            )
+            requirements.append(
+                _compact_requirement(
+                    lane="hold",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="decrease_current_position_hold_memory",
+                )
+            )
+            requirements.append(
+                _compact_requirement(
+                    lane="exit",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="decrease_current_position_exit_memory",
+                )
+            )
+    elif lifecycle == "exit":
+        managed_side = current_side or target_side
+        if managed_side in {"long", "short"}:
+            requirements.append(
+                _compact_requirement(
+                    lane="exit",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="exit_current_position_exit_memory",
+                )
+            )
+            requirements.append(
+                _compact_requirement(
+                    lane="hold",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="exit_current_position_hold_memory",
+                )
+            )
+            requirements.append(
+                _compact_requirement(
+                    lane="reduce",
+                    side=managed_side,
+                    side_role="current_position_side",
+                    must_land=True,
+                    reason="exit_current_position_reduce_memory",
+                )
+            )
+    elif lifecycle == "ordinary_hold" and current_side in {"long", "short"}:
+        requirements.append(
+            _compact_requirement(
+                lane="hold",
+                side=current_side,
+                side_role="current_position_side",
+                must_land=True,
+                reason="hold_current_position_hold_memory",
+            )
+        )
+        audit_only.append(
+            _compact_requirement(
+                lane="exit",
+                side=current_side,
+                side_role="current_position_side",
+                must_land=False,
+                reason="hold_current_position_exit_context",
+            )
+        )
+
+    # Dedupe while preserving declaration order and allowing add->open fallback.
+    seen: set[tuple[str, str, str, bool]] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in requirements:
+        lane = _clean(item.get("lane"))
+        if lane == "add":
+            # The DB stores older add samples as open/increase in some paths; PM
+            # reads open as the canonical add/increase fallback.
+            item = dict(item)
+            item["lane"] = item["learning_lane"] = item["action_value_lane"] = "open"
+        key = (
+            _clean(item.get("lane")),
+            _clean(item.get("side")),
+            _clean(item.get("memory_side_role")),
+            bool(item.get("must_land_in_pm_contract")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return {
+        "contract": "final_action_semantics.memory_requirements.v1",
+        "action_lifecycle": lifecycle,
+        "action": action,
+        "current_position_side": current_side,
+        "target_side": target_side,
+        "contract_side_role": (
+            "trigger_side" if lifecycle == "conditional_monitor"
+            else "target_side" if lifecycle in {"open", "increase"}
+            else "current_position_side" if lifecycle in {"ordinary_hold", "decrease", "exit"}
+            else ""
+        ),
+        "required_memory_lanes": sorted({item["lane"] for item in deduped}),
+        "required_memory_side_roles": sorted({item["memory_side_role"] for item in deduped}),
+        "required_pm_memory": deduped,
+        "must_land_in_pm_contract": [item for item in deduped if item.get("must_land_in_pm_contract")],
+        "audit_only_memory": audit_only,
+        "accounting_reads_memory": False,
+        "execution_reads_pm_action_value": False,
+    }
+
+
+def _requirement_key(item: Mapping[str, Any] | None) -> tuple[str, str, str]:
+    item = item if isinstance(item, Mapping) else {}
+    return (
+        _clean(item.get("lane") or item.get("learning_lane") or item.get("action_value_lane")),
+        _clean(item.get("side")),
+        _clean(item.get("memory_side_role")),
+    )
+
+
+def _lane_matches_requirement(row_lane: str, required_lane: str) -> bool:
+    row_lane = _clean(row_lane)
+    required_lane = _clean(required_lane)
+    if not row_lane or not required_lane:
+        return False
+    aliases = {
+        "conditional_monitor": {"conditional_monitor", "open", "hold"},
+        "reduce": {"reduce", "exit", "hold"},
+        "exit": {"exit", "reduce", "hold", "open"},
+        "hold": {"hold", "exit", "reduce", "open"},
+        "open": {"open", "add", "increase"},
+    }
+    return row_lane in aliases.get(required_lane, {required_lane})
+
+
+def _row_text(row: Mapping[str, Any], key: str) -> str:
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    return _clean(row.get(key) or payload.get(key))
+
+
+def _row_covers_requirement(row: Mapping[str, Any], requirement: Mapping[str, Any]) -> bool:
+    if not isinstance(row, Mapping) or not isinstance(requirement, Mapping):
+        return False
+    required_lane, required_side, required_role = _requirement_key(requirement)
+    row_lane = _row_text(row, "learning_lane") or _row_text(row, "action_value_lane") or _row_text(row, "action_name")
+    row_side = _row_text(row, "side")
+    row_role = _row_text(row, "memory_side_role")
+    if required_side and row_side and row_side not in {required_side, "*"}:
+        return False
+    if required_role and row_role and row_role != required_role:
+        return False
+    return _lane_matches_requirement(row_lane, required_lane)
+
+
+def audit_pm_memory_consumption(contract: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Audit whether a signed PM contract carries its required memory evidence.
+
+    The function is intentionally read-only.  It inspects only the PM contract
+    artifact already handed to downstream agents; it does not query research
+    tables, mutate the contract, issue orders, or write accounting/research
+    facts.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    expected = derive_memory_requirements(contract)
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
+    declared = (
+        learning_used.get("memory_requirements")
+        if isinstance(learning_used.get("memory_requirements"), Mapping)
+        else {}
+    )
+    retrieval = (
+        learning_used.get("memory_retrieval")
+        if isinstance(learning_used.get("memory_retrieval"), Mapping)
+        else {}
+    )
+    rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
+    expected_required = [
+        item for item in (expected.get("must_land_in_pm_contract") or [])
+        if isinstance(item, Mapping) and item.get("must_land_in_pm_contract")
+    ]
+    declared_required = [
+        item for item in (declared.get("must_land_in_pm_contract") or [])
+        if isinstance(item, Mapping) and item.get("must_land_in_pm_contract")
+    ]
+    expected_keys = sorted(_requirement_key(item) for item in expected_required)
+    declared_keys = sorted(_requirement_key(item) for item in declared_required)
+    detail_rows = retrieval.get("requirement_details") if isinstance(retrieval.get("requirement_details"), list) else []
+    retrieval_counts: dict[tuple[str, str, str], int] = {}
+    for detail in detail_rows:
+        if not isinstance(detail, Mapping):
+            continue
+        key = _requirement_key(detail)
+        retrieval_counts[key] = max(retrieval_counts.get(key, 0), _int(detail.get("row_count"), 0))
+
+    uncovered: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for requirement in expected_required:
+        key = _requirement_key(requirement)
+        matched_rows = [row for row in rows if _row_covers_requirement(row, requirement)]
+        retrieval_row_count = retrieval_counts.get(key, 0)
+        if retrieval_row_count > 0 and not matched_rows:
+            uncovered.append({
+                "lane": key[0],
+                "side": key[1],
+                "memory_side_role": key[2],
+                "retrieval_row_count": retrieval_row_count,
+            })
+        elif retrieval_row_count == 0:
+            warnings.append(f"pm_required_memory_no_available_rows:{key[0]}:{key[1]}:{key[2]}")
+
+    errors: list[str] = []
+    if expected_required and not declared:
+        errors.append("pm_memory_requirements_missing_from_contract")
+    if expected_keys != declared_keys:
+        errors.append("pm_memory_requirements_do_not_match_final_action_semantics")
+    if uncovered:
+        errors.append("pm_required_memory_not_landed_in_alpha_setup_action_values")
+
+    return {
+        "contract": "final_action_semantics.pm_memory_consumption_audit.v1",
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "expected_memory_requirements": expected,
+        "declared_memory_requirements": declared,
+        "expected_requirement_keys": [":".join(key) for key in expected_keys],
+        "declared_requirement_keys": [":".join(key) for key in declared_keys],
+        "uncovered_required_pm_memory": uncovered,
+        "alpha_setup_action_value_count": len(rows),
+        "auditor_reads_research_db": False,
+        "trader_reads_pm_action_value": False,
+        "accountant_reads_memory": False,
+    }
+
+
 def derive_execution_requirement(contract: Mapping[str, Any] | None) -> dict[str, Any]:
     semantics = classify_final_action_contract(contract)
+    memory = derive_memory_requirements(contract)
     return {
         "contract": "final_action_semantics.execution_requirement.v1",
         "lifecycle_state": semantics["lifecycle_state"],
@@ -402,6 +805,8 @@ def derive_execution_requirement(contract: Mapping[str, Any] | None) -> dict[str
         "blocked": semantics["blocked"],
         "blocked_reasons": semantics["hard_block_reasons"],
         "soft_limit_reasons": semantics["soft_limit_reasons"],
+        "memory_side_role": memory["contract_side_role"],
+        "trader_reads_pm_action_value": False,
     }
 
 
@@ -484,6 +889,7 @@ def derive_accounting_expectation(
     transactions = execution_result.get("actual_transactions")
     has_transaction = bool(transactions) if isinstance(transactions, list) else False
     semantics = classify_final_action_contract(contract)
+    memory = derive_memory_requirements(contract)
     return {
         "contract": "final_action_semantics.accounting_expectation.v1",
         "lifecycle_state": semantics["lifecycle_state"],
@@ -492,6 +898,7 @@ def derive_accounting_expectation(
         "position_change_allowed": has_transaction,
         "fee_allowed": has_transaction,
         "no_trigger_no_accounting_mutation": semantics["requires_intraday_result"] and not has_transaction,
+        "accounting_reads_memory": memory["accounting_reads_memory"],
     }
 
 
@@ -501,11 +908,19 @@ def derive_review_expectation(
 ) -> dict[str, Any]:
     semantics = classify_final_action_contract(contract)
     accounting = derive_accounting_expectation(contract, execution_result)
+    memory = derive_memory_requirements(contract)
+    memory_audit = audit_pm_memory_consumption(contract)
     return {
         "contract": "final_action_semantics.review_expectation.v1",
         "lifecycle_state": semantics["lifecycle_state"],
         "requires_intraday_result": semantics["requires_intraday_result"],
         "settlement_basis": accounting["settlement_basis"],
+        "required_pm_memory": memory["required_pm_memory"],
+        "pm_memory_consumption_ok": memory_audit["ok"],
+        "pm_memory_consumption_errors": memory_audit["errors"],
+        "historical_learning_influenced_contract": bool(
+            memory_audit["alpha_setup_action_value_count"] and not memory_audit["errors"]
+        ),
     }
 
 
@@ -514,22 +929,29 @@ def derive_research_fact_state(
     execution_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     semantics = classify_final_action_contract(contract)
+    memory = derive_memory_requirements(contract)
     execution_result = execution_result if isinstance(execution_result, Mapping) else {}
     return {
         "contract": "final_action_semantics.research_fact_state.v1",
         "learning_source": "phase4_completed_facts",
         "lifecycle_state": semantics["lifecycle_state"],
         "execution_outcome": execution_result.get("outcome") or execution_result.get("status") or "",
+        "memory_side_role": memory["contract_side_role"],
+        "required_memory_lanes": memory["required_memory_lanes"],
         "can_mutate_same_day_trade_facts": False,
     }
 
 
 def derive_protocol_semantic_checks(contract: Mapping[str, Any] | None) -> dict[str, Any]:
     semantics = classify_final_action_contract(contract)
+    memory = derive_memory_requirements(contract)
     return {
         "contract": "final_action_semantics.protocol_checks.v1",
         "lifecycle_state": semantics["lifecycle_state"],
         "requires_intraday_result": semantics["requires_intraday_result"],
+        "required_pm_memory": memory["required_pm_memory"],
+        "required_memory_lanes": memory["required_memory_lanes"],
+        "required_memory_side_roles": memory["required_memory_side_roles"],
         "hard_block_reasons": semantics["hard_block_reasons"],
         "soft_limit_reasons": semantics["soft_limit_reasons"],
         "semantic_errors": semantics["semantic_errors"],

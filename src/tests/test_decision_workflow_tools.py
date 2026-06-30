@@ -95,6 +95,28 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         for forbidden in ("target_lots", "lots_delta", "final_action", "target_position_ratio"):
             self.assertNotIn(forbidden, contract)
 
+    def test_signal_collector_does_not_read_action_value_or_generate_trade_action(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "signal_collector.py").read_text(encoding="utf-8-sig")
+        collection_source = (SRC_ROOT / "tools" / "common" / "signal_evidence_collection.py").read_text(encoding="utf-8-sig")
+        for forbidden in (
+            "get_alpha_setup_action_values",
+            "get_similar_alpha_setup_action_values",
+            "retrieve_pm_memory",
+            "final_action_contract",
+        ):
+            self.assertNotIn(forbidden, source)
+        contract = build_signal_collection_contract(
+            ticker="RB",
+            trading_date="2025-03-04",
+            analyst_signals=[_signal("technical", Signal.BULLISH, 0.7)],
+            enabled_analysts=["technical", "fundamental", "commodity_news"],
+        )
+        self.assertTrue(contract["no_trade_authority"])
+        self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
+        for forbidden in ("final_action", "target_lots", "lots_delta", "margin_required", "authority_type"):
+            self.assertNotIn(forbidden, contract)
+            self.assertNotIn(f'"{forbidden}"', collection_source)
+
     def test_memory_retrieval_real_history_not_blocked_by_empty_history(self):
         result = retrieve_pm_memory(
             db=FakeMemoryDB(),

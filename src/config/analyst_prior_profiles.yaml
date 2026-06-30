@@ -10,7 +10,7 @@
 #
 # 最终交易权限必须来自 PM 的 action evidence router：
 # 技术/事件触发、失效边界、市场确认、action-value 和风险约束。
-# 静态先验不能直接生成 open/hold/exit/execution 动作偏好，也不能直接生成最终交易合约。
+# 静态先验不能直接生成 open/add/hold/reduce/exit/conditional_monitor/execution 动作偏好，也不能直接生成最终交易合约。
 
 dynamic_bounds:
   min_weight: 0.05

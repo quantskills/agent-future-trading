@@ -436,11 +436,14 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
 
         self.assertIn("ACTION-VALUE USAGE BOUNDARY", researcher_review)
         self.assertIn("signal_calibration", researcher_review)
-        self.assertIn("exit/reduce action-value", researcher_review)
+        self.assertIn("reduce/exit action-value", researcher_review)
         self.assertIn("execution action-value", researcher_review)
 
         self.assertIn("open rewards evaluate the full episode result", researcher_review)
-        self.assertIn("PM via matching open/hold/exit/execution lane", researcher_review)
+        self.assertIn(
+            "PM via matching open/add/hold/reduce/exit/conditional_monitor/execution lane",
+            researcher_review,
+        )
         self.assertIn("Trader only through final_action_contract execution fields", researcher_review)
 
     def test_enabled_analyst_prompts_request_learning_explainability_summaries(self):
@@ -626,7 +629,14 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertEqual(policy.get("research_output_contract_version"), "agentquant.research_action_value.v1")
         self.assertEqual(policy.get("analyst_allowed_action_value_view"), "signal_calibration_only")
         self.assertEqual(policy.get("pm_allowed_consumer_scope"), "pm_learning")
-        self.assertEqual(policy.get("pm_allowed_action_value_lanes"), ["open", "hold", "exit", "execution"])
+        self.assertEqual(
+            policy.get("pm_allowed_action_value_lanes"),
+            ["open", "add", "hold", "reduce", "exit", "conditional_monitor", "execution"],
+        )
+        self.assertEqual(
+            policy.get("pm_allowed_memory_side_roles"),
+            ["target_side", "current_position_side", "trigger_side", "historical_sample_side"],
+        )
         self.assertEqual(policy.get("analyst_allowed_consumer_scope"), "analyst_calibration")
         self.assertFalse(policy.get("trader_direct_research_consumption_allowed"))
         self.assertNotIn("trader_allowed_consumer_scope", policy)

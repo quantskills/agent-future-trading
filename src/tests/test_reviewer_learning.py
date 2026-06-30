@@ -55,6 +55,7 @@ from tools.common.alpha_setup import (
     upsert_alpha_setup_sample_and_profile,
 )
 from tools.agent_tools.research.reviewer_phase4_review import (
+    _final_action_semantic_summary,
     _horizon_class,
     _validate_phase1_signal_persistence,
 )
@@ -2716,6 +2717,117 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
+
+    def test_researcher_downgrades_incomplete_pm_consumable_action_value(self):
+        from tools.agent_tools.research import research_memory_writers
+
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            research_memory_writers.upsert_alpha_setup_action_value(
+                cursor,
+                record={
+                    "id": "av-incomplete",
+                    "config_id": "cfg",
+                    "scope_key": "RB|long|short|trend|setup",
+                    "ticker": "RB",
+                    "side": "long",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "breakout",
+                    "data_combo": "technical",
+                    "action_name": "open",
+                    "sample_count": 2,
+                    "reward_sum": 3000.0,
+                    "reward_mean": 1500.0,
+                    "win_rate": 0.5,
+                    "confidence_score": 0.7,
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "real_trade",
+                    "evidence_scope": "exact_real_state",
+                    "action_value_lane": "open",
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": "open",
+                    "retrieval_key": "rb-long-open",
+                    "fallback_retrieval_key": "rb-long",
+                    "execution_retrieval_key": "rb-execution",
+                    "max_position_impact": 0.02,
+                    "last_sample_date": "2025-03-04",
+                    "created_at": "2025-03-05T00:00:00+00:00",
+                    "updated_at": "2025-03-05T00:00:00+00:00",
+                    "valid_until": "2025-04-04",
+                    "payload_json": json.dumps(
+                        {
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
+                            "consumer_scope": "pm_learning",
+                            "last_sample_date": "2025-03-04",
+                            "valid_until": "2025-04-04",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                        }
+                    ),
+                },
+            )
+            row = cursor.execute(
+                "SELECT consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-incomplete'"
+            ).fetchone()
+
+            payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(row["consumer_scope"], "research_diagnostics")
+            self.assertIn("memory_side_role", payload["pm_consumable_rejected_missing_fields"])
+            self.assertEqual(payload["original_consumer_scope"], "pm_learning")
+        finally:
+            conn.close()
+
+    def test_reviewer_summary_marks_lifecycle_and_pm_learning_influence_without_writing_memory(self):
+        from tools.common.final_action_semantics import derive_memory_requirements
+
+        contract = {
+            "current_lots": 1,
+            "target_lots": 0,
+            "lots_delta": -1,
+            "final_action": "exit",
+            "authority_type": "exit",
+        }
+        requirements = derive_memory_requirements(contract)
+        contract["learning_used"] = {
+            "memory_requirements": requirements,
+            "memory_retrieval": {
+                "requirement_details": [
+                    {
+                        "side": "long",
+                        "lane": "exit",
+                        "memory_side_role": "current_position_side",
+                        "row_count": 1,
+                    }
+                ]
+            },
+            "alpha_setup_action_values": [
+                {
+                    "side": "long",
+                    "learning_lane": "exit",
+                    "action_value_lane": "exit",
+                    "memory_side_role": "current_position_side",
+                    "action_preference": "positive_candidate_exit",
+                }
+            ],
+        }
+        summary = _final_action_semantic_summary(
+            [
+                {
+                    "signal_snapshot": {
+                        "final_action_contract": contract,
+                        "execution_result": {"status": "executed"},
+                    }
+                }
+            ]
+        )
+
+        self.assertEqual(summary["lifecycle_counts"].get("exit"), 1, summary)
+        self.assertEqual(summary["historical_learning_influenced_contract_counts"].get("exit"), 1, summary)
+        self.assertEqual(summary["pm_memory_consumption_error_count"], 0)
+        self.assertFalse(summary["reviewer_writes_action_value"])
 
     def test_infer_setup_type_ignores_pm_draft_pm_internal_draft(self):
         setup_type = infer_setup_type(

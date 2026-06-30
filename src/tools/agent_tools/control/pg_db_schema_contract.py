@@ -86,6 +86,7 @@ CORE_TABLE_COLUMNS: Mapping[str, Set[str]] = {
         "evidence_scope",
         "action_value_lane",
         "consumer_scope",
+        "memory_side_role",
         "last_sample_date",
         "active",
         "payload_json",
@@ -194,4 +195,3 @@ def audit_db_schema_contract(
 
     metadata["observed_columns"] = observed
     return DbSchemaContractReport(ok=not errors, errors=errors, metadata=metadata)
-

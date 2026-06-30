@@ -35,6 +35,7 @@ from tools.common.contracts import (
 )
 from tools.common.final_action_semantics import (
     authority_allows_entry as _semantic_authority_allows_entry,
+    derive_memory_requirements,
     is_conditional_monitor_contract,
 )
 from tools.agent_tools.decision.pm_capital_allocator import (
@@ -3617,6 +3618,8 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "reward_source": row.get("reward_source") or payload.get("reward_source"),
         "consumer_scope": row.get("consumer_scope") or payload.get("consumer_scope"),
         "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
+        "memory_side_role": row.get("memory_side_role") or payload.get("memory_side_role"),
+        "memory_requirement_reason": row.get("memory_requirement_reason") or payload.get("memory_requirement_reason"),
         "retrieval_key": row.get("retrieval_key") or payload.get("retrieval_key"),
         "fallback_retrieval_key": row.get("fallback_retrieval_key") or payload.get("fallback_retrieval_key"),
         "execution_retrieval_key": row.get("execution_retrieval_key") or payload.get("execution_retrieval_key"),
@@ -3771,6 +3774,12 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
     ).strip().lower()
     if learning_lane:
         normalized["learning_lane"] = learning_lane
+    memory_side_role = str(pick("memory_side_role", default="") or "").strip().lower()
+    if memory_side_role:
+        normalized["memory_side_role"] = memory_side_role
+    memory_requirement_reason = str(pick("memory_requirement_reason", default="") or "").strip().lower()
+    if memory_requirement_reason:
+        normalized["memory_requirement_reason"] = memory_requirement_reason
     for key in (
         "retrieval_key",
         "fallback_retrieval_key",
@@ -3899,6 +3908,133 @@ def _append_unique_action_values(base_rows: list | None, extra_rows: list | None
         rows.append(normalized)
         index[key] = len(rows) - 1
     return rows
+
+
+def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
+    normalized = _normalize_alpha_setup_action_value(row)
+    memory_side_role = str(requirement.get("memory_side_role") or "").strip().lower()
+    requirement_reason = str(requirement.get("reason") or "").strip().lower()
+    required_lane = str(requirement.get("lane") or requirement.get("learning_lane") or "").strip().lower()
+    if memory_side_role:
+        normalized["memory_side_role"] = memory_side_role
+    if requirement_reason:
+        normalized["memory_requirement_reason"] = requirement_reason
+    if required_lane and not normalized.get("learning_lane"):
+        normalized["learning_lane"] = required_lane
+    payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+    if payload:
+        payload = dict(payload)
+        if memory_side_role:
+            payload["memory_side_role"] = memory_side_role
+        if requirement_reason:
+            payload["memory_requirement_reason"] = requirement_reason
+        if required_lane and not payload.get("learning_lane"):
+            payload["learning_lane"] = required_lane
+        normalized["payload"] = payload
+    return normalized
+
+
+def _retrieve_lifecycle_pm_memory(
+    *,
+    db,
+    config_id: str,
+    ticker: str,
+    trading_date,
+    contract: dict,
+    analyst_signals: list,
+    signal_combo: list,
+    fusion_context: dict,
+    alpha_setup_action_values: list | None,
+) -> tuple[list[dict], dict]:
+    requirements = derive_memory_requirements(contract)
+    if not db or not config_id:
+        return list(alpha_setup_action_values or []), {
+            "tool": "decision_memory_retrieval",
+            "memory_requirements": requirements,
+            "status": "unavailable",
+            "reason": "db_or_config_missing",
+        }
+    rows = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    details: list[dict] = []
+    for requirement in requirements.get("required_pm_memory") or []:
+        if not isinstance(requirement, dict) or not requirement.get("must_land_in_pm_contract"):
+            continue
+        side = str(requirement.get("side") or "").lower()
+        lane = str(requirement.get("lane") or requirement.get("learning_lane") or "").lower()
+        if side not in {"long", "short"}:
+            continue
+        horizon = _resolve_decision_horizon(
+            analyst_signals,
+            1 if side == "long" else -1,
+        )
+        market_regime = _market_regime_from_signals(analyst_signals, side)
+        setup_type = _setup_type_from_signals(side, analyst_signals, signal_combo) or None
+        try:
+            memory_result = retrieve_pm_memory(
+                db=db,
+                config_id=config_id,
+                ticker=ticker,
+                side=side,
+                horizon_class=horizon,
+                market_regime=market_regime,
+                setup_type=setup_type,
+                sector=fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
+                signal_combo=list(signal_combo or []),
+                trading_date=trading_date,
+                limit=12,
+            )
+        except Exception as exc:
+            details.append({
+                "side": side,
+                "lane": lane,
+                "memory_side_role": requirement.get("memory_side_role"),
+                "row_count": 0,
+                "error": str(exc),
+            })
+            continue
+        action_values = memory_result.get("action_values") or []
+        lane_matched: list[dict] = []
+        for row in action_values:
+            normalized = _normalize_alpha_setup_action_value(row)
+            row_lane = str(
+                normalized.get("learning_lane")
+                or normalized.get("action_value_lane")
+                or normalized.get("action_name")
+                or ""
+            ).lower()
+            if lane == "conditional_monitor":
+                lane_ok = row_lane in {"conditional_monitor", "open", "hold"}
+            elif lane == "reduce":
+                lane_ok = row_lane in {"reduce", "exit", "hold"}
+            elif lane == "exit":
+                lane_ok = row_lane in {"exit", "reduce", "hold", "open"}
+            elif lane == "hold":
+                lane_ok = row_lane in {"hold", "exit", "reduce", "open"}
+            elif lane == "open":
+                lane_ok = row_lane in {"open", "add", "increase"}
+            else:
+                lane_ok = row_lane == lane
+            if not lane_ok:
+                continue
+            lane_matched.append(_annotate_memory_requirement_row(normalized, requirement))
+        rows = _append_unique_action_values(rows, lane_matched)
+        details.append({
+            "side": side,
+            "lane": lane,
+            "memory_side_role": requirement.get("memory_side_role"),
+            "row_count": len(lane_matched),
+            "effective_memory_summary": memory_result.get("effective_memory_summary") or {},
+            "retrieval_attempts": memory_result.get("retrieval_attempts") or [],
+            "rejected_or_downgraded": memory_result.get("rejected_or_downgraded") or [],
+        })
+    audit = {
+        "tool": "decision_memory_retrieval",
+        "boundary": "final_action_semantics_memory_requirements",
+        "memory_requirements": requirements,
+        "requirement_details": details,
+        "alpha_setup_action_value_count_after_lifecycle": len(rows),
+    }
+    return rows, audit
 
 
 _OPEN_OR_ADD_ACTION_NAMES = {
@@ -10743,6 +10879,51 @@ def portfolio_agent_futures(state: FundState):
     recommendation_intent = recommendation_intent_from_lots(current_lots, target_lots)
     pre_open_action = FuturesAction(recommendation_intent["action"])
     pre_open_lots = int(recommendation_intent["lots"])
+    lifecycle_memory_contract = {
+        "ticker": ticker,
+        "current_lots": int(current_lots or 0),
+        "target_lots": int(target_lots or 0),
+        "lots_delta": int((target_lots or 0) - (current_lots or 0)),
+        "final_action": _final_action_from_lots(
+            current_lots=current_lots,
+            target_lots=target_lots,
+            final_entry_authority=final_entry_authority,
+        ),
+        "reason_codes": sorted(set(str(item) for item in control_reasons if item)),
+        "conditional_trigger_authority": bool(
+            final_entry_authority.get("conditional_trigger_authority")
+            if isinstance(final_entry_authority, dict)
+            else "conditional_trigger_authority" in control_reasons
+        ),
+        "requires_intraday_confirmation": bool(
+            final_entry_authority.get("requires_intraday_confirmation")
+            if isinstance(final_entry_authority, dict)
+            else "conditional_trigger_authority" in control_reasons
+        ),
+        "can_execute_without_intraday_trigger": (
+            bool(final_entry_authority.get("can_execute_without_intraday_trigger"))
+            if isinstance(final_entry_authority, dict)
+            and final_entry_authority.get("can_execute_without_intraday_trigger") is not None
+            else False if "conditional_trigger_authority" in control_reasons else True
+        ),
+    }
+    alpha_setup_action_values, lifecycle_memory_audit = _retrieve_lifecycle_pm_memory(
+        db=db,
+        config_id=config_id,
+        ticker=ticker,
+        trading_date=trading_date,
+        contract=lifecycle_memory_contract,
+        analyst_signals=analyst_signals,
+        signal_combo=list(signal_combo),
+        fusion_context=fusion_context if isinstance(fusion_context, dict) else {},
+        alpha_setup_action_values=alpha_setup_action_values,
+    )
+    pm_learning_audit["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
+    pm_learning_audit["final_action_memory_retrieval"] = lifecycle_memory_audit
+    pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
+    pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
+    control_diagnostics["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
+    control_diagnostics["final_action_memory_retrieval"] = lifecycle_memory_audit
 
     plan_snapshot = _build_pm_decision_context(
         target_lots=target_lots,

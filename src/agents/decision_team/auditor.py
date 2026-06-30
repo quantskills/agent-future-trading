@@ -17,7 +17,7 @@ from tools.common.contracts import (
     validate_auditor_artifact_boundary,
     validate_final_action_contract,
 )
-from tools.common.final_action_semantics import derive_protocol_semantic_checks
+from tools.common.final_action_semantics import audit_pm_memory_consumption, derive_protocol_semantic_checks
 
 
 APPROVED_AUDIT_VERDICTS = {"approve", "approve_with_warning"}
@@ -164,6 +164,13 @@ class Auditor:
         if _enum_value(recommendation.get("source_type")) == "strategy" and not contract:
             hard_reasons.append("missing_pm_final_action_contract")
 
+        memory_consumption_audit = audit_pm_memory_consumption(contract)
+        for reason in memory_consumption_audit.get("errors") or []:
+            if reason == "pm_required_memory_not_landed_in_alpha_setup_action_values":
+                hard_reasons.append(reason)
+            else:
+                soft_reasons.append(reason)
+
         if _is_new_or_increasing_exposure(contract):
             if not contract.get("invalidation_condition") and not contract.get("invalidation"):
                 hard_reasons.append("missing_invalidation_condition")
@@ -213,6 +220,8 @@ class Auditor:
                 "auditor_does_not_create_trade_authority": True,
                 "trader_requires_approved_audit_verdict": True,
                 "research_memory_not_consumed": True,
+                "auditor_reads_research_db": False,
+                "auditor_checks_pm_memory_consumption_from_contract_only": True,
             },
             "contract_summary": {
                 "final_action": contract.get("final_action"),
@@ -235,6 +244,7 @@ class Auditor:
                     "semantic_errors",
                 }
             },
+            "pm_memory_consumption_audit": memory_consumption_audit,
         }
         validate_auditor_artifact_boundary(audit_payload)
         return AuditorOutput(

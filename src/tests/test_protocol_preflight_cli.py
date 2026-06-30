@@ -141,6 +141,60 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertFalse(report["preflight"]["ok"])
         self.assertIn("deepfund_python_missing", "\n".join(report["errors"]))
 
+    def test_pre_backtest_gate_initializes_local_sqlite_schema_before_acceptance(self):
+        import run.pre_backtest_test as pre_gate
+
+        argv = [
+            "pre_backtest_test.py",
+            "--config",
+            str(SRC_ROOT / "config" / "dev.yaml"),
+            "--local-db",
+        ]
+        calls = []
+
+        class _Report:
+            def __init__(self, ok=True):
+                self.ok = ok
+
+            def to_dict(self):
+                return {"ok": self.ok, "errors": [], "warnings": []}
+
+        def fake_init_database():
+            calls.append("init_database")
+
+        def fake_unittest(_modules):
+            calls.append("unittest")
+            return {"ok": True, "tests_run": 0, "errors": [], "failures": []}
+
+        def fake_protocol(*_args, **_kwargs):
+            calls.append("protocol")
+            return {"ok": True, "errors": [], "warnings": []}
+
+        def fake_coverage(_repo_root):
+            calls.append("coverage")
+            return _Report()
+
+        def fake_acceptance(**_kwargs):
+            calls.append("acceptance")
+            return _Report()
+
+        with patch.object(sys, "argv", argv), patch(
+            "database.sqlite_setup.init_database",
+            side_effect=fake_init_database,
+        ), patch.object(pre_gate, "_run_unittest_modules", side_effect=fake_unittest), patch.object(
+            pre_gate,
+            "_run_protocol_preflight",
+            side_effect=fake_protocol,
+        ), patch.object(pre_gate, "audit_contract_coverage", side_effect=fake_coverage), patch.object(
+            pre_gate,
+            "run_pre_backtest_acceptance",
+            side_effect=fake_acceptance,
+        ):
+            result = pre_gate.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["init_database", "unittest", "protocol", "coverage", "acceptance"])
+
     def test_backtest_pre_backtest_command_uses_integrated_gate(self):
         import run.backtest as backtest
 

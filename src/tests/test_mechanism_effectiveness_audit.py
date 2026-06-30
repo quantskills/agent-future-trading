@@ -320,6 +320,98 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertIn("reduce_exit", report.metadata.get("checked_scenarios", {}))
         self.assertEqual(report.counts.get("scenarios", {}).get("reduce_exit"), 1)
 
+    def test_exit_current_position_side_learning_must_reach_pm_contract(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="RB",
+            side="long",
+            preference="tail_loss_protect",
+            action_name="exit",
+            action_value_lane="exit",
+            reward_sum=-1993.34,
+            last_sample_date="2025-03-03",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="rb-exit-missing-learning",
+            ticker="RB",
+            contract={
+                "ticker": "RB",
+                "current_lots": 13,
+                "target_lots": 0,
+                "lots_delta": -13,
+                "final_action": "exit",
+                "reason_codes": ["new_position_loss_revalidation_failed"],
+                "evidence_used": {
+                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {"alpha_setup_action_values": []},
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertIn("mechanism_action_value_not_read_by_pm", "\n".join(report.hard_failures))
+
+    def test_exit_current_position_side_learning_lands_with_memory_side_role(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="RB",
+            side="long",
+            preference="tail_loss_protect",
+            action_name="exit",
+            action_value_lane="exit",
+            reward_sum=-1993.34,
+            last_sample_date="2025-03-03",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="rb-exit-with-learning",
+            ticker="RB",
+            contract={
+                "ticker": "RB",
+                "current_lots": 13,
+                "target_lots": 0,
+                "lots_delta": -13,
+                "final_action": "exit",
+                "reason_codes": ["new_position_loss_revalidation_failed"],
+                "evidence_used": {
+                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "scope_key": "RB|long|trend",
+                            "ticker": "RB",
+                            "side": "long",
+                            "action_name": "exit",
+                            "action_preference": "tail_loss_protect",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "consumer_scope": "pm_learning",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
+                            "memory_side_role": "current_position_side",
+                            "reward_sum": -1993.34,
+                            "reward_mean": -1993.34,
+                            "sample_count": 1,
+                            "win_rate": 0.0,
+                            "last_sample_date": "2025-03-03",
+                        }
+                    ]
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+
     def test_hold_exit_learning_fails_when_position_does_not_change_without_explanation(self):
         db_path = self._make_db()
         self._insert_action_value(

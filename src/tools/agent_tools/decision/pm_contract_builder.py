@@ -138,6 +138,16 @@ def build_final_action_contract(
         })
 
     selected_action_values = select_learning_trace(alpha_setup_action_values, 10)
+    memory_requirements = (
+        diagnostics.get("final_action_memory_requirements")
+        if isinstance(diagnostics.get("final_action_memory_requirements"), dict)
+        else {}
+    )
+    memory_retrieval = (
+        diagnostics.get("final_action_memory_retrieval")
+        if isinstance(diagnostics.get("final_action_memory_retrieval"), dict)
+        else {}
+    )
     margin_ratio_estimate = float(margin_required or 0.0) / max(float(account_equity or 0.0), 1.0)
     reason_codes = {str(item) for item in (control_reasons or []) if item}
     if lots_to_trade_reason:
@@ -209,6 +219,8 @@ def build_final_action_contract(
         },
         "learning_used": {
             "alpha_setup_action_values": selected_action_values,
+            "memory_requirements": memory_requirements,
+            "memory_retrieval": memory_retrieval,
             "positive_open_seed": diagnostics.get("positive_open_action_value_seed") if isinstance(diagnostics.get("positive_open_action_value_seed"), dict) else {},
             "alpha_setup_ev_fusion": diagnostics.get("alpha_setup_ev_fusion") if isinstance(diagnostics.get("alpha_setup_ev_fusion"), dict) else {},
             "capital_utilization_learning": (

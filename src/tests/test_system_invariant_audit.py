@@ -176,6 +176,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     action_value_lane TEXT DEFAULT '',
                     consumer_scope TEXT DEFAULT 'pm_learning',
                     learning_lane TEXT DEFAULT '',
+                    memory_side_role TEXT DEFAULT '',
                     retrieval_key TEXT DEFAULT '',
                     fallback_retrieval_key TEXT DEFAULT '',
                     execution_retrieval_key TEXT DEFAULT '',

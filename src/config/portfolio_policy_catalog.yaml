@@ -448,8 +448,8 @@ portfolio_manager:
       # PM 将 Alpha Setup 档案与 action-value 转成仓位影响。
       # 这是收益主链路：正期望受控放大，未知机会小仓探索，负期望降级/退出。
       # 不是产品偏好，不突破 20% 总保证金上限；候选档案不能支撑加仓、position_matched 或亏损硬扛。
-      # 正/负 action-value 必须按 open/hold/exit/execution 动作维度使用，不能跨动作裸迁移。
-      # PM 只读取 open/hold/exit 对仓位生命周期的偏好；execution lane 由 PM 写入 final_action_contract.execution_profile。
+      # 正/负 action-value 必须按 open/add/hold/reduce/exit/conditional_monitor/execution 动作维度使用，不能跨动作裸迁移。
+      # PM 按 final_action_semantics 读取 target_side/current_position_side/trigger_side 记忆；execution lane 由 PM 写入 final_action_contract.execution_profile。
       # 分析师只能读取 signal_calibration 校准证据质量；similar SQL/RAG 和 Counterfactual 只能作弱先验。
       # 单样本 exact-state 正收益会先成为明确动作偏好：
       # positive_candidate_open / positive_candidate_hold / positive_candidate_exit / positive_candidate_execution。

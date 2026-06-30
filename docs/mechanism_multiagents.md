@@ -150,7 +150,7 @@ Phase4 完成后，研究学习单独运行：
 
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
 
-`src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发和已触发成交。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
+`src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期和交易生命周期记忆语义的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发、已触发成交，以及该合约必须读取的 `action_value_lane` 和 `memory_side_role`。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
 
 ## 五、系统事实统一入口
 
@@ -249,7 +249,7 @@ Phase4 完成后，研究学习单独运行：
 
 - `effective_memory_summary`；
 - 有效 action-value 列表；
-- `action_preference`、`reward_source`、`evidence_scope`、`action_value_lane`、`reward_sum/reward_mean`、`last_sample_date`；
+- `action_preference`、`reward_source`、`evidence_scope`、`action_value_lane`、`memory_side_role`、`reward_sum/reward_mean`、`last_sample_date`；
 - 过期、空壳、非 `pm_learning` scope、未来数据、弱先验的剔除或降级原因。
 
 边界：

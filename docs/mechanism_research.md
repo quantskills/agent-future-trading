@@ -59,7 +59,7 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 | `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
-| `alpha_setup_action_value` | open/hold/exit/execution 分动作结果 | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action lane 使用 |
+| `alpha_setup_action_value` | open/add/hold/reduce/exit/execution/conditional_monitor 分动作结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action lane 使用 |
 | `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
 | `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
 | `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
@@ -81,7 +81,7 @@ negative_hold_revalidate
 tail_loss_protect
 ```
 
-open 评价“当时开仓是否有正期望”；hold 评价“继续持有是否保护收益或扩大收益”；exit 评价“退出/减仓是否避免回吐或尾部亏损”；execution 评价“触发方式和成交质量是否改善结果”。
+open 评价“当时开仓是否有正期望”；add 评价“同方向扩大风险是否有效”；hold 评价“继续持有是否保护收益或扩大收益”；reduce 评价“减仓是否保护收益或降低尾部风险”；exit 评价“退出是否避免回吐或尾部亏损”；conditional_monitor 评价“等待触发是否应被保留为盘中监控”；execution 评价“触发方式和成交质量是否改善结果”。
 
 不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被投资组合经理写入 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能改变方向或目标手数，也不能由交易员直接读取后放宽触发。
 
@@ -94,6 +94,7 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 - `action_value_lane`；
 - `consumer_scope`；
 - `learning_lane`；
+- `memory_side_role`；
 - `reward_sum`、`reward_mean`；
 - `sample_count`；
 - `last_sample_date`；
@@ -188,7 +189,7 @@ signal_collection_contract
 4. `final_action_contract` 是否仍由盘前预测证据、研究分项、资金风控和审计共同决定，而不是被学习单独覆盖。
 5. 交易员是否只按审计通过的合约和合约化触发规则执行或跳过。
 6. 会计师是否按事实结算。
-7. 研究员是否按 open/hold/exit/execution 分账更新 action-value。
+7. 研究员是否按 open/add/hold/reduce/exit/conditional_monitor/execution 分账并带 `memory_side_role` 更新 action-value。
 
 如果学习只增加解释文本，却没有在未来同作用域、合规边界内改善开仓、持仓、退出、执行质量或资金部署质量，就不能认为研究机制已经贡献收益。
 

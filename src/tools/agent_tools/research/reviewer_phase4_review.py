@@ -93,22 +93,31 @@ def _fetchone(cursor, query: str, params: tuple):
 
 def _final_action_semantic_summary(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
     lifecycle_counts: Counter = Counter()
+    memory_influenced_counts: Counter = Counter()
+    memory_error_count = 0
     intraday_required = 0
     for recommendation in recommendations:
-        snapshot = _review_helpers._json_loads(recommendation.get("signal_snapshot")) or {}
+        raw_snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation, dict) else {}
+        snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else _review_helpers._recommendation_snapshot(recommendation)
         if not isinstance(snapshot, dict):
             continue
         contract = final_action_contract_from_snapshot(snapshot)
         execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
         semantic_state = derive_review_expectation(contract, execution_result)
         lifecycle_counts[str(semantic_state.get("lifecycle_state") or "unknown")] += 1
+        if semantic_state.get("historical_learning_influenced_contract"):
+            memory_influenced_counts[str(semantic_state.get("lifecycle_state") or "unknown")] += 1
+        memory_error_count += len(semantic_state.get("pm_memory_consumption_errors") or [])
         if semantic_state.get("requires_intraday_result"):
             intraday_required += 1
     return {
         "contract": "final_action_semantics.reviewer_summary.v1",
         "lifecycle_counts": dict(sorted(lifecycle_counts.items())),
+        "historical_learning_influenced_contract_counts": dict(sorted(memory_influenced_counts.items())),
+        "pm_memory_consumption_error_count": memory_error_count,
         "intraday_result_required_count": intraday_required,
         "reviewer_does_not_modify_trade_facts": True,
+        "reviewer_writes_action_value": False,
     }
 
 

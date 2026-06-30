@@ -200,6 +200,17 @@ def _action_value_lane(action_name: Any) -> str:
     return "observe"
 
 
+def _memory_side_role_for_action(action_name: Any) -> str:
+    lane = _action_value_lane(action_name)
+    if lane == "open":
+        return "target_side"
+    if lane in {"hold", "exit"}:
+        return "current_position_side"
+    if lane == "execution":
+        return "historical_sample_side"
+    return "historical_sample_side"
+
+
 def _learning_consumer_scope(action_name: Any) -> str:
     # alpha_setup_action_value is PM-consumed learning. Trader execution
     # diagnostics use separate trader_execution_learning traces.
@@ -955,6 +966,7 @@ def _upsert_action_values(
         )
         action_value_lane = _action_value_lane(action_name)
         consumer_scope = _learning_consumer_scope(action_name)
+        memory_side_role = _memory_side_role_for_action(action_name)
         retrieval_keys = _learning_retrieval_keys(
             profile_scope=profile_scope,
             action_name=action_name,
@@ -979,6 +991,7 @@ def _upsert_action_values(
             "action_value_lane": action_value_lane,
             "consumer_scope": consumer_scope,
             "learning_lane": action_value_lane,
+            "memory_side_role": memory_side_role,
             **retrieval_keys,
             "last_sample_date": str(trading_date)[:10],
             "sample_count": sample_count,
@@ -1044,6 +1057,7 @@ def _upsert_action_values(
                 "action_value_lane": action_value_lane,
                 "consumer_scope": consumer_scope,
                 "learning_lane": action_value_lane,
+                "memory_side_role": memory_side_role,
                 "retrieval_key": retrieval_keys["retrieval_key"],
                 "fallback_retrieval_key": retrieval_keys["fallback_retrieval_key"],
                 "execution_retrieval_key": retrieval_keys["execution_retrieval_key"],

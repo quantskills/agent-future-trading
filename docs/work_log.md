@@ -222,6 +222,18 @@
 
 （3）修复 Phase1 加速测试假 DB 与独立 Auditor 状态写回接口不一致。修改：`src/tests/test_phase1_acceleration.py`。原因：全量单测中 workflow 已按独立 Auditor 链路调用 `update_futures_recommendation_status`，测试假 DB 缺少该接口会造成夹具断裂，无法用全量测试干净判断回测前系统状态。
 
+==========2026年06月30日==========
+
+（1）扩展 `final_action_semantics.py` 为交易生命周期记忆语义状态机。修改：共享语义工具、PM、PM 合约构造、PG 机制有效性审计和测试。原因：PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 必须按同一套 `open/add/hold/reduce/exit/conditional_monitor/execution` 与 `memory_side_role` 解释 action-value；减仓/退出必须读取当前持仓方向记忆，条件监控必须读取触发方向记忆。
+
+（2）补齐 action-value `memory_side_role` canonical 字段。修改：SQLite schema/helper、研究写入器、`alpha_setup`、学习配置、提示词和测试。原因：固定 `side` 在学习记录中的角色，区分 `target_side/current_position_side/trigger_side/historical_sample_side`，避免 PM 退出 long 时只按目标方向读记忆。
+
+（3）让回测前总门先执行本地 SQLite schema 迁移。修改：`pre_backtest_test.py` 和 CLI 回归测试。原因：回测前验收要检查迁移后的真实运行库 schema，不能在 `init_database()` 补列前被旧库缺列误拦。
+
+（4）补齐 Auditor/Reviewer/Researcher 在交易生命周期记忆语义里的显式边界。修改：`final_action_semantics.py`、Auditor、Reviewer Phase4、Researcher 写入器和测试。原因：Auditor 只按 PM 合约审 `learning_used.memory_requirements` 与 `alpha_setup_action_values` 覆盖，不查研究库、不改方向手数；Reviewer 标注生命周期和历史学习是否影响 PM 合约；Researcher 缺 `action_value_lane/learning_lane/consumer_scope/memory_side_role/last_sample_date/valid_until/reward_source/evidence_scope` 的记录不能进入 PM 可消费记忆。
+
+（5）锁住 Trader、Accountant、三类分析师和 signal_collector 的非记忆解释边界。修改：分析师输出落地测试、信号收集测试、事实入口边界测试和决策工具测试。原因：Trader 只继承 PM 合约学习解释、不读 action-value；Accountant 只读成交、持仓、结算价、费用、保证金和权益；分析师不能输出合约、手数、保证金、reason code 或 authority type；signal_collector 只保真收集证据，不读 action-value、不生成交易动作。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

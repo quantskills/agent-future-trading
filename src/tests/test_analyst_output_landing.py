@@ -50,13 +50,22 @@ class AnalystOutputLandingTest(unittest.TestCase):
                     "trigger_valid": True,
                     "invalidation_present": True,
                     "target_lots": 3,
+                    "authority_type": "real_budget_entry",
+                    "reason_codes": ["positive_open_action_value_seed"],
                 }
             },
-            learning_impact_summary={"final_action": "open_real"},
+            learning_impact_summary={
+                "final_action": "open_real",
+                "margin_required": 10000,
+                "lots_delta": 1,
+            },
         )
         violations = analyst_output_landing_violations(signal)
         self.assertTrue(any("target_lots" in item for item in violations))
         self.assertTrue(any("final_action" in item for item in violations))
+        self.assertTrue(any("authority_type" in item for item in violations))
+        self.assertTrue(any("reason_codes" in item for item in violations))
+        self.assertTrue(any("margin_required" in item for item in violations))
 
     def test_probe_or_tradeable_candidate_requires_current_trigger_and_invalidation(self):
         signal = self._signal(

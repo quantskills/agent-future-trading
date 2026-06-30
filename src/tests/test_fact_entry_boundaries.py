@@ -503,6 +503,7 @@ class FactEntryBoundaryTest(unittest.TestCase):
 
     def test_auditor_does_not_modify_pm_contract(self):
         from agents.decision_team.auditor import audit_futures_recommendation
+        from tools.common.final_action_semantics import derive_memory_requirements
 
         contract = {
             "current_lots": 0,
@@ -514,6 +515,11 @@ class FactEntryBoundaryTest(unittest.TestCase):
             "strong_current_evidence": True,
             "invalidation_condition": {"type": "stop"},
             "target_margin_ratio_estimate": 0.01,
+        }
+        contract["learning_used"] = {
+            "memory_requirements": derive_memory_requirements(contract),
+            "memory_retrieval": {"requirement_details": []},
+            "alpha_setup_action_values": [],
         }
         recommendation = {
             "id": "rec-1",
@@ -532,8 +538,55 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertEqual(recommendation["signal_snapshot"]["final_action_contract"], contract)
         self.assertEqual(output.audit_payload["producer"], "auditor")
         self.assertTrue(output.audit_payload["boundary"]["auditor_does_not_modify_final_action_contract"])
+        self.assertTrue(output.audit_payload["boundary"]["auditor_checks_pm_memory_consumption_from_contract_only"])
         self.assertEqual(output.audit_payload["semantic_state"]["lifecycle_state"], "open")
         self.assertFalse(output.audit_payload["semantic_state"]["requires_intraday_result"])
+        self.assertTrue(output.audit_payload["pm_memory_consumption_audit"]["ok"])
+
+    def test_auditor_blocks_when_pm_found_required_memory_but_did_not_land_it(self):
+        from agents.decision_team.auditor import audit_futures_recommendation
+        from tools.common.final_action_semantics import derive_memory_requirements
+
+        contract = {
+            "current_lots": 2,
+            "target_lots": 0,
+            "lots_delta": -2,
+            "final_action": "exit",
+            "authority_type": "exit",
+            "target_margin_ratio_estimate": 0.0,
+        }
+        contract["learning_used"] = {
+            "memory_requirements": derive_memory_requirements(contract),
+            "memory_retrieval": {
+                "requirement_details": [
+                    {
+                        "side": "long",
+                        "lane": "exit",
+                        "memory_side_role": "current_position_side",
+                        "row_count": 1,
+                    }
+                ]
+            },
+            "alpha_setup_action_values": [],
+        }
+        recommendation = {
+            "id": "rec-exit",
+            "config_id": "cfg",
+            "source_type": "strategy",
+            "underlying_code": "RB",
+            "trading_date": "2025-03-04",
+            "effective_trade_date": "2025-03-04",
+            "signal_snapshot": {"final_action_contract": dict(contract)},
+        }
+
+        output = audit_futures_recommendation(
+            recommendation=recommendation,
+            full_config={"auditor": {"enabled": True}, "max_total_margin_ratio": 0.20},
+        )
+
+        self.assertEqual(output.audit_verdict, "block")
+        self.assertIn("pm_required_memory_not_landed_in_alpha_setup_action_values", output.hard_risk_reasons)
+        self.assertFalse(output.audit_payload["pm_memory_consumption_audit"]["ok"])
 
     def test_execution_payload_writers_enforce_artifact_boundary(self):
         futures_execution_source = _read("tools/agent_tools/execution/trader_futures_execution.py")
@@ -586,6 +639,34 @@ class FactEntryBoundaryTest(unittest.TestCase):
         self.assertIn("context.get(\"analyst_calibration_items\")", analyst_calibration_source)
         self.assertNotIn("\"alpha_setup_action_values\": []", learning_context_source)
         self.assertNotIn("context.get(\"alpha_setup_action_values\")", analyst_calibration_source)
+
+    def test_non_pm_agents_do_not_read_pm_action_value_memory(self):
+        trader_source = _read("agents/execution_team/trader.py")
+        trader_engine_source = _read("tools/agent_tools/execution/trader_futures_execution.py")
+        accountant_entry_source = _read("agents/execution_team/accountant.py")
+        accountant_engine_source = _read("tools/agent_tools/execution/accountant_futures_settlement.py")
+        signal_collector_source = _read("agents/decision_team/signal_collector.py")
+        signal_collection_source = _read("tools/common/signal_evidence_collection.py")
+
+        for label, source in {
+            "trader": trader_source,
+            "trader_engine": trader_engine_source,
+            "accountant": accountant_entry_source,
+            "accountant_engine": accountant_engine_source,
+            "signal_collector": signal_collector_source,
+            "signal_collection": signal_collection_source,
+        }.items():
+            self.assertNotIn("get_alpha_setup_action_values", source, label)
+            self.assertNotIn("get_similar_alpha_setup_action_values", source, label)
+            self.assertNotIn("retrieve_pm_memory", source, label)
+            self.assertNotIn("pm_decision_memory_retrieval", source, label)
+
+        self.assertIn("\"no_full_final_action_contract_mirror\": True", trader_source)
+        self.assertIn("\"learning_source\": \"final_action_contract\"", trader_source)
+        self.assertIn("get_futures_transactions_by_date", accountant_engine_source)
+        self.assertIn("save_daily_settlement", accountant_engine_source)
+        self.assertIn("collector_decision_boundary", signal_collection_source)
+        self.assertIn("no_trade_authority", signal_collection_source)
 
     def test_research_writer_json_exit_rejects_trade_fact_mutation(self):
         from tools.agent_tools.research import research_memory_writers

@@ -124,6 +124,10 @@ def main() -> int:
     args = parse_args()
     config_path = _resolve_config_path(args.config)
     cfg = _load_config(config_path)
+    if args.local_db:
+        from database.sqlite_setup import init_database
+
+        init_database()
 
     unittest_report = _run_unittest_modules(PRE_BACKTEST_TEST_MODULES)
     protocol_report = _run_protocol_preflight(args, config_path, cfg)

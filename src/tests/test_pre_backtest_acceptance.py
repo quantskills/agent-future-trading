@@ -146,6 +146,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     action_value_lane TEXT,
                     consumer_scope TEXT DEFAULT 'pm_learning',
                     learning_lane TEXT,
+                    memory_side_role TEXT DEFAULT '',
                     retrieval_key TEXT,
                     fallback_retrieval_key TEXT,
                     execution_retrieval_key TEXT,

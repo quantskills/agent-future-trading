@@ -87,11 +87,22 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 5. `tradeable_candidate` 不是小额试探；它是强候选，PM 可按资金和风险规则转成 `open_real/add/scale`。
 6. 审计员、交易员、会计师、复盘员、研究员都不能把机会状态改成最终交易动作。
 
+交易生命周期记忆读取固定规则：
+
+| 最终合约生命周期 | PM 必须读取的记忆 | `side` 的含义 |
+|---|---|---|
+| 新开仓 `open/open_probe/open_real` | open lane | `target_side` |
+| 加仓/扩大 `add/scale` | open/add 与 hold lane | `target_side` 与 `current_position_side` |
+| 持仓 `hold` | hold lane，必要时 exit/reduce 作为审计背景 | `current_position_side` |
+| 减仓 `reduce/trim` | reduce/exit/hold lane | `current_position_side` |
+| 退出 `exit/close/risk_exit` | exit/reduce/hold lane | `current_position_side` |
+| 条件监控 `conditional_probe/watch_trigger` | conditional_monitor/open/hold lane | `trigger_side` |
+
 ### 2.2 reason code 语义表
 
 `reason_codes` 只解释状态流转原因，不能代替状态、动作或手数。每个 reason code 必须只属于一类；同一个 code 不能前面表示“候选”，后面又表示“阻断”。新增或修改 reason code 时，必须同步到共享分类逻辑和测试。
 
-共享分类逻辑固定为 `src/tools/common/final_action_semantics.py`。各智能体不得在本地维护与它相反的 hard/soft/candidate/release/diagnostic 分类；PM、Auditor、Trader、Reviewer、Researcher 和 Protocol Governor 对同一张 `final_action_contract` 的生命周期解释必须来自这个状态机。
+共享分类逻辑固定为 `src/tools/common/final_action_semantics.py`。各智能体不得在本地维护与它相反的 hard/soft/candidate/release/diagnostic 分类；PM、Auditor、Trader、Reviewer、Researcher 和 Protocol Governor 对同一张 `final_action_contract` 的生命周期解释、记忆读取 lane 和 `memory_side_role` 必须来自这个状态机。
 
 | 类别 | 含义 | 允许效果 | 禁止效果 | 典型例子 |
 |---|---|---|---|---|

@@ -592,7 +592,52 @@ def _upsert_alpha_setup_profile(cursor: sqlite3.Cursor, *, record: Mapping[str, 
     )
 
 
+PM_CONSUMABLE_ACTION_VALUE_REQUIRED_FIELDS = (
+    "action_value_lane",
+    "learning_lane",
+    "consumer_scope",
+    "memory_side_role",
+    "last_sample_date",
+    "valid_until",
+    "reward_source",
+    "evidence_scope",
+)
+
+
+def _pm_consumable_action_value_missing_fields(record: Mapping[str, Any]) -> list[str]:
+    payload = _review_helpers._json_loads(record.get("payload_json")) if isinstance(record, Mapping) else {}
+    payload = payload if isinstance(payload, Mapping) else {}
+    missing: list[str] = []
+    for field in PM_CONSUMABLE_ACTION_VALUE_REQUIRED_FIELDS:
+        value = record.get(field) if isinstance(record, Mapping) else None
+        if value in (None, ""):
+            value = payload.get(field)
+        if value in (None, ""):
+            missing.append(field)
+    return missing
+
+
+def _normalize_pm_consumable_action_value_record(record: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized = dict(record or {})
+    consumer_scope = str(normalized.get("consumer_scope") or "").strip().lower()
+    if consumer_scope != "pm_learning":
+        return normalized
+    missing = _pm_consumable_action_value_missing_fields(normalized)
+    if not missing:
+        return normalized
+
+    payload = _review_helpers._json_loads(normalized.get("payload_json"))
+    payload = payload if isinstance(payload, dict) else {}
+    payload["pm_consumable_rejected_missing_fields"] = missing
+    payload["original_consumer_scope"] = "pm_learning"
+    payload["consumer_scope"] = "research_diagnostics"
+    normalized["consumer_scope"] = "research_diagnostics"
+    normalized["payload_json"] = _json_dumps(payload)
+    return normalized
+
+
 def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[str, Any]) -> None:
+    record = _normalize_pm_consumable_action_value_record(record)
     cursor.execute(
         """
         INSERT INTO alpha_setup_action_value (
@@ -600,11 +645,11 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             setup_type, data_combo, action_name, sample_count, reward_sum,
             reward_mean, win_rate, confidence_score, action_preference,
             reward_source, evidence_scope, action_value_lane,
-            consumer_scope, learning_lane, retrieval_key,
+            consumer_scope, learning_lane, memory_side_role, retrieval_key,
             fallback_retrieval_key, execution_retrieval_key,
             max_position_impact, last_sample_date, created_at, updated_at,
             valid_until, active, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(config_id, scope_key, action_name)
         DO UPDATE SET
             sample_count=excluded.sample_count,
@@ -618,6 +663,7 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             action_value_lane=excluded.action_value_lane,
             consumer_scope=excluded.consumer_scope,
             learning_lane=excluded.learning_lane,
+            memory_side_role=excluded.memory_side_role,
             retrieval_key=excluded.retrieval_key,
             fallback_retrieval_key=excluded.fallback_retrieval_key,
             execution_retrieval_key=excluded.execution_retrieval_key,
@@ -650,6 +696,7 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             record.get("action_value_lane"),
             record.get("consumer_scope"),
             record.get("learning_lane"),
+            record.get("memory_side_role"),
             record.get("retrieval_key"),
             record.get("fallback_retrieval_key"),
             record.get("execution_retrieval_key"),

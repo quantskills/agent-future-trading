@@ -61,7 +61,7 @@ Output format:
 - holding_period_hint: expected holding style/window
 - factor_focus: list of factor/setup/catalyst groups that define learning scope
 - current_evidence_conflict: list of current evidence against this view
-- metadata.action_evidence_contract: structured open/hold/exit/execution evidence contract for PM and later Researcher review; it is not a Trader instruction
+- metadata.action_evidence_contract: structured lifecycle evidence contract for PM and later Researcher review; it is not a Trader instruction
 - metadata.learning_scope: setup/factor/catalyst scope for future lane-scoped action-value learning
 - Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, final_action_contract, final_action, authority_type, reason_codes, conditional_trigger_authority, requires_intraday_confirmation, can_execute_without_intraday_trigger, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
 
@@ -129,17 +129,28 @@ ACTION_VALUE_USAGE_BOUNDARY = """
 
 Researcher action-values are action-scoped learning contracts, not a single
 general memory score. Read them only through consumer_scope, action_value_lane,
-retrieval_key, and usage_boundary:
-- open action-value may inform PM open/probe/scale candidates only when the
-  current setup, side, regime, invalidation, and reward source match.
-- hold action-value may inform PM hold/protect lifecycle decisions only.
-- exit/reduce action-value may inform PM profit protection, reduce, exit, or
-  revalidation bias only; it must not be used as open amplification.
+retrieval_key, memory_side_role, and usage_boundary:
+- open action-value may inform PM open/probe candidates only when the current
+  setup, side, regime, invalidation, reward source, and target_side role match.
+- add/scale reads target_side open/add learning plus current_position_side hold
+  learning; it is never created by Analysts, Signal Collector, Trader, or Reviewer.
+- hold action-value may inform PM hold/protect lifecycle decisions only, using
+  current_position_side memory.
+- reduce/exit action-value may inform PM profit protection, reduce, exit, or
+  revalidation bias only, using current_position_side memory; it must not be
+  used as open amplification.
+- conditional_monitor action-value may inform PM trigger-side monitoring only,
+  using trigger_side memory; it does not authorize a fill without Trader's
+  intraday trigger result.
 - PM may read only consumer_scope=pm_learning rows. PM must consume them through
-  exact state -> same ticker/side/horizon -> same ticker/side -> weak prior,
-  then write any effect only into opportunity_score_components,
-  learning_adjustment_summary, final_action_contract.learning_used, and the
-  single final_action_contract target fields.
+  final_action_semantics memory requirements and exact state -> same
+  ticker/side/horizon -> same ticker/side -> weak prior, then write any effect
+  only into opportunity_score_components, learning_adjustment_summary,
+  final_action_contract.learning_used, and the single final_action_contract
+  target fields.
+- PM lifecycle side roles are fixed: open reads target_side; add/scale reads
+  target_side plus current_position_side; hold/reduce/exit reads
+  current_position_side; conditional_monitor reads trigger_side.
 - execution action-value may inform PM's execution_profile; execution lane
   action-value inside consumer_scope=pm_learning may inform PM's
   execution_profile and trigger-method preference before PM writes
@@ -156,9 +167,9 @@ retrieval_key, and usage_boundary:
 - PM must not rely on analyst-compressed action-value traces for scoring.
   After ticker/side/setup/horizon/regime are known, PM reads canonical
   action-value rows directly, preferring top-level action_preference,
-  reward_source, evidence_scope, action_value_lane, reward_sum/reward_mean,
-  sample_count, win_rate, last_sample_date, and valid_until, with payload only
-  as backward-compatible fallback.
+  reward_source, evidence_scope, action_value_lane, memory_side_role,
+  reward_sum/reward_mean, sample_count, win_rate, last_sample_date, and
+  valid_until, with payload only as backward-compatible fallback.
 - PM must read canonical action-value for both long and short candidate sides
   before rebuilding the scorecard; the initial preferred side must not prevent
   real episode learning from correcting ranking.
@@ -594,15 +605,17 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         + ACTION_VALUE_USAGE_BOUNDARY
         + "When writing next-round memory, separate output into action lanes: "
         "open rewards evaluate the full episode result of the entry decision; "
+        "add/scale rewards evaluate whether larger exposure improved the same lifecycle; "
         "hold rewards evaluate giveback, protection, and continuation quality; "
-        "exit/reduce rewards evaluate whether profit was protected or exits were too early; "
+        "reduce/exit rewards evaluate whether profit was protected or exits were too early; "
+        "conditional_monitor rewards evaluate trigger-side watch decisions and unfilled trigger checks; "
         "execution rewards evaluate trigger method, slippage, chase failure, or missed execution. "
         "Treat complete trade episodes as stronger learning evidence than single-day noise; "
         "record when positive alpha should be promoted/scaled, when recent tail loss should "
         "cool or invalidate stale positive memories, and when exit/hold behavior rather than "
         "entry selection caused the result. "
         "Each lesson must state who may use it: analysts only via signal_calibration, "
-        "PM via matching open/hold/exit/execution lane, Trader only through final_action_contract execution fields after independent audit_verdict approval; trade_contract_audit is an execution audit mirror, "
+        "PM via matching open/add/hold/reduce/exit/conditional_monitor/execution lane and memory_side_role, Trader only through final_action_contract execution fields after independent audit_verdict approval; trade_contract_audit is an execution audit mirror, "
         "and protocol-governor only for audit. "
         "Control-governance metadata can support chain-health audit only; it cannot become market alpha, "
         "an action-preference reward, or a direct PM/Trader instruction. "
