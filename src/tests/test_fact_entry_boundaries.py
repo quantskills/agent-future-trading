@@ -152,6 +152,21 @@ class FactEntryBoundaryTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
             validate_pm_artifact_boundary({"execution_result": {"status": "filled"}})
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "pm_internal_draft": {
+                        "opportunity_rank": 1,
+                        "target_lots": -11,
+                    },
+                    "final_action_contract": {
+                        "final_action": "open_probe",
+                        "current_lots": 0,
+                        "target_lots": -11,
+                        "lots_delta": -11,
+                    },
+                }
+            )
 
         validate_auditor_artifact_boundary(
             {

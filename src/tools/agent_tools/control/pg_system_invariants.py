@@ -150,6 +150,14 @@ PM_EXPLANATION_FIELDS = {
     "opportunity_score_components",
     "position_sizing_result",
 }
+PM_INTERNAL_DRAFT_FIELDS = {
+    "pm_internal_draft",
+    "pm_scoring_draft",
+    "pm_ranking_draft",
+    "pm_capital_deployment_draft",
+    "pm_contract_submission_draft",
+    "internal_pm_draft",
+}
 TRADE_INTENT_FIELDS = {
     "action",
     "can_execute_without_intraday_trigger",
@@ -164,6 +172,7 @@ TRADE_INTENT_FIELDS = {
 }
 ARTIFACT_PHASE_BOUNDARY_ERROR_PREFIXES = {
     "pm_artifact_forbidden_downstream_field",
+    "pm_artifact_forbidden_internal_draft_field",
     "auditor_artifact_forbidden_contract_mutation",
     "trader_artifact_forbidden_pm_explanation",
     "transaction_audit_payload_forbidden_pm_contract_mirror",
@@ -1675,6 +1684,9 @@ def _audit_artifact_phase_boundaries(
             pm_hits = _node_field_hits(_dict(artifact.get("final_action_contract")), pm_forbidden_downstream_fields)
             if pm_hits:
                 errors.append(f"pm_artifact_forbidden_downstream_field:{label}:{artifact_name}:{pm_hits}")
+            pm_draft_hits = _node_field_hits(artifact, PM_INTERNAL_DRAFT_FIELDS)
+            if pm_draft_hits:
+                errors.append(f"pm_artifact_forbidden_internal_draft_field:{label}:{artifact_name}:{pm_draft_hits}")
             audit_hits = _node_field_hits(_dict(artifact.get("audit_verdict") or artifact.get("audit_payload") or artifact.get("audit")), auditor_mutation_fields)
             if audit_hits:
                 errors.append(f"auditor_artifact_forbidden_contract_mutation:{label}:{artifact_name}:{audit_hits}")

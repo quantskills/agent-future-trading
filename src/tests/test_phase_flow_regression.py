@@ -696,6 +696,92 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         )
         self.assertEqual(len(updates), 2)
 
+    def test_pm_atomic_submission_repairs_bare_ranked_zero_score_contract(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+        recommendation = FuturesRecommendation(
+            id="bare-rank",
+            status=RecommendationStatus.PENDING,
+            underlying_code="EB",
+            base_price=8000.0,
+            action=RecommendationAction.OPEN_SHORT,
+            lots=11,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {
+                        "opportunity_score": 0.0,
+                        "opportunity_rank": 1,
+                        "final_state": "watch_for_trigger",
+                        "conditional_monitor_candidate": True,
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": -11,
+                    "lots_delta": -11,
+                    "target_margin_ratio_estimate": 0.008,
+                    "conditional_trigger_authority": True,
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "evidence_used": {
+                        "opportunity_score": 0.0,
+                        "opportunity_rank": 1,
+                        "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
+                    },
+                    "reason_codes": ["conditional_monitor_probe_seed"],
+                },
+                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 1}},
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("EB", recommendation)])
+
+        contract = recommendation.signal_snapshot["final_action_contract"]
+        deployment = contract["capital_deployment"]
+        self.assertEqual(contract["target_lots"], -11)
+        self.assertEqual(contract["lots_delta"], -11)
+        self.assertEqual(contract["final_action"], "open_probe")
+        self.assertTrue(deployment["selected_for_capital_deployment"])
+        self.assertEqual(deployment["opportunity_rank"], 1)
+        self.assertEqual(deployment["original_target_lots"], -11)
+        self.assertEqual(deployment["deployed_target_lots"], -11)
+        self.assertEqual(deployment["deployed_lots_delta"], -11)
+        self.assertEqual(
+            deployment["capital_allocation_reason"],
+            "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
+        )
+        self.assertIn("pm_full_market_capital_deployment", contract["reason_codes"])
+        self.assertEqual(recommendation.action, RecommendationAction.OPEN_SHORT)
+        self.assertEqual(recommendation.lots, 11)
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0][0], "bare-rank")
+        self.assertEqual(updates[0][3]["action"], RecommendationAction.OPEN_SHORT)
+        self.assertEqual(updates[0][3]["lots"], 11)
+
 
 class ResearchLearningMechanismRegressionTest(unittest.TestCase):
     def test_learning_mechanisms_use_final_action_contract_trace(self):

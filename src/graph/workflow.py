@@ -386,6 +386,126 @@ class AgentWorkflow:
             opportunity["capital_allocation_reason"] = reason
             opportunity["selected_for_capital_deployment"] = bool(selected)
 
+    @staticmethod
+    def _safe_opportunity_rank(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _snapshot_opportunity_rank(snapshot: Dict[str, Any], side: str = "") -> int | None:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
+        evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        rank = AgentWorkflow._safe_opportunity_rank(deployment.get("opportunity_rank"))
+        if rank is None:
+            rank = AgentWorkflow._safe_opportunity_rank(evidence.get("opportunity_rank"))
+        scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        if rank is None and side in {"long", "short"}:
+            row = scorecard.get(side) if isinstance(scorecard.get(side), dict) else {}
+            rank = AgentWorkflow._safe_opportunity_rank(row.get("opportunity_rank"))
+        if rank is None:
+            active = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
+            opportunity = active.get("opportunity") if isinstance(active.get("opportunity"), dict) else {}
+            rank = AgentWorkflow._safe_opportunity_rank(opportunity.get("opportunity_rank"))
+        return rank
+
+    @staticmethod
+    def _capital_deployment_complete(contract: Dict[str, Any], rank: int | None) -> bool:
+        deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
+        if not deployment:
+            return False
+        required = {
+            "selected_for_capital_deployment",
+            "capital_allocation_reason",
+            "original_target_lots",
+            "deployed_target_lots",
+            "deployed_lots_delta",
+        }
+        if not required.issubset(deployment.keys()):
+            return False
+        if rank is not None and deployment.get("opportunity_rank") in (None, ""):
+            return False
+        return True
+
+    @staticmethod
+    def _requires_atomic_capital_deployment(snapshot: Dict[str, Any], contract: Dict[str, Any]) -> bool:
+        final_action = str(contract.get("final_action") or "").strip().lower()
+        if AgentWorkflow._is_new_or_increasing_risk(snapshot):
+            return True
+        if final_action in {"open", "open_long", "open_short", "open_probe", "open_real", "add", "scale", "increase", "conditional_probe", "conditional_monitor", "watch_trigger"}:
+            return True
+        if bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation")):
+            return True
+        return False
+
+    @staticmethod
+    def _ensure_atomic_capital_deployment_submission(
+        snapshot: Dict[str, Any],
+        *,
+        side: str = "",
+    ) -> bool:
+        """Make rank, deployment, target lots, and allocation reason one PM fact.
+
+        PM may build ranking and sizing in separate internal steps, but a
+        persisted final_action_contract cannot expose a bare rank. If rank has
+        reached the final contract or PM diagnostics, the same contract must also
+        carry the capital deployment conclusion that downstream agents audit.
+        """
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        if not contract:
+            return False
+        rank = AgentWorkflow._snapshot_opportunity_rank(snapshot, side)
+        evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
+        if rank is None and not deployment and not AgentWorkflow._requires_atomic_capital_deployment(snapshot, contract):
+            return False
+        if AgentWorkflow._capital_deployment_complete(contract, rank):
+            changed = False
+            if rank is not None and evidence.get("opportunity_rank") in (None, ""):
+                evidence["opportunity_rank"] = rank
+                changed = True
+            reason = deployment.get("capital_allocation_reason")
+            if reason and evidence.get("capital_allocation_reason") in (None, ""):
+                evidence["capital_allocation_reason"] = reason
+                changed = True
+            if changed:
+                contract["evidence_used"] = evidence
+                snapshot["final_action_contract"] = contract
+            return changed
+
+        current_lots = AgentWorkflow._contract_current_lots(snapshot)
+        target_lots = AgentWorkflow._contract_target_lots(snapshot)
+        lots_changed = target_lots != current_lots
+        selected = (
+            bool(deployment.get("selected_for_capital_deployment"))
+            if deployment and "selected_for_capital_deployment" in deployment
+            else lots_changed
+        )
+        reason = str(
+            deployment.get("capital_allocation_reason")
+            or evidence.get("capital_allocation_reason")
+            or contract.get("capital_allocation_reason")
+            or ""
+        ).strip()
+        if not reason:
+            if selected:
+                reason = f"selected_by_pm_atomic_contract_submission:rank={rank if rank is not None else 'unranked'}"
+            else:
+                reason = f"not_selected_by_pm_atomic_contract_submission:rank={rank if rank is not None else 'unranked'}"
+        deployed_target = target_lots if selected else current_lots
+        AgentWorkflow._apply_deployed_target_to_snapshot(
+            snapshot,
+            target_lots=deployed_target,
+            reason=reason,
+            selected=selected,
+            rank=rank,
+        )
+        return True
+
     def _daily_capital_deployment_config(self) -> Dict[str, float]:
         budget = self.config.get("position_budget_policy", {}) or {}
         capital = self.config.get("capital_utilization_control", {}) or {}
@@ -424,6 +544,7 @@ class AgentWorkflow:
     def _apply_daily_capital_deployment(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         deployment_cfg = self._daily_capital_deployment_config()
         candidates: List[Tuple[float, str, FuturesRecommendation, str, float]] = []
+        updated_ids: set[str] = set()
         for ticker, recommendation in generated:
             if recommendation.status == RecommendationStatus.SKIPPED:
                 continue
@@ -495,6 +616,33 @@ class AgentWorkflow:
                         selected=False,
                         rank=rank,
                     )
+            recommendation.signal_snapshot = snapshot
+            action, lots = self._lots_action_from_target(
+                self._contract_current_lots(snapshot),
+                self._contract_target_lots(snapshot),
+            )
+            recommendation.action = action
+            recommendation.lots = lots
+            self.db.update_futures_recommendation_status(
+                recommendation.id,
+                recommendation.status,
+                action=recommendation.action,
+                lots=recommendation.lots,
+                signal_snapshot=snapshot,
+            )
+            updated_ids.add(str(recommendation.id))
+        for ticker, recommendation in generated:
+            if str(recommendation.id) in updated_ids:
+                continue
+            if recommendation.status == RecommendationStatus.SKIPPED:
+                continue
+            source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+            if source_type != RecommendationSourceType.STRATEGY.value:
+                continue
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            side, _ = self._scorecard_preferred_row(snapshot)
+            if not self._ensure_atomic_capital_deployment_submission(snapshot, side=side):
+                continue
             recommendation.signal_snapshot = snapshot
             action, lots = self._lots_action_from_target(
                 self._contract_current_lots(snapshot),

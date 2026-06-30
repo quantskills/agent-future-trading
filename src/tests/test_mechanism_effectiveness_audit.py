@@ -599,6 +599,40 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("mechanism_learning_score_missing_rank", "\n".join(report.hard_failures))
 
+    def test_ranked_open_contract_without_capital_deployment_hard_fails(self):
+        db_path = self._make_db()
+        self._insert_recommendation(
+            db_path,
+            rec_id="ranked-open-no-deployment",
+            ticker="EB",
+            contract={
+                "ticker": "EB",
+                "current_lots": 0,
+                "target_lots": -11,
+                "lots_delta": -11,
+                "final_action": "open_probe",
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "evidence_used": {
+                    "opportunity_score": 0.0,
+                    "opportunity_rank": 1,
+                    "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {"alpha_setup_action_values": []},
+            },
+            trading_date="2025-03-03",
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertIn(
+            "mechanism_rank_missing_capital_deployment:2025-03-03:EB:ranked-open-no-deployment:rank=1",
+            "\n".join(report.hard_failures),
+        )
+
     def test_diagnostics_do_not_fail_when_mechanism_is_connected_but_rank_loses_money(self):
         db_path = self._make_db()
         self._insert_action_value(db_path)

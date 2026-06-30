@@ -1615,6 +1615,26 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
+    def test_system_invariant_audit_rejects_pm_internal_draft_artifact(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_internal_draft"] = {
+                "opportunity_rank": 1,
+                "target_lots": -9,
+                "capital_deployment_reason": "draft_not_final",
+            }
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_artifact_forbidden_internal_draft_field") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_rejects_auditor_artifact_contract_mutation(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)

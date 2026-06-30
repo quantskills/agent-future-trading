@@ -395,6 +395,8 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 4. 手数计算必须晚于机会状态和学习排序；分析师证据不能直接决定手数。
 5. 最终合约自检失败时必须停止保存 PM 推荐，不能把不一致合约交给审计员兜底。
 
+PM 内部可以分步生成评分草稿、排序草稿和资金部署草稿，但这些草稿只能存在 PM 内部内存中，不得写入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。对外事实入口只有最终合约提交器。最终合约提交必须是原子动作：凡最终 `final_action_contract` 中出现 `opportunity_rank`，或合约属于新开、加仓、扩大交易、条件监控，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化和资金部署 reason code；不得把裸 rank 或半成品资金部署交给 Auditor、Trader、Reviewer、Researcher 或 Protocol Governor。
+
 ### 6.3 配置参数对应关系
 
 PM 的小额试探、正常交易、放大交易和硬上限必须只读取下表列出的配置段。新增资金、手数或门控参数时，必须先补本表，不能在代码里临时读取散落 YAML。

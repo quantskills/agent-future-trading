@@ -372,11 +372,12 @@
 | `negative_learning` | `opportunity_score_components` | `tail_loss_protect` / `negative_revalidate` / `negative_hold_revalidate` 等负向 action-value 对机会排序的扣分分项；只降低 rank，不是永久封杀。 |
 | `execution_profile_learning` | `opportunity_score_components` | 同类 `execution_profile` / `trigger_reason` 后续收益对排序的影响；可正可负，只供 PM 排名和执行 profile 选择参考；必须经 PM 写入 `final_action_contract.execution_profile/entry_trigger` 后才影响执行，Trader 不能直接读取学习记录、改手数或方向。 |
 | `recent_tail_loss_penalty` | `opportunity_score_components` | 近期同作用域大亏或 tail-loss episode 对排序的惩罚分项，可抵消旧正向学习，防止失效 alpha 继续被抬分；不等于硬风险 block。 |
-| `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。 |
-| `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。 |
+| `opportunity_rank` | PM scorecard / 主机会审计 / 资金部署 / 复盘评估 | 当日候选机会在 PM 可比较候选中的排序；用于解释资金优先级，不生成第二张合约。只要进入最终 `final_action_contract` 或其 `evidence_used`，同一合约必须同时写入完整 `capital_deployment`，不得裸 rank 落盘。 |
+| `capital_allocation_reason` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 为什么给该候选资金、监控或暂不分配资金的机器可读理由。凡有资金排名、新开、加仓、扩大或条件监控的最终合约，都必须有该理由。 |
 | `fusion_attribution_label` | Reviewer 归因 / Researcher 学习输入 | 复盘员对 PM 融合证据处理结果的只读标签，如 fusion_conflict_handled、fusion_conflict_unresolved、multi_evidence_consensus_supported；只供未来学习，不改当天事实。 |
 | `evidence_fusion_attribution` | Researcher learning event | 研究员基于复盘事实写入的未来融合学习上下文；只服务下一交易日分析师校准和 PM 排序，不创建当天交易权限。 |
-| `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。 |
+| `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署手数变化、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。最终合约出现 rank、新开、加仓、扩大或条件监控时必须原子写入该对象。 |
+| `pm_internal_draft` / `pm_scoring_draft` / `pm_ranking_draft` / `pm_capital_deployment_draft` / `pm_contract_submission_draft` / `internal_pm_draft` | PM 内部内存草稿名，非系统事实字段 | PM 可在内部内存分步形成评分、排序、资金部署和提交草稿；这些名字不得进入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。出现即为系统事实入口越界。 |
 | `learning_adjustment_summary` | 分析师证据 / PM scorecard / `final_action_contract.learning_used` / Researcher / 复盘评估 | 历史学习如何影响本次证据、评分或资金排序；不能直接改变 Trader 方向或手数。 |
 | `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |
 | `tradeable_opportunity_state_count` | PM scorecard | `tradeable_candidate` 与 `probe_candidate` 的证据数量。 |

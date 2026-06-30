@@ -238,6 +238,8 @@
 
 （7）建立多维证据融合预测协议。修改：新增 `src/config/evidence_fusion_policy_catalog.yaml` 和 `src/tools/common/evidence_fusion_semantics.py`，同步三类分析师落地、`signal_collection_contract`、PM 评分和唯一合约、Auditor 审核、Reviewer 归因、Researcher 未来学习、协议管理员能力卡/契约覆盖、统一字段语义、机制文档、提示词和回测前测试。原因：technical、fundamental、commodity_news 必须把技术、基本面、新闻、商品 profile、历史学习和执行反馈形成的预测证据强弱、时效、一致性、冲突、确认需求和缺失证据结构化传给 PM；signal_collector 只保真汇总，PM 只把融合诊断作为 scorecard 分项和合约解释，Auditor 只审 PM 是否解释主要冲突，Trader/Accountant 不读取融合证据改执行或结算。
 
+（8）建立 PM 内部草稿隔离与最终合约原子提交协议。修改：workflow 资金部署提交口、PM artifact 边界、PG 系统不变量、阶段流/事实入口/系统不变量测试和机制文档。原因：PM 可以在内部内存分步形成评分、排序和资金部署草稿，但对外只能一次性提交完整 `final_action_contract`；凡最终合约出现 rank、新开、加仓、扩大或条件监控，必须同时落入 `capital_deployment`、资金理由和部署前后手数，杜绝裸 rank、半成品资金部署和 PM 草稿被下游偷看。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

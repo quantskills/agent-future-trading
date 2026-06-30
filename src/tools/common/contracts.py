@@ -95,6 +95,15 @@ PM_RESEARCH_FACT_OBJECT_FIELDS = {
     "adaptive_policy_state",
 }
 
+PM_INTERNAL_DRAFT_FIELDS = {
+    "pm_internal_draft",
+    "pm_scoring_draft",
+    "pm_ranking_draft",
+    "pm_capital_deployment_draft",
+    "pm_contract_submission_draft",
+    "internal_pm_draft",
+}
+
 EXECUTION_ARTIFACT_CONTAINERS = (
     "execution_translation",
     "execution_result",
@@ -307,12 +316,13 @@ def validate_execution_artifact_boundary(payload: Dict[str, Any]) -> None:
 
 
 def pm_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
-    """Return PM artifact paths that persist downstream execution or settlement facts."""
+    """Return PM artifact paths that persist downstream facts or PM drafts."""
     violations: List[str] = []
     payload = payload if isinstance(payload, dict) else {}
     object_forbidden = PM_DOWNSTREAM_FACT_FIELDS | RESEARCH_LEARNING_FIELDS
     for path, node in _iter_nested_dicts(payload):
         fields = _fact_object_forbidden_fields(node, object_forbidden)
+        fields.extend(field for field in _present_forbidden_fields(node, PM_INTERNAL_DRAFT_FIELDS) if field not in fields)
         if fields:
             violations.append(f"{path or '<root>'}:{fields}")
     return violations
