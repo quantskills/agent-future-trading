@@ -92,11 +92,11 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 | 最终合约生命周期 | PM 必须读取的记忆 | `side` 的含义 |
 |---|---|---|
 | 新开仓 `open/open_probe/open_real` | open lane | `target_side` |
-| 加仓/扩大 `add/scale` | open/add 与 hold lane | `target_side` 与 `current_position_side` |
+| 加仓/扩大 `add/scale/increase` | add/scale/increase/open 与 hold lane | `target_side` 与 `current_position_side` |
 | 持仓 `hold` | hold lane，必要时 exit/reduce 作为审计背景 | `current_position_side` |
 | 减仓 `reduce/trim` | reduce/exit/hold lane | `current_position_side` |
 | 退出 `exit/close/risk_exit` | exit/reduce/hold lane | `current_position_side` |
-| 条件监控 `conditional_probe/watch_trigger` | conditional_monitor/open/hold lane | `trigger_side` |
+| 条件监控 `conditional_probe/watch_trigger` | conditional_monitor lane | `trigger_side` |
 
 ### 2.2 reason code 语义表
 

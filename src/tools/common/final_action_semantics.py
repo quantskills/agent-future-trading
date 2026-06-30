@@ -20,8 +20,8 @@ DECREASE_ACTIONS = {"reduce", "trim", "decrease", "reduce_position", "scale_down
 EXIT_ACTIONS = {"exit", "close", "close_long", "close_short", "close_position", "risk_exit", "flatten"}
 TRADE_ACTIONS = OPEN_ACTIONS | INCREASE_ACTIONS | DECREASE_ACTIONS | EXIT_ACTIONS | CONDITIONAL_ACTIONS
 
-MEMORY_LANES = {"open", "add", "hold", "reduce", "exit", "execution", "conditional_monitor"}
-PM_MEMORY_LANES = {"open", "hold", "reduce", "exit", "conditional_monitor"}
+MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
+PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
 MEMORY_SIDE_ROLES = {
     "target_side",
     "current_position_side",
@@ -625,16 +625,11 @@ def derive_memory_requirements(contract: Mapping[str, Any] | None) -> dict[str, 
             )
         )
 
-    # Dedupe while preserving declaration order and allowing add->open fallback.
+    # Dedupe while preserving declaration order.  Lane fallback is handled by
+    # _lane_matches_requirement so requirement records keep their true lane.
     seen: set[tuple[str, str, str, bool]] = set()
     deduped: list[dict[str, Any]] = []
     for item in requirements:
-        lane = _clean(item.get("lane"))
-        if lane == "add":
-            # The DB stores older add samples as open/increase in some paths; PM
-            # reads open as the canonical add/increase fallback.
-            item = dict(item)
-            item["lane"] = item["learning_lane"] = item["action_value_lane"] = "open"
         key = (
             _clean(item.get("lane")),
             _clean(item.get("side")),
@@ -683,11 +678,14 @@ def _lane_matches_requirement(row_lane: str, required_lane: str) -> bool:
     if not row_lane or not required_lane:
         return False
     aliases = {
-        "conditional_monitor": {"conditional_monitor", "open", "hold"},
+        "open": {"open"},
+        "add": {"add", "scale", "increase", "open"},
+        "scale": {"add", "scale", "increase", "open"},
+        "increase": {"add", "scale", "increase", "open"},
+        "hold": {"hold", "reduce", "exit"},
         "reduce": {"reduce", "exit", "hold"},
-        "exit": {"exit", "reduce", "hold", "open"},
-        "hold": {"hold", "exit", "reduce", "open"},
-        "open": {"open", "add", "increase"},
+        "exit": {"exit", "reduce", "hold"},
+        "conditional_monitor": {"conditional_monitor"},
     }
     return row_lane in aliases.get(required_lane, {required_lane})
 

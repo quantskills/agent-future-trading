@@ -12,7 +12,10 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
+from tools.agent_tools.control.pg_system_invariants import (
+    _audit_pm_learning_transport_and_contract_effect,
+    audit_system_invariants,
+)
 
 
 def _dumps(value):
@@ -699,6 +702,114 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
 
         self.assertTrue(report.ok, report.to_dict())
+
+    def test_pg_learning_check_does_not_treat_prior_open_as_exit_learning(self):
+        contract = {
+            "ticker": "RB",
+            "final_action": "exit",
+            "current_lots": -2,
+            "target_lots": 0,
+            "lots_delta": 2,
+            "evidence_used": {
+                "opportunity_score_components": {
+                    "positive_learning": 0.0,
+                    "negative_learning": 0.0,
+                    "execution_profile_learning": 0.0,
+                    "recent_tail_loss_penalty": 0.0,
+                }
+            },
+            "learning_used": {"alpha_setup_action_values": []},
+        }
+        recommendations = {
+            "rb-exit": {
+                "trading_date": "2025-03-04",
+                "effective_trade_date": "2025-03-04",
+                "source_type": "strategy",
+                "underlying_code": "RB",
+                "signal_snapshot": {"final_action_contract": contract},
+            }
+        }
+        action_values = [
+            {
+                "id": "open-prior",
+                "ticker": "RB",
+                "side": "short",
+                "scope_key": "RB|short|open",
+                "action_name": "open",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "memory_side_role": "target_side",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "consumer_scope": "pm_learning",
+                "reward_sum": 1200.0,
+                "last_sample_date": "2025-03-03",
+            }
+        ]
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
+
+        self.assertFalse(
+            any(error.startswith("pm_learning_components_zero_despite_prior_real_action_value") for error in errors),
+            errors,
+        )
+
+    def test_pg_learning_check_still_treats_prior_open_as_add_learning_context(self):
+        contract = {
+            "ticker": "RB",
+            "final_action": "add",
+            "current_lots": -1,
+            "target_lots": -3,
+            "lots_delta": -2,
+            "evidence_used": {
+                "opportunity_score_components": {
+                    "positive_learning": 0.0,
+                    "negative_learning": 0.0,
+                    "execution_profile_learning": 0.0,
+                    "recent_tail_loss_penalty": 0.0,
+                }
+            },
+            "learning_used": {"alpha_setup_action_values": []},
+        }
+        recommendations = {
+            "rb-add": {
+                "trading_date": "2025-03-04",
+                "effective_trade_date": "2025-03-04",
+                "source_type": "strategy",
+                "underlying_code": "RB",
+                "signal_snapshot": {"final_action_contract": contract},
+            }
+        }
+        action_values = [
+            {
+                "id": "open-prior",
+                "ticker": "RB",
+                "side": "short",
+                "scope_key": "RB|short|open",
+                "action_name": "open",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "memory_side_role": "target_side",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "consumer_scope": "pm_learning",
+                "reward_sum": 1200.0,
+                "last_sample_date": "2025-03-03",
+            }
+        ]
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
+
+        self.assertTrue(
+            any(error.startswith("pm_learning_components_zero_despite_prior_real_action_value") for error in errors),
+            errors,
+        )
 
     def test_system_invariant_audit_rejects_rank_without_contract_effect_or_reason(self):
         db_path = self._make_db()

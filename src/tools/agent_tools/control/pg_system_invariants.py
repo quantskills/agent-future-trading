@@ -21,7 +21,7 @@ from tools.common.order_semantics import (
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
 )
-from tools.common.final_action_semantics import is_conditional_monitor_contract
+from tools.common.final_action_semantics import derive_memory_requirements, is_conditional_monitor_contract
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
 
 
@@ -1242,6 +1242,122 @@ def _payload_or_row_value(row: Dict[str, Any], key: str, *aliases: str) -> Any:
     return None
 
 
+def _action_value_lane(row: Dict[str, Any]) -> str:
+    return _lower(_payload_or_row_value(row, "learning_lane", "action_value_lane", "action_name"))
+
+
+def _action_value_memory_side_role(row: Dict[str, Any]) -> str:
+    return _lower(_payload_or_row_value(row, "memory_side_role"))
+
+
+def _lane_matches_requirement(row_lane: str, required_lane: str) -> bool:
+    row_lane = _lower(row_lane)
+    required_lane = _lower(required_lane)
+    if not row_lane or not required_lane:
+        return False
+    aliases = {
+        "open": {"open"},
+        "add": {"add", "scale", "increase", "open"},
+        "scale": {"add", "scale", "increase", "open"},
+        "increase": {"add", "scale", "increase", "open"},
+        "hold": {"hold", "reduce", "exit"},
+        "reduce": {"reduce", "exit", "hold"},
+        "exit": {"exit", "reduce", "hold"},
+        "conditional_monitor": {"conditional_monitor"},
+    }
+    return row_lane in aliases.get(required_lane, {required_lane})
+
+
+def _action_value_matches_requirement(
+    row: Dict[str, Any],
+    *,
+    ticker: str,
+    side: str,
+    decision_date: str,
+    lane: str,
+    memory_side_role: str,
+) -> bool:
+    target_ticker = _lower(ticker).upper()
+    target_side = _lower(side)
+    decision_day = _date10(decision_date)
+    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
+        return False
+    row_ticker = str(row.get("ticker") or "").upper()
+    row_side = _lower(row.get("side"))
+    if row_ticker not in {target_ticker, "*"}:
+        return False
+    if row_side not in {target_side, "*", "both", "any"}:
+        return False
+    sample_day = _date10(row.get("last_sample_date"))
+    if not sample_day or sample_day >= decision_day:
+        return False
+    preference = _lower(_payload_or_row_value(row, "action_preference"))
+    if preference not in ACTION_PREFERENCE_VALUES:
+        return False
+    if _action_value_consumer_scope(row) != "pm_learning":
+        return False
+    payload = _dict(row.get("payload"))
+    reward_source = _lower(row.get("reward_source")) or _effective_reward_source(payload)
+    if not any(marker in reward_source for marker in REAL_REWARD_SOURCE_MARKERS):
+        return False
+    if not _lane_matches_requirement(_action_value_lane(row), lane):
+        return False
+    required_role = _lower(memory_side_role)
+    row_role = _action_value_memory_side_role(row)
+    if required_role and row_role and row_role != required_role:
+        return False
+    return True
+
+
+def _real_action_values_for_memory_requirements(
+    action_values: List[Dict[str, Any]],
+    *,
+    contract: Dict[str, Any],
+    ticker: str,
+    side: str,
+    decision_date: str,
+) -> List[Dict[str, Any]]:
+    requirements = derive_memory_requirements(contract)
+    required_memory = [
+        item for item in (requirements.get("must_land_in_pm_contract") or [])
+        if isinstance(item, dict) and item.get("must_land_in_pm_contract")
+    ]
+    matched: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for requirement in required_memory:
+        req_side = _lower(requirement.get("side")) or _lower(side)
+        req_lane = _lower(requirement.get("lane") or requirement.get("learning_lane"))
+        req_role = _lower(requirement.get("memory_side_role"))
+        if req_side not in {"long", "short"} or not req_lane:
+            continue
+        for row in action_values:
+            if not _action_value_matches_requirement(
+                row,
+                ticker=ticker,
+                side=req_side,
+                decision_date=decision_date,
+                lane=req_lane,
+                memory_side_role=req_role,
+            ):
+                continue
+            row_id = str(
+                row.get("id")
+                or _payload_or_row_value(row, "id")
+                or "|".join([
+                    str(row.get("scope_key") or ""),
+                    str(row.get("ticker") or ""),
+                    str(row.get("side") or ""),
+                    _action_value_lane(row),
+                    _lower(_payload_or_row_value(row, "action_preference")),
+                ])
+            )
+            if row_id in seen:
+                continue
+            seen.add(row_id)
+            matched.append(row)
+    return matched
+
+
 def _real_action_value_available_before(
     action_values: List[Dict[str, Any]],
     *,
@@ -1316,6 +1432,17 @@ def _prior_real_action_value_is_hold_exit(
     return False
 
 
+def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bool:
+    for row in rows:
+        preference = _lower(_payload_or_row_value(row, "action_preference"))
+        lane = _action_value_lane(row)
+        if preference in {"tail_loss_protect", "negative_hold_revalidate", "positive_candidate_exit"}:
+            return True
+        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
+            return True
+    return False
+
+
 def _audit_pm_learning_transport_and_contract_effect(
     recommendations: Dict[str, Dict[str, Any]],
     action_values: List[Dict[str, Any]],
@@ -1352,18 +1479,15 @@ def _audit_pm_learning_transport_and_contract_effect(
         components = _contract_learning_components(contract)
         learning_all_zero = all(abs(value) <= 1e-12 for value in components.values())
         decision_date = str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or "")
-        prior_real_action_value_available = _real_action_value_available_before(
+        required_prior_rows = _real_action_values_for_memory_requirements(
             action_values,
+            contract=contract,
             ticker=str(ticker),
             side=side,
             decision_date=decision_date,
         )
-        prior_hold_exit_learning = _prior_real_action_value_is_hold_exit(
-            action_values,
-            ticker=str(ticker),
-            side=side,
-            decision_date=decision_date,
-        )
+        prior_real_action_value_available = bool(required_prior_rows)
+        prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(required_prior_rows)
         if (
             prior_real_action_value_available
             and learning_all_zero

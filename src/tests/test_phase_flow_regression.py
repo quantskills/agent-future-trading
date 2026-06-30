@@ -57,6 +57,7 @@ from agents.decision_team.portfolio_manager import (
     _build_final_action_contract,
     _build_release_block_diagnostics,
     _canonical_action_evidence_contract,
+    _retrieve_lifecycle_pm_memory,
     _validate_required_analyst_signals,
     _pm_new_entry_semantic_block_reason,
     _current_open_evidence_snapshot,
@@ -6436,6 +6437,108 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         detail = diagnostics["winning_template_continuation"]
         self.assertEqual(detail["decision"], "protective_reduce_no_continuation")
         self.assertTrue(detail["prevents_position_matched_profit_giveback"])
+
+    def test_lifecycle_memory_retrieval_does_not_land_open_for_exit(self):
+        open_row = {
+            "scope_key": "RB|long|open",
+            "ticker": "RB",
+            "side": "long",
+            "action_name": "open",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "memory_side_role": "target_side",
+            "action_preference": "positive_candidate_open",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": 1200.0,
+        }
+        contract = {
+            "ticker": "RB",
+            "current_lots": 2,
+            "target_lots": 0,
+            "lots_delta": -2,
+            "final_action": "exit",
+        }
+        with patch(
+            "agents.decision_team.portfolio_manager.retrieve_pm_memory",
+            return_value={"action_values": [open_row]},
+        ):
+            rows, audit = _retrieve_lifecycle_pm_memory(
+                db=object(),
+                config_id="cfg",
+                ticker="RB",
+                trading_date="2025-03-04",
+                contract=contract,
+                analyst_signals=[],
+                signal_combo=[],
+                fusion_context={},
+                alpha_setup_action_values=[],
+            )
+
+        self.assertEqual(rows, [])
+        self.assertTrue(audit["requirement_details"])
+        self.assertTrue(all(detail["row_count"] == 0 for detail in audit["requirement_details"]))
+
+    def test_lifecycle_memory_retrieval_allows_open_for_add(self):
+        open_row = {
+            "scope_key": "RB|long|open",
+            "ticker": "RB",
+            "side": "long",
+            "action_name": "open",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "memory_side_role": "target_side",
+            "action_preference": "positive_candidate_open",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": 1200.0,
+        }
+        hold_row = {
+            "scope_key": "RB|long|hold",
+            "ticker": "RB",
+            "side": "long",
+            "action_name": "hold",
+            "action_value_lane": "hold",
+            "learning_lane": "hold",
+            "memory_side_role": "current_position_side",
+            "action_preference": "positive_candidate_hold",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": 800.0,
+        }
+        contract = {
+            "ticker": "RB",
+            "current_lots": 1,
+            "target_lots": 3,
+            "lots_delta": 2,
+            "final_action": "add",
+        }
+        with patch(
+            "agents.decision_team.portfolio_manager.retrieve_pm_memory",
+            return_value={"action_values": [open_row, hold_row]},
+        ):
+            rows, audit = _retrieve_lifecycle_pm_memory(
+                db=object(),
+                config_id="cfg",
+                ticker="RB",
+                trading_date="2025-03-04",
+                contract=contract,
+                analyst_signals=[],
+                signal_combo=[],
+                fusion_context={},
+                alpha_setup_action_values=[],
+            )
+
+        landed_lanes = {row.get("learning_lane") for row in rows}
+        counts = {
+            (detail["lane"], detail["memory_side_role"]): detail["row_count"]
+            for detail in audit["requirement_details"]
+        }
+        self.assertIn("open", landed_lanes)
+        self.assertIn("hold", landed_lanes)
+        self.assertEqual(counts.get(("add", "target_side")), 1)
+        self.assertEqual(counts.get(("open", "target_side")), 1)
+        self.assertEqual(counts.get(("hold", "current_position_side")), 1)
 
     def test_profit_protective_reduce_is_not_overridden_by_min_hold_lifecycle(self):
         current_position = SimpleNamespace(

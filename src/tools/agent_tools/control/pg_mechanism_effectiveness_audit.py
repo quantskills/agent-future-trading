@@ -444,17 +444,17 @@ def _lane_matches_requirement(row: Dict[str, Any], lane: str) -> bool:
     required = _lower(lane)
     if not required:
         return True
-    if required == "conditional_monitor":
-        return row_lane in {"conditional_monitor", "open", "hold"}
-    if required == "open":
-        return row_lane in {"open", "add", "increase"}
-    if required == "hold":
-        return row_lane in {"hold", "exit", "reduce", "open"}
-    if required == "reduce":
-        return row_lane in {"reduce", "exit", "hold"}
-    if required == "exit":
-        return row_lane in {"exit", "reduce", "hold", "open"}
-    return row_lane == required
+    aliases = {
+        "open": {"open"},
+        "add": {"add", "scale", "increase", "open"},
+        "scale": {"add", "scale", "increase", "open"},
+        "increase": {"add", "scale", "increase", "open"},
+        "hold": {"hold", "reduce", "exit"},
+        "reduce": {"reduce", "exit", "hold"},
+        "exit": {"exit", "reduce", "hold"},
+        "conditional_monitor": {"conditional_monitor"},
+    }
+    return row_lane in aliases.get(required, {required})
 
 
 def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -702,6 +702,64 @@ def _has_intraday_decision(intraday_decisions: Iterable[Dict[str, Any]], recomme
     return False
 
 
+def _audit_payload_candidates(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for source in (_dict(recommendation.get("audit_payload")), _dict(recommendation.get("signal_snapshot"))):
+        if not source:
+            continue
+        candidates.append(source)
+        for key in ("independent_auditor", "auditor", "trade_contract_audit"):
+            nested = _dict(source.get(key))
+            if nested:
+                candidates.append(nested)
+    return candidates
+
+
+def _auditor_verdict_from_recommendation(recommendation: Dict[str, Any]) -> str:
+    for payload in _audit_payload_candidates(recommendation):
+        verdict = _lower(
+            payload.get("audit_verdict")
+            or payload.get("verdict")
+            or payload.get("audit_status")
+            or payload.get("status")
+        )
+        if verdict:
+            if verdict in {"approve", "approved", "pass", "passed"}:
+                return "approve"
+            if verdict in {"approve_with_warning", "warning", "approved_with_warning"}:
+                return "approve_with_warning"
+            if verdict in {"block", "blocked", "reject", "rejected"}:
+                return "block"
+            if verdict in {"require_review", "review_required", "manual_review"}:
+                return "require_review"
+            return verdict
+    return ""
+
+
+def _auditor_block_reason_present(recommendation: Dict[str, Any]) -> bool:
+    reason_keys = {
+        "audit_reason",
+        "audit_reason_code",
+        "audit_reason_codes",
+        "hard_risk_reason",
+        "hard_risk_reasons",
+        "soft_risk_reasons",
+        "risk_reasons",
+        "block_reason",
+        "block_reasons",
+        "reason",
+        "reason_codes",
+    }
+    for payload in _audit_payload_candidates(recommendation):
+        for key in reason_keys:
+            value = payload.get(key)
+            if isinstance(value, list) and any(str(item).strip() for item in value):
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
 def _capital_deployment_selected(contract: Dict[str, Any]) -> Optional[bool]:
     deployment = _dict(contract.get("capital_deployment"))
     if not deployment:
@@ -844,8 +902,13 @@ def _audit_recommendation_mechanisms(
         if _has_hold_exit_learning(contract) and not _hold_exit_landed_in_position(contract) and not _hold_exit_has_explanation(contract):
             hard_failures.append(f"mechanism_hold_exit_learning_not_landed:{label}")
 
-        if _is_conditional_monitor(contract) and not _has_intraday_decision(intraday_decisions, recommendation_id):
-            hard_failures.append(f"mechanism_conditional_probe_missing_intraday_result:{label}")
+        if _is_conditional_monitor(contract):
+            auditor_verdict = _auditor_verdict_from_recommendation(recommendation)
+            if auditor_verdict in {"block", "require_review"}:
+                if not _auditor_block_reason_present(recommendation):
+                    hard_failures.append(f"mechanism_conditional_probe_auditor_block_missing_reason:{label}")
+            elif not _has_intraday_decision(intraday_decisions, recommendation_id):
+                hard_failures.append(f"mechanism_conditional_probe_missing_intraday_result:{label}")
 
         score = _opportunity_score(contract)
         if rank is not None and score is not None and selected is False and rank <= 3:

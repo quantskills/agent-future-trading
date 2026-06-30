@@ -3934,6 +3934,24 @@ def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
     return normalized
 
 
+def _pm_memory_lane_matches(row_lane: str, required_lane: str) -> bool:
+    row_lane = str(row_lane or "").strip().lower()
+    required_lane = str(required_lane or "").strip().lower()
+    if not row_lane or not required_lane:
+        return False
+    aliases = {
+        "open": {"open"},
+        "add": {"add", "scale", "increase", "open"},
+        "scale": {"add", "scale", "increase", "open"},
+        "increase": {"add", "scale", "increase", "open"},
+        "hold": {"hold", "reduce", "exit"},
+        "reduce": {"reduce", "exit", "hold"},
+        "exit": {"exit", "reduce", "hold"},
+        "conditional_monitor": {"conditional_monitor"},
+    }
+    return row_lane in aliases.get(required_lane, {required_lane})
+
+
 def _retrieve_lifecycle_pm_memory(
     *,
     db,
@@ -4002,19 +4020,7 @@ def _retrieve_lifecycle_pm_memory(
                 or normalized.get("action_name")
                 or ""
             ).lower()
-            if lane == "conditional_monitor":
-                lane_ok = row_lane in {"conditional_monitor", "open", "hold"}
-            elif lane == "reduce":
-                lane_ok = row_lane in {"reduce", "exit", "hold"}
-            elif lane == "exit":
-                lane_ok = row_lane in {"exit", "reduce", "hold", "open"}
-            elif lane == "hold":
-                lane_ok = row_lane in {"hold", "exit", "reduce", "open"}
-            elif lane == "open":
-                lane_ok = row_lane in {"open", "add", "increase"}
-            else:
-                lane_ok = row_lane == lane
-            if not lane_ok:
+            if not _pm_memory_lane_matches(row_lane, lane):
                 continue
             lane_matched.append(_annotate_memory_requirement_row(normalized, requirement))
         rows = _append_unique_action_values(rows, lane_matched)

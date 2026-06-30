@@ -240,6 +240,8 @@
 
 （8）建立 PM 内部草稿隔离与最终合约原子提交协议。修改：workflow 资金部署提交口、PM artifact 边界、PG 系统不变量、阶段流/事实入口/系统不变量测试和机制文档。原因：PM 可以在内部内存分步形成评分、排序和资金部署草稿，但对外只能一次性提交完整 `final_action_contract`；凡最终合约出现 rank、新开、加仓、扩大或条件监控，必须同时落入 `capital_deployment`、资金理由和部署前后手数，杜绝裸 rank、半成品资金部署和 PM 草稿被下游偷看。
 
+（9）收口交易生命周期记忆 lane 覆盖与 PG 旧检查路径。修改：`final_action_semantics.py`、PM 生命周期记忆读取、PG 系统不变量、PG 机制有效性审计、机制文档和回归测试。原因：open 学习只能支持开仓，不能冒充持仓、减仓、退出或条件监控学习；add/scale/increase 仍可读取 add/scale/increase/open 与当前持仓 hold 学习；PG 学习检查改为按当前合约动作要求匹配记忆，Auditor block/require_review 的条件监控不再要求 Trader 写盘中结果，从而修记录和检查口径，不新增交易阻断。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

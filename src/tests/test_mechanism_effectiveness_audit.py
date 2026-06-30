@@ -138,6 +138,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         preference: str = "positive_candidate_open",
         action_name: str = "open",
         action_value_lane: str = "open",
+        memory_side_role: str = "",
         reward_sum: float = 1200.0,
         last_sample_date: str = "2025-03-03",
     ) -> None:
@@ -173,6 +174,11 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     last_sample_date,
                 ),
             )
+            if memory_side_role:
+                conn.execute(
+                    "UPDATE alpha_setup_action_value SET payload_json=? WHERE id='av1'",
+                    (_dumps({"memory_side_role": memory_side_role}),),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -411,6 +417,45 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertTrue(report.ok, report.to_dict())
+
+    def test_prior_open_learning_does_not_trigger_exit_action_value_read_failure(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="RB",
+            side="short",
+            preference="positive_candidate_open",
+            action_name="open",
+            action_value_lane="open",
+            memory_side_role="current_position_side",
+            reward_sum=1200.0,
+            last_sample_date="2025-03-03",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="rb-exit-with-only-open-prior",
+            ticker="RB",
+            contract={
+                "ticker": "RB",
+                "current_lots": -2,
+                "target_lots": 0,
+                "lots_delta": 2,
+                "final_action": "exit",
+                "reason_codes": ["not_new_or_increasing_exposure"],
+                "evidence_used": {
+                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {"alpha_setup_action_values": []},
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        joined = "\n".join(report.hard_failures)
+        self.assertNotIn("mechanism_action_value_not_read_by_pm", joined)
+        self.assertNotIn("mechanism_matching_action_value_not_landed_in_pm", joined)
 
     def test_hold_exit_learning_fails_when_position_does_not_change_without_explanation(self):
         db_path = self._make_db()
@@ -733,6 +778,59 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
+
+    def test_auditor_blocked_conditional_probe_does_not_require_intraday_result(self):
+        db_path = self._make_db()
+        contract = {
+            "ticker": "HC",
+            "current_lots": 0,
+            "target_lots": -1,
+            "lots_delta": -1,
+            "final_action": "open_probe",
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "evidence_used": {
+                "opportunity_rank": 2,
+                "capital_allocation_reason": "selected_conditional_monitor",
+                "opportunity_score_components": {},
+            },
+            "capital_deployment": {
+                "opportunity_rank": 2,
+                "selected_for_capital_deployment": True,
+                "deployed_target_lots": -1,
+                "original_target_lots": -1,
+            },
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            audit_payload = {
+                "final_action_contract": contract,
+                "independent_auditor": {
+                    "audit_verdict": "block",
+                    "hard_risk_reasons": ["missing_margin_or_price_boundary"],
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date,
+                    effective_trade_date, source_type, underlying_code,
+                    action, lots, signal_snapshot, audit_payload, status, created_at
+                )
+                VALUES ('blocked-conditional', 'cfg', 'p1', '2025-03-04', '2025-03-04',
+                    'strategy', 'HC', 'hold', 0, ?, ?, 'blocked', '2025-03-04T09:00:00')
+                """,
+                (_dumps({"final_action_contract": contract}), _dumps(audit_payload)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertNotIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
 
     def test_cli_returns_zero_for_diagnostics_and_nonzero_for_hard_fail(self):
         db_path = self._make_db()
