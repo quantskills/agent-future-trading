@@ -13,7 +13,7 @@ import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apis.contract_info_cache import FuturesContractInfoCache
 from database.artifact_store import externalize_json_for_db
@@ -909,6 +909,66 @@ def _deactivate_adaptive_policy_state_from_counterfactual_reversal(
         )
     return changed
 
+
+def _episode_payload_pair(payload: Dict[str, Any]) -> Dict[str, Any]:
+    pair = payload.get("pair") if isinstance(payload.get("pair"), dict) else {}
+    return pair
+
+
+def _episode_payload_trace(payload: Dict[str, Any]) -> Dict[str, Any]:
+    trace = payload.get("opportunity_ranking_trace") if isinstance(payload.get("opportunity_ranking_trace"), dict) else {}
+    return trace
+
+
+def _episode_payload_net_pnl(payload: Dict[str, Any]) -> float:
+    return _safe_float(_episode_payload_pair(payload).get("net_pnl"))
+
+
+def _episode_payload_opportunity_score(payload: Dict[str, Any]) -> float:
+    return _safe_float(_episode_payload_trace(payload).get("opportunity_score"), -1.0)
+
+
+def _episode_payload_recommendation_id(payload: Dict[str, Any]) -> str:
+    pair = _episode_payload_pair(payload)
+    return str(payload.get("open_recommendation_id") or pair.get("open_recommendation_id") or "")
+
+
+def _select_representative_episode_payload(
+    rows: List[Dict[str, Any]],
+    effect: str,
+) -> Tuple[Dict[str, Any], str]:
+    valid_rows = [row for row in rows or [] if isinstance(row, dict)]
+    if not valid_rows:
+        return {}, "no_representative_episode"
+    normalized_effect = str(effect or "").lower()
+    if normalized_effect == "lower_priority":
+        return min(
+            valid_rows,
+            key=lambda row: (
+                _episode_payload_net_pnl(row),
+                -_episode_payload_opportunity_score(row),
+                _episode_payload_recommendation_id(row),
+            ),
+        ), "largest_loss_for_lower_priority"
+    if normalized_effect == "raise_priority":
+        return max(
+            valid_rows,
+            key=lambda row: (
+                _episode_payload_net_pnl(row),
+                _episode_payload_opportunity_score(row),
+                _episode_payload_recommendation_id(row),
+            ),
+        ), "largest_gain_for_raise_priority"
+    return max(
+        valid_rows,
+        key=lambda row: (
+            _episode_payload_opportunity_score(row),
+            abs(_episode_payload_net_pnl(row)),
+            _episode_payload_recommendation_id(row),
+        ),
+    ), "highest_score_for_observe"
+
+
 def _write_opportunity_ranking_learning_events(
     cursor: sqlite3.Cursor,
     *,
@@ -944,14 +1004,22 @@ def _write_opportunity_ranking_learning_events(
     for key, rows in grouped.items():
         if len(rows) < min_samples:
             continue
-        net_pnl = sum(_safe_float((row.get("pair") or {}).get("net_pnl")) for row in rows)
-        wins = sum(1 for row in rows if _safe_float((row.get("pair") or {}).get("net_pnl")) > 0)
-        avg_score = sum(_safe_float((row.get("opportunity_ranking_trace") or {}).get("opportunity_score")) for row in rows) / len(rows)
+        net_pnl = sum(_episode_payload_net_pnl(row) for row in rows)
+        wins = sum(1 for row in rows if _episode_payload_net_pnl(row) > 0)
+        avg_score = sum(_episode_payload_opportunity_score(row) for row in rows) / len(rows)
         win_rate = wins / len(rows) if rows else 0.0
         ticker, side, setup_type, opportunity_state, regime = key
         confidence = min(0.85, 0.35 + 0.08 * len(rows) + min(0.25, abs(net_pnl) / 80000.0))
         effect = "raise_priority" if net_pnl > 0 and win_rate >= 0.55 else "lower_priority" if net_pnl < 0 and win_rate <= 0.45 else "observe"
         multiplier = 1.10 if effect == "raise_priority" else 0.75 if effect == "lower_priority" else 1.0
+        representative, representative_selection_reason = _select_representative_episode_payload(rows, effect)
+        representative_snapshot = (
+            representative.get("signal_snapshot")
+            if isinstance(representative.get("signal_snapshot"), dict)
+            else {}
+        )
+        representative_trace = _episode_payload_trace(representative)
+        representative_recommendation_id = _episode_payload_recommendation_id(representative)
         evidence = {
             "ticker": ticker,
             "side": side,
@@ -1002,7 +1070,7 @@ def _write_opportunity_ranking_learning_events(
             action=action,
             status="candidate",
         )
-        fusion_attribution = build_reviewer_fusion_attribution(snapshot)
+        fusion_attribution = build_reviewer_fusion_attribution(representative_snapshot)
         _insert_learning_event(
             cursor,
             config_id=config_id,
@@ -1011,17 +1079,30 @@ def _write_opportunity_ranking_learning_events(
             scope_type="ticker_side",
             scope_key=f"{ticker}:{side}",
             evidence={
-                "recommendation_id": recommendation.get("id"),
+                "recommendation_id": representative_recommendation_id,
+                "representative_recommendation_id": representative_recommendation_id,
                 "ticker": ticker,
                 "side": side,
+                "aggregation_scope": "opportunity_ranking_group",
+                "attribution_scope": "representative_episode",
+                "source_episode_count": len(rows),
+                "representative_selection_reason": representative_selection_reason,
+                "representative_net_pnl": _episode_payload_net_pnl(representative),
+                "representative_opportunity_score": _safe_float(
+                    representative_trace.get("opportunity_score"),
+                    -1.0,
+                ),
                 "fusion_attribution_label": fusion_attribution.get("fusion_attribution_label"),
                 "pm_fusion_diagnostics": fusion_attribution.get("pm_fusion_diagnostics") or {},
                 "pm_conflict_resolution": fusion_attribution.get("pm_conflict_resolution") or {},
+                "not_trade_authority": True,
             },
             action={
                 "consumer_scope": "future_analyst_and_pm_fusion_learning",
                 "does_not_modify_same_day_trade_facts": True,
                 "does_not_create_trade_authority": True,
+                "aggregation_scope": "opportunity_ranking_group",
+                "attribution_scope": "representative_episode",
             },
         )
         inserted += 1

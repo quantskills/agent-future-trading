@@ -68,6 +68,7 @@ from tools.agent_tools.research.research_memory_writers import (
     _export_template_prior,
     _backfill_neutral_forward_counterfactual_tracking,
     _backfill_no_trade_opportunity_counterfactual_results,
+    _select_representative_episode_payload,
     _write_alpha_promotion_state,
     _write_config_overlay,
     _write_contextual_rule_calibration_state,
@@ -75,6 +76,7 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_learned_vs_unlearned_policy_state,
     _write_loss_template_observation_research,
     _write_no_trade_opportunity_memory,
+    _write_opportunity_ranking_learning_events,
     _write_research_position_feedback,
     _write_signal_context_history,
     _write_tail_loss_sentinel_state,
@@ -2717,6 +2719,110 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         _ensure_reviewer_learning_schema(conn.cursor())
         return conn
+
+    def _ranking_episode_payload(
+        self,
+        *,
+        rec_id: str,
+        net_pnl: float,
+        score: float,
+        rank: int,
+        ticker: str = "RB",
+        side: str = "short",
+    ):
+        return {
+            "open_recommendation_id": rec_id,
+            "candidate_side": side,
+            "opportunity_type": "trend_breakout",
+            "opportunity_state": "tradeable_candidate",
+            "pair": {
+                "ticker": ticker,
+                "side": side,
+                "net_pnl": net_pnl,
+                "open_recommendation_id": rec_id,
+            },
+            "opportunity_ranking_trace": {
+                "opportunity_score": score,
+                "opportunity_rank": rank,
+                "capital_allocation_reason": "ranking regression sample",
+            },
+            "signal_snapshot": {
+                "market_regime": "trend",
+                "final_action_contract": {
+                    "evidence_used": {
+                        "pm_fusion_diagnostics": {
+                            "cross_analyst_conflict_count": 1,
+                            "multi_evidence_consensus_score": 0.52,
+                        },
+                        "pm_conflict_resolution": {"handled": True},
+                    }
+                },
+            },
+        }
+
+    def test_representative_episode_selector_uses_effect_specific_sample(self):
+        rows = [
+            self._ranking_episode_payload(rec_id="rec-high-score", net_pnl=-600.0, score=0.92, rank=1),
+            self._ranking_episode_payload(rec_id="rec-largest-loss", net_pnl=-3200.0, score=0.74, rank=2),
+            self._ranking_episode_payload(rec_id="rec-largest-gain", net_pnl=2800.0, score=0.81, rank=3),
+        ]
+
+        selected, reason = _select_representative_episode_payload(rows, "lower_priority")
+        self.assertEqual(selected["open_recommendation_id"], "rec-largest-loss")
+        self.assertEqual(reason, "largest_loss_for_lower_priority")
+
+        selected, reason = _select_representative_episode_payload(rows, "raise_priority")
+        self.assertEqual(selected["open_recommendation_id"], "rec-largest-gain")
+        self.assertEqual(reason, "largest_gain_for_raise_priority")
+
+        selected, reason = _select_representative_episode_payload(rows, "observe")
+        self.assertEqual(selected["open_recommendation_id"], "rec-high-score")
+        self.assertEqual(reason, "highest_score_for_observe")
+
+    def test_opportunity_ranking_learning_events_write_representative_fusion_attribution(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            rows = [
+                self._ranking_episode_payload(rec_id="rec-loss-small", net_pnl=-500.0, score=0.66, rank=1),
+                self._ranking_episode_payload(rec_id="rec-loss-largest", net_pnl=-3600.0, score=0.82, rank=2),
+                self._ranking_episode_payload(rec_id="rec-loss-mid", net_pnl=-1200.0, score=0.71, rank=3),
+            ]
+
+            inserted = _write_opportunity_ranking_learning_events(
+                cursor,
+                config_id="cfg",
+                trading_date="2025-03-06",
+                cfg={"opportunity_ranking_learning_policy": {"enabled": True, "min_samples_for_ranking_preference": 3}},
+                episode_payloads=rows,
+            )
+
+            self.assertEqual(inserted, 1)
+            events = cursor.execute(
+                "SELECT event_type, evidence_json, action_json FROM learning_event_log ORDER BY event_type"
+            ).fetchall()
+            self.assertEqual({row["event_type"] for row in events}, {"evidence_fusion_attribution", "opportunity_ranking_preference"})
+
+            preference = next(row for row in events if row["event_type"] == "opportunity_ranking_preference")
+            preference_action = json.loads(preference["action_json"])
+            self.assertEqual(preference_action["policy_action"], "lower_priority")
+
+            attribution = next(row for row in events if row["event_type"] == "evidence_fusion_attribution")
+            attribution_evidence = json.loads(attribution["evidence_json"])
+            attribution_action = json.loads(attribution["action_json"])
+            self.assertEqual(attribution_evidence["recommendation_id"], "rec-loss-largest")
+            self.assertEqual(attribution_evidence["representative_recommendation_id"], "rec-loss-largest")
+            self.assertEqual(attribution_evidence["source_episode_count"], 3)
+            self.assertEqual(attribution_evidence["aggregation_scope"], "opportunity_ranking_group")
+            self.assertEqual(attribution_evidence["attribution_scope"], "representative_episode")
+            self.assertEqual(attribution_evidence["representative_selection_reason"], "largest_loss_for_lower_priority")
+            self.assertEqual(attribution_evidence["fusion_attribution_label"], "fusion_conflict_handled")
+            self.assertTrue(attribution_evidence["not_trade_authority"])
+            self.assertTrue(attribution_action["does_not_modify_same_day_trade_facts"])
+            self.assertTrue(attribution_action["does_not_create_trade_authority"])
+            self.assertEqual(attribution_action["attribution_scope"], "representative_episode")
+        finally:
+            conn.close()
 
     def test_researcher_downgrades_incomplete_pm_consumable_action_value(self):
         from tools.agent_tools.research import research_memory_writers

@@ -595,6 +595,13 @@
 | `pm_effect` | research feedback | PM 影响。 |
 | `auditor_effect` | research feedback | Auditor 影响。 |
 | `trader_effect` | research feedback | Trader 影响。 |
+| `aggregation_scope` | Researcher learning event | 聚合学习写回的样本分组口径；用于说明该学习事件来自单条样本还是机会排序分组，不创建交易权限。 |
+| `attribution_scope` | Researcher learning event | 归因对象口径；`representative_episode` 表示融合归因绑定组内确定性代表样本，而不是整组样本本身。 |
+| `source_episode_count` | Researcher learning event | 本次聚合学习事件包含的 episode 样本数量。 |
+| `representative_recommendation_id` | Researcher learning event | 聚合组中被选作归因代表样本的 PM 推荐 ID；只用于未来学习追溯。 |
+| `representative_selection_reason` | Researcher learning event | 代表样本选择原因，如最大亏损样本用于降级、最大盈利样本用于升级、最高评分样本用于观察。 |
+| `representative_net_pnl` | Researcher learning event | 代表样本的净盈亏。 |
+| `representative_opportunity_score` | Researcher learning event | 代表样本的 PM 机会评分。 |
 | `outcome` | research feedback / execution | 结果对象。 |
 | `trader_status` | alpha setup sample | Trader 执行状态。 |
 | `transaction_count` | research feedback | 成交笔数。 |
