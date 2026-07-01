@@ -39,6 +39,10 @@ from util.futures_audit import (
 from util.futures_trade_pairs import summarize_trade_pairs
 from util.logger import logger
 from tools.common.neutral_accountability import build_neutral_accountability_summary
+from tools.common.final_action_semantics import (
+    canonical_action_preference_for_action_value,
+    validate_action_value_write_consistency,
+)
 
 # Reuse deterministic parsing/report helpers without depending on the Reviewer
 # main tool or letting Phase4 own research persistence entrypoints.
@@ -623,13 +627,31 @@ def _normalize_pm_consumable_action_value_record(record: Mapping[str, Any]) -> D
     consumer_scope = str(normalized.get("consumer_scope") or "").strip().lower()
     if consumer_scope != "pm_learning":
         return normalized
-    missing = _pm_consumable_action_value_missing_fields(normalized)
-    if not missing:
-        return normalized
-
     payload = _review_helpers._json_loads(normalized.get("payload_json"))
     payload = payload if isinstance(payload, dict) else {}
-    payload["pm_consumable_rejected_missing_fields"] = missing
+    canonical_preference = canonical_action_preference_for_action_value(normalized)
+    current_preference = str(
+        normalized.get("action_preference")
+        or payload.get("action_preference")
+        or ""
+    ).strip().lower()
+    if canonical_preference and canonical_preference != current_preference:
+        payload["original_action_preference"] = current_preference
+        payload["action_preference"] = canonical_preference
+        payload["action_preference_canonicalized_by"] = "final_action_semantics"
+        normalized["action_preference"] = canonical_preference
+        normalized["payload_json"] = _json_dumps(payload)
+
+    missing = _pm_consumable_action_value_missing_fields(normalized)
+    consistency = validate_action_value_write_consistency(normalized)
+    errors = list(consistency.get("errors") or [])
+    if not missing and not errors:
+        return normalized
+
+    if missing:
+        payload["pm_consumable_rejected_missing_fields"] = missing
+    if errors:
+        payload["pm_consumable_rejected_consistency_errors"] = errors
     payload["original_consumer_scope"] = "pm_learning"
     payload["consumer_scope"] = "research_diagnostics"
     normalized["consumer_scope"] = "research_diagnostics"

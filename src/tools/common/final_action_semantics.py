@@ -80,6 +80,11 @@ ACTIVE_OPPORTUNITY_REJECTION_REASONS = GENERIC_NO_CHANGE_EXPLANATION_REASONS | {
 
 MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
 PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
+PM_ACTION_VALUE_CONSUMER_SCOPE = "pm_learning"
+POSITIVE_OPEN_ACTION_PREFERENCES = {"positive_candidate_open"}
+POSITIVE_EXIT_ACTION_PREFERENCES = {"positive_candidate_exit"}
+POSITIVE_EXECUTION_ACTION_PREFERENCES = {"positive_candidate_execution"}
+PROTECTIVE_ACTION_PREFERENCES = {"negative_revalidate", "negative_hold_revalidate", "tail_loss_protect"}
 MEMORY_SIDE_ROLES = {
     "target_side",
     "current_position_side",
@@ -281,6 +286,15 @@ def _int(value: Any, default: int = 0) -> int:
         if value is None:
             return default
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -956,11 +970,172 @@ def _row_covers_requirement(row: Mapping[str, Any], requirement: Mapping[str, An
     row_lane = _row_text(row, "learning_lane") or _row_text(row, "action_value_lane") or _row_text(row, "action_name")
     row_side = _row_text(row, "side")
     row_role = _row_text(row, "memory_side_role")
-    if required_side and row_side and row_side not in {required_side, "*"}:
+    if required_side and not row_side:
         return False
-    if required_role and row_role and row_role != required_role:
+    if required_side and row_side not in {required_side, "*"}:
+        return False
+    if required_role and not row_role:
+        return False
+    if required_role and row_role != required_role:
         return False
     return _lane_matches_requirement(row_lane, required_lane)
+
+
+def _action_value_lane(row: Mapping[str, Any]) -> str:
+    return _row_text(row, "learning_lane") or _row_text(row, "action_value_lane") or _row_text(row, "action_name")
+
+
+def _has_real_reward_source(row: Mapping[str, Any]) -> bool:
+    reward_source = _row_text(row, "reward_source")
+    evidence_scope = _row_text(row, "evidence_scope")
+    return (
+        "real" in reward_source
+        or "episode" in reward_source
+        or evidence_scope in {"exact_real_state", "partial_real_state"}
+    )
+
+
+def canonical_action_preference_for_action_value(row: Mapping[str, Any] | None) -> str:
+    """Return the deterministic action_preference implied by one action-value row."""
+    row = row if isinstance(row, Mapping) else {}
+    action = _row_text(row, "action_name")
+    lane = _action_value_lane(row)
+    reward_sum = _float(row.get("reward_sum"), 0.0)
+    reward_mean = _float(row.get("reward_mean"), 0.0)
+    preference = _row_text(row, "action_preference")
+    has_real_reward = _has_real_reward_source(row)
+    positive = has_real_reward and reward_sum > 0 and reward_mean >= 0
+    negative = has_real_reward and (reward_sum < 0 or reward_mean < 0)
+
+    if positive and (action in {"open", "add", "add_or_open", "increase", "increase_position"} or lane in {"open", "add", "scale", "increase"}):
+        return "positive_candidate_open"
+    if positive and (action in {"exit", "close", "reduce", "reduce_or_exit", "close_or_reduce", "flatten"} or lane in {"exit", "reduce"}):
+        return "positive_candidate_exit"
+    if positive and (action == "execution" or lane == "execution" or "execution" in action or "trigger" in action or "fill" in action):
+        return "positive_candidate_execution"
+    if negative:
+        if preference in PROTECTIVE_ACTION_PREFERENCES:
+            return preference
+        if action in {"hold", "hold_position", "continue_hold", "observe", "watchlist"} or lane == "hold":
+            return "negative_hold_revalidate"
+        return "negative_revalidate"
+    return preference
+
+
+def validate_action_value_write_consistency(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate Researcher action-value writes before they become PM memory."""
+    row = row if isinstance(row, Mapping) else {}
+    consumer_scope = _row_text(row, "consumer_scope")
+    lane = _action_value_lane(row)
+    action = _row_text(row, "action_name")
+    side = _row_text(row, "side")
+    role = _row_text(row, "memory_side_role")
+    preference = _row_text(row, "action_preference")
+    canonical_preference = canonical_action_preference_for_action_value(row)
+    reward_sum = _float(row.get("reward_sum"), 0.0)
+    errors: list[str] = []
+
+    if consumer_scope == PM_ACTION_VALUE_CONSUMER_SCOPE:
+        if lane == "execution" or action == "execution":
+            errors.append("pm_learning_execution_lane_not_allowed")
+        if lane and lane not in PM_MEMORY_LANES:
+            errors.append("pm_learning_lane_not_allowed")
+        if side and side not in {"long", "short", "*"}:
+            errors.append("pm_learning_side_invalid")
+        if role and role not in MEMORY_SIDE_ROLES:
+            errors.append("pm_learning_memory_side_role_invalid")
+    if canonical_preference and preference and preference != canonical_preference:
+        if canonical_preference == "positive_candidate_open":
+            errors.append("positive_open_action_value_not_open_preference")
+        elif canonical_preference == "positive_candidate_exit":
+            errors.append("positive_exit_action_value_not_exit_preference")
+        elif canonical_preference == "positive_candidate_execution":
+            errors.append("positive_execution_action_value_not_execution_preference")
+        elif canonical_preference in PROTECTIVE_ACTION_PREFERENCES and reward_sum < 0:
+            errors.append("negative_action_value_not_protective_preference")
+        else:
+            errors.append("action_value_preference_lifecycle_mismatch")
+    if canonical_preference and not preference and _has_real_reward_source(row):
+        errors.append("action_value_missing_canonical_preference")
+
+    return {
+        "contract": "final_action_semantics.action_value_write_consistency.v1",
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "action_name": action,
+        "learning_lane": lane,
+        "consumer_scope": consumer_scope,
+        "memory_side_role": role,
+        "action_preference": preference,
+        "canonical_action_preference": canonical_preference,
+    }
+
+
+def action_value_matches_contract_memory_requirement(
+    contract: Mapping[str, Any] | None,
+    row: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether one PM action-value row may land in this contract."""
+    row = row if isinstance(row, Mapping) else {}
+    if _row_text(row, "consumer_scope") != PM_ACTION_VALUE_CONSUMER_SCOPE:
+        return False
+    validation = validate_action_value_write_consistency(row)
+    if not validation.get("ok"):
+        return False
+    requirements = derive_memory_requirements(contract)
+    for requirement in requirements.get("must_land_in_pm_contract") or []:
+        if _row_covers_requirement(row, requirement):
+            return True
+    return False
+
+
+def filter_action_values_for_contract_learning(
+    contract: Mapping[str, Any] | None,
+    rows: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Filter PM learning rows to the current final_action lifecycle."""
+    kept: list[Mapping[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    requirements = derive_memory_requirements(contract)
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        validation = validate_action_value_write_consistency(row)
+        matches = (
+            _row_text(row, "consumer_scope") == PM_ACTION_VALUE_CONSUMER_SCOPE
+            and bool(validation.get("ok"))
+            and any(
+            _row_covers_requirement(row, requirement)
+            for requirement in requirements.get("must_land_in_pm_contract") or []
+            )
+        )
+        if matches:
+            kept.append(row)
+            continue
+        rejected.append({
+            "id": row.get("id"),
+            "scope_key": row.get("scope_key"),
+            "ticker": row.get("ticker"),
+            "side": _row_text(row, "side"),
+            "action_name": _row_text(row, "action_name"),
+            "learning_lane": _action_value_lane(row),
+            "memory_side_role": _row_text(row, "memory_side_role"),
+            "action_preference": _row_text(row, "action_preference"),
+            "reason": (
+                "action_value_write_consistency_failed"
+                if not validation.get("ok")
+                else "not_required_by_final_action_contract"
+            ),
+            "errors": validation.get("errors") or [],
+        })
+    return {
+        "contract": "final_action_semantics.contract_learning_action_value_filter.v1",
+        "memory_requirements": requirements,
+        "rows": kept,
+        "rejected_action_values": rejected,
+        "kept_count": len(kept),
+        "rejected_count": len(rejected),
+    }
 
 
 def audit_pm_memory_consumption(contract: Mapping[str, Any] | None) -> dict[str, Any]:

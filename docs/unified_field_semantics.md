@@ -547,14 +547,15 @@
 | `policy_type` | adaptive policy / provisional policy | 策略学习类型；不能作为交易动作。 |
 | `policy_multiplier` | adaptive policy / provisional policy | 策略学习倍率；只能影响策略参数，不能覆盖 PM 合约。 |
 | `action_name` | action-value | open、add、hold、reduce、exit、execution、conditional_monitor 等历史动作名称。 |
-| `action_preference` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 唯一动作偏好；PM 评分优先读取 DB 顶层 canonical 字段，payload 只作历史兼容来源。 |
+| `action_preference` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 唯一动作偏好；PM 评分优先读取 DB 顶层 canonical 字段，payload 只作历史兼容来源。真实正收益 open / add / increase 固定写 `positive_candidate_open`，不能写成 `tail_loss_protect`；保护类偏好只能表达负收益、持仓再验证、退出保护或风险诊断。 |
 | `reward_source` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 奖励来源；用于区分真实 episode、真实交易、反事实或观察先验。 |
 | `evidence_scope` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | exact、partial、similar、counterfactual；PM 评分优先使用该字段判断学习作用域。 |
-| `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线，固定为 open、add、hold、reduce、exit、execution、conditional_monitor；不能跨动作线使用。 |
-| `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读 `pm_learning`，分析师只读 `analyst_calibration` 安全摘要，Trader 只读 `trader_execution_learning` 执行诊断。 |
+| `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线，固定为 open、add、hold、reduce、exit、execution、conditional_monitor；不能跨动作线使用。`execution` 是执行反馈线，不能作为 PM 可消费的开仓、持仓、减仓或退出学习。 |
+| `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读 `pm_learning`，分析师只读 `analyst_calibration` 安全摘要，Trader 只读 `trader_execution_learning` 执行诊断；`execution` lane 记录不得写成 `pm_learning`。 |
 | `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务 open、add、hold、reduce、exit、execution、conditional_monitor、calibration 或 diagnostic。 |
 | `memory_side_role` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / PM `learning_used` | 声明该学习记录中 `side` 的角色；固定为 `target_side`、`current_position_side`、`trigger_side`、`historical_sample_side`。新开仓/加仓读取目标方向，减仓/退出/持仓读取当前持仓方向，条件监控读取触发方向；会计师不读取该字段入账。 |
 | `memory_requirements` | `final_action_contract.learning_used` / `final_action_semantics` / 机制审计 | 由 `src/tools/common/final_action_semantics.py` 根据最终合约生命周期生成的 PM 必读记忆需求；包含 lanes、side roles、是否必须落入 PM 合约，不创建交易权限。 |
+| `learning_used.alpha_setup_action_values` | `final_action_contract.learning_used` | PM 最终合约实际声明消费的 action-value。只能包含与当前 `final_action_contract` 的动作生命周期、方向和 `memory_side_role` 匹配的 `pm_learning` 记录；持仓、减仓、退出不能落入不匹配方向的 open 学习或 execution 学习。缺少匹配学习只记录检索为空，不直接禁止交易。 |
 | `retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM exact state 检索键，格式为 ticker、side、horizon_class、market_regime、setup_type、learning_lane；用于机器检索，不是交易授权。 |
 | `fallback_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM fallback 检索键，格式为 ticker、side、horizon_class、learning_lane；exact state 漂移时用于同品种同方向同期限学习消费。 |
 | `execution_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 执行学习检索键，格式为 ticker、execution_profile、trigger_reason、learning_lane；只能支持执行质量诊断或 PM execution profile 偏好，不产生交易权限，Trader 不直接读取。 |

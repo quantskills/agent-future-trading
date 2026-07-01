@@ -445,12 +445,11 @@ def _action_preference_from_stats(
     positive = reward_sum > 0 and reward_mean > 0 and win_rate > 0
     negative = reward_sum < 0 or reward_mean < 0 or loss_reward_count > 0
     tail_loss = tail_loss_count > 0 or worst_reward <= -1000.0
-    if positive and has_real_reward and not tail_loss:
-        if exact_real:
-            if action in {"open", "add", "add_or_open", "increase", "increase_position"}:
-                return "positive_candidate_open"
-            if action in {"hold", "hold_position", "continue_hold"}:
-                return "positive_candidate_hold"
+    if positive and has_real_reward:
+        if action in {"open", "add", "add_or_open", "increase", "increase_position"}:
+            return "positive_candidate_open"
+        if exact_real and action in {"hold", "hold_position", "continue_hold"}:
+            return "positive_candidate_hold"
         if action in {"exit", "close", "reduce", "reduce_or_exit", "close_or_reduce", "flatten"}:
             return "positive_candidate_exit"
         if "execution" in action or "trigger" in action or "fill" in action:

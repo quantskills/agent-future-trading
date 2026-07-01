@@ -1618,6 +1618,120 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertIn("same_ticker_side_horizon", detail["matched_levels"])
         self.assertGreaterEqual(len(attempts), 2)
 
+    def test_pm_lifecycle_memory_filters_to_final_hold_side_and_lane(self):
+        class FakeDB:
+            def get_alpha_setup_action_values(self, **kwargs):
+                return [
+                    {
+                        "id": "c-short-hold",
+                        "scope_key": "C|short|short|trend|hold|hold",
+                        "ticker": "C",
+                        "side": "short",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "hold",
+                        "action_name": "hold",
+                        "sample_count": 1,
+                        "reward_sum": -500.0,
+                        "reward_mean": -500.0,
+                        "win_rate": 0.0,
+                        "action_preference": "negative_hold_revalidate",
+                        "reward_source": "real_trade",
+                        "evidence_scope": "exact_real_state",
+                        "action_value_lane": "hold",
+                        "learning_lane": "hold",
+                        "consumer_scope": "pm_learning",
+                        "memory_side_role": "current_position_side",
+                        "last_sample_date": "2025-03-13",
+                        "valid_until": "2025-04-13",
+                    },
+                    {
+                        "id": "c-long-open",
+                        "scope_key": "C|long|short|trend|news|open",
+                        "ticker": "C",
+                        "side": "long",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "news",
+                        "action_name": "open",
+                        "sample_count": 1,
+                        "reward_sum": 800.0,
+                        "reward_mean": 800.0,
+                        "win_rate": 1.0,
+                        "action_preference": "positive_candidate_open",
+                        "reward_source": "real_trade",
+                        "evidence_scope": "exact_real_state",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "consumer_scope": "pm_learning",
+                        "memory_side_role": "target_side",
+                        "last_sample_date": "2025-03-13",
+                        "valid_until": "2025-04-13",
+                    },
+                ]
+
+        existing_rows = [
+            {
+                "id": "c-old-long-open",
+                "ticker": "C",
+                "side": "long",
+                "action_name": "open",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "target_side",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": 1000.0,
+                "reward_mean": 1000.0,
+                "last_sample_date": "2025-03-13",
+                "valid_until": "2025-04-13",
+            },
+            {
+                "id": "c-old-execution",
+                "ticker": "C",
+                "side": "long",
+                "action_name": "execution",
+                "action_value_lane": "execution",
+                "learning_lane": "execution",
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "historical_sample_side",
+                "action_preference": "positive_candidate_execution",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": 1000.0,
+                "reward_mean": 1000.0,
+                "last_sample_date": "2025-03-13",
+                "valid_until": "2025-04-13",
+            },
+        ]
+        contract = {
+            "ticker": "C",
+            "current_lots": -22,
+            "target_lots": -22,
+            "lots_delta": 0,
+            "final_action": "hold",
+        }
+
+        rows, audit = _retrieve_lifecycle_pm_memory(
+            db=FakeDB(),
+            config_id="cfg",
+            ticker="C",
+            trading_date="2025-03-14",
+            contract=contract,
+            analyst_signals=[],
+            signal_combo=[],
+            fusion_context={},
+            alpha_setup_action_values=existing_rows,
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["c-short-hold"])
+        rejected_ids = {row["id"] for row in audit["rejected_action_values"]}
+        self.assertIn("c-old-long-open", rejected_ids)
+        self.assertIn("c-old-execution", rejected_ids)
+        self.assertIn("c-long-open", rejected_ids)
+
     def test_pm_action_value_retrieval_real_history_not_blocked_by_empty_lane(self):
         class FakeDB:
             def __init__(self):

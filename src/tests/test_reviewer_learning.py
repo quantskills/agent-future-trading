@@ -2886,6 +2886,137 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_researcher_canonicalizes_positive_open_action_value_preference(self):
+        from tools.agent_tools.research import research_memory_writers
+
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            research_memory_writers.upsert_alpha_setup_action_value(
+                cursor,
+                record={
+                    "id": "av-eb-open-positive",
+                    "config_id": "cfg",
+                    "scope_key": "EB|short|short|trend|news_event_setup|open",
+                    "ticker": "EB",
+                    "side": "short",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "news_event_setup",
+                    "data_combo": "news",
+                    "action_name": "open",
+                    "sample_count": 1,
+                    "reward_sum": 1200.0,
+                    "reward_mean": 1200.0,
+                    "win_rate": 1.0,
+                    "confidence_score": 0.7,
+                    "action_preference": "tail_loss_protect",
+                    "reward_source": "real_trade",
+                    "evidence_scope": "exact_real_state",
+                    "action_value_lane": "open",
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": "open",
+                    "memory_side_role": "target_side",
+                    "retrieval_key": "eb-short-open",
+                    "fallback_retrieval_key": "eb-short",
+                    "execution_retrieval_key": "eb-execution",
+                    "max_position_impact": 0.02,
+                    "last_sample_date": "2025-03-14",
+                    "created_at": "2025-03-15T00:00:00+00:00",
+                    "updated_at": "2025-03-15T00:00:00+00:00",
+                    "valid_until": "2025-04-14",
+                    "payload_json": json.dumps(
+                        {
+                            "action_preference": "tail_loss_protect",
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
+                            "consumer_scope": "pm_learning",
+                            "memory_side_role": "target_side",
+                            "last_sample_date": "2025-03-14",
+                            "valid_until": "2025-04-14",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                        }
+                    ),
+                },
+            )
+            row = cursor.execute(
+                "SELECT action_preference, consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-eb-open-positive'"
+            ).fetchone()
+
+            payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(row["action_preference"], "positive_candidate_open")
+            self.assertEqual(row["consumer_scope"], "pm_learning")
+            self.assertEqual(payload["action_preference"], "positive_candidate_open")
+            self.assertEqual(payload["original_action_preference"], "tail_loss_protect")
+        finally:
+            conn.close()
+
+    def test_researcher_downgrades_execution_action_value_from_pm_learning(self):
+        from tools.agent_tools.research import research_memory_writers
+
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            research_memory_writers.upsert_alpha_setup_action_value(
+                cursor,
+                record={
+                    "id": "av-c-execution",
+                    "config_id": "cfg",
+                    "scope_key": "C|long|short|trend|execution_pullback_setup|execution",
+                    "ticker": "C",
+                    "side": "long",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "execution_pullback_setup",
+                    "data_combo": "execution",
+                    "action_name": "execution",
+                    "sample_count": 1,
+                    "reward_sum": 900.0,
+                    "reward_mean": 900.0,
+                    "win_rate": 1.0,
+                    "confidence_score": 0.7,
+                    "action_preference": "positive_candidate_execution",
+                    "reward_source": "real_trade",
+                    "evidence_scope": "exact_real_state",
+                    "action_value_lane": "execution",
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": "execution",
+                    "memory_side_role": "historical_sample_side",
+                    "retrieval_key": "c-long-execution",
+                    "fallback_retrieval_key": "c-long",
+                    "execution_retrieval_key": "c-execution",
+                    "max_position_impact": 0.02,
+                    "last_sample_date": "2025-03-14",
+                    "created_at": "2025-03-15T00:00:00+00:00",
+                    "updated_at": "2025-03-15T00:00:00+00:00",
+                    "valid_until": "2025-04-14",
+                    "payload_json": json.dumps(
+                        {
+                            "action_preference": "positive_candidate_execution",
+                            "action_value_lane": "execution",
+                            "learning_lane": "execution",
+                            "consumer_scope": "pm_learning",
+                            "memory_side_role": "historical_sample_side",
+                            "last_sample_date": "2025-03-14",
+                            "valid_until": "2025-04-14",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                        }
+                    ),
+                },
+            )
+            row = cursor.execute(
+                "SELECT consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-c-execution'"
+            ).fetchone()
+
+            payload = load_externalized_json(row["payload_json"])
+            self.assertEqual(row["consumer_scope"], "research_diagnostics")
+            self.assertIn("pm_learning_execution_lane_not_allowed", payload["pm_consumable_rejected_consistency_errors"])
+            self.assertEqual(payload["original_consumer_scope"], "pm_learning")
+        finally:
+            conn.close()
+
     def test_reviewer_summary_marks_lifecycle_and_pm_learning_influence_without_writing_memory(self):
         from tools.common.final_action_semantics import derive_memory_requirements
 

@@ -252,6 +252,8 @@
 
 （3）同步 `learning_used` 契约覆盖到 PG 统一语义入口。修改：`pg_contract_coverage_audit.py` 和 `test_contract_coverage_audit.py`。原因：`learning_used` 的消费路径已迁入 `final_action_semantics.py` 共享解释器，并由两条 PG 检查调用共享语义函数；回测前契约覆盖闸门必须识别当前真实 consumer 路径，不能继续按旧文件和旧字段组合误判缺失。
 
+（4）收口学习记忆写入与消费生命周期硬锁。修改：`alpha_setup.py`、`final_action_semantics.py`、Researcher 写入器、PM 生命周期记忆读取、统一字段语义表和回归测试。原因：Researcher 写入真实正收益 open action-value 时必须写成 `positive_candidate_open`，不能写成保护/止损偏好；PM 最终合约只能落入与当前动作生命周期、方向和 `memory_side_role` 匹配的 `pm_learning`，持仓/减仓/退出不能把不匹配方向的 open 或 execution 学习写进 `learning_used.alpha_setup_action_values`。分析师主逻辑不改，只补边界测试，确保三类分析师只读学习摘要与校准，不直接读取 PM action-value 或输出交易权限。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

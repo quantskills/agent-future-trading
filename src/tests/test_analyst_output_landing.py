@@ -89,6 +89,23 @@ class AnalystOutputLandingTest(unittest.TestCase):
             any(error.startswith("analyst_output_forbidden_trade_authority_field") for error in checked.validation_errors)
         )
 
+    def test_analyst_entrypoints_do_not_directly_consume_pm_action_values(self):
+        agent_root = SRC_ROOT / "agents" / "analysis_team"
+        forbidden_tokens = (
+            "get_alpha_setup_action_values",
+            "retrieve_pm_memory",
+            "pm_learning",
+            "alpha_setup_action_values",
+        )
+        required_tokens = ("build_learning_context", "calibrate_signal_with_learning_context")
+        for filename in ("technical.py", "fundamental.py", "commodity_news.py"):
+            with self.subTest(filename=filename):
+                text = (agent_root / filename).read_text(encoding="utf-8")
+                for token in forbidden_tokens:
+                    self.assertNotIn(token, text)
+                for token in required_tokens:
+                    self.assertIn(token, text)
+
 
 if __name__ == "__main__":
     unittest.main()

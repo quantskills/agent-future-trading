@@ -36,7 +36,9 @@ from tools.common.contracts import (
 from tools.common.final_action_semantics import (
     authority_allows_entry as _semantic_authority_allows_entry,
     derive_memory_requirements,
+    filter_action_values_for_contract_learning,
     is_conditional_monitor_contract,
+    lane_matches_memory_requirement,
 )
 from tools.agent_tools.decision.pm_capital_allocator import (
     conflicting_weak_memory_record as _capital_conflicting_weak_memory_record,
@@ -3935,21 +3937,7 @@ def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
 
 
 def _pm_memory_lane_matches(row_lane: str, required_lane: str) -> bool:
-    row_lane = str(row_lane or "").strip().lower()
-    required_lane = str(required_lane or "").strip().lower()
-    if not row_lane or not required_lane:
-        return False
-    aliases = {
-        "open": {"open"},
-        "add": {"add", "scale", "increase", "open"},
-        "scale": {"add", "scale", "increase", "open"},
-        "increase": {"add", "scale", "increase", "open"},
-        "hold": {"hold", "reduce", "exit"},
-        "reduce": {"reduce", "exit", "hold"},
-        "exit": {"exit", "reduce", "hold"},
-        "conditional_monitor": {"conditional_monitor"},
-    }
-    return row_lane in aliases.get(required_lane, {required_lane})
+    return lane_matches_memory_requirement(required_lane, row_lane)
 
 
 def _retrieve_lifecycle_pm_memory(
@@ -3966,13 +3954,23 @@ def _retrieve_lifecycle_pm_memory(
 ) -> tuple[list[dict], dict]:
     requirements = derive_memory_requirements(contract)
     if not db or not config_id:
-        return list(alpha_setup_action_values or []), {
+        unavailable_filter = filter_action_values_for_contract_learning(
+            contract,
+            _normalize_alpha_setup_action_values(alpha_setup_action_values),
+        )
+        return _normalize_alpha_setup_action_values(unavailable_filter.get("rows") or []), {
             "tool": "decision_memory_retrieval",
             "memory_requirements": requirements,
             "status": "unavailable",
             "reason": "db_or_config_missing",
+            "rejected_action_values": unavailable_filter.get("rejected_action_values") or [],
         }
-    rows = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    initial_filter = filter_action_values_for_contract_learning(
+        contract,
+        _normalize_alpha_setup_action_values(alpha_setup_action_values),
+    )
+    rows = _normalize_alpha_setup_action_values(initial_filter.get("rows") or [])
+    rejected_action_values: list[dict] = list(initial_filter.get("rejected_action_values") or [])
     details: list[dict] = []
     for requirement in requirements.get("required_pm_memory") or []:
         if not isinstance(requirement, dict) or not requirement.get("must_land_in_pm_contract"):
@@ -4014,6 +4012,33 @@ def _retrieve_lifecycle_pm_memory(
         lane_matched: list[dict] = []
         for row in action_values:
             normalized = _normalize_alpha_setup_action_value(row)
+            row_side = str(normalized.get("side") or "").strip().lower()
+            if side and row_side and row_side not in {side, "*"}:
+                rejected_action_values.append({
+                    "id": normalized.get("id"),
+                    "scope_key": normalized.get("scope_key"),
+                    "ticker": normalized.get("ticker"),
+                    "side": row_side,
+                    "action_name": normalized.get("action_name"),
+                    "learning_lane": normalized.get("learning_lane") or normalized.get("action_value_lane"),
+                    "memory_side_role": normalized.get("memory_side_role"),
+                    "reason": "retrieved_memory_side_mismatch",
+                })
+                continue
+            row_role = str(normalized.get("memory_side_role") or "").strip().lower()
+            required_role = str(requirement.get("memory_side_role") or "").strip().lower()
+            if required_role and row_role != required_role:
+                rejected_action_values.append({
+                    "id": normalized.get("id"),
+                    "scope_key": normalized.get("scope_key"),
+                    "ticker": normalized.get("ticker"),
+                    "side": row_side,
+                    "action_name": normalized.get("action_name"),
+                    "learning_lane": normalized.get("learning_lane") or normalized.get("action_value_lane"),
+                    "memory_side_role": row_role,
+                    "reason": "retrieved_memory_side_role_mismatch",
+                })
+                continue
             row_lane = str(
                 normalized.get("learning_lane")
                 or normalized.get("action_value_lane")
@@ -4021,6 +4046,16 @@ def _retrieve_lifecycle_pm_memory(
                 or ""
             ).lower()
             if not _pm_memory_lane_matches(row_lane, lane):
+                rejected_action_values.append({
+                    "id": normalized.get("id"),
+                    "scope_key": normalized.get("scope_key"),
+                    "ticker": normalized.get("ticker"),
+                    "side": row_side,
+                    "action_name": normalized.get("action_name"),
+                    "learning_lane": row_lane,
+                    "memory_side_role": row_role,
+                    "reason": "retrieved_memory_lane_mismatch",
+                })
                 continue
             lane_matched.append(_annotate_memory_requirement_row(normalized, requirement))
         rows = _append_unique_action_values(rows, lane_matched)
@@ -4033,12 +4068,16 @@ def _retrieve_lifecycle_pm_memory(
             "retrieval_attempts": memory_result.get("retrieval_attempts") or [],
             "rejected_or_downgraded": memory_result.get("rejected_or_downgraded") or [],
         })
+    final_filter = filter_action_values_for_contract_learning(contract, rows)
+    rows = _normalize_alpha_setup_action_values(final_filter.get("rows") or [])
+    rejected_action_values.extend(final_filter.get("rejected_action_values") or [])
     audit = {
         "tool": "decision_memory_retrieval",
         "boundary": "final_action_semantics_memory_requirements",
         "memory_requirements": requirements,
         "requirement_details": details,
         "alpha_setup_action_value_count_after_lifecycle": len(rows),
+        "rejected_action_values": rejected_action_values,
     }
     return rows, audit
 

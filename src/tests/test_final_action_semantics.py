@@ -8,8 +8,10 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tools.common.final_action_semantics import (
+    action_value_matches_contract_memory_requirement,
     audit_pm_memory_consumption,
     authority_allows_entry,
+    canonical_action_preference_for_action_value,
     classify_analyst_evidence,
     classify_final_action_contract,
     classify_final_action_reason_codes,
@@ -24,8 +26,10 @@ from tools.common.final_action_semantics import (
     has_open_transaction_blocker,
     has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
+    filter_action_values_for_contract_learning,
     lane_matches_memory_requirement,
     requires_intraday_result,
+    validate_action_value_write_consistency,
     validate_final_action_lot_transition,
     validate_signal_collection,
 )
@@ -295,6 +299,93 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
         self.assertFalse(audit["ok"])
         self.assertIn("pm_required_memory_not_landed_in_alpha_setup_action_values", audit["errors"])
+
+    def test_contract_learning_filter_rejects_mismatched_open_and_execution_rows_for_hold(self):
+        contract = {
+            "current_lots": -22,
+            "target_lots": -22,
+            "lots_delta": 0,
+            "final_action": "hold",
+        }
+        rows = [
+            {
+                "id": "c-long-open",
+                "ticker": "C",
+                "side": "long",
+                "action_name": "open",
+                "learning_lane": "open",
+                "action_value_lane": "open",
+                "memory_side_role": "target_side",
+                "consumer_scope": "pm_learning",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": 1000.0,
+                "reward_mean": 1000.0,
+            },
+            {
+                "id": "c-long-execution",
+                "ticker": "C",
+                "side": "long",
+                "action_name": "execution",
+                "learning_lane": "execution",
+                "action_value_lane": "execution",
+                "memory_side_role": "historical_sample_side",
+                "consumer_scope": "pm_learning",
+                "action_preference": "positive_candidate_execution",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": 1000.0,
+                "reward_mean": 1000.0,
+            },
+            {
+                "id": "c-short-hold",
+                "ticker": "C",
+                "side": "short",
+                "action_name": "hold",
+                "learning_lane": "hold",
+                "action_value_lane": "hold",
+                "memory_side_role": "current_position_side",
+                "consumer_scope": "pm_learning",
+                "action_preference": "negative_hold_revalidate",
+                "reward_source": "real_trade",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": -100.0,
+                "reward_mean": -100.0,
+            },
+        ]
+
+        result = filter_action_values_for_contract_learning(contract, rows)
+
+        self.assertEqual([row["id"] for row in result["rows"]], ["c-short-hold"])
+        rejected_ids = {row["id"] for row in result["rejected_action_values"]}
+        self.assertIn("c-long-open", rejected_ids)
+        self.assertIn("c-long-execution", rejected_ids)
+        self.assertTrue(action_value_matches_contract_memory_requirement(contract, rows[2]))
+        self.assertFalse(action_value_matches_contract_memory_requirement(contract, rows[0]))
+        self.assertFalse(action_value_matches_contract_memory_requirement(contract, rows[1]))
+
+    def test_positive_open_action_value_canonical_preference_is_required(self):
+        row = {
+            "ticker": "EB",
+            "side": "short",
+            "action_name": "open",
+            "learning_lane": "open",
+            "action_value_lane": "open",
+            "memory_side_role": "target_side",
+            "consumer_scope": "pm_learning",
+            "action_preference": "tail_loss_protect",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": 500.0,
+            "reward_mean": 500.0,
+        }
+
+        self.assertEqual(canonical_action_preference_for_action_value(row), "positive_candidate_open")
+        validation = validate_action_value_write_consistency(row)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn("positive_open_action_value_not_open_preference", validation["errors"])
 
     def test_increase_can_use_open_and_current_hold_memory(self):
         contract = {
