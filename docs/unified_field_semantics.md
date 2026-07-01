@@ -351,6 +351,8 @@
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
+| `holding_period_control` | `final_action_contract.reason_codes` | 合法持仓生命周期解释；表示 PM 因最小持仓期、持仓周期控制或当前持仓保护规则，暂不执行减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
+| `position_matched` | `final_action_contract.reason_codes` / Trader 执行摘要 | 仓位匹配解释；表示当前仓位已经等于 PM 目标仓位，可解释无成交，不能单独解释负向 hold/exit 学习为什么没有导致减仓或退出。 |
 | `final_action_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/final_action_semantics.py` 生成的只读语义解释结果；用于统一生命周期、执行权限、盘中结果要求和 reason code 分类，不是第二张合约，不创建交易权限。 |
 | `semantic_state` | Auditor / Reviewer / Researcher 只读摘要 | 对同一张 `final_action_contract` 的生命周期解释，如 `conditional_monitor`、`open`、`increase`、`decrease`、`exit`、`ordinary_hold`、`hard_block`；不得包含改手数、改方向或新合约字段。 |
 | `scorecard_current_tradeable_probe_seed` | `final_action_contract.reason_codes` / PM 诊断 | PM scorecard 将当前可交易候选释放为受控 probe 的原因代码；只适用于 `probe_candidate` / `tradeable_candidate` 或当前触发已成立的候选，不能用于 `watch_for_trigger` 条件监控。 |

@@ -520,6 +520,122 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertIn("mechanism_hold_exit_learning_not_landed", joined)
         self.assertEqual(report.counts.get("scenarios", {}).get("position_hold"), 1)
 
+    def test_hold_exit_learning_accepts_holding_period_control_explanation(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="SR",
+            side="long",
+            preference="negative_hold_revalidate",
+            action_name="observe",
+            action_value_lane="hold",
+            memory_side_role="current_position_side",
+            reward_sum=-300.0,
+            last_sample_date="2025-03-04",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="sr-hold-period",
+            ticker="SR",
+            trading_date="2025-03-13",
+            contract={
+                "ticker": "SR",
+                "current_lots": 2,
+                "target_lots": 2,
+                "lots_delta": 0,
+                "final_action": "hold",
+                "reason_codes": ["flat_target", "holding_period_control", "position_matched"],
+                "evidence_used": {
+                    "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "scope_key": "SR|long|hold",
+                            "ticker": "SR",
+                            "side": "long",
+                            "action_name": "observe",
+                            "action_preference": "negative_hold_revalidate",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "consumer_scope": "pm_learning",
+                            "action_value_lane": "hold",
+                            "learning_lane": "hold",
+                            "memory_side_role": "current_position_side",
+                            "reward_sum": -300.0,
+                            "reward_mean": -300.0,
+                            "sample_count": 1,
+                            "win_rate": 0.0,
+                            "last_sample_date": "2025-03-04",
+                        }
+                    ]
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+
+    def test_hold_exit_learning_rejects_position_matched_as_only_explanation(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="SR",
+            side="long",
+            preference="negative_hold_revalidate",
+            action_name="observe",
+            action_value_lane="hold",
+            memory_side_role="current_position_side",
+            reward_sum=-300.0,
+            last_sample_date="2025-03-04",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="sr-position-matched-only",
+            ticker="SR",
+            trading_date="2025-03-13",
+            contract={
+                "ticker": "SR",
+                "current_lots": 2,
+                "target_lots": 2,
+                "lots_delta": 0,
+                "final_action": "hold",
+                "reason_codes": ["position_matched"],
+                "evidence_used": {
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "scope_key": "SR|long|hold",
+                            "ticker": "SR",
+                            "side": "long",
+                            "action_name": "observe",
+                            "action_preference": "negative_hold_revalidate",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "consumer_scope": "pm_learning",
+                            "action_value_lane": "hold",
+                            "learning_lane": "hold",
+                            "memory_side_role": "current_position_side",
+                            "reward_sum": -300.0,
+                            "reward_mean": -300.0,
+                            "sample_count": 1,
+                            "win_rate": 0.0,
+                            "last_sample_date": "2025-03-04",
+                        }
+                    ]
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertIn("mechanism_hold_exit_learning_not_landed", "\n".join(report.hard_failures))
+
     def test_reduce_contract_with_learning_components_does_not_require_rank(self):
         db_path = self._make_db()
         self._insert_action_value(

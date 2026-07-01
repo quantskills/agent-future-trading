@@ -20,7 +20,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
-from tools.common.final_action_semantics import derive_memory_requirements, is_conditional_monitor_contract
+from tools.common.final_action_semantics import (
+    contract_reduces_or_exits_position,
+    derive_memory_requirements,
+    has_valid_hold_exit_no_change_explanation,
+    is_conditional_monitor_contract,
+)
 
 
 STRATEGY_SOURCE_TYPE = "strategy"
@@ -99,19 +104,6 @@ NO_CHANGE_EXPLANATION_MARKERS = {
     "insufficient",
     "selected_for_capital_deployment=false",
 }
-HOLD_EXIT_EXPLANATION_MARKERS = {
-    "positive_candidate_hold",
-    "current_confirmation",
-    "still_valid",
-    "invalidation_not_triggered",
-    "cooling",
-    "min_hold",
-    "already_reduced",
-    "position_matched",
-    "hold_reason",
-}
-
-
 @dataclass
 class MechanismEffectivenessAuditReport:
     ok: bool
@@ -614,12 +606,7 @@ def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
 
 
 def _contract_reduces_or_exits_position(contract: Dict[str, Any]) -> bool:
-    current = _int(contract.get("current_lots"))
-    target = _int(contract.get("target_lots"))
-    final_action = _lower(contract.get("final_action"))
-    if final_action in REDUCE_EXIT_ACTIONS:
-        return True
-    return current != 0 and abs(target) < abs(current)
+    return contract_reduces_or_exits_position(contract)
 
 
 def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
@@ -651,14 +638,7 @@ def _scenario_for_contract(contract: Dict[str, Any]) -> str:
 
 
 def _hold_exit_has_explanation(contract: Dict[str, Any]) -> bool:
-    text = _text_blob(
-        contract.get("reason_codes"),
-        contract.get("explanation"),
-        contract.get("final_reason"),
-        _dict(contract.get("evidence_used")).get("capital_allocation_reason"),
-        _dict(contract.get("learning_used")).get("learning_adjustment_summary"),
-    )
-    return any(marker in text for marker in HOLD_EXIT_EXPLANATION_MARKERS)
+    return has_valid_hold_exit_no_change_explanation(contract)
 
 
 def _has_hold_exit_learning(contract: Dict[str, Any]) -> bool:
@@ -685,10 +665,9 @@ def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bo
 
 def _hold_exit_landed_in_position(contract: Dict[str, Any]) -> bool:
     current = _int(contract.get("current_lots"))
-    target = _int(contract.get("target_lots"))
     if current == 0:
         return True
-    return abs(target) < abs(current) or _lower(contract.get("final_action")) in {"reduce", "exit"}
+    return contract_reduces_or_exits_position(contract)
 
 
 def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:

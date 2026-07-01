@@ -931,6 +931,225 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
+    def test_system_invariant_audit_accepts_hold_exit_learning_with_holding_period_control(self):
+        db_path = self._make_db()
+        requirements = {
+            "contract": "final_action_semantics.memory_requirements.v1",
+            "action": "hold",
+            "action_lifecycle": "ordinary_hold",
+            "current_position_side": "long",
+            "target_side": "long",
+            "contract_side_role": "current_position_side",
+            "required_memory_lanes": ["hold"],
+            "required_memory_side_roles": ["current_position_side"],
+            "required_pm_memory": [
+                {
+                    "lane": "hold",
+                    "learning_lane": "hold",
+                    "action_value_lane": "hold",
+                    "side": "long",
+                    "memory_side_role": "current_position_side",
+                    "must_land_in_pm_contract": True,
+                    "reason": "hold_current_position_hold_memory",
+                }
+            ],
+            "must_land_in_pm_contract": [
+                {
+                    "lane": "hold",
+                    "learning_lane": "hold",
+                    "action_value_lane": "hold",
+                    "side": "long",
+                    "memory_side_role": "current_position_side",
+                    "must_land_in_pm_contract": True,
+                    "reason": "hold_current_position_hold_memory",
+                }
+            ],
+            "audit_only_memory": [],
+            "accounting_reads_memory": False,
+            "execution_reads_pm_action_value": False,
+        }
+        action_value_row = {
+            "id": "sr-hold-av",
+            "ticker": "SR",
+            "side": "long",
+            "action_name": "observe",
+            "action_preference": "negative_hold_revalidate",
+            "action_value_lane": "hold",
+            "learning_lane": "hold",
+            "memory_side_role": "current_position_side",
+            "consumer_scope": "pm_learning",
+            "last_sample_date": "2025-03-04",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": -100.0,
+            "reward_mean": -100.0,
+            "win_rate": 0.0,
+        }
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "ticker": "SR",
+                "final_action": "hold",
+                "current_lots": 2,
+                "target_lots": 2,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["flat_target", "holding_period_control", "position_matched"],
+                "evidence_used": {
+                    "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
+                    "opportunity_score_components": {
+                        "positive_learning": 0.0,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "learning_used": {
+                    "memory_requirements": requirements,
+                    "memory_retrieval": {
+                        "requirement_details": [
+                            {
+                                "side": "long",
+                                "lane": "hold",
+                                "memory_side_role": "current_position_side",
+                                "row_count": 1,
+                            }
+                        ]
+                    },
+                    "alpha_setup_action_values": [action_value_row],
+                    "learning_adjustment_summary": {
+                        "positive_learning_signal": 0.0,
+                        "negative_learning_signal": 0.0,
+                        "execution_profile_learning_signal": 0.0,
+                        "recent_tail_loss_signal": 0.0,
+                    },
+                },
+            }
+        }
+        payload = _with_auditor_approval(payload)
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-sr-hold-period", "cfg", "pf", "2025-03-13", "2025-03-13", "strategy", "SR", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.execute(
+                """
+                INSERT INTO alpha_setup_action_value(
+                    id, config_id, scope_key, ticker, side, action_name, sample_count,
+                    reward_sum, reward_mean, win_rate, confidence_score, action_preference,
+                    reward_source, evidence_scope, action_value_lane, consumer_scope,
+                    learning_lane, memory_side_role, last_sample_date, created_at, updated_at, active, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "sr-hold-av",
+                    "cfg",
+                    "SR|long|hold",
+                    "SR",
+                    "long",
+                    "observe",
+                    1,
+                    -100.0,
+                    -100.0,
+                    0.0,
+                    0.8,
+                    "negative_hold_revalidate",
+                    "real_trade",
+                    "exact_real_state",
+                    "hold",
+                    "pm_learning",
+                    "hold",
+                    "current_position_side",
+                    "2025-03-04",
+                    now,
+                    now,
+                    1,
+                    "{}",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_rejects_position_matched_as_only_hold_exit_explanation(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "ticker": "SR",
+                "final_action": "hold",
+                "current_lots": 2,
+                "target_lots": 2,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["position_matched"],
+                "evidence_used": {
+                    "opportunity_score_components": {
+                        "positive_learning": 0.0,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    }
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "ticker": "SR",
+                            "side": "long",
+                            "action_name": "observe",
+                            "action_preference": "negative_hold_revalidate",
+                            "action_value_lane": "hold",
+                            "learning_lane": "hold",
+                            "memory_side_role": "current_position_side",
+                            "consumer_scope": "pm_learning",
+                            "last_sample_date": "2025-03-04",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "reward_sum": -100.0,
+                        }
+                    ],
+                    "learning_adjustment_summary": {
+                        "negative_learning_signal": 0.0,
+                        "recent_tail_loss_signal": 0.0,
+                    },
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-sr-position-matched-only", "cfg", "pf", "2025-03-13", "2025-03-13", "strategy", "SR", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_accepts_hold_exit_learning_landed_in_exit_contract(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)

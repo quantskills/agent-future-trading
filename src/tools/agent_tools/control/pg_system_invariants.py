@@ -21,7 +21,12 @@ from tools.common.order_semantics import (
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
 )
-from tools.common.final_action_semantics import derive_memory_requirements, is_conditional_monitor_contract
+from tools.common.final_action_semantics import (
+    contract_reduces_or_exits_position,
+    derive_memory_requirements,
+    has_valid_hold_exit_no_change_explanation,
+    is_conditional_monitor_contract,
+)
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
 
 
@@ -1596,37 +1601,13 @@ def _protective_hold_exit_learning_present(contract: Dict[str, Any]) -> bool:
 
 def _hold_exit_learning_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
     current_lots = _int(contract.get("current_lots"))
-    target_lots = _int(contract.get("target_lots"))
     if not current_lots:
         return False
-    if abs(target_lots) < abs(current_lots):
-        return False
-    final_action = _lower(contract.get("final_action"))
-    if final_action in {"close_position", "reduce_position", "scale_down", "exit"}:
-        return False
-    return True
+    return not contract_reduces_or_exits_position(contract)
 
 
 def _hold_exit_learning_has_contract_explanation(contract: Dict[str, Any]) -> bool:
-    reason_codes = " ".join(str(item).lower() for item in contract.get("reason_codes") or [] if item)
-    evidence = _dict(contract.get("evidence_used"))
-    text = " ".join([
-        reason_codes,
-        _lower(evidence.get("capital_allocation_reason")),
-        _lower(contract.get("final_action")),
-    ])
-    markers = (
-        "hold_exit_action_value_protection",
-        "positive_candidate_hold",
-        "profitable_continuation",
-        "strong_current_confirmation",
-        "min_hold",
-        "cooling",
-        "auditor",
-        "risk",
-        "margin",
-    )
-    return any(marker in text for marker in markers)
+    return has_valid_hold_exit_no_change_explanation(contract)
 
 
 def _learning_no_change_has_contract_explanation(contract: Dict[str, Any]) -> bool:

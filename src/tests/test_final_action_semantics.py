@@ -19,6 +19,7 @@ from tools.common.final_action_semantics import (
     derive_protocol_semantic_checks,
     derive_research_fact_state,
     derive_review_expectation,
+    has_valid_hold_exit_no_change_explanation,
     requires_intraday_result,
     validate_signal_collection,
 )
@@ -345,6 +346,65 @@ class FinalActionSemanticsTest(unittest.TestCase):
         audit = audit_pm_memory_consumption(audited_contract)
 
         self.assertTrue(audit["ok"], audit)
+
+    def test_hold_exit_no_change_explanation_requires_lifecycle_reason(self):
+        base = {
+            "current_lots": 2,
+            "target_lots": 2,
+            "lots_delta": 0,
+            "final_action": "hold",
+        }
+
+        self.assertTrue(
+            has_valid_hold_exit_no_change_explanation({
+                **base,
+                "reason_codes": ["holding_period_control", "position_matched"],
+            })
+        )
+        self.assertTrue(
+            has_valid_hold_exit_no_change_explanation({
+                **base,
+                "reason_codes": ["profitable_hold_continuation"],
+            })
+        )
+        self.assertTrue(
+            has_valid_hold_exit_no_change_explanation({
+                **base,
+                "reason_codes": ["position_lifecycle_trend_hold"],
+            })
+        )
+        self.assertTrue(
+            has_valid_hold_exit_no_change_explanation({
+                **base,
+                "reason_codes": ["hold_exit_action_value_protection"],
+            })
+        )
+        self.assertFalse(
+            has_valid_hold_exit_no_change_explanation({
+                **base,
+                "reason_codes": ["position_matched"],
+            })
+        )
+        self.assertFalse(has_valid_hold_exit_no_change_explanation({**base, "reason_codes": []}))
+
+    def test_hold_exit_no_change_explanation_accepts_actual_reduce_and_exit(self):
+        reduce_contract = {
+            "current_lots": 2,
+            "target_lots": 1,
+            "lots_delta": -1,
+            "final_action": "reduce",
+            "reason_codes": ["position_matched"],
+        }
+        exit_contract = {
+            "current_lots": -2,
+            "target_lots": 0,
+            "lots_delta": 2,
+            "final_action": "exit",
+            "reason_codes": [],
+        }
+
+        self.assertTrue(has_valid_hold_exit_no_change_explanation(reduce_contract))
+        self.assertTrue(has_valid_hold_exit_no_change_explanation(exit_contract))
 
 
 if __name__ == "__main__":

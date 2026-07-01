@@ -19,6 +19,12 @@ INCREASE_ACTIONS = {"add", "scale", "increase"}
 DECREASE_ACTIONS = {"reduce", "trim", "decrease", "reduce_position", "scale_down", "reduce_only"}
 EXIT_ACTIONS = {"exit", "close", "close_long", "close_short", "close_position", "risk_exit", "flatten"}
 TRADE_ACTIONS = OPEN_ACTIONS | INCREASE_ACTIONS | DECREASE_ACTIONS | EXIT_ACTIONS | CONDITIONAL_ACTIONS
+HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS = {
+    "holding_period_control",
+    "profitable_hold_continuation",
+    "position_lifecycle_trend_hold",
+    "hold_exit_action_value_protection",
+}
 
 MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
 PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
@@ -335,6 +341,30 @@ def contract_has_trade_intent(contract: Mapping[str, Any]) -> bool:
     if action in TRADE_ACTIONS:
         return True
     return contract_has_lot_change(contract)
+
+
+def contract_reduces_or_exits_position(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether the final contract actually reduces or exits a position."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    current_lots, target_lots, _ = _current_target_delta(contract)
+    if not current_lots:
+        return False
+    if abs(target_lots) < abs(current_lots):
+        return True
+    return _clean(contract.get("final_action")) in DECREASE_ACTIONS | EXIT_ACTIONS
+
+
+def has_valid_hold_exit_no_change_explanation(contract: Mapping[str, Any] | None) -> bool:
+    """Interpret hold/exit learning no-change explanations from one shared place.
+
+    This function is read-only.  It does not fetch research memory, sign a
+    contract, submit orders, mutate lots, or change same-day trade facts.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    if contract_reduces_or_exits_position(contract):
+        return True
+    reason_set = set(reason_codes_from(contract))
+    return bool(reason_set & HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS)
 
 
 def is_conditional_monitor_contract(contract: Mapping[str, Any]) -> bool:
