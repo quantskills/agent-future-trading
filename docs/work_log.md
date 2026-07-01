@@ -248,6 +248,8 @@
 
 （1）收口 PG 持仓生命周期解释语义。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：当 hold/exit 学习未导致减仓或退出时，两条 PG 检查必须用同一套确定性解释判断；`holding_period_control` 是合法持仓生命周期解释，`position_matched` 只能解释仓位已匹配，不能单独解释负向 hold/exit 学习。
 
+（2）收口 PG 统一语义入口。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：Protocol Governor 不再保留学习 lane 匹配、`final_action` 与手数变化一致性、泛化 no-change/rank/learning 解释、active opportunity routing 和 open transaction blocking 的私有判断；两条 PG 检查统一调用共享语义工具，只检查正式事实，不改策略、参数、交易生成、结算、学习写回或已有回测记录。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

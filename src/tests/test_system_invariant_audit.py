@@ -14,7 +14,13 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.agent_tools.control.pg_system_invariants import (
     _audit_pm_learning_transport_and_contract_effect,
+    _contract_increases_risk as system_contract_increases_risk,
+    _learning_no_change_has_contract_explanation as system_learning_no_change_has_contract_explanation,
     audit_system_invariants,
+)
+from tools.agent_tools.control.pg_mechanism_effectiveness_audit import (
+    _contract_has_no_change_explanation as mechanism_contract_has_no_change_explanation,
+    _scenario_for_contract as mechanism_scenario_for_contract,
 )
 
 
@@ -2583,6 +2589,63 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             ),
             report.to_dict(),
         )
+
+    def test_pg_no_change_explanation_uses_shared_semantics_in_both_audits(self):
+        explained = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "reason_codes": ["capital_queue_not_selected"],
+        }
+        with_field = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "capital_deployment": {"capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking"},
+        }
+        unexplained = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "reason_codes": ["diagnostic_only_comment"],
+        }
+
+        for contract, expected in ((explained, True), (with_field, True), (unexplained, False)):
+            with self.subTest(contract=contract):
+                self.assertEqual(system_learning_no_change_has_contract_explanation(contract), expected)
+                self.assertEqual(mechanism_contract_has_no_change_explanation(contract), expected)
+
+    def test_pg_action_lifecycle_wrappers_stay_aligned_for_scenarios(self):
+        cases = [
+            (
+                {"current_lots": 0, "target_lots": -1, "lots_delta": -1, "final_action": "open_probe"},
+                True,
+                "open_increase",
+            ),
+            (
+                {"current_lots": -1, "target_lots": -3, "lots_delta": -2, "final_action": "add"},
+                True,
+                "open_increase",
+            ),
+            (
+                {"current_lots": 2, "target_lots": 1, "lots_delta": -1, "final_action": "reduce"},
+                False,
+                "reduce_exit",
+            ),
+            (
+                {"current_lots": 2, "target_lots": 2, "lots_delta": 0, "final_action": "hold"},
+                False,
+                "position_hold",
+            ),
+        ]
+
+        for contract, increases_risk, scenario in cases:
+            with self.subTest(contract=contract):
+                self.assertEqual(system_contract_increases_risk(contract), increases_risk)
+                self.assertEqual(mechanism_scenario_for_contract(contract), scenario)
 
     def test_system_invariant_audit_fails_strategy_recommendation_with_non_strategy_contract(self):
         db_path = self._make_db()

@@ -25,6 +25,58 @@ HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS = {
     "position_lifecycle_trend_hold",
     "hold_exit_action_value_protection",
 }
+CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS = {
+    "",
+    "pm_watch_for_trigger_probe_cap",
+    "conditional_trigger_authority",
+    "conditional_watch",
+    "conditional_monitor",
+    "candidate_routed_to_conditional_monitor",
+}
+GENERIC_NO_CHANGE_EXPLANATION_REASONS = {
+    "already_at_target",
+    "blocked",
+    "capital_queue_not_selected",
+    "cooling_period",
+    "daily_tradeability_watchlist_only",
+    "hard_risk",
+    "insufficient_margin",
+    "margin_insufficient",
+    "min_hold",
+    "not_allocated_missing_invalidation_boundary",
+    "not_new_or_increasing_risk_preserve_pm_contract",
+    "not_selected_by_full_market_pm_capital_queue",
+    "no_trade",
+    "position_matched",
+    "ranked_below_capital_queue",
+    "risk_block",
+    "soft_risk",
+    "watch_for_trigger_cannot_open_position",
+    "watchlist_only",
+}
+OPEN_TRANSACTION_BLOCKER_REASONS = {
+    "daily_tradeability_watchlist_only",
+    "final_action_contract_watch_for_trigger_probe_block",
+    "pm_text_no_trade_blocks_new_entry",
+    "pm_text_watchlist_only_blocks_new_entry",
+    "pm_watch_for_trigger_probe_cap",
+    "watch_for_trigger_cannot_open_position",
+}
+ACTIVE_OPPORTUNITY_REJECTION_REASONS = GENERIC_NO_CHANGE_EXPLANATION_REASONS | {
+    "business_quality_observe_or_block",
+    "cold_start_weak_combo_block",
+    "insufficient_quality_support",
+    "market_confirmation_below_probe_threshold",
+    "market_confirmation_conflict",
+    "market_confirmation_data_gap",
+    "market_confirmation_quality_gate",
+    "missing_pretrade_invalidation",
+    "no_analyst_support_for_target",
+    "pm_opportunity_scorecard_no_trade",
+    "real_probe_qualification_not_met",
+    "weak_conditional_combo_cap",
+    "weak_signal_combo_probe_cap",
+}
 
 MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
 PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
@@ -285,6 +337,63 @@ def reason_codes_from(value: Any) -> list[str]:
     return [_clean(raw)]
 
 
+def lane_matches_memory_requirement(required_lane: Any, candidate_lane: Any) -> bool:
+    """Return whether a memory row lane can satisfy a required PM memory lane.
+
+    The first argument is the requirement lane produced by
+    ``derive_memory_requirements``.  The second argument is the candidate
+    action-value row lane.  This is read-only and does not fetch memory or
+    change the PM contract.
+    """
+    return _lane_matches_requirement(candidate_lane, required_lane)
+
+
+def validate_final_action_lot_transition(contract: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate final_action against current/target/lots_delta from one place."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    action = _clean(contract.get("final_action"))
+    current_lots, target_lots, lots_delta = _current_target_delta(contract)
+    expected_delta = target_lots - current_lots
+    errors: list[str] = []
+    expected_action_family = "wait" if target_lots == current_lots and current_lots == 0 else ""
+    allowed_actions: set[str] = set()
+    if lots_delta != expected_delta:
+        errors.append("final_action_contract_lots_delta_mismatch")
+    if target_lots == current_lots:
+        expected_action_family = "hold" if current_lots else "wait"
+        allowed_actions = {"hold"} if current_lots else {"wait"}
+    elif current_lots == 0 and target_lots != 0:
+        expected_action_family = "open"
+        allowed_actions = OPEN_ACTIONS
+    elif target_lots == 0 and current_lots != 0:
+        expected_action_family = "exit"
+        allowed_actions = EXIT_ACTIONS
+    elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
+        if abs(target_lots) > abs(current_lots):
+            expected_action_family = "increase"
+            allowed_actions = INCREASE_ACTIONS
+        else:
+            expected_action_family = "decrease"
+            allowed_actions = DECREASE_ACTIONS
+    else:
+        expected_action_family = "exit"
+        allowed_actions = EXIT_ACTIONS
+    if action not in allowed_actions:
+        errors.append("final_action_contract_action_mismatch")
+    return {
+        "contract": "final_action_semantics.final_action_lot_transition.v1",
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "action": action,
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "lots_delta": lots_delta,
+        "expected_lots_delta": expected_delta,
+        "expected_action_family": expected_action_family,
+        "allowed_final_actions": sorted(allowed_actions),
+    }
+
+
 def classify_reason_codes(reasons: Iterable[Any] | Mapping[str, Any] | None) -> dict[str, Any]:
     cleaned = reason_codes_from(reasons)
     hard_blocks = [reason for reason in cleaned if reason in HARD_BLOCK_REASONS or reason.startswith("hard_")]
@@ -322,6 +431,109 @@ def classify_reason_codes(reasons: Iterable[Any] | Mapping[str, Any] | None) -> 
     }
 
 
+def classify_final_action_reason_codes(contract: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Classify PM reason codes for PG routing and no-change audits."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    base = classify_reason_codes(contract)
+    reason_set = set(base["reason_codes"])
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), Mapping) else {}
+    capital_explanation = any(
+        bool(value)
+        for value in (
+            evidence.get("capital_allocation_reason"),
+            evidence.get("learning_adjustment_summary"),
+            deployment.get("capital_allocation_reason"),
+            deployment.get("allocation_explanation"),
+            deployment.get("deployment_reason"),
+            contract.get("capital_allocation_reason"),
+            contract.get("explanation"),
+            contract.get("final_reason"),
+        )
+    )
+    generic_no_change = (
+        bool(reason_set & GENERIC_NO_CHANGE_EXPLANATION_REASONS)
+        or bool(reason_set & HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS)
+        or capital_explanation
+    )
+    active_rejection = bool(
+        (reason_set - CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS)
+        & (ACTIVE_OPPORTUNITY_REJECTION_REASONS | HARD_BLOCK_REASONS | SOFT_LIMIT_REASONS)
+    )
+    open_blockers = set(reason for reason in reason_set if reason in OPEN_TRANSACTION_BLOCKER_REASONS)
+    return {
+        **base,
+        "contract": "final_action_semantics.reason_code_classification.v1",
+        "active_opportunity_rejection_reasons": sorted(
+            (reason_set - CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS)
+            & (ACTIVE_OPPORTUNITY_REJECTION_REASONS | HARD_BLOCK_REASONS | SOFT_LIMIT_REASONS)
+        ),
+        "open_transaction_blocker_reasons": sorted(open_blockers),
+        "no_change_explanation_reasons": sorted(
+            reason_set & (GENERIC_NO_CHANGE_EXPLANATION_REASONS | HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS)
+        ),
+        "rank_no_deployment_explanation": generic_no_change,
+        "learning_no_effect_explanation": generic_no_change,
+        "conditional_monitor_candidate_only": bool(reason_set) and not bool(reason_set - CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS),
+        "capital_allocation_explanation": capital_explanation,
+    }
+
+
+def has_valid_generic_no_change_explanation(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether no-change/rank/learning no-effect has a valid PM explanation."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    classification = classify_final_action_reason_codes(contract)
+    if classification.get("rank_no_deployment_explanation") or classification.get("learning_no_effect_explanation"):
+        return True
+    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), Mapping) else {}
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    if deployment and (
+        deployment.get("capital_allocation_reason")
+        or deployment.get("allocation_explanation")
+        or deployment.get("deployment_reason")
+    ):
+        return True
+    return bool(evidence.get("capital_allocation_reason") or contract.get("capital_allocation_reason"))
+
+
+def has_active_opportunity_rejection(
+    active_audit: Mapping[str, Any] | None,
+    contract: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether PM formally rejected/degraded an active opportunity."""
+    active_audit = active_audit if isinstance(active_audit, Mapping) else {}
+    contract = contract if isinstance(contract, Mapping) else {}
+    decision = active_audit.get("decision") if isinstance(active_audit.get("decision"), Mapping) else {}
+    combined_reasons = [
+        *reason_codes_from(contract),
+        *reason_codes_from(contract.get("audit_reason_codes")),
+        decision.get("reason"),
+    ]
+    reason_set = {_clean(item) for item in combined_reasons if _clean(item)}
+    reason_set -= CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS
+    if reason_set & (ACTIVE_OPPORTUNITY_REJECTION_REASONS | HARD_BLOCK_REASONS | SOFT_LIMIT_REASONS):
+        return True
+    decision_authority = _clean(decision.get("authority_type"))
+    if decision_authority in BLOCKING_AUTHORITY_TYPES:
+        return bool(reason_set)
+    return False
+
+
+def has_open_transaction_blocker(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether a contract explicitly forbids a real open transaction."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    if _bool(contract.get("watch_for_trigger_block")):
+        return True
+    classification = classify_final_action_reason_codes(contract)
+    blockers = set(classification["open_transaction_blocker_reasons"])
+    if (
+        is_conditional_monitor_contract(contract)
+        and not _bool(contract.get("watch_for_trigger_block"))
+    ):
+        blockers.discard("pm_watch_for_trigger_probe_cap")
+    return bool(blockers)
+
+
 def _current_target_delta(contract: Mapping[str, Any]) -> tuple[int, int, int]:
     current_lots = _int(contract.get("current_lots"), 0)
     target_lots = _int(contract.get("target_lots"), current_lots)
@@ -352,6 +564,18 @@ def contract_reduces_or_exits_position(contract: Mapping[str, Any] | None) -> bo
     if abs(target_lots) < abs(current_lots):
         return True
     return _clean(contract.get("final_action")) in DECREASE_ACTIONS | EXIT_ACTIONS
+
+
+def contract_increases_risk_position(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether the final contract increases absolute position risk."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    current_lots, target_lots, _ = _current_target_delta(contract)
+    action = _clean(contract.get("final_action"))
+    if action in OPEN_ACTIONS | INCREASE_ACTIONS:
+        return abs(target_lots) > abs(current_lots) or current_lots == 0
+    if action in DECREASE_ACTIONS | EXIT_ACTIONS:
+        return False
+    return abs(target_lots) > abs(current_lots)
 
 
 def has_valid_hold_exit_no_change_explanation(contract: Mapping[str, Any] | None) -> bool:

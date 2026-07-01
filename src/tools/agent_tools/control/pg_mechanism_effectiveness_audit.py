@@ -21,10 +21,13 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.common.final_action_semantics import (
+    contract_increases_risk_position,
     contract_reduces_or_exits_position,
     derive_memory_requirements,
+    has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
+    lane_matches_memory_requirement,
 )
 
 
@@ -67,43 +70,6 @@ CHECKED_SCENARIOS = {
     SCENARIO_FLAT_WAIT: "flat/no-action candidate with prior learning must explain why it did not affect deployment",
 }
 CONDITIONAL_FINAL_ACTIONS = {"conditional_probe", "conditional_monitor", "watch_trigger"}
-OPEN_INCREASE_ACTIONS = {
-    "open",
-    "open_long",
-    "open_short",
-    "open_probe",
-    "conditional_probe",
-    "scale",
-    "add",
-    "increase",
-}
-REDUCE_EXIT_ACTIONS = {
-    "reduce",
-    "exit",
-    "close",
-    "close_long",
-    "close_short",
-    "reduce_only",
-}
-NO_CHANGE_EXPLANATION_MARKERS = {
-    "capital_deployment",
-    "not_selected",
-    "ranked_below",
-    "capacity",
-    "budget",
-    "margin",
-    "risk",
-    "hard_risk",
-    "soft_risk",
-    "cooling",
-    "min_hold",
-    "already_at_target",
-    "position_matched",
-    "hold_reason",
-    "no_add",
-    "insufficient",
-    "selected_for_capital_deployment=false",
-}
 @dataclass
 class MechanismEffectivenessAuditReport:
     ok: bool
@@ -432,21 +398,10 @@ def _row_has_pm_canonical_fields(row: Dict[str, Any]) -> bool:
 
 
 def _lane_matches_requirement(row: Dict[str, Any], lane: str) -> bool:
-    row_lane = _row_lane(row)
     required = _lower(lane)
     if not required:
         return True
-    aliases = {
-        "open": {"open"},
-        "add": {"add", "scale", "increase", "open"},
-        "scale": {"add", "scale", "increase", "open"},
-        "increase": {"add", "scale", "increase", "open"},
-        "hold": {"hold", "reduce", "exit"},
-        "reduce": {"reduce", "exit", "hold"},
-        "exit": {"exit", "reduce", "hold"},
-        "conditional_monitor": {"conditional_monitor"},
-    }
-    return row_lane in aliases.get(required, {required})
+    return lane_matches_memory_requirement(required, _row_lane(row))
 
 
 def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -595,14 +550,7 @@ def _contract_lots_changed(contract: Dict[str, Any]) -> bool:
 
 
 def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
-    current = _int(contract.get("current_lots"))
-    target = _int(contract.get("target_lots"))
-    final_action = _lower(contract.get("final_action"))
-    if final_action in OPEN_INCREASE_ACTIONS:
-        return abs(target) > abs(current) or current == 0
-    if final_action in REDUCE_EXIT_ACTIONS:
-        return False
-    return abs(target) > abs(current)
+    return contract_increases_risk_position(contract)
 
 
 def _contract_reduces_or_exits_position(contract: Dict[str, Any]) -> bool:
@@ -610,17 +558,7 @@ def _contract_reduces_or_exits_position(contract: Dict[str, Any]) -> bool:
 
 
 def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
-    deployment = _dict(contract.get("capital_deployment"))
-    evidence = _dict(contract.get("evidence_used"))
-    text = _text_blob(
-        deployment,
-        evidence.get("capital_allocation_reason"),
-        evidence.get("learning_adjustment_summary"),
-        contract.get("reason_codes"),
-        contract.get("explanation"),
-        contract.get("final_reason"),
-    )
-    return any(marker in text for marker in NO_CHANGE_EXPLANATION_MARKERS)
+    return has_valid_generic_no_change_explanation(contract)
 
 
 def _scenario_for_contract(contract: Dict[str, Any]) -> str:

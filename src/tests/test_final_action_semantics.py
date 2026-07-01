@@ -12,6 +12,7 @@ from tools.common.final_action_semantics import (
     authority_allows_entry,
     classify_analyst_evidence,
     classify_final_action_contract,
+    classify_final_action_reason_codes,
     classify_reason_codes,
     derive_memory_requirements,
     derive_accounting_expectation,
@@ -19,8 +20,13 @@ from tools.common.final_action_semantics import (
     derive_protocol_semantic_checks,
     derive_research_fact_state,
     derive_review_expectation,
+    has_active_opportunity_rejection,
+    has_open_transaction_blocker,
+    has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
+    lane_matches_memory_requirement,
     requires_intraday_result,
+    validate_final_action_lot_transition,
     validate_signal_collection,
 )
 
@@ -405,6 +411,99 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
         self.assertTrue(has_valid_hold_exit_no_change_explanation(reduce_contract))
         self.assertTrue(has_valid_hold_exit_no_change_explanation(exit_contract))
+
+    def test_public_lane_matcher_is_the_single_memory_lane_source(self):
+        self.assertTrue(lane_matches_memory_requirement("add", "open"))
+        self.assertTrue(lane_matches_memory_requirement("increase", "scale"))
+        self.assertTrue(lane_matches_memory_requirement("reduce", "hold"))
+        self.assertTrue(lane_matches_memory_requirement("exit", "reduce"))
+        self.assertFalse(lane_matches_memory_requirement("exit", "open"))
+        self.assertFalse(lane_matches_memory_requirement("conditional_monitor", "open"))
+
+    def test_final_action_lot_transition_validation_covers_trade_lifecycle(self):
+        cases = [
+            ({"current_lots": 0, "target_lots": 0, "lots_delta": 0, "final_action": "wait"}, "wait"),
+            ({"current_lots": 2, "target_lots": 2, "lots_delta": 0, "final_action": "hold"}, "hold"),
+            ({"current_lots": 0, "target_lots": -1, "lots_delta": -1, "final_action": "open_probe"}, "open"),
+            ({"current_lots": -1, "target_lots": -3, "lots_delta": -2, "final_action": "add"}, "increase"),
+            ({"current_lots": 3, "target_lots": 1, "lots_delta": -2, "final_action": "reduce"}, "decrease"),
+            ({"current_lots": -2, "target_lots": 0, "lots_delta": 2, "final_action": "exit"}, "exit"),
+        ]
+        for contract, expected_family in cases:
+            with self.subTest(contract=contract):
+                result = validate_final_action_lot_transition(contract)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["expected_action_family"], expected_family)
+
+        bad = validate_final_action_lot_transition(
+            {"current_lots": 0, "target_lots": -1, "lots_delta": -1, "final_action": "hold"}
+        )
+        self.assertFalse(bad["ok"])
+        self.assertIn("final_action_contract_action_mismatch", bad["errors"])
+
+    def test_generic_no_change_explanation_requires_registered_reason_or_explicit_field(self):
+        explained = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "reason_codes": ["capital_queue_not_selected"],
+        }
+        with_field = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "capital_deployment": {"capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking"},
+        }
+        unexplained = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "reason_codes": ["diagnostic_only_comment"],
+        }
+
+        self.assertTrue(has_valid_generic_no_change_explanation(explained))
+        self.assertTrue(has_valid_generic_no_change_explanation(with_field))
+        self.assertFalse(has_valid_generic_no_change_explanation(unexplained))
+
+    def test_reason_code_classification_drives_active_rejection_and_open_blockers(self):
+        classification = classify_final_action_reason_codes({
+            "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+        })
+        self.assertTrue(classification["conditional_monitor_candidate_only"])
+
+        self.assertFalse(
+            has_active_opportunity_rejection(
+                {"decision": {"reason": "pm_watch_for_trigger_probe_cap", "authority_type": "watchlist_only"}},
+                {"reason_codes": ["pm_watch_for_trigger_probe_cap"]},
+            )
+        )
+        self.assertTrue(
+            has_active_opportunity_rejection(
+                {"decision": {"reason": "market_confirmation_conflict", "authority_type": "watchlist_only"}},
+                {"reason_codes": ["market_confirmation_conflict"]},
+            )
+        )
+        self.assertTrue(
+            has_open_transaction_blocker({
+                "final_action": "open_probe",
+                "authority_type": "exploration_probe",
+                "reason_codes": ["pm_watch_for_trigger_probe_cap"],
+            })
+        )
+        self.assertFalse(
+            has_open_transaction_blocker({
+                "final_action": "open_probe",
+                "authority_type": "exploration_probe",
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "watch_for_trigger_block": False,
+                "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
+            })
+        )
 
 
 if __name__ == "__main__":

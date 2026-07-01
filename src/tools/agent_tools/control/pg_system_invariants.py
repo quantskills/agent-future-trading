@@ -22,10 +22,16 @@ from tools.common.order_semantics import (
     recommendation_intent_from_lots,
 )
 from tools.common.final_action_semantics import (
+    contract_increases_risk_position,
     contract_reduces_or_exits_position,
     derive_memory_requirements,
+    has_active_opportunity_rejection,
+    has_open_transaction_blocker,
+    has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
+    lane_matches_memory_requirement,
+    validate_final_action_lot_transition,
 )
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
 
@@ -34,33 +40,10 @@ OPEN_ACTIONS = {"open_long", "open_short"}
 CLOSE_ACTIONS = {"close_long", "close_short"}
 OPEN_FINAL_ACTIONS = {"open_probe", "open_real"}
 OPEN_AUTHORITY_TYPES = {"exploration_probe", "real_budget_entry"}
-OPEN_INCREASE_FINAL_ACTIONS = {
-    "open",
-    "open_long",
-    "open_short",
-    "open_probe",
-    "open_real",
-    "conditional_probe",
-    "scale",
-    "add",
-    "increase",
-}
-REDUCE_EXIT_FINAL_ACTIONS = {
-    "reduce",
-    "reduce_position",
-    "reduce_only",
-    "scale_down",
-    "exit",
-    "close",
-    "close_long",
-    "close_short",
-    "close_position",
-}
 STRATEGY_SOURCE_TYPE = "strategy"
 ROLLOVER_SOURCE_TYPE = "rollover"
 FORCED_RISK_SOURCE_TYPE = "forced_risk"
 OPERATIONAL_SOURCE_TYPES = {ROLLOVER_SOURCE_TYPE, FORCED_RISK_SOURCE_TYPE}
-BLOCKING_AUTHORITY_TYPES = {"", "watchlist_only", "no_trade", "not_applicable", "analysis_or_watchlist_only"}
 TRIGGER_PASSED_REASONS = {
     "intraday_trigger_confirmed",
     "intraday_pullback_confirmed",
@@ -194,14 +177,6 @@ UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES = {
     "trigger_valid_without_current_trigger_confirmed",
     "setup_quality_ok_used_as_current_trigger",
     "trade_research_action_evidence_trigger_valid_mismatch",
-}
-CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS = {
-    "",
-    "pm_watch_for_trigger_probe_cap",
-    "conditional_trigger_authority",
-    "conditional_watch",
-    "conditional_monitor",
-    "candidate_routed_to_conditional_monitor",
 }
 PENDING_ENTRY_TRIGGER_MARKERS = {
     "only if",
@@ -939,21 +914,6 @@ def _transaction_trade_contract_audit(transaction: Dict[str, Any]) -> Dict[str, 
     return _audit_from_payload(_dict(transaction.get("audit_payload")))
 
 
-def _final_action_allowed_by_lots(current_lots: int, target_lots: int, final_action: str) -> bool:
-    action = _lower(final_action)
-    current = int(current_lots or 0)
-    target = int(target_lots or 0)
-    if current == target:
-        return action == ("hold" if current else "wait")
-    if current == 0 and target != 0:
-        return action in OPEN_FINAL_ACTIONS
-    if target == 0 and current != 0:
-        return action == "exit"
-    if (current > 0 and target > 0) or (current < 0 and target < 0):
-        return action == ("scale" if abs(target) > abs(current) else "reduce")
-    return action == "exit"
-
-
 def _source_type(recommendation: Dict[str, Any]) -> str:
     return _lower(recommendation.get("source_type") or "strategy")
 
@@ -1023,7 +983,8 @@ def _audit_recommendation_final_contract_consistency(
                 f"{label}:current={current_lots}:target={target_lots}:delta={lots_delta}"
             )
             continue
-        if not _final_action_allowed_by_lots(current_lots, target_lots, str(contract.get("final_action") or "")):
+        transition = validate_final_action_lot_transition(contract)
+        if not transition.get("ok"):
             errors.append(
                 "recommendation_final_action_contract_action_mismatch:"
                 f"{label}:action={contract.get('final_action')}:"
@@ -1255,24 +1216,6 @@ def _action_value_memory_side_role(row: Dict[str, Any]) -> str:
     return _lower(_payload_or_row_value(row, "memory_side_role"))
 
 
-def _lane_matches_requirement(row_lane: str, required_lane: str) -> bool:
-    row_lane = _lower(row_lane)
-    required_lane = _lower(required_lane)
-    if not row_lane or not required_lane:
-        return False
-    aliases = {
-        "open": {"open"},
-        "add": {"add", "scale", "increase", "open"},
-        "scale": {"add", "scale", "increase", "open"},
-        "increase": {"add", "scale", "increase", "open"},
-        "hold": {"hold", "reduce", "exit"},
-        "reduce": {"reduce", "exit", "hold"},
-        "exit": {"exit", "reduce", "hold"},
-        "conditional_monitor": {"conditional_monitor"},
-    }
-    return row_lane in aliases.get(required_lane, {required_lane})
-
-
 def _action_value_matches_requirement(
     row: Dict[str, Any],
     *,
@@ -1305,7 +1248,7 @@ def _action_value_matches_requirement(
     reward_source = _lower(row.get("reward_source")) or _effective_reward_source(payload)
     if not any(marker in reward_source for marker in REAL_REWARD_SOURCE_MARKERS):
         return False
-    if not _lane_matches_requirement(_action_value_lane(row), lane):
+    if not lane_matches_memory_requirement(lane, _action_value_lane(row)):
         return False
     required_role = _lower(memory_side_role)
     row_role = _action_value_memory_side_role(row)
@@ -1396,14 +1339,7 @@ def _real_action_value_available_before(
 
 
 def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
-    current_lots = _int(contract.get("current_lots"))
-    target_lots = _int(contract.get("target_lots"))
-    final_action = _lower(contract.get("final_action"))
-    if final_action in OPEN_INCREASE_FINAL_ACTIONS:
-        return abs(target_lots) > abs(current_lots) or current_lots == 0
-    if final_action in REDUCE_EXIT_FINAL_ACTIONS:
-        return False
-    return abs(target_lots) > abs(current_lots)
+    return contract_increases_risk_position(contract)
 
 
 def _prior_real_action_value_is_hold_exit(
@@ -1611,36 +1547,7 @@ def _hold_exit_learning_has_contract_explanation(contract: Dict[str, Any]) -> bo
 
 
 def _learning_no_change_has_contract_explanation(contract: Dict[str, Any]) -> bool:
-    deployment = _dict(contract.get("capital_deployment"))
-    evidence = _dict(contract.get("evidence_used"))
-    reason = _lower(
-        deployment.get("capital_allocation_reason")
-        or evidence.get("capital_allocation_reason")
-        or contract.get("capital_allocation_reason")
-    )
-    if deployment and reason:
-        return True
-    reason_codes = " ".join(str(item).lower() for item in contract.get("reason_codes") or [] if item)
-    final_action = _lower(contract.get("final_action"))
-    explanation_text = " ".join([reason, reason_codes, final_action])
-    markers = (
-        "capital_queue_not_selected",
-        "not_selected",
-        "already_at_target",
-        "position_matched",
-        "protect",
-        "risk",
-        "margin",
-        "auditor",
-        "watch",
-        "not_triggered",
-        "no_trade",
-        "blocked",
-        "cooling",
-        "min_hold",
-        "invalidation",
-    )
-    return any(marker in explanation_text for marker in markers)
+    return has_valid_generic_no_change_explanation(contract)
 
 
 def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
@@ -1911,15 +1818,7 @@ def _active_opportunity_has_explicit_rejection(
     active_audit: Dict[str, Any],
     contract: Dict[str, Any],
 ) -> bool:
-    decision = _dict(active_audit.get("decision"))
-    reason_codes = {
-        _lower(item)
-        for item in _list(contract.get("reason_codes"))
-        + _list(contract.get("audit_reason_codes"))
-        + [decision.get("reason")]
-    }
-    reason_codes = {item for item in reason_codes if item not in CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS}
-    return bool(reason_codes)
+    return has_active_opportunity_rejection(active_audit, contract)
 
 
 def _audit_active_opportunity_routing(
@@ -2072,22 +1971,8 @@ def _audit_open_transactions(
         ):
             errors.append(f"real_open_without_current_contract_evidence:{tx_label}")
         if authority_type == "exploration_probe":
-            blocking = {
-                "pm_watch_for_trigger_probe_cap",
-                "watch_for_trigger_cannot_open_position",
-                "final_action_contract_watch_for_trigger_probe_block",
-                "daily_tradeability_watchlist_only",
-                "pm_text_watchlist_only_blocks_new_entry",
-                "pm_text_no_trade_blocks_new_entry",
-            }
-            conditional_trigger_contract = bool(
-                is_conditional_monitor_contract(contract)
-                and not authority.get("watch_for_trigger_block")
-            )
-            if conditional_trigger_contract:
-                blocking.discard("pm_watch_for_trigger_probe_cap")
-            if reason_codes & blocking or bool(authority.get("watch_for_trigger_block")):
-                errors.append(f"direction_or_watchlist_probe_opened:{tx_label}:{sorted(reason_codes & blocking)}")
+            if has_open_transaction_blocker(contract):
+                errors.append(f"direction_or_watchlist_probe_opened:{tx_label}:{sorted(reason_codes)}")
         if audit and (
             audit.get("single_source_of_trade_truth") is False
             or audit.get("candidate_sources_do_not_bypass_contract") is False
