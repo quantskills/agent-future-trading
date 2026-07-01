@@ -250,6 +250,8 @@
 
 （2）收口 PG 统一语义入口。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：Protocol Governor 不再保留学习 lane 匹配、`final_action` 与手数变化一致性、泛化 no-change/rank/learning 解释、active opportunity routing 和 open transaction blocking 的私有判断；两条 PG 检查统一调用共享语义工具，只检查正式事实，不改策略、参数、交易生成、结算、学习写回或已有回测记录。
 
+（3）同步 `learning_used` 契约覆盖到 PG 统一语义入口。修改：`pg_contract_coverage_audit.py` 和 `test_contract_coverage_audit.py`。原因：`learning_used` 的消费路径已迁入 `final_action_semantics.py` 共享解释器，并由两条 PG 检查调用共享语义函数；回测前契约覆盖闸门必须识别当前真实 consumer 路径，不能继续按旧文件和旧字段组合误判缺失。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

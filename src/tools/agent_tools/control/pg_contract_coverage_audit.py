@@ -659,14 +659,19 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/tools/agent_tools/research/reviewer_phase4_review.py",
-                ("learning_used", "final_action_contract"),
-                "Reviewer uses final-contract learning diagnostics",
+                "src/tools/common/final_action_semantics.py",
+                ("def audit_pm_memory_consumption", "learning_used", "alpha_setup_action_values"),
+                "shared final-action semantics consumes PM learning_used for deterministic memory coverage checks",
+            ),
+            _rule(
+                "src/tools/agent_tools/control/pg_system_invariants.py",
+                ("contract.get(\"learning_used\")", "has_valid_generic_no_change_explanation"),
+                "system invariant audit consumes learning_used through the shared semantic interpreter",
             ),
             _rule(
                 "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
-                ("learning_used", "learning_adjustment_summary"),
-                "mechanism audit checks learning impact",
+                ("contract.get(\"learning_used\")", "has_valid_generic_no_change_explanation"),
+                "mechanism audit consumes learning_used through the shared semantic interpreter",
             ),
         ),
         audits=(
