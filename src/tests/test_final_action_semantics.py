@@ -16,6 +16,7 @@ from tools.common.final_action_semantics import (
     classify_final_action_contract,
     classify_final_action_reason_codes,
     classify_reason_codes,
+    contract_consumes_hold_exit_pm_learning,
     derive_memory_requirements,
     derive_accounting_expectation,
     derive_execution_requirement,
@@ -502,6 +503,68 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
         self.assertTrue(has_valid_hold_exit_no_change_explanation(reduce_contract))
         self.assertTrue(has_valid_hold_exit_no_change_explanation(exit_contract))
+
+    def test_contract_consumes_hold_exit_pm_learning_uses_pm_scope_and_lifecycle(self):
+        self.assertTrue(
+            contract_consumes_hold_exit_pm_learning(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "consumer_scope": "pm_learning",
+                                "action_preference": "positive_candidate_exit",
+                                "action_value_lane": "exit",
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertTrue(
+            contract_consumes_hold_exit_pm_learning(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "consumer_scope": "pm_learning",
+                                "action_preference": "negative_hold_revalidate",
+                                "action_value_lane": "hold",
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            contract_consumes_hold_exit_pm_learning(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "consumer_scope": "analyst_calibration",
+                                "action_preference": "positive_candidate_exit",
+                                "action_value_lane": "exit",
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            contract_consumes_hold_exit_pm_learning(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "consumer_scope": "pm_learning",
+                                "action_preference": "positive_candidate_open",
+                                "action_value_lane": "open",
+                            }
+                        ]
+                    }
+                }
+            )
+        )
 
     def test_public_lane_matcher_is_the_single_memory_lane_source(self):
         self.assertTrue(lane_matches_memory_requirement("add", "open"))

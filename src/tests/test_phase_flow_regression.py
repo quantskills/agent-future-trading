@@ -42,6 +42,7 @@ from agents.decision_team.portfolio_manager import (
     _alpha_setup_action_value_trace,
     _conditional_monitor_probe_seed_plan,
     _final_contract_authority,
+    _finalize_hold_exit_learning_explanation,
     _is_lifecycle_exit_required_reason,
     _minimum_real_probe_candidate_ratio,
     _positive_open_action_value_seed,
@@ -4204,6 +4205,39 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "max_setup_quality": 0.66,
             }
         }
+
+    def test_hold_exit_learning_no_change_completion_adds_explanation_without_changing_trade(self):
+        contract = {
+            "ticker": "EB",
+            "final_action": "hold",
+            "current_lots": -12,
+            "target_lots": -12,
+            "lots_delta": 0,
+            "reason_codes": ["position_matched", "reverse_requires_stronger_evidence"],
+            "learning_used": {
+                "alpha_setup_action_values": [
+                    {
+                        "ticker": "EB",
+                        "side": "short",
+                        "action_name": "exit",
+                        "action_preference": "positive_candidate_exit",
+                        "action_value_lane": "exit",
+                        "learning_lane": "exit",
+                        "memory_side_role": "current_position_side",
+                        "consumer_scope": "pm_learning",
+                    }
+                ]
+            },
+        }
+
+        completed = _finalize_hold_exit_learning_explanation(contract)
+
+        self.assertEqual(completed["final_action"], "hold")
+        self.assertEqual(completed["current_lots"], -12)
+        self.assertEqual(completed["target_lots"], -12)
+        self.assertEqual(completed["lots_delta"], 0)
+        self.assertIn("holding_period_control", completed["reason_codes"])
+        self.assertIn("position_matched", completed["reason_codes"])
 
     def test_candidate_adaptive_policy_cannot_release_trade_authority(self):
         rows, trace = filter_adaptive_policy_state_for_pm([

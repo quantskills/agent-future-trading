@@ -518,6 +518,11 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         joined = "\n".join(report.hard_failures)
         self.assertIn("mechanism_hold_exit_learning_not_landed", joined)
+        self.assertEqual(
+            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
+            1,
+            report.to_dict(),
+        )
         self.assertEqual(report.counts.get("scenarios", {}).get("position_hold"), 1)
 
     def test_hold_exit_learning_accepts_holding_period_control_explanation(self):
@@ -635,6 +640,74 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("mechanism_hold_exit_learning_not_landed", "\n".join(report.hard_failures))
+        self.assertEqual(
+            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
+            1,
+            report.to_dict(),
+        )
+
+    def test_positive_exit_learning_hold_without_lifecycle_explanation_fails_once(self):
+        db_path = self._make_db()
+        self._insert_action_value(
+            db_path,
+            ticker="EB",
+            side="short",
+            preference="positive_candidate_exit",
+            action_name="exit",
+            action_value_lane="exit",
+            memory_side_role="current_position_side",
+            reward_sum=2626.06,
+            last_sample_date="2025-03-25",
+        )
+        self._insert_recommendation(
+            db_path,
+            rec_id="eb-positive-exit-hold",
+            ticker="EB",
+            trading_date="2025-03-26",
+            contract={
+                "ticker": "EB",
+                "current_lots": -12,
+                "target_lots": -12,
+                "lots_delta": 0,
+                "final_action": "hold",
+                "reason_codes": ["position_matched", "reverse_requires_stronger_evidence"],
+                "evidence_used": {
+                    "opportunity_rank": 3,
+                    "opportunity_score_components": {},
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "scope_key": "EB|short|exit",
+                            "ticker": "EB",
+                            "side": "short",
+                            "action_name": "exit",
+                            "action_preference": "positive_candidate_exit",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "consumer_scope": "pm_learning",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
+                            "memory_side_role": "current_position_side",
+                            "reward_sum": 2626.06,
+                            "reward_mean": 2626.06,
+                            "sample_count": 1,
+                            "win_rate": 1.0,
+                            "last_sample_date": "2025-03-25",
+                        }
+                    ]
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertEqual(
+            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
+            1,
+            report.to_dict(),
+        )
 
     def test_reduce_contract_with_learning_components_does_not_require_rank(self):
         db_path = self._make_db()

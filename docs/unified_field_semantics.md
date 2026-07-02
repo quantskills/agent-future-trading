@@ -352,6 +352,9 @@
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
 | `holding_period_control` | `final_action_contract.reason_codes` | 合法持仓生命周期解释；表示 PM 因最小持仓期、持仓周期控制或当前持仓保护规则，暂不执行减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
+| `profitable_hold_continuation` | `final_action_contract.reason_codes` | 合法继续持仓解释；表示当前持仓仍处于有利或可继续验证状态，PM 暂不减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
+| `position_lifecycle_trend_hold` | `final_action_contract.reason_codes` | 合法继续持仓解释；表示当前持仓方向仍被生命周期趋势判断支持，PM 暂不减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
+| `hold_exit_action_value_protection` | `final_action_contract.reason_codes` | 合法学习保护解释；表示 PM 已消费 hold/exit 类学习，并据此选择保护当前持仓而非立即减仓或退出。它只能解释 hold/exit 学习未产生仓位变化，不创建交易权限。 |
 | `position_matched` | `final_action_contract.reason_codes` / Trader 执行摘要 | 仓位匹配解释；表示当前仓位已经等于 PM 目标仓位，可解释无成交，不能单独解释负向 hold/exit 学习为什么没有导致减仓或退出。 |
 | `final_action_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 / Protocol Governor 检查 | 由 `src/tools/common/final_action_semantics.py` 生成的只读语义解释结果；用于统一生命周期、执行权限、盘中结果要求、reason code 分类、学习 lane 匹配、手数变化与 `final_action` 一致性、no-change / rank / learning 解释、active opportunity rejection 和 open transaction blocker，不是第二张合约，不创建交易权限。 |
 | `semantic_state` | Auditor / Reviewer / Researcher 只读摘要 | 对同一张 `final_action_contract` 的生命周期解释，如 `conditional_monitor`、`open`、`increase`、`decrease`、`exit`、`ordinary_hold`、`hard_block`；不得包含改手数、改方向或新合约字段。 |

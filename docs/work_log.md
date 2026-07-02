@@ -256,6 +256,10 @@
 
 （5）修复每日交易日志中文模板乱码。修改：`reviewer_phase4_review.py` 和交易日志可读性回归测试。原因：6 月 28 日 Reviewer Phase4 文件迁移时交易日志中文模板被损坏；本次只恢复 `*_transaction.log` 的人类可读中文标题和段落说明，不改策略、数据库、回测记录、Phase4 复盘逻辑、研究学习写回或 30 个交易日回测计划。
 
+==========2026年07月02日==========
+
+（1）收口 PM 持仓学习消费闭环与 PG 重复报错。修改：`portfolio_manager.py`、`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：PM 在最终合约为继续持仓且消费 hold/exit 类 PM 学习时，必须做到减仓、退出或写入合法继续持有解释；`position_matched` 只能解释仓位已匹配，不能单独解释 hold/exit 学习未落地。PG 对同一推荐 ID 的同一 hold/exit 未落地问题只报一次，不降低 hard fail，不改策略参数、不改 Trader/Accountant/Researcher 主逻辑、不改数据库或回测记录。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

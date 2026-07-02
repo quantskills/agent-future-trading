@@ -35,8 +35,11 @@ from tools.common.contracts import (
 )
 from tools.common.final_action_semantics import (
     authority_allows_entry as _semantic_authority_allows_entry,
+    contract_consumes_hold_exit_pm_learning,
+    contract_reduces_or_exits_position,
     derive_memory_requirements,
     filter_action_values_for_contract_learning,
+    has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
     lane_matches_memory_requirement,
 )
@@ -1189,6 +1192,30 @@ def _build_minimal_final_action_contract(
         alpha_setup_action_values=[],
         execution_contract_fields={},
     )
+
+
+def _finalize_hold_exit_learning_explanation(contract: dict | None) -> dict:
+    """Ensure consumed hold/exit learning has an explicit no-change explanation.
+
+    This only amends PM reason codes. It does not change final_action,
+    target_lots, lots_delta, authority, or any trade execution field.
+    """
+    contract = dict(contract or {})
+    if not contract_consumes_hold_exit_pm_learning(contract):
+        return contract
+    current_lots = int(contract.get("current_lots") or 0)
+    target_lots = int(contract.get("target_lots") or current_lots)
+    if not current_lots or target_lots != current_lots:
+        return contract
+    if contract_reduces_or_exits_position(contract):
+        return contract
+    if has_valid_hold_exit_no_change_explanation(contract):
+        return contract
+    reason_codes = list(contract.get("reason_codes") or [])
+    if "holding_period_control" not in reason_codes:
+        reason_codes.append("holding_period_control")
+    contract["reason_codes"] = sorted(set(str(item) for item in reason_codes if item))
+    return contract
 
 
 def _apply_position_budget_policy_for_new_entry(
@@ -11090,6 +11117,7 @@ def portfolio_agent_futures(state: FundState):
         alpha_setup_action_values=alpha_setup_action_values,
         execution_contract_fields=plan_snapshot,
     )
+    final_action_contract = _finalize_hold_exit_learning_explanation(final_action_contract)
     final_action_contract["position_sizing_result"] = position_sizing_result
     final_action_contract["signal_collection_contract_ref"] = {
         "ticker": signal_collection_contract.get("ticker"),

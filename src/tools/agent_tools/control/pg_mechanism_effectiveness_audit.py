@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.common.final_action_semantics import (
+    contract_consumes_hold_exit_pm_learning,
     contract_increases_risk_position,
     contract_reduces_or_exits_position,
     derive_memory_requirements,
@@ -580,14 +581,7 @@ def _hold_exit_has_explanation(contract: Dict[str, Any]) -> bool:
 
 
 def _has_hold_exit_learning(contract: Dict[str, Any]) -> bool:
-    for row in _contract_action_value_rows(contract):
-        preference = _row_preference(row)
-        lane = _row_lane(row)
-        if preference in {"negative_hold_revalidate", "tail_loss_protect", "positive_candidate_exit"}:
-            return True
-        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
-            return True
-    return False
+    return contract_consumes_hold_exit_pm_learning(contract)
 
 
 def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bool:
@@ -769,6 +763,7 @@ def _audit_recommendation_mechanisms(
                 )
 
         prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(prior_rows)
+        hold_exit_failure = f"mechanism_hold_exit_learning_not_landed:{label}"
         learning_should_land_in_score = scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}
         if prior_rows and learning_should_land_in_score and not components_nonzero:
             hard_failures.append(f"mechanism_pm_learning_not_in_score:{label}:side={side or 'missing'}")
@@ -787,8 +782,9 @@ def _audit_recommendation_mechanisms(
             and not components_nonzero
             and not _contract_reduces_or_exits_position(contract)
             and not _hold_exit_has_explanation(contract)
+            and hold_exit_failure not in hard_failures
         ):
-            hard_failures.append(f"mechanism_hold_exit_learning_not_landed:{label}")
+            hard_failures.append(hold_exit_failure)
 
         rank = _rank_value(contract)
         if components_nonzero and rank is None and scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}:
@@ -816,8 +812,13 @@ def _audit_recommendation_mechanisms(
         if selected is False and not reason:
             hard_failures.append(f"mechanism_unselected_candidate_missing_capital_reason:{label}:rank={rank or 'missing'}")
 
-        if _has_hold_exit_learning(contract) and not _hold_exit_landed_in_position(contract) and not _hold_exit_has_explanation(contract):
-            hard_failures.append(f"mechanism_hold_exit_learning_not_landed:{label}")
+        if (
+            _has_hold_exit_learning(contract)
+            and not _hold_exit_landed_in_position(contract)
+            and not _hold_exit_has_explanation(contract)
+            and hold_exit_failure not in hard_failures
+        ):
+            hard_failures.append(hold_exit_failure)
 
         if _is_conditional_monitor(contract):
             auditor_verdict = _auditor_verdict_from_recommendation(recommendation)

@@ -22,6 +22,7 @@ from tools.common.order_semantics import (
     recommendation_intent_from_lots,
 )
 from tools.common.final_action_semantics import (
+    contract_consumes_hold_exit_pm_learning,
     contract_increases_risk_position,
     contract_reduces_or_exits_position,
     derive_memory_requirements,
@@ -1429,6 +1430,10 @@ def _audit_pm_learning_transport_and_contract_effect(
         )
         prior_real_action_value_available = bool(required_prior_rows)
         prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(required_prior_rows)
+        hold_exit_error = (
+            "pm_hold_exit_learning_without_contract_effect_or_explanation:"
+            f"{label}:target_lots={target_lots}:current_lots={current_lots}"
+        )
         if (
             prior_real_action_value_available
             and learning_all_zero
@@ -1444,11 +1449,9 @@ def _audit_pm_learning_transport_and_contract_effect(
             and learning_all_zero
             and _hold_exit_learning_has_no_contract_effect(contract)
             and not _hold_exit_learning_has_contract_explanation(contract)
+            and hold_exit_error not in errors
         ):
-            errors.append(
-                "pm_hold_exit_learning_without_contract_effect_or_explanation:"
-                f"{label}:target_lots={target_lots}:current_lots={current_lots}"
-            )
+            errors.append(hold_exit_error)
         alpha_profile_adjustment = float(
             _dict(_dict(contract.get("evidence_used")).get("opportunity_score_components")).get("alpha_profile_adjustment")
             or 0.0
@@ -1482,11 +1485,8 @@ def _audit_pm_learning_transport_and_contract_effect(
                     f"{label}:rank={rank_value}:final_action={_lower(contract.get('final_action')) or 'missing'}"
                 )
         if _protective_hold_exit_learning_present(contract) and _hold_exit_learning_has_no_contract_effect(contract):
-            if not _hold_exit_learning_has_contract_explanation(contract):
-                errors.append(
-                    "pm_hold_exit_learning_without_contract_effect_or_explanation:"
-                    f"{label}:target_lots={target_lots}:current_lots={current_lots}"
-                )
+            if not _hold_exit_learning_has_contract_explanation(contract) and hold_exit_error not in errors:
+                errors.append(hold_exit_error)
 
 
 def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
@@ -1522,17 +1522,7 @@ def _rank_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
 
 
 def _protective_hold_exit_learning_present(contract: Dict[str, Any]) -> bool:
-    protective_preferences = {
-        "tail_loss_protect",
-        "negative_hold_revalidate",
-        "negative_revalidate",
-        "positive_candidate_exit",
-    }
-    for row in _contract_action_value_rows(contract):
-        preference = _lower(_payload_or_row_value(row, "action_preference"))
-        if preference in protective_preferences:
-            return True
-    return False
+    return contract_consumes_hold_exit_pm_learning(contract)
 
 
 def _hold_exit_learning_has_no_contract_effect(contract: Dict[str, Any]) -> bool:

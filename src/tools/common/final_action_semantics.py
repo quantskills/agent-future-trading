@@ -85,6 +85,7 @@ POSITIVE_OPEN_ACTION_PREFERENCES = {"positive_candidate_open"}
 POSITIVE_EXIT_ACTION_PREFERENCES = {"positive_candidate_exit"}
 POSITIVE_EXECUTION_ACTION_PREFERENCES = {"positive_candidate_execution"}
 PROTECTIVE_ACTION_PREFERENCES = {"negative_revalidate", "negative_hold_revalidate", "tail_loss_protect"}
+HOLD_EXIT_ACTION_PREFERENCES = PROTECTIVE_ACTION_PREFERENCES | POSITIVE_EXIT_ACTION_PREFERENCES
 MEMORY_SIDE_ROLES = {
     "target_side",
     "current_position_side",
@@ -603,6 +604,32 @@ def has_valid_hold_exit_no_change_explanation(contract: Mapping[str, Any] | None
         return True
     reason_set = set(reason_codes_from(contract))
     return bool(reason_set & HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS)
+
+
+def contract_consumes_hold_exit_pm_learning(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether a PM contract consumed hold/exit lifecycle learning.
+
+    This is a deterministic classifier only. It does not fetch research rows,
+    change lots, sign contracts, submit orders, write DB rows, or downgrade
+    Protocol Governor failures.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
+    rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used, Mapping) else []
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if _row_text(row, "consumer_scope") != PM_ACTION_VALUE_CONSUMER_SCOPE:
+            continue
+        preference = _row_text(row, "action_preference")
+        lane = _action_value_lane(row)
+        if preference in HOLD_EXIT_ACTION_PREFERENCES:
+            return True
+        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
+            return True
+    return False
 
 
 def is_conditional_monitor_contract(contract: Mapping[str, Any]) -> bool:

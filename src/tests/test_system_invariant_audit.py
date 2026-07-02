@@ -903,6 +903,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                             "win_rate": 0.0,
                             "reward_source": "trade_episode",
                             "evidence_scope": "exact_real_state",
+                            "consumer_scope": "pm_learning",
                             "action_value_lane": "exit",
                         }
                     ],
@@ -932,8 +933,13 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
 
         self.assertFalse(report.ok)
-        self.assertTrue(
-            any(error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation") for error in report.errors),
+        hold_exit_errors = [
+            error for error in report.errors
+            if error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation")
+        ]
+        self.assertEqual(
+            len(hold_exit_errors),
+            1,
             report.to_dict(),
         )
 
@@ -1151,8 +1157,128 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
 
         self.assertFalse(report.ok)
-        self.assertTrue(
-            any(error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation") for error in report.errors),
+        hold_exit_errors = [
+            error for error in report.errors
+            if error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation")
+        ]
+        self.assertEqual(
+            len(hold_exit_errors),
+            1,
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_positive_exit_hold_without_explanation_once(self):
+        db_path = self._make_db()
+        payload = {
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "ticker": "EB",
+                "final_action": "hold",
+                "current_lots": -12,
+                "target_lots": -12,
+                "lots_delta": 0,
+                "authority_type": "not_applicable",
+                "reason_codes": ["position_matched", "reverse_requires_stronger_evidence"],
+                "evidence_used": {
+                    "opportunity_score_components": {
+                        "positive_learning": 0.0,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    }
+                },
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {
+                            "ticker": "EB",
+                            "side": "short",
+                            "action_name": "exit",
+                            "action_preference": "positive_candidate_exit",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
+                            "memory_side_role": "current_position_side",
+                            "consumer_scope": "pm_learning",
+                            "last_sample_date": "2025-03-25",
+                            "reward_source": "real_trade",
+                            "evidence_scope": "exact_real_state",
+                            "reward_sum": 2626.06,
+                            "reward_mean": 2626.06,
+                        }
+                    ],
+                    "learning_adjustment_summary": {
+                        "positive_learning_signal": 0.0,
+                        "negative_learning_signal": 0.0,
+                        "recent_tail_loss_signal": 0.0,
+                    },
+                },
+            }
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO alpha_setup_action_value(
+                    id, config_id, scope_key, ticker, side, horizon_class, market_regime,
+                    setup_type, data_combo, action_name, sample_count, reward_sum, reward_mean,
+                    win_rate, confidence_score, action_preference, reward_source, evidence_scope,
+                    action_value_lane, consumer_scope, learning_lane, memory_side_role,
+                    last_sample_date, created_at, updated_at, active, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "eb-exit-av",
+                    "cfg",
+                    "EB|short|exit",
+                    "EB",
+                    "short",
+                    "short_term",
+                    "trend",
+                    "news_event_setup",
+                    "*",
+                    "exit",
+                    1,
+                    2626.06,
+                    2626.06,
+                    1.0,
+                    0.8,
+                    "positive_candidate_exit",
+                    "real_trade",
+                    "exact_real_state",
+                    "exit",
+                    "pm_learning",
+                    "exit",
+                    "current_position_side",
+                    "2025-03-25",
+                    now,
+                    now,
+                    1,
+                    "{}",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("rec-eb-positive-exit-hold", "cfg", "pf", "2025-03-26", "2025-03-26", "strategy", "EB", "hold", 0, _dumps(payload), _dumps(payload), "skipped", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        hold_exit_errors = [
+            error for error in report.errors
+            if error.startswith("pm_hold_exit_learning_without_contract_effect_or_explanation")
+        ]
+        self.assertEqual(
+            len(hold_exit_errors),
+            1,
             report.to_dict(),
         )
 
