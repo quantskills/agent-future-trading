@@ -900,31 +900,31 @@ def _build_daily_transaction_report(
     warnings_text = "yes" if (settlement_row and (settlement_row.get("is_warning") or settlement_row.get("is_liquidation"))) else "no"
 
     lines = [
-        f"AgentQuant {trading_date} 瀹屾暣浜ゆ槗鏃ュ織",
+        f"AgentQuant {trading_date} 完整交易日志",
         "=" * 80,
         "",
     ]
 
     lines.extend(
         [
-            "涓€銆佽处鎴锋€昏",
+            "一、账户总览",
             "",
-            f"  鏈熷垵鏉冪泭:      {_money(previous_equity)}",
-            f"  鏈熸湯鏉冪泭:      {_money(account_equity)}",
-            f"  褰撴棩鐩堜簭:      {_signed_money((settlement_row or {}).get('daily_pnl'))}",
-            f"  鎵嬬画璐?        {_money((settlement_row or {}).get('commission'))}",
-            f"  淇濊瘉閲戝崰鐢?    {_money((settlement_row or {}).get('current_margin'))} "
-            f"(淇濊瘉閲戠巼 {margin_ratio:.2%})",
-            f"  鍙敤璧勯噾:      {_money((settlement_row or {}).get('cash_available') or (settlement_row or {}).get('current_balance'))}",
-            f"  鎬昏祫浜?        {_money(total_assets)}",
-            f"  鏉犳潌鍊嶆暟:      {leverage:.2f}x",
-            f"  棰勮/寮哄钩:     {warnings_text}",
+            f"  期初权益:      {_money(previous_equity)}",
+            f"  期末权益:      {_money(account_equity)}",
+            f"  当日盈亏:      {_signed_money((settlement_row or {}).get('daily_pnl'))}",
+            f"  手续费:        {_money((settlement_row or {}).get('commission'))}",
+            f"  保证金占用:    {_money((settlement_row or {}).get('current_margin'))} "
+            f"(保证金率 {margin_ratio:.2%})",
+            f"  可用资金:      {_money((settlement_row or {}).get('cash_available') or (settlement_row or {}).get('current_balance'))}",
+            f"  总资产:        {_money(total_assets)}",
+            f"  杠杆倍数:      {leverage:.2f}x",
+            f"  预警/强平:     {warnings_text}",
             "",
         ]
     )
 
-    _report_section(lines, "浜屻€佸綋鏃ヤ氦鏄撴墽琛?")
-    lines.append(f"鍏?{len(phase2_transactions)} 绗斾氦鏄擄紝鍦?phase2 闃舵瀹屾垚銆?")
+    _report_section(lines, "二、当日交易执行")
+    lines.append(f"共 {len(phase2_transactions)} 笔交易，在 phase2 阶段完成。")
     lines.append("")
     lines.append(
         f"  {'#':>2}  {'ticker':<8} {'action':<12} {'lots':>5} "
@@ -998,7 +998,7 @@ def _build_daily_transaction_report(
                 lines.append(f"  [transaction_note] {_report_text(tx.get('justification'), limit=520)}")
             lines.append("")
 
-    _report_section(lines, "鍥涖€佹湭浜ゆ槗鍝佺鍘熷洜璇﹁堪")
+    _report_section(lines, "四、未交易品种原因详述")
     recommendations_by_id = {str(item.get("id")): item for item in recommendations if item.get("id")}
     for recommendation in strategy_recommendations:
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "UNKNOWN")
@@ -1045,7 +1045,7 @@ def _build_daily_transaction_report(
         snapshot = snapshots_by_id.get(str(recommendation.get("id") or "")) or _recommendation_snapshot(recommendation)
         lines.append(_signal_matrix_row(ticker, recommendation, snapshot, ticker in traded_tickers))
     lines.append("")
-    lines.append("  5.2 淇″彿妯℃澘鍒嗗竷")
+    lines.append("  5.2 信号模板分布")
     for template, count in _setup_type_counts(strategy_recommendations).most_common():
         lines.append(f"  {template:<48} {count}")
     if not _setup_type_counts(strategy_recommendations):

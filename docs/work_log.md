@@ -254,6 +254,8 @@
 
 （4）收口学习记忆写入与消费生命周期硬锁。修改：`alpha_setup.py`、`final_action_semantics.py`、Researcher 写入器、PM 生命周期记忆读取、统一字段语义表和回归测试。原因：Researcher 写入真实正收益 open action-value 时必须写成 `positive_candidate_open`，不能写成保护/止损偏好；PM 最终合约只能落入与当前动作生命周期、方向和 `memory_side_role` 匹配的 `pm_learning`，持仓/减仓/退出不能把不匹配方向的 open 或 execution 学习写进 `learning_used.alpha_setup_action_values`。分析师主逻辑不改，只补边界测试，确保三类分析师只读学习摘要与校准，不直接读取 PM action-value 或输出交易权限。
 
+（5）修复每日交易日志中文模板乱码。修改：`reviewer_phase4_review.py` 和交易日志可读性回归测试。原因：6 月 28 日 Reviewer Phase4 文件迁移时交易日志中文模板被损坏；本次只恢复 `*_transaction.log` 的人类可读中文标题和段落说明，不改策略、数据库、回测记录、Phase4 复盘逻辑、研究学习写回或 30 个交易日回测计划。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。
