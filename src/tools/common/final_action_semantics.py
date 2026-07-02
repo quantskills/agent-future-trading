@@ -82,9 +82,17 @@ MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "e
 PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
 PM_ACTION_VALUE_CONSUMER_SCOPE = "pm_learning"
 POSITIVE_OPEN_ACTION_PREFERENCES = {"positive_candidate_open"}
+POSITIVE_HOLD_ACTION_PREFERENCES = {"positive_candidate_hold"}
 POSITIVE_EXIT_ACTION_PREFERENCES = {"positive_candidate_exit"}
 POSITIVE_EXECUTION_ACTION_PREFERENCES = {"positive_candidate_execution"}
 PROTECTIVE_ACTION_PREFERENCES = {"negative_revalidate", "negative_hold_revalidate", "tail_loss_protect"}
+ACTION_PREFERENCE_VALUES = (
+    POSITIVE_OPEN_ACTION_PREFERENCES
+    | POSITIVE_HOLD_ACTION_PREFERENCES
+    | POSITIVE_EXIT_ACTION_PREFERENCES
+    | POSITIVE_EXECUTION_ACTION_PREFERENCES
+    | PROTECTIVE_ACTION_PREFERENCES
+)
 HOLD_EXIT_ACTION_PREFERENCES = PROTECTIVE_ACTION_PREFERENCES | POSITIVE_EXIT_ACTION_PREFERENCES
 MEMORY_SIDE_ROLES = {
     "target_side",

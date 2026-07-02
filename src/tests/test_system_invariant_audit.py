@@ -80,6 +80,22 @@ def _transaction_audit_payload(payload):
 
 
 class SystemInvariantAuditRegressionTest(unittest.TestCase):
+    def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
+        db_path = SRC_ROOT / "assets" / "agentquant.db"
+        if not db_path.exists():
+            self.skipTest("local backtest database is not present")
+        for trading_date in ("2025-03-12", "2025-03-20", "2025-03-24"):
+            with self.subTest(trading_date=trading_date):
+                report = audit_system_invariants(
+                    db_path=db_path,
+                    exp_name="agentquant-futures-trading-2025",
+                    start_date=trading_date,
+                    end_date=trading_date,
+                )
+                report_dict = report.to_dict()
+                self.assertIn("ok", report_dict)
+                self.assertTrue(report_dict.get("metadata", {}).get("config_id"))
+
     def _make_db(self) -> Path:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)

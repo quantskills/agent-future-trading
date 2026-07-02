@@ -13,7 +13,7 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from llm.inference import llm_audit_metadata
+from llm.inference import _normalize_llm_config, get_model, llm_audit_metadata
 from llm.provider import Provider
 from run.pre_backtest_test import _load_config, _run_protocol_preflight
 from tools.agent_tools.control.pg_preflight import run_llm_preflight_check
@@ -37,6 +37,26 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertEqual(metadata.get("reasoning_effort"), "medium")
         self.assertIn('# provider: "TQXAI"', raw_config)
         self.assertIn("# tqxai:", raw_config)
+
+    def test_codex_runtime_model_carries_medium_reasoning_extra_body(self):
+        llm_config = self._load_dev_llm_config()
+        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
+            model = get_model(_normalize_llm_config(llm_config))
+
+        self.assertEqual(getattr(model, "model_name", None), "gpt-5.5")
+        self.assertEqual(str(getattr(model, "openai_api_base", "")), "http://47.74.0.65/v1")
+        self.assertEqual(getattr(model, "extra_body", None), {"reasoning_effort": "medium"})
+        self.assertIsNone(getattr(model, "temperature", None))
+
+    def test_env_example_documents_codex_current_route_and_tqx_backup(self):
+        raw_env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+        self.assertIn("Backup third-party multi-model LLM gateway (TQX)", raw_env_example)
+        self.assertIn("Active CodexOpenAI GPT-5.5 gateway", raw_env_example)
+        self.assertIn("Current AgentQuant main route is CodexOpenAI gpt-5.5", raw_env_example)
+        self.assertNotIn("Current AgentQuant main route: https://llm.tqx.ai", raw_env_example)
+        self.assertNotIn("Old third-party Codex GPT-5.5 fallback gateway", raw_env_example)
+        self.assertIn("CODEX_OPENAI_BASE_URL=http://47.74.0.65", raw_env_example)
 
     def test_deepseek_provider_remains_available_for_non_runtime_configs(self):
         self.assertEqual(Provider.DEEPSEEK.value, "DeepSeek")

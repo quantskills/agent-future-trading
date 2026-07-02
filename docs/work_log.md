@@ -260,6 +260,10 @@
 
 （1）收口 PM 持仓学习消费闭环与 PG 重复报错。修改：`portfolio_manager.py`、`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：PM 在最终合约为继续持仓且消费 hold/exit 类 PM 学习时，必须做到减仓、退出或写入合法继续持有解释；`position_matched` 只能解释仓位已匹配，不能单独解释 hold/exit 学习未落地。PG 对同一推荐 ID 的同一 hold/exit 未落地问题只报一次，不降低 hard fail，不改策略参数、不改 Trader/Accountant/Researcher 主逻辑、不改数据库或回测记录。
 
+（2）收口 AgentQuant Codex GPT-5.5 调用路由一致性。修改：`.env`、`.env.example` 注释和 `test_protocol_preflight_cli.py`。原因：当前 LLM 主路由固定为 `CodexOpenAI -> gpt-5.5 -> http://47.74.0.65/v1 -> CODEX_OPENAI_API_KEY -> reasoning_effort=medium`；`dev.yaml` 实际配置值不改，`base_url: http://47.74.0.65` 继续由运行时规范化为 `/v1`，TQX 只作为备用第三方 LLM 接口保留且停用。新增回归测试锁住 runtime `ChatOpenAI.extra_body={"reasoning_effort": "medium"}` 和 `.env.example` 说明口径，不改提示词、智能体边界、策略参数、数据库或回测记录。
+
+（3）收口 `final_action_semantics.py` 迁移依赖完整性。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py` 和回归测试。原因：PG 统一语义入口迁移后，`contract_consumes_hold_exit_pm_learning()` 已进入共享语义工具，但 `ACTION_PREFERENCE_VALUES` 仍停留在 PG 私有常量中，导致部分日期 daily gate 命中 hold/exit 学习分支时崩溃；本次把 action preference 常量迁入共享语义工具，PG 两条检查只导入同一常量，并用 2025-03-12、2025-03-20、2025-03-24 触发分支做回归，不改策略、参数、交易生成、数据库或回测记录。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

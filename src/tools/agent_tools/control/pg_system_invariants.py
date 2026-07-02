@@ -22,6 +22,7 @@ from tools.common.order_semantics import (
     recommendation_intent_from_lots,
 )
 from tools.common.final_action_semantics import (
+    ACTION_PREFERENCE_VALUES,
     contract_consumes_hold_exit_pm_learning,
     contract_increases_risk_position,
     contract_reduces_or_exits_position,
@@ -51,15 +52,6 @@ TRIGGER_PASSED_REASONS = {
     "intraday_vwap_confirmed",
     "intraday_immediate_execution",
     "intraday_event_immediate_execution",
-}
-ACTION_PREFERENCE_VALUES = {
-    "positive_candidate_open",
-    "positive_candidate_hold",
-    "positive_candidate_exit",
-    "positive_candidate_execution",
-    "negative_revalidate",
-    "negative_hold_revalidate",
-    "tail_loss_protect",
 }
 REAL_REWARD_SOURCE_MARKERS = {"episode", "real"}
 ACTION_PREFERENCE_LANDING_TERMS = {

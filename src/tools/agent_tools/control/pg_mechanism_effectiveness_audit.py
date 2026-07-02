@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.common.final_action_semantics import (
+    ACTION_PREFERENCE_VALUES,
     contract_consumes_hold_exit_pm_learning,
     contract_increases_risk_position,
     contract_reduces_or_exits_position,
@@ -33,15 +34,6 @@ from tools.common.final_action_semantics import (
 
 
 STRATEGY_SOURCE_TYPE = "strategy"
-ACTION_PREFERENCE_VALUES = {
-    "positive_candidate_open",
-    "positive_candidate_hold",
-    "positive_candidate_exit",
-    "positive_candidate_execution",
-    "negative_revalidate",
-    "negative_hold_revalidate",
-    "tail_loss_protect",
-}
 PROTECTIVE_PREFERENCES = {"tail_loss_protect", "negative_hold_revalidate", "negative_revalidate"}
 POSITIVE_PREFERENCES = {
     "positive_candidate_open",

@@ -8,6 +8,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tools.common.final_action_semantics import (
+    ACTION_PREFERENCE_VALUES,
     action_value_matches_contract_memory_requirement,
     audit_pm_memory_consumption,
     authority_allows_entry,
@@ -505,6 +506,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertTrue(has_valid_hold_exit_no_change_explanation(exit_contract))
 
     def test_contract_consumes_hold_exit_pm_learning_uses_pm_scope_and_lifecycle(self):
+        self.assertIn("positive_candidate_hold", ACTION_PREFERENCE_VALUES)
         self.assertTrue(
             contract_consumes_hold_exit_pm_learning(
                 {
@@ -528,6 +530,21 @@ class FinalActionSemanticsTest(unittest.TestCase):
                             {
                                 "consumer_scope": "pm_learning",
                                 "action_preference": "negative_hold_revalidate",
+                                "action_value_lane": "hold",
+                            }
+                        ]
+                    }
+                }
+            )
+        )
+        self.assertTrue(
+            contract_consumes_hold_exit_pm_learning(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [
+                            {
+                                "consumer_scope": "pm_learning",
+                                "action_preference": "positive_candidate_hold",
                                 "action_value_lane": "hold",
                             }
                         ]
