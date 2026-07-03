@@ -20,6 +20,10 @@ from agents.registry import AgentRegistry
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
 from tools.agent_tools.analysis.analyst_quality import write_analyst_report
 from tools.agent_tools.analysis.analyst_data_usage import prefetch_local_daily_data, prefetch_pandaai_daily_data
+from tools.agent_tools.analysis.analyst_signal_fusion import (
+    CAPITAL_PRIORITY_RANK_MEANING,
+    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+)
 from apis.contract_info_cache import FuturesContractInfoCache
 from util.db_helper import get_db
 from util.logger import logger
@@ -240,14 +244,26 @@ class AgentWorkflow:
         row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
         if row:
             row["opportunity_rank"] = rank
+            row["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
+            row["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
+            row["rank_is_capital_priority"] = True
+            row["rank_is_not_trade_authority"] = True
         contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         evidence_used = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
         if evidence_used:
             evidence_used["opportunity_rank"] = rank
+            evidence_used["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
+            evidence_used["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
+            evidence_used["rank_is_capital_priority"] = True
+            evidence_used["rank_is_not_trade_authority"] = True
         active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
         active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
         if active_opportunity:
             active_opportunity["opportunity_rank"] = rank
+            active_opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
+            active_opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
+            active_opportunity["rank_is_capital_priority"] = True
+            active_opportunity["rank_is_not_trade_authority"] = True
         consistency = (
             snapshot.get("pm_landing_consistency_audit")
             if isinstance(snapshot.get("pm_landing_consistency_audit"), dict)
@@ -361,6 +377,10 @@ class AgentWorkflow:
         evidence["capital_allocation_reason"] = reason
         if rank is not None:
             evidence["opportunity_rank"] = rank
+        evidence["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
+        evidence["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
+        evidence["rank_is_capital_priority"] = True
+        evidence["rank_is_not_trade_authority"] = True
         contract["evidence_used"] = evidence
         deployment = {
             "selected_for_capital_deployment": bool(selected),
@@ -369,6 +389,10 @@ class AgentWorkflow:
             "deployed_target_lots": int(target_lots),
             "deployed_lots_delta": int(lots_delta),
             "opportunity_rank": rank,
+            "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+            "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
+            "rank_is_capital_priority": True,
+            "rank_is_not_trade_authority": True,
             "not_second_contract": True,
             "pm_remains_single_fund_manager": True,
         }
@@ -385,6 +409,10 @@ class AgentWorkflow:
         if opportunity:
             opportunity["capital_allocation_reason"] = reason
             opportunity["selected_for_capital_deployment"] = bool(selected)
+            opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
+            opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
+            opportunity["rank_is_capital_priority"] = True
+            opportunity["rank_is_not_trade_authority"] = True
 
     @staticmethod
     def _safe_opportunity_rank(value: Any) -> int | None:
@@ -543,7 +571,7 @@ class AgentWorkflow:
 
     def _apply_daily_capital_deployment(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         deployment_cfg = self._daily_capital_deployment_config()
-        candidates: List[Tuple[float, str, FuturesRecommendation, str, float]] = []
+        candidates: List[Tuple[float, float, str, FuturesRecommendation, str, float]] = []
         updated_ids: set[str] = set()
         for ticker, recommendation in generated:
             if recommendation.status == RecommendationStatus.SKIPPED:
@@ -561,17 +589,21 @@ class AgentWorkflow:
                 score = 0.0
             if score <= 0:
                 continue
+            try:
+                priority_score = float(row.get("capital_priority_score", score) or score)
+            except (TypeError, ValueError):
+                priority_score = score
             self._set_daily_opportunity_rank(snapshot, side, 0)
             recommendation.signal_snapshot = snapshot
             margin_ratio = self._recommended_margin_ratio(recommendation)
-            candidates.append((score, str(ticker).upper(), recommendation, side, margin_ratio))
+            candidates.append((priority_score, score, str(ticker).upper(), recommendation, side, margin_ratio))
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
         selected_ids: set[str] = set()
         used_margin_ratio = 0.0
         target_margin_ratio = deployment_cfg["target_margin_ratio"]
         min_probe_ratio = deployment_cfg["min_probe_margin_ratio"]
         max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
-        for rank, (_, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
+        for rank, (priority_score, score, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
             snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
             self._set_daily_opportunity_rank(snapshot, side, rank)
             current_lots = self._contract_current_lots(snapshot)
@@ -593,7 +625,7 @@ class AgentWorkflow:
                     used_margin_ratio += capped_margin
                     reason = (
                         "selected_by_full_market_pm_capital_queue:"
-                        f"rank={rank};score={snapshot.get('final_action_contract', {}).get('evidence_used', {}).get('opportunity_score')};"
+                        f"rank={rank};capital_priority_score={priority_score};score={score};"
                         f"target_margin_used={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
                     )
                     self._apply_deployed_target_to_snapshot(
@@ -607,7 +639,8 @@ class AgentWorkflow:
                 else:
                     reason = (
                         "not_selected_by_full_market_pm_capital_queue:"
-                        f"rank={rank};capital_target_filled={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
+                        f"rank={rank};capital_priority_score={priority_score};"
+                        f"capital_target_filled={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
                     )
                     self._apply_deployed_target_to_snapshot(
                         snapshot,

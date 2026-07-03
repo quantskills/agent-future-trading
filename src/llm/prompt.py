@@ -88,6 +88,16 @@ Neutral is allowed, but it is not a free pass. If signal="Neutral", also fill:
 Provide well-reasoned analysis considering all aspects.
 """
 
+PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY = """
+=== Product Learning Calibration Boundary ===
+When product_learning_calibration_view appears in learning_context, analysts may use
+product-level historical performance only to calibrate evidence quality, confidence,
+confirmation needs, setup classification, and validation questions. It must not create
+or output opportunity_rank, opportunity_score, capital_allocation_reason, lots, margin,
+authority_type, final_action, final_action_contract, target_lots, or trade commands.
+PM alone converts calibrated evidence into ranking and capital deployment.
+"""
+
 CONTROL_GOVERNANCE_OUTPUT_BOUNDARY = """
 === CONTROL-GOVERNANCE BOUNDARY ===
 
@@ -495,6 +505,7 @@ Output format:
 
 Provide a concise, well-reasoned futures technical view.
 """
+    prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 
 
@@ -546,6 +557,7 @@ def build_futures_fundamental_prompt(
         "as tradeable_candidate instead of hiding it behind Neutral. Candidate memories cannot authorize sizing, add-ons, or holding "
         "a losing position.\n"
     )
+    prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 
 
@@ -595,6 +607,7 @@ def build_futures_commodity_news_prompt(
         "and an invalidation boundary, mark it as probe_candidate or tradeable_candidate. Candidate memories cannot authorize sizing, "
         "add-ons, or holding a losing position.\n"
     )
+    prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 
 

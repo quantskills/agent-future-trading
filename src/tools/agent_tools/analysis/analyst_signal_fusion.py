@@ -9,6 +9,18 @@ from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
+CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION = "agentquant.capital_priority_rank.v1"
+CAPITAL_PRIORITY_RANK_MEANING = (
+    "rank_1_is_current_highest_capital_priority_not_trade_authority"
+)
+
+_CAPITAL_PRIORITY_STATE_TIER = {
+    "tradeable_candidate": 3,
+    "probe_candidate": 2,
+    "watch_for_trigger": 1,
+    "no_opportunity": 0,
+    "unknown": 0,
+}
 
 
 def normalize_analyst_name(value: Any) -> str:
@@ -107,6 +119,59 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except Exception:
         return default
+
+
+def _capital_priority_tier(state: Any) -> int:
+    return int(_CAPITAL_PRIORITY_STATE_TIER.get(_clean_key(state), 0))
+
+
+def _capital_priority_score(
+    *,
+    opportunity_score: float,
+    final_state: str,
+    gating_failures: Iterable[Any],
+    action_value_learning: Mapping[str, Any],
+) -> float:
+    """Single PM rank score: current evidence plus learned deployability.
+
+    This is not a second rank. It is the deterministic score used to assign the
+    only `opportunity_rank`, where rank=1 means highest current capital priority.
+    """
+    tier_bonus = {
+        "tradeable_candidate": 0.18,
+        "probe_candidate": 0.10,
+        "watch_for_trigger": 0.02,
+        "no_opportunity": 0.0,
+    }.get(_clean_key(final_state), 0.0)
+    positive = _safe_float(action_value_learning.get("positive_signal"), 0.0)
+    negative = _safe_float(action_value_learning.get("negative_signal"), 0.0)
+    tail_loss = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
+    entry_loss = _safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0)
+    trigger_positive = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
+    trigger_loss = _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0)
+    learning_delta = max(
+        -0.12,
+        min(
+            0.08,
+            0.05 * positive
+            + 0.03 * trigger_positive
+            - 0.06 * negative
+            - 0.05 * tail_loss
+            - 0.05 * entry_loss
+            - 0.04 * trigger_loss,
+        ),
+    )
+    failure_penalty = min(0.10, 0.02 * len([item for item in gating_failures or [] if str(item or "").strip()]))
+    return round(_bounded(0.82 * _safe_float(opportunity_score, 0.0) + tier_bonus + learning_delta - failure_penalty), 4)
+
+
+def rank_semantics_payload() -> dict[str, Any]:
+    return {
+        "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+        "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
+        "rank_is_capital_priority": True,
+        "rank_is_not_trade_authority": True,
+    }
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -499,6 +564,9 @@ def _action_value_learning_summary(
     negative_signal = 0.0
     execution_signal = 0.0
     recent_tail_loss_signal = 0.0
+    entry_quality_loss_signal = 0.0
+    trigger_quality_positive_signal = 0.0
+    trigger_quality_loss_signal = 0.0
     positive_count = 0
     negative_count = 0
     exact_real_count = 0
@@ -509,6 +577,12 @@ def _action_value_learning_summary(
         if not isinstance(row, Mapping):
             continue
         payload = _row_payload(row)
+        product_key = payload.get("product_learning_performance_key")
+        if not isinstance(product_key, Mapping):
+            product_key = {}
+        entry_quality_outcome = product_key.get("entry_quality_outcome")
+        if not isinstance(entry_quality_outcome, Mapping):
+            entry_quality_outcome = {}
         consumer_scope = _clean_key(
             _row_value(row, payload, "consumer_scope", "learning_consumer_scope", default="pm_learning")
         )
@@ -626,15 +700,35 @@ def _action_value_learning_summary(
                     "weight": round(negative_strength, 4),
                     "tail_loss": is_tail_loss,
                 }
+        if entry_quality_outcome:
+            entry_penalty_weight = _safe_float(entry_quality_outcome.get("penalty_weight"), 0.0)
+            trigger_support_weight = _safe_float(entry_quality_outcome.get("support_weight"), 0.0)
+            if bool(entry_quality_outcome.get("positive_entry_episode")):
+                trigger_quality_positive_signal += strength * max(0.25, trigger_support_weight)
+            if bool(entry_quality_outcome.get("loss_episode")):
+                entry_quality_loss_signal += strength * max(0.35, entry_penalty_weight)
+            if bool(entry_quality_outcome.get("tail_loss_episode")):
+                trigger_quality_loss_signal += strength * max(0.55, entry_penalty_weight)
+                recent_tail_loss_signal += strength * 0.35
     positive_signal = _bounded(positive_signal)
     negative_signal = _bounded(negative_signal)
     execution_signal = _bounded(execution_signal, -1.0, 1.0)
     recent_tail_loss_signal = _bounded(recent_tail_loss_signal)
+    entry_quality_loss_signal = _bounded(entry_quality_loss_signal)
+    trigger_quality_positive_signal = _bounded(trigger_quality_positive_signal)
+    trigger_quality_loss_signal = _bounded(trigger_quality_loss_signal)
+    net_trigger_quality_loss_signal = _bounded(
+        max(0.0, trigger_quality_loss_signal - trigger_quality_positive_signal * 0.50)
+    )
     return {
         "positive_signal": positive_signal,
         "negative_signal": negative_signal,
         "execution_profile_signal": execution_signal,
         "recent_tail_loss_signal": recent_tail_loss_signal,
+        "entry_quality_loss_signal": entry_quality_loss_signal,
+        "trigger_quality_positive_signal": trigger_quality_positive_signal,
+        "trigger_quality_loss_signal": trigger_quality_loss_signal,
+        "net_trigger_quality_loss_signal": net_trigger_quality_loss_signal,
         "positive_count": positive_count,
         "negative_count": negative_count,
         "exact_real_count": exact_real_count,
@@ -690,6 +784,22 @@ def _learning_adjustment_summary(
         ),
         "recent_tail_loss_signal": round(
             _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0),
+            4,
+        ),
+        "entry_quality_loss_signal": round(
+            _safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0),
+            4,
+        ),
+        "trigger_quality_positive_signal": round(
+            _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0),
+            4,
+        ),
+        "trigger_quality_loss_signal": round(
+            _safe_float(action_value_learning.get("trigger_quality_loss_signal"), 0.0),
+            4,
+        ),
+        "net_trigger_quality_loss_signal": round(
+            _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0),
             4,
         ),
         "strongest_positive_action_value": action_value_learning.get("strongest_positive") or {},
@@ -860,11 +970,18 @@ def build_opportunity_scorecard(
         )
         execution_profile_signal = _safe_float(action_value_learning.get("execution_profile_signal"), 0.0)
         recent_tail_loss_signal = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
+        entry_quality_loss_signal = _safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0)
+        trigger_quality_positive_signal = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
+        trigger_quality_loss_signal = _safe_float(action_value_learning.get("trigger_quality_loss_signal"), 0.0)
+        net_trigger_quality_loss_signal = _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), trigger_quality_loss_signal)
         action_value_signal_present = bool(
             int(action_value_learning.get("positive_count", 0) or 0)
             or int(action_value_learning.get("negative_count", 0) or 0)
             or abs(execution_profile_signal) > 1e-9
             or recent_tail_loss_signal > 1e-9
+            or entry_quality_loss_signal > 1e-9
+            or trigger_quality_loss_signal > 1e-9
+            or trigger_quality_positive_signal > 1e-9
         )
         score_components = {
             "directional_support": min(
@@ -883,6 +1000,9 @@ def build_opportunity_scorecard(
             "negative_learning": -abs(_score_weight(cfg, "negative_learning", 0.16)) * negative_learning_signal,
             "execution_profile_learning": _score_weight(cfg, "execution_profile_learning", 0.10) * execution_profile_signal,
             "recent_tail_loss_penalty": -abs(_score_weight(cfg, "recent_tail_loss_penalty", 0.18)) * recent_tail_loss_signal,
+            "entry_quality_loss_penalty": -abs(_score_weight(cfg, "entry_quality_loss_penalty", 0.12)) * entry_quality_loss_signal,
+            "trigger_quality_positive_bonus": _score_weight(cfg, "trigger_quality_positive_bonus", 0.08) * trigger_quality_positive_signal,
+            "trigger_quality_loss_penalty": -abs(_score_weight(cfg, "trigger_quality_loss_penalty", 0.10)) * net_trigger_quality_loss_signal,
             "fusion_consensus": _score_weight(cfg, "fusion_consensus", 0.08) * fusion_consensus,
             "fusion_conflict_adjustment": fusion_adjustment,
         }
@@ -990,6 +1110,8 @@ def build_opportunity_scorecard(
             single_tradeable_candidate_setup_confirmed
             and negative_learning_signal < _safe_float(cfg.get("single_candidate_negative_learning_soft_cap"), 0.45)
             and recent_tail_loss_signal < _safe_float(cfg.get("single_candidate_tail_loss_soft_cap"), 0.35)
+            and entry_quality_loss_signal < _safe_float(cfg.get("single_candidate_entry_quality_loss_soft_cap"), 0.35)
+            and net_trigger_quality_loss_signal < _safe_float(cfg.get("single_candidate_trigger_quality_loss_soft_cap"), 0.35)
         )
         scorecard_promotion_reasons: list[str] = []
         if single_tradeable_candidate_setup_promoted:
@@ -1017,10 +1139,19 @@ def build_opportunity_scorecard(
             final_state = "no_opportunity"
 
         opportunity_score = round(score, 4)
+        capital_priority_score = _capital_priority_score(
+            opportunity_score=opportunity_score,
+            final_state=final_state,
+            gating_failures=gating_failures,
+            action_value_learning=action_value_learning,
+        )
         side_rows[side] = {
             "side": side,
             "score": opportunity_score,
             "opportunity_score": opportunity_score,
+            "capital_priority_score": capital_priority_score,
+            "capital_priority_tier": _capital_priority_tier(final_state),
+            **rank_semantics_payload(),
             "opportunity_score_components": {
                 key: round(float(value or 0.0), 4)
                 for key, value in score_components.items()
@@ -1061,6 +1192,10 @@ def build_opportunity_scorecard(
                 "negative_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
                 "execution_profile_signal": round(_safe_float(action_value_learning.get("execution_profile_signal"), 0.0), 4),
                 "recent_tail_loss_signal": round(_safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0), 4),
+                "entry_quality_loss_signal": round(_safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0), 4),
+                "trigger_quality_positive_signal": round(_safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0), 4),
+                "trigger_quality_loss_signal": round(_safe_float(action_value_learning.get("trigger_quality_loss_signal"), 0.0), 4),
+                "net_trigger_quality_loss_signal": round(_safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0), 4),
                 "positive_count": action_value_learning.get("positive_count", 0),
                 "negative_count": action_value_learning.get("negative_count", 0),
                 "exact_real_count": action_value_learning.get("exact_real_count", 0),
@@ -1145,7 +1280,9 @@ def build_opportunity_scorecard(
             or side_rows[side]["final_state"] in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
         ),
         key=lambda item: (
+            _safe_float(side_rows[item].get("capital_priority_score"), 0.0),
             _safe_float(side_rows[item].get("opportunity_score"), 0.0),
+            _safe_int(side_rows[item].get("capital_priority_tier"), 0),
             int(side_rows[item].get("supporting_signal_count") or 0),
             _safe_float(side_rows[item].get("max_setup_quality"), 0.0),
         ),
@@ -1157,6 +1294,7 @@ def build_opportunity_scorecard(
         side_rows[side].setdefault("opportunity_rank", None)
     return {
         "version": "opportunity_scorecard_v1",
+        **rank_semantics_payload(),
         "ticker": ticker,
         "preferred_side": preferred_side,
         "market_regime": _market_regime_from_signals(signals),

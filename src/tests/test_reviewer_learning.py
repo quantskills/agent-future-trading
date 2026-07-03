@@ -51,6 +51,7 @@ from tools.agent_tools.research.research_learning import (
 )
 from tools.common.alpha_setup import (
     _action_preference_from_stats,
+    compact_product_learning_performance_key_for_analyst,
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
@@ -213,6 +214,75 @@ class _ActionValueLearningDB(_FakeLearningDB):
 
     def get_similar_alpha_setup_action_values(self, **kwargs):
         raise AssertionError("analyst learning context must not read similar trade-decision action-values")
+
+
+class _ProductLearningProfileDB(_FakeLearningDB):
+    def get_analyst_learning_digest(self, **kwargs):
+        self.digest_calls += 1
+        return []
+
+    def get_alpha_setup_profiles(self, **kwargs):
+        return [
+            {
+                "id": "profile-eb-short",
+                "scope_key": "EB|short|short|range|trend_breakout_setup|technical_news_combo",
+                "ticker": "EB",
+                "side": "short",
+                "sector": "chemical",
+                "horizon_class": "short",
+                "market_regime": "range",
+                "setup_type": "trend_breakout_setup",
+                "data_combo": "technical:used|fundamental:used|news:fresh",
+                "lifecycle_state": "protected",
+                "profile_state_hint": "profile_protected",
+                "sample_count": 7,
+                "win_rate": 0.71,
+                "profit_factor": 1.42,
+                "net_pnl": 9200.0,
+                "confidence_score": 0.76,
+                "payload": {
+                    "product_learning_performance_key": {
+                        "contract_version": "agentquant.product_learning_performance_key.v1",
+                        "performance_scope_key": (
+                            "EB|short|trend_breakout_setup|opening_range_breakdown|"
+                            "technical:used|fundamental:used|news:fresh|capital_deployed"
+                        ),
+                        "ticker": "EB",
+                        "side": "short",
+                        "horizon_class": "short",
+                        "market_regime": "range",
+                        "setup_type": "trend_breakout_setup",
+                        "action_name": "open",
+                        "trigger_key": "opening_range_breakdown",
+                        "evidence_combo": "technical:used|fundamental:used|news:fresh",
+                        "opportunity_state": "tradeable_candidate",
+                        "deployment_outcome": {
+                            "selected_for_capital_deployment": True,
+                            "deployment_tier": "capital_deployed",
+                            "authority_type": "real_budget_entry",
+                            "final_action": "open_real",
+                            "current_lots": 0,
+                            "target_lots": -2,
+                            "lots_delta": -2,
+                            "opportunity_rank": 1,
+                            "opportunity_score": 0.83,
+                            "capital_allocation_reason": "ranked_deployable_candidate",
+                        },
+                        "outcome_label": "profit",
+                        "net_pnl": 3180.0,
+                        "reward_source": "ticker_daily_pnl",
+                        "not_trade_authority": True,
+                        "future_only": True,
+                    }
+                },
+            }
+        ]
+
+    def get_alpha_setup_action_values(self, **kwargs):
+        raise AssertionError("analysts must not read PM action-values for product learning")
+
+    def get_similar_alpha_setup_action_values(self, **kwargs):
+        raise AssertionError("analysts must not read similar PM action-values for product learning")
 
 
 class _FallbackLearningDB:
@@ -510,6 +580,56 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertNotIn("reward_mean=", context["text"])
         self.assertNotIn("reward_sum=", context["text"])
         self.assertNotIn("hint=", context["text"])
+
+    def test_learning_context_exposes_product_learning_profile_as_safe_calibration_view(self):
+        db = _ProductLearningProfileDB()
+        context = build_learning_context(
+            db=db,
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 5,
+                    "max_chars_per_prompt": 1800,
+                    "exploratory_memory": {
+                        "enabled": True,
+                        "alpha_setup_profile": {
+                            "enabled": True,
+                            "max_items": 2,
+                            "max_chars": 900,
+                        },
+                    },
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-21",
+            analyst="technical",
+            ticker="EB",
+            context={"sector": "chemical", "market_regime": "range"},
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(context["alpha_setup_items"]), 1)
+        view = context["alpha_setup_items"][0]["product_learning_calibration_view"]
+        self.assertEqual(view["performance_scope_key"], (
+            "EB|short|trend_breakout_setup|opening_range_breakdown|"
+            "technical:used|fundamental:used|news:fresh|capital_deployed"
+        ))
+        self.assertEqual(view["deployment_tier"], "capital_deployed")
+        self.assertEqual(view["historical_pm_rank"], 1)
+        self.assertEqual(view["historical_pm_score"], 0.83)
+        self.assertTrue(view["not_trade_authority"])
+        self.assertIn("Product learning:", context["text"])
+        self.assertIn("historical_pm_rank=1", context["text"])
+        self.assertIn("historical_pm_score=0.83", context["text"])
+        self.assertNotIn("authority_type", context["text"])
+        self.assertNotIn("target_lots", context["text"])
+        self.assertNotIn("lots_delta", context["text"])
+        self.assertNotIn("final_action_contract", context["text"])
+        self.assertEqual(
+            context["memory_trace"]["selected_memory_refs"][0]["product_learning_calibration_view"],
+            view,
+        )
 
     def test_config_overlay_uses_allowlist(self):
         config = apply_config_learning_overlay(
@@ -5475,6 +5595,182 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(payload["reward_source"], "real_trade")
             self.assertEqual(payload["sample_source"], "real_trade")
             self.assertEqual(payload["exact_state_real_trade_sample_count"], 1)
+        finally:
+            conn.close()
+
+    def test_alpha_setup_writes_product_learning_performance_key(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+            sample = {
+                "ticker": "EB",
+                "side": "short",
+                "sector": "chemical",
+                "horizon_class": "short",
+                "market_regime": "range",
+                "setup_type": "trend_breakout_setup",
+                "data_combo": "technical:used|fundamental:used|news:fresh",
+                "recommendation_id": "rec-eb-rank",
+                "action_taken": "open_short",
+                "target_lots": -2,
+                "current_lots": 0,
+                "executed_lots": 2,
+                "net_pnl": 3200.0,
+                "commission": 20.0,
+                "source_type": "trade",
+                "opportunity_state": "tradeable_candidate",
+                "outcome_label": "profit",
+                "evidence": {
+                    "analyst_payloads": {
+                        "technical": {
+                            "signal": "Bearish",
+                            "entry_trigger": "opening range breakdown",
+                        }
+                    },
+                    "final_action_contract": {
+                        "final_action": "open_real",
+                        "current_lots": 0,
+                        "target_lots": -2,
+                        "lots_delta": -2,
+                        "authority_type": "real_budget_entry",
+                        "entry_trigger": "opening range breakdown",
+                        "capital_deployment": {
+                            "selected_for_capital_deployment": True,
+                            "capital_allocation_reason": "ranked_deployable_candidate",
+                        },
+                        "evidence_used": {
+                            "opportunity_rank": 1,
+                            "opportunity_score": 0.81,
+                        },
+                    },
+                },
+                "result": {"pnl_source": "ticker_daily_pnl"},
+            }
+
+            result = upsert_alpha_setup_sample_and_profile(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-20",
+                sample=sample,
+            )
+
+            self.assertEqual(result["rows"], 1)
+            profile = cursor.execute(
+                "SELECT payload_json FROM alpha_setup_profile WHERE config_id='cfg'"
+            ).fetchone()
+            profile_payload = load_externalized_json(profile["payload_json"])
+            key = profile_payload["product_learning_performance_key"]
+            self.assertEqual(key["ticker"], "EB")
+            self.assertEqual(key["side"], "short")
+            self.assertEqual(key["setup_type"], "trend_breakout_setup")
+            self.assertEqual(key["trigger_key"], "opening_range_breakdown")
+            self.assertEqual(key["deployment_outcome"]["deployment_tier"], "capital_deployed")
+            self.assertEqual(key["deployment_outcome"]["opportunity_rank"], 1)
+            self.assertEqual(key["entry_quality_outcome"]["entry_quality_verdict"], "entry_quality_supported")
+            self.assertEqual(key["entry_quality_outcome"]["trigger_quality_verdict"], "trigger_quality_supported")
+            self.assertEqual(
+                key["entry_quality_outcome"]["trigger_confirmation_adjustment"],
+                "standard_confirmation_supported",
+            )
+            self.assertFalse(key["entry_quality_outcome"]["loss_episode"])
+            self.assertTrue(key["not_trade_authority"])
+            self.assertTrue(key["future_only"])
+
+            action_value = cursor.execute(
+                "SELECT payload_json FROM alpha_setup_action_value WHERE config_id='cfg'"
+            ).fetchone()
+            action_value_payload = load_externalized_json(action_value["payload_json"])
+            self.assertEqual(
+                action_value_payload["product_learning_performance_key"]["performance_scope_key"],
+                key["performance_scope_key"],
+            )
+            self.assertEqual(
+                action_value_payload["entry_quality_outcome"]["entry_quality_verdict"],
+                "entry_quality_supported",
+            )
+        finally:
+            conn.close()
+
+    def test_alpha_setup_loss_episode_writes_entry_quality_outcome(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+            sample = {
+                "ticker": "TA",
+                "side": "long",
+                "sector": "chemical",
+                "horizon_class": "short",
+                "market_regime": "range",
+                "setup_type": "pullback_support_setup",
+                "data_combo": "technical:used|fundamental:weak|news:none",
+                "recommendation_id": "rec-ta-loss",
+                "action_taken": "open_long",
+                "target_lots": 2,
+                "current_lots": 0,
+                "executed_lots": 2,
+                "net_pnl": -2600.0,
+                "commission": 20.0,
+                "source_type": "trade",
+                "opportunity_state": "tradeable_candidate",
+                "outcome_label": "loss",
+                "evidence": {
+                    "analyst_payloads": {
+                        "technical": {
+                            "signal": "Bullish",
+                            "entry_trigger": "vwap pullback support",
+                        }
+                    },
+                    "final_action_contract": {
+                        "final_action": "open_probe",
+                        "current_lots": 0,
+                        "target_lots": 2,
+                        "lots_delta": 2,
+                        "authority_type": "exploration_probe",
+                        "entry_trigger": "vwap pullback support",
+                        "capital_deployment": {
+                            "selected_for_capital_deployment": False,
+                            "capital_allocation_reason": "ranked_probe_candidate",
+                        },
+                        "evidence_used": {
+                            "opportunity_rank": 1,
+                            "opportunity_score": 0.66,
+                        },
+                    },
+                },
+                "result": {"pnl_source": "ticker_daily_pnl"},
+            }
+
+            result = upsert_alpha_setup_sample_and_profile(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-21",
+                sample=sample,
+            )
+
+            self.assertEqual(result["rows"], 1)
+            row = cursor.execute(
+                "SELECT payload_json FROM alpha_setup_action_value WHERE config_id='cfg'"
+            ).fetchone()
+            payload = load_externalized_json(row["payload_json"])
+            outcome = payload["entry_quality_outcome"]
+            self.assertEqual(outcome["entry_quality_verdict"], "entry_tail_loss_revalidate")
+            self.assertEqual(outcome["trigger_quality_verdict"], "trigger_tail_loss_revalidate")
+            self.assertEqual(outcome["trigger_confirmation_adjustment"], "strict_confirmation_required")
+            self.assertTrue(outcome["loss_episode"])
+            self.assertTrue(outcome["tail_loss_episode"])
+            self.assertEqual(outcome["trigger_key"], "vwap_pullback_support")
+            self.assertIn("capital_priority_score", outcome["affects"])
+            self.assertTrue(outcome["future_only"])
+            self.assertEqual(
+                payload["product_learning_performance_key"]["entry_quality_outcome"]["entry_quality_verdict"],
+                "entry_tail_loss_revalidate",
+            )
         finally:
             conn.close()
 

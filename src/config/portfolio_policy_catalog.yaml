@@ -389,6 +389,9 @@ portfolio_manager:
         negative_learning: 0.16
         execution_profile_learning: 0.10
         recent_tail_loss_penalty: 0.18
+        entry_quality_loss_penalty: 0.12
+        trigger_quality_positive_bonus: 0.08
+        trigger_quality_loss_penalty: 0.10
         market_conflict_penalty: 0.10
         critical_data_gap_penalty: 0.12
         fundamental_gap_penalty: 0.06
@@ -431,6 +434,8 @@ portfolio_manager:
       single_tradeable_candidate_setup_min_confidence: 0.42
       single_candidate_negative_learning_soft_cap: 0.45
       single_candidate_tail_loss_soft_cap: 0.35
+      single_candidate_entry_quality_loss_soft_cap: 0.35
+      single_candidate_trigger_quality_loss_soft_cap: 0.35
       technical_opposition_min_confidence: 0.45
       block_single_setup_on_technical_opposition: true
     position_quality_sizing:

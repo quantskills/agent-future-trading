@@ -89,6 +89,36 @@ class AnalystOutputLandingTest(unittest.TestCase):
             any(error.startswith("analyst_output_forbidden_trade_authority_field") for error in checked.validation_errors)
         )
 
+    def test_product_learning_calibration_view_is_allowed_when_trade_authority_aliases_are_safe(self):
+        signal = self._signal(
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "watch_for_trigger",
+                    "trigger_valid": False,
+                    "invalidation_present": True,
+                },
+                "reviewer_learning_context": {
+                    "memory_trace": {
+                        "selected_memory_refs": [
+                            {
+                                "memory_type": "alpha_setup_profile",
+                                "product_learning_calibration_view": {
+                                    "performance_scope_key": "EB|short|setup|trigger|evidence|capital_deployed",
+                                    "deployment_tier": "capital_deployed",
+                                    "historical_pm_rank": 1,
+                                    "historical_pm_score": 0.83,
+                                    "historical_net_pnl": 3180.0,
+                                    "not_trade_authority": True,
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(analyst_output_landing_violations(signal), [])
+
     def test_analyst_entrypoints_do_not_directly_consume_pm_action_values(self):
         agent_root = SRC_ROOT / "agents" / "analysis_team"
         forbidden_tokens = (

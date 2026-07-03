@@ -82,7 +82,11 @@ from tools.agent_tools.analysis.analyst_quality import (
     summarize_news_events,
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
-from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.analysis.analyst_signal_fusion import (
+    CAPITAL_PRIORITY_RANK_MEANING,
+    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+    build_opportunity_scorecard,
+)
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
@@ -487,7 +491,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             signal_snapshot={
                 "opportunity_scorecard": {
                     "preferred_side": "short",
-                    "short": {"opportunity_score": 0.41, "opportunity_rank": 1},
+                    "short": {
+                        "opportunity_score": 0.82,
+                        "capital_priority_score": 0.55,
+                        "opportunity_rank": 1,
+                    },
                 },
                 "final_action_contract": {
                     "final_action": "open_probe",
@@ -495,7 +503,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "target_lots": -1,
                     "lots_delta": -1,
                     "target_margin_ratio_estimate": 0.008,
-                    "evidence_used": {"opportunity_score": 0.41, "opportunity_rank": 1},
+                    "evidence_used": {
+                        "opportunity_score": 0.82,
+                        "capital_priority_score": 0.55,
+                        "opportunity_rank": 1,
+                    },
                 },
                 "active_opportunity_audit": {"opportunity": {"opportunity_rank": 1}},
             },
@@ -510,7 +522,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             signal_snapshot={
                 "opportunity_scorecard": {
                     "preferred_side": "short",
-                    "short": {"opportunity_score": 0.73, "opportunity_rank": 2},
+                    "short": {
+                        "opportunity_score": 0.73,
+                        "capital_priority_score": 0.91,
+                        "opportunity_rank": 2,
+                    },
                 },
                 "final_action_contract": {
                     "final_action": "open_real",
@@ -518,7 +534,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "target_lots": -2,
                     "lots_delta": -2,
                     "target_margin_ratio_estimate": 0.008,
-                    "evidence_used": {"opportunity_score": 0.73, "opportunity_rank": 2},
+                    "evidence_used": {
+                        "opportunity_score": 0.73,
+                        "capital_priority_score": 0.91,
+                        "opportunity_rank": 2,
+                    },
                 },
                 "active_opportunity_audit": {"opportunity": {"opportunity_rank": 2}},
             },
@@ -535,6 +555,17 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_high.lots, 2)
         self.assertTrue(rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
         self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(
+            rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["rank_semantics_version"],
+            CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+        )
+        self.assertEqual(
+            rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank_meaning"],
+            CAPITAL_PRIORITY_RANK_MEANING,
+        )
+        self.assertTrue(
+            rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_is_capital_priority"]
+        )
         self.assertEqual(rec_low.signal_snapshot["final_action_contract"]["target_lots"], 0)
         self.assertEqual(rec_low.signal_snapshot["final_action_contract"]["lots_delta"], 0)
         self.assertEqual(rec_low.action, RecommendationAction.HOLD)
@@ -1086,6 +1117,61 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertNotIn("margin_ratio", impact)
         self.assertEqual(calibrated.metadata["learning_impact_summary"], impact)
 
+    def test_analyst_learning_calibration_uses_product_learning_scope_without_trade_authority(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.50,
+            business_quality_score=0.50,
+            factor_alignment_score=0.50,
+            horizon_class="short",
+        )
+        performance_scope = (
+            "EB|short|trend_breakout_setup|opening_range_breakdown|"
+            "technical:used|fundamental:used|news:fresh|capital_deployed"
+        )
+        calibrated = calibrate_signal_with_learning_context(
+            signal,
+            analyst="technical",
+            ticker="EB",
+            learning_context={
+                "alpha_setup_items": [
+                    {
+                        "ticker": "EB",
+                        "side": "short",
+                        "horizon_class": "short",
+                        "market_regime": "range",
+                        "setup_type": "trend_breakout_setup",
+                        "action_name": "open",
+                        "sample_count": 7,
+                        "net_pnl": 9200.0,
+                        "win_rate": 0.71,
+                        "confidence_score": 0.76,
+                        "product_learning_calibration_view": {
+                            "contract_version": "agentquant.product_learning_calibration_view.v1",
+                            "performance_scope_key": performance_scope,
+                            "deployment_tier": "capital_deployed",
+                            "historical_pm_rank": 1,
+                            "historical_pm_score": 0.83,
+                            "historical_net_pnl": 3180.0,
+                            "not_trade_authority": True,
+                            "future_only": True,
+                        },
+                    }
+                ]
+            },
+        )
+
+        self.assertGreater(calibrated.business_quality_score, 0.50)
+        impact = calibrated.learning_impact_summary
+        self.assertIn(performance_scope, impact["historical_support"])
+        self.assertIn(performance_scope, impact["product_learning_scopes"])
+        self.assertIn("no_trade_authority", impact["authority_boundary"])
+        self.assertNotIn("opportunity_rank", impact)
+        self.assertNotIn("authority_type", impact)
+        self.assertNotIn("target_lots", impact)
+        self.assertNotIn("lots_delta", impact)
+
     def test_analyst_learning_calibration_marks_negative_same_scope_without_product_ban(self):
         signal = AnalystSignal(
             agent_name="fundamental",
@@ -1356,6 +1442,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                 "negative_learning": 0.16,
                 "execution_profile_learning": 0.10,
                 "recent_tail_loss_penalty": 0.18,
+                "entry_quality_loss_penalty": 0.12,
+                "trigger_quality_positive_bonus": 0.08,
+                "trigger_quality_loss_penalty": 0.10,
             },
             "learning_reward_unit": 1000.0,
             "learning_full_weight_sample_count": 3,
@@ -1407,6 +1496,110 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertLess(negative_components["recent_tail_loss_penalty"], 0.0)
         self.assertGreater(positive["short"]["opportunity_score"], negative["short"]["opportunity_score"])
         self.assertNotIn("product_blacklist", json.dumps(negative["short"], ensure_ascii=False))
+
+    def test_entry_loss_episode_penalizes_entry_quality_and_capital_priority(self):
+        signal = self._tradeable_signal()
+        clean = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        loss_value = self._action_value(
+            action_preference="tail_loss_protect",
+            lane="open",
+            reward_mean=-1800.0,
+            reward_sum=-7200.0,
+            worst_reward=-2400.0,
+        )
+        loss_value["payload"]["product_learning_performance_key"] = {
+            "contract_version": "agentquant.product_learning_performance_key.v1",
+            "entry_quality_outcome": {
+                "contract_version": "agentquant.entry_quality_outcome.v1",
+                "entry_quality_verdict": "entry_tail_loss_revalidate",
+                "loss_episode": True,
+                "tail_loss_episode": True,
+                "penalty_weight": 0.55,
+                "entry_trigger": "vwap pullback support",
+                "trigger_key": "vwap_pullback_support",
+                "future_only": True,
+                "not_trade_authority": True,
+            },
+        }
+        loss = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[loss_value],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        components = loss["short"]["opportunity_score_components"]
+        summary = loss["short"]["action_value_learning_summary"]
+        self.assertLess(components["entry_quality_loss_penalty"], 0.0)
+        self.assertLess(components["trigger_quality_loss_penalty"], 0.0)
+        self.assertGreater(summary["entry_quality_loss_signal"], 0.0)
+        self.assertGreater(summary["trigger_quality_loss_signal"], 0.0)
+        self.assertGreaterEqual(summary["net_trigger_quality_loss_signal"], 0.0)
+        self.assertLess(loss["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
+
+    def test_positive_trigger_episode_boosts_trigger_quality_without_second_rank(self):
+        signal = self._tradeable_signal()
+        clean = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+        positive_value = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=1800.0,
+            reward_sum=7200.0,
+            worst_reward=900.0,
+        )
+        positive_value["payload"]["product_learning_performance_key"] = {
+            "contract_version": "agentquant.product_learning_performance_key.v1",
+            "entry_quality_outcome": {
+                "contract_version": "agentquant.entry_quality_outcome.v1",
+                "entry_quality_verdict": "entry_quality_supported",
+                "trigger_quality_verdict": "trigger_quality_supported",
+                "trigger_confirmation_adjustment": "standard_confirmation_supported",
+                "positive_entry_episode": True,
+                "loss_episode": False,
+                "tail_loss_episode": False,
+                "support_weight": 0.40,
+                "entry_trigger": "opening range breakdown",
+                "trigger_key": "opening_range_breakdown",
+                "future_only": True,
+                "not_trade_authority": True,
+            },
+        }
+        positive = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[positive_value],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        components = positive["short"]["opportunity_score_components"]
+        summary = positive["short"]["action_value_learning_summary"]
+        self.assertGreater(components["trigger_quality_positive_bonus"], 0.0)
+        self.assertGreater(summary["trigger_quality_positive_signal"], 0.0)
+        self.assertEqual(summary["net_trigger_quality_loss_signal"], 0.0)
+        self.assertGreater(positive["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
+        self.assertEqual(positive["short"]["opportunity_rank_meaning"], "rank_1_is_current_highest_capital_priority_not_trade_authority")
 
     def test_pm_action_value_normalizer_preserves_canonical_fields_from_payload_or_top_level(self):
         payload_only = {
@@ -3212,6 +3405,48 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         self.assertEqual(side, "long")
         self.assertGreater(ratio, 0.0)
         self.assertEqual(row["final_state"], "tradeable_candidate")
+
+    def test_scorecard_probe_seed_prefers_capital_priority_score(self):
+        side, ratio, row = _scorecard_probe_seed(
+            opportunity_scorecard={
+                "long": {
+                    "final_state": "tradeable_candidate",
+                    "supporting_signal_count": 2,
+                    "score": 0.82,
+                    "capital_priority_score": 0.60,
+                    "capital_priority_tier": 2,
+                    "max_setup_quality": 0.70,
+                    "max_business_quality": 0.70,
+                    "market_confirmation_score": 0.72,
+                    "gating_failures": [],
+                },
+                "short": {
+                    "final_state": "tradeable_candidate",
+                    "supporting_signal_count": 1,
+                    "score": 0.70,
+                    "capital_priority_score": 0.91,
+                    "capital_priority_tier": 3,
+                    "max_setup_quality": 0.70,
+                    "max_business_quality": 0.70,
+                    "market_confirmation_score": 0.72,
+                    "gating_failures": [],
+                },
+            },
+            control={
+                "watch_for_trigger_new_entry": {
+                    "allow_probe": True,
+                    "probe_max_ratio": 0.01,
+                    "probe_floor_ratio": 0.005,
+                    "scorecard_probe_min_supporting_signals": 1,
+                    "scorecard_probe_min_score": 0.35,
+                    "scorecard_tradeable_candidate_probe_min_confirmation_score": 0.68,
+                }
+            },
+        )
+
+        self.assertEqual(side, "short")
+        self.assertLess(ratio, 0.0)
+        self.assertEqual(row["capital_priority_score"], 0.91)
 
     def test_scorecard_watch_for_trigger_seed_is_conditional_monitor_candidate(self):
         side, ratio, row = _scorecard_probe_seed(
@@ -8449,6 +8684,78 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             detail["source_parameters"]["position_budget_policy"]["min_real_trade_margin_ratio"],
             0.008,
         )
+
+    def test_rank_one_tradeable_candidate_with_current_evidence_releases_real_budget(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "tradeable_candidate",
+                    "opportunity_rank": 1,
+                    "rank_is_capital_priority": True,
+                    "capital_priority_score": 0.86,
+                    "capital_priority_tier": 3,
+                    "has_tradeable_support": True,
+                    "has_invalidation_or_stop": True,
+                    "qualified_positive_expectancy": False,
+                    "positive_action_value": False,
+                    "positive_profile": False,
+                    "strong_realtime_evidence": True,
+                    "strong_market_confirmation": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": True,
+                    "technical_opposes_side": False,
+                    "current_confirmation_score": 0.72,
+                    "independent_support_count": 2,
+                }
+            },
+            full_config={
+                "portfolio_manager": {
+                    "quality_aware_fusion": {
+                        "opportunity_scorecard": {
+                            "tradeable_threshold": 0.58,
+                        }
+                    }
+                }
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "real_budget_entry")
+        self.assertTrue(detail["rank_capital_priority_real_budget_release"])
+        self.assertIn("rank_capital_priority_real_budget_release", detail["reason_codes"])
+        self.assertTrue(detail["rank_capital_priority_release_detail"]["open_action_evidence"])
+        self.assertTrue(detail["rank_capital_priority_release_detail"]["has_invalidation_or_stop"])
+
+    def test_rank_one_without_current_evidence_does_not_release_real_budget(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "tradeable_candidate",
+                    "opportunity_rank": 1,
+                    "rank_is_capital_priority": True,
+                    "capital_priority_score": 0.90,
+                    "capital_priority_tier": 3,
+                    "has_tradeable_support": True,
+                    "has_invalidation_or_stop": False,
+                    "qualified_positive_expectancy": False,
+                    "positive_action_value": False,
+                    "positive_profile": False,
+                    "strong_realtime_evidence": False,
+                    "strong_market_confirmation": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": False,
+                    "technical_opposes_side": False,
+                    "current_confirmation_score": 0.72,
+                    "independent_support_count": 1,
+                }
+            },
+        )
+
+        self.assertFalse(allowed)
+        self.assertNotEqual(detail["authority_type"], "real_budget_entry")
+        self.assertFalse(detail["rank_capital_priority_real_budget_release"])
 
     def test_position_budget_floor_applies_only_to_real_budget_entry(self):
         common = {

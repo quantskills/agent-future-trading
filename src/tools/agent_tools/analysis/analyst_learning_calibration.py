@@ -124,7 +124,11 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
     calibration = _signal_calibration(row)
     if not calibration:
         return None
-    return {
+    product_view = row.get("product_learning_calibration_view")
+    if not isinstance(product_view, Mapping):
+        payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+        product_view = payload.get("product_learning_calibration_view")
+    safe_row = {
         "ticker": row.get("ticker"),
         "side": row.get("side"),
         "horizon_class": row.get("horizon_class"),
@@ -136,6 +140,9 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
         "confidence_score": row.get("confidence_score"),
         "signal_calibration": dict(calibration),
     }
+    if isinstance(product_view, Mapping):
+        safe_row["product_learning_calibration_view"] = dict(product_view)
+    return safe_row
 
 
 def _row_is_negative(row: Mapping[str, Any]) -> bool:
@@ -205,6 +212,14 @@ def _unique_strings(values: Iterable[Any], *, max_items: int = 6) -> List[str]:
 
 
 def _row_scope_label(row: Mapping[str, Any]) -> str:
+    product_view = row.get("product_learning_calibration_view")
+    if not isinstance(product_view, Mapping):
+        payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+        product_view = payload.get("product_learning_calibration_view")
+    if isinstance(product_view, Mapping):
+        key = str(product_view.get("performance_scope_key") or "").strip()
+        if key:
+            return key
     parts = [
         str(row.get("ticker") or "").upper(),
         str(row.get("side") or ""),
@@ -265,6 +280,18 @@ def _learning_impact_summary(
         [_row_scope_label(row) for row in negative_rows + broad_negative_rows],
         max_items=6,
     )
+    product_learning_scopes = _unique_strings(
+        [
+            str(view.get("performance_scope_key") or "")
+            for row in positive_rows + negative_rows + broad_positive_rows + broad_negative_rows
+            for view in [
+                row.get("product_learning_calibration_view")
+                if isinstance(row.get("product_learning_calibration_view"), Mapping)
+                else {}
+            ]
+        ],
+        max_items=6,
+    )
     current_confirmed = _unique_strings(
         list(getattr(signal, "factor_focus", []) or [])
         + list(getattr(signal, "setup_quality_notes", []) or []),
@@ -288,6 +315,7 @@ def _learning_impact_summary(
         "analyst": str(analyst or ""),
         "historical_support": historical_support,
         "historical_contradiction": historical_contradiction,
+        "product_learning_scopes": product_learning_scopes,
         "current_evidence_confirmed": current_confirmed,
         "current_evidence_missing": current_missing,
         "opportunity_state": opportunity_state,

@@ -18,6 +18,7 @@ from util.logger import logger
 from tools.common.learning_contract import CONTRACT_KEY, contract_prompt_line
 from tools.common.alpha_setup import (
     analyst_signal_calibration_prompt_line,
+    compact_product_learning_performance_key_for_analyst,
     compact_action_value_for_analyst_trace,
     compact_profile_for_trace,
     profile_prompt_line,
@@ -233,7 +234,7 @@ def _budget_plain_lines(lines: Iterable[str], *, max_chars: int, max_items: int)
 def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     contract = payload.get(CONTRACT_KEY) if isinstance(payload.get(CONTRACT_KEY), dict) else {}
-    return {
+    ref = {
         "memory_type": memory_type,
         "id": str(item.get("id") or ""),
         "ticker": str(item.get("ticker") or "*").upper(),
@@ -246,6 +247,10 @@ def _memory_trace_ref(item: Dict[str, Any], memory_type: str) -> Dict[str, Any]:
         "sample_count": int(item.get("sample_count") or contract.get("sample_count") or 0),
         "confidence_score": float(item.get("confidence_score") or 0.0),
     }
+    product_view = compact_product_learning_performance_key_for_analyst(item)
+    if product_view:
+        ref["product_learning_calibration_view"] = product_view
+    return ref
 
 
 def _scope_authority_boundary(selected_scopes: Iterable[str]) -> Dict[str, Any]:

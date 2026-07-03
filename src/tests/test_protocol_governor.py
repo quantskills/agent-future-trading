@@ -476,6 +476,9 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             self.assertIn("current_evidence_missing", prompt)
             self.assertIn("opportunity_state_reason", prompt)
             self.assertIn("Do not include lots, margin, final_action", prompt)
+            self.assertIn("product_learning_calibration_view", prompt)
+            self.assertIn("calibrate evidence quality", prompt)
+            self.assertIn("PM alone converts calibrated evidence into ranking and capital deployment", prompt)
 
         self.assertIn("factor_calibration_summary", fundamental_prompt)
         self.assertIn("effective_factors", fundamental_prompt)

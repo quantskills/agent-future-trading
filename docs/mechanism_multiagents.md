@@ -278,6 +278,8 @@ Phase4 完成后，研究学习单独运行：
 
 - `opportunity_scorecard`；
 - `opportunity_score_components`；
+- `capital_priority_score`；
+- `capital_priority_tier`；
 - `opportunity_rank`；
 - `capital_allocation_reason`；
 - 未入选或降级原因。
@@ -286,7 +288,12 @@ Phase4 完成后，研究学习单独运行：
 
 - 不调用 LLM；
 - 评分和排序必须可复现；
+- 系统只保留一个 rank：`opportunity_rank=1` 固定表示当前最高资金优先级；
+- `capital_priority_score/tier` 只是唯一 rank 的排序输入和解释字段，不是第二套 rank；
 - rank 不是交易权限，只能供投资组合经理资金部署使用；
+- `rank=1` 可以支持 PM 最终出口释放 `real_budget_entry`，但必须同时满足 `tradeable_candidate`、当前开仓证据、失效边界、无技术反对和硬风险通过；
+- 亏损开仓 episode 必须经 Researcher 写入 `entry_quality_outcome`，由 PM 在下一轮 scorecard 中转成 `entry_quality_loss_penalty` / `trigger_quality_loss_penalty`，只降低入场质量、触发质量、资金优先级和真实部署资格，不生成硬阻断；
+- 盈利开仓 episode 必须同样反写到触发质量，PM 用 `trigger_quality_positive_bonus` 与 `net_trigger_quality_loss_signal` 校准同类 trigger，避免只收紧坏触发而不放大好触发；
 - 不能输出最终手数或最终合约。
 
 排名至少由以下分项组成：

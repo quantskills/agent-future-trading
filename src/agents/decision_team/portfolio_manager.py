@@ -580,7 +580,8 @@ def _scorecard_probe_seed(
         return "flat", 0.0, {}
     candidates.sort(
         key=lambda item: (
-            _safe_float(item[1].get("score"), 0.0),
+            _safe_float(item[1].get("capital_priority_score", item[1].get("score")), 0.0),
+            _safe_int(item[1].get("capital_priority_tier"), 0),
             int(item[1].get("supporting_signal_count") or 0),
             _safe_float(item[1].get("max_setup_quality"), 0.0),
         ),
@@ -1657,6 +1658,72 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
     }
 
 
+def _rank_supported_real_budget_release(
+    *,
+    alpha_ev: dict,
+    trade_authority: dict,
+    opportunity_cfg: dict,
+    open_action_evidence: bool,
+    strong_current_evidence: bool,
+) -> tuple[bool, dict]:
+    """Release real budget only when the capital-priority rank has current evidence."""
+    if not isinstance(alpha_ev, dict):
+        alpha_ev = {}
+    if not isinstance(trade_authority, dict):
+        trade_authority = {}
+    if not isinstance(opportunity_cfg, dict):
+        opportunity_cfg = {}
+
+    rank_value = alpha_ev.get("opportunity_rank")
+    try:
+        opportunity_rank = int(rank_value) if rank_value not in (None, "") else None
+    except (TypeError, ValueError):
+        opportunity_rank = None
+    priority_score = _safe_float(
+        alpha_ev.get("capital_priority_score", alpha_ev.get("opportunity_score", alpha_ev.get("score"))),
+        0.0,
+    )
+    priority_tier = _safe_int(alpha_ev.get("capital_priority_tier"), 0)
+    min_score = max(
+        _safe_float(opportunity_cfg.get("tradeable_threshold"), 0.58),
+        _safe_float(opportunity_cfg.get("real_budget_entry_capital_priority_min_score"), 0.58),
+    )
+    min_tier = max(3, _safe_int(opportunity_cfg.get("real_budget_entry_capital_priority_min_tier"), 3))
+    scorecard_state = str(trade_authority.get("scorecard_state") or alpha_ev.get("scorecard_state") or "").lower()
+    rank_is_capital_priority = bool(
+        alpha_ev.get("rank_is_capital_priority")
+        or alpha_ev.get("opportunity_rank_meaning")
+        or alpha_ev.get("rank_semantics_version")
+        or alpha_ev.get("capital_priority_score") not in (None, "")
+    )
+    passed = bool(
+        rank_is_capital_priority
+        and opportunity_rank == 1
+        and priority_score >= min_score
+        and priority_tier >= min_tier
+        and scorecard_state == "tradeable_candidate"
+        and bool(open_action_evidence)
+        and bool(strong_current_evidence)
+        and bool(trade_authority.get("has_invalidation_or_stop"))
+        and not bool(trade_authority.get("technical_opposes_side"))
+    )
+    return passed, {
+        "decision": "allow" if passed else "reject",
+        "rank_is_capital_priority": rank_is_capital_priority,
+        "opportunity_rank": opportunity_rank,
+        "capital_priority_score": priority_score,
+        "capital_priority_tier": priority_tier,
+        "min_capital_priority_score": min_score,
+        "min_capital_priority_tier": min_tier,
+        "scorecard_state": scorecard_state,
+        "open_action_evidence": bool(open_action_evidence),
+        "strong_current_evidence": bool(strong_current_evidence),
+        "has_invalidation_or_stop": bool(trade_authority.get("has_invalidation_or_stop")),
+        "technical_opposes_side": bool(trade_authority.get("technical_opposes_side")),
+        "boundary": "rank_supports_real_budget_only_after_current_evidence_and_risk_gates",
+    }
+
+
 def _qualified_real_probe_release(
     *,
     control_reasons: list[str],
@@ -2097,6 +2164,15 @@ def _final_contract_authority(
         or event_catalyst_confirmation
     )
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
+    rank_capital_priority_real_budget_release, rank_capital_priority_release_detail = (
+        _rank_supported_real_budget_release(
+            alpha_ev=alpha_ev,
+            trade_authority=trade_authority,
+            opportunity_cfg=opportunity_cfg,
+            open_action_evidence=open_action_evidence,
+            strong_current_evidence=strong_current_evidence,
+        )
+    )
     watch_for_trigger_without_setup = bool(trade_authority.get("watch_for_trigger_without_setup"))
     scorecard_state = str(trade_authority.get("scorecard_state") or "").lower()
     market_conflict = "market_confirmation_conflict" in reason_set
@@ -2172,6 +2248,7 @@ def _final_contract_authority(
         and (
             (qualified_positive and strong_current_evidence)
             or (release_qualified and qualified_positive)
+            or rank_capital_priority_real_budget_release
         )
     )
     can_explore = bool(
@@ -2253,6 +2330,7 @@ def _final_contract_authority(
             + (["hard_zero"] if hard_zero else [])
             + (["analyst_tradeable_probe_candidate"] if analyst_tradeable_probe_candidate else [])
             + (["conditional_trigger_authority"] if conditional_trigger_authority else [])
+            + (["rank_capital_priority_real_budget_release"] if rank_capital_priority_real_budget_release else [])
         )
     )
     return has_authority, {
@@ -2285,6 +2363,9 @@ def _final_contract_authority(
             },
             "opportunity_scorecard": {
                 "single_tradeable_candidate_setup_confirmation_score": opportunity_cfg.get("single_tradeable_candidate_setup_confirmation_score"),
+                "tradeable_threshold": opportunity_cfg.get("tradeable_threshold"),
+                "real_budget_entry_capital_priority_min_score": opportunity_cfg.get("real_budget_entry_capital_priority_min_score"),
+                "real_budget_entry_capital_priority_min_tier": opportunity_cfg.get("real_budget_entry_capital_priority_min_tier"),
             },
             "watch_for_trigger_new_entry": watch_for_trigger_semantic_audit,
         },
@@ -2314,6 +2395,8 @@ def _final_contract_authority(
         "weak_only": weak_only,
         "release": release,
         "release_qualified": release_qualified,
+        "rank_capital_priority_real_budget_release": rank_capital_priority_real_budget_release,
+        "rank_capital_priority_release_detail": rank_capital_priority_release_detail,
         "qualified_positive": qualified_positive,
         "analyst_tradeable_probe_candidate": analyst_tradeable_probe_candidate,
         "strong_realtime_evidence": strong_realtime,
@@ -6221,6 +6304,12 @@ def _apply_alpha_setup_ev_position_control(
             "decision": "no_expectancy_evidence",
             "target_side": target_side,
             "scorecard_state": layer,
+            "opportunity_rank": side_scorecard.get("opportunity_rank"),
+            "opportunity_rank_meaning": side_scorecard.get("opportunity_rank_meaning"),
+            "rank_semantics_version": side_scorecard.get("rank_semantics_version"),
+            "rank_is_capital_priority": bool(side_scorecard.get("rank_is_capital_priority")),
+            "capital_priority_score": side_scorecard.get("capital_priority_score", side_scorecard.get("score")),
+            "capital_priority_tier": side_scorecard.get("capital_priority_tier"),
             "current_confirmation_score": confirmation_score,
             "has_tradeable_support": has_tradeable_support,
             "has_monitorable_setup": has_monitorable_setup,
@@ -6527,6 +6616,12 @@ def _apply_alpha_setup_ev_position_control(
         "matched_action_value_count": len(intent_matched_action_values),
         "ignored_action_value_count": max(0, len(action_values) - len(intent_matched_action_values)),
         "scorecard_state": layer,
+        "opportunity_rank": side_scorecard.get("opportunity_rank"),
+        "opportunity_rank_meaning": side_scorecard.get("opportunity_rank_meaning"),
+        "rank_semantics_version": side_scorecard.get("rank_semantics_version"),
+        "rank_is_capital_priority": bool(side_scorecard.get("rank_is_capital_priority")),
+        "capital_priority_score": side_scorecard.get("capital_priority_score", side_scorecard.get("score")),
+        "capital_priority_tier": side_scorecard.get("capital_priority_tier"),
         "scorecard_gating_failures": gating_failures,
         "current_confirmation_score": confirmation_score,
         "has_tradeable_support": has_tradeable_support,

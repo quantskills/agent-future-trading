@@ -69,6 +69,18 @@ def _compact_text(value: Any, limit: int = 120) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _first_text(*values: Any, default: str = "unknown") -> str:
+    for value in values:
+        text = _compact_text(value, 180)
+        if text and text.lower() not in {"none", "null", "nan", "unknown"}:
+            return text
+    return default
+
+
 def build_scope_key(
     *,
     ticker: str,
@@ -88,6 +100,222 @@ def build_scope_key(
             _clean_token(data_combo, "unknown")[:160],
         ]
     )
+
+
+def _analyst_entry_trigger(evidence: Mapping[str, Any]) -> str:
+    analyst_payloads = _mapping_or_empty(evidence.get("analyst_payloads"))
+    for analyst in ("technical", "fundamental", "commodity_news", "company_news"):
+        payload = _mapping_or_empty(analyst_payloads.get(analyst))
+        trigger = _first_text(payload.get("entry_trigger"), default="")
+        if trigger:
+            return trigger
+    contracts = _mapping_or_empty(evidence.get("analyst_action_evidence_contracts"))
+    for contract in contracts.values():
+        contract_map = _mapping_or_empty(contract)
+        trigger = _first_text(contract_map.get("entry_trigger"), default="")
+        if trigger:
+            return trigger
+    return ""
+
+
+def _deployment_outcome_from_contract(
+    *,
+    contract: Mapping[str, Any],
+    sample: Mapping[str, Any],
+) -> Dict[str, Any]:
+    capital_deployment = _mapping_or_empty(contract.get("capital_deployment"))
+    evidence_used = _mapping_or_empty(contract.get("evidence_used"))
+    current_lots = _safe_int(contract.get("current_lots"), _safe_int(sample.get("current_lots")))
+    target_lots = _safe_int(contract.get("target_lots"), _safe_int(sample.get("target_lots")))
+    lots_delta = _safe_int(contract.get("lots_delta"), target_lots - current_lots)
+    selected = bool(capital_deployment.get("selected_for_capital_deployment"))
+    authority_type = _first_text(contract.get("authority_type"), default="unknown")
+    final_action = _first_text(contract.get("final_action"), sample.get("pm_action"), default="unknown")
+    if selected:
+        deployment_tier = "capital_deployed"
+    elif authority_type in {"real_budget_entry", "tradeable_candidate"}:
+        deployment_tier = "real_budget_entry_candidate"
+    elif authority_type in {"exploration_probe", "conditional_trigger_authority"} or final_action in {
+        "open_probe",
+        "conditional_probe",
+        "watch_trigger",
+    }:
+        deployment_tier = "exploration_or_conditional_probe"
+    elif lots_delta:
+        deployment_tier = "position_changed_without_capital_queue_selection"
+    else:
+        deployment_tier = "not_selected_or_no_change"
+    return {
+        "selected_for_capital_deployment": selected,
+        "deployment_tier": deployment_tier,
+        "authority_type": authority_type,
+        "final_action": final_action,
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "lots_delta": lots_delta,
+        "opportunity_rank": evidence_used.get("opportunity_rank"),
+        "opportunity_score": evidence_used.get("opportunity_score"),
+        "capital_allocation_reason": (
+            capital_deployment.get("capital_allocation_reason")
+            or evidence_used.get("capital_allocation_reason")
+            or ""
+        ),
+    }
+
+
+def _entry_quality_outcome_from_sample(
+    *,
+    sample: Mapping[str, Any],
+    result: Mapping[str, Any],
+    action_name: str,
+    entry_trigger: str,
+    evidence_combo: str,
+    deployment: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Bind settled entry outcome back to the original setup and trigger."""
+    action_lane = _action_value_lane(action_name)
+    episode_reward = result.get("episode_net_pnl") if isinstance(result, Mapping) else None
+    net_pnl = (
+        _safe_float(episode_reward)
+        if episode_reward is not None
+        else _safe_float(sample.get("net_pnl")) - _safe_float(sample.get("commission"))
+    )
+    is_entry_action = action_lane == "open"
+    deployed = str(deployment.get("deployment_tier") or "").lower() in {
+        "capital_deployed",
+        "exploration_or_conditional_probe",
+        "position_changed_without_capital_queue_selection",
+    }
+    loss_episode = bool(is_entry_action and deployed and net_pnl < 0)
+    tail_loss_episode = bool(loss_episode and net_pnl <= -1000.0)
+    positive_entry_episode = bool(is_entry_action and deployed and net_pnl > 0)
+    penalty_weight = 0.0
+    support_weight = 0.0
+    if loss_episode:
+        penalty_weight = min(1.0, max(0.10, abs(net_pnl) / 10000.0))
+    if tail_loss_episode:
+        penalty_weight = min(1.0, max(penalty_weight, 0.55))
+    if positive_entry_episode:
+        support_weight = min(1.0, max(0.10, net_pnl / 10000.0))
+    if tail_loss_episode:
+        verdict = "entry_tail_loss_revalidate"
+        trigger_verdict = "trigger_tail_loss_revalidate"
+        trigger_confirmation_adjustment = "strict_confirmation_required"
+    elif loss_episode:
+        verdict = "entry_loss_revalidate"
+        trigger_verdict = "trigger_loss_revalidate"
+        trigger_confirmation_adjustment = "stronger_confirmation_required"
+    elif positive_entry_episode:
+        verdict = "entry_quality_supported"
+        trigger_verdict = "trigger_quality_supported"
+        trigger_confirmation_adjustment = "standard_confirmation_supported"
+    elif is_entry_action:
+        verdict = "entry_outcome_neutral"
+        trigger_verdict = "trigger_outcome_neutral"
+        trigger_confirmation_adjustment = "neutral"
+    else:
+        verdict = "not_entry_action"
+        trigger_verdict = "not_entry_action"
+        trigger_confirmation_adjustment = "not_applicable"
+    return {
+        "contract_version": "agentquant.entry_quality_outcome.v1",
+        "entry_quality_verdict": verdict,
+        "entry_action": is_entry_action,
+        "deployed": deployed,
+        "loss_episode": loss_episode,
+        "tail_loss_episode": tail_loss_episode,
+        "positive_entry_episode": positive_entry_episode,
+        "net_pnl": net_pnl,
+        "penalty_weight": round(penalty_weight, 4),
+        "support_weight": round(support_weight, 4),
+        "trigger_quality_verdict": trigger_verdict,
+        "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
+        "entry_trigger": entry_trigger,
+        "trigger_key": _clean_token(entry_trigger, "unknown_trigger")[:120],
+        "evidence_combo": evidence_combo,
+        "deployment_tier": deployment.get("deployment_tier"),
+        "affects": [
+            "entry_quality_score",
+            "trigger_quality_score",
+            "capital_priority_score",
+            "real_budget_entry_qualification",
+        ],
+        "not_trade_authority": True,
+        "future_only": True,
+    }
+
+
+def build_product_learning_performance_key(
+    *,
+    scope_key: str,
+    sample: Mapping[str, Any],
+    action_name: str,
+    evidence: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Build the product-level learning identity used by future ranking."""
+    evidence = _mapping_or_empty(evidence)
+    result = _mapping_or_empty(result)
+    contract = _mapping_or_empty(evidence.get("final_action_contract"))
+    execution_feedback = _mapping_or_empty(result.get("execution_feedback"))
+    entry_trigger = _first_text(
+        contract.get("entry_trigger"),
+        execution_feedback.get("reason"),
+        _analyst_entry_trigger(evidence),
+        sample.get("entry_trigger"),
+    )
+    trigger_key = _clean_token(entry_trigger, "unknown_trigger")[:120]
+    data_combo = _first_text(sample.get("data_combo"), default="data_unknown")
+    deployment = _deployment_outcome_from_contract(contract=contract, sample=sample)
+    entry_quality_outcome = _entry_quality_outcome_from_sample(
+        sample=sample,
+        result=result,
+        action_name=action_name,
+        entry_trigger=entry_trigger,
+        evidence_combo=data_combo,
+        deployment=deployment,
+    )
+    ticker = str(sample.get("ticker") or "*").upper()
+    side = _clean_token(sample.get("side"), "*")
+    setup_type = _clean_token(sample.get("setup_type"), "unknown")
+    performance_scope_key = "|".join(
+        [
+            _clean_token(ticker, "*").upper(),
+            side,
+            setup_type,
+            trigger_key,
+            _clean_token(data_combo, "data_unknown")[:120],
+            deployment["deployment_tier"],
+        ]
+    )
+    return {
+        "contract_version": PRODUCT_LEARNING_PERFORMANCE_KEY_VERSION,
+        "scope_key": scope_key,
+        "performance_scope_key": performance_scope_key,
+        "ticker": ticker,
+        "side": side,
+        "horizon_class": _clean_token(sample.get("horizon_class"), "unknown"),
+        "market_regime": _clean_token(sample.get("market_regime"), "unknown"),
+        "setup_type": setup_type,
+        "action_name": _clean_token(action_name, "unknown"),
+        "entry_trigger": entry_trigger,
+        "trigger_key": trigger_key,
+        "evidence_combo": data_combo,
+        "opportunity_state": _first_text(sample.get("opportunity_state"), default="watch_for_trigger"),
+        "deployment_outcome": deployment,
+        "entry_quality_outcome": entry_quality_outcome,
+        "source_type": _first_text(sample.get("source_type"), default="unknown"),
+        "outcome_label": _first_text(sample.get("outcome_label"), default="observed"),
+        "net_pnl": _safe_float(sample.get("net_pnl")) - _safe_float(sample.get("commission")),
+        "reward_source": _first_text(
+            result.get("reward_source"),
+            result.get("episode_reward_source"),
+            result.get("pnl_source"),
+            default="unknown",
+        ),
+        "not_trade_authority": True,
+        "future_only": True,
+    }
 
 
 def infer_setup_type(
@@ -178,6 +406,7 @@ COUNTERFACTUAL_SOURCE_TYPES = {
 }
 COUNTERFACTUAL_REWARD_WEIGHT = 0.35
 RESEARCH_ACTION_VALUE_CONTRACT_VERSION = "agentquant.research_action_value.v1"
+PRODUCT_LEARNING_PERFORMANCE_KEY_VERSION = "agentquant.product_learning_performance_key.v1"
 INCOMPLETE_SETUP_TYPES = {
     "",
     "*",
@@ -686,10 +915,18 @@ def upsert_alpha_setup_sample_and_profile(
     )
     evidence = sample.get("evidence") if isinstance(sample.get("evidence"), Mapping) else {}
     result = sample.get("result") if isinstance(sample.get("result"), Mapping) else {}
+    product_learning_performance_key = build_product_learning_performance_key(
+        scope_key=scope_key,
+        sample=sample,
+        action_name=action_name,
+        evidence=evidence,
+        result=result,
+    )
     payload = {
         **dict(sample),
         "scope_key": scope_key,
         "action_name": action_name,
+        "product_learning_performance_key": product_learning_performance_key,
         "anti_overfit_boundary": {
             "same_scope_required": True,
             "not_product_blacklist": True,
@@ -770,10 +1007,12 @@ def upsert_alpha_setup_sample_and_profile(
         ],
         analysis_strategy_updates=[
             "Compare today's setup, market state, data combo, trigger, and invalidation with this profile.",
+            "Compare today's product-learning performance key before changing evidence strength.",
             "Use positive profiles to sharpen opportunity identification; use weak profiles to ask for stronger evidence, not to blacklist products.",
         ],
         trading_strategy_updates=[
             "PM may translate deployable/protected profiles into controlled sizing only with current confirmation and invalidation.",
+            "PM ranking and capital deployment may use this product-level performance key only through the final_action_contract.",
             "Candidate/watchlist profiles can guide probe/watchlist decisions; capped/rejected profiles require repair evidence before new risk.",
         ],
         pm_action_conditions=[
@@ -802,6 +1041,7 @@ def upsert_alpha_setup_sample_and_profile(
         "profile_state_hint": lifecycle["profile_state_hint"],
         "profile_state_hint_boundary": "profile lifecycle hint only; not an action preference or trade command",
         "last_sample": payload,
+        "product_learning_performance_key": product_learning_performance_key,
         "lookback_days": lookback_days,
         "not_product_blacklist": True,
         CONTRACT_KEY: contract,
@@ -859,6 +1099,7 @@ def upsert_alpha_setup_sample_and_profile(
         trading_date=str(trading_date)[:10],
         rows=rows,
         profile_lifecycle=lifecycle,
+        product_learning_performance_key=product_learning_performance_key,
         valid_until=valid_until,
         now=now,
     )
@@ -883,6 +1124,7 @@ def _upsert_action_values(
     trading_date: str,
     rows: List[Mapping[str, Any]],
     profile_lifecycle: Mapping[str, Any],
+    product_learning_performance_key: Mapping[str, Any],
     valid_until: str,
     now: str,
 ) -> None:
@@ -999,6 +1241,7 @@ def _upsert_action_values(
             "win_rate": win_rate,
             "profile_lifecycle": dict(profile_lifecycle),
             "source": "alpha_setup_profile_action_value",
+            "product_learning_performance_key": product_learning_performance_key,
             "action_preference": action_preference,
             "canonical_action_preference_source": "payload.action_preference",
             "prior_role": "" if action_preference else "weak_prior_not_action_preference",
@@ -1020,6 +1263,11 @@ def _upsert_action_values(
             "reward_source": reward_source,
             "sample_source": reward_source,
             "state_completeness": state_completeness,
+            "entry_quality_outcome": (
+                product_learning_performance_key.get("entry_quality_outcome")
+                if isinstance(product_learning_performance_key.get("entry_quality_outcome"), Mapping)
+                else {}
+            ),
             "counterfactual_reward_count": counterfactual_reward_count,
             "loss_reward_count": loss_reward_count,
             "tail_loss_count": tail_loss_count,
@@ -1076,6 +1324,20 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
         profile.get("profile_state_hint")
         or "profile_observe"
     )
+    product_view = compact_product_learning_performance_key_for_analyst(profile)
+    product_suffix = ""
+    if product_view:
+        product_suffix = (
+            " Product learning: "
+            f"scope={product_view.get('performance_scope_key')}, "
+            f"trigger={product_view.get('trigger_key')}, "
+            f"evidence={product_view.get('evidence_combo')}, "
+            f"deployment={product_view.get('deployment_tier')}, "
+            f"historical_pm_rank={product_view.get('historical_pm_rank')}, "
+            f"historical_pm_score={_safe_float(product_view.get('historical_pm_score')):.2f}, "
+            f"net_pnl={_safe_float(product_view.get('historical_net_pnl')):.0f}. "
+            "This is historical evidence-calibration context only."
+        )
     return (
         f"{profile.get('ticker')}/{profile.get('side')}/{profile.get('horizon_class')}/"
         f"{profile.get('market_regime')}: setup={profile.get('setup_type')}, "
@@ -1083,7 +1345,7 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
         f"wr={_safe_float(profile.get('win_rate')):.2f}, pf={_safe_float(profile.get('profit_factor')):.2f}, "
         f"pnl={_safe_float(profile.get('net_pnl')):.0f}, max_impact={_safe_float(profile.get('max_position_impact')):.3f}. "
         "Use as rebuttable profile-state prior only; it is not an action preference or trade command; "
-        "current evidence and invalidation are required."
+        f"current evidence and invalidation are required.{product_suffix}"
     )
 
 
@@ -1169,11 +1431,65 @@ def _analyst_signal_calibration_view(signal_calibration: Mapping[str, Any]) -> D
     }
 
 
+def _product_learning_key_from_payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = value.get("payload") if isinstance(value.get("payload"), Mapping) else {}
+    key = payload.get("product_learning_performance_key")
+    if isinstance(key, Mapping):
+        return key
+    key = value.get("product_learning_performance_key")
+    if isinstance(key, Mapping):
+        return key
+    return {}
+
+
+def compact_product_learning_performance_key_for_analyst(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return an analyst-safe view of the product learning performance key.
+
+    The raw key may contain PM contract field names such as opportunity_rank or
+    authority_type. Analysts may use only a historical evidence-calibration view,
+    so this function deliberately renames PM facts and drops trade-authority
+    fields.
+    """
+    key = _product_learning_key_from_payload(value)
+    if not key:
+        return {}
+    deployment = key.get("deployment_outcome") if isinstance(key.get("deployment_outcome"), Mapping) else {}
+    return {
+        "contract_version": "agentquant.product_learning_calibration_view.v1",
+        "source_contract_version": key.get("contract_version"),
+        "performance_scope_key": key.get("performance_scope_key"),
+        "ticker": key.get("ticker"),
+        "side": key.get("side"),
+        "horizon_class": key.get("horizon_class"),
+        "market_regime": key.get("market_regime"),
+        "setup_type": key.get("setup_type"),
+        "action_name": key.get("action_name"),
+        "trigger_key": key.get("trigger_key"),
+        "evidence_combo": key.get("evidence_combo"),
+        "opportunity_state": key.get("opportunity_state"),
+        "deployment_tier": deployment.get("deployment_tier"),
+        "historical_pm_rank": deployment.get("opportunity_rank"),
+        "historical_pm_score": deployment.get("opportunity_score"),
+        "historical_selected_for_capital_deployment": bool(
+            deployment.get("selected_for_capital_deployment")
+        ),
+        "historical_net_pnl": key.get("net_pnl"),
+        "outcome_label": key.get("outcome_label"),
+        "reward_source": key.get("reward_source"),
+        "not_trade_authority": True,
+        "future_only": True,
+        "analyst_usage_boundary": (
+            "product_performance_evidence_calibration_only_no_trade_authority_no_lots_no_margin"
+        ),
+    }
+
+
 def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
     profile_state_hint = (
         profile.get("profile_state_hint")
         or "profile_observe"
     )
+    product_view = compact_product_learning_performance_key_for_analyst(profile)
     return {
         "scope_key": profile.get("scope_key"),
         "ticker": profile.get("ticker"),
@@ -1193,6 +1509,7 @@ def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
         "confidence_score": profile.get("confidence_score"),
         "max_position_impact": profile.get("max_position_impact"),
         "valid_until": profile.get("valid_until"),
+        "product_learning_calibration_view": product_view,
     }
 
 
@@ -1233,6 +1550,7 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
     if not isinstance(signal_calibration, Mapping):
         signal_calibration = {}
     analyst_signal_calibration = _analyst_signal_calibration_view(signal_calibration)
+    product_view = compact_product_learning_performance_key_for_analyst(action_value)
     return {
         "scope_key": action_value.get("scope_key"),
         "ticker": action_value.get("ticker"),
@@ -1253,6 +1571,7 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
             or action_value.get("action_name")
         ),
         "signal_calibration": analyst_signal_calibration,
+        "product_learning_calibration_view": product_view,
         "analyst_usage_boundary": (
             "signal_calibration_only_no_trade_authority_no_lots_no_margin_no_direction_override"
         ),

@@ -94,7 +94,15 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 )
                 report_dict = report.to_dict()
                 self.assertIn("ok", report_dict)
-                self.assertTrue(report_dict.get("metadata", {}).get("config_id"))
+                metadata = report_dict.get("metadata", {})
+                warnings = report_dict.get("warnings", [])
+                if any(str(item).startswith("config_not_found_empty_db:") for item in warnings):
+                    self.assertIn(
+                        "empty_db_no_invariant_records_to_audit",
+                        metadata.get("record_boundary", ""),
+                    )
+                    continue
+                self.assertTrue(metadata.get("config_id"))
 
     def _make_db(self) -> Path:
         tmpdir = tempfile.TemporaryDirectory()

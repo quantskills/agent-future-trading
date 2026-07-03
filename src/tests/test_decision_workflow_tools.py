@@ -11,7 +11,11 @@ if str(SRC_ROOT) not in sys.path:
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.pm_opportunity_ranking import rank_opportunities
+from tools.agent_tools.decision.pm_opportunity_ranking import (
+    CAPITAL_PRIORITY_RANK_MEANING,
+    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+    rank_opportunities,
+)
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
@@ -165,8 +169,62 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         self.assertIn("opportunity_scorecard", result)
         self.assertIn("opportunity_rank", result)
+        self.assertEqual(result["rank_semantics_version"], CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION)
+        self.assertEqual(result["opportunity_rank_meaning"], CAPITAL_PRIORITY_RANK_MEANING)
+        self.assertTrue(result["rank_is_capital_priority"])
         self.assertTrue(result["capital_allocation_reason"]["rank_is_not_trade_authority"])
+        self.assertTrue(result["capital_allocation_reason"]["rank_is_capital_priority"])
+        row = result["opportunity_scorecard"]["long"]
+        self.assertEqual(row["rank_semantics_version"], CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION)
+        self.assertEqual(row["opportunity_rank_meaning"], CAPITAL_PRIORITY_RANK_MEANING)
+        self.assertTrue(row["rank_is_capital_priority"])
+        self.assertTrue(row["rank_is_not_trade_authority"])
+        self.assertIn("capital_priority_score", row)
         self.assertTrue(result["ranking_tool_trace"]["no_llm"])
+
+    def test_opportunity_ranking_uses_single_capital_priority_rank(self):
+        result = rank_opportunities(
+            ticker="EB",
+            analyst_signals=[],
+            signal_collection_contract={"dominant_side": "short"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            decision_date="2025-03-05",
+            config={},
+            prebuilt_scorecard={
+                "preferred_side": "short",
+                "long": {
+                    "side": "long",
+                    "score": 0.82,
+                    "opportunity_score": 0.82,
+                    "capital_priority_score": 0.62,
+                    "capital_priority_tier": 1,
+                    "final_state": "watch_for_trigger",
+                },
+                "short": {
+                    "side": "short",
+                    "score": 0.74,
+                    "opportunity_score": 0.74,
+                    "capital_priority_score": 0.91,
+                    "capital_priority_tier": 3,
+                    "final_state": "tradeable_candidate",
+                },
+            },
+        )
+
+        scorecard = result["opportunity_scorecard"]
+        self.assertEqual(scorecard["short"]["opportunity_rank"], 1)
+        self.assertEqual(scorecard["long"]["opportunity_rank"], 2)
+        self.assertNotIn("deployment_rank", scorecard["short"])
+        self.assertNotIn("exploration_rank", scorecard["short"])
+        self.assertEqual(
+            result["capital_allocation_reason"]["preferred_capital_priority_score"],
+            0.91,
+        )
 
     def test_position_sizing_records_math_without_final_action_authority(self):
         result = build_position_sizing_result(

@@ -264,6 +264,26 @@
 
 （3）收口 `final_action_semantics.py` 迁移依赖完整性。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py` 和回归测试。原因：PG 统一语义入口迁移后，`contract_consumes_hold_exit_pm_learning()` 已进入共享语义工具，但 `ACTION_PREFERENCE_VALUES` 仍停留在 PG 私有常量中，导致部分日期 daily gate 命中 hold/exit 学习分支时崩溃；本次把 action preference 常量迁入共享语义工具，PG 两条检查只导入同一常量，并用 2025-03-12、2025-03-20、2025-03-24 触发分支做回归，不改策略、参数、交易生成、数据库或回测记录。
 
+==========2026年07月03日==========
+
+（1）强化产品级动态学习写入身份键。修改：`alpha_setup.py`、统一字段语义表和 `test_reviewer_learning.py`。原因：Researcher 写入 alpha setup/profile/action-value 时，必须把产品、方向、setup、触发、证据组合、资金部署结果、rank/score 和后续收益绑定成同一个 `product_learning_performance_key`；该键只服务下一轮分析师校准、PM 排名和资金部署学习，不创建交易权限、不改 PM/Trader/Accountant 边界、不硬编码具体品种好坏。
+
+（2）强化分析师读取产品级学习的安全视图。修改：`alpha_setup.py`、`analyst_learning_context.py`、`analyst_learning_calibration.py`、统一字段语义表和分析师/学习回归测试。原因：三类分析师下一交易日必须能通过 `learning_context` 读取产品、方向、setup、触发、证据组合、历史部署层级、历史 PM rank/score 和后续收益形成的产品级表现摘要，但只能作为证据质量校准和待验证问题；安全视图改用 `historical_pm_rank/historical_pm_score`，不暴露 `authority_type/final_action/target_lots/lots_delta/opportunity_rank` 等 PM 权限字段，不改 PM/Trader/Accountant 边界。
+
+（3）固定唯一 rank 为资金优先级语义。修改：`analyst_signal_fusion.py`、`pm_opportunity_ranking.py`、`pm_contract_builder.py`、`workflow.py`、统一字段语义表和 PM 排序/资金部署回归测试。原因：系统只保留一个 `opportunity_rank`，`rank=1` 固定表示当前最值得投入资金的机会；新增 `capital_priority_score/tier` 作为唯一 rank 的排序输入和解释字段，全市场资金部署队列按同一资金优先级口径重排，并把 `rank_semantics_version/opportunity_rank_meaning/rank_is_capital_priority/rank_is_not_trade_authority` 原子写入 scorecard、最终合约证据和 `capital_deployment`。本次不新增第二套 rank，不让 rank 直接成为交易权限，不改 Trader/Accountant 边界。
+
+（4）打通 rank 到真实资金部署出口。修改：`portfolio_manager.py`、统一字段语义表、机制文档和 PM 阶段流回归测试。原因：`rank=1` 不再只停留在观察/探针队列解释中；当唯一资金优先级 rank 对应 `tradeable_candidate`，且当前开仓证据、失效边界、确认质量、无技术反对和硬风险均通过时，PM 最终出口可写入 `rank_capital_priority_real_budget_release` 并释放 `real_budget_entry`。本次不新增第二套 rank，不让 rank 单独授权交易，不改 Trader/Accountant 边界，不通过压低交易频率改善结果。
+
+（5）把亏损开仓 episode 反写到入场质量。修改：`alpha_setup.py`、`analyst_signal_fusion.py`、统一字段语义表、机制文档和回归测试。原因：Researcher 写入产品级学习时必须把开仓亏损绑定回原始 setup、触发、证据组合和资金部署层级，PM 下一轮用 `entry_quality_loss_signal`、`trigger_quality_loss_signal`、`entry_quality_loss_penalty`、`trigger_quality_loss_penalty` 调整唯一 rank 和真实资金部署资格；本次只降低同类低质量入场/触发的资金优先级，不新增硬阻断，不改 Trader/Accountant 边界，不压低整体交易频率。
+
+（6）校准触发质量并保留放大通道。修改：`alpha_setup.py`、`analyst_signal_fusion.py`、`portfolio_policy_catalog.yaml`、统一字段语义表、机制文档和回归测试。原因：开仓 episode 必须把盈利/亏损结果同时反写到 `trigger_quality_verdict`、`trigger_confirmation_adjustment`、`trigger_quality_positive_signal` 和 `net_trigger_quality_loss_signal`；PM 下一轮用 `trigger_quality_positive_bonus` 放大被验证有效的同类 trigger，用净触发亏损信号降低失效 trigger 的真实资金部署优先级。本次不新增第二套 rank，不让 Trader 读学习或放宽触发，不用单向限制压低交易频率。
+
+（7）同步分析师提示词中的产品级学习安全边界。修改：`prompt.py` 和提示词回归测试。原因：`product_learning_calibration_view` 已由代码生成并注入 `learning_context`，三类分析师 prompt 需要显式说明只能把产品级历史表现用于证据质量、确认需求、setup 分类和待验证问题校准，不能生成 rank、资金部署、手数或交易权限；PM 仍是唯一把校准后证据转成排名和资金部署的智能体。
+
+（8）瘦身主配置中文注释。修改：`dev.yaml` 注释，不改任何参数值。原因：主配置只保留运行入口、catalog 索引、资金红线、交易宇宙和 LLM 路由的重点说明；机制解释继续放在机制文档和统一字段语义表，产品级学习写入、分析师安全视图、唯一 rank、真实资金部署、入场/触发质量校准继续由 catalog、代码机制和数据库学习承载。
+
+（9）修复空回测库下的已知日期回归测试口径。修改：`test_system_invariant_audit.py`、`test_mechanism_effectiveness_audit.py`。原因：当前已清理全部回测记录准备干净重跑，旧的“已知日期不崩溃”测试仍强制要求真实库存在历史 `config_id`，导致回测前总门误阻断；本次只让测试识别 `config_not_found_empty_db` 空库边界，有真实配置记录时仍要求 `config_id`，不放宽真实回测日 hard fail。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。
