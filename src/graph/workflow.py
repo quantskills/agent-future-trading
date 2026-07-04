@@ -20,7 +20,7 @@ from agents.registry import AgentRegistry
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
 from tools.agent_tools.analysis.analyst_quality import write_analyst_report
 from tools.agent_tools.analysis.analyst_data_usage import prefetch_local_daily_data, prefetch_pandaai_daily_data
-from tools.agent_tools.decision.pm_opportunity_ranking import rank_metadata_for_row
+from tools.agent_tools.decision.pm_opportunity_ranking import RANK_TRACE_FIELDS, rank_metadata_for_row, rank_trace_for_row
 from tools.common.final_action_semantics import (
     CAPITAL_PRIORITY_RANK_MEANING,
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
@@ -276,6 +276,27 @@ class AgentWorkflow:
         return metadata
 
     @staticmethod
+    def _rank_trace_from_snapshot(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
+        scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
+        if not row:
+            _, row = AgentWorkflow._scorecard_preferred_row(snapshot)
+        if row:
+            return rank_trace_for_row(row)
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
+        for source in (deployment, evidence):
+            trace = {
+                "rank_input_components": source.get("rank_input_components"),
+                "lifecycle_learning_trace": source.get("lifecycle_learning_trace"),
+                "learning_impact_delta": source.get("learning_impact_delta"),
+            }
+            if all(isinstance(value, dict) for value in trace.values()):
+                return trace
+        return {}
+
+    @staticmethod
     def _canonicalize_snapshot_final_contract(
         snapshot: Dict[str, Any],
         *,
@@ -300,10 +321,12 @@ class AgentWorkflow:
         scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
         row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
         rank_metadata = rank_metadata_for_row(row) if row else {}
+        rank_trace = rank_trace_for_row(row) if row else {}
         rank_metadata.update(full_market_rank_source_payload())
         if row:
             row["opportunity_rank"] = rank
             row.update(rank_metadata)
+            row.update(rank_trace)
             row["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             row["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             row["rank_is_capital_priority"] = True
@@ -313,6 +336,7 @@ class AgentWorkflow:
         if isinstance(evidence_used, dict):
             evidence_used["opportunity_rank"] = rank
             evidence_used.update(rank_metadata)
+            evidence_used.update(rank_trace)
             evidence_used["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             evidence_used["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             evidence_used["rank_is_capital_priority"] = True
@@ -322,6 +346,7 @@ class AgentWorkflow:
         if isinstance(active_opportunity, dict):
             active_opportunity["opportunity_rank"] = rank
             active_opportunity.update(rank_metadata)
+            active_opportunity.update(rank_trace)
             active_opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             active_opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             active_opportunity["rank_is_capital_priority"] = True
@@ -339,12 +364,14 @@ class AgentWorkflow:
         if isinstance(alignment, dict):
             alignment["opportunity_rank"] = rank
             alignment.update(rank_metadata)
+            alignment.update(rank_trace)
 
     @staticmethod
     def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
         rank_fields = (
             set(RANK_CAPITAL_LAYER_FIELDS)
             | set(RANK_CAPITAL_SOURCE_FIELDS)
+            | set(RANK_TRACE_FIELDS)
             | {
                 "opportunity_rank",
                 "rank_semantics_version",
@@ -479,11 +506,13 @@ class AgentWorkflow:
             reason_set.add("no_rank_no_new_exposure")
         contract["reason_codes"] = sorted(reason_set)
         rank_metadata = AgentWorkflow._rank_metadata_from_snapshot(snapshot) if rank is not None else {}
+        rank_trace = AgentWorkflow._rank_trace_from_snapshot(snapshot) if rank is not None else {}
         evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
         evidence["capital_allocation_reason"] = reason
         if rank is not None:
             evidence["opportunity_rank"] = rank
             evidence.update(rank_metadata)
+            evidence.update(rank_trace)
             evidence["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             evidence["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             evidence["rank_is_capital_priority"] = True
@@ -503,6 +532,7 @@ class AgentWorkflow:
                 {
                     "opportunity_rank": rank,
                     **rank_metadata,
+                    **rank_trace,
                     "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
                     "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
                     "rank_is_capital_priority": True,
@@ -525,6 +555,7 @@ class AgentWorkflow:
             if rank is not None:
                 opportunity["opportunity_rank"] = rank
                 opportunity.update(rank_metadata)
+                opportunity.update(rank_trace)
                 opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
                 opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
                 opportunity["rank_is_capital_priority"] = True

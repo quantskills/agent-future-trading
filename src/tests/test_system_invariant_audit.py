@@ -279,8 +279,36 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.close()
         return db_path
 
+    def _rank_trace(self):
+        return {
+            "rank_input_components": {
+                "capital_priority_tier": 3,
+                "capital_priority_score": 0.74,
+                "watch_priority_score": 0.82,
+                "opportunity_score": 0.68,
+            },
+            "lifecycle_learning_trace": {
+                "rank_lifecycle": "open_add_new_risk",
+                "allowed_learning_lanes": ["open", "add", "scale", "increase"],
+                "blocked_learning_lanes": ["hold", "reduce", "exit", "execution", "conditional_monitor"],
+                "used_lanes": ["open"],
+                "ignored_lanes": [],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {
+                "positive_learning": 0.12,
+                "negative_learning": 0.0,
+                "entry_quality_loss_penalty": 0.0,
+                "trigger_quality_positive_bonus": 0.0,
+                "trigger_quality_loss_penalty": 0.0,
+                "net_rank_learning_delta": 0.12,
+                "execution_profile_learning_direct_to_rank": False,
+            },
+        }
+
     def _insert_good_open(self, db_path: Path):
         rank_source = full_market_rank_source_payload()
+        rank_trace = self._rank_trace()
         contract = {
             "contract_type": "strategy",
             "final_action": "open_real",
@@ -302,6 +330,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "capital_layer": "real_budget_entry",
                 "capital_ratio_source": "normal_trade_margin_ratio",
                 "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                **rank_trace,
                 **rank_source,
                 "opportunity_score_components": {
                     "positive_learning": 0.12,
@@ -337,6 +366,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "capital_layer": "real_budget_entry",
                 "capital_ratio_source": "normal_trade_margin_ratio",
                 "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                **rank_trace,
                 **rank_source,
             },
         }
@@ -1985,6 +2015,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             rank_source = full_market_rank_source_payload()
+            rank_trace = self._rank_trace()
             payload = {
                 "final_action_contract": {
                     "contract_type": "strategy",
@@ -2007,6 +2038,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "capital_layer": "exploration_probe",
                         "capital_ratio_source": "probe_margin_ratio_0.008",
                         "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_trace,
                         **rank_source,
                     },
                     "capital_deployment": {
@@ -2020,6 +2052,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "capital_layer": "exploration_probe",
                         "capital_ratio_source": "probe_margin_ratio_0.008",
                         "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_trace,
                         **rank_source,
                     },
                 },
@@ -2074,6 +2107,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             rank_source = full_market_rank_source_payload()
+            rank_trace = self._rank_trace()
             payload = {
                 "final_action_contract": {
                     "contract_type": "strategy",
@@ -2098,6 +2132,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "capital_layer": "real_budget_entry",
                         "capital_ratio_source": "normal_trade_margin_ratio",
                         "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                        **rank_trace,
                         **rank_source,
                     },
                     "capital_deployment": {
@@ -2111,6 +2146,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "capital_layer": "real_budget_entry",
                         "capital_ratio_source": "normal_trade_margin_ratio",
                         "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                        **rank_trace,
                         **rank_source,
                     },
                 },

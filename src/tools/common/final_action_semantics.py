@@ -106,6 +106,11 @@ RANK_CAPITAL_LAYER_FIELDS = {
     "capital_ratio_source",
     "rank_reason",
 }
+RANK_CAPITAL_TRACE_FIELDS = {
+    "rank_input_components",
+    "lifecycle_learning_trace",
+    "learning_impact_delta",
+}
 CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION = "agentquant.capital_priority_rank.v1"
 CAPITAL_PRIORITY_RANK_MEANING = "rank_1_is_current_highest_capital_priority_not_trade_authority"
 FULL_MARKET_RANK_SOURCE = "full_market_capital_deployment"
@@ -561,6 +566,15 @@ def canonicalize_final_action_contract_for_persistence(
             if _non_empty(value):
                 evidence[field] = value
                 deployment[field] = value
+        for field in sorted(RANK_CAPITAL_TRACE_FIELDS):
+            value = metadata.get(field)
+            if not isinstance(value, Mapping):
+                value = evidence.get(field)
+            if not isinstance(value, Mapping):
+                value = deployment.get(field)
+            if isinstance(value, Mapping):
+                evidence[field] = dict(value)
+                deployment[field] = dict(value)
         canonical["evidence_used"] = evidence
         canonical["capital_deployment"] = deployment
         canonical.pop("opportunity_rank", None)
@@ -568,6 +582,7 @@ def canonicalize_final_action_contract_for_persistence(
         rank_fields = (
             set(RANK_CAPITAL_LAYER_FIELDS)
             | set(RANK_CAPITAL_SOURCE_FIELDS)
+            | set(RANK_CAPITAL_TRACE_FIELDS)
             | {
                 "opportunity_rank",
                 "rank_semantics_version",
@@ -801,6 +816,27 @@ def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) ->
     return bool(is_full_market_rank_source(deployment) or is_full_market_rank_source(evidence))
 
 
+def contract_is_unselected_no_new_exposure_candidate(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether a candidate was explicitly left undeployed with no new risk."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    if contract_increases_risk_position(contract):
+        return False
+    deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), Mapping)
+        else {}
+    )
+    if deployment.get("selected_for_capital_deployment") is not False:
+        return False
+    reason = _clean(
+        deployment.get("capital_allocation_reason")
+        or deployment.get("no_trade_reason")
+        or contract.get("capital_allocation_reason")
+    )
+    reason_set = set(reason_codes_from(contract))
+    return bool(reason or "no_rank_no_new_exposure" in reason_set)
+
+
 def full_market_rank_gate_errors(contract: Mapping[str, Any] | None) -> list[str]:
     """Return hard-gate errors for unranked new risk exposure."""
     if not contract_requires_full_market_capital_rank(contract):
@@ -887,11 +923,52 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
             errors.append(f"capital_deployment.{field}_missing")
         if evidence_has_rank and evidence.get(field) in (None, ""):
             errors.append(f"evidence_used.{field}_missing")
+    for field in sorted(RANK_CAPITAL_TRACE_FIELDS):
+        if deployment and not isinstance(deployment.get(field), Mapping):
+            errors.append(f"capital_deployment.{field}_missing")
+        if evidence_has_rank and not isinstance(evidence.get(field), Mapping):
+            errors.append(f"evidence_used.{field}_missing")
     if deployment_has_rank and deployment and not is_full_market_rank_source(deployment):
         errors.append("capital_deployment.rank_source_not_full_market")
     if evidence_has_rank and evidence and not is_full_market_rank_source(evidence):
         errors.append("evidence_used.rank_source_not_full_market")
     return errors
+
+
+def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> list[str]:
+    """Return errors when full-market new-capital rank used wrong lifecycle learning."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    if _rank_value_from_contract(contract) in (None, ""):
+        return []
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), Mapping)
+        else {}
+    )
+    trace = deployment.get("lifecycle_learning_trace")
+    if not isinstance(trace, Mapping):
+        trace = evidence.get("lifecycle_learning_trace")
+    impact = deployment.get("learning_impact_delta")
+    if not isinstance(impact, Mapping):
+        impact = evidence.get("learning_impact_delta")
+    errors: list[str] = []
+    if not isinstance(trace, Mapping):
+        errors.append("lifecycle_learning_trace_missing")
+        return errors
+    lifecycle = _clean(trace.get("rank_lifecycle"))
+    if lifecycle != "open_add_new_risk":
+        errors.append(f"rank_lifecycle_invalid:{lifecycle or 'missing'}")
+    forbidden_lanes = {"hold", "reduce", "exit", "execution", "conditional_monitor"}
+    used_lanes = {_clean(item) for item in trace.get("used_lanes") or [] if _clean(item)}
+    mixed = sorted(used_lanes & forbidden_lanes)
+    if mixed:
+        errors.append(f"open_rank_mixed_forbidden_learning_lanes:{','.join(mixed)}")
+    if bool(trace.get("execution_profile_signal_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    if isinstance(impact, Mapping) and bool(impact.get("execution_profile_learning_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    return sorted(set(errors))
 
 
 def rank_capital_layer_contract_complete(contract: Mapping[str, Any] | None) -> bool:
@@ -915,6 +992,22 @@ def is_conditional_monitor_contract(contract: Mapping[str, Any]) -> bool:
     )
 
 
+def contract_requires_conditional_intraday_result(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether a conditional contract must have a Trader intraday result.
+
+    Conditional fields can remain on an undeployed watch/probe candidate for
+    auditability. Trader is required to write triggered/not-triggered only when
+    the final contract still adds risk exposure after the full-market capital
+    rank gate.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    if not is_conditional_monitor_contract(contract):
+        return False
+    if contract_is_unselected_no_new_exposure_candidate(contract):
+        return False
+    return contract_increases_risk_position(contract)
+
+
 def classify_final_action_contract(contract: Mapping[str, Any] | None) -> dict[str, Any]:
     contract = contract if isinstance(contract, Mapping) else {}
     reason_summary = classify_reason_codes(contract)
@@ -923,6 +1016,7 @@ def classify_final_action_contract(contract: Mapping[str, Any] | None) -> dict[s
     current_lots, target_lots, lots_delta = _current_target_delta(contract)
     lot_change = target_lots != current_lots or lots_delta != 0
     conditional_monitor = is_conditional_monitor_contract(contract)
+    deployed_conditional_monitor = contract_requires_conditional_intraday_result(contract)
     hard_blocks = list(reason_summary["hard_block_reasons"])
     semantic_errors: list[str] = []
     if lots_delta != target_lots - current_lots:
@@ -939,7 +1033,7 @@ def classify_final_action_contract(contract: Mapping[str, Any] | None) -> dict[s
     if hard_blocks:
         lifecycle_state = "hard_block"
         execution_permission = "blocked"
-    elif conditional_monitor:
+    elif deployed_conditional_monitor:
         lifecycle_state = "conditional_monitor"
         execution_permission = "monitor_intraday"
         requires_intraday_result = True

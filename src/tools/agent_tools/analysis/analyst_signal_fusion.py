@@ -148,19 +148,19 @@ def _capital_priority_score(
     trigger_positive = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
     trigger_loss = _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0)
     learning_delta = max(
-        -0.12,
+        -0.28,
         min(
-            0.08,
-            0.05 * positive
-            + 0.03 * trigger_positive
-            - 0.06 * negative
-            - 0.05 * tail_loss
-            - 0.05 * entry_loss
-            - 0.04 * trigger_loss,
+            0.22,
+            0.14 * positive
+            + 0.10 * trigger_positive
+            - 0.16 * negative
+            - 0.13 * tail_loss
+            - 0.14 * entry_loss
+            - 0.12 * trigger_loss,
         ),
     )
     failure_penalty = min(0.10, 0.02 * len([item for item in gating_failures or [] if str(item or "").strip()]))
-    return round(_bounded(0.82 * _safe_float(opportunity_score, 0.0) + tier_bonus + learning_delta - failure_penalty), 4)
+    return round(_bounded(0.62 * _safe_float(opportunity_score, 0.0) + tier_bonus + learning_delta - failure_penalty), 4)
 
 
 def side_priority_semantics_payload() -> dict[str, Any]:
@@ -537,6 +537,7 @@ def _action_value_learning_summary(
     side: str,
     config: Mapping[str, Any],
     decision_date: Any = None,
+    decision_lifecycle: str = "open_add_new_risk",
 ) -> dict[str, Any]:
     default_scope_weights = {
         "exact_real_state": 1.0,
@@ -571,6 +572,11 @@ def _action_value_learning_summary(
     episode_count = 0
     strongest_positive: dict[str, Any] = {}
     strongest_negative: dict[str, Any] = {}
+    used_lanes: set[str] = set()
+    ignored_lanes: set[str] = set()
+    lifecycle = _clean_key(decision_lifecycle) or "open_add_new_risk"
+    open_rank_lanes = {"", "open", "add", "scale", "increase"}
+    blocked_open_rank_lanes = {"hold", "reduce", "exit", "execution", "conditional_monitor"}
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
@@ -597,6 +603,12 @@ def _action_value_learning_summary(
         if not action_preference:
             continue
         lane = _clean_key(_row_value(row, payload, "action_value_lane", "action_name", default=""))
+        if lifecycle == "open_add_new_risk" and lane in blocked_open_rank_lanes:
+            ignored_lanes.add(lane or "unknown")
+            continue
+        if lifecycle == "open_add_new_risk" and lane not in open_rank_lanes:
+            ignored_lanes.add(lane or "unknown")
+            continue
         scope = _clean_key(
             _row_value(row, payload, "amplification_scope_quality", "source_quality", "evidence_scope", default="unknown")
         )
@@ -659,6 +671,10 @@ def _action_value_learning_summary(
         )
         is_positive = action_preference in _POSITIVE_ACTION_PREFERENCES
         is_negative = action_preference in _NEGATIVE_ACTION_PREFERENCES or action_preference.startswith("negative")
+        if lifecycle == "open_add_new_risk" and action_preference == "positive_candidate_execution":
+            ignored_lanes.add("execution")
+            continue
+        used_lanes.add(lane or "unknown")
         if scope == "exact_real_state":
             exact_real_count += 1
         if reward_source in {"trade_episode", "episode_trade"}:
@@ -674,14 +690,7 @@ def _action_value_learning_summary(
         }
         if is_positive:
             positive_count += 1
-            if action_preference == "positive_candidate_execution" or "execution" in lane:
-                execution_signal += strength if reward_mean >= 0 else -strength
-            elif action_preference == "positive_candidate_hold":
-                positive_signal += strength * 0.65
-            elif action_preference == "positive_candidate_exit":
-                positive_signal += strength * 0.35
-            else:
-                positive_signal += strength
+            positive_signal += strength
             if not strongest_positive or strength > _safe_float(strongest_positive.get("weight"), 0.0):
                 strongest_positive = summary_ref
         if is_negative:
@@ -690,8 +699,6 @@ def _action_value_learning_summary(
             if action_preference == "negative_hold_revalidate":
                 negative_strength *= 0.75
             negative_signal += negative_strength
-            if "execution" in lane:
-                execution_signal -= strength
             if is_tail_loss:
                 recent_tail_loss_signal += strength * 1.35
             if not strongest_negative or negative_strength > _safe_float(strongest_negative.get("weight"), 0.0):
@@ -735,6 +742,10 @@ def _action_value_learning_summary(
         "episode_count": episode_count,
         "strongest_positive": strongest_positive,
         "strongest_negative": strongest_negative,
+        "decision_lifecycle": lifecycle,
+        "used_lanes": sorted(used_lanes),
+        "ignored_lanes": sorted(ignored_lanes),
+        "execution_profile_signal_direct_to_rank": False,
     }
 
 
@@ -1201,6 +1212,12 @@ def build_opportunity_scorecard(
                 "episode_count": action_value_learning.get("episode_count", 0),
                 "strongest_positive": action_value_learning.get("strongest_positive") or {},
                 "strongest_negative": action_value_learning.get("strongest_negative") or {},
+                "decision_lifecycle": action_value_learning.get("decision_lifecycle") or "open_add_new_risk",
+                "used_lanes": list(action_value_learning.get("used_lanes") or []),
+                "ignored_lanes": list(action_value_learning.get("ignored_lanes") or []),
+                "execution_profile_signal_direct_to_rank": bool(
+                    action_value_learning.get("execution_profile_signal_direct_to_rank")
+                ),
             },
             "alpha_setup_profile_counts": {
                 "deployable": len(deployable_profiles),

@@ -285,6 +285,9 @@ Phase4 完成后，研究学习单独运行：
 - `capital_layer`；
 - `capital_ratio_source`；
 - `rank_reason`；
+- `rank_input_components`；
+- `lifecycle_learning_trace`；
+- `learning_impact_delta`；
 - `capital_allocation_reason`；
 - 未入选或降级原因。
 

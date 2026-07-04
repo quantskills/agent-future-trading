@@ -617,18 +617,18 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         producers=(
             _rule(
                 "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
-                ("def rank_metadata_for_row", "rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
-                "ranking metadata helper describes capital role, layer, ratio source, and reason for workflow-generated rank",
+                ("def rank_metadata_for_row", "def rank_trace_for_row", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
+                "ranking helpers describe capital role, layer, ratio source, reason, rank inputs, lifecycle learning trace, and learning impact for workflow-generated rank",
             ),
             _rule(
                 "src/graph/workflow.py",
-                ("_apply_deployed_target_to_snapshot", "rank_source", "rank_scope", "capital_rank_generated_by"),
-                "workflow atomically lands full-market rank source and metadata in final_action_contract capital_deployment",
+                ("_apply_deployed_target_to_snapshot", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
+                "workflow atomically lands full-market rank source, metadata, rank inputs, lifecycle learning trace, and learning impact in final_action_contract capital_deployment",
             ),
             _rule(
                 "src/tools/agent_tools/decision/pm_contract_builder.py",
-                ("rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
-                "PM contract builder carries rank capital-layer metadata into final_action_contract evidence",
+                ("rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
+                "PM contract builder carries rank input and learning trace fields into final_action_contract evidence",
             ),
         ),
         consumers=(
@@ -646,13 +646,13 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         audits=(
             _rule(
                 "src/tools/common/final_action_semantics.py",
-                ("def rank_capital_layer_contract_errors", "RANK_CAPITAL_LAYER_FIELDS"),
+                ("def rank_capital_layer_contract_errors", "RANK_CAPITAL_LAYER_FIELDS", "RANK_CAPITAL_TRACE_FIELDS"),
                 "shared semantics defines the complete ranked capital-layer contract",
             ),
             _rule(
                 "docs/mechanism_multiagents.md",
-                ("rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
-                "mechanism document fixes the single-rank capital-layer contract fields",
+                ("rank_capital_role", "capital_layer", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
+                "mechanism document fixes the single-rank capital-layer and lifecycle learning trace contract fields",
             ),
         ),
         tests=(

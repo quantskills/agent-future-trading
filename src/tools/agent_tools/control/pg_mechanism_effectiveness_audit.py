@@ -24,12 +24,15 @@ from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
     contract_consumes_hold_exit_pm_learning,
     contract_increases_risk_position,
+    contract_is_unselected_no_new_exposure_candidate,
     contract_reduces_or_exits_position,
+    contract_requires_conditional_intraday_result,
     derive_memory_requirements,
     has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
     lane_matches_memory_requirement,
+    rank_lifecycle_learning_route_errors,
 )
 
 
@@ -561,7 +564,7 @@ def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
 
 
 def _scenario_for_contract(contract: Dict[str, Any]) -> str:
-    if _is_conditional_monitor(contract):
+    if _requires_conditional_intraday_result(contract):
         return SCENARIO_CONDITIONAL_MONITOR
     if _contract_reduces_or_exits_position(contract):
         return SCENARIO_REDUCE_EXIT
@@ -602,6 +605,14 @@ def _hold_exit_landed_in_position(contract: Dict[str, Any]) -> bool:
 
 def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:
     return is_conditional_monitor_contract(contract)
+
+
+def _requires_conditional_intraday_result(contract: Dict[str, Any]) -> bool:
+    return contract_requires_conditional_intraday_result(contract)
+
+
+def _is_unselected_no_new_exposure_candidate(contract: Dict[str, Any]) -> bool:
+    return contract_is_unselected_no_new_exposure_candidate(contract)
 
 
 def _has_intraday_decision(intraday_decisions: Iterable[Dict[str, Any]], recommendation_id: str) -> bool:
@@ -785,7 +796,17 @@ def _audit_recommendation_mechanisms(
             hard_failures.append(hold_exit_failure)
 
         rank = _rank_value(contract)
-        if components_nonzero and rank is None and scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}:
+        rank_route_errors = rank_lifecycle_learning_route_errors(contract)
+        if rank_route_errors:
+            hard_failures.append(
+                f"mechanism_rank_lifecycle_learning_route_invalid:{label}:errors={','.join(rank_route_errors)}"
+            )
+        if (
+            components_nonzero
+            and rank is None
+            and scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}
+            and not _is_unselected_no_new_exposure_candidate(contract)
+        ):
             hard_failures.append(f"mechanism_learning_score_missing_rank:{label}")
 
         deployment = _dict(contract.get("capital_deployment"))
@@ -818,7 +839,7 @@ def _audit_recommendation_mechanisms(
         ):
             hard_failures.append(hold_exit_failure)
 
-        if _is_conditional_monitor(contract):
+        if _requires_conditional_intraday_result(contract):
             auditor_verdict = _auditor_verdict_from_recommendation(recommendation)
             if auditor_verdict in {"block", "require_review"}:
                 if not _auditor_block_reason_present(recommendation):

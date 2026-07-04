@@ -22,6 +22,7 @@ from tools.agent_tools.decision.pm_opportunity_ranking import (
     SIDE_PRIORITY_MEANING,
     SIDE_PRIORITY_SEMANTICS_VERSION,
     rank_metadata_for_row,
+    rank_trace_for_row,
     rank_opportunities,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
@@ -290,6 +291,105 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             metadata["rank_reason"],
             "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
         )
+
+    def test_open_action_value_learning_changes_new_capital_priority_only_by_lifecycle(self):
+        base_signal = [_signal("technical", Signal.BULLISH, 0.72)]
+        positive = rank_opportunities(
+            ticker="P",
+            analyst_signals=base_signal,
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.65},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[
+                {
+                    "consumer_scope": "pm_learning",
+                    "side": "long",
+                    "action_value_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 6000,
+                    "reward_mean": 6000,
+                    "sample_count": 3,
+                    "last_sample_date": "2025-03-04",
+                }
+            ],
+            decision_date="2025-03-05",
+            config={},
+        )
+        negative = rank_opportunities(
+            ticker="P",
+            analyst_signals=base_signal,
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.65},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[
+                {
+                    "consumer_scope": "pm_learning",
+                    "side": "long",
+                    "action_value_lane": "open",
+                    "action_preference": "negative_revalidate",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": -6000,
+                    "reward_mean": -6000,
+                    "sample_count": 3,
+                    "last_sample_date": "2025-03-04",
+                },
+                {
+                    "consumer_scope": "pm_learning",
+                    "side": "long",
+                    "action_value_lane": "hold",
+                    "action_preference": "positive_candidate_hold",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 9000,
+                    "reward_mean": 9000,
+                    "sample_count": 3,
+                    "last_sample_date": "2025-03-04",
+                },
+                {
+                    "consumer_scope": "pm_learning",
+                    "side": "long",
+                    "action_value_lane": "execution",
+                    "action_preference": "positive_candidate_execution",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 9000,
+                    "reward_mean": 9000,
+                    "sample_count": 3,
+                    "last_sample_date": "2025-03-04",
+                },
+            ],
+            decision_date="2025-03-05",
+            config={},
+        )
+
+        positive_row = positive["opportunity_scorecard"]["long"]
+        negative_row = negative["opportunity_scorecard"]["long"]
+        self.assertGreater(positive_row["capital_priority_score"], negative_row["capital_priority_score"])
+        self.assertGreater(
+            positive_row["opportunity_score_components"]["positive_learning"],
+            0.0,
+        )
+        self.assertLess(
+            negative_row["opportunity_score_components"]["negative_learning"],
+            0.0,
+        )
+        self.assertEqual(
+            negative_row["opportunity_score_components"]["execution_profile_learning"],
+            0.0,
+        )
+        trace = rank_trace_for_row(negative_row)["lifecycle_learning_trace"]
+        self.assertIn("open", trace["used_lanes"])
+        self.assertIn("hold", trace["ignored_lanes"])
+        self.assertIn("execution", trace["ignored_lanes"])
 
     def test_repeated_alpha_candidate_uses_same_rank_with_alpha_scale_layer(self):
         result = rank_opportunities(

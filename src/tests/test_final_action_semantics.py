@@ -20,6 +20,8 @@ from tools.common.final_action_semantics import (
     classify_reason_codes,
     contract_consumes_hold_exit_pm_learning,
     contract_has_full_market_capital_rank,
+    contract_is_unselected_no_new_exposure_candidate,
+    contract_requires_conditional_intraday_result,
     derive_memory_requirements,
     derive_accounting_expectation,
     derive_execution_requirement,
@@ -36,6 +38,7 @@ from tools.common.final_action_semantics import (
     lane_matches_memory_requirement,
     rank_capital_layer_contract_complete,
     rank_capital_layer_contract_errors,
+    rank_lifecycle_learning_route_errors,
     requires_intraday_result,
     validate_action_value_write_consistency,
     validate_final_action_lot_transition,
@@ -44,6 +47,33 @@ from tools.common.final_action_semantics import (
 
 
 class FinalActionSemanticsTest(unittest.TestCase):
+    def _rank_trace(self) -> dict:
+        return {
+            "rank_input_components": {
+                "capital_priority_tier": 1,
+                "capital_priority_score": 0.42,
+                "watch_priority_score": 0.61,
+                "opportunity_score": 0.48,
+            },
+            "lifecycle_learning_trace": {
+                "rank_lifecycle": "open_add_new_risk",
+                "allowed_learning_lanes": ["open", "add", "scale", "increase"],
+                "blocked_learning_lanes": ["hold", "reduce", "exit", "execution", "conditional_monitor"],
+                "used_lanes": ["open"],
+                "ignored_lanes": ["execution"],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {
+                "positive_learning": 0.04,
+                "negative_learning": 0.0,
+                "entry_quality_loss_penalty": 0.0,
+                "trigger_quality_positive_bonus": 0.02,
+                "trigger_quality_loss_penalty": 0.0,
+                "net_rank_learning_delta": 0.06,
+                "execution_profile_learning_direct_to_rank": False,
+            },
+        }
+
     def _conditional_contract(self) -> dict:
         return {
             "ticker": "SR",
@@ -214,6 +244,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
             "capital_deployment": {
@@ -224,6 +255,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
         }
@@ -264,12 +296,14 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
                 "opportunity_rank": 1,
+                **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
         }
@@ -282,6 +316,83 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "probe_margin_ratio_0.008",
         )
         self.assertEqual(rank_capital_layer_contract_errors(canonical), [])
+
+    def test_rank_lifecycle_route_rejects_hold_or_execution_learning_in_open_rank(self):
+        contract = {
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
+            "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **self._rank_trace(),
+                **full_market_rank_source_payload(),
+            },
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "opportunity_rank": 1,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **self._rank_trace(),
+                **full_market_rank_source_payload(),
+            },
+        }
+        contract["capital_deployment"]["lifecycle_learning_trace"]["used_lanes"] = ["open", "hold", "execution"]
+
+        errors = rank_lifecycle_learning_route_errors(contract)
+
+        self.assertTrue(any(error.startswith("open_rank_mixed_forbidden_learning_lanes") for error in errors))
+
+    def test_unselected_conditional_candidate_does_not_require_intraday_result(self):
+        contract = {
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "reason_codes": ["no_rank_no_new_exposure", "conditional_trigger_authority"],
+            "capital_deployment": {
+                "selected_for_capital_deployment": False,
+                "original_target_lots": -4,
+                "deployed_target_lots": 0,
+                "deployed_lots_delta": 0,
+                "capital_allocation_reason": "no_rank_no_new_exposure",
+            },
+        }
+
+        self.assertTrue(contract_is_unselected_no_new_exposure_candidate(contract))
+        self.assertFalse(contract_requires_conditional_intraday_result(contract))
+        self.assertFalse(classify_final_action_contract(contract)["requires_intraday_result"])
+
+    def test_deployed_conditional_open_requires_intraday_result(self):
+        contract = {
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": -1,
+            "lots_delta": -1,
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "original_target_lots": -1,
+                "deployed_target_lots": -1,
+                "deployed_lots_delta": -1,
+            },
+        }
+
+        self.assertFalse(contract_is_unselected_no_new_exposure_candidate(contract))
+        self.assertTrue(contract_requires_conditional_intraday_result(contract))
+        self.assertTrue(classify_final_action_contract(contract)["requires_intraday_result"])
 
     def test_pm_memory_consumption_audit_checks_declared_and_landed_memory(self):
         contract = {

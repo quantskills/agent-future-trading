@@ -35,6 +35,7 @@ from tools.common.final_action_semantics import (
     is_conditional_monitor_contract,
     lane_matches_memory_requirement,
     rank_capital_layer_contract_errors,
+    rank_lifecycle_learning_route_errors,
     validate_final_action_lot_transition,
 )
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
@@ -1477,6 +1478,12 @@ def _audit_pm_learning_transport_and_contract_effect(
             errors.append(
                 "pm_rank_capital_layer_contract_incomplete:"
                 f"{label}:missing={','.join(rank_contract_errors)}"
+            )
+        rank_route_errors = rank_lifecycle_learning_route_errors(contract)
+        if rank_route_errors:
+            errors.append(
+                "pm_rank_lifecycle_learning_route_invalid:"
+                f"{label}:errors={','.join(rank_route_errors)}"
             )
         rank_gate_errors = full_market_rank_gate_errors(contract)
         if rank_gate_errors:

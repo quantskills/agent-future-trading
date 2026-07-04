@@ -19,6 +19,33 @@ def _dumps(value):
 
 
 class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
+    def _rank_trace(self) -> dict:
+        return {
+            "rank_input_components": {
+                "capital_priority_tier": 1,
+                "capital_priority_score": 0.42,
+                "watch_priority_score": 0.61,
+                "opportunity_score": 0.48,
+            },
+            "lifecycle_learning_trace": {
+                "rank_lifecycle": "open_add_new_risk",
+                "allowed_learning_lanes": ["open", "add", "scale", "increase"],
+                "blocked_learning_lanes": ["hold", "reduce", "exit", "execution", "conditional_monitor"],
+                "used_lanes": ["open"],
+                "ignored_lanes": [],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {
+                "positive_learning": 0.12,
+                "negative_learning": 0.0,
+                "entry_quality_loss_penalty": 0.0,
+                "trigger_quality_positive_bonus": 0.0,
+                "trigger_quality_loss_penalty": 0.0,
+                "net_rank_learning_delta": 0.12,
+                "execution_profile_learning_direct_to_rank": False,
+            },
+        }
+
     def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
         db_path = SRC_ROOT / "assets" / "agentquant.db"
         if not db_path.exists():
@@ -263,6 +290,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     "rank_capital_role": "best_exploration_probe_candidate",
                     "capital_ratio_source": "probe_margin_ratio_0.008",
                     "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                    **self._rank_trace(),
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": -1,
                     "original_target_lots": -1,
@@ -314,12 +342,10 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     }
                 ],
                 "evidence_used": {
-                    "opportunity_rank": 15,
                     "opportunity_score_components": {},
                     "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
                 },
                 "capital_deployment": {
-                    "opportunity_rank": 15,
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": 0,
                     "original_target_lots": 0,
@@ -862,6 +888,53 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("mechanism_learning_score_missing_rank", "\n".join(report.hard_failures))
 
+    def test_unselected_conditional_candidate_does_not_require_rank_or_intraday_result(self):
+        db_path = self._make_db()
+        self._insert_recommendation(
+            db_path,
+            rec_id="unselected-conditional-no-new-exposure",
+            ticker="HC",
+            contract={
+                "ticker": "HC",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "final_action": "wait",
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "reason_codes": [
+                    "conditional_trigger_authority",
+                    "no_rank_no_new_exposure",
+                    "capital_queue_not_selected",
+                ],
+                "evidence_used": {
+                    "opportunity_score": 0.0,
+                    "capital_priority_score": 0.0,
+                    "opportunity_score_components": {
+                        "positive_learning": 0.12,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": False,
+                    "original_target_lots": -11,
+                    "deployed_target_lots": 0,
+                    "deployed_lots_delta": 0,
+                    "capital_allocation_reason": "no_rank_no_new_exposure",
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        failures = "\n".join(report.hard_failures)
+        self.assertNotIn("mechanism_learning_score_missing_rank", failures)
+        self.assertNotIn("mechanism_conditional_probe_missing_intraday_result", failures)
+
     def test_ranked_open_contract_without_capital_deployment_hard_fails(self):
         db_path = self._make_db()
         self._insert_recommendation(
@@ -913,10 +986,11 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     "opportunity_score": 0.88,
                     "opportunity_rank": 1,
                     "capital_allocation_reason": "selected_by_full_market_rank",
+                    **self._rank_trace(),
                     "opportunity_score_components": {
                         "positive_learning": 0.24,
                         "negative_learning": 0,
-                        "execution_profile_learning": 0.02,
+                        "execution_profile_learning": 0.0,
                         "recent_tail_loss_penalty": 0,
                     },
                 },
@@ -926,6 +1000,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     "rank_capital_role": "best_exploration_probe_candidate",
                     "capital_ratio_source": "probe_margin_ratio_0.008",
                     "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                    **self._rank_trace(),
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": -1,
                     "original_target_lots": -1,
@@ -985,10 +1060,12 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "evidence_used": {
                     "opportunity_rank": 2,
                     "capital_allocation_reason": "selected_conditional_monitor",
+                    **self._rank_trace(),
                     "opportunity_score_components": {},
                 },
                 "capital_deployment": {
                     "opportunity_rank": 2,
+                    **self._rank_trace(),
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": -1,
                     "original_target_lots": -1,
@@ -1015,10 +1092,12 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
             "evidence_used": {
                 "opportunity_rank": 2,
                 "capital_allocation_reason": "selected_conditional_monitor",
+                **self._rank_trace(),
                 "opportunity_score_components": {},
             },
             "capital_deployment": {
                 "opportunity_rank": 2,
+                **self._rank_trace(),
                 "selected_for_capital_deployment": True,
                 "deployed_target_lots": -1,
                 "original_target_lots": -1,

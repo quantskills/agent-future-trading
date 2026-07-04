@@ -296,6 +296,12 @@
 
 （3）收口新增风险敞口全市场 rank 闸门。修改：`workflow.py`、`final_action_semantics.py`、`pg_system_invariants.py`、统一字段语义表、机制文档和回归测试。原因：2025-04-08 暴露出 HC/ZN 这类 `open_probe` 可通过 atomic fallback 保留新增 `target_lots`，但没有进入全市场资金 rank 队列；本次固定所有 open/open_probe/open_real/add/scale/increase/reverse/conditional open 只要新增风险敞口，最终落盘前必须获得 `rank_source=full_market_capital_deployment` 的 `opportunity_rank`。分数为 0 的 watch/open_probe 也进入同一全市场候选池排序；没有 full-market rank 的新增风险合约必须还原到 `current_lots` 并写入 `no_rank_no_new_exposure`。不改仓位参数、不新增第二套 rank、不改 Trader/Accountant/Researcher 主逻辑、不降低 PG hard fail。
 
+==========2026年07月05日==========
+
+（1）收口未部署条件候选与新增风险 rank 闸门的 PG 机制审计语义。修改：`final_action_semantics.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和机制审计回归测试。原因：2025-04-08 EB/HC/ZN 最终合约已被 `no_rank_no_new_exposure` 还原为 `wait/target_lots=0/lots_delta=0/selected_for_capital_deployment=false`，但 PG 机制审计仍按旧口径用 `conditional_trigger_authority/requires_intraday_confirmation` 把未部署观察候选误判为已部署条件开仓，进而要求 Trader 盘中结果和 rank。本次固定只有真正部署新增风险敞口的条件开仓才需要 `opportunity_rank` 和 Trader 盘中结果；未部署且无新增风险候选只要求明确未选中原因，不改 PM 决策、不改 Trader/Accountant/Researcher 主逻辑、不改仓位参数、不降低 hard fail。
+
+（2）收口全市场资金 rank 目标函数与生命周期强化学习决策口。修改：`analyst_signal_fusion.py`、`pm_opportunity_ranking.py`、`workflow.py`、`pm_contract_builder.py`、`final_action_semantics.py`、两条 PG 检查、契约覆盖、统一字段语义表、机制文档和回归测试。原因：此前 rank 管道已经落盘，但排序目标仍偏重当日证据外观，产品级 action-value 与交易后收益对 `capital_priority_score/watch_priority_score` 的校准力度不足，且 hold/reduce/exit/execution 学习仍有被误解为新资金 rank 输入的风险。本次把 open/add/scale/increase 学习作为新资金 rank 的直接强化学习输入，放大正向历史收益、入场亏损和触发质量反馈对排序分数的影响；hold/reduce/exit 学习只服务持仓和释放资金决策，execution 学习只服务 trigger/profile 校准。最终 ranked 合约必须同步写入 `rank_input_components/lifecycle_learning_trace/learning_impact_delta`，PG hard fail 生命周期学习混用、execution 学习直接生成 rank、旧局部 rank 或无 rank 新增风险敞口。不新增第二套 rank、不改仓位参数、不改 PM/Trader/Accountant/Researcher 边界、不降低 hard fail。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

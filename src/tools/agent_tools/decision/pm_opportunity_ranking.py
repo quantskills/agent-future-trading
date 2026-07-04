@@ -32,6 +32,11 @@ FINAL_RANK_FIELDS = {
     "rank_is_capital_priority",
     "rank_is_not_trade_authority",
 }
+RANK_TRACE_FIELDS = {
+    "rank_input_components",
+    "lifecycle_learning_trace",
+    "learning_impact_delta",
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -152,6 +157,75 @@ def rank_metadata_for_row(row: Mapping[str, Any]) -> dict[str, str]:
         "capital_layer": layer,
         "capital_ratio_source": capital_ratio_source_for_layer(layer),
         "rank_reason": rank_reason_for_layer(row, layer),
+    }
+
+
+def rank_input_components_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the deterministic inputs used by the single full-market rank."""
+    components = row.get("opportunity_score_components")
+    components = components if isinstance(components, Mapping) else {}
+    return {
+        "final_state": str(row.get("final_state") or row.get("opportunity_state") or ""),
+        "capital_priority_tier": _capital_priority_tier(row),
+        "capital_priority_score": round(_capital_priority_score(row), 6),
+        "watch_priority_score": round(_watch_priority_score(row), 6),
+        "opportunity_score": round(_safe_float(row.get("opportunity_score", row.get("score")), 0.0), 6),
+        "evidence_quality_score": round(_safe_float(row.get("evidence_quality_score"), 0.0), 6),
+        "setup_quality_score": round(_safe_float(row.get("setup_quality_score", row.get("max_setup_quality")), 0.0), 6),
+        "trigger_quality_score": round(_safe_float(row.get("trigger_quality_score"), 0.0), 6),
+        "positive_learning_component": round(_safe_float(components.get("positive_learning"), 0.0), 6),
+        "negative_learning_component": round(_safe_float(components.get("negative_learning"), 0.0), 6),
+        "entry_quality_loss_component": round(_safe_float(components.get("entry_quality_loss_penalty"), 0.0), 6),
+        "trigger_quality_positive_component": round(_safe_float(components.get("trigger_quality_positive_bonus"), 0.0), 6),
+        "trigger_quality_loss_component": round(_safe_float(components.get("trigger_quality_loss_penalty"), 0.0), 6),
+        "execution_profile_learning_component": round(_safe_float(components.get("execution_profile_learning"), 0.0), 6),
+    }
+
+
+def lifecycle_learning_trace_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Trace which learning lanes were allowed to affect new capital rank."""
+    summary = row.get("action_value_learning_summary")
+    summary = summary if isinstance(summary, Mapping) else {}
+    return {
+        "rank_lifecycle": "open_add_new_risk",
+        "allowed_learning_lanes": ["open", "add", "scale", "increase"],
+        "blocked_learning_lanes": ["hold", "reduce", "exit", "execution", "conditional_monitor"],
+        "used_lanes": list(summary.get("used_lanes") or []),
+        "ignored_lanes": list(summary.get("ignored_lanes") or []),
+        "positive_count": int(_safe_float(summary.get("positive_count"), 0.0)),
+        "negative_count": int(_safe_float(summary.get("negative_count"), 0.0)),
+        "exact_real_count": int(_safe_float(summary.get("exact_real_count"), 0.0)),
+        "episode_count": int(_safe_float(summary.get("episode_count"), 0.0)),
+        "execution_profile_signal_direct_to_rank": bool(summary.get("execution_profile_signal_direct_to_rank")),
+        "strongest_positive": dict(summary.get("strongest_positive") or {}),
+        "strongest_negative": dict(summary.get("strongest_negative") or {}),
+    }
+
+
+def learning_impact_delta_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the lifecycle-safe learning contribution used by rank scoring."""
+    components = row.get("opportunity_score_components")
+    components = components if isinstance(components, Mapping) else {}
+    direct_terms = {
+        "positive_learning": _safe_float(components.get("positive_learning"), 0.0),
+        "negative_learning": _safe_float(components.get("negative_learning"), 0.0),
+        "entry_quality_loss_penalty": _safe_float(components.get("entry_quality_loss_penalty"), 0.0),
+        "trigger_quality_positive_bonus": _safe_float(components.get("trigger_quality_positive_bonus"), 0.0),
+        "trigger_quality_loss_penalty": _safe_float(components.get("trigger_quality_loss_penalty"), 0.0),
+    }
+    return {
+        **{key: round(value, 6) for key, value in direct_terms.items()},
+        "net_rank_learning_delta": round(sum(direct_terms.values()), 6),
+        "execution_profile_learning_direct_to_rank": False,
+        "execution_profile_learning_observed": round(_safe_float(components.get("execution_profile_learning"), 0.0), 6),
+    }
+
+
+def rank_trace_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "rank_input_components": rank_input_components_for_row(row),
+        "lifecycle_learning_trace": lifecycle_learning_trace_for_row(row),
+        "learning_impact_delta": learning_impact_delta_for_row(row),
     }
 
 
@@ -295,6 +369,7 @@ def rank_opportunities(
             row["ticker_side_priority"] = priority
             row["side_priority_score"] = _watch_priority_score(row)
             row["watch_priority_score"] = _watch_priority_score(row)
+            row.update(rank_trace_for_row(row))
             row.update(side_priority_semantics_payload())
 
     preferred_side = str(scorecard.get("preferred_side") or "flat").lower()
