@@ -100,6 +100,12 @@ MEMORY_SIDE_ROLES = {
     "trigger_side",
     "historical_sample_side",
 }
+RANK_CAPITAL_LAYER_FIELDS = {
+    "rank_capital_role",
+    "capital_layer",
+    "capital_ratio_source",
+    "rank_reason",
+}
 
 DIRECT_AUTHORITY_TYPES = {"real_budget_entry", "scale", "add", "reduce", "exit", "risk_exit"}
 PROBE_AUTHORITY_TYPES = {"exploration_probe"}
@@ -638,6 +644,47 @@ def contract_consumes_hold_exit_pm_learning(contract: Mapping[str, Any] | None) 
         if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
             return True
     return False
+
+
+def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> list[str]:
+    """Return rank/capital-layer completeness errors for a PM final contract.
+
+    The single opportunity rank is allowed to describe capital priority only
+    when the same final_action_contract also carries its capital role, layer,
+    ratio source, and rank reason. This function is read-only and does not
+    change ranking, sizing, orders, or audit severity.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), Mapping)
+        else {}
+    )
+    contract_has_rank = contract.get("opportunity_rank") not in (None, "")
+    evidence_has_rank = evidence.get("opportunity_rank") not in (None, "")
+    deployment_has_rank = deployment.get("opportunity_rank") not in (None, "")
+    if not (contract_has_rank or evidence_has_rank or deployment_has_rank):
+        return []
+
+    errors: list[str] = []
+    if contract_has_rank:
+        errors.append("top_level.opportunity_rank_forbidden")
+    if not deployment:
+        errors.append("capital_deployment_missing")
+    elif not deployment_has_rank:
+        errors.append("capital_deployment.opportunity_rank_missing")
+    for field in sorted(RANK_CAPITAL_LAYER_FIELDS):
+        if deployment and deployment.get(field) in (None, ""):
+            errors.append(f"capital_deployment.{field}_missing")
+        if evidence_has_rank and evidence.get(field) in (None, ""):
+            errors.append(f"evidence_used.{field}_missing")
+    return errors
+
+
+def rank_capital_layer_contract_complete(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether any ranked PM contract has complete capital-layer fields."""
+    return not rank_capital_layer_contract_errors(contract)
 
 
 def is_conditional_monitor_contract(contract: Mapping[str, Any]) -> bool:

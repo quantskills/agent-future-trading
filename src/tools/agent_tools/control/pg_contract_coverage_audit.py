@@ -613,6 +613,62 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
     ),
     ContractCoverageSpec(
+        contract="rank_capital_layer_contract",
+        producers=(
+            _rule(
+                "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
+                ("def rank_metadata_for_row", "rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
+                "ranking tool emits the single rank's capital role, layer, ratio source, and reason",
+            ),
+            _rule(
+                "src/graph/workflow.py",
+                ("_apply_deployed_target_to_snapshot", "rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
+                "workflow atomically lands rank metadata in final_action_contract capital_deployment",
+            ),
+            _rule(
+                "src/tools/agent_tools/decision/pm_contract_builder.py",
+                ("rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
+                "PM contract builder carries rank capital-layer metadata into final_action_contract evidence",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/tools/agent_tools/control/pg_system_invariants.py",
+                ("rank_capital_layer_contract_errors", "pm_rank_capital_layer_contract_incomplete"),
+                "daily hard gate rejects ranked contracts missing capital-layer semantics",
+            ),
+            _rule(
+                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
+                ("def _capital_layer", "diagnostic_low_rank_outperformed_top_rank"),
+                "mechanism diagnostics bucket rank performance by capital layer",
+            ),
+        ),
+        audits=(
+            _rule(
+                "src/tools/common/final_action_semantics.py",
+                ("def rank_capital_layer_contract_errors", "RANK_CAPITAL_LAYER_FIELDS"),
+                "shared semantics defines the complete ranked capital-layer contract",
+            ),
+            _rule(
+                "docs/mechanism_multiagents.md",
+                ("rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
+                "mechanism document fixes the single-rank capital-layer contract fields",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_system_invariant_audit.py",
+                ("test_system_invariant_audit_rejects_rank_missing_capital_layer_contract",),
+                "system invariant test catches ranked contracts missing capital-layer fields",
+            ),
+            _rule(
+                "src/tests/test_phase_flow_regression.py",
+                ("test_watch_rank_one_keeps_probe_capital_layer_and_probe_ratio_source",),
+                "phase flow test proves ranked watch candidate keeps probe capital layer and ratio source",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="position_sizing_result",
         producers=(
             _rule(

@@ -284,6 +284,10 @@
 
 （9）修复空回测库下的已知日期回归测试口径。修改：`test_system_invariant_audit.py`、`test_mechanism_effectiveness_audit.py`。原因：当前已清理全部回测记录准备干净重跑，旧的“已知日期不崩溃”测试仍强制要求真实库存在历史 `config_id`，导致回测前总门误阻断；本次只让测试识别 `config_not_found_empty_db` 空库边界，有真实配置记录时仍要求 `config_id`，不放宽真实回测日 hard fail。
 
+（10）收口唯一资金优先级 rank 与资金层级解耦。修改：`pm_opportunity_ranking.py`、workflow 资金部署、PG 机制诊断、统一字段语义表、机制文档和回归测试。原因：系统仍只保留一个 `opportunity_rank`，`rank=1` 固定表示当前最值得占用资金；当所有候选都是 `watch_for_trigger` 时，rank 按证据质量、触发完整度、失效边界、冲突程度、产品级学习、trigger 历史表现和资金效率排出最值得用既有 `0.008` 小探针资金试的候选，不自动升仓；`tradeable_candidate` 与反复验证 alpha 候选通过同一 rank 映射到真实资金或放大资金层级，并把 `rank_capital_role/capital_layer/capital_ratio_source/rank_reason` 写入最终合约资金部署。本次不新增第二套 rank，不改仓位参数，不硬编码品种好坏，不改 Trader/Accountant/Researcher 边界。
+
+（11）收口产品级学习到唯一资金 rank 合约闭环。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_contract_coverage_audit.py`、`analyst_signal_fusion.py`、`pm_contract_builder.py`、统一字段语义表和回归测试。原因：凡最终合约写入 `opportunity_rank`，必须同步写入 `rank_capital_role/capital_layer/capital_ratio_source/rank_reason` 并由 PG 与契约覆盖硬检查；PM 必须能消费顶层 `entry_quality_outcome` 形成入场/触发质量分项，并把真实资金释放或未释放诊断写入最终合约证据，防止产品级学习、唯一 rank 和资金部署只停留在诊断字段。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

@@ -138,6 +138,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     trading_date TEXT NOT NULL,
                     ticker TEXT NOT NULL,
                     daily_pnl REAL NOT NULL,
+                    new_position_pnl REAL DEFAULT 0,
                     commission REAL DEFAULT 0,
                     lots REAL DEFAULT 0,
                     entry_price REAL DEFAULT 0,
@@ -258,6 +259,10 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 },
                 "capital_deployment": {
                     "opportunity_rank": 1,
+                    "capital_layer": "exploration_probe",
+                    "rank_capital_role": "best_exploration_probe_candidate",
+                    "capital_ratio_source": "probe_margin_ratio_0.008",
+                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": -1,
                     "original_target_lots": -1,
@@ -917,6 +922,10 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 },
                 "capital_deployment": {
                     "opportunity_rank": 1,
+                    "capital_layer": "exploration_probe",
+                    "rank_capital_role": "best_exploration_probe_candidate",
+                    "capital_ratio_source": "probe_margin_ratio_0.008",
+                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
                     "selected_for_capital_deployment": True,
                     "deployed_target_lots": -1,
                     "original_target_lots": -1,
@@ -943,7 +952,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
-                "INSERT INTO ticker_daily_pnl VALUES ('pnl1','p1','2025-03-04','RB',-500,0,1,3600,3550,'2025-03-04T15:00:00')"
+                "INSERT INTO ticker_daily_pnl VALUES ('pnl1','p1','2025-03-04','RB',-500,-500,0,1,3600,3550,'2025-03-04T15:00:00')"
             )
             conn.execute(
                 "INSERT INTO daily_settlement VALUES ('ds1','p1','2025-03-04',1000000,1000,0.001,-500,'2025-03-04T15:00:00')"
@@ -955,7 +964,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertTrue(report.ok, report.to_dict())
-        self.assertTrue(any(item.startswith("diagnostic_top_rank_bucket_negative_pnl") for item in report.diagnostics))
+        self.assertTrue(any(item.startswith("diagnostic_top_rank_bucket_negative_new_position_pnl") for item in report.diagnostics))
         self.assertTrue(any(item.startswith("diagnostic_low_average_margin_utilization") for item in report.diagnostics))
 
     def test_hard_fails_conditional_probe_without_intraday_result(self):

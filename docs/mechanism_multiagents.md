@@ -281,6 +281,10 @@ Phase4 完成后，研究学习单独运行：
 - `capital_priority_score`；
 - `capital_priority_tier`；
 - `opportunity_rank`；
+- `rank_capital_role`；
+- `capital_layer`；
+- `capital_ratio_source`；
+- `rank_reason`；
 - `capital_allocation_reason`；
 - 未入选或降级原因。
 
@@ -291,7 +295,10 @@ Phase4 完成后，研究学习单独运行：
 - 系统只保留一个 rank：`opportunity_rank=1` 固定表示当前最高资金优先级；
 - `capital_priority_score/tier` 只是唯一 rank 的排序输入和解释字段，不是第二套 rank；
 - rank 不是交易权限，只能供投资组合经理资金部署使用；
+- 资金层级和 rank 解耦：`rank=1` 决定“谁最值得占用资金”，`capital_layer` 决定“占用多少资金”；
+- 当所有候选都是 `watch_for_trigger` 时，也必须按证据质量、触发完整度、失效边界、冲突程度、产品级学习、trigger 历史表现和资金效率排出 1 到 N；`rank=1` 只是最值得按既有 `probe_margin_ratio=0.008` 小额探针试的候选，不能因为排第一自动升仓或变成真实资金；
 - `rank=1` 可以支持 PM 最终出口释放 `real_budget_entry`，但必须同时满足 `tradeable_candidate`、当前开仓证据、失效边界、无技术反对和硬风险通过；
+- 反复验证有 alpha 的候选可以通过同一个 rank 进入 `alpha_scale_entry`，但必须由产品级学习和当前证据共同支持，不能硬编码品种好坏；
 - 亏损开仓 episode 必须经 Researcher 写入 `entry_quality_outcome`，由 PM 在下一轮 scorecard 中转成 `entry_quality_loss_penalty` / `trigger_quality_loss_penalty`，只降低入场质量、触发质量、资金优先级和真实部署资格，不生成硬阻断；
 - 盈利开仓 episode 必须同样反写到触发质量，PM 用 `trigger_quality_positive_bonus` 与 `net_trigger_quality_loss_signal` 校准同类 trigger，避免只收紧坏触发而不放大好触发；
 - 不能输出最终手数或最终合约。

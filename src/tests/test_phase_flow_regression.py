@@ -87,6 +87,13 @@ from tools.agent_tools.analysis.analyst_signal_fusion import (
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     build_opportunity_scorecard,
 )
+from tools.agent_tools.decision.pm_opportunity_ranking import (
+    CAPITAL_LAYER_EXPLORATION,
+    CAPITAL_LAYER_REAL_BUDGET,
+    CAPITAL_RATIO_SOURCE_EXPLORATION,
+    RANK_CAPITAL_ROLE_EXPLORATION,
+    RANK_CAPITAL_ROLE_REAL_BUDGET,
+)
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
@@ -494,7 +501,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "short": {
                         "opportunity_score": 0.82,
                         "capital_priority_score": 0.55,
+                        "capital_priority_tier": 1,
                         "opportunity_rank": 1,
+                        "final_state": "watch_for_trigger",
                     },
                 },
                 "final_action_contract": {
@@ -525,7 +534,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "short": {
                         "opportunity_score": 0.73,
                         "capital_priority_score": 0.91,
+                        "capital_priority_tier": 3,
                         "opportunity_rank": 2,
+                        "final_state": "tradeable_candidate",
                     },
                 },
                 "final_action_contract": {
@@ -554,6 +565,14 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_high.action, RecommendationAction.OPEN_SHORT)
         self.assertEqual(rec_high.lots, 2)
         self.assertTrue(rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(
+            rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_capital_role"],
+            RANK_CAPITAL_ROLE_REAL_BUDGET,
+        )
+        self.assertEqual(
+            rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_layer"],
+            CAPITAL_LAYER_REAL_BUDGET,
+        )
         self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
         self.assertEqual(
             rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["rank_semantics_version"],
@@ -571,6 +590,14 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_low.action, RecommendationAction.HOLD)
         self.assertEqual(rec_low.lots, 0)
         self.assertFalse(rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(
+            rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_capital_role"],
+            RANK_CAPITAL_ROLE_EXPLORATION,
+        )
+        self.assertEqual(
+            rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_layer"],
+            CAPITAL_LAYER_EXPLORATION,
+        )
         self.assertIn(
             "not_selected_by_full_market_pm_capital_queue",
             rec_low.signal_snapshot["final_action_contract"]["evidence_used"]["capital_allocation_reason"],
@@ -582,6 +609,102 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(update_by_id["high"][3]["lots"], 2)
         self.assertEqual(update_by_id["low"][3]["action"], RecommendationAction.HOLD)
         self.assertEqual(update_by_id["low"][3]["lots"], 0)
+
+    def test_watch_rank_one_keeps_probe_capital_layer_and_probe_ratio_source(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+        rec_best_watch = FuturesRecommendation(
+            id="best-watch",
+            status=RecommendationStatus.PENDING,
+            underlying_code="P",
+            base_price=7000.0,
+            action=RecommendationAction.OPEN_LONG,
+            lots=1,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "long",
+                    "long": {
+                        "opportunity_score": 0.52,
+                        "capital_priority_score": 0.42,
+                        "capital_priority_tier": 1,
+                        "final_state": "watch_for_trigger",
+                        "entry_trigger": {"rule": "breakout_confirm"},
+                        "invalidation": {"rule": "close_back_below_range"},
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {"opportunity_score": 0.52, "capital_priority_score": 0.42},
+                },
+            },
+        )
+        rec_other_watch = FuturesRecommendation(
+            id="other-watch",
+            status=RecommendationStatus.PENDING,
+            underlying_code="M",
+            base_price=3500.0,
+            action=RecommendationAction.OPEN_LONG,
+            lots=1,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "long",
+                    "long": {
+                        "opportunity_score": 0.49,
+                        "capital_priority_score": 0.35,
+                        "capital_priority_tier": 1,
+                        "final_state": "watch_for_trigger",
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {"opportunity_score": 0.49, "capital_priority_score": 0.35},
+                },
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("P", rec_best_watch), ("M", rec_other_watch)])
+
+        contract = rec_best_watch.signal_snapshot["final_action_contract"]
+        deployment = contract["capital_deployment"]
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertEqual(deployment["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
+        self.assertEqual(contract["target_margin_ratio_estimate"], 0.008)
+        self.assertNotEqual(deployment["capital_layer"], "real_budget_entry")
+        self.assertEqual(rec_best_watch.action, RecommendationAction.OPEN_LONG)
+        self.assertEqual(rec_best_watch.lots, 1)
+        self.assertEqual(len(updates), 2)
 
     def test_workflow_learning_rank_changes_final_contract_or_explains_no_effect(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
@@ -1547,6 +1670,43 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(summary["trigger_quality_loss_signal"], 0.0)
         self.assertGreaterEqual(summary["net_trigger_quality_loss_signal"], 0.0)
         self.assertLess(loss["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
+
+    def test_entry_quality_outcome_top_level_payload_also_penalizes_entry_quality(self):
+        signal = self._tradeable_signal()
+        loss_value = self._action_value(
+            action_preference="tail_loss_protect",
+            lane="open",
+            reward_mean=-1200.0,
+            reward_sum=-3600.0,
+            worst_reward=-1800.0,
+        )
+        loss_value["payload"]["entry_quality_outcome"] = {
+            "contract_version": "agentquant.entry_quality_outcome.v1",
+            "entry_quality_verdict": "entry_loss_revalidate",
+            "trigger_quality_verdict": "trigger_loss_revalidate",
+            "loss_episode": True,
+            "tail_loss_episode": False,
+            "penalty_weight": 0.45,
+            "entry_trigger": "vwap pullback support",
+            "trigger_key": "vwap_pullback_support",
+            "future_only": True,
+            "not_trade_authority": True,
+        }
+
+        loss = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[loss_value],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
+
+        components = loss["short"]["opportunity_score_components"]
+        summary = loss["short"]["action_value_learning_summary"]
+        self.assertLess(components["entry_quality_loss_penalty"], 0.0)
+        self.assertGreater(summary["entry_quality_loss_signal"], 0.0)
 
     def test_positive_trigger_episode_boosts_trigger_quality_without_second_rank(self):
         signal = self._tradeable_signal()

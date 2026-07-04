@@ -423,6 +423,12 @@ def _rank_value(contract: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _capital_layer(contract: Dict[str, Any]) -> str:
+    deployment = _dict(contract.get("capital_deployment"))
+    evidence = _dict(contract.get("evidence_used"))
+    return _lower(deployment.get("capital_layer") or evidence.get("capital_layer"))
+
+
 def _opportunity_score(contract: Dict[str, Any]) -> Optional[float]:
     evidence = _dict(contract.get("evidence_used"))
     raw = evidence.get("opportunity_score")
@@ -843,34 +849,48 @@ def _audit_rank_pnl_diagnostics(
     diagnostics: List[str],
 ) -> None:
     pnl_by_day_ticker = {
-        (_date10(row.get("trading_date")), str(row.get("ticker") or "").upper()): _float(row.get("daily_pnl"))
+        (_date10(row.get("trading_date")), str(row.get("ticker") or "").upper()): {
+            "daily_pnl": _float(row.get("daily_pnl")),
+            "new_position_pnl": _float(row.get("new_position_pnl")),
+        }
         for row in ticker_daily_pnl
     }
-    top_rank_pnls: List[float] = []
-    low_rank_pnls: List[float] = []
+    top_rank_pnls_by_layer: Dict[str, List[float]] = {}
+    low_rank_pnls_by_layer: Dict[str, List[float]] = {}
     for recommendation_id, recommendation in recommendations.items():
         contract = _contract_from_recommendation(recommendation)
         rank = _rank_value(contract)
         if rank is None:
             continue
+        scenario = _scenario_for_contract(contract)
+        if scenario not in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR, SCENARIO_UNSELECTED_CANDIDATE}:
+            continue
+        layer = _capital_layer(contract)
+        if layer not in {"exploration_probe", "real_budget_entry", "alpha_scale_entry"}:
+            continue
         day = _date10(recommendation.get("trading_date"))
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-        pnl = pnl_by_day_ticker.get((day, ticker))
-        if pnl is None:
+        pnl_row = pnl_by_day_ticker.get((day, ticker))
+        if pnl_row is None:
             continue
+        pnl = pnl_row["new_position_pnl"]
         if rank <= 3:
-            top_rank_pnls.append(pnl)
+            top_rank_pnls_by_layer.setdefault(layer, []).append(pnl)
         elif rank >= 6:
-            low_rank_pnls.append(pnl)
-    if top_rank_pnls and sum(top_rank_pnls) < 0:
-        diagnostics.append(
-            f"diagnostic_top_rank_bucket_negative_pnl:pnl={sum(top_rank_pnls):.2f}:count={len(top_rank_pnls)}"
-        )
-    if top_rank_pnls and low_rank_pnls and sum(top_rank_pnls) < sum(low_rank_pnls):
-        diagnostics.append(
-            "diagnostic_low_rank_outperformed_top_rank:"
-            f"top={sum(top_rank_pnls):.2f}:low={sum(low_rank_pnls):.2f}"
-        )
+            low_rank_pnls_by_layer.setdefault(layer, []).append(pnl)
+    for layer in sorted(set(top_rank_pnls_by_layer) | set(low_rank_pnls_by_layer)):
+        top_rank_pnls = top_rank_pnls_by_layer.get(layer, [])
+        low_rank_pnls = low_rank_pnls_by_layer.get(layer, [])
+        if top_rank_pnls and sum(top_rank_pnls) < 0:
+            diagnostics.append(
+                "diagnostic_top_rank_bucket_negative_new_position_pnl:"
+                f"layer={layer}:pnl={sum(top_rank_pnls):.2f}:count={len(top_rank_pnls)}"
+            )
+        if top_rank_pnls and low_rank_pnls and sum(top_rank_pnls) < sum(low_rank_pnls):
+            diagnostics.append(
+                "diagnostic_low_rank_outperformed_top_rank:"
+                f"layer={layer}:top={sum(top_rank_pnls):.2f}:low={sum(low_rank_pnls):.2f}"
+            )
 
 
 def audit_mechanism_effectiveness(

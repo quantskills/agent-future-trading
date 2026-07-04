@@ -899,6 +899,81 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
+    def test_system_invariant_audit_rejects_rank_missing_capital_layer_contract(self):
+        db_path = self._make_db()
+        payload = _with_auditor_approval({
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": 1,
+                "lots_delta": 1,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": True,
+                "strong_current_evidence": True,
+                "reason_codes": ["pm_full_market_capital_deployment"],
+                "evidence_used": {
+                    "opportunity_rank": 1,
+                    "opportunity_score_components": {
+                        "positive_learning": 0.0,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": True,
+                    "opportunity_rank": 1,
+                    "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                    "original_target_lots": 1,
+                    "deployed_target_lots": 1,
+                    "deployed_lots_delta": 1,
+                },
+            },
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+                "execution_requirement": "intraday_trigger_required",
+            },
+        })
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "rec-rank-missing-layer",
+                    "cfg",
+                    "pf",
+                    "2025-03-04",
+                    "2025-03-04",
+                    "strategy",
+                    "RB",
+                    "open_long",
+                    1,
+                    _dumps(payload),
+                    _dumps(payload),
+                    "generated",
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_rank_capital_layer_contract_incomplete") for error in report.errors),
+            report.to_dict(),
+        )
+
     def test_system_invariant_audit_rejects_hold_exit_learning_without_effect_or_reason(self):
         db_path = self._make_db()
         payload = {

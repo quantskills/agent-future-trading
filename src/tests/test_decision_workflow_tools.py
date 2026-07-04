@@ -12,8 +12,15 @@ from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.decision.pm_opportunity_ranking import (
+    CAPITAL_LAYER_ALPHA_SCALE,
+    CAPITAL_LAYER_EXPLORATION,
+    CAPITAL_RATIO_SOURCE_ALPHA_SCALE,
+    CAPITAL_RATIO_SOURCE_EXPLORATION,
     CAPITAL_PRIORITY_RANK_MEANING,
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+    RANK_CAPITAL_ROLE_ALPHA_SCALE,
+    RANK_CAPITAL_ROLE_EXPLORATION,
+    RANK_CAPITAL_ROLE_REAL_BUDGET,
     rank_opportunities,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
@@ -199,9 +206,9 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "preferred_side": "short",
                 "long": {
                     "side": "long",
-                    "score": 0.82,
-                    "opportunity_score": 0.82,
-                    "capital_priority_score": 0.62,
+                    "score": 0.95,
+                    "opportunity_score": 0.95,
+                    "capital_priority_score": 0.99,
                     "capital_priority_tier": 1,
                     "final_state": "watch_for_trigger",
                 },
@@ -209,7 +216,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "side": "short",
                     "score": 0.74,
                     "opportunity_score": 0.74,
-                    "capital_priority_score": 0.91,
+                    "capital_priority_score": 0.50,
                     "capital_priority_tier": 3,
                     "final_state": "tradeable_candidate",
                 },
@@ -219,12 +226,109 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         scorecard = result["opportunity_scorecard"]
         self.assertEqual(scorecard["short"]["opportunity_rank"], 1)
         self.assertEqual(scorecard["long"]["opportunity_rank"], 2)
+        self.assertEqual(scorecard["short"]["rank_capital_role"], RANK_CAPITAL_ROLE_REAL_BUDGET)
+        self.assertEqual(scorecard["long"]["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
         self.assertNotIn("deployment_rank", scorecard["short"])
         self.assertNotIn("exploration_rank", scorecard["short"])
         self.assertEqual(
             result["capital_allocation_reason"]["preferred_capital_priority_score"],
-            0.91,
+            0.50,
         )
+        self.assertEqual(result["capital_allocation_reason"]["preferred_capital_layer"], "real_budget_entry")
+
+    def test_all_watch_for_trigger_candidates_rank_by_single_probe_priority(self):
+        result = rank_opportunities(
+            ticker="P",
+            analyst_signals=[],
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            decision_date="2025-03-05",
+            config={},
+            prebuilt_scorecard={
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "score": 0.48,
+                    "opportunity_score": 0.48,
+                    "capital_priority_score": 0.31,
+                    "capital_priority_tier": 1,
+                    "final_state": "watch_for_trigger",
+                    "trigger_valid": True,
+                    "entry_trigger": {"rule": "breakout_confirm"},
+                    "invalidation": {"rule": "close_back_below_range"},
+                    "opportunity_score_components": {"positive_learning": 0.04, "fusion_conflict_adjustment": 0.0},
+                },
+                "short": {
+                    "side": "short",
+                    "score": 0.51,
+                    "opportunity_score": 0.51,
+                    "capital_priority_score": 0.34,
+                    "capital_priority_tier": 1,
+                    "final_state": "watch_for_trigger",
+                    "opportunity_score_components": {"positive_learning": 0.0, "fusion_conflict_adjustment": -0.05},
+                    "gating_failures": ["missing_invalidation"],
+                },
+            },
+        )
+
+        scorecard = result["opportunity_scorecard"]
+        self.assertEqual(scorecard["long"]["opportunity_rank"], 1)
+        self.assertEqual(scorecard["short"]["opportunity_rank"], 2)
+        self.assertEqual(scorecard["long"]["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(scorecard["long"]["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertEqual(scorecard["long"]["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
+        self.assertEqual(
+            scorecard["long"]["rank_reason"],
+            "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+        )
+
+    def test_repeated_alpha_candidate_uses_same_rank_with_alpha_scale_layer(self):
+        result = rank_opportunities(
+            ticker="EB",
+            analyst_signals=[],
+            signal_collection_contract={"dominant_side": "short"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            decision_date="2025-03-05",
+            config={},
+            prebuilt_scorecard={
+                "preferred_side": "short",
+                "short": {
+                    "side": "short",
+                    "score": 0.77,
+                    "opportunity_score": 0.77,
+                    "capital_priority_score": 0.89,
+                    "capital_priority_tier": 3,
+                    "final_state": "tradeable_candidate",
+                    "alpha_scale_candidate": True,
+                },
+                "long": {
+                    "side": "long",
+                    "score": 0.33,
+                    "opportunity_score": 0.33,
+                    "capital_priority_score": 0.30,
+                    "capital_priority_tier": 1,
+                    "final_state": "watch_for_trigger",
+                },
+            },
+        )
+
+        scorecard = result["opportunity_scorecard"]
+        self.assertEqual(scorecard["short"]["opportunity_rank"], 1)
+        self.assertEqual(scorecard["short"]["rank_capital_role"], RANK_CAPITAL_ROLE_ALPHA_SCALE)
+        self.assertEqual(scorecard["short"]["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
+        self.assertEqual(scorecard["short"]["capital_ratio_source"], CAPITAL_RATIO_SOURCE_ALPHA_SCALE)
+        self.assertNotIn("alpha_rank", scorecard["short"])
+        self.assertNotIn("deployment_rank", scorecard["short"])
 
     def test_position_sizing_records_math_without_final_action_authority(self):
         result = build_position_sizing_result(

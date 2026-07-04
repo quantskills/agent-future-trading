@@ -103,6 +103,7 @@ def _write_minimal_covered_repo(root: Path) -> None:
                 "effective_memory_summary",
                 "opportunity_scorecard",
                 "position_sizing_result",
+                "rank_capital_layer_contract",
             ]
         ),
     )

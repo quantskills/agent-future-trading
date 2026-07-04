@@ -24,6 +24,7 @@ from tools.agent_tools.analysis.analyst_signal_fusion import (
     CAPITAL_PRIORITY_RANK_MEANING,
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
 )
+from tools.agent_tools.decision.pm_opportunity_ranking import rank_metadata_for_row
 from apis.contract_info_cache import FuturesContractInfoCache
 from util.db_helper import get_db
 from util.logger import logger
@@ -239,11 +240,21 @@ class AgentWorkflow:
         return best_side, best_row
 
     @staticmethod
+    def _rank_metadata_from_snapshot(snapshot: Dict[str, Any], side: str = "") -> Dict[str, str]:
+        scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
+        row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
+        if not row:
+            _, row = AgentWorkflow._scorecard_preferred_row(snapshot)
+        return rank_metadata_for_row(row) if row else {}
+
+    @staticmethod
     def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) -> None:
         scorecard = snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
         row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
+        rank_metadata = rank_metadata_for_row(row) if row else {}
         if row:
             row["opportunity_rank"] = rank
+            row.update(rank_metadata)
             row["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             row["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             row["rank_is_capital_priority"] = True
@@ -252,6 +263,7 @@ class AgentWorkflow:
         evidence_used = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
         if evidence_used:
             evidence_used["opportunity_rank"] = rank
+            evidence_used.update(rank_metadata)
             evidence_used["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             evidence_used["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             evidence_used["rank_is_capital_priority"] = True
@@ -260,6 +272,7 @@ class AgentWorkflow:
         active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
         if active_opportunity:
             active_opportunity["opportunity_rank"] = rank
+            active_opportunity.update(rank_metadata)
             active_opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             active_opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             active_opportunity["rank_is_capital_priority"] = True
@@ -276,6 +289,7 @@ class AgentWorkflow:
         )
         if alignment:
             alignment["opportunity_rank"] = rank
+            alignment.update(rank_metadata)
 
     @staticmethod
     def _contract_target_lots(snapshot: Dict[str, Any]) -> int:
@@ -373,10 +387,12 @@ class AgentWorkflow:
         if not selected and original_target != target_lots:
             reason_set.add("capital_queue_not_selected")
         contract["reason_codes"] = sorted(reason_set)
+        rank_metadata = AgentWorkflow._rank_metadata_from_snapshot(snapshot)
         evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
         evidence["capital_allocation_reason"] = reason
         if rank is not None:
             evidence["opportunity_rank"] = rank
+            evidence.update(rank_metadata)
         evidence["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
         evidence["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
         evidence["rank_is_capital_priority"] = True
@@ -389,6 +405,7 @@ class AgentWorkflow:
             "deployed_target_lots": int(target_lots),
             "deployed_lots_delta": int(lots_delta),
             "opportunity_rank": rank,
+            **rank_metadata,
             "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
             "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
             "rank_is_capital_priority": True,
@@ -409,6 +426,7 @@ class AgentWorkflow:
         if opportunity:
             opportunity["capital_allocation_reason"] = reason
             opportunity["selected_for_capital_deployment"] = bool(selected)
+            opportunity.update(rank_metadata)
             opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
             opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             opportunity["rank_is_capital_priority"] = True
@@ -453,6 +471,8 @@ class AgentWorkflow:
             "deployed_target_lots",
             "deployed_lots_delta",
         }
+        if rank is not None:
+            required.update({"rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"})
         if not required.issubset(deployment.keys()):
             return False
         if rank is not None and deployment.get("opportunity_rank") in (None, ""):
@@ -569,9 +589,46 @@ class AgentWorkflow:
         equity = float(getattr(self.init_portfolio, "account_equity", 0.0) or getattr(self.init_portfolio, "cashflow", 0.0) or 1.0)
         return margin / max(equity, 1.0)
 
+    @staticmethod
+    def _float_field(mapping: Dict[str, Any], field: str, default: float = 0.0) -> float:
+        try:
+            return float(mapping.get(field, default) if mapping.get(field, default) is not None else default)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _capital_rank_eligible(snapshot: Dict[str, Any], row: Dict[str, Any]) -> bool:
+        state = str(row.get("final_state") or row.get("opportunity_state") or "").strip().lower()
+        if state in {"no_opportunity", "wait", "flat_wait", "blocked", "rejected"}:
+            return False
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        final_action = str(contract.get("final_action") or "").strip().lower()
+        if final_action in {"reduce", "exit", "close", "close_long", "close_short", "risk_exit"}:
+            return False
+        current_lots = AgentWorkflow._contract_current_lots(snapshot)
+        target_lots = AgentWorkflow._contract_target_lots(snapshot)
+        if target_lots == 0 and current_lots == 0 and not (
+            bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation"))
+        ):
+            return False
+        if state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger"}:
+            return True
+        return AgentWorkflow._float_field(row, "opportunity_score", AgentWorkflow._float_field(row, "score", 0.0)) > 0.0
+
+    @staticmethod
+    def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[int, float, float, float]:
+        try:
+            tier = int(row.get("capital_priority_tier") or 0)
+        except (TypeError, ValueError):
+            tier = 0
+        priority = AgentWorkflow._float_field(row, "capital_priority_score")
+        watch_priority = AgentWorkflow._float_field(row, "watch_priority_score", priority)
+        score = AgentWorkflow._float_field(row, "opportunity_score", AgentWorkflow._float_field(row, "score"))
+        return tier, watch_priority, priority, score
+
     def _apply_daily_capital_deployment(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         deployment_cfg = self._daily_capital_deployment_config()
-        candidates: List[Tuple[float, float, str, FuturesRecommendation, str, float]] = []
+        candidates: List[Tuple[int, float, float, float, str, FuturesRecommendation, str, float]] = []
         updated_ids: set[str] = set()
         for ticker, recommendation in generated:
             if recommendation.status == RecommendationStatus.SKIPPED:
@@ -582,6 +639,8 @@ class AgentWorkflow:
             snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
             side, row = self._scorecard_preferred_row(snapshot)
             if side not in {"long", "short"} or not row:
+                continue
+            if not self._capital_rank_eligible(snapshot, row):
                 continue
             try:
                 score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
@@ -596,14 +655,15 @@ class AgentWorkflow:
             self._set_daily_opportunity_rank(snapshot, side, 0)
             recommendation.signal_snapshot = snapshot
             margin_ratio = self._recommended_margin_ratio(recommendation)
-            candidates.append((priority_score, score, str(ticker).upper(), recommendation, side, margin_ratio))
-        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            tier, watch_priority, _, _ = self._capital_rank_sort_tuple(row)
+            candidates.append((tier, watch_priority, priority_score, score, str(ticker).upper(), recommendation, side, margin_ratio))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
         selected_ids: set[str] = set()
         used_margin_ratio = 0.0
         target_margin_ratio = deployment_cfg["target_margin_ratio"]
         min_probe_ratio = deployment_cfg["min_probe_margin_ratio"]
         max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
-        for rank, (priority_score, score, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
+        for rank, (_, _, priority_score, score, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
             snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
             self._set_daily_opportunity_rank(snapshot, side, rank)
             current_lots = self._contract_current_lots(snapshot)

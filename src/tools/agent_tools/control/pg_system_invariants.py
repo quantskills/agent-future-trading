@@ -33,6 +33,7 @@ from tools.common.final_action_semantics import (
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
     lane_matches_memory_requirement,
+    rank_capital_layer_contract_errors,
     validate_final_action_lot_transition,
 )
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
@@ -1470,6 +1471,12 @@ def _audit_pm_learning_transport_and_contract_effect(
                     f"{label}:final_action={_lower(contract.get('final_action')) or 'missing'}"
                 )
         rank_value = _rank_value_from_contract(contract)
+        rank_contract_errors = rank_capital_layer_contract_errors(contract)
+        if rank_contract_errors:
+            errors.append(
+                "pm_rank_capital_layer_contract_incomplete:"
+                f"{label}:missing={','.join(rank_contract_errors)}"
+            )
         if rank_value is not None and _rank_has_no_contract_effect(contract):
             if not _learning_no_change_has_contract_explanation(contract):
                 errors.append(

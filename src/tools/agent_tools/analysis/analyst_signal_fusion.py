@@ -582,6 +582,8 @@ def _action_value_learning_summary(
             product_key = {}
         entry_quality_outcome = product_key.get("entry_quality_outcome")
         if not isinstance(entry_quality_outcome, Mapping):
+            entry_quality_outcome = payload.get("entry_quality_outcome")
+        if not isinstance(entry_quality_outcome, Mapping):
             entry_quality_outcome = {}
         consumer_scope = _clean_key(
             _row_value(row, payload, "consumer_scope", "learning_consumer_scope", default="pm_learning")

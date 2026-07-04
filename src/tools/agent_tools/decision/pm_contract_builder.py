@@ -207,10 +207,22 @@ def build_final_action_contract(
             "capital_priority_tier": scorecard_side.get("capital_priority_tier"),
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
             "opportunity_rank": scorecard_side.get("opportunity_rank"),
+            "rank_capital_role": scorecard_side.get("rank_capital_role"),
+            "capital_layer": scorecard_side.get("capital_layer"),
+            "capital_ratio_source": scorecard_side.get("capital_ratio_source"),
+            "rank_reason": scorecard_side.get("rank_reason"),
             "rank_semantics_version": scorecard_side.get("rank_semantics_version"),
             "opportunity_rank_meaning": scorecard_side.get("opportunity_rank_meaning"),
             "rank_is_capital_priority": bool(scorecard_side.get("rank_is_capital_priority")),
             "rank_is_not_trade_authority": bool(scorecard_side.get("rank_is_not_trade_authority", True)),
+            "rank_capital_priority_real_budget_release": bool(
+                authority.get("rank_capital_priority_real_budget_release")
+            ),
+            "rank_capital_priority_release_detail": (
+                authority.get("rank_capital_priority_release_detail")
+                if isinstance(authority.get("rank_capital_priority_release_detail"), dict)
+                else {}
+            ),
             "capital_allocation_reason": scorecard_side.get("capital_allocation_reason"),
             "pm_fusion_diagnostics": scorecard_side.get("pm_fusion_diagnostics") or {},
             "pm_conflict_resolution": scorecard_side.get("pm_conflict_resolution") or {},

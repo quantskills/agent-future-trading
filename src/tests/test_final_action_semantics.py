@@ -30,6 +30,8 @@ from tools.common.final_action_semantics import (
     has_valid_hold_exit_no_change_explanation,
     filter_action_values_for_contract_learning,
     lane_matches_memory_requirement,
+    rank_capital_layer_contract_complete,
+    rank_capital_layer_contract_errors,
     requires_intraday_result,
     validate_action_value_write_consistency,
     validate_final_action_lot_transition,
@@ -191,6 +193,42 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertEqual(review["lifecycle_state"], "conditional_monitor")
         self.assertEqual(research["lifecycle_state"], "conditional_monitor")
         self.assertTrue(protocol["requires_intraday_result"])
+
+    def test_rank_capital_layer_contract_requires_complete_rank_metadata(self):
+        incomplete = {
+            "evidence_used": {"opportunity_rank": 1},
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "opportunity_rank": 1,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+            },
+        }
+        complete = {
+            "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+            },
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "opportunity_rank": 1,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+            },
+        }
+
+        self.assertIn(
+            "capital_deployment.capital_layer_missing",
+            rank_capital_layer_contract_errors(incomplete),
+        )
+        self.assertFalse(rank_capital_layer_contract_complete(incomplete))
+        self.assertEqual(rank_capital_layer_contract_errors(complete), [])
+        self.assertTrue(rank_capital_layer_contract_complete(complete))
 
     def test_pm_memory_consumption_audit_checks_declared_and_landed_memory(self):
         contract = {
