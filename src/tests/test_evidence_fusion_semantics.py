@@ -95,15 +95,10 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             config={},
         )
         side_row = scorecard["long"]
-        side_row.update({
-            "opportunity_rank": 1,
-            "rank_capital_role": "best_exploration_probe_candidate",
-            "capital_layer": "exploration_probe",
-            "capital_ratio_source": "probe_margin_ratio_0.008",
-            "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-        })
         self.assertIn("pm_fusion_diagnostics", side_row)
         self.assertIn("pm_conflict_resolution", side_row)
+        self.assertIn("side_priority", side_row)
+        self.assertNotIn("opportunity_rank", side_row)
         contract = build_final_action_contract(
             ticker="RB",
             current_lots=0,
@@ -131,13 +126,12 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             alpha_setup_action_values=[],
         )
         self.assertIn("pm_fusion_diagnostics", contract["evidence_used"])
-        self.assertEqual(contract["evidence_used"]["rank_capital_role"], "best_exploration_probe_candidate")
-        self.assertEqual(contract["evidence_used"]["capital_layer"], "exploration_probe")
-        self.assertEqual(contract["evidence_used"]["capital_ratio_source"], "probe_margin_ratio_0.008")
-        self.assertEqual(
-            contract["evidence_used"]["rank_reason"],
-            "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-        )
+        self.assertIn("side_priority", contract["evidence_used"])
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+        self.assertNotIn("rank_capital_role", contract["evidence_used"])
+        self.assertNotIn("capital_layer", contract["evidence_used"])
+        self.assertNotIn("capital_ratio_source", contract["evidence_used"])
+        self.assertNotIn("rank_reason", contract["evidence_used"])
         self.assertFalse(contract["evidence_used"]["rank_capital_priority_real_budget_release"])
         self.assertEqual(
             contract["evidence_used"]["rank_capital_priority_release_detail"]["decision"],

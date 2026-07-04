@@ -22,6 +22,7 @@ from tools.agent_tools.control.pg_mechanism_effectiveness_audit import (
     _contract_has_no_change_explanation as mechanism_contract_has_no_change_explanation,
     _scenario_for_contract as mechanism_scenario_for_contract,
 )
+from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
 def _dumps(value):
@@ -279,6 +280,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         return db_path
 
     def _insert_good_open(self, db_path: Path):
+        rank_source = full_market_rank_source_payload()
         contract = {
             "contract_type": "strategy",
             "final_action": "open_real",
@@ -295,6 +297,12 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "execution_requirement": "intraday_trigger_required",
             "reason_codes": ["positive_candidate_open"],
             "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_capital_role": "best_real_budget_candidate",
+                "capital_layer": "real_budget_entry",
+                "capital_ratio_source": "normal_trade_margin_ratio",
+                "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                **rank_source,
                 "opportunity_score_components": {
                     "positive_learning": 0.12,
                     "negative_learning": 0.0,
@@ -317,6 +325,19 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "retrieval_match_level": "exact_state",
                     }
                 ]
+            },
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "opportunity_rank": 1,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "original_target_lots": -2,
+                "deployed_target_lots": -2,
+                "deployed_lots_delta": -2,
+                "rank_capital_role": "best_real_budget_candidate",
+                "capital_layer": "real_budget_entry",
+                "capital_ratio_source": "normal_trade_margin_ratio",
+                "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                **rank_source,
             },
         }
         payload = {
@@ -971,6 +992,164 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertTrue(
             any(error.startswith("pm_rank_capital_layer_contract_incomplete") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_new_risk_without_full_market_rank(self):
+        db_path = self._make_db()
+        payload = _with_auditor_approval({
+            "final_action_contract": {
+                "contract_type": "strategy",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -4,
+                "lots_delta": -4,
+                "authority_type": "exploration_probe",
+                "open_action_evidence": True,
+                "reason_codes": [
+                    "conditional_trigger_authority",
+                    "exploration_probe_probe_floor_applied",
+                    "pm_watch_for_trigger_probe_cap",
+                ],
+                "evidence_used": {
+                    "opportunity_score": 0.0,
+                    "opportunity_score_components": {
+                        "directional_support": 0.08,
+                        "market_conflict_penalty": -0.1,
+                    },
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": True,
+                    "capital_allocation_reason": "selected_by_pm_atomic_contract_submission:rank=unranked",
+                    "original_target_lots": -4,
+                    "deployed_target_lots": -4,
+                    "deployed_lots_delta": -4,
+                },
+            },
+            "trade_contract_audit": {
+                "single_source_of_trade_truth": True,
+                "candidate_sources_do_not_bypass_contract": True,
+                "execution_requirement": "intraday_trigger_required",
+            },
+        })
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """
+                INSERT INTO futures_recommendation(
+                    id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                    underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "rec-unranked-new-risk",
+                    "cfg",
+                    "pf",
+                    "2025-04-08",
+                    "2025-04-08",
+                    "strategy",
+                    "ZN",
+                    "open_short",
+                    4,
+                    _dumps(payload),
+                    _dumps(payload),
+                    "generated",
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_new_risk_missing_full_market_rank") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_duplicate_daily_full_market_rank_one(self):
+        db_path = self._make_db()
+
+        def payload_for(ticker: str) -> dict:
+            rank_source = full_market_rank_source_payload()
+            return _with_auditor_approval({
+                "final_action_contract": {
+                    "contract_type": "strategy",
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "authority_type": "exploration_probe",
+                    "reason_codes": ["pm_full_market_capital_deployment"],
+                    "evidence_used": {
+                        "opportunity_rank": 1,
+                        "rank_capital_role": "best_exploration_probe_candidate",
+                        "capital_layer": "exploration_probe",
+                        "capital_ratio_source": "probe_margin_ratio_0.008",
+                        "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_source,
+                    },
+                    "capital_deployment": {
+                        "selected_for_capital_deployment": True,
+                        "opportunity_rank": 1,
+                        "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                        "original_target_lots": 1,
+                        "deployed_target_lots": 1,
+                        "deployed_lots_delta": 1,
+                        "rank_capital_role": "best_exploration_probe_candidate",
+                        "capital_layer": "exploration_probe",
+                        "capital_ratio_source": "probe_margin_ratio_0.008",
+                        "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_source,
+                    },
+                },
+                "trade_contract_audit": {
+                    "single_source_of_trade_truth": True,
+                    "candidate_sources_do_not_bypass_contract": True,
+                    "execution_requirement": "intraday_trigger_required",
+                },
+            })
+
+        conn = sqlite3.connect(db_path)
+        try:
+            now = datetime.utcnow().isoformat()
+            for rec_id, ticker in (("rec-rank-one-a", "RB"), ("rec-rank-one-b", "TA")):
+                payload = payload_for(ticker)
+                conn.execute(
+                    """
+                    INSERT INTO futures_recommendation(
+                        id, config_id, reference_portfolio_id, trading_date, effective_trade_date, source_type,
+                        underlying_code, action, lots, signal_snapshot, audit_payload, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec_id,
+                        "cfg",
+                        "pf",
+                        "2025-03-04",
+                        "2025-03-04",
+                        "strategy",
+                        ticker,
+                        "open_long",
+                        1,
+                        _dumps(payload),
+                        _dumps(payload),
+                        "generated",
+                        now,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_full_market_rank_one_not_unique") for error in report.errors),
             report.to_dict(),
         )
 
@@ -1805,6 +1984,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
         try:
+            rank_source = full_market_rank_source_payload()
             payload = {
                 "final_action_contract": {
                     "contract_type": "strategy",
@@ -1821,6 +2001,27 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "reason_codes": ["pm_watch_for_trigger_probe_cap", "conditional_trigger_authority"],
                     "single_source_of_trade_truth": True,
                     "candidate_sources_do_not_bypass_contract": True,
+                    "evidence_used": {
+                        "opportunity_rank": 1,
+                        "rank_capital_role": "best_exploration_probe_candidate",
+                        "capital_layer": "exploration_probe",
+                        "capital_ratio_source": "probe_margin_ratio_0.008",
+                        "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_source,
+                    },
+                    "capital_deployment": {
+                        "selected_for_capital_deployment": True,
+                        "opportunity_rank": 1,
+                        "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                        "original_target_lots": -2,
+                        "deployed_target_lots": -2,
+                        "deployed_lots_delta": -2,
+                        "rank_capital_role": "best_exploration_probe_candidate",
+                        "capital_layer": "exploration_probe",
+                        "capital_ratio_source": "probe_margin_ratio_0.008",
+                        "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                        **rank_source,
+                    },
                 },
                 "active_opportunity_audit": {
                     "decision": {
@@ -1872,6 +2073,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self._insert_good_open(db_path)
         conn = sqlite3.connect(db_path)
         try:
+            rank_source = full_market_rank_source_payload()
             payload = {
                 "final_action_contract": {
                     "contract_type": "strategy",
@@ -1890,6 +2092,27 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "reason_codes": ["positive_candidate_open"],
                     "single_source_of_trade_truth": True,
                     "candidate_sources_do_not_bypass_contract": True,
+                    "evidence_used": {
+                        "opportunity_rank": 1,
+                        "rank_capital_role": "best_real_budget_candidate",
+                        "capital_layer": "real_budget_entry",
+                        "capital_ratio_source": "normal_trade_margin_ratio",
+                        "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                        **rank_source,
+                    },
+                    "capital_deployment": {
+                        "selected_for_capital_deployment": True,
+                        "opportunity_rank": 1,
+                        "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                        "original_target_lots": -2,
+                        "deployed_target_lots": -2,
+                        "deployed_lots_delta": -2,
+                        "rank_capital_role": "best_real_budget_candidate",
+                        "capital_layer": "real_budget_entry",
+                        "capital_ratio_source": "normal_trade_margin_ratio",
+                        "rank_reason": "tradeable_candidate_supported_by_current_evidence_and_product_learning",
+                        **rank_source,
+                    },
                 },
                 "release_block_diagnostics": {
                     "contract_version": "agentquant.release_block_diagnostics.v1",

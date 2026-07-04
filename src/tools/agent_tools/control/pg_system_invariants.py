@@ -24,6 +24,7 @@ from tools.common.order_semantics import (
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
     contract_consumes_hold_exit_pm_learning,
+    full_market_rank_gate_errors,
     contract_increases_risk_position,
     contract_reduces_or_exits_position,
     derive_memory_requirements,
@@ -1477,6 +1478,12 @@ def _audit_pm_learning_transport_and_contract_effect(
                 "pm_rank_capital_layer_contract_incomplete:"
                 f"{label}:missing={','.join(rank_contract_errors)}"
             )
+        rank_gate_errors = full_market_rank_gate_errors(contract)
+        if rank_gate_errors:
+            errors.append(
+                "pm_new_risk_missing_full_market_rank:"
+                f"{label}:missing={','.join(rank_gate_errors)}"
+            )
         if rank_value is not None and _rank_has_no_contract_effect(contract):
             if not _learning_no_change_has_contract_explanation(contract):
                 errors.append(
@@ -1500,6 +1507,40 @@ def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
         return int(raw)
     except Exception:
         return None
+
+
+def _audit_daily_full_market_rank_uniqueness(
+    recommendations: Dict[str, Dict[str, Any]],
+    errors: List[str],
+) -> None:
+    ranks_by_day: Dict[str, List[tuple[int, str]]] = {}
+    for recommendation_id, recommendation in recommendations.items():
+        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
+            continue
+        contract = _contract_from_recommendation(recommendation)
+        rank = _rank_value_from_contract(contract)
+        if rank is None:
+            continue
+        day = str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or "")[:10]
+        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker") or ""
+        label = f"{day}:{ticker}:{recommendation_id}"
+        ranks_by_day.setdefault(day, []).append((rank, label))
+    for day, rows in sorted(ranks_by_day.items()):
+        seen: Dict[int, List[str]] = {}
+        for rank, label in rows:
+            seen.setdefault(rank, []).append(label)
+        for rank, labels in sorted(seen.items()):
+            if len(labels) > 1:
+                errors.append(
+                    "pm_full_market_rank_duplicate:"
+                    f"{day}:rank={rank}:recommendations={','.join(labels)}"
+                )
+        rank_one = seen.get(1, [])
+        if len(rank_one) > 1:
+            errors.append(
+                "pm_full_market_rank_one_not_unique:"
+                f"{day}:recommendations={','.join(rank_one)}"
+            )
 
 
 def _rank_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
@@ -2386,6 +2427,7 @@ def audit_system_invariants(
     )
     _audit_opportunity_ranking_boundary(recommendations, errors, transactions)
     _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
+    _audit_daily_full_market_rank_uniqueness(recommendations, errors)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
     _audit_active_opportunity_routing(recommendations, errors)

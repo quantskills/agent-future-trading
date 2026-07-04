@@ -1330,6 +1330,7 @@ def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict
     scorecard_side = _scorecard_side_row(snapshot, side)
     final_contract = final_action_contract_from_snapshot(snapshot)
     evidence_used = final_contract.get("evidence_used") if isinstance(final_contract.get("evidence_used"), dict) else {}
+    deployment = final_contract.get("capital_deployment") if isinstance(final_contract.get("capital_deployment"), dict) else {}
     learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
     active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
     active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
@@ -1345,10 +1346,12 @@ def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict
             else evidence_used.get("opportunity_score_components") if isinstance(evidence_used.get("opportunity_score_components"), dict) else {}
         ),
         "opportunity_rank": (
-            scorecard_side.get("opportunity_rank")
-            if scorecard_side.get("opportunity_rank") is not None
+            deployment.get("opportunity_rank")
+            if deployment.get("opportunity_rank") is not None
             else evidence_used.get("opportunity_rank")
         ),
+        "side_priority": scorecard_side.get("side_priority"),
+        "ticker_side_priority": scorecard_side.get("ticker_side_priority"),
         "capital_allocation_reason": (
             scorecard_side.get("capital_allocation_reason")
             or evidence_used.get("capital_allocation_reason")

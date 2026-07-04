@@ -297,6 +297,7 @@ Phase4 完成后，研究学习单独运行：
 - rank 不是交易权限，只能供投资组合经理资金部署使用；
 - 资金层级和 rank 解耦：`rank=1` 决定“谁最值得占用资金”，`capital_layer` 决定“占用多少资金”；
 - 当所有候选都是 `watch_for_trigger` 时，也必须按证据质量、触发完整度、失效边界、冲突程度、产品级学习、trigger 历史表现和资金效率排出 1 到 N；`rank=1` 只是最值得按既有 `probe_margin_ratio=0.008` 小额探针试的候选，不能因为排第一自动升仓或变成真实资金；
+- 所有新增风险敞口候选，包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`，必须先进入全市场资金候选池；分数为 0 的 `watch_for_trigger` 也必须排序，不能绕过 rank 直接保留新增 `target_lots`；
 - `rank=1` 可以支持 PM 最终出口释放 `real_budget_entry`，但必须同时满足 `tradeable_candidate`、当前开仓证据、失效边界、无技术反对和硬风险通过；
 - 反复验证有 alpha 的候选可以通过同一个 rank 进入 `alpha_scale_entry`，但必须由产品级学习和当前证据共同支持，不能硬编码品种好坏；
 - 亏损开仓 episode 必须经 Researcher 写入 `entry_quality_outcome`，由 PM 在下一轮 scorecard 中转成 `entry_quality_loss_penalty` / `trigger_quality_loss_penalty`，只降低入场质量、触发质量、资金优先级和真实部署资格，不生成硬阻断；
@@ -574,7 +575,7 @@ Phase4 完成后，研究学习单独运行：
 | 减仓/退出 | `target_lots` 向 0 收敛，`final_action=reduce/exit` | exit/保护学习应落到目标手数下降或明确解释 |
 | 未入选候选 | `target_lots` 不因该候选变化 | 必须写 `capital_allocation_reason` 或未入选原因 |
 
-减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。开仓/加仓、扩大交易、条件监控和资金部署场景必须保留 score/rank/资金理由，并且 `opportunity_rank`、资金部署结论、部署前后手数、资金理由必须在同一张最终 `final_action_contract` 中原子落地。PM 内部评分草稿、排序草稿和资金部署草稿不得被任何下游智能体读取，也不得进入跨智能体消息。
+减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。开仓/加仓、扩大交易、反手和条件开仓必须先通过全市场资金 rank；没有 `rank_source=full_market_capital_deployment` 的最终合约不得保留新增 `target_lots`，必须还原到 `current_lots` 并写入 `no_rank_no_new_exposure`。开仓/加仓、扩大交易、条件监控和资金部署场景必须保留 score/rank/资金理由，并且 `opportunity_rank`、资金部署结论、部署前后手数、资金理由必须在同一张最终 `final_action_contract` 中原子落地。PM 内部评分草稿、排序草稿和资金部署草稿不得被任何下游智能体读取，也不得进入跨智能体消息。
 
 ## 十三、回测前后验收
 

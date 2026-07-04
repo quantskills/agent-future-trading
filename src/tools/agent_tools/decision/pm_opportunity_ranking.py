@@ -5,10 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from tools.agent_tools.analysis.analyst_signal_fusion import (
-    CAPITAL_PRIORITY_RANK_MEANING,
-    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     build_opportunity_scorecard,
-    rank_semantics_payload,
 )
 
 RANK_CAPITAL_ROLE_EXPLORATION = "best_exploration_probe_candidate"
@@ -20,6 +17,21 @@ CAPITAL_LAYER_ALPHA_SCALE = "alpha_scale_entry"
 CAPITAL_RATIO_SOURCE_EXPLORATION = "probe_margin_ratio_0.008"
 CAPITAL_RATIO_SOURCE_REAL_BUDGET = "normal_trade_margin_ratio"
 CAPITAL_RATIO_SOURCE_ALPHA_SCALE = "strong_opportunity_target_margin_ratio"
+SIDE_PRIORITY_SEMANTICS_VERSION = "agentquant.ticker_side_priority.v1"
+SIDE_PRIORITY_MEANING = "side_priority_selects_ticker_direction_not_capital_rank"
+
+
+FINAL_RANK_FIELDS = {
+    "opportunity_rank",
+    "rank_capital_role",
+    "capital_layer",
+    "capital_ratio_source",
+    "rank_reason",
+    "rank_semantics_version",
+    "opportunity_rank_meaning",
+    "rank_is_capital_priority",
+    "rank_is_not_trade_authority",
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -143,6 +155,15 @@ def rank_metadata_for_row(row: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def side_priority_semantics_payload() -> dict[str, Any]:
+    return {
+        "side_priority_semantics_version": SIDE_PRIORITY_SEMANTICS_VERSION,
+        "side_priority_meaning": SIDE_PRIORITY_MEANING,
+        "side_priority_is_not_capital_rank": True,
+        "side_priority_is_not_trade_authority": True,
+    }
+
+
 def _count_items(value: Any) -> int:
     if isinstance(value, list):
         return len([item for item in value if item])
@@ -203,10 +224,11 @@ def rank_opportunities(
     config: Mapping[str, Any] | None,
     prebuilt_scorecard: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Return a reproducible opportunity scorecard and capital-priority rank.
+    """Return a reproducible opportunity scorecard and ticker side priority.
 
-    The tool scores and ranks opportunity candidates. It does not size positions
-    and does not create final trading authority.
+    The tool scores long/short candidates inside one ticker. It does not create
+    the final all-market capital rank, size positions, or create final trading
+    authority.
     """
     scorecard = (
         dict(prebuilt_scorecard)
@@ -229,7 +251,9 @@ def rank_opportunities(
         row = _side_row(scorecard, side)
         if not row:
             continue
-        row.update(rank_semantics_payload())
+        for field in FINAL_RANK_FIELDS:
+            row.pop(field, None)
+        row.update(side_priority_semantics_payload())
         candidates.append(
             {
                 "side": side,
@@ -240,8 +264,8 @@ def rank_opportunities(
                 "watch_priority_score": _watch_priority_score(row),
                 "final_state": str(row.get("final_state") or row.get("opportunity_state") or "unknown"),
                 "rankable": _rankable(row),
-                **rank_metadata_for_row(row),
                 "opportunity_score_components": dict(row.get("opportunity_score_components") or {}),
+                **side_priority_semantics_payload(),
             }
         )
     candidates.sort(
@@ -254,49 +278,48 @@ def rank_opportunities(
             row["side"],
         )
     )
-    rank_by_side: dict[str, int | None] = {}
-    rank = 1
+    priority_by_side: dict[str, int | None] = {}
+    side_priority = 1
     for candidate in candidates:
         if candidate["rankable"]:
-            rank_by_side[candidate["side"]] = rank
-            rank += 1
+            priority_by_side[candidate["side"]] = side_priority
+            side_priority += 1
         else:
-            rank_by_side[candidate["side"]] = None
-    for side, side_rank in rank_by_side.items():
+            priority_by_side[candidate["side"]] = None
+    for side, priority in priority_by_side.items():
         row = scorecard.get(side)
         if isinstance(row, dict):
-            row["opportunity_rank"] = side_rank
+            for field in FINAL_RANK_FIELDS:
+                row.pop(field, None)
+            row["side_priority"] = priority
+            row["ticker_side_priority"] = priority
+            row["side_priority_score"] = _watch_priority_score(row)
             row["watch_priority_score"] = _watch_priority_score(row)
-            if side_rank is not None:
-                row.update(rank_metadata_for_row(row))
-            row.update(rank_semantics_payload())
+            row.update(side_priority_semantics_payload())
 
     preferred_side = str(scorecard.get("preferred_side") or "flat").lower()
     preferred_row = _side_row(scorecard, preferred_side) if preferred_side in {"long", "short"} else {}
     capital_allocation_reason = {
         "tool": "opportunity_ranking",
         "ticker": ticker,
-        "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
-        "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
-        "rank_is_capital_priority": True,
+        "side_priority_semantics_version": SIDE_PRIORITY_SEMANTICS_VERSION,
+        "side_priority_meaning": SIDE_PRIORITY_MEANING,
+        "side_priority_is_not_capital_rank": True,
         "preferred_side": preferred_side,
         "preferred_score": _safe_float(preferred_row.get("score"), 0.0),
         "preferred_capital_priority_score": _capital_priority_score(preferred_row) if preferred_row else 0.0,
         "preferred_capital_priority_tier": _capital_priority_tier(preferred_row) if preferred_row else 0,
         "preferred_watch_priority_score": _watch_priority_score(preferred_row) if preferred_row else 0.0,
-        "preferred_rank_capital_role": (
-            rank_metadata_for_row(preferred_row).get("rank_capital_role") if preferred_row else ""
-        ),
-        "preferred_capital_layer": (
+        "preferred_candidate_capital_layer": (
             rank_metadata_for_row(preferred_row).get("capital_layer") if preferred_row else ""
         ),
-        "preferred_capital_ratio_source": (
+        "preferred_candidate_capital_ratio_source": (
             rank_metadata_for_row(preferred_row).get("capital_ratio_source") if preferred_row else ""
         ),
-        "preferred_rank_reason": (
+        "preferred_candidate_rank_reason": (
             rank_metadata_for_row(preferred_row).get("rank_reason") if preferred_row else ""
         ),
-        "preferred_rank": rank_by_side.get(preferred_side),
+        "preferred_side_priority": priority_by_side.get(preferred_side),
         "signal_collection_summary": {
             "dominant_side": (signal_collection_contract or {}).get("dominant_side"),
             "side_consensus": (signal_collection_contract or {}).get("side_consensus"),
@@ -311,22 +334,26 @@ def rank_opportunities(
         },
         "memory_summary": dict(effective_memory_summary or {}),
         "rank_is_not_trade_authority": True,
+        "final_opportunity_rank_generated_here": False,
     }
     return {
         "opportunity_scorecard": scorecard,
-        "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
-        "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
-        "rank_is_capital_priority": True,
+        "side_priority_semantics_version": SIDE_PRIORITY_SEMANTICS_VERSION,
+        "side_priority_meaning": SIDE_PRIORITY_MEANING,
+        "side_priority_is_not_capital_rank": True,
         "rank_is_not_trade_authority": True,
         "opportunity_score_components": (
             dict(preferred_row.get("opportunity_score_components") or {}) if preferred_row else {}
         ),
-        "opportunity_rank": rank_by_side,
+        "ticker_side_priority": priority_by_side,
+        "side_priority": priority_by_side,
+        "final_opportunity_rank_generated_here": False,
         "capital_allocation_reason": capital_allocation_reason,
         "ranking_tool_trace": {
             "tool": "opportunity_ranking",
             "deterministic": True,
             "no_llm": True,
+            "final_opportunity_rank_generated_here": False,
             "candidates": candidates,
         },
     }

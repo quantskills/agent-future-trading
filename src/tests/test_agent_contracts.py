@@ -25,7 +25,11 @@ from agents.analysis_team.technical import (
     get_mean_reversion_signal,
 )
 from apis.router import Router
-from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.analysis.analyst_signal_fusion import (
+    SIDE_PRIORITY_MEANING,
+    SIDE_PRIORITY_SEMANTICS_VERSION,
+    build_opportunity_scorecard,
+)
 from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
 from tools.common.contracts import (
     build_internal_message_contract,
@@ -750,7 +754,12 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(row["source_analysts"], ["technical"])
         self.assertIn("opportunity_score", row)
         self.assertIn("opportunity_score_components", row)
-        self.assertIn("opportunity_rank", row)
+        self.assertNotIn("opportunity_rank", row)
+        self.assertEqual(row["side_priority"], 1)
+        self.assertEqual(row["ticker_side_priority"], 1)
+        self.assertEqual(row["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
+        self.assertEqual(row["side_priority_meaning"], SIDE_PRIORITY_MEANING)
+        self.assertTrue(row["side_priority_is_not_capital_rank"])
         self.assertIn("capital_allocation_reason", row)
         self.assertIn("learning_adjustment_summary", row)
         self.assertTrue(row["conditional_monitor_candidate"])
@@ -841,8 +850,11 @@ class AgentContractFixtureTest(unittest.TestCase):
             config={"weak_confirmation_threshold": 0.45},
         )
 
-        self.assertEqual(card["long"]["opportunity_rank"], 1)
-        self.assertEqual(card["short"]["opportunity_rank"], 2)
+        self.assertNotIn("opportunity_rank", card["long"])
+        self.assertNotIn("opportunity_rank", card["short"])
+        self.assertEqual(card["long"]["side_priority"], 1)
+        self.assertEqual(card["short"]["side_priority"], 2)
+        self.assertTrue(card["long"]["side_priority_is_not_capital_rank"])
         self.assertGreater(card["long"]["opportunity_score"], card["short"]["opportunity_score"])
         self.assertIn("setup_quality", card["long"]["opportunity_score_components"])
 

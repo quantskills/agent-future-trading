@@ -106,6 +106,16 @@ RANK_CAPITAL_LAYER_FIELDS = {
     "capital_ratio_source",
     "rank_reason",
 }
+CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION = "agentquant.capital_priority_rank.v1"
+CAPITAL_PRIORITY_RANK_MEANING = "rank_1_is_current_highest_capital_priority_not_trade_authority"
+FULL_MARKET_RANK_SOURCE = "full_market_capital_deployment"
+FULL_MARKET_RANK_SCOPE = "daily_full_market_capital_pool"
+FULL_MARKET_RANK_GENERATOR = "workflow._apply_daily_capital_deployment"
+RANK_CAPITAL_SOURCE_FIELDS = {
+    "rank_source",
+    "rank_scope",
+    "capital_rank_generated_by",
+}
 
 DIRECT_AUTHORITY_TYPES = {"real_budget_entry", "scale", "add", "reduce", "exit", "risk_exit"}
 PROBE_AUTHORITY_TYPES = {"exploration_probe"}
@@ -446,6 +456,25 @@ def _rank_value_from_contract(
     return None
 
 
+def full_market_rank_source_payload() -> dict[str, str]:
+    """Return the only accepted provenance for final capital ranks."""
+    return {
+        "rank_source": FULL_MARKET_RANK_SOURCE,
+        "rank_scope": FULL_MARKET_RANK_SCOPE,
+        "capital_rank_generated_by": FULL_MARKET_RANK_GENERATOR,
+    }
+
+
+def is_full_market_rank_source(value: Mapping[str, Any] | None) -> bool:
+    """Return whether a rank-bearing mapping came from the daily full-market pool."""
+    value = value if isinstance(value, Mapping) else {}
+    return (
+        _clean(value.get("rank_source")) == FULL_MARKET_RANK_SOURCE
+        and _clean(value.get("rank_scope")) == FULL_MARKET_RANK_SCOPE
+        and _clean(value.get("capital_rank_generated_by")) == FULL_MARKET_RANK_GENERATOR
+    )
+
+
 def canonicalize_final_action_contract_for_persistence(
     contract: Mapping[str, Any] | None,
     *,
@@ -482,14 +511,19 @@ def canonicalize_final_action_contract_for_persistence(
     else:
         canonical["final_action"] = action if action in EXIT_ACTIONS else "exit"
 
-    rank = _rank_value_from_contract(canonical, opportunity_rank=opportunity_rank)
+    evidence = dict(canonical.get("evidence_used")) if isinstance(canonical.get("evidence_used"), Mapping) else {}
+    deployment = (
+        dict(canonical.get("capital_deployment"))
+        if isinstance(canonical.get("capital_deployment"), Mapping)
+        else {}
+    )
+    rank = opportunity_rank if _non_empty(opportunity_rank) else None
+    if not _non_empty(rank):
+        if is_full_market_rank_source(deployment):
+            rank = _rank_value_from_contract({"capital_deployment": deployment})
+        elif is_full_market_rank_source(evidence):
+            rank = _rank_value_from_contract({"evidence_used": evidence})
     if _non_empty(rank):
-        evidence = dict(canonical.get("evidence_used")) if isinstance(canonical.get("evidence_used"), Mapping) else {}
-        deployment = (
-            dict(canonical.get("capital_deployment"))
-            if isinstance(canonical.get("capital_deployment"), Mapping)
-            else {}
-        )
         metadata = rank_metadata if isinstance(rank_metadata, Mapping) else {}
         evidence["opportunity_rank"] = rank
         deployment["opportunity_rank"] = rank
@@ -518,9 +552,39 @@ def canonicalize_final_action_contract_for_persistence(
             if _non_empty(value):
                 evidence[field] = value
                 deployment[field] = value
+        for field in sorted(RANK_CAPITAL_SOURCE_FIELDS):
+            value = metadata.get(field)
+            if not _non_empty(value):
+                value = evidence.get(field)
+            if not _non_empty(value):
+                value = deployment.get(field)
+            if _non_empty(value):
+                evidence[field] = value
+                deployment[field] = value
         canonical["evidence_used"] = evidence
         canonical["capital_deployment"] = deployment
         canonical.pop("opportunity_rank", None)
+    else:
+        rank_fields = (
+            set(RANK_CAPITAL_LAYER_FIELDS)
+            | set(RANK_CAPITAL_SOURCE_FIELDS)
+            | {
+                "opportunity_rank",
+                "rank_semantics_version",
+                "opportunity_rank_meaning",
+                "rank_is_capital_priority",
+                "rank_is_not_trade_authority",
+            }
+        )
+        canonical.pop("opportunity_rank", None)
+        if evidence:
+            for field in rank_fields:
+                evidence.pop(field, None)
+            canonical["evidence_used"] = evidence
+        if deployment:
+            for field in rank_fields:
+                deployment.pop(field, None)
+            canonical["capital_deployment"] = deployment
     return canonical
 
 
@@ -700,12 +764,50 @@ def contract_increases_risk_position(contract: Mapping[str, Any] | None) -> bool
     """Return whether the final contract increases absolute position risk."""
     contract = contract if isinstance(contract, Mapping) else {}
     current_lots, target_lots, _ = _current_target_delta(contract)
-    action = _clean(contract.get("final_action"))
-    if action in OPEN_ACTIONS | INCREASE_ACTIONS:
-        return abs(target_lots) > abs(current_lots) or current_lots == 0
-    if action in DECREASE_ACTIONS | EXIT_ACTIONS:
+    if target_lots == current_lots:
         return False
+    if target_lots == 0:
+        return False
+    if current_lots == 0:
+        return True
+    if (current_lots > 0 and target_lots < 0) or (current_lots < 0 and target_lots > 0):
+        return True
     return abs(target_lots) > abs(current_lots)
+
+
+def contract_requires_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether a PM contract must carry a full-market capital rank.
+
+    Only contracts that add new risk exposure require the rank gate: open,
+    add/scale/increase, side reversal, or conditional open with non-zero target
+    risk. Hold/wait/reduce/exit/close do not participate in capital-priority
+    ranking.
+    """
+    return contract_increases_risk_position(contract)
+
+
+def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether the contract has a valid full-market opportunity rank."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), Mapping)
+        else {}
+    )
+    rank = _rank_value_from_contract(contract)
+    if not _non_empty(rank):
+        return False
+    return bool(is_full_market_rank_source(deployment) or is_full_market_rank_source(evidence))
+
+
+def full_market_rank_gate_errors(contract: Mapping[str, Any] | None) -> list[str]:
+    """Return hard-gate errors for unranked new risk exposure."""
+    if not contract_requires_full_market_capital_rank(contract):
+        return []
+    if contract_has_full_market_capital_rank(contract):
+        return []
+    return ["new_risk_exposure_missing_full_market_rank"]
 
 
 def has_valid_hold_exit_no_change_explanation(contract: Mapping[str, Any] | None) -> bool:
@@ -780,6 +882,15 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
             errors.append(f"capital_deployment.{field}_missing")
         if evidence_has_rank and evidence.get(field) in (None, ""):
             errors.append(f"evidence_used.{field}_missing")
+    for field in sorted(RANK_CAPITAL_SOURCE_FIELDS):
+        if deployment and deployment.get(field) in (None, ""):
+            errors.append(f"capital_deployment.{field}_missing")
+        if evidence_has_rank and evidence.get(field) in (None, ""):
+            errors.append(f"evidence_used.{field}_missing")
+    if deployment_has_rank and deployment and not is_full_market_rank_source(deployment):
+        errors.append("capital_deployment.rank_source_not_full_market")
+    if evidence_has_rank and evidence and not is_full_market_rank_source(evidence):
+        errors.append("evidence_used.rank_source_not_full_market")
     return errors
 
 

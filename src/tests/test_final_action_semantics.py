@@ -19,6 +19,7 @@ from tools.common.final_action_semantics import (
     classify_final_action_reason_codes,
     classify_reason_codes,
     contract_consumes_hold_exit_pm_learning,
+    contract_has_full_market_capital_rank,
     derive_memory_requirements,
     derive_accounting_expectation,
     derive_execution_requirement,
@@ -30,6 +31,8 @@ from tools.common.final_action_semantics import (
     has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
     filter_action_values_for_contract_learning,
+    full_market_rank_gate_errors,
+    full_market_rank_source_payload,
     lane_matches_memory_requirement,
     rank_capital_layer_contract_complete,
     rank_capital_layer_contract_errors,
@@ -211,6 +214,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **full_market_rank_source_payload(),
             },
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
@@ -220,6 +224,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **full_market_rank_source_payload(),
             },
         }
 
@@ -259,11 +264,13 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "capital_layer": "exploration_probe",
                 "capital_ratio_source": "probe_margin_ratio_0.008",
                 "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                **full_market_rank_source_payload(),
             },
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
                 "opportunity_rank": 1,
+                **full_market_rank_source_payload(),
             },
         }
 
@@ -695,6 +702,43 @@ class FinalActionSemanticsTest(unittest.TestCase):
         )
         self.assertFalse(bad["ok"])
         self.assertIn("final_action_contract_action_mismatch", bad["errors"])
+
+    def test_full_market_rank_gate_required_only_for_new_risk(self):
+        unranked_open = {
+            "current_lots": 0,
+            "target_lots": -1,
+            "lots_delta": -1,
+            "final_action": "open_probe",
+        }
+        unranked_reverse = {
+            "current_lots": 2,
+            "target_lots": -1,
+            "lots_delta": -3,
+            "final_action": "exit",
+        }
+        reduce_contract = {
+            "current_lots": 2,
+            "target_lots": 1,
+            "lots_delta": -1,
+            "final_action": "reduce",
+        }
+        ranked_open = {
+            **unranked_open,
+            "evidence_used": {"opportunity_rank": 1, **full_market_rank_source_payload()},
+            "capital_deployment": {"opportunity_rank": 1, **full_market_rank_source_payload()},
+        }
+
+        self.assertEqual(
+            full_market_rank_gate_errors(unranked_open),
+            ["new_risk_exposure_missing_full_market_rank"],
+        )
+        self.assertEqual(
+            full_market_rank_gate_errors(unranked_reverse),
+            ["new_risk_exposure_missing_full_market_rank"],
+        )
+        self.assertEqual(full_market_rank_gate_errors(reduce_contract), [])
+        self.assertTrue(contract_has_full_market_capital_rank(ranked_open))
+        self.assertEqual(full_market_rank_gate_errors(ranked_open), [])
 
     def test_generic_no_change_explanation_requires_registered_reason_or_explicit_field(self):
         explained = {

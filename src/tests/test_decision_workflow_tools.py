@@ -16,11 +16,12 @@ from tools.agent_tools.decision.pm_opportunity_ranking import (
     CAPITAL_LAYER_EXPLORATION,
     CAPITAL_RATIO_SOURCE_ALPHA_SCALE,
     CAPITAL_RATIO_SOURCE_EXPLORATION,
-    CAPITAL_PRIORITY_RANK_MEANING,
-    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     RANK_CAPITAL_ROLE_ALPHA_SCALE,
     RANK_CAPITAL_ROLE_EXPLORATION,
     RANK_CAPITAL_ROLE_REAL_BUDGET,
+    SIDE_PRIORITY_MEANING,
+    SIDE_PRIORITY_SEMANTICS_VERSION,
+    rank_metadata_for_row,
     rank_opportunities,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
@@ -152,7 +153,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             {item["reason"] for item in result["rejected_or_downgraded"]},
         )
 
-    def test_opportunity_ranking_ranks_without_trade_authority(self):
+    def test_opportunity_ranking_selects_side_without_trade_authority(self):
         signal = _signal("technical", Signal.BULLISH, 0.74)
         result = rank_opportunities(
             ticker="RB",
@@ -175,21 +176,22 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         self.assertIn("opportunity_scorecard", result)
-        self.assertIn("opportunity_rank", result)
-        self.assertEqual(result["rank_semantics_version"], CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION)
-        self.assertEqual(result["opportunity_rank_meaning"], CAPITAL_PRIORITY_RANK_MEANING)
-        self.assertTrue(result["rank_is_capital_priority"])
+        self.assertNotIn("opportunity_rank", result)
+        self.assertIn("ticker_side_priority", result)
+        self.assertEqual(result["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
+        self.assertEqual(result["side_priority_meaning"], SIDE_PRIORITY_MEANING)
+        self.assertTrue(result["side_priority_is_not_capital_rank"])
         self.assertTrue(result["capital_allocation_reason"]["rank_is_not_trade_authority"])
-        self.assertTrue(result["capital_allocation_reason"]["rank_is_capital_priority"])
+        self.assertTrue(result["capital_allocation_reason"]["side_priority_is_not_capital_rank"])
         row = result["opportunity_scorecard"]["long"]
-        self.assertEqual(row["rank_semantics_version"], CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION)
-        self.assertEqual(row["opportunity_rank_meaning"], CAPITAL_PRIORITY_RANK_MEANING)
-        self.assertTrue(row["rank_is_capital_priority"])
-        self.assertTrue(row["rank_is_not_trade_authority"])
+        self.assertNotIn("opportunity_rank", row)
+        self.assertEqual(row["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
+        self.assertTrue(row["side_priority_is_not_capital_rank"])
+        self.assertTrue(row["side_priority_is_not_trade_authority"])
         self.assertIn("capital_priority_score", row)
         self.assertTrue(result["ranking_tool_trace"]["no_llm"])
 
-    def test_opportunity_ranking_uses_single_capital_priority_rank(self):
+    def test_opportunity_ranking_uses_ticker_side_priority_only(self):
         result = rank_opportunities(
             ticker="EB",
             analyst_signals=[],
@@ -224,19 +226,20 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         scorecard = result["opportunity_scorecard"]
-        self.assertEqual(scorecard["short"]["opportunity_rank"], 1)
-        self.assertEqual(scorecard["long"]["opportunity_rank"], 2)
-        self.assertEqual(scorecard["short"]["rank_capital_role"], RANK_CAPITAL_ROLE_REAL_BUDGET)
-        self.assertEqual(scorecard["long"]["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(scorecard["short"]["side_priority"], 1)
+        self.assertEqual(scorecard["long"]["side_priority"], 2)
+        self.assertNotIn("opportunity_rank", scorecard["short"])
+        self.assertEqual(rank_metadata_for_row(scorecard["short"])["rank_capital_role"], RANK_CAPITAL_ROLE_REAL_BUDGET)
+        self.assertEqual(rank_metadata_for_row(scorecard["long"])["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
         self.assertNotIn("deployment_rank", scorecard["short"])
         self.assertNotIn("exploration_rank", scorecard["short"])
         self.assertEqual(
             result["capital_allocation_reason"]["preferred_capital_priority_score"],
             0.50,
         )
-        self.assertEqual(result["capital_allocation_reason"]["preferred_capital_layer"], "real_budget_entry")
+        self.assertEqual(result["capital_allocation_reason"]["preferred_candidate_capital_layer"], "real_budget_entry")
 
-    def test_all_watch_for_trigger_candidates_rank_by_single_probe_priority(self):
+    def test_all_watch_for_trigger_sides_rank_by_ticker_side_priority(self):
         result = rank_opportunities(
             ticker="P",
             analyst_signals=[],
@@ -277,13 +280,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         scorecard = result["opportunity_scorecard"]
-        self.assertEqual(scorecard["long"]["opportunity_rank"], 1)
-        self.assertEqual(scorecard["short"]["opportunity_rank"], 2)
-        self.assertEqual(scorecard["long"]["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
-        self.assertEqual(scorecard["long"]["capital_layer"], CAPITAL_LAYER_EXPLORATION)
-        self.assertEqual(scorecard["long"]["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
+        self.assertEqual(scorecard["long"]["side_priority"], 1)
+        self.assertEqual(scorecard["short"]["side_priority"], 2)
+        metadata = rank_metadata_for_row(scorecard["long"])
+        self.assertEqual(metadata["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(metadata["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertEqual(metadata["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
         self.assertEqual(
-            scorecard["long"]["rank_reason"],
+            metadata["rank_reason"],
             "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
         )
 
@@ -323,10 +327,11 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         scorecard = result["opportunity_scorecard"]
-        self.assertEqual(scorecard["short"]["opportunity_rank"], 1)
-        self.assertEqual(scorecard["short"]["rank_capital_role"], RANK_CAPITAL_ROLE_ALPHA_SCALE)
-        self.assertEqual(scorecard["short"]["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
-        self.assertEqual(scorecard["short"]["capital_ratio_source"], CAPITAL_RATIO_SOURCE_ALPHA_SCALE)
+        self.assertEqual(scorecard["short"]["side_priority"], 1)
+        metadata = rank_metadata_for_row(scorecard["short"])
+        self.assertEqual(metadata["rank_capital_role"], RANK_CAPITAL_ROLE_ALPHA_SCALE)
+        self.assertEqual(metadata["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
+        self.assertEqual(metadata["capital_ratio_source"], CAPITAL_RATIO_SOURCE_ALPHA_SCALE)
         self.assertNotIn("alpha_rank", scorecard["short"])
         self.assertNotIn("deployment_rank", scorecard["short"])
 

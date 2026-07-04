@@ -83,8 +83,6 @@ from tools.agent_tools.analysis.analyst_quality import (
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.analyst_signal_fusion import (
-    CAPITAL_PRIORITY_RANK_MEANING,
-    CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     build_opportunity_scorecard,
 )
 from tools.agent_tools.decision.pm_opportunity_ranking import (
@@ -94,6 +92,7 @@ from tools.agent_tools.decision.pm_opportunity_ranking import (
     RANK_CAPITAL_ROLE_EXPLORATION,
     RANK_CAPITAL_ROLE_REAL_BUDGET,
 )
+from tools.common.final_action_semantics import full_market_rank_source_payload
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
@@ -576,11 +575,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
         self.assertEqual(
             rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["rank_semantics_version"],
-            CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
+            "agentquant.capital_priority_rank.v1",
         )
         self.assertEqual(
             rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank_meaning"],
-            CAPITAL_PRIORITY_RANK_MEANING,
+            "rank_1_is_current_highest_capital_priority_not_trade_authority",
         )
         self.assertTrue(
             rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_is_capital_priority"]
@@ -778,6 +777,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "capital_layer": CAPITAL_LAYER_EXPLORATION,
                     "capital_ratio_source": CAPITAL_RATIO_SOURCE_EXPLORATION,
                     "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                    **full_market_rank_source_payload(),
                 },
                 "capital_deployment": {
                     "selected_for_capital_deployment": True,
@@ -786,6 +786,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     "deployed_target_lots": -1,
                     "deployed_lots_delta": -1,
                     "opportunity_rank": 1,
+                    **full_market_rank_source_payload(),
                 },
             },
         }
@@ -948,7 +949,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         )
         self.assertEqual(len(updates), 2)
 
-    def test_pm_atomic_submission_repairs_bare_ranked_zero_score_contract(self):
+    def test_pm_atomic_submission_restores_unranked_new_risk_to_current_lots(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         updates = []
 
@@ -1010,29 +1011,99 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("EB", recommendation)])
+        snapshot = recommendation.signal_snapshot
+        changed = workflow._ensure_atomic_capital_deployment_submission(snapshot, side="short")
+
+        self.assertTrue(changed)
+        contract = snapshot["final_action_contract"]
+        deployment = contract["capital_deployment"]
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertFalse(deployment["selected_for_capital_deployment"])
+        self.assertNotIn("opportunity_rank", deployment)
+        self.assertNotIn("opportunity_rank", contract.get("evidence_used", {}))
+        self.assertEqual(deployment["original_target_lots"], -11)
+        self.assertEqual(deployment["deployed_target_lots"], 0)
+        self.assertEqual(deployment["deployed_lots_delta"], 0)
+        self.assertEqual(
+            deployment["capital_allocation_reason"],
+            "no_rank_no_new_exposure",
+        )
+        self.assertIn("pm_full_market_capital_deployment", contract["reason_codes"])
+        self.assertIn("no_rank_no_new_exposure", contract["reason_codes"])
+
+    def test_zero_score_watch_open_probe_enters_full_market_rank_queue(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+        recommendation = FuturesRecommendation(
+            id="zero-score-watch",
+            status=RecommendationStatus.PENDING,
+            underlying_code="HC",
+            base_price=3200.0,
+            action=RecommendationAction.OPEN_SHORT,
+            lots=4,
+            signal_snapshot={
+                "opportunity_scorecard": {
+                    "preferred_side": "short",
+                    "short": {
+                        "opportunity_score": 0.0,
+                        "capital_priority_score": 0.0,
+                        "capital_priority_tier": 1,
+                        "final_state": "watch_for_trigger",
+                    },
+                },
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": -4,
+                    "lots_delta": -4,
+                    "target_margin_ratio_estimate": 0.008,
+                    "evidence_used": {"opportunity_score": 0.0, "capital_priority_score": 0.0},
+                    "reason_codes": [
+                        "conditional_trigger_authority",
+                        "exploration_probe_probe_floor_applied",
+                    ],
+                },
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("HC", recommendation)])
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
-        self.assertEqual(contract["target_lots"], -11)
-        self.assertEqual(contract["lots_delta"], -11)
-        self.assertEqual(contract["final_action"], "open_probe")
-        self.assertTrue(deployment["selected_for_capital_deployment"])
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
         self.assertEqual(deployment["opportunity_rank"], 1)
-        self.assertEqual(deployment["original_target_lots"], -11)
-        self.assertEqual(deployment["deployed_target_lots"], -11)
-        self.assertEqual(deployment["deployed_lots_delta"], -11)
-        self.assertEqual(
-            deployment["capital_allocation_reason"],
-            "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
-        )
-        self.assertIn("pm_full_market_capital_deployment", contract["reason_codes"])
+        self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertEqual(deployment["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
+        self.assertEqual(contract["target_lots"], -4)
+        self.assertEqual(contract["lots_delta"], -4)
         self.assertEqual(recommendation.action, RecommendationAction.OPEN_SHORT)
-        self.assertEqual(recommendation.lots, 11)
+        self.assertEqual(recommendation.lots, 4)
         self.assertEqual(len(updates), 1)
-        self.assertEqual(updates[0][0], "bare-rank")
-        self.assertEqual(updates[0][3]["action"], RecommendationAction.OPEN_SHORT)
-        self.assertEqual(updates[0][3]["lots"], 11)
 
 
 class ResearchLearningMechanismRegressionTest(unittest.TestCase):
@@ -1855,7 +1926,11 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(summary["trigger_quality_positive_signal"], 0.0)
         self.assertEqual(summary["net_trigger_quality_loss_signal"], 0.0)
         self.assertGreater(positive["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
-        self.assertEqual(positive["short"]["opportunity_rank_meaning"], "rank_1_is_current_highest_capital_priority_not_trade_authority")
+        self.assertNotIn("opportunity_rank", positive["short"])
+        self.assertEqual(
+            positive["short"]["side_priority_meaning"],
+            "side_priority_selects_ticker_direction_not_capital_rank",
+        )
 
     def test_pm_action_value_normalizer_preserves_canonical_fields_from_payload_or_top_level(self):
         payload_only = {
@@ -4880,7 +4955,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "score": 0.72,
                     "opportunity_score": 0.72,
                     "opportunity_score_components": {"setup_quality": 0.12},
-                    "opportunity_rank": 1,
+                    "side_priority": 1,
+                    "ticker_side_priority": 1,
                     "capital_allocation_reason": "ranked_deployable_candidate_with_complete_current_evidence",
                     "learning_adjustment_summary": {"effect": "boosted"},
                 },
@@ -4905,7 +4981,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["target_lots"], 5)
         self.assertEqual(contract["action_candidates"][0]["source"], "alpha_setup_action_value")
         self.assertEqual(contract["evidence_used"]["opportunity_score"], 0.72)
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+        self.assertEqual(contract["evidence_used"]["side_priority"], 1)
         self.assertEqual(
             contract["evidence_used"]["capital_allocation_reason"],
             "ranked_deployable_candidate_with_complete_current_evidence",

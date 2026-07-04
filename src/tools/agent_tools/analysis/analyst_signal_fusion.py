@@ -9,10 +9,8 @@ from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
-CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION = "agentquant.capital_priority_rank.v1"
-CAPITAL_PRIORITY_RANK_MEANING = (
-    "rank_1_is_current_highest_capital_priority_not_trade_authority"
-)
+SIDE_PRIORITY_SEMANTICS_VERSION = "agentquant.ticker_side_priority.v1"
+SIDE_PRIORITY_MEANING = "side_priority_selects_ticker_direction_not_capital_rank"
 
 _CAPITAL_PRIORITY_STATE_TIER = {
     "tradeable_candidate": 3,
@@ -134,8 +132,8 @@ def _capital_priority_score(
 ) -> float:
     """Single PM rank score: current evidence plus learned deployability.
 
-    This is not a second rank. It is the deterministic score used to assign the
-    only `opportunity_rank`, where rank=1 means highest current capital priority.
+    This is not a second rank. It is the deterministic score later used by the
+    full-market deployment pass to assign the only `opportunity_rank`.
     """
     tier_bonus = {
         "tradeable_candidate": 0.18,
@@ -165,12 +163,12 @@ def _capital_priority_score(
     return round(_bounded(0.82 * _safe_float(opportunity_score, 0.0) + tier_bonus + learning_delta - failure_penalty), 4)
 
 
-def rank_semantics_payload() -> dict[str, Any]:
+def side_priority_semantics_payload() -> dict[str, Any]:
     return {
-        "rank_semantics_version": CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
-        "opportunity_rank_meaning": CAPITAL_PRIORITY_RANK_MEANING,
-        "rank_is_capital_priority": True,
-        "rank_is_not_trade_authority": True,
+        "side_priority_semantics_version": SIDE_PRIORITY_SEMANTICS_VERSION,
+        "side_priority_meaning": SIDE_PRIORITY_MEANING,
+        "side_priority_is_not_capital_rank": True,
+        "side_priority_is_not_trade_authority": True,
     }
 
 
@@ -1153,7 +1151,6 @@ def build_opportunity_scorecard(
             "opportunity_score": opportunity_score,
             "capital_priority_score": capital_priority_score,
             "capital_priority_tier": _capital_priority_tier(final_state),
-            **rank_semantics_payload(),
             "opportunity_score_components": {
                 key: round(float(value or 0.0), 4)
                 for key, value in score_components.items()
@@ -1291,12 +1288,16 @@ def build_opportunity_scorecard(
         reverse=True,
     )
     for rank, side in enumerate(ranked_sides, start=1):
-        side_rows[side]["opportunity_rank"] = rank
+        side_rows[side]["side_priority"] = rank
+        side_rows[side]["ticker_side_priority"] = rank
+        side_rows[side].update(side_priority_semantics_payload())
     for side in ("long", "short"):
-        side_rows[side].setdefault("opportunity_rank", None)
+        side_rows[side].setdefault("side_priority", None)
+        side_rows[side].setdefault("ticker_side_priority", None)
+        side_rows[side].update(side_priority_semantics_payload())
     return {
         "version": "opportunity_scorecard_v1",
-        **rank_semantics_payload(),
+        **side_priority_semantics_payload(),
         "ticker": ticker,
         "preferred_side": preferred_side,
         "market_regime": _market_regime_from_signals(signals),

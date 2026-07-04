@@ -587,7 +587,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
                 ("def rank_opportunities", "opportunity_scorecard"),
-                "opportunity ranking tool wraps reproducible scorecard and rank output",
+                "opportunity ranking tool wraps reproducible scorecard and ticker side-priority output",
             ),
         ),
         consumers=(
@@ -607,8 +607,8 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         tests=(
             _rule(
                 "src/tests/test_decision_workflow_tools.py",
-                ("test_opportunity_ranking_ranks_without_trade_authority",),
-                "decision workflow tests cover deterministic rank without trade authority",
+                ("test_opportunity_ranking_selects_side_without_trade_authority",),
+                "decision workflow tests cover deterministic side priority without trade authority",
             ),
         ),
     ),
@@ -618,12 +618,12 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
                 ("def rank_metadata_for_row", "rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
-                "ranking tool emits the single rank's capital role, layer, ratio source, and reason",
+                "ranking metadata helper describes capital role, layer, ratio source, and reason for workflow-generated rank",
             ),
             _rule(
                 "src/graph/workflow.py",
-                ("_apply_deployed_target_to_snapshot", "rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"),
-                "workflow atomically lands rank metadata in final_action_contract capital_deployment",
+                ("_apply_deployed_target_to_snapshot", "rank_source", "rank_scope", "capital_rank_generated_by"),
+                "workflow atomically lands full-market rank source and metadata in final_action_contract capital_deployment",
             ),
             _rule(
                 "src/tools/agent_tools/decision/pm_contract_builder.py",

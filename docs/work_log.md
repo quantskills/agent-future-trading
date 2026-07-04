@@ -292,6 +292,10 @@
 
 （1）收口 PM/workflow 最终合约统一落盘出口。修改：`final_action_semantics.py`、`workflow.py` 和回归测试。原因：2025-03-21 暴露出两个出口漂移：空仓无目标的最终合约仍可能保留 `final_action=hold`，以及条件候选/full-market capital queue 分支可能只把 rank 资金语义写入 `evidence_used`，没有同步写入 `capital_deployment`。本次新增最终合约持久化前规范化入口，统一把 flat/no position 合约写成 `wait`，并把 ranked 合约的 `rank_capital_role/capital_layer/capital_ratio_source/rank_reason` 同步到 `evidence_used` 与 `capital_deployment`；不改策略参数、不新增第二套 rank、不降低 PG hard fail、不改 Trader/Accountant/Researcher 边界。
 
+（2）收口全市场资金优先级 rank 生成权。修改：`analyst_signal_fusion.py`、`pm_opportunity_ranking.py`、`pm_contract_builder.py`、`portfolio_manager.py`、`workflow.py`、`final_action_semantics.py`、`pg_system_invariants.py`、Researcher rank trace、契约覆盖、统一字段语义表和回归测试。原因：单品种 long/short 排序只能用于确定产品代表方向，改为 `side_priority/ticker_side_priority`，不得写入最终 `opportunity_rank`；最终资金 rank 只能由 workflow 全市场资金部署池生成，并携带 `rank_source=full_market_capital_deployment`、`rank_scope=daily_full_market_capital_pool`、`capital_rank_generated_by=workflow._apply_daily_capital_deployment`。PG 新增同日 rank 去重 hard fail，防止多个 `rank=1` 或旧局部 rank 泄漏；资金层级和仓位参数不变，Trader/Accountant/Researcher 主边界不变。
+
+（3）收口新增风险敞口全市场 rank 闸门。修改：`workflow.py`、`final_action_semantics.py`、`pg_system_invariants.py`、统一字段语义表、机制文档和回归测试。原因：2025-04-08 暴露出 HC/ZN 这类 `open_probe` 可通过 atomic fallback 保留新增 `target_lots`，但没有进入全市场资金 rank 队列；本次固定所有 open/open_probe/open_real/add/scale/increase/reverse/conditional open 只要新增风险敞口，最终落盘前必须获得 `rank_source=full_market_capital_deployment` 的 `opportunity_rank`。分数为 0 的 watch/open_probe 也进入同一全市场候选池排序；没有 full-market rank 的新增风险合约必须还原到 `current_lots` 并写入 `no_rank_no_new_exposure`。不改仓位参数、不新增第二套 rank、不改 Trader/Accountant/Researcher 主逻辑、不降低 PG hard fail。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。
