@@ -706,6 +706,102 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_best_watch.lots, 1)
         self.assertEqual(len(updates), 2)
 
+    def test_workflow_canonicalizes_flat_skipped_contract_to_wait_before_persistence(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {"min_real_trade_margin_ratio": 0.008},
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+        recommendation = FuturesRecommendation(
+            id="flat-skipped",
+            status=RecommendationStatus.SKIPPED,
+            underlying_code="J",
+            base_price=1700.0,
+            action=RecommendationAction.HOLD,
+            lots=0,
+            signal_snapshot={
+                "opportunity_scorecard": {"preferred_side": "short", "short": {"final_state": "wait"}},
+                "final_action_contract": {
+                    "final_action": "hold",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                },
+            },
+        )
+
+        workflow._write_daily_opportunity_ranks([("J", recommendation)])
+
+        contract = recommendation.signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertEqual(recommendation.action, RecommendationAction.HOLD)
+        self.assertEqual(recommendation.lots, 0)
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0][2]["final_action_contract"]["final_action"], "wait")
+
+    def test_workflow_persists_rank_metadata_to_capital_deployment_from_existing_evidence(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        snapshot = {
+            "opportunity_scorecard": {
+                "preferred_side": "short",
+                "short": {
+                    "opportunity_score": 0.46,
+                    "capital_priority_score": 0.18,
+                    "capital_priority_tier": 1,
+                    "final_state": "watch_for_trigger",
+                },
+            },
+            "final_action_contract": {
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": -1,
+                "lots_delta": -1,
+                "evidence_used": {
+                    "opportunity_rank": 1,
+                    "rank_capital_role": RANK_CAPITAL_ROLE_EXPLORATION,
+                    "capital_layer": CAPITAL_LAYER_EXPLORATION,
+                    "capital_ratio_source": CAPITAL_RATIO_SOURCE_EXPLORATION,
+                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": True,
+                    "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
+                    "original_target_lots": -1,
+                    "deployed_target_lots": -1,
+                    "deployed_lots_delta": -1,
+                    "opportunity_rank": 1,
+                },
+            },
+        }
+
+        changed = workflow._ensure_atomic_capital_deployment_submission(snapshot, side="short")
+
+        self.assertTrue(changed)
+        deployment = snapshot["final_action_contract"]["capital_deployment"]
+        self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertEqual(deployment["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
+        self.assertEqual(
+            deployment["rank_reason"],
+            "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+        )
+
     def test_workflow_learning_rank_changes_final_contract_or_explains_no_effect(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         updates = []

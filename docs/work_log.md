@@ -288,6 +288,10 @@
 
 （11）收口产品级学习到唯一资金 rank 合约闭环。修改：`final_action_semantics.py`、`pg_system_invariants.py`、`pg_contract_coverage_audit.py`、`analyst_signal_fusion.py`、`pm_contract_builder.py`、统一字段语义表和回归测试。原因：凡最终合约写入 `opportunity_rank`，必须同步写入 `rank_capital_role/capital_layer/capital_ratio_source/rank_reason` 并由 PG 与契约覆盖硬检查；PM 必须能消费顶层 `entry_quality_outcome` 形成入场/触发质量分项，并把真实资金释放或未释放诊断写入最终合约证据，防止产品级学习、唯一 rank 和资金部署只停留在诊断字段。
 
+==========2026年07月04日==========
+
+（1）收口 PM/workflow 最终合约统一落盘出口。修改：`final_action_semantics.py`、`workflow.py` 和回归测试。原因：2025-03-21 暴露出两个出口漂移：空仓无目标的最终合约仍可能保留 `final_action=hold`，以及条件候选/full-market capital queue 分支可能只把 rank 资金语义写入 `evidence_used`，没有同步写入 `capital_deployment`。本次新增最终合约持久化前规范化入口，统一把 flat/no position 合约写成 `wait`，并把 ranked 合约的 `rank_capital_role/capital_layer/capital_ratio_source/rank_reason` 同步到 `evidence_used` 与 `capital_deployment`；不改策略参数、不新增第二套 rank、不降低 PG hard fail、不改 Trader/Accountant/Researcher 边界。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

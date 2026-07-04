@@ -423,6 +423,107 @@ def validate_final_action_lot_transition(contract: Mapping[str, Any] | None) -> 
     }
 
 
+def _non_empty(value: Any) -> bool:
+    return value not in (None, "")
+
+
+def _rank_value_from_contract(
+    contract: Mapping[str, Any],
+    *,
+    opportunity_rank: Any = None,
+) -> Any:
+    if _non_empty(opportunity_rank):
+        return opportunity_rank
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), Mapping) else {}
+    for value in (
+        deployment.get("opportunity_rank"),
+        evidence.get("opportunity_rank"),
+        contract.get("opportunity_rank"),
+    ):
+        if _non_empty(value):
+            return value
+    return None
+
+
+def canonicalize_final_action_contract_for_persistence(
+    contract: Mapping[str, Any] | None,
+    *,
+    rank_metadata: Mapping[str, Any] | None = None,
+    opportunity_rank: Any = None,
+) -> dict[str, Any]:
+    """Return the canonical PM contract shape used before DB persistence.
+
+    This is a deterministic normalization boundary only.  It does not rank
+    candidates, choose lots, sign a second contract, submit orders, audit,
+    settle, or write research memory.
+    """
+    source = contract if isinstance(contract, Mapping) else {}
+    canonical = dict(source)
+    current_lots, target_lots, _ = _current_target_delta(canonical)
+    lots_delta = target_lots - current_lots
+    canonical["current_lots"] = current_lots
+    canonical["target_lots"] = target_lots
+    canonical["lots_delta"] = lots_delta
+    canonical["lots_delta_abs"] = abs(lots_delta)
+
+    action = _clean(canonical.get("final_action"))
+    if target_lots == current_lots:
+        canonical["final_action"] = "hold" if current_lots else "wait"
+    elif current_lots == 0:
+        canonical["final_action"] = action if action in OPEN_ACTIONS else "open_probe"
+    elif target_lots == 0:
+        canonical["final_action"] = action if action in EXIT_ACTIONS else "exit"
+    elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
+        if abs(target_lots) > abs(current_lots):
+            canonical["final_action"] = action if action in INCREASE_ACTIONS else "scale"
+        else:
+            canonical["final_action"] = action if action in DECREASE_ACTIONS else "reduce"
+    else:
+        canonical["final_action"] = action if action in EXIT_ACTIONS else "exit"
+
+    rank = _rank_value_from_contract(canonical, opportunity_rank=opportunity_rank)
+    if _non_empty(rank):
+        evidence = dict(canonical.get("evidence_used")) if isinstance(canonical.get("evidence_used"), Mapping) else {}
+        deployment = (
+            dict(canonical.get("capital_deployment"))
+            if isinstance(canonical.get("capital_deployment"), Mapping)
+            else {}
+        )
+        metadata = rank_metadata if isinstance(rank_metadata, Mapping) else {}
+        evidence["opportunity_rank"] = rank
+        deployment["opportunity_rank"] = rank
+        for field in sorted(RANK_CAPITAL_LAYER_FIELDS):
+            value = metadata.get(field)
+            if not _non_empty(value):
+                value = evidence.get(field)
+            if not _non_empty(value):
+                value = deployment.get(field)
+            if _non_empty(value):
+                evidence[field] = value
+                deployment[field] = value
+        for field in (
+            "rank_semantics_version",
+            "opportunity_rank_meaning",
+            "rank_is_capital_priority",
+            "rank_is_not_trade_authority",
+        ):
+            value = metadata.get(field)
+            if not _non_empty(value):
+                value = evidence.get(field)
+            if not _non_empty(value):
+                value = deployment.get(field)
+            if not _non_empty(value):
+                value = canonical.get(field)
+            if _non_empty(value):
+                evidence[field] = value
+                deployment[field] = value
+        canonical["evidence_used"] = evidence
+        canonical["capital_deployment"] = deployment
+        canonical.pop("opportunity_rank", None)
+    return canonical
+
+
 def classify_reason_codes(reasons: Iterable[Any] | Mapping[str, Any] | None) -> dict[str, Any]:
     cleaned = reason_codes_from(reasons)
     hard_blocks = [reason for reason in cleaned if reason in HARD_BLOCK_REASONS or reason.startswith("hard_")]

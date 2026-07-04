@@ -336,7 +336,7 @@
 |---|---|---|
 | `final_action_contract` | PM 输出 / 推荐 snapshot | 唯一策略交易合约。 |
 | `optimal_position_ratio` | 风险评估 / PM 输入 | 风险评估建议仓位比例；不能绕过 PM，最终必须进入 `final_action_contract.target_position_ratio`。 |
-| `final_action` | `final_action_contract` | wait、hold、open、open_probe、open_real、add、scale、reduce、exit。 |
+| `final_action` | `final_action_contract` | wait、hold、open、open_probe、open_real、add、scale、reduce、exit。空仓且目标仍为空仓时必须为 `wait`；已有持仓且目标仓位不变时才是 `hold`。 |
 | `current_lots` | `final_action_contract` | 动作前当前手数。 |
 | `target_lots` | `final_action_contract` | 动作后目标手数。 |
 | `lots_delta` | `final_action_contract` | `target_lots - current_lots`。 |

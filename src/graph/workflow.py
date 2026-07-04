@@ -25,6 +25,11 @@ from tools.agent_tools.analysis.analyst_signal_fusion import (
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
 )
 from tools.agent_tools.decision.pm_opportunity_ranking import rank_metadata_for_row
+from tools.common.final_action_semantics import (
+    RANK_CAPITAL_LAYER_FIELDS,
+    canonicalize_final_action_contract_for_persistence,
+    rank_capital_layer_contract_complete,
+)
 from apis.contract_info_cache import FuturesContractInfoCache
 from util.db_helper import get_db
 from util.logger import logger
@@ -245,7 +250,44 @@ class AgentWorkflow:
         row = scorecard.get(side) if side in {"long", "short"} and isinstance(scorecard.get(side), dict) else {}
         if not row:
             _, row = AgentWorkflow._scorecard_preferred_row(snapshot)
-        return rank_metadata_for_row(row) if row else {}
+        if row:
+            metadata = rank_metadata_for_row(row)
+            if all(metadata.get(field) not in (None, "") for field in RANK_CAPITAL_LAYER_FIELDS):
+                return metadata
+        else:
+            metadata = {}
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+        deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
+        for source in (evidence, deployment):
+            recovered = {
+                field: source.get(field)
+                for field in RANK_CAPITAL_LAYER_FIELDS
+                if source.get(field) not in (None, "")
+            }
+            if all(field in recovered for field in RANK_CAPITAL_LAYER_FIELDS):
+                return recovered
+        return metadata
+
+    @staticmethod
+    def _canonicalize_snapshot_final_contract(
+        snapshot: Dict[str, Any],
+        *,
+        side: str = "",
+        rank: int | None = None,
+    ) -> bool:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        if not contract:
+            return False
+        rank_metadata = AgentWorkflow._rank_metadata_from_snapshot(snapshot, side)
+        canonical = canonicalize_final_action_contract_for_persistence(
+            contract,
+            rank_metadata=rank_metadata,
+            opportunity_rank=rank,
+        )
+        changed = canonical != contract
+        snapshot["final_action_contract"] = canonical
+        return changed
 
     @staticmethod
     def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) -> None:
@@ -431,6 +473,7 @@ class AgentWorkflow:
             opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             opportunity["rank_is_capital_priority"] = True
             opportunity["rank_is_not_trade_authority"] = True
+        AgentWorkflow._canonicalize_snapshot_final_contract(snapshot, rank=rank)
 
     @staticmethod
     def _safe_opportunity_rank(value: Any) -> int | None:
@@ -463,6 +506,8 @@ class AgentWorkflow:
     def _capital_deployment_complete(contract: Dict[str, Any], rank: int | None) -> bool:
         deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
         if not deployment:
+            return False
+        if rank is not None and not rank_capital_layer_contract_complete(contract):
             return False
         required = {
             "selected_for_capital_deployment",
@@ -512,7 +557,10 @@ class AgentWorkflow:
         if rank is None and not deployment and not AgentWorkflow._requires_atomic_capital_deployment(snapshot, contract):
             return False
         if AgentWorkflow._capital_deployment_complete(contract, rank):
-            changed = False
+            changed = AgentWorkflow._canonicalize_snapshot_final_contract(snapshot, side=side, rank=rank)
+            contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+            evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+            deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
             if rank is not None and evidence.get("opportunity_rank") in (None, ""):
                 evidence["opportunity_rank"] = rank
                 changed = True
@@ -631,6 +679,32 @@ class AgentWorkflow:
         candidates: List[Tuple[int, float, float, float, str, FuturesRecommendation, str, float]] = []
         updated_ids: set[str] = set()
         for ticker, recommendation in generated:
+            if recommendation.status != RecommendationStatus.SKIPPED:
+                continue
+            source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+            if source_type != RecommendationSourceType.STRATEGY.value:
+                continue
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            side, _ = self._scorecard_preferred_row(snapshot)
+            rank = self._snapshot_opportunity_rank(snapshot, side)
+            if not self._canonicalize_snapshot_final_contract(snapshot, side=side, rank=rank):
+                continue
+            recommendation.signal_snapshot = snapshot
+            action, lots = self._lots_action_from_target(
+                self._contract_current_lots(snapshot),
+                self._contract_target_lots(snapshot),
+            )
+            recommendation.action = action
+            recommendation.lots = lots
+            self.db.update_futures_recommendation_status(
+                recommendation.id,
+                recommendation.status,
+                action=recommendation.action,
+                lots=recommendation.lots,
+                signal_snapshot=snapshot,
+            )
+            updated_ids.add(str(recommendation.id))
+        for ticker, recommendation in generated:
             if recommendation.status == RecommendationStatus.SKIPPED:
                 continue
             source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
@@ -710,6 +784,7 @@ class AgentWorkflow:
                         rank=rank,
                     )
             recommendation.signal_snapshot = snapshot
+            self._canonicalize_snapshot_final_contract(snapshot, side=side, rank=rank)
             action, lots = self._lots_action_from_target(
                 self._contract_current_lots(snapshot),
                 self._contract_target_lots(snapshot),
@@ -737,6 +812,11 @@ class AgentWorkflow:
             if not self._ensure_atomic_capital_deployment_submission(snapshot, side=side):
                 continue
             recommendation.signal_snapshot = snapshot
+            self._canonicalize_snapshot_final_contract(
+                snapshot,
+                side=side,
+                rank=self._snapshot_opportunity_rank(snapshot, side),
+            )
             action, lots = self._lots_action_from_target(
                 self._contract_current_lots(snapshot),
                 self._contract_target_lots(snapshot),
@@ -771,6 +851,12 @@ class AgentWorkflow:
                 },
             )
             snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            side, _ = self._scorecard_preferred_row(snapshot)
+            self._canonicalize_snapshot_final_contract(
+                snapshot,
+                side=side,
+                rank=self._snapshot_opportunity_rank(snapshot, side),
+            )
             snapshot["auditor"] = {
                 "producer": "auditor",
                 "audit_status": audit_output.audit_status,

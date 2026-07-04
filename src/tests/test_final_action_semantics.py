@@ -12,6 +12,7 @@ from tools.common.final_action_semantics import (
     action_value_matches_contract_memory_requirement,
     audit_pm_memory_consumption,
     authority_allows_entry,
+    canonicalize_final_action_contract_for_persistence,
     canonical_action_preference_for_action_value,
     classify_analyst_evidence,
     classify_final_action_contract,
@@ -229,6 +230,51 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertFalse(rank_capital_layer_contract_complete(incomplete))
         self.assertEqual(rank_capital_layer_contract_errors(complete), [])
         self.assertTrue(rank_capital_layer_contract_complete(complete))
+
+    def test_canonical_persistence_turns_flat_hold_into_wait(self):
+        contract = {
+            "final_action": "hold",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+        }
+
+        canonical = canonicalize_final_action_contract_for_persistence(contract)
+
+        self.assertEqual(canonical["final_action"], "wait")
+        self.assertEqual(canonical["current_lots"], 0)
+        self.assertEqual(canonical["target_lots"], 0)
+        self.assertEqual(canonical["lots_delta"], 0)
+        self.assertTrue(validate_final_action_lot_transition(canonical)["ok"])
+
+    def test_canonical_persistence_syncs_rank_metadata_to_deployment(self):
+        contract = {
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": -1,
+            "lots_delta": -1,
+            "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
+            },
+            "capital_deployment": {
+                "selected_for_capital_deployment": True,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "opportunity_rank": 1,
+            },
+        }
+
+        canonical = canonicalize_final_action_contract_for_persistence(contract)
+
+        self.assertEqual(canonical["capital_deployment"]["capital_layer"], "exploration_probe")
+        self.assertEqual(
+            canonical["capital_deployment"]["capital_ratio_source"],
+            "probe_margin_ratio_0.008",
+        )
+        self.assertEqual(rank_capital_layer_contract_errors(canonical), [])
 
     def test_pm_memory_consumption_audit_checks_declared_and_landed_memory(self):
         contract = {
