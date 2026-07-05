@@ -46,6 +46,7 @@ GENERIC_NO_CHANGE_EXPLANATION_REASONS = {
     "not_allocated_missing_invalidation_boundary",
     "not_new_or_increasing_risk_preserve_pm_contract",
     "not_selected_by_full_market_pm_capital_queue",
+    "no_rank_or_budget_no_new_exposure",
     "no_trade",
     "position_matched",
     "ranked_below_capital_queue",
@@ -964,6 +965,59 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
     mixed = sorted(used_lanes & forbidden_lanes)
     if mixed:
         errors.append(f"open_rank_mixed_forbidden_learning_lanes:{','.join(mixed)}")
+    if bool(trace.get("execution_profile_signal_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    if isinstance(impact, Mapping) and bool(impact.get("execution_profile_learning_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    return sorted(set(errors))
+
+
+def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | None) -> list[str]:
+    """Return errors when non-rank lifecycle learning is not landed in the PM contract.
+
+    Full-market new-risk rank has its own stricter route audit above. This
+    helper covers the other lifecycle ports: hold, reduce/exit, execution
+    profile, and conditional monitor. It is read-only and does not change
+    actions, lots, rank, or audit severity.
+    """
+    contract = contract if isinstance(contract, Mapping) else {}
+    if contract_has_full_market_capital_rank(contract):
+        return []
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
+    rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
+    if not rows:
+        return []
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    trace = evidence.get("lifecycle_learning_trace")
+    impact = evidence.get("learning_impact_delta")
+    errors: list[str] = []
+    if not isinstance(trace, Mapping):
+        errors.append("lifecycle_learning_trace_missing")
+        return errors
+    if not isinstance(impact, Mapping):
+        errors.append("learning_impact_delta_missing")
+
+    port = _clean(trace.get("contract_lifecycle_port") or trace.get("rank_lifecycle"))
+    if not port:
+        errors.append("lifecycle_decision_port_missing")
+    lanes = {_action_value_lane(row) for row in rows if isinstance(row, Mapping)}
+    lanes = {_clean(lane) for lane in lanes if _clean(lane)}
+    open_like = {"open", "add", "scale", "increase"}
+    if port == "hold" and lanes & (open_like | {"execution", "conditional_monitor"}):
+        errors.append(
+            "hold_lifecycle_mixed_forbidden_learning_lanes:"
+            + ",".join(sorted(lanes & (open_like | {"execution", "conditional_monitor"})))
+        )
+    if port == "reduce_exit" and lanes & (open_like | {"execution", "conditional_monitor"}):
+        errors.append(
+            "reduce_exit_lifecycle_mixed_forbidden_learning_lanes:"
+            + ",".join(sorted(lanes & (open_like | {"execution", "conditional_monitor"})))
+        )
+    if port == "conditional_monitor" and lanes & {"hold", "reduce", "exit"}:
+        errors.append(
+            "conditional_monitor_mixed_forbidden_learning_lanes:"
+            + ",".join(sorted(lanes & {"hold", "reduce", "exit"}))
+        )
     if bool(trace.get("execution_profile_signal_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
     if isinstance(impact, Mapping) and bool(impact.get("execution_profile_learning_direct_to_rank")):

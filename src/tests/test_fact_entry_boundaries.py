@@ -364,6 +364,82 @@ class FactEntryBoundaryTest(unittest.TestCase):
                 }
             )
 
+    def test_pm_learning_contract_summary_must_not_copy_research_fact_objects(self):
+        validate_pm_artifact_boundary(
+            {
+                "final_action_contract": {
+                    "evidence_used": {
+                        "rank_input_components": {"rank_score": 0.41},
+                        "lifecycle_learning_trace": {
+                            "rank_lifecycle": "open_add_new_risk",
+                            "used_lanes": ["open"],
+                        },
+                        "learning_impact_delta": {
+                            "net_rank_learning_delta": 0.12,
+                        },
+                    },
+                    "learning_used": {
+                        "learning_to_position_summary": {
+                            "trace_version": "agentquant.pm_learning_contract_summary.v1",
+                            "learning_source_summary": {
+                                "adaptive_policy_summary": {
+                                    "policy_count": 2,
+                                    "policy_type_counts": {"alpha_promotion": 1, "tail_loss_sentinel": 1},
+                                    "status": "summary_only_no_policy_rows",
+                                },
+                                "strategy_memory_summary": {
+                                    "status": "summary_only_no_raw_strategy_memory",
+                                    "raw_object_omitted": True,
+                                },
+                                "action_value_summary": {
+                                    "action_value_count": 1,
+                                    "action_preference_counts": {"positive_candidate_open": 1},
+                                },
+                            },
+                        },
+                        "pm_lifecycle_learning_trace": {
+                            "contract_lifecycle_port": "open_add_new_risk",
+                            "used_lanes": ["open"],
+                        },
+                        "pm_lifecycle_learning_impact_delta": {
+                            "open_add_rank_score_delta": 0.12,
+                        },
+                    },
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "final_action_contract": {
+                        "learning_used": {
+                            "learning_to_position_trace": {
+                                "adaptive_policy_state": {"policy_action": "calibrate"},
+                                "strategy_memory": {"memory_state": "protected"},
+                            }
+                        }
+                    }
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+            validate_pm_artifact_boundary(
+                {
+                    "final_action_contract": {
+                        "learning_used": {
+                            "learning_to_position_summary": {
+                                "loss_template_research_trace": {
+                                    "adaptive_policy_scope": {
+                                        "policies": [{"policy_action": "calibrate"}],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
     def test_artifact_boundaries_distinguish_summary_values_from_fact_objects(self):
         validate_execution_artifact_boundary(
             {

@@ -123,44 +123,92 @@ def _capital_priority_tier(state: Any) -> int:
     return int(_CAPITAL_PRIORITY_STATE_TIER.get(_clean_key(state), 0))
 
 
-def _capital_priority_score(
-    *,
-    opportunity_score: float,
-    final_state: str,
-    gating_failures: Iterable[Any],
-    action_value_learning: Mapping[str, Any],
-) -> float:
-    """Single PM rank score: current evidence plus learned deployability.
-
-    This is not a second rank. It is the deterministic score later used by the
-    full-market deployment pass to assign the only `opportunity_rank`.
-    """
-    tier_bonus = {
-        "tradeable_candidate": 0.18,
-        "probe_candidate": 0.10,
-        "watch_for_trigger": 0.02,
-        "no_opportunity": 0.0,
-    }.get(_clean_key(final_state), 0.0)
+def _rank_learning_delta(action_value_learning: Mapping[str, Any]) -> float:
+    """Lifecycle-safe open/add reinforcement term for the single capital rank."""
     positive = _safe_float(action_value_learning.get("positive_signal"), 0.0)
     negative = _safe_float(action_value_learning.get("negative_signal"), 0.0)
     tail_loss = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
     entry_loss = _safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0)
     trigger_positive = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
     trigger_loss = _safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0)
-    learning_delta = max(
-        -0.28,
+    return max(
+        -0.35,
         min(
-            0.22,
-            0.14 * positive
-            + 0.10 * trigger_positive
-            - 0.16 * negative
-            - 0.13 * tail_loss
-            - 0.14 * entry_loss
-            - 0.12 * trigger_loss,
+            0.35,
+            0.18 * positive
+            + 0.08 * trigger_positive
+            - 0.18 * negative
+            - 0.14 * tail_loss
+            - 0.16 * entry_loss
+            - 0.10 * trigger_loss,
         ),
     )
-    failure_penalty = min(0.10, 0.02 * len([item for item in gating_failures or [] if str(item or "").strip()]))
-    return round(_bounded(0.62 * _safe_float(opportunity_score, 0.0) + tier_bonus + learning_delta - failure_penalty), 4)
+
+
+def _rank_score_components(
+    *,
+    opportunity_score: float,
+    final_state: str,
+    gating_failures: Iterable[Any],
+    score_components: Mapping[str, Any],
+    action_value_learning: Mapping[str, Any],
+) -> dict[str, float]:
+    """Deterministic components for the single full-market capital rank.
+
+    The score ranks which product opportunity deserves capital first. It is not
+    sizing authority and it is not the ticker-local side priority.
+    """
+    components = score_components if isinstance(score_components, Mapping) else {}
+    tier_bonus = {
+        "tradeable_candidate": 0.18,
+        "probe_candidate": 0.10,
+        "watch_for_trigger": 0.02,
+        "no_opportunity": 0.0,
+    }.get(_clean_key(final_state), 0.0)
+    cold_start_evidence = 0.52 * _safe_float(opportunity_score, 0.0)
+    trigger_execution_quality = (
+        _safe_float(components.get("execution_profile_learning"), 0.0)
+        + _safe_float(components.get("trigger_quality_positive_bonus"), 0.0)
+        + _safe_float(components.get("trigger_quality_loss_penalty"), 0.0)
+    )
+    product_setup_trigger_history = _safe_float(components.get("alpha_profile_adjustment"), 0.0)
+    lifecycle_action_value_delta = _rank_learning_delta(action_value_learning)
+    conflict_and_risk_penalty = (
+        abs(min(0.0, _safe_float(components.get("fusion_conflict_adjustment"), 0.0)))
+        + abs(min(0.0, _safe_float(components.get("market_conflict_penalty"), 0.0)))
+        + abs(min(0.0, _safe_float(components.get("critical_data_gap_penalty"), 0.0)))
+        + abs(min(0.0, _safe_float(components.get("fundamental_gap_penalty"), 0.0)))
+        + min(0.16, 0.025 * len([item for item in gating_failures or [] if str(item or "").strip()]))
+    )
+    capital_efficiency = 0.0
+    return {
+        "cold_start_evidence_quality": round(cold_start_evidence, 6),
+        "capital_layer_priority": round(tier_bonus, 6),
+        "open_add_action_value_delta": round(lifecycle_action_value_delta, 6),
+        "product_setup_trigger_history": round(product_setup_trigger_history, 6),
+        "trigger_execution_quality": round(trigger_execution_quality, 6),
+        "capital_efficiency": round(capital_efficiency, 6),
+        "conflict_risk_invalidation_penalty": round(-conflict_and_risk_penalty, 6),
+    }
+
+
+def _capital_priority_score(
+    *,
+    opportunity_score: float,
+    final_state: str,
+    gating_failures: Iterable[Any],
+    score_components: Mapping[str, Any],
+    action_value_learning: Mapping[str, Any],
+) -> float:
+    """Single PM rank score used later by full-market deployment."""
+    components = _rank_score_components(
+        opportunity_score=opportunity_score,
+        final_state=final_state,
+        gating_failures=gating_failures,
+        score_components=score_components,
+        action_value_learning=action_value_learning,
+    )
+    return round(_bounded(sum(float(value or 0.0) for value in components.values())), 4)
 
 
 def side_priority_semantics_payload() -> dict[str, Any]:
@@ -603,10 +651,11 @@ def _action_value_learning_summary(
         if not action_preference:
             continue
         lane = _clean_key(_row_value(row, payload, "action_value_lane", "action_name", default=""))
-        if lifecycle == "open_add_new_risk" and lane in blocked_open_rank_lanes:
+        lane_is_execution_profile = lifecycle == "open_add_new_risk" and lane == "execution"
+        if lifecycle == "open_add_new_risk" and lane in blocked_open_rank_lanes and not lane_is_execution_profile:
             ignored_lanes.add(lane or "unknown")
             continue
-        if lifecycle == "open_add_new_risk" and lane not in open_rank_lanes:
+        if lifecycle == "open_add_new_risk" and lane not in open_rank_lanes and not lane_is_execution_profile:
             ignored_lanes.add(lane or "unknown")
             continue
         scope = _clean_key(
@@ -671,8 +720,19 @@ def _action_value_learning_summary(
         )
         is_positive = action_preference in _POSITIVE_ACTION_PREFERENCES
         is_negative = action_preference in _NEGATIVE_ACTION_PREFERENCES or action_preference.startswith("negative")
-        if lifecycle == "open_add_new_risk" and action_preference == "positive_candidate_execution":
+        if lane_is_execution_profile:
             ignored_lanes.add("execution")
+            if action_preference == "positive_candidate_execution":
+                execution_signal += strength
+            elif is_negative:
+                execution_signal -= strength * (1.20 if is_tail_loss else 1.0)
+            if entry_quality_outcome:
+                entry_penalty_weight = _safe_float(entry_quality_outcome.get("penalty_weight"), 0.0)
+                trigger_support_weight = _safe_float(entry_quality_outcome.get("support_weight"), 0.0)
+                if bool(entry_quality_outcome.get("positive_entry_episode")):
+                    trigger_quality_positive_signal += strength * max(0.25, trigger_support_weight)
+                if bool(entry_quality_outcome.get("loss_episode")):
+                    trigger_quality_loss_signal += strength * max(0.35, entry_penalty_weight)
             continue
         used_lanes.add(lane or "unknown")
         if scope == "exact_real_state":
@@ -1150,16 +1210,26 @@ def build_opportunity_scorecard(
             final_state = "no_opportunity"
 
         opportunity_score = round(score, 4)
+        rank_score_components = _rank_score_components(
+            opportunity_score=opportunity_score,
+            final_state=final_state,
+            gating_failures=gating_failures,
+            score_components=score_components,
+            action_value_learning=action_value_learning,
+        )
         capital_priority_score = _capital_priority_score(
             opportunity_score=opportunity_score,
             final_state=final_state,
             gating_failures=gating_failures,
+            score_components=score_components,
             action_value_learning=action_value_learning,
         )
         side_rows[side] = {
             "side": side,
             "score": opportunity_score,
             "opportunity_score": opportunity_score,
+            "rank_score": capital_priority_score,
+            "rank_score_components": rank_score_components,
             "capital_priority_score": capital_priority_score,
             "capital_priority_tier": _capital_priority_tier(final_state),
             "opportunity_score_components": {

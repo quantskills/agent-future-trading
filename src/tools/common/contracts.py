@@ -291,6 +291,14 @@ def _fact_object_forbidden_fields(node: Dict[str, Any], fields: set[str]) -> Lis
     return sorted(field for field in fields.intersection(node.keys()) if _is_fact_object(node.get(field)))
 
 
+def _pm_research_alias_forbidden_fields(node: Dict[str, Any]) -> List[str]:
+    fields: List[str] = []
+    adaptive_scope = node.get("adaptive_policy_scope")
+    if isinstance(adaptive_scope, dict) and _is_fact_object(adaptive_scope.get("policies")):
+        fields.append("adaptive_policy_scope.policies")
+    return fields
+
+
 def execution_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     """Return execution payload paths that persist PM explanation fields."""
     violations: List[str] = []
@@ -322,6 +330,7 @@ def pm_artifact_boundary_violations(payload: Dict[str, Any]) -> List[str]:
     object_forbidden = PM_DOWNSTREAM_FACT_FIELDS | RESEARCH_LEARNING_FIELDS
     for path, node in _iter_nested_dicts(payload):
         fields = _fact_object_forbidden_fields(node, object_forbidden)
+        fields.extend(field for field in _pm_research_alias_forbidden_fields(node) if field not in fields)
         fields.extend(field for field in _present_forbidden_fields(node, PM_INTERNAL_DRAFT_FIELDS) if field not in fields)
         if fields:
             violations.append(f"{path or '<root>'}:{fields}")

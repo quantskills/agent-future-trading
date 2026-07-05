@@ -81,6 +81,24 @@ def _transaction_audit_payload(payload):
 
 
 class SystemInvariantAuditRegressionTest(unittest.TestCase):
+    def _lifecycle_trace(self, port: str, lanes: list[str]) -> dict:
+        return {
+            "lifecycle_learning_trace": {
+                "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+                "contract_lifecycle_port": port,
+                "rank_lifecycle": port,
+                "used_lanes": lanes,
+                "accepted_learning_lanes": lanes,
+                "blocked_learning_lanes": ["open", "add", "scale", "increase"],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {
+                "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
+                "execution_profile_learning_direct_to_rank": False,
+                "lots_delta": 0,
+            },
+        }
+
     def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
         db_path = SRC_ROOT / "assets" / "agentquant.db"
         if not db_path.exists():
@@ -792,6 +810,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "target_lots": 0,
             "lots_delta": 2,
             "evidence_used": {
+                **self._lifecycle_trace("reduce_exit", ["exit"]),
                 "opportunity_score_components": {
                     "positive_learning": 0.0,
                     "negative_learning": 0.0,
@@ -1317,6 +1336,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "reason_codes": ["flat_target", "holding_period_control", "position_matched"],
                 "evidence_used": {
                     "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
+                    **self._lifecycle_trace("hold", ["hold"]),
                     "opportunity_score_components": {
                         "positive_learning": 0.0,
                         "negative_learning": 0.0,
@@ -1611,6 +1631,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "single_source_of_trade_truth": True,
             "candidate_sources_do_not_bypass_contract": True,
             "evidence_used": {
+                **self._lifecycle_trace("reduce_exit", ["exit"]),
                 "opportunity_score_components": {
                     "positive_learning": 0.0,
                     "negative_learning": 0.0,
@@ -3594,6 +3615,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "lots_delta": 1,
                     "reason_codes": ["protective_reduce_after_tail_loss"],
                     "evidence_used": {
+                        **self._lifecycle_trace("reduce_exit", ["exit"]),
                         "opportunity_score_components": {
                             "positive_learning": 0.0,
                             "negative_learning": -0.12,

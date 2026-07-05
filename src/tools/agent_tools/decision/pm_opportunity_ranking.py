@@ -63,6 +63,9 @@ def _rankable(row: Mapping[str, Any]) -> bool:
 
 
 def _capital_priority_score(row: Mapping[str, Any]) -> float:
+    value = row.get("rank_score")
+    if value not in (None, ""):
+        return _safe_float(value, 0.0)
     value = row.get("capital_priority_score")
     if value not in (None, ""):
         return _safe_float(value, 0.0)
@@ -164,9 +167,16 @@ def rank_input_components_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """Return the deterministic inputs used by the single full-market rank."""
     components = row.get("opportunity_score_components")
     components = components if isinstance(components, Mapping) else {}
+    rank_score_components = row.get("rank_score_components")
+    rank_score_components = rank_score_components if isinstance(rank_score_components, Mapping) else {}
     return {
         "final_state": str(row.get("final_state") or row.get("opportunity_state") or ""),
         "capital_priority_tier": _capital_priority_tier(row),
+        "rank_score": round(_capital_priority_score(row), 6),
+        "rank_score_components": {
+            str(key): round(_safe_float(value), 6)
+            for key, value in rank_score_components.items()
+        },
         "capital_priority_score": round(_capital_priority_score(row), 6),
         "watch_priority_score": round(_watch_priority_score(row), 6),
         "opportunity_score": round(_safe_float(row.get("opportunity_score", row.get("score")), 0.0), 6),
@@ -213,9 +223,16 @@ def learning_impact_delta_for_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "trigger_quality_positive_bonus": _safe_float(components.get("trigger_quality_positive_bonus"), 0.0),
         "trigger_quality_loss_penalty": _safe_float(components.get("trigger_quality_loss_penalty"), 0.0),
     }
+    rank_score_components = row.get("rank_score_components")
+    rank_score_components = rank_score_components if isinstance(rank_score_components, Mapping) else {}
     return {
         **{key: round(value, 6) for key, value in direct_terms.items()},
         "net_rank_learning_delta": round(sum(direct_terms.values()), 6),
+        "rank_score": round(_capital_priority_score(row), 6),
+        "rank_score_open_add_learning_delta": round(
+            _safe_float(rank_score_components.get("open_add_action_value_delta"), 0.0),
+            6,
+        ),
         "execution_profile_learning_direct_to_rank": False,
         "execution_profile_learning_observed": round(_safe_float(components.get("execution_profile_learning"), 0.0), 6),
     }
@@ -333,6 +350,7 @@ def rank_opportunities(
                 "side": side,
                 "score": _safe_float(row.get("score"), 0.0),
                 "opportunity_score": _safe_float(row.get("opportunity_score", row.get("score")), 0.0),
+                "rank_score": _capital_priority_score(row),
                 "capital_priority_score": _capital_priority_score(row),
                 "capital_priority_tier": _capital_priority_tier(row),
                 "watch_priority_score": _watch_priority_score(row),
@@ -368,6 +386,7 @@ def rank_opportunities(
             row["side_priority"] = priority
             row["ticker_side_priority"] = priority
             row["side_priority_score"] = _watch_priority_score(row)
+            row["rank_score"] = _capital_priority_score(row)
             row["watch_priority_score"] = _watch_priority_score(row)
             row.update(rank_trace_for_row(row))
             row.update(side_priority_semantics_payload())

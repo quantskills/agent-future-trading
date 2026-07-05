@@ -22,8 +22,219 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _compact_learning_trace_row(row: Any) -> dict:
+    if not isinstance(row, dict):
+        return {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    return {
+        "action_value_id": row.get("id") or payload.get("id"),
+        "scope_key": row.get("scope_key") or payload.get("scope_key"),
+        "ticker": row.get("ticker") or payload.get("ticker"),
+        "side": row.get("side") or payload.get("side"),
+        "setup_type": row.get("setup_type") or payload.get("setup_type"),
+        "action_name": row.get("action_name") or payload.get("action_name"),
+        "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
+        "action_preference": row.get("action_preference") or payload.get("action_preference"),
+        "memory_side_role": row.get("memory_side_role") or payload.get("memory_side_role"),
+        "reward_mean": row.get("reward_mean") or payload.get("reward_mean"),
+        "reward_sum": row.get("reward_sum") or payload.get("reward_sum"),
+        "win_rate": row.get("win_rate") or payload.get("win_rate"),
+        "sample_count": row.get("sample_count") or payload.get("sample_count"),
+        "last_sample_date": row.get("last_sample_date") or payload.get("last_sample_date"),
+        "retrieval_match_level": row.get("retrieval_match_level") or payload.get("retrieval_match_level"),
+    }
+
+
 def _default_learning_trace(rows: list | None, limit: int = 10) -> list:
-    return list(rows or [])[: int(limit or 10)]
+    compacted: list[dict] = []
+    for row in rows or []:
+        compact = _compact_learning_trace_row(row)
+        if compact:
+            compacted.append(compact)
+        if len(compacted) >= int(limit or 10):
+            break
+    return compacted
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _action_value_lane(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    for key in ("learning_lane", "action_value_lane", "lane", "action_name"):
+        value = _clean_text(row.get(key) or payload.get(key))
+        if value:
+            if value in {"scale", "increase"}:
+                return "add"
+            if value in {"close", "decrease"}:
+                return "exit"
+            if "execution" in value or "trigger" in value or "fill" in value:
+                return "execution"
+            return value
+    return ""
+
+
+def _contract_lifecycle_port(
+    *,
+    final_action: str,
+    current_lots: int,
+    target_lots: int,
+    authority: dict,
+) -> str:
+    action = _clean_text(final_action)
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    if bool(authority.get("conditional_trigger_authority")) or bool(authority.get("requires_intraday_confirmation")):
+        return "conditional_monitor"
+    if current == 0 and target != 0:
+        return "open_add_new_risk"
+    if current != 0 and target != 0 and (
+        (current > 0 and target > current)
+        or (current < 0 and target < current)
+        or (current > 0 and target < 0)
+        or (current < 0 and target > 0)
+    ):
+        return "open_add_new_risk"
+    if current != 0 and target == current:
+        return "hold"
+    if current != 0 and (target == 0 or abs(target) < abs(current) or action in {"reduce", "exit", "close"}):
+        return "reduce_exit"
+    if action in {"open", "open_probe", "open_real", "scale", "add", "increase", "reverse"}:
+        return "open_add_new_risk"
+    return "wait"
+
+
+def _pm_lifecycle_learning_trace(
+    *,
+    final_action: str,
+    current_lots: int,
+    target_lots: int,
+    authority: dict,
+    diagnostics: dict,
+    selected_action_values: list,
+    execution_contract_payload: dict,
+) -> dict:
+    lifecycle_port = _contract_lifecycle_port(
+        final_action=final_action,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        authority=authority,
+    )
+    used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values or []) if lane})
+    memory_retrieval = diagnostics.get("final_action_memory_retrieval")
+    memory_retrieval = memory_retrieval if isinstance(memory_retrieval, dict) else {}
+    rejected = memory_retrieval.get("rejected_action_values")
+    rejected_lanes = sorted({
+        lane for lane in (_action_value_lane(row) for row in (rejected or [])) if lane
+    })
+    accepted_by_port = {
+        "open_add_new_risk": ["open", "add", "scale", "increase"],
+        "hold": ["hold"],
+        "reduce_exit": ["reduce", "exit"],
+        "conditional_monitor": ["conditional_monitor"],
+        "wait": [],
+    }.get(lifecycle_port, [])
+    trace = {
+        "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+        "contract_lifecycle_port": lifecycle_port,
+        "rank_lifecycle": "open_add_new_risk" if lifecycle_port == "open_add_new_risk" else lifecycle_port,
+        "used_lanes": used_lanes,
+        "accepted_learning_lanes": accepted_by_port,
+        "rejected_learning_lanes": rejected_lanes,
+        "blocked_learning_lanes": (
+            ["hold", "reduce", "exit", "execution", "conditional_monitor"]
+            if lifecycle_port == "open_add_new_risk"
+            else ["open", "add", "scale", "increase"]
+        ),
+        "memory_requirement_status": memory_retrieval.get("status"),
+        "memory_requirements": diagnostics.get("final_action_memory_requirements")
+        if isinstance(diagnostics.get("final_action_memory_requirements"), dict)
+        else {},
+        "hold_learning_decision": (
+            diagnostics.get("holding_rebalance_control")
+            if isinstance(diagnostics.get("holding_rebalance_control"), dict)
+            else {}
+        ),
+        "reduce_exit_learning_decision": (
+            diagnostics.get("winning_template_continuation")
+            if isinstance(diagnostics.get("winning_template_continuation"), dict)
+            else {}
+        ),
+        "open_add_learning_decision": (
+            diagnostics.get("alpha_setup_ev_fusion")
+            if isinstance(diagnostics.get("alpha_setup_ev_fusion"), dict)
+            else {}
+        ),
+        "conditional_monitor_learning_decision": (
+            diagnostics.get("conditional_monitor_probe_plan")
+            if isinstance(diagnostics.get("conditional_monitor_probe_plan"), dict)
+            else {}
+        ),
+        "execution_profile_learning_decision": (
+            execution_contract_payload.get("execution_action_value_preference")
+            if isinstance(execution_contract_payload.get("execution_action_value_preference"), dict)
+            else {}
+        ),
+        "execution_profile_signal_direct_to_rank": False,
+        "final_contract_effect_fields": [
+            "final_action",
+            "target_lots",
+            "lots_delta",
+            "reason_codes",
+            "execution_profile",
+            "requires_intraday_confirmation",
+        ],
+    }
+    return trace
+
+
+def _pm_lifecycle_learning_impact_delta(
+    *,
+    current_lots: int,
+    target_lots: int,
+    position_ratio: float,
+    diagnostics: dict,
+    execution_contract_payload: dict,
+) -> dict:
+    alpha_ev = diagnostics.get("alpha_setup_ev_fusion")
+    alpha_ev = alpha_ev if isinstance(alpha_ev, dict) else {}
+    holding = diagnostics.get("holding_rebalance_control")
+    holding = holding if isinstance(holding, dict) else {}
+    reduce_exit = diagnostics.get("winning_template_continuation")
+    reduce_exit = reduce_exit if isinstance(reduce_exit, dict) else {}
+    conditional = diagnostics.get("conditional_monitor_probe_plan")
+    conditional = conditional if isinstance(conditional, dict) else {}
+    execution_pref = execution_contract_payload.get("execution_action_value_preference")
+    execution_pref = execution_pref if isinstance(execution_pref, dict) else {}
+    pre_ratio = _safe_float(alpha_ev.get("pre_control_ratio"), _safe_float(holding.get("pre_control_ratio"), position_ratio))
+    final_ratio = _safe_float(alpha_ev.get("final_ratio"), position_ratio)
+    return {
+        "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
+        "current_lots": int(current_lots or 0),
+        "target_lots": int(target_lots or 0),
+        "lots_delta": int((target_lots or 0) - (current_lots or 0)),
+        "pre_learning_position_ratio": pre_ratio,
+        "final_target_position_ratio": float(position_ratio or 0.0),
+        "position_ratio_delta": round(float(position_ratio or 0.0) - pre_ratio, 8),
+        "open_add_rank_score_delta": _safe_float(
+            alpha_ev.get("rank_score_open_add_learning_delta"),
+            _safe_float(alpha_ev.get("learning_impact_delta"), 0.0),
+        ),
+        "alpha_setup_multiplier": alpha_ev.get("multiplier"),
+        "alpha_setup_expectancy_lane": alpha_ev.get("expectancy_lane"),
+        "hold_decision": holding.get("decision"),
+        "hold_changes_position": bool(holding and holding.get("final_ratio") != holding.get("pre_control_ratio")),
+        "reduce_exit_decision": reduce_exit.get("decision"),
+        "reduce_exit_changes_position": bool(
+            reduce_exit and reduce_exit.get("final_ratio") != reduce_exit.get("pre_control_ratio")
+        ),
+        "conditional_monitor_decision": conditional.get("decision"),
+        "execution_profile_changed": bool(execution_pref.get("enabled")),
+        "execution_profile_learning_direct_to_rank": False,
+    }
 
 
 def build_final_action_contract(
@@ -174,6 +385,35 @@ def build_final_action_contract(
             action_value = futures_action_cls(str(action_value))
         except Exception:
             pass
+    pm_lifecycle_trace = _pm_lifecycle_learning_trace(
+        final_action=final_action,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        authority=authority,
+        diagnostics=diagnostics,
+        selected_action_values=selected_action_values,
+        execution_contract_payload=execution_contract_payload,
+    )
+    pm_lifecycle_impact = _pm_lifecycle_learning_impact_delta(
+        current_lots=current_lots,
+        target_lots=target_lots,
+        position_ratio=position_ratio,
+        diagnostics=diagnostics,
+        execution_contract_payload=execution_contract_payload,
+    )
+    scorecard_rank_trace = scorecard_side.get("lifecycle_learning_trace") or {}
+    scorecard_learning_impact = scorecard_side.get("learning_impact_delta") or {}
+    is_new_capital_port = pm_lifecycle_trace.get("contract_lifecycle_port") == "open_add_new_risk"
+    lifecycle_learning_trace = (
+        {**scorecard_rank_trace, "pm_final_contract_lifecycle_trace": pm_lifecycle_trace}
+        if is_new_capital_port and isinstance(scorecard_rank_trace, dict) and scorecard_rank_trace
+        else pm_lifecycle_trace
+    )
+    learning_impact_delta = (
+        {**scorecard_learning_impact, "pm_lifecycle_impact_delta": pm_lifecycle_impact}
+        if is_new_capital_port and isinstance(scorecard_learning_impact, dict) and scorecard_learning_impact
+        else pm_lifecycle_impact
+    )
     return {
         "contract_version": FINAL_ACTION_CONTRACT_VERSION,
         "ticker": ticker,
@@ -206,8 +446,8 @@ def build_final_action_contract(
             "capital_priority_score": scorecard_side.get("capital_priority_score"),
             "capital_priority_tier": scorecard_side.get("capital_priority_tier"),
             "rank_input_components": scorecard_side.get("rank_input_components") or {},
-            "lifecycle_learning_trace": scorecard_side.get("lifecycle_learning_trace") or {},
-            "learning_impact_delta": scorecard_side.get("learning_impact_delta") or {},
+            "lifecycle_learning_trace": lifecycle_learning_trace,
+            "learning_impact_delta": learning_impact_delta,
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
             "side_priority": scorecard_side.get("side_priority"),
             "ticker_side_priority": scorecard_side.get("ticker_side_priority"),
@@ -261,6 +501,8 @@ def build_final_action_contract(
                 else ""
             ),
             "learning_adjustment_summary": scorecard_side.get("learning_adjustment_summary") or {},
+            "pm_lifecycle_learning_trace": pm_lifecycle_trace,
+            "pm_lifecycle_learning_impact_delta": pm_lifecycle_impact,
         },
         "risk_flags": sorted(reason_codes),
         **execution_fields,

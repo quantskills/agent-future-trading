@@ -46,6 +46,24 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
             },
         }
 
+    def _lifecycle_trace(self, port: str, lanes: list[str]) -> dict:
+        return {
+            "lifecycle_learning_trace": {
+                "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+                "contract_lifecycle_port": port,
+                "rank_lifecycle": port,
+                "used_lanes": lanes,
+                "accepted_learning_lanes": lanes,
+                "blocked_learning_lanes": ["open", "add", "scale", "increase"],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {
+                "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
+                "execution_profile_learning_direct_to_rank": False,
+                "lots_delta": 0,
+            },
+        }
+
     def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
         db_path = SRC_ROOT / "assets" / "agentquant.db"
         if not db_path.exists():
@@ -344,6 +362,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "evidence_used": {
                     "opportunity_score_components": {},
                     "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
+                    **self._lifecycle_trace("reduce_exit", ["exit"]),
                 },
                 "capital_deployment": {
                     "selected_for_capital_deployment": True,
@@ -407,6 +426,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "evidence_used": {
                     "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
                     "opportunity_score_components": {},
+                    **self._lifecycle_trace("reduce_exit", ["exit"]),
                 },
                 "learning_used": {"alpha_setup_action_values": []},
             },
@@ -443,6 +463,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "evidence_used": {
                     "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
                     "opportunity_score_components": {},
+                    **self._lifecycle_trace("reduce_exit", ["exit"]),
                 },
                 "learning_used": {
                     "alpha_setup_action_values": [
@@ -608,6 +629,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "evidence_used": {
                     "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
                     "opportunity_score_components": {},
+                    **self._lifecycle_trace("hold", ["hold"]),
                 },
                 "learning_used": {
                     "alpha_setup_action_values": [
@@ -802,6 +824,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     "opportunity_rank": None,
                     "opportunity_score": 0.0,
                     "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
+                    **self._lifecycle_trace("reduce_exit", ["exit"]),
                     "opportunity_score_components": {
                         "positive_learning": 0.0025,
                         "negative_learning": 0.0,
@@ -815,13 +838,13 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                             "scope_key": "C|long|event_short|range|news_event_setup",
                             "ticker": "C",
                             "side": "long",
-                            "action_name": "open",
-                            "action_preference": "positive_candidate_open",
+                            "action_name": "exit",
+                            "action_preference": "positive_candidate_exit",
                             "reward_source": "real_trade",
                             "evidence_scope": "exact_real_state",
                             "consumer_scope": "pm_learning",
-                            "action_value_lane": "open",
-                            "learning_lane": "open",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
                             "reward_sum": 865.63,
                             "reward_mean": 865.63,
                             "sample_count": 1,

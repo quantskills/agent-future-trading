@@ -304,6 +304,14 @@
 
 （3）收口 Trader 条件触发记录与下单安全闸顺序。修改：`trader.py`、`final_action_semantics.py`、统一字段语义表、机制文档和回归测试。原因：2025-03-25 暴露出已审计通过且仍保留新增风险敞口的条件探针，Trader 在盘中触发检查前用入场权限安全闸把合约改成 `hold/0 lots`，导致没有写 `futures_intraday_decision`。本次固定 Trader 对需要盘中确认的条件合约先写触发/未触发事实；未触发不下单，触发后再运行最终下单安全闸。保留安全闸，不让 Trader 判断策略好坏、不改 PM/Auditor/PG 权限、不改仓位参数、不降低 hard fail。
 
+（4）补齐 `execution` action-value 到 trigger/profile 的真实影响路径。修改：`analyst_signal_fusion.py` 和决策工作流回归测试。原因：在 open/add 新资金生命周期下，`execution` lane 之前被提前归入 ignored 并 `continue`，导致 `execution_profile_learning` 恒为 0，违背“execution 学习只影响 trigger/profile，不直接生成资金 rank”的语义。本次让 execution 学习只形成执行/触发质量修正与 trace，仍不进入 open/add 正负 action-value、不过度生成交易权限、不改变仓位参数。
+
+（5）执行唯一全市场 rank 机制与生命周期强化学习决策口总收口。修改：`analyst_signal_fusion.py`、`pm_opportunity_ranking.py`、`workflow.py`、`final_action_semantics.py`、统一字段语义表和回归测试。原因：此前 rank 字段和闸门已经收住，但 `rank_score` 仍没有显式拆成“冷启动证据质量 + 生命周期 open/add action-value 修正 + 产品/setup/trigger 历史表现 + trigger/execution 质量 + 资金效率 - 冲突/风险/失效边界惩罚”，workflow 资金部署也没有把当前组合保证金和净敞口预算作为 rank 顺序消耗的一部分。本次固定 `rank_score/rank_score_components` 为唯一全市场资金 rank 的排序输入，`opportunity_rank` 仍只能由 workflow 全市场资金部署阶段生成；按 rank 顺序占用保证金和净敞口预算，后续候选若预算不足必须还原为 `wait/hold` 并写入 `no_rank_or_budget_no_new_exposure`。不新增第二套 rank、不改 0.008 probe、不改仓位参数、不让 hold/reduce/exit/execution 抢新资金 rank、不降低 PG hard fail。
+
+（6）补齐 PM 最终合约生命周期学习落盘和 PG 防遗漏检查。修改：`portfolio_manager.py`、`pm_contract_builder.py`、`final_action_semantics.py`、`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、统一字段语义表和回归测试。原因：非 rank 动作的 hold、reduce/exit、conditional_monitor 学习不能只停留在 PM 内部诊断或 plan snapshot；最终 `final_action_contract` 必须写入 `lifecycle_learning_trace/learning_impact_delta/pm_lifecycle_learning_trace/pm_lifecycle_learning_impact_delta`，并在 PM 签出后只回填安全的 `learning_to_position_summary` 与 `pm_lifecycle_trace_landed_in_contract`。内部 `learning_to_position_trace`、`adaptive_policy_state`、`strategy_memory` 和策略行对象不得进入 PM artifact；PG 新增非 rank 生命周期学习 trace hard fail，阻止 hold/reduce/exit/execution/conditional_monitor 学习混用或只写诊断不落合约；不改智能体边界、不改仓位参数、不降低 hard fail。
+
+（7）收口 PM learning trace artifact 边界。修改：`portfolio_manager.py`、`pm_contract_builder.py`、`contracts.py`、统一字段语义表和事实入口边界测试。原因：2025-03-25 Phase1 保存 BU 推荐时暴露出 `final_action_contract.learning_used.learning_to_position_trace` 原样携带 `adaptive_policy_state/strategy_memory`，违反 PM artifact 边界。本次把落合约内容改为 `learning_to_position_summary` 安全摘要，只保留 count、lane、scope、status、delta、reason；`adaptive_policy_scope.policies` 这类换名策略行也由边界校验 hard fail。保留 rank/lifecycle 学习影响字段，不改交易参数、不改 Trader/Accountant/Researcher 边界。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

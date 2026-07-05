@@ -472,6 +472,7 @@ class AgentWorkflow:
         reason: str,
         selected: bool,
         rank: int | None,
+        deployment_extra: Dict[str, Any] | None = None,
     ) -> None:
         contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         if not contract:
@@ -501,6 +502,7 @@ class AgentWorkflow:
         reason_set.add("pm_full_market_capital_deployment")
         if not selected and original_target != target_lots:
             reason_set.add("capital_queue_not_selected")
+            reason_set.add("no_rank_or_budget_no_new_exposure")
         reason_key = str(reason or "").split(":", 1)[0].strip()
         if reason_key == "no_rank_no_new_exposure":
             reason_set.add("no_rank_no_new_exposure")
@@ -539,6 +541,8 @@ class AgentWorkflow:
                     "rank_is_not_trade_authority": True,
                 }
             )
+        if isinstance(deployment_extra, dict):
+            deployment.update(deployment_extra)
         contract["capital_deployment"] = deployment
         snapshot["final_action_contract"] = contract
         rebalance = snapshot.get("rebalance_summary") if isinstance(snapshot.get("rebalance_summary"), dict) else {}
@@ -707,16 +711,81 @@ class AgentWorkflow:
     def _daily_capital_deployment_config(self) -> Dict[str, float]:
         budget = self.config.get("position_budget_policy", {}) or {}
         capital = self.config.get("capital_utilization_control", {}) or {}
+        net_control = self.config.get("net_exposure_control", {}) or {}
         hard_max = self._safe_positive_ratio(self.config.get("max_total_margin_ratio"), 0.20)
         target = self._safe_positive_ratio(capital.get("target_margin_ratio_confirmed"), 0.10)
         min_probe = self._safe_positive_ratio(budget.get("min_real_trade_margin_ratio"), 0.008)
         max_single = self._safe_positive_ratio(budget.get("max_single_ticker_margin_ratio"), 0.13)
+        max_net = self._safe_positive_ratio(net_control.get("max_net_exposure"), 0.50)
         return {
             "target_margin_ratio": min(target, hard_max),
             "min_probe_margin_ratio": min_probe,
             "max_single_ticker_margin_ratio": min(max_single, hard_max),
             "hard_max_total_margin_ratio": hard_max,
+            "max_net_exposure": max_net,
         }
+
+    def _portfolio_margin_ratio(self) -> float:
+        equity = float(getattr(self.init_portfolio, "account_equity", 0.0) or getattr(self.init_portfolio, "cashflow", 0.0) or 0.0)
+        if equity <= 0:
+            return 0.0
+        return max(0.0, float(getattr(self.init_portfolio, "margin_used", 0.0) or 0.0) / equity)
+
+    def _portfolio_current_net_exposure(self) -> float:
+        equity = float(getattr(self.init_portfolio, "account_equity", 0.0) or getattr(self.init_portfolio, "cashflow", 0.0) or 0.0)
+        if equity <= 0:
+            return 0.0
+        exposure = 0.0
+        for position in (getattr(self.init_portfolio, "positions", {}) or {}).values():
+            try:
+                shares = int(getattr(position, "shares", 0) or 0)
+                value = abs(float(getattr(position, "value", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                continue
+            if shares == 0 or value <= 0:
+                continue
+            exposure += (1.0 if shares > 0 else -1.0) * value / equity
+        return exposure
+
+    def _portfolio_ticker_exposure(self, ticker: str) -> float:
+        equity = float(getattr(self.init_portfolio, "account_equity", 0.0) or getattr(self.init_portfolio, "cashflow", 0.0) or 0.0)
+        if equity <= 0:
+            return 0.0
+        position = (getattr(self.init_portfolio, "positions", {}) or {}).get(str(ticker).upper())
+        if position is None:
+            position = (getattr(self.init_portfolio, "positions", {}) or {}).get(str(ticker))
+        if position is None:
+            return 0.0
+        try:
+            shares = int(getattr(position, "shares", 0) or 0)
+            value = abs(float(getattr(position, "value", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if shares == 0 or value <= 0:
+            return 0.0
+        return (1.0 if shares > 0 else -1.0) * value / equity
+
+    @staticmethod
+    def _contract_target_position_ratio(snapshot: Dict[str, Any]) -> float:
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        try:
+            value = float(contract.get("target_position_ratio") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value:
+            return value
+        target_lots = AgentWorkflow._contract_target_lots(snapshot)
+        if target_lots == 0:
+            return 0.0
+        try:
+            margin_ratio = float(contract.get("target_margin_ratio_estimate") or 0.0)
+            margin_rate = float(contract.get("margin_rate") or 0.0)
+        except (TypeError, ValueError):
+            margin_ratio = 0.0
+            margin_rate = 0.0
+        if margin_ratio > 0 and margin_rate > 0:
+            return (1.0 if target_lots > 0 else -1.0) * margin_ratio / margin_rate
+        return 0.0
 
     def _recommended_margin_ratio(self, recommendation: FuturesRecommendation) -> float:
         snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
@@ -775,14 +844,61 @@ class AgentWorkflow:
             tier = int(row.get("capital_priority_tier") or 0)
         except (TypeError, ValueError):
             tier = 0
+        rank_score = AgentWorkflow._float_field(row, "rank_score")
         priority = AgentWorkflow._float_field(row, "capital_priority_score")
         watch_priority = AgentWorkflow._float_field(row, "watch_priority_score", priority)
         score = AgentWorkflow._float_field(row, "opportunity_score", AgentWorkflow._float_field(row, "score"))
-        return tier, watch_priority, priority, score
+        if rank_score <= 0:
+            rank_score = priority
+        return tier, rank_score, watch_priority, score
+
+    @staticmethod
+    def _capital_efficiency_rank_bonus(
+        margin_ratio: float,
+        *,
+        min_probe_ratio: float,
+        max_single_ratio: float,
+    ) -> float:
+        """Small rank correction for efficient capital usage, not sizing authority."""
+        if max_single_ratio <= 0:
+            return 0.0
+        candidate_margin = max(float(margin_ratio or 0.0), float(min_probe_ratio or 0.0))
+        if candidate_margin <= 0:
+            return 0.0
+        efficiency = max(0.0, min(1.0, (max_single_ratio - candidate_margin) / max_single_ratio))
+        return round(0.02 * efficiency, 6)
+
+    @staticmethod
+    def _apply_workflow_capital_efficiency_to_rank_row(
+        row: Dict[str, Any],
+        *,
+        margin_ratio: float,
+        min_probe_ratio: float,
+        max_single_ratio: float,
+    ) -> float:
+        bonus = AgentWorkflow._capital_efficiency_rank_bonus(
+            margin_ratio,
+            min_probe_ratio=min_probe_ratio,
+            max_single_ratio=max_single_ratio,
+        )
+        components = row.get("rank_score_components")
+        components = dict(components) if isinstance(components, dict) else {}
+        previous_efficiency = AgentWorkflow._float_field(components, "capital_efficiency")
+        components["capital_efficiency"] = round(previous_efficiency + bonus, 6)
+        base_score = AgentWorkflow._float_field(
+            row,
+            "rank_score",
+            AgentWorkflow._float_field(row, "capital_priority_score", AgentWorkflow._float_field(row, "opportunity_score")),
+        )
+        rank_score = round(max(0.0, min(1.0, base_score + bonus)), 6)
+        row["rank_score_components"] = components
+        row["rank_score"] = rank_score
+        row["capital_priority_score"] = rank_score
+        return rank_score
 
     def _apply_daily_capital_deployment(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         deployment_cfg = self._daily_capital_deployment_config()
-        candidates: List[Tuple[int, float, float, float, str, FuturesRecommendation, str, float]] = []
+        candidates: List[Tuple[int, float, float, float, str, FuturesRecommendation, str, float, float, float]] = []
         updated_ids: set[str] = set()
         for ticker, recommendation in generated:
             if recommendation.status != RecommendationStatus.SKIPPED:
@@ -832,17 +948,46 @@ class AgentWorkflow:
                 priority_score = float(row.get("capital_priority_score", score) or score)
             except (TypeError, ValueError):
                 priority_score = score
+            rank_score = self._float_field(row, "rank_score", priority_score)
             recommendation.signal_snapshot = snapshot
             margin_ratio = self._recommended_margin_ratio(recommendation)
-            tier, watch_priority, _, _ = self._capital_rank_sort_tuple(row)
-            candidates.append((tier, watch_priority, priority_score, score, str(ticker).upper(), recommendation, side, margin_ratio))
+            rank_score = self._apply_workflow_capital_efficiency_to_rank_row(
+                row,
+                margin_ratio=margin_ratio,
+                min_probe_ratio=deployment_cfg["min_probe_margin_ratio"],
+                max_single_ratio=deployment_cfg["max_single_ticker_margin_ratio"],
+            )
+            priority_score = rank_score
+            target_position_ratio = self._contract_target_position_ratio(snapshot)
+            current_ticker_exposure = self._portfolio_ticker_exposure(str(ticker).upper())
+            tier, sorted_rank_score, _, _ = self._capital_rank_sort_tuple(row)
+            if sorted_rank_score > 0:
+                rank_score = sorted_rank_score
+            candidates.append(
+                (
+                    tier,
+                    rank_score,
+                    priority_score,
+                    score,
+                    str(ticker).upper(),
+                    recommendation,
+                    side,
+                    margin_ratio,
+                    target_position_ratio,
+                    current_ticker_exposure,
+                )
+            )
         candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
         selected_ids: set[str] = set()
-        used_margin_ratio = 0.0
+        used_margin_ratio = self._portfolio_margin_ratio()
+        running_net_exposure = self._portfolio_current_net_exposure()
         target_margin_ratio = deployment_cfg["target_margin_ratio"]
         min_probe_ratio = deployment_cfg["min_probe_margin_ratio"]
         max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
-        for rank, (_, _, priority_score, score, _, recommendation, side, margin_ratio) in enumerate(candidates, start=1):
+        hard_max_margin_ratio = deployment_cfg["hard_max_total_margin_ratio"]
+        max_net_exposure = deployment_cfg["max_net_exposure"]
+        budget_ceiling = min(target_margin_ratio, hard_max_margin_ratio)
+        for rank, (_, rank_score, priority_score, score, ticker, recommendation, side, margin_ratio, target_position_ratio, current_ticker_exposure) in enumerate(candidates, start=1):
             snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
             self._set_daily_opportunity_rank(snapshot, side, rank)
             current_lots = self._contract_current_lots(snapshot)
@@ -855,17 +1000,45 @@ class AgentWorkflow:
                     reason=reason,
                     selected=True,
                     rank=rank,
+                    deployment_extra={
+                        "rank_budget_sequence": rank,
+                        "rank_score": round(float(rank_score or 0.0), 6),
+                        "budget_check": "not_new_or_increasing_risk",
+                    },
                 )
                 selected_ids.add(str(recommendation.id))
             else:
-                capped_margin = min(max(margin_ratio, min_probe_ratio), max_single_ratio)
-                can_select = used_margin_ratio + capped_margin <= target_margin_ratio or not selected_ids
+                candidate_margin = max(float(margin_ratio or 0.0), min_probe_ratio)
+                single_ok = candidate_margin <= max_single_ratio + 1e-12
+                total_ok = used_margin_ratio + candidate_margin <= budget_ceiling + 1e-12
+                projected_net_exposure = running_net_exposure - float(current_ticker_exposure or 0.0) + float(target_position_ratio or 0.0)
+                net_ok = abs(projected_net_exposure) <= max_net_exposure + 1e-12
+                can_select = bool(single_ok and total_ok and net_ok)
+                budget_detail = {
+                    "rank_budget_sequence": rank,
+                    "rank_score": round(float(rank_score or 0.0), 6),
+                    "candidate_margin_ratio": round(candidate_margin, 6),
+                    "queue_margin_ratio_before": round(used_margin_ratio, 6),
+                    "queue_margin_ratio_after_if_selected": round(used_margin_ratio + candidate_margin, 6),
+                    "target_margin_ratio_budget": round(budget_ceiling, 6),
+                    "max_single_ticker_margin_ratio": round(max_single_ratio, 6),
+                    "current_net_exposure_before": round(running_net_exposure, 6),
+                    "current_ticker_exposure": round(float(current_ticker_exposure or 0.0), 6),
+                    "target_position_ratio": round(float(target_position_ratio or 0.0), 6),
+                    "projected_net_exposure_if_selected": round(projected_net_exposure, 6),
+                    "max_net_exposure": round(max_net_exposure, 6),
+                    "single_ticker_budget_ok": bool(single_ok),
+                    "total_margin_budget_ok": bool(total_ok),
+                    "net_exposure_budget_ok": bool(net_ok),
+                }
                 if can_select:
-                    used_margin_ratio += capped_margin
+                    used_margin_ratio += candidate_margin
+                    running_net_exposure = projected_net_exposure
                     reason = (
                         "selected_by_full_market_pm_capital_queue:"
-                        f"rank={rank};capital_priority_score={priority_score};score={score};"
-                        f"target_margin_used={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
+                        f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};score={score};"
+                        f"target_margin_used={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
+                        f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
                     )
                     self._apply_deployed_target_to_snapshot(
                         snapshot,
@@ -873,13 +1046,23 @@ class AgentWorkflow:
                         reason=reason,
                         selected=True,
                         rank=rank,
+                        deployment_extra=budget_detail,
                     )
                     selected_ids.add(str(recommendation.id))
                 else:
+                    blocked = []
+                    if not single_ok:
+                        blocked.append("single_ticker_budget")
+                    if not total_ok:
+                        blocked.append("total_margin_budget")
+                    if not net_ok:
+                        blocked.append("net_exposure_budget")
                     reason = (
                         "not_selected_by_full_market_pm_capital_queue:"
-                        f"rank={rank};capital_priority_score={priority_score};"
-                        f"capital_target_filled={used_margin_ratio:.4f}/{target_margin_ratio:.4f}"
+                        f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};"
+                        f"blocked_by={','.join(blocked) or 'unknown'};"
+                        f"capital_target_filled={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
+                        f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
                     )
                     self._apply_deployed_target_to_snapshot(
                         snapshot,
@@ -887,6 +1070,7 @@ class AgentWorkflow:
                         reason=reason,
                         selected=False,
                         rank=rank,
+                        deployment_extra=budget_detail,
                     )
             recommendation.signal_snapshot = snapshot
             self._canonicalize_snapshot_final_contract(snapshot, side=side, rank=rank)

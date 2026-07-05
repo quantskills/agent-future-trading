@@ -1,6 +1,6 @@
 # 参数调节备忘录
 
-本文档记录 AgentQuant 的参数调节边界、rank 分数机制和回测后再微调的观察口径。它不是当前策略指令，也不是立即改参清单；所有微调必须基于干净回测证据。
+本文记录 AgentQuant 的参数边界、唯一全市场 rank 分数制度，以及回测后允许微调的观察口径。它不是立即改参数清单；所有微调必须基于干净回测证据。
 
 本轮重点回测样本区间固定为：
 
@@ -8,87 +8,69 @@
 2025-03-25 至 2025-05-31
 ```
 
-在样本不足前，不允许因为单日或少数品种盈亏直接改参数。至少 30 个交易日后才允许做第一轮系数复核；至少 40 个交易日后才允许微调 rank 分数权重和学习修正强度。
+样本不足前，不允许因为单日或少数品种盈亏直接改参数。至少 30 个交易日后才允许做第一轮复核；至少 40 个交易日后才允许微调 rank 分数权重和学习修正强度。
 
 ## 不动的硬边界
 
 - `max_total_margin_ratio = 0.20`：组合总保证金硬上限 20%。
-- 现有 probe/normal/strong 资金层级参数不因短样本调动。
+- `probe_margin_ratio / min_real_trade_margin_ratio = 0.008`：小探针资金底线不因 rank 高低自动提高。
+- 现有 probe / normal / strong 资金层级参数不因短样本调整。
 - 手续费、滑点、合约乘数、保证金率属于交易事实，不因策略表现调参。
-- PM/Auditor/Trader/Accountant/Researcher 边界不因调参改变。
+- PM、Auditor、Trader、Accountant、Researcher 边界不因调参改变。
 - hard fail 只用于非策略错误，不能为改善收益而降级。
 
-## 唯一全市场 rank 分数机制
+## 唯一全市场 rank 分数制度
 
-唯一 `opportunity_rank` 只用于新增风险敞口资金排序。rank=1 永远表示当天全市场最值得占用资金的产品机会。
+唯一 `opportunity_rank` 只用于新增风险敞口资金排序。`rank=1` 永远表示当天全市场最值得占用资金的产品机会。
 
 基础公式：
 
 ```text
 rank_score =
   冷启动证据质量分
-+ 生命周期 action-value 学习修正分
++ 生命周期 open/add action-value 学习修正分
 + 产品/setup/trigger 历史收益修正分
-+ trigger/执行质量修正分
++ trigger/execution 质量修正分
 + 资金效率小修正
 - 冲突/风险/失效边界惩罚
 ```
 
-建议 100 分口径：
+当前代码映射：
 
-| 模块 | 分值 | 含义 |
-|---|---:|---|
-| 当前证据质量 | 45 | 冷启动或学习不足时的主分数 |
-| 强化学习修正 | -35 到 +35 | action-value 和产品级历史表现对 rank 的核心修正 |
-| trigger / execution 质量 | -10 到 +10 | 只修正触发质量，不直接生成开仓权限 |
-| 资金效率 | 0 到 10 | 小权重修正，不能替代盈利概率 |
-| 硬风险 | 不打分 | 审计 block、无效合约、超硬风控直接不能部署 |
-
-当前证据质量 45 分拆分：
-
-| 子项 | 分值 |
-|---|---:|
-| 三类分析师方向一致或主方向清楚 | 10 |
-| 证据强度和新鲜度 | 8 |
-| setup 清晰且适合该产品 | 8 |
-| entry trigger 明确且 Trader 可客观判断 | 7 |
-| invalidation / stop 边界明确 | 6 |
-| 市场确认支持 | 6 |
-
-强化学习修正 -35 到 +35 分拆分：
-
-| 子项 | 分值 |
-|---|---:|
-| 同产品 + 同方向 + 同 setup + 同 trigger 的 open/add action-value | -18 到 +18 |
-| 产品/setup/trigger 历史收益表现 | -10 到 +10 |
-| entry quality outcome | -4 到 +4 |
-| 近期亏损或 tail loss 惩罚 | 最高 -8 |
+| 分项 | 字段 | 当前作用 |
+|---|---|---|
+| 冷启动证据质量 | `rank_score_components.cold_start_evidence_quality` | 无学习或学习样本少时的主排序依据 |
+| 资金层级资格 | `capital_layer_priority` | tradeable_candidate 高于 probe，高于 watch |
+| open/add 学习 | `open_add_action_value_delta` | 正向学习提高 rank，负向/tail/entry loss 降低 rank |
+| 产品/setup/trigger 历史表现 | `product_setup_trigger_history` | alpha profile 对同类机会的加减分 |
+| trigger/execution 质量 | `trigger_execution_quality` | execution 学习只修正触发质量，不直接生成开仓权限 |
+| 资金效率 | `capital_efficiency` | 预留小权重，40 日样本后再评估是否启用 |
+| 冲突/风险/失效边界 | `conflict_risk_invalidation_penalty` | 冲突、数据缺口、风险和失效边界不足的扣分 |
 
 资金部署规则：
 
 - 按 `rank_score` 从高到低排出 1-N。
 - `rank=1` 只表示最值得占用资金，不自动升仓。
-- `watch_for_trigger / exploration_probe` 仍使用原 probe 资金层，不因 rank 高而加仓。
+- `watch_for_trigger / exploration_probe` 仍使用原 0.008 小探针资金层。
 - `tradeable_candidate` 才能进入 normal 真实资金层。
 - 反复验证有 alpha 的候选才允许进入 strong / scale 资金层。
-- 资金按 rank 顺序逐个占用预算；触及总保证金、净敞口或多空平衡限制后，后续候选还原为 wait。
+- 资金按 rank 顺序逐个占用预算；触及总保证金、单品种或净敞口限制后，后续候选还原为 wait/hold，并写入 `no_rank_or_budget_no_new_exposure`。
 
-## 需要 30 个交易日后复核的参数
+## 30 个交易日后复核
 
-以下项目必须至少有 30 个干净交易日记录后才允许复核：
+至少 30 个干净交易日记录后，允许复核：
 
-- 冷启动证据质量 45 分的子项权重。
-- `watch_priority_score` 和 `capital_priority_score` 中当前证据项的权重。
-- `probe_candidate` 与 `watch_for_trigger` 的排序差异是否合理。
-- `entry_trigger`、`invalidation`、`market_confirmation` 对 rank 的贡献比例。
-- `execution_profile_learning` 对 trigger 质量的修正强度。
-- 探针层 rank 表现诊断口径：只比较 exploration_probe 新仓收益，不混入 hold/reduce/exit。
+- 冷启动证据质量在 rank 中是否过强或过弱。
+- `watch_for_trigger` 与 `probe_candidate` 的排序差异是否合理。
+- entry trigger、invalidation、market confirmation 对 rank 的贡献是否方向正确。
+- exploration_probe 层 rank=1 平均新仓收益是否高于低 rank。
+- rank 诊断是否只比较同资金层、同生命周期，不混入 hold/reduce/exit。
 
-30 日复核只允许判断“方向是否明显错位”，原则上不做大幅调参。
+30 日复核只判断机制是否错位，原则上不做大幅调参。
 
-## 需要 40 个交易日后微调的参数
+## 40 个交易日后微调
 
-以下项目必须至少有 40 个干净交易日记录后才允许微调：
+至少 40 个干净交易日记录后，允许微调：
 
 - open/add action-value 对新资金 rank 的修正强度。
 - 产品/setup/trigger 历史收益修正分。
@@ -113,7 +95,7 @@ rank_score =
 
 - 不能用“限制交易”冒充优化。
 - 不能因为某个品种短期亏损写死品种黑名单。
-- 不能把 watch_for_trigger 直接排除出 rank；全是 watch 时仍要排出最值得小仓试探的 1-N。
+- 不能把 `watch_for_trigger` 直接排除出 rank；全是 watch 时仍要排出最值得小仓试探的 1-N。
 - 不能让 execution 学习直接冒充 open/add 学习进入资金 rank。
 - 不能让 hold/reduce/exit 抢新资金 rank。
 - 不能在样本不足时把单日亏损写成硬规则。
@@ -125,7 +107,3 @@ rank_score =
 3. 修改后预期改变什么交易行为？
 4. 是否可能压死交易、过拟合、引入品种黑名单或未来数据污染？
 5. 是否需要删除某日回测记录重跑，还是可以继续回测？
-
-## 当前提醒
-
-当前优先任务不是立即调 rank 分数，而是确认 Researcher 写出的 action-value / product learning 能在下一交易日进入 PM rank 输入并形成非零修正。只有确认学习闭环真实生效后，才可以用 30/40 个交易日样本微调上述系数。

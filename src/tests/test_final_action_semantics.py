@@ -36,6 +36,7 @@ from tools.common.final_action_semantics import (
     full_market_rank_gate_errors,
     full_market_rank_source_payload,
     lane_matches_memory_requirement,
+    lifecycle_learning_decision_contract_errors,
     rank_capital_layer_contract_complete,
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
@@ -383,6 +384,40 @@ class FinalActionSemanticsTest(unittest.TestCase):
         errors = rank_lifecycle_learning_route_errors(contract)
 
         self.assertTrue(any(error.startswith("open_rank_mixed_forbidden_learning_lanes") for error in errors))
+
+    def test_non_rank_lifecycle_learning_requires_trace_and_rejects_mixed_lanes(self):
+        contract = {
+            "current_lots": -4,
+            "target_lots": -4,
+            "lots_delta": 0,
+            "final_action": "hold",
+            "evidence_used": {},
+            "learning_used": {
+                "alpha_setup_action_values": [
+                    {"learning_lane": "hold", "action_name": "hold"},
+                ]
+            },
+        }
+        self.assertEqual(
+            lifecycle_learning_decision_contract_errors(contract),
+            ["lifecycle_learning_trace_missing"],
+        )
+
+        contract["evidence_used"] = {
+            "lifecycle_learning_trace": {
+                "contract_lifecycle_port": "hold",
+                "used_lanes": ["hold"],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+            "learning_impact_delta": {"hold_decision": "continue_hold"},
+        }
+        self.assertEqual(lifecycle_learning_decision_contract_errors(contract), [])
+
+        contract["learning_used"]["alpha_setup_action_values"].append(
+            {"learning_lane": "open", "action_name": "open"}
+        )
+        errors = lifecycle_learning_decision_contract_errors(contract)
+        self.assertIn("hold_lifecycle_mixed_forbidden_learning_lanes:open", errors)
 
     def test_unselected_conditional_candidate_does_not_require_intraday_result(self):
         contract = {

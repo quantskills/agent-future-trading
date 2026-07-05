@@ -705,6 +705,197 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_best_watch.lots, 1)
         self.assertEqual(len(updates), 2)
 
+    def test_full_market_rank_consumes_net_exposure_budget_in_rank_order(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.03},
+            "net_exposure_control": {"max_net_exposure": 0.05},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+
+        def _watch_rec(rec_id, ticker, rank_score):
+            return FuturesRecommendation(
+                id=rec_id,
+                status=RecommendationStatus.PENDING,
+                underlying_code=ticker,
+                base_price=3000.0,
+                action=RecommendationAction.OPEN_LONG,
+                lots=1,
+                signal_snapshot={
+                    "opportunity_scorecard": {
+                        "preferred_side": "long",
+                        "long": {
+                            "opportunity_score": rank_score,
+                            "capital_priority_score": rank_score,
+                            "rank_score": rank_score,
+                            "rank_score_components": {
+                                "cold_start_evidence_quality": rank_score,
+                                "open_add_action_value_delta": 0.0,
+                            },
+                            "capital_priority_tier": 1,
+                            "final_state": "watch_for_trigger",
+                        },
+                    },
+                    "final_action_contract": {
+                        "final_action": "open_probe",
+                        "current_lots": 0,
+                        "target_lots": 1,
+                        "lots_delta": 1,
+                        "target_margin_ratio_estimate": 0.008,
+                        "target_position_ratio": 0.04,
+                        "evidence_used": {
+                            "opportunity_score": rank_score,
+                            "capital_priority_score": rank_score,
+                            "rank_score": rank_score,
+                        },
+                    },
+                },
+            )
+
+        rec_rank_1 = _watch_rec("rank-1", "P", 0.82)
+        rec_rank_2 = _watch_rec("rank-2", "M", 0.74)
+
+        workflow._write_daily_opportunity_ranks([("P", rec_rank_1), ("M", rec_rank_2)])
+
+        contract_1 = rec_rank_1.signal_snapshot["final_action_contract"]
+        contract_2 = rec_rank_2.signal_snapshot["final_action_contract"]
+        deployment_1 = contract_1["capital_deployment"]
+        deployment_2 = contract_2["capital_deployment"]
+        components_1 = contract_1["evidence_used"]["rank_input_components"]["rank_score_components"]
+
+        self.assertEqual(contract_1["evidence_used"]["opportunity_rank"], 1)
+        self.assertTrue(deployment_1["selected_for_capital_deployment"])
+        self.assertEqual(contract_1["target_lots"], 1)
+        self.assertEqual(contract_1["target_margin_ratio_estimate"], 0.008)
+        self.assertEqual(deployment_1["rank_budget_sequence"], 1)
+        self.assertTrue(deployment_1["net_exposure_budget_ok"])
+        self.assertGreater(components_1["capital_efficiency"], 0.0)
+
+        self.assertEqual(contract_2["evidence_used"]["opportunity_rank"], 2)
+        self.assertFalse(deployment_2["selected_for_capital_deployment"])
+        self.assertEqual(contract_2["target_lots"], 0)
+        self.assertEqual(contract_2["lots_delta"], 0)
+        self.assertEqual(contract_2["final_action"], "wait")
+        self.assertEqual(deployment_2["rank_budget_sequence"], 2)
+        self.assertFalse(deployment_2["net_exposure_budget_ok"])
+        self.assertIn("no_rank_or_budget_no_new_exposure", contract_2["reason_codes"])
+        self.assertIn(
+            "not_selected_by_full_market_pm_capital_queue",
+            contract_2["evidence_used"]["capital_allocation_reason"],
+        )
+
+    def test_fifteen_watch_candidates_receive_unique_full_market_rank_one_to_n(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        updates = []
+
+        class _DB:
+            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
+                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
+                return True
+
+        workflow.db = _DB()
+        workflow.config = {
+            "max_total_margin_ratio": 0.20,
+            "position_budget_policy": {
+                "min_real_trade_margin_ratio": 0.008,
+                "max_single_ticker_margin_ratio": 0.13,
+            },
+            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.20},
+            "net_exposure_control": {"max_net_exposure": 0.50},
+        }
+        workflow.init_portfolio = Portfolio(
+            id="p1",
+            cashflow=5_000_000,
+            positions={},
+            margin_used=0.0,
+            account_equity=5_000_000,
+        )
+
+        tickers = ["BU", "C", "CF", "EB", "HC", "I", "J", "M", "MA", "P", "PB", "RB", "SR", "TA", "ZN"]
+        recommendations = []
+        for index, ticker in enumerate(tickers):
+            rank_score = round(0.90 - index * 0.02, 4)
+            recommendations.append(
+                (
+                    ticker,
+                    FuturesRecommendation(
+                        id=f"watch-{ticker}",
+                        status=RecommendationStatus.PENDING,
+                        underlying_code=ticker,
+                        base_price=3000.0,
+                        action=RecommendationAction.OPEN_LONG,
+                        lots=1,
+                        signal_snapshot={
+                            "opportunity_scorecard": {
+                                "preferred_side": "long",
+                                "long": {
+                                    "opportunity_score": rank_score,
+                                    "capital_priority_score": rank_score,
+                                    "rank_score": rank_score,
+                                    "rank_score_components": {
+                                        "cold_start_evidence_quality": rank_score,
+                                        "open_add_action_value_delta": 0.0,
+                                    },
+                                    "capital_priority_tier": 1,
+                                    "final_state": "watch_for_trigger",
+                                },
+                            },
+                            "final_action_contract": {
+                                "final_action": "open_probe",
+                                "current_lots": 0,
+                                "target_lots": 1,
+                                "lots_delta": 1,
+                                "target_margin_ratio_estimate": 0.008,
+                                "target_position_ratio": 0.01,
+                                "evidence_used": {
+                                    "opportunity_score": rank_score,
+                                    "capital_priority_score": rank_score,
+                                    "rank_score": rank_score,
+                                },
+                            },
+                        },
+                    ),
+                )
+            )
+
+        workflow._write_daily_opportunity_ranks(recommendations)
+
+        observed = []
+        for ticker, recommendation in recommendations:
+            contract = recommendation.signal_snapshot["final_action_contract"]
+            deployment = contract["capital_deployment"]
+            components = contract["evidence_used"]["rank_input_components"]["rank_score_components"]
+            observed.append(contract["evidence_used"]["opportunity_rank"])
+            self.assertEqual(contract["target_margin_ratio_estimate"], 0.008)
+            self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+            self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+            self.assertEqual(deployment["rank_budget_sequence"], contract["evidence_used"]["opportunity_rank"])
+            self.assertGreater(components["capital_efficiency"], 0.0)
+
+        self.assertEqual(sorted(observed), list(range(1, 16)))
+        self.assertEqual(recommendations[0][1].signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(recommendations[-1][1].signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 15)
+        self.assertEqual(len(updates), 15)
+
     def test_workflow_canonicalizes_flat_skipped_contract_to_wait_before_persistence(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         updates = []
@@ -4988,6 +5179,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "ranked_deployable_candidate_with_complete_current_evidence",
         )
         self.assertEqual(contract["learning_used"]["learning_adjustment_summary"]["effect"], "boosted")
+        self.assertEqual(
+            contract["evidence_used"]["lifecycle_learning_trace"]["contract_lifecycle_port"],
+            "open_add_new_risk",
+        )
+        self.assertIn("open", contract["evidence_used"]["lifecycle_learning_trace"]["used_lanes"])
+        self.assertEqual(
+            contract["evidence_used"]["learning_impact_delta"]["lots_delta"],
+            5,
+        )
         self.assertNotIn("opportunity_score", contract)
 
     def test_final_action_contract_carries_execution_contract_as_trade_truth(self):
@@ -5022,6 +5222,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertEqual(contract["execution_profile"], "vwap_confirmed")
         self.assertEqual(contract["trigger_source"], "execution_action_value_vwap")
+        trace = contract["evidence_used"]["lifecycle_learning_trace"]
+        impact = contract["evidence_used"]["learning_impact_delta"]
+        self.assertEqual(trace["contract_lifecycle_port"], "open_add_new_risk")
+        self.assertFalse(trace["execution_profile_signal_direct_to_rank"])
+        self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
         self.assertTrue(contract["single_source_of_trade_truth"])
 
     def test_final_action_contract_separates_conditional_monitor_from_scorecard_probe_seed(self):
@@ -5058,7 +5263,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         "invalidation_present": True,
                         "entry_trigger": "wait for post-open break below support",
                     },
-                }
+                },
+                "conditional_monitor_probe_plan": {
+                    "allowed": True,
+                    "decision": "allow_conditional_monitor_probe",
+                    "target_lots": -1,
+                },
             },
             opportunity_scorecard={
                 "preferred_side": "short",
@@ -5079,7 +5289,100 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(contract["action_candidates"][0]["source"], "conditional_monitor")
         self.assertEqual(contract["action_candidates"][0]["action"], "conditional_probe")
         self.assertTrue(contract["action_candidates"][0]["requires_intraday_confirmation"])
+        self.assertEqual(
+            contract["evidence_used"]["lifecycle_learning_trace"]["contract_lifecycle_port"],
+            "conditional_monitor",
+        )
+        self.assertEqual(
+            contract["evidence_used"]["learning_impact_delta"]["conditional_monitor_decision"],
+            "allow_conditional_monitor_probe",
+        )
         self.assertNotIn("scorecard_current_tradeable_probe_seed", contract["reason_codes"])
+
+    def test_final_action_contract_routes_hold_learning_without_capital_rank(self):
+        contract = _build_final_action_contract(
+            ticker="EB",
+            current_lots=-12,
+            target_lots=-12,
+            position_ratio=-0.04,
+            margin_required=0.0,
+            account_equity=5000000.0,
+            lots_to_trade=0,
+            lots_to_trade_reason="position_matched",
+            recommendation_intent={"action": "hold", "lots": 0, "action_type": "keep"},
+            final_entry_authority={"authority_type": "not_applicable"},
+            control_reasons=["holding_period_control"],
+            control_diagnostics={
+                "holding_rebalance_control": {
+                    "decision": "continue_hold_with_learning_explanation",
+                    "pre_control_ratio": -0.04,
+                    "final_ratio": -0.04,
+                    "lifecycle_classification": "profitable_hold",
+                },
+            },
+            opportunity_scorecard={"preferred_side": "short", "short": {"final_state": "hold_candidate"}},
+            market_confirmation={"confirmation_score": 0.55, "conflicts": []},
+            alpha_setup_action_values=[
+                {
+                    "ticker": "EB",
+                    "side": "short",
+                    "action_name": "hold",
+                    "learning_lane": "hold",
+                    "action_value_lane": "hold",
+                    "action_preference": "profitable_hold_continuation",
+                }
+            ],
+        )
+
+        trace = contract["evidence_used"]["lifecycle_learning_trace"]
+        impact = contract["evidence_used"]["learning_impact_delta"]
+        self.assertEqual(contract["final_action"], "hold")
+        self.assertEqual(trace["contract_lifecycle_port"], "hold")
+        self.assertIn("hold", trace["used_lanes"])
+        self.assertEqual(impact["hold_decision"], "continue_hold_with_learning_explanation")
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+
+    def test_final_action_contract_routes_reduce_exit_learning_without_capital_rank(self):
+        contract = _build_final_action_contract(
+            ticker="SR",
+            current_lots=8,
+            target_lots=3,
+            position_ratio=0.015,
+            margin_required=0.0,
+            account_equity=5000000.0,
+            lots_to_trade=5,
+            lots_to_trade_reason="protective_reduce_after_tail_loss",
+            recommendation_intent={"action": "close_long", "lots": 5, "action_type": "decrease"},
+            final_entry_authority={"authority_type": "not_applicable"},
+            control_reasons=["protective_reduce_after_tail_loss"],
+            control_diagnostics={
+                "winning_template_continuation": {
+                    "decision": "protective_reduce",
+                    "pre_control_ratio": 0.04,
+                    "final_ratio": 0.015,
+                },
+            },
+            opportunity_scorecard={"preferred_side": "long", "long": {"final_state": "risk_reduction_candidate"}},
+            market_confirmation={"confirmation_score": 0.42, "conflicts": ["trend_fading"]},
+            alpha_setup_action_values=[
+                {
+                    "ticker": "SR",
+                    "side": "long",
+                    "action_name": "exit",
+                    "learning_lane": "exit",
+                    "action_value_lane": "exit",
+                    "action_preference": "positive_candidate_exit",
+                }
+            ],
+        )
+
+        trace = contract["evidence_used"]["lifecycle_learning_trace"]
+        impact = contract["evidence_used"]["learning_impact_delta"]
+        self.assertEqual(contract["final_action"], "reduce")
+        self.assertEqual(trace["contract_lifecycle_port"], "reduce_exit")
+        self.assertIn("exit", trace["used_lanes"])
+        self.assertEqual(impact["reduce_exit_decision"], "protective_reduce")
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
 
     def test_negative_action_value_blocks_repeat_new_entry_without_new_evidence(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(

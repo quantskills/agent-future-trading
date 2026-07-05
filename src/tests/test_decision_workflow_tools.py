@@ -373,7 +373,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         positive_row = positive["opportunity_scorecard"]["long"]
         negative_row = negative["opportunity_scorecard"]["long"]
+        self.assertIn("rank_score", positive_row)
+        self.assertIn("rank_score_components", positive_row)
+        self.assertGreater(positive_row["rank_score"], negative_row["rank_score"])
         self.assertGreater(positive_row["capital_priority_score"], negative_row["capital_priority_score"])
+        self.assertGreater(
+            positive_row["rank_score_components"]["open_add_action_value_delta"],
+            negative_row["rank_score_components"]["open_add_action_value_delta"],
+        )
         self.assertGreater(
             positive_row["opportunity_score_components"]["positive_learning"],
             0.0,
@@ -382,10 +389,12 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             negative_row["opportunity_score_components"]["negative_learning"],
             0.0,
         )
-        self.assertEqual(
+        self.assertGreater(
             negative_row["opportunity_score_components"]["execution_profile_learning"],
             0.0,
         )
+        impact = rank_trace_for_row(negative_row)["learning_impact_delta"]
+        self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
         trace = rank_trace_for_row(negative_row)["lifecycle_learning_trace"]
         self.assertIn("open", trace["used_lanes"])
         self.assertIn("hold", trace["ignored_lanes"])

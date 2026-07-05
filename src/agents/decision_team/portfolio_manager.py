@@ -3671,7 +3671,9 @@ def _adaptive_policy_trace(adaptive_policy_state: list | None) -> dict:
     return {
         "policy_count": len(rows),
         "policy_type_counts": counts,
-        "policies": rows[:8],
+        "scope": "adaptive_policy_state_summary",
+        "status": "summary_only_no_policy_rows",
+        "policy_rows_omitted": True,
         "candidate_boundary": "candidate_or_observation_rows_are_context_only_until_promoted_by_same_scope_validation",
         "not_product_blacklist": True,
     }
@@ -4985,6 +4987,106 @@ def _learning_to_position_trace(
         },
     }
     return trace
+
+
+def _contract_safe_learning_to_position_summary(trace: dict | None) -> dict:
+    trace = trace if isinstance(trace, dict) else {}
+    learning_context = trace.get("learning_context") if isinstance(trace.get("learning_context"), dict) else {}
+    adaptive_policy = trace.get("adaptive_policy_state") if isinstance(trace.get("adaptive_policy_state"), dict) else {}
+    alpha_profiles = trace.get("alpha_setup_profiles") if isinstance(trace.get("alpha_setup_profiles"), dict) else {}
+    action_values = trace.get("alpha_setup_action_values") if isinstance(trace.get("alpha_setup_action_values"), dict) else {}
+    position_effect = trace.get("position_effect") if isinstance(trace.get("position_effect"), dict) else {}
+    opportunity = trace.get("opportunity_to_position") if isinstance(trace.get("opportunity_to_position"), dict) else {}
+    current_day = trace.get("current_day_validation") if isinstance(trace.get("current_day_validation"), dict) else {}
+    holding = trace.get("holding_lifecycle") if isinstance(trace.get("holding_lifecycle"), dict) else {}
+    selected_digest_ids = learning_context.get("selected_digest_ids")
+    selected_digest_count = len(selected_digest_ids) if isinstance(selected_digest_ids, list) else 0
+    return {
+        "trace_version": "agentquant.pm_learning_contract_summary.v1",
+        "learning_context": {
+            "enabled": bool(learning_context.get("enabled")),
+            "selected_digest_count": selected_digest_count,
+            "candidate_hypothesis_count": int(learning_context.get("candidate_hypothesis_count") or 0),
+            "validated_hypothesis_count": int(learning_context.get("validated_hypothesis_count") or 0),
+            "candidate_hypothesis_authority": learning_context.get("candidate_hypothesis_authority"),
+        },
+        "learning_source_summary": {
+            "adaptive_policy_summary": {
+                "policy_count": int(adaptive_policy.get("policy_count") or 0),
+                "policy_type_counts": adaptive_policy.get("policy_type_counts") or {},
+                "scope": adaptive_policy.get("scope") or "adaptive_policy_state_summary",
+                "status": adaptive_policy.get("status") or "summary_only_no_policy_rows",
+            },
+            "alpha_setup_profile_summary": {
+                "profile_count": int(alpha_profiles.get("profile_count") or 0),
+                "lifecycle_counts": alpha_profiles.get("lifecycle_counts") or {},
+                "status": "summary_only_no_profile_rows",
+            },
+            "action_value_summary": {
+                "action_value_count": int(action_values.get("action_value_count") or 0),
+                "canonical_action_value_count": int(action_values.get("canonical_action_value_count") or 0),
+                "incomplete_trace_action_value_count": int(
+                    action_values.get("incomplete_trace_action_value_count") or 0
+                ),
+                "action_preference_counts": action_values.get("action_preference_counts") or {},
+                "status": "summary_only_no_action_value_rows",
+            },
+            "strategy_memory_summary": {
+                "status": "summary_only_no_raw_strategy_memory",
+                "raw_object_omitted": True,
+            },
+        },
+        "position_effect": {
+            "current_lots": position_effect.get("current_lots"),
+            "target_lots": position_effect.get("target_lots"),
+            "lots_delta": position_effect.get("lots_delta"),
+            "pre_control_position_ratio": position_effect.get("pre_control_position_ratio"),
+            "final_target_position_ratio": position_effect.get("final_target_position_ratio"),
+            "action": position_effect.get("action"),
+            "action_lots": position_effect.get("action_lots"),
+            "reason": position_effect.get("reason"),
+            "control_reasons": position_effect.get("control_reasons") or [],
+        },
+        "opportunity_to_position": {
+            "target_side": opportunity.get("target_side"),
+            "scorecard_preferred_side": opportunity.get("scorecard_preferred_side"),
+            "mature_alpha_policy_count": int(opportunity.get("mature_alpha_policy_count") or 0),
+            "fast_candidate_alpha_count": int(opportunity.get("fast_candidate_alpha_count") or 0),
+            "high_quality_opportunity_present": bool(opportunity.get("high_quality_opportunity_present")),
+            "high_quality_opportunity_executed_or_targeted": bool(
+                opportunity.get("high_quality_opportunity_executed_or_targeted")
+            ),
+            "if_not_targeted_requires_accountability": bool(
+                opportunity.get("if_not_targeted_requires_accountability")
+            ),
+        },
+        "current_day_validation": {
+            "market_confirmation_score": current_day.get("market_confirmation_score"),
+            "has_structured_invalidation": bool(current_day.get("has_structured_invalidation")),
+            "has_explicit_stop_protection": bool(current_day.get("has_explicit_stop_protection")),
+            "requires_today_signal_market_state_and_invalidation": bool(
+                current_day.get("requires_today_signal_market_state_and_invalidation")
+            ),
+        },
+        "holding_lifecycle": {
+            "decision": holding.get("decision"),
+            "lifecycle_classification": holding.get("lifecycle_classification"),
+            "holding_days": holding.get("holding_days"),
+            "current_side": holding.get("current_side"),
+            "target_side": holding.get("target_side"),
+            "loss_revalidation_due": holding.get("loss_revalidation_due"),
+            "loss_revalidation_failed": holding.get("loss_revalidation_failed"),
+            "market_confirmation_score": holding.get("market_confirmation_score"),
+        },
+        "artifact_boundary": {
+            "summary_only": True,
+            "research_fact_objects_omitted": [
+                "adaptive_policy_state",
+                "strategy_memory",
+                "adaptive_policy_scope.policies",
+            ],
+        },
+    }
 
 
 def _build_active_opportunity_audit(
@@ -11376,6 +11478,30 @@ def portfolio_agent_futures(state: FundState):
         margin_available=margin_available,
         market_confirmation=market_confirmation,
     )
+    if isinstance(final_action_contract, dict):
+        learning_used = (
+            final_action_contract.get("learning_used")
+            if isinstance(final_action_contract.get("learning_used"), dict)
+            else {}
+        )
+        learning_used.pop("learning_to_position_trace", None)
+        learning_used["learning_to_position_summary"] = _contract_safe_learning_to_position_summary(
+            plan_snapshot["learning_to_position_trace"]
+        )
+        learning_used["pm_landing_consistency_audit"] = plan_snapshot["pm_landing_consistency_audit"]
+        final_action_contract["learning_used"] = learning_used
+        evidence_used = (
+            final_action_contract.get("evidence_used")
+            if isinstance(final_action_contract.get("evidence_used"), dict)
+            else {}
+        )
+        evidence_used["pm_lifecycle_decision_port"] = (
+            (evidence_used.get("pm_lifecycle_learning_trace") or {}).get("contract_lifecycle_port")
+            if isinstance(evidence_used.get("pm_lifecycle_learning_trace"), dict)
+            else ""
+        )
+        evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
+        final_action_contract["evidence_used"] = evidence_used
     if control_reasons or control_notes or control_diagnostics:
         plan_snapshot["strategy_controls"] = {
             "reasons": sorted(set(control_reasons)),

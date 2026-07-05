@@ -32,6 +32,7 @@ from tools.common.final_action_semantics import (
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
     lane_matches_memory_requirement,
+    lifecycle_learning_decision_contract_errors,
     rank_lifecycle_learning_route_errors,
 )
 
@@ -800,6 +801,11 @@ def _audit_recommendation_mechanisms(
         if rank_route_errors:
             hard_failures.append(
                 f"mechanism_rank_lifecycle_learning_route_invalid:{label}:errors={','.join(rank_route_errors)}"
+            )
+        lifecycle_route_errors = lifecycle_learning_decision_contract_errors(contract)
+        if lifecycle_route_errors:
+            hard_failures.append(
+                f"mechanism_lifecycle_learning_contract_trace_invalid:{label}:errors={','.join(lifecycle_route_errors)}"
             )
         if (
             components_nonzero
