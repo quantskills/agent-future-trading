@@ -13429,6 +13429,88 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             1,
         )
 
+    def test_phase2_deferred_conditional_probe_records_intraday_before_order_safety_gate(self):
+        portfolio = Portfolio(
+            id="p1",
+            cashflow=5000000.0,
+            margin_used=0.0,
+            positions={},
+        )
+        contract = self._strategy_contract(
+            "SR",
+            target_lots=1,
+            final_action="open_probe",
+            authority_type="exploration_probe",
+            current_evidence=False,
+            reason_codes=[
+                "pm_watch_for_trigger_probe_cap",
+                "real_probe_qualification_not_met",
+                "conditional_trigger_authority",
+            ],
+        )
+        contract.update(
+            {
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "watch_for_trigger_block": True,
+                "execution_profile": "breakout",
+                "entry_trigger": "wait for price to break above 5900 after open",
+                "invalidation": "below 5840",
+            }
+        )
+        recommendation = {
+            "underlying_code": "SR",
+            "contract_code": "sr2505",
+            "source_type": RecommendationSourceType.STRATEGY.value,
+            "action": RecommendationAction.OPEN_LONG.value,
+            "lots": 1,
+            "signal_snapshot": {"final_action_contract": contract},
+        }
+        config = {
+            "cashflow": 5000000,
+            "max_total_margin_ratio": 0.20,
+            "risk_control": {
+                "warning_ratio": 0.70,
+                "danger_ratio": 0.50,
+                "emergency_ratio": 0.30,
+                "max_single_position_ratio": {"safe": 0.12},
+            },
+        }
+
+        pre_trigger_snapshot = {}
+        pre_trigger_decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=5900.0),
+            snapshot=pre_trigger_snapshot,
+            defer_conditional_entry_authority=True,
+        )
+
+        self.assertEqual(pre_trigger_decision.action, FuturesAction.OPEN_LONG)
+        self.assertEqual(pre_trigger_decision.lots, 1)
+        self.assertEqual(
+            pre_trigger_snapshot["phase2_execution"]["entry_authority_gate"]["status"],
+            "deferred_until_intraday_trigger",
+        )
+
+        post_trigger_snapshot = {}
+        post_trigger_decision = _translate_pre_open_recommendation_to_order(
+            recommendation=recommendation,
+            portfolio=portfolio,
+            config=config,
+            morning_price_context=SimpleNamespace(base_price=5900.0),
+            snapshot=post_trigger_snapshot,
+        )
+
+        self.assertEqual(post_trigger_decision.action, FuturesAction.HOLD)
+        self.assertEqual(post_trigger_decision.lots, 0)
+        self.assertEqual(
+            post_trigger_snapshot["phase2_execution"]["pm_plan_validation"]["reason"],
+            "final_contract_authority_not_met",
+        )
+
     def test_phase2_artifacts_do_not_mirror_pm_explanation_fields(self):
         portfolio = Portfolio(
             id="p1",

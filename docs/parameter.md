@@ -1,50 +1,131 @@
 # 参数调节备忘录
 
-本备忘录用于 smoke test 结束后的长期干净回测计划：从 `2025-05-01` 连续回测到 `2026-06-01`。目标不是为了调参本身，而是让系统更接近稳定正收益：合格机会能落成有意义仓位，弱方向观点不乱开仓，盈利 setup 能晋升，亏损 setup 能降级，资金利用率具备实战部署意义。
+本文档记录 AgentQuant 的参数调节边界、rank 分数机制和回测后再微调的观察口径。它不是当前策略指令，也不是立即改参清单；所有微调必须基于干净回测证据。
 
-smoke test 用于确认两类事情：第一，代码、数据、LLM、账务、执行、学习链路是否按设计打通；第二，小样本策略行为是否明显异常，例如一直不交易、资金利用率没有部署意义、入场/退出明显断链、PM 推荐与 Trader 执行不一致、学习记录只写不读。长期回测才用于评估系统生成的交易策略是否有稳定收益质量。不能把 smoke test 盈亏直接当成最终策略结论，也不能因为单日或单品种盈亏立刻过拟合改参。
+本轮重点回测样本区间固定为：
 
-## 不要动的硬参数
+```text
+2025-03-25 至 2025-05-31
+```
 
-- `dev.yaml:max_total_margin_ratio` 固定 0.20，组合保证金最多 20%。
-- `execution_commission_catalog.yaml` 是手续费事实表，除非手续费规则有真实变化，否则不调。
-- `execution_slippage_catalog.yaml` 是滑点 tick 假设，除非执行记录证明假设明显失真，否则不调。
-- `data_factor_policy_catalog.yaml` 是 PandaAI/Finoview/新闻数据入口和数据质量策略，除非数据源、字段可用性或确认用因子集合真实变化，否则不调。
-- `finoview_factor_catalog.yaml` 是本地 feather 字段目录，只在本地字段真实新增、删除或重命名时改。
-- 交易事实、推荐、结算、PnL、完整交易日志、原始信号不自动清理。
+在样本不足前，不允许因为单日或少数品种盈亏直接改参数。至少 30 个交易日后才允许做第一轮系数复核；至少 40 个交易日后才允许微调 rank 分数权重和学习修正强度。
 
-## 可微调的弱参数
+## 不动的硬边界
 
-- `dev.yaml:position_budget_policy`：真实开仓最低保证金、probe/normal/deployable/exceptional 分层。
-- `dev.yaml:capital_utilization_control`：合格机会的资金释放目标，不能突破 20%。
-- `portfolio_policy_catalog.yaml:portfolio_manager / market_confirmation / alpha_setup_ev_fusion / holding_rebalance_control`：机会分层、市场确认、正负期望、持仓生命周期。运行时由 `config_normalizer.py` 展开到 PM 读取的配置形状。旧 `block/cap/probe/reduction` 字段是兼容输入和动作倾向，不是独立交易权限；门控语义不再作为独立 YAML 参数维护，必须先经 `reason_effects.py` 解释，再由 PM 授权事实入口统一仲裁。
-- `analyst_prior_profiles.yaml`：中期方向背景与日频交易时机的冷启动先验；会展开到旧字段 `sector_weights / strategic_view_weights`，但只能辅助排序和上下文解释，不能被解释成静态加权开仓规则，也不能直接生成 open/add/scale 权限。
-- `execution_exit_policy_catalog.yaml`：ATR 止损、probe time stop、趋势仓 time stop。
-- `learning_policy_catalog.yaml`：学习、记忆、Neutral 追责、action-value 和保留周期。只能基于足够样本微调，不能把少数亏损写成死规则；`learning_gatekeeping_policy` 明确学习结果是 open/hold/exit/execution 的动作偏好，不是直接交易命令。学习侧的 `cap/probe/block` 只能影响同作用域偏好、确认要求或保护动作，不能绕过 PM/Auditor/Trader。
+- `max_total_margin_ratio = 0.20`：组合总保证金硬上限 20%。
+- 现有 probe/normal/strong 资金层级参数不因短样本调动。
+- 手续费、滑点、合约乘数、保证金率属于交易事实，不因策略表现调参。
+- PM/Auditor/Trader/Accountant/Researcher 边界不因调参改变。
+- hard fail 只用于非策略错误，不能为改善收益而降级。
 
-## 分阶段检查与调参节点
+## 唯一全市场 rank 分数机制
 
-- smoke test 结束：先确认模型调用、数据读取、无未来数据污染、Phase1-Phase4、账务、Trader、Researcher、配置展开全部正常；再检查小样本策略行为是否有明显业务异常，包括是否交易、资金利用率是否有部署意义、开仓/加仓/减仓/平仓是否落实到交易出口、入场/退出是否明显断链、PM 推荐与 Trader 执行是否一致、学习记录是否被 PM 读取并改变 lots/margin。若有链路问题，先修链路，不进入长期回测；若只是正常业务亏损，不能立刻过拟合改参。
-- 跑到 `2025-05-07`：检查 Phase1 是否完整、是否正常交易、真实新开仓是否满足最低保证金、是否有异常 no-trade、probe 是否被吞掉。这里主要修链路，不轻易调收益参数。
-- 跑到 `2025-05-16`：检查资金利用率、真实 probe、normal/deployable 仓位是否落地。如果合格机会仍过小，才看 `position_budget_policy` 和 `capital_utilization_control`；如果弱机会亏损，先查资格链，不直接压低所有仓位。
-- 跑到 `2025-06-01`：做第一个完整月收益审计。重点看每日 PnL、品种、动作、PM scorecard、alpha EV、分析师信号、Trader 执行和 Researcher 写入。只允许小幅修正明显不符合实战意义的弱参。
-- 跑到 `2025-07-01`：检查学习机制是否开始影响下一轮交易。重点看 open/hold/exit/action-value 是否被 PM 读取并改变 lots，不看只写记录的假闭环。
-- 跑到 `2025-09-01`：做季度级审计。此时样本开始足够，才允许评估 `analyst_prior_profiles.yaml`、`portfolio_policy_catalog.yaml:alpha_setup_ev_fusion`、`execution_exit_policy_catalog.yaml` 是否需要阶段性微调。若发现 `analyst_prior_profiles.yaml` 被当成静态权重开仓规则，优先修 PM/配置展开语义，不先调数值。
-- 跑到 `2025-12-01`：做跨市场状态审计。重点看趋势、震荡、反转、事件驱动下，技术触发、基本面背景、新闻催化和 Trader 执行是否各司其职。
-- 跑到 `2026-03-01`：检查长期学习是否过拟合、是否压死交易、是否形成隐性品种黑名单，必要时调整学习保留、样本门槛和 action-value 晋升/降级弱参。
-- 跑到 `2026-06-01`：做完整长期收益审计，再决定是否进入模拟盘或继续优化。结论必须包括净收益、最大回撤、资金利用率、胜率、盈亏比、平均持仓、手续费后收益、错过机会和机制实际落仓效果。
+唯一 `opportunity_rank` 只用于新增风险敞口资金排序。rank=1 永远表示当天全市场最值得占用资金的产品机会。
 
-## 每次请求调参时必须回答
+基础公式：
 
-- 为什么这个参数直接服务收益，而不是只完善机制。
-- 依据来自哪段回测、哪类交易、哪条学习记录或哪条执行记录。
-- 修改后预期改变什么交易行为，例如提高合格机会仓位、减少弱方向开仓、保护盈利持仓或加快亏损退出。
-- 是否可能引入过拟合、压死交易、未来数据污染或隐性黑名单。
-- 是否需要删除某段回测记录重跑；如果只是弱参微调，优先说明能否续跑，避免无意义重删。
+```text
+rank_score =
+  冷启动证据质量分
++ 生命周期 action-value 学习修正分
++ 产品/setup/trigger 历史收益修正分
++ trigger/执行质量修正分
++ 资金效率小修正
+- 冲突/风险/失效边界惩罚
+```
 
-## 清理规则
+建议 100 分口径：
 
-- 学习明细保留 90 天或约 60 个交易日。
-- 聚合经验保留 180 天，只保留 active 或近期更新状态。
-- 自动清理只在 Researcher 学习完成后执行，不能在 Phase1/PM 决策前执行。
-- 交易事实永不自动清理；如果用户手动删除全部回测记录，必须先检查是否删干净，再决定能否重新跑。
+| 模块 | 分值 | 含义 |
+|---|---:|---|
+| 当前证据质量 | 45 | 冷启动或学习不足时的主分数 |
+| 强化学习修正 | -35 到 +35 | action-value 和产品级历史表现对 rank 的核心修正 |
+| trigger / execution 质量 | -10 到 +10 | 只修正触发质量，不直接生成开仓权限 |
+| 资金效率 | 0 到 10 | 小权重修正，不能替代盈利概率 |
+| 硬风险 | 不打分 | 审计 block、无效合约、超硬风控直接不能部署 |
+
+当前证据质量 45 分拆分：
+
+| 子项 | 分值 |
+|---|---:|
+| 三类分析师方向一致或主方向清楚 | 10 |
+| 证据强度和新鲜度 | 8 |
+| setup 清晰且适合该产品 | 8 |
+| entry trigger 明确且 Trader 可客观判断 | 7 |
+| invalidation / stop 边界明确 | 6 |
+| 市场确认支持 | 6 |
+
+强化学习修正 -35 到 +35 分拆分：
+
+| 子项 | 分值 |
+|---|---:|
+| 同产品 + 同方向 + 同 setup + 同 trigger 的 open/add action-value | -18 到 +18 |
+| 产品/setup/trigger 历史收益表现 | -10 到 +10 |
+| entry quality outcome | -4 到 +4 |
+| 近期亏损或 tail loss 惩罚 | 最高 -8 |
+
+资金部署规则：
+
+- 按 `rank_score` 从高到低排出 1-N。
+- `rank=1` 只表示最值得占用资金，不自动升仓。
+- `watch_for_trigger / exploration_probe` 仍使用原 probe 资金层，不因 rank 高而加仓。
+- `tradeable_candidate` 才能进入 normal 真实资金层。
+- 反复验证有 alpha 的候选才允许进入 strong / scale 资金层。
+- 资金按 rank 顺序逐个占用预算；触及总保证金、净敞口或多空平衡限制后，后续候选还原为 wait。
+
+## 需要 30 个交易日后复核的参数
+
+以下项目必须至少有 30 个干净交易日记录后才允许复核：
+
+- 冷启动证据质量 45 分的子项权重。
+- `watch_priority_score` 和 `capital_priority_score` 中当前证据项的权重。
+- `probe_candidate` 与 `watch_for_trigger` 的排序差异是否合理。
+- `entry_trigger`、`invalidation`、`market_confirmation` 对 rank 的贡献比例。
+- `execution_profile_learning` 对 trigger 质量的修正强度。
+- 探针层 rank 表现诊断口径：只比较 exploration_probe 新仓收益，不混入 hold/reduce/exit。
+
+30 日复核只允许判断“方向是否明显错位”，原则上不做大幅调参。
+
+## 需要 40 个交易日后微调的参数
+
+以下项目必须至少有 40 个干净交易日记录后才允许微调：
+
+- open/add action-value 对新资金 rank 的修正强度。
+- 产品/setup/trigger 历史收益修正分。
+- `entry_quality_loss_penalty`。
+- `trigger_quality_positive_bonus`。
+- `trigger_quality_loss_penalty`。
+- `recent_tail_loss_penalty`。
+- `learning_reward_unit`。
+- `learning_full_weight_sample_count`。
+- alpha setup 从 probe 到 normal/strong 资金层的晋升阈值。
+- rank=1、rank=2、rank=3 分层平均收益是否显著优于低 rank。
+
+40 日微调依据必须来自：
+
+- rank 分层平均收益；
+- 同资金层内 rank 表现；
+- 同生命周期 action-value 命中后的收益；
+- 产品 + 方向 + setup + trigger + evidence combo 的历史表现；
+- 资金利用率、净敞口、手续费后收益和最大回撤。
+
+## 禁止调参方式
+
+- 不能用“限制交易”冒充优化。
+- 不能因为某个品种短期亏损写死品种黑名单。
+- 不能把 watch_for_trigger 直接排除出 rank；全是 watch 时仍要排出最值得小仓试探的 1-N。
+- 不能让 execution 学习直接冒充 open/add 学习进入资金 rank。
+- 不能让 hold/reduce/exit 抢新资金 rank。
+- 不能在样本不足时把单日亏损写成硬规则。
+
+## 每次调参前必须回答
+
+1. 依据来自哪一段回测、多少交易日、多少笔样本？
+2. 调的是冷启动证据分、学习修正分、trigger 质量分，还是资金层级阈值？
+3. 修改后预期改变什么交易行为？
+4. 是否可能压死交易、过拟合、引入品种黑名单或未来数据污染？
+5. 是否需要删除某日回测记录重跑，还是可以继续回测？
+
+## 当前提醒
+
+当前优先任务不是立即调 rank 分数，而是确认 Researcher 写出的 action-value / product learning 能在下一交易日进入 PM rank 输入并形成非零修正。只有确认学习闭环真实生效后，才可以用 30/40 个交易日样本微调上述系数。

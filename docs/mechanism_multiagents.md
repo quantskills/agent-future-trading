@@ -573,7 +573,7 @@ Phase4 完成后，研究学习单独运行：
 | 场景 | 合约要求 | 学习落地要求 |
 |---|---|---|
 | 开仓/加仓 | `target_lots` 绝对值大于 `current_lots`，`final_action=open/add` 或对应 signed lots | 正向 open 学习可进 score/rank，但必须有盘前预测证据、资金和审计员通过 |
-| 条件监控 | `requires_intraday_confirmation=true`，`can_execute_without_intraday_trigger=false` | 交易员必须写盘中触发或未触发结果 |
+| 条件监控 | `requires_intraday_confirmation=true`，`can_execute_without_intraday_trigger=false` | 审计通过且仍保留新增风险敞口时，交易员必须先写盘中触发或未触发结果；只有触发后才运行最终下单安全闸 |
 | 持仓 | `target_lots == current_lots` 或有限调整 | 若有 hold/exit 学习，必须写明继续持有或不减仓原因 |
 | 减仓/退出 | `target_lots` 向 0 收敛，`final_action=reduce/exit` | exit/保护学习应落到目标手数下降或明确解释 |
 | 未入选候选 | `target_lots` 不因该候选变化 | 必须写 `capital_allocation_reason` 或未入选原因 |

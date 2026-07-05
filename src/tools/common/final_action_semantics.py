@@ -1636,6 +1636,7 @@ def authority_allows_entry(authority: Mapping[str, Any] | None) -> bool:
     if semantics["blocked"]:
         return False
     authority_type = _clean(authority.get("authority_type"))
+    authority_decision = _clean(authority.get("authority_decision") or authority.get("decision"))
     if authority_type in DIRECT_AUTHORITY_TYPES:
         if authority_type == "real_budget_entry":
             return bool(authority.get("open_action_evidence") and authority.get("strong_current_evidence"))
@@ -1644,6 +1645,14 @@ def authority_allows_entry(authority: Mapping[str, Any] | None) -> bool:
         if _bool(authority.get("watch_for_trigger_block")):
             return False
         if semantics["can_monitor_intraday"]:
+            return True
+        if (
+            _bool(authority.get("conditional_trigger_authority"))
+            and _bool(authority.get("requires_intraday_confirmation"))
+            and not _bool(authority.get("can_execute_without_intraday_trigger"))
+            and authority_decision
+            not in {"block", "blocked", "reject", "rejected", "watchlist_only", "no_trade"}
+        ):
             return True
         return bool(
             authority.get("open_action_evidence")

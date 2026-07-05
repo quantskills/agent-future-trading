@@ -61,7 +61,10 @@ from tools.common.contracts import (
     sanitize_execution_contract,
     validate_final_action_contract,
 )
-from tools.common.final_action_semantics import authority_allows_entry
+from tools.common.final_action_semantics import (
+    authority_allows_entry,
+    contract_requires_conditional_intraday_result,
+)
 from agents.decision_team.auditor import audit_verdict_allows_trader
 from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
 from util.config import ConfigParser
@@ -1039,6 +1042,7 @@ def _translate_pre_open_recommendation_to_order(
     config: Dict[str, Any],
     morning_price_context,
     snapshot: Dict[str, Any],
+    defer_conditional_entry_authority: bool = False,
 ) -> FuturesDecision:
     snapshot = _merge_recommendation_signal_snapshot(snapshot, recommendation)
     ticker = recommendation["underlying_code"]
@@ -1248,7 +1252,24 @@ def _translate_pre_open_recommendation_to_order(
             ),
         }
 
-        if _requires_entry_authority(current_lots, target_lots):
+        entry_authority_deferred_until_intraday = bool(
+            defer_conditional_entry_authority
+            and _requires_entry_authority(current_lots, target_lots)
+            and contract_requires_conditional_intraday_result(final_action_contract)
+        )
+        if entry_authority_deferred_until_intraday:
+            phase2_execution["entry_authority_gate"] = {
+                "status": "deferred_until_intraday_trigger",
+                "reason": "conditional_intraday_result_must_be_recorded_before_order_safety_gate",
+                "current_lots": int(current_lots),
+                "target_lots": int(target_lots),
+                "business_boundary": (
+                    "Trader records triggered/not-triggered for audited conditional "
+                    "contracts before running the final order safety gate."
+                ),
+            }
+
+        if _requires_entry_authority(current_lots, target_lots) and not entry_authority_deferred_until_intraday:
             authority_consistency = _final_entry_authority_consistency(snapshot)
             final_authority = authority_consistency.get("selected_authority") or {}
             if not authority_consistency.get("passed") or not _authority_allows_entry(final_authority):
@@ -1843,12 +1864,14 @@ def _process_strategy_recommendations(
 
         current_position = portfolio.positions.get(ticker)
         current_lots_before = int(getattr(current_position, "shares", 0) or 0)
+        intraday_enabled = intraday_confirmation_enabled(cfg)
         decision = _translate_pre_open_recommendation_to_order(
             recommendation=recommendation,
             portfolio=portfolio,
             config=cfg,
             morning_price_context=morning_price_context,
             snapshot=audit_snapshot,
+            defer_conditional_entry_authority=intraday_enabled,
         )
         _record_phase2_state(
             audit_snapshot,
@@ -1864,7 +1887,7 @@ def _process_strategy_recommendations(
 
         execution_price_context = morning_price_context
         intraday_selection = None
-        if intraday_confirmation_enabled(cfg):
+        if intraday_enabled:
             execution_price_context, intraday_selection = _resolve_phase2_execution_basis(
                 router=router,
                 cfg=cfg,

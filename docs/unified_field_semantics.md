@@ -347,7 +347,7 @@
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
 | `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 抽取的触发/执行配置摘要，不是第二张交易合约。只能包含 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes`、`execution_action_value_preference`、`analyst_execution_roles` 等执行规则字段；不得包含 `target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
 | `final_contract_execution_fields` | Trader Phase2 执行学习上下文 / 执行摘要 | 从已审计 `final_action_contract` 抽取的执行必要字段摘要，可用于记录执行来源和复盘追溯；不是第二张交易合约，不能携带 PM 学习、排名、资金部署解释。 |
-| `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。 |
+| `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。已审计通过且仍保留新增风险敞口的条件合约必须先由 Trader 写触发/未触发事实，只有触发后才运行最终下单安全闸。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
 | `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
@@ -439,6 +439,7 @@
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
 | `execution_result` | Trader 输出 / snapshot | 执行结果对象。 |
+| `entry_authority_gate` | Trader Phase2 audit | 条件新增风险合约的下单安全闸记录。对需要盘中确认的合约，初次翻译可记录 `deferred_until_intraday_trigger`，表示先写盘中触发/未触发事实；触发后再校验最终下单安全，不生成策略权限。 |
 | `execution_phase` | 执行 / 成交 | 执行阶段。 |
 | `slot_datetime` | 盘中决策 | 盘中判断时间。 |
 | `cutoff_datetime` | 盘中决策 | 盘中数据截止时间。 |

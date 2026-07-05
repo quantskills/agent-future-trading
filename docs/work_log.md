@@ -302,6 +302,8 @@
 
 （2）收口全市场资金 rank 目标函数与生命周期强化学习决策口。修改：`analyst_signal_fusion.py`、`pm_opportunity_ranking.py`、`workflow.py`、`pm_contract_builder.py`、`final_action_semantics.py`、两条 PG 检查、契约覆盖、统一字段语义表、机制文档和回归测试。原因：此前 rank 管道已经落盘，但排序目标仍偏重当日证据外观，产品级 action-value 与交易后收益对 `capital_priority_score/watch_priority_score` 的校准力度不足，且 hold/reduce/exit/execution 学习仍有被误解为新资金 rank 输入的风险。本次把 open/add/scale/increase 学习作为新资金 rank 的直接强化学习输入，放大正向历史收益、入场亏损和触发质量反馈对排序分数的影响；hold/reduce/exit 学习只服务持仓和释放资金决策，execution 学习只服务 trigger/profile 校准。最终 ranked 合约必须同步写入 `rank_input_components/lifecycle_learning_trace/learning_impact_delta`，PG hard fail 生命周期学习混用、execution 学习直接生成 rank、旧局部 rank 或无 rank 新增风险敞口。不新增第二套 rank、不改仓位参数、不改 PM/Trader/Accountant/Researcher 边界、不降低 hard fail。
 
+（3）收口 Trader 条件触发记录与下单安全闸顺序。修改：`trader.py`、`final_action_semantics.py`、统一字段语义表、机制文档和回归测试。原因：2025-03-25 暴露出已审计通过且仍保留新增风险敞口的条件探针，Trader 在盘中触发检查前用入场权限安全闸把合约改成 `hold/0 lots`，导致没有写 `futures_intraday_decision`。本次固定 Trader 对需要盘中确认的条件合约先写触发/未触发事实；未触发不下单，触发后再运行最终下单安全闸。保留安全闸，不让 Trader 判断策略好坏、不改 PM/Auditor/PG 权限、不改仓位参数、不降低 hard fail。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

@@ -115,6 +115,40 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertTrue(authority_allows_entry(contract))
         self.assertTrue(requires_intraday_result(contract))
 
+    def test_reduced_conditional_probe_authority_allows_intraday_monitoring(self):
+        authority = {
+            "authority_type": "exploration_probe",
+            "authority_decision": "allow_exploration_probe",
+            "open_action_evidence": False,
+            "strong_current_evidence": False,
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "watch_for_trigger_block": False,
+            "reason_codes": [
+                "pm_watch_for_trigger_probe_cap",
+                "real_probe_qualification_not_met",
+                "conditional_trigger_authority",
+            ],
+        }
+
+        self.assertTrue(authority_allows_entry(authority))
+
+    def test_bare_probe_authority_without_evidence_does_not_allow_entry(self):
+        authority = {
+            "authority_type": "exploration_probe",
+            "authority_decision": "allow_exploration_probe",
+            "open_action_evidence": False,
+            "strong_current_evidence": False,
+            "conditional_trigger_authority": False,
+            "requires_intraday_confirmation": False,
+            "can_execute_without_intraday_trigger": False,
+            "watch_for_trigger_block": False,
+            "reason_codes": ["test_pm_final_trade_authority"],
+        }
+
+        self.assertFalse(authority_allows_entry(authority))
+
     def test_direct_open_add_reduce_and_exit_lifecycle_states(self):
         cases = [
             ("open", 0, 2, "open"),
