@@ -352,6 +352,64 @@ class FinalActionSemanticsTest(unittest.TestCase):
         )
         self.assertEqual(rank_capital_layer_contract_errors(canonical), [])
 
+    def test_canonical_persistence_preserves_lifecycle_trace_when_clearing_non_rank_fields(self):
+        contract = {
+            "final_action": "hold",
+            "current_lots": -3,
+            "target_lots": -3,
+            "lots_delta": 0,
+            "learning_used": {
+                "alpha_setup_action_values": [
+                    {"learning_lane": "hold", "action_name": "hold"},
+                ],
+            },
+            "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_source": "ticker_side_priority",
+                "rank_input_components": {"old_local_rank_score": 0.9},
+                "capital_layer": "exploration_probe",
+                "lifecycle_learning_trace": {
+                    "contract_lifecycle_port": "hold",
+                    "used_lanes": ["hold"],
+                    "execution_profile_signal_direct_to_rank": False,
+                },
+                "learning_impact_delta": {
+                    "hold_decision": "continue_hold",
+                    "net_lifecycle_learning_delta": 0.03,
+                },
+                "pm_lifecycle_learning_trace": {
+                    "contract_lifecycle_port": "hold",
+                    "used_lanes": ["hold"],
+                },
+                "pm_lifecycle_learning_impact_delta": {
+                    "hold_decision": "continue_hold",
+                },
+            },
+            "capital_deployment": {
+                "opportunity_rank": 1,
+                "rank_source": "ticker_side_priority",
+                "rank_input_components": {"old_local_rank_score": 0.9},
+                "capital_layer": "exploration_probe",
+                "selected_for_capital_deployment": False,
+            },
+        }
+
+        canonical = canonicalize_final_action_contract_for_persistence(contract)
+
+        evidence = canonical["evidence_used"]
+        deployment = canonical["capital_deployment"]
+        self.assertNotIn("opportunity_rank", evidence)
+        self.assertNotIn("rank_source", evidence)
+        self.assertNotIn("rank_input_components", evidence)
+        self.assertNotIn("capital_layer", evidence)
+        self.assertNotIn("opportunity_rank", deployment)
+        self.assertNotIn("rank_source", deployment)
+        self.assertNotIn("rank_input_components", deployment)
+        self.assertEqual(evidence["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(evidence["learning_impact_delta"]["hold_decision"], "continue_hold")
+        self.assertEqual(evidence["pm_lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(lifecycle_learning_decision_contract_errors(canonical), [])
+
     def test_rank_lifecycle_route_rejects_hold_or_execution_learning_in_open_rank(self):
         contract = {
             "final_action": "open_probe",

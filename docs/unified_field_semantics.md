@@ -109,6 +109,7 @@
 | `profile_invalid_use_flags` | `product_profile_evidence` | 本次分析中被识别的 profile 错用风险，如把成本变化当直接交易权限。 |
 | `profile_analysis_boundary` | `product_profile_evidence` | 固定为分析证据边界，声明该 profile 不创建交易权限。 |
 | `evidence_fusion_policy` | config catalog | 多维证据融合预测协议配置；只定义证据强弱、时效、冲突、确认需求、profile 融合和复盘学习口径，不创建交易权限。 |
+| `rank_score_policy` | config catalog / `src/config/rank_score_policy.yaml` / runtime config | 唯一全市场资金 rank 的评分权重配置，只控制 `rank_score_components` 的权重和资金效率小修正；不创建交易权限、不改变仓位参数、不覆盖 0.008 probe、20% 总保证金或 0.5 净敞口红线。40 个干净交易日后才允许依据 rank 分层平均收益微调。 |
 | `evidence_fusion_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/evidence_fusion_semantics.py` 生成的只读融合语义解释；不签合约、不下单、不入账、不写当天交易事实。 |
 | `fusion_evidence` | 分析师 `metadata.action_evidence_contract` / `signal_collection_contract.source_contracts` | 单个分析师的多维证据融合字段包，说明证据强弱、时效、冲突、缺失和确认需求；不是交易合约。 |
 | `evidence_strength_score` | `fusion_evidence` / `evidence_fusion` | 预测证据强度的 0-1 确定性评分；可被 PM 用于排序分项，不能直接授权交易。 |
@@ -370,7 +371,7 @@
 | `contract_hash` | 审计 / 执行 | 被审计的合约哈希。 |
 | `single_source_of_trade_truth_remains` | PM 诊断 | 必须等于 `final_action_contract`；只用于审计说明。 |
 | `active_opportunity_audit` | PM 推荐 snapshot | PM 对当前机会释放路径的诊断对象；只用于解释候选、阻断和条件监控，不生成第二张交易合约。 |
-| `opportunity_scorecard` | `opportunity_ranking` 输出 / PM 输入 / `final_action_contract.evidence_used` | PM 对同一品种多方向候选的结构化评分卡，包含现实证据、历史学习、市场确认、数据质量、风险扣分和单品种方向优先级；它不生成最终资金 rank，也不是交易授权。 |
+| `opportunity_scorecard` | `pm_ticker_side_selection` 输出 / PM 输入 / `final_action_contract.evidence_used` | PM 对同一品种多方向候选的结构化评分卡，包含现实证据、历史学习、市场确认、数据质量、风险扣分和单品种方向优先级；它不生成最终资金 rank，也不是交易授权。 |
 | `opportunity_score` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 对候选机会的综合评分，用于资金部署排序解释；不是交易授权，不能替代 `target_lots`。 |
 | `opportunity_score_components` | PM scorecard / `final_action_contract.evidence_used` / 复盘评估 | `opportunity_score` 的分项来源，如方向支持、setup 质量、市场确认、学习调整和风险扣分。 |
 | `positive_learning` | `opportunity_score_components` | 正向 action-value 对对应生命周期决策口的加分分项；新资金 rank 只允许 open/add/scale/increase 学习直接加分，hold/reduce/exit/conditional_monitor/execution 只能进入各自生命周期决策或触发/profile 校准，不能冒充开仓学习。按 episode、作用域、样本、收益、`memory_side_role` 和时间衰减计算，不能单独授权交易。 |
@@ -380,14 +381,14 @@
 | `entry_quality_loss_penalty` | `opportunity_score_components` | 亏损开仓 episode 反写到原始入场质量后的 PM 排序扣分分项；来源必须是 Researcher 写入的 `entry_quality_outcome`，只降低资金优先级和真实部署资格，不是硬阻断。 |
 | `trigger_quality_positive_bonus` | `opportunity_score_components` | 盈利开仓 episode 反写到原始触发质量后的 PM 排序加分分项；来源必须是 `entry_quality_outcome.positive_entry_episode`，只提高同类触发的资金优先级，不单独生成交易权限。 |
 | `trigger_quality_loss_penalty` | `opportunity_score_components` | 亏损开仓 episode 反写到原始触发质量后的 PM 排序扣分分项；使用 `net_trigger_quality_loss_signal`，用于让同类触发在下一轮需要更强确认，不授权 Trader 修改触发或手数。 |
-| `rank_score` | PM scorecard / `opportunity_ranking` / workflow 全市场资金部署 | 唯一全市场资金 rank 的直接排序分数。它由冷启动证据质量、资金层级资格、open/add action-value 学习修正、产品/setup/trigger 历史表现、trigger/execution 质量、资金效率和冲突/风险/失效边界惩罚共同组成；`opportunity_rank` 必须按该分数在全市场候选池中生成。 |
+| `rank_score` | PM 第 5 步工具 `pm_full_market_capital_deployment` / `rank_score_policy` | 唯一全市场资金 rank 的直接排序分数。它由冷启动证据质量、资金层级资格、open/add action-value 学习修正、产品/setup/trigger 历史表现、trigger/execution 质量、资金效率和冲突/风险/失效边界惩罚共同组成；权重来自 `src/config/rank_score_policy.yaml`，只能由 `pm_full_market_capital_deployment` 在全市场候选池中生成。PM scorecard / `analyst_signal_fusion` 只能提供输入组件，不能写最终 `rank_score`。 |
 | `rank_score_components` | PM scorecard / `rank_input_components` | `rank_score` 的确定性拆解，至少包含 `cold_start_evidence_quality`、`capital_layer_priority`、`open_add_action_value_delta`、`product_setup_trigger_history`、`trigger_execution_quality`、`capital_efficiency`、`conflict_risk_invalidation_penalty`；用于证明强化学习和当前证据真实进入排序。 |
-| `capital_priority_score` | PM scorecard / `opportunity_ranking` / workflow 全市场资金部署 | 全市场 `opportunity_rank` 的排序输入分数，综合当前证据、产品级学习、部署资格、触发质量和风险扣分；它不是第二个 rank，也不是交易权限。 |
-| `capital_priority_tier` | PM scorecard / `opportunity_ranking` / workflow 全市场资金部署 | 候选的资金优先级层级：tradeable_candidate 高于 probe_candidate，高于 watch_for_trigger，高于 no_opportunity；只用于解释全市场资金 rank 的排序依据。 |
-| `side_priority` / `ticker_side_priority` | PM scorecard / `opportunity_ranking` | 单品种内部 long/short 方向优先级，只用于确定该产品代表候选方向；不得写入最终 `opportunity_rank`，不得进入 Trader/Accountant 权限链。 |
-| `side_priority_semantics_version` | PM scorecard / `opportunity_ranking` | 单品种方向优先级语义版本，固定为 `agentquant.ticker_side_priority.v1`。 |
-| `side_priority_is_not_capital_rank` | PM scorecard / `opportunity_ranking` | 布尔声明：单品种方向优先级不是全市场资金 rank。 |
-| `opportunity_rank` | workflow 全市场资金部署 / `final_action_contract.evidence_used` / `capital_deployment` / 复盘评估 | 当日所有产品代表候选进入同一个全市场资金候选池后的唯一资金优先级排序；`rank=1` 固定表示当天全市场最值得占用资金的产品机会。它可以对应小探、正常真实资金或学习验证后的放大资金，但不生成第二张合约。PM scorecard 的单品种方向排序不得写入该字段；所有会新增风险敞口的 open / add / scale / reverse / conditional open 必须先获得该全市场 rank，分数为 0 的 watch/open_probe 也要入池排序，不能绕过 rank 直接保留新增目标手数。 |
+| `capital_priority_score` | PM 第 5 步工具 `pm_full_market_capital_deployment` | 全市场 `opportunity_rank` 的排序输入分数，综合当前证据、产品级学习、部署资格、触发质量和风险扣分；它不是第二个 rank，也不是交易权限。PM 第 3 步只能写 `candidate_quality`，不能写该字段。 |
+| `capital_priority_tier` | PM 第 5 步工具 `pm_full_market_capital_deployment` | 候选的资金优先级层级：tradeable_candidate 高于 probe_candidate，高于 watch_for_trigger，高于 no_opportunity；只用于解释全市场资金 rank 的排序依据。PM 第 3 步只能写 `candidate_layer_hint`，不能写该字段。 |
+| `side_priority` / `ticker_side_priority` | PM scorecard / `pm_ticker_side_selection` | 单品种内部 long/short 方向优先级，只用于确定该产品代表候选方向；不得写入最终 `opportunity_rank`，不得进入 Trader/Accountant 权限链。 |
+| `side_priority_semantics_version` | PM scorecard / `pm_ticker_side_selection` | 单品种方向优先级语义版本，固定为 `agentquant.ticker_side_priority.v1`。 |
+| `side_priority_is_not_capital_rank` | PM scorecard / `pm_ticker_side_selection` | 布尔声明：单品种方向优先级不是全市场资金 rank。 |
+| `opportunity_rank` | PM 全市场资金部署工具 `pm_full_market_capital_deployment` / `final_action_contract.evidence_used` / `capital_deployment` / 复盘评估 | 当日所有产品代表候选进入同一个全市场资金候选池后的唯一资金优先级排序；`rank=1` 固定表示当天全市场最值得占用资金的产品机会。它可以对应小探、正常真实资金或学习验证后的放大资金，但不生成第二张合约。PM scorecard 的单品种方向排序不得写入该字段；所有会新增风险敞口的 open / add / scale / reverse / conditional open 必须先获得该全市场 rank，分数为 0 的 watch/open_probe 也要入池排序，不能绕过 rank 直接保留新增目标手数。 |
 | `rank_capital_layer_contract` | PG / contract coverage / `final_action_contract` 完整性检查 | 版本级契约名：凡最终 PM 合约出现 `opportunity_rank`，必须同时在同一合约的资金部署事实中写入 `rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`lifecycle_learning_trace`、`learning_impact_delta`、`rank_source`、`rank_scope`、`capital_rank_generated_by`。缺任一项是非策略契约错误，不是策略收益诊断。 |
 | `rank_capital_priority_real_budget_release` | `final_action_contract.reason_codes` / `final_action_contract.final_entry_authority` / PM 诊断 | PM 最终出口原因代码，表示唯一资金优先级 rank 支持真实资金部署资格。它只能在 `tradeable_candidate`、`rank=1`、`capital_priority_score/tier` 达标、当前开仓证据成立、失效边界存在、无技术反对且硬风险通过时出现；rank 本身仍不是交易权限，不能绕过唯一合约和审计。 |
 | `rank_semantics_version` | `final_action_contract.evidence_used` / `capital_deployment` | 唯一全市场资金 rank 语义版本，固定为 `agentquant.capital_priority_rank.v1`；用于证明 rank 含义已经收束为资金优先级。 |
@@ -396,7 +397,7 @@
 | `rank_is_not_trade_authority` | `final_action_contract.evidence_used` / `capital_deployment` | 布尔声明：该 rank 不是交易授权，不能绕过 PM 唯一合约、Auditor 审计和 Trader 执行边界。 |
 | `rank_source` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 来源，固定为 `full_market_capital_deployment`；PG 必须拒绝 PM scorecard 局部 rank 泄漏到最终合约。 |
 | `rank_scope` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 范围，固定为 `daily_full_market_capital_pool`；说明同一交易日所有产品代表候选同池排序。 |
-| `capital_rank_generated_by` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 生成入口，固定为 `workflow._apply_daily_capital_deployment`。 |
+| `capital_rank_generated_by` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 生成入口，固定为 `pm_full_market_capital_deployment`。 |
 | `rank_capital_role` | `final_action_contract.evidence_used` / `capital_deployment` | 唯一 rank 对当前资金层级的角色解释。固定取值包括 `best_exploration_probe_candidate`、`best_real_budget_candidate`、`best_alpha_scale_candidate`；它说明 rank=1 是最值得小额探针、正常真实资金还是放大资金占用的候选，不新增第二套 rank。 |
 | `capital_layer` | `final_action_contract.evidence_used` / `capital_deployment` | rank 对应的资金层级。`exploration_probe` 使用既有小探针资金参数，`real_budget_entry` 使用正常真实资金参数，`alpha_scale_entry` 使用强机会放大资金参数；资金层级决定占用多少，rank 只决定同层和全市场资金优先级。 |
 | `capital_ratio_source` | `final_action_contract.evidence_used` / `capital_deployment` | 当前资金层级引用的资金参数来源，例如 `probe_margin_ratio_0.008`、`normal_trade_margin_ratio`、`strong_opportunity_target_margin_ratio`。该字段只解释参数来源，不改参数值。 |
@@ -404,6 +405,7 @@
 | `rank_input_components` | `final_action_contract.evidence_used` / `capital_deployment` | 全市场资金 rank 的确定性输入快照，至少包含 `capital_priority_tier`、`capital_priority_score`、`watch_priority_score`、`opportunity_score`、证据质量、setup/trigger 质量和主要学习分项；用于证明 rank 不是旧局部排序或空字段补齐。 |
 | `lifecycle_learning_trace` | `final_action_contract.evidence_used` / `capital_deployment` | 学习路由轨迹。新资金 rank 固定为 `open_add_new_risk`，只允许 open/add/scale/increase 学习直接影响排序；hold/reduce/exit/execution/conditional_monitor 必须记录为 blocked/ignored，不能冒充开仓学习。非 rank 的 hold、reduce/exit、conditional_monitor 合约也必须写入该字段，用来证明对应生命周期学习已经落到最终合约而不是只停在诊断字段。 |
 | `learning_impact_delta` | `final_action_contract.evidence_used` / `capital_deployment` | 学习对本次资金 rank 或生命周期决策的净影响拆解。rank 场景记录正向 open/add 学习、负向 open/add 学习、入场质量亏损、触发质量正负反馈等分项；非 rank 场景记录是否改变持仓解释、减仓/退出倾向、条件监控或 execution profile；`execution_profile_learning_direct_to_rank` 必须为 false。 |
+| `rank_cleanup_fields` | PM 全市场资金部署工具 / `final_action_semantics.canonicalize_final_action_contract_for_persistence()` | 非 full-market rank 清理只允许删除 rank 专属字段：`opportunity_rank`、`rank_source`、`rank_scope`、`capital_rank_generated_by`、`rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components` 及 rank 语义布尔字段。`lifecycle_learning_trace`、`learning_impact_delta`、`pm_lifecycle_learning_trace`、`pm_lifecycle_learning_impact_delta` 是生命周期学习解释字段，不能因为合约不走 rank 而被清理。 |
 | `pm_lifecycle_learning_trace` | `final_action_contract.learning_used` | PM 合约构造器写入的最终动作生命周期学习 trace，覆盖 `open_add_new_risk`、`hold`、`reduce_exit`、`conditional_monitor` 和 `wait`。它用于证明 PM 把 action-value 按生命周期路由到正确决策口，不创建第二张交易合约。 |
 | `pm_lifecycle_learning_impact_delta` | `final_action_contract.learning_used` | PM 合约构造器写入的生命周期学习影响拆解，记录学习对 `target_lots/lots_delta`、持仓解释、释放资金动作、条件监控和 execution profile 的影响。它只解释最终合约结果，不授权 Trader 改手数或方向。 |
 | `pm_lifecycle_decision_port` | `final_action_contract.evidence_used` | PM 最终合约签出后的生命周期决策口快照，来自 `pm_lifecycle_learning_trace.contract_lifecycle_port`。PG 用它辅助识别非 rank 动作是否已经被对应生命周期学习解释。 |
@@ -412,7 +414,7 @@
 | `fusion_attribution_label` | Reviewer 归因 / Researcher 学习输入 | 复盘员对 PM 融合证据处理结果的只读标签，如 fusion_conflict_handled、fusion_conflict_unresolved、multi_evidence_consensus_supported；只供未来学习，不改当天事实。 |
 | `evidence_fusion_attribution` | Researcher learning event | 研究员基于复盘事实写入的未来融合学习上下文；只服务下一交易日分析师校准和 PM 排序，不创建当天交易权限。 |
 | `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 全市场资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署手数变化、部署原因和排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。最终合约出现 rank、新开、加仓、扩大或条件监控时必须原子写入该对象。 |
-| `no_rank_no_new_exposure` | `final_action_contract.reason_codes` / `capital_deployment.capital_allocation_reason` | 新增风险敞口候选未获得 workflow 全市场资金 rank 时的确定性还原原因；最终合约必须把 `target_lots` 还原为 `current_lots`，不得由 atomic fallback 保留 open/open_probe/add/scale/reverse/conditional open 的新增目标手数。 |
+| `no_rank_no_new_exposure` | `final_action_contract.reason_codes` / `capital_deployment.capital_allocation_reason` | 新增风险敞口候选未获得 PM 全市场资金 rank 时的确定性还原原因；最终合约必须把 `target_lots` 还原为 `current_lots`，不得由 workflow fallback 保留 open/open_probe/add/scale/reverse/conditional open 的新增目标手数。 |
 | `no_rank_or_budget_no_new_exposure` | `final_action_contract.reason_codes` / `capital_deployment.capital_allocation_reason` | 新增风险候选已经进入全市场 rank 队列，但按 rank 顺序消耗总保证金、单品种或净敞口预算时未被选中；最终合约必须还原为 `wait/hold` 且 `target_lots=current_lots`，不能绕过预算继续开仓。 |
 | `contract_requires_conditional_intraday_result` | `final_action_semantics` / PG 机制审计 / Trader 盘中结果要求 | 条件候选是否需要 Trader 写盘中触发/未触发结果的统一只读语义。只有最终合约仍然部署新增风险敞口的条件开仓才需要盘中结果；已经被 `no_rank_no_new_exposure` 或明确未选中原因还原为 `wait/hold`、`target_lots=current_lots`、`selected_for_capital_deployment=false` 的未部署条件候选，不要求 `opportunity_rank`，也不要求 Trader 写盘中结果。真正新增风险的 open/add/scale/reverse/conditional open 仍必须经过全市场 rank 闸门和 Trader 执行记录。 |
 | `pm_internal_draft` / `pm_scoring_draft` / `pm_ranking_draft` / `pm_capital_deployment_draft` / `pm_contract_submission_draft` / `internal_pm_draft` | PM 内部内存草稿名，非系统事实字段 | PM 可在内部内存分步形成评分、排序、资金部署和提交草稿；这些名字不得进入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。出现即为系统事实入口越界。 |

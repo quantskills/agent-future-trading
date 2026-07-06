@@ -71,7 +71,10 @@ from tools.agent_tools.decision.pm_reason_effects import (
 )
 from tools.agent_tools.decision.pm_risk_controls import business_quality_position_gate
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.pm_opportunity_ranking import rank_opportunities
+from tools.agent_tools.decision.pm_full_market_capital_deployment import apply_full_market_capital_deployment
+from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
+from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
+from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput
 from tools.agent_tools.decision.pm_contract_builder import (
@@ -90,6 +93,16 @@ from tools.agent_tools.analysis.analyst_signal_fusion import (
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
 from tools.common.alpha_setup import compact_profile_for_trace
+
+
+def finalize_pm_full_market_contracts(*, generated, config, portfolio):
+    """PM-owned finalization: full-market rank, capital deployment, and signed contracts."""
+    return apply_full_market_capital_deployment(
+        generated=generated,
+        config=config,
+        portfolio=portfolio,
+    )
+
 
 class RiskLevel(Enum):
     """Risk level classification for futures portfolio control."""
@@ -580,8 +593,7 @@ def _scorecard_probe_seed(
         return "flat", 0.0, {}
     candidates.sort(
         key=lambda item: (
-            _safe_float(item[1].get("capital_priority_score", item[1].get("score")), 0.0),
-            _safe_int(item[1].get("capital_priority_tier"), 0),
+            _safe_float(item[1].get("candidate_quality", item[1].get("score")), 0.0),
             int(item[1].get("supporting_signal_count") or 0),
             _safe_float(item[1].get("max_setup_quality"), 0.0),
         ),
@@ -4024,6 +4036,32 @@ def _append_unique_action_values(base_rows: list | None, extra_rows: list | None
     return rows
 
 
+def _route_pm_scorecard_action_values(
+    *,
+    lifecycle_port: str,
+    alpha_setup_action_values: list | None,
+) -> tuple[list[dict], dict]:
+    normalized = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    router_trace = route_lifecycle_learning(
+        lifecycle_port=lifecycle_port,
+        action_values=normalized,
+    )
+    allowed_indices = set(router_trace.get("accepted_indices") or [])
+    allowed_indices.update(router_trace.get("trigger_profile_indices") or [])
+    routed_rows = [
+        row
+        for index, row in enumerate(normalized)
+        if index in allowed_indices
+    ]
+    router_trace["scorecard_consumed_indices"] = sorted(allowed_indices)
+    router_trace["scorecard_consumed_count"] = len(routed_rows)
+    router_trace["scorecard_consumption_boundary"] = (
+        "accepted_lifecycle_rows_plus_trigger_profile_rows; "
+        "execution rows may calibrate trigger/profile but cannot directly create rank"
+    )
+    return routed_rows, router_trace
+
+
 def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
     normalized = _normalize_alpha_setup_action_value(row)
     memory_side_role = str(requirement.get("memory_side_role") or "").strip().lower()
@@ -5484,6 +5522,37 @@ def _same_sign(lhs: float, rhs: float) -> bool:
 
 def _is_new_or_increasing_exposure(target_ratio: float, current_ratio: float) -> bool:
     return _position_is_new_or_increasing_exposure(target_ratio, current_ratio)
+
+
+def _provisional_target_lots_for_lifecycle_port(
+    *,
+    current_lots: int,
+    current_ratio: float,
+    target_ratio: float,
+) -> int:
+    """Infer lifecycle intent before final sizing.
+
+    This value is only for PM step 2 action-port routing. It never becomes the
+    final target_lots and never changes position sizing parameters.
+    """
+    current_lots = int(current_lots or 0)
+    target_ratio = float(target_ratio or 0.0)
+    current_ratio = float(current_ratio or 0.0)
+    if abs(target_ratio) <= 1e-12:
+        return 0 if current_lots else 0
+    target_sign = 1 if target_ratio > 0 else -1
+    if current_lots == 0:
+        return target_sign
+    if abs(current_ratio) > 1e-12 and not _same_sign(target_ratio, current_ratio):
+        return target_sign
+    if abs(current_ratio) > 1e-12 and _same_sign(target_ratio, current_ratio):
+        if abs(target_ratio) > abs(current_ratio) + 1e-6:
+            return current_lots + (1 if current_lots > 0 else -1)
+        if abs(target_ratio) < abs(current_ratio) - 1e-6:
+            if abs(current_lots) <= 1:
+                return 0
+            return current_lots - (1 if current_lots > 0 else -1)
+    return current_lots
 
 
 def _scale_signed_ratio(position_ratio: float, multiplier: float) -> float:
@@ -9771,6 +9840,31 @@ def portfolio_agent_futures(state: FundState):
     opportunity_scorecard_cfg = (
         (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
     )
+    initial_lifecycle_target_lots = _provisional_target_lots_for_lifecycle_port(
+        current_lots=current_lots_for_control,
+        current_ratio=current_ticker_exposure,
+        target_ratio=position_risk.optimal_position_ratio,
+    )
+    initial_lifecycle_action_contract = {
+        "final_action": _final_action_from_lots(
+            current_lots=current_lots_for_control,
+            target_lots=initial_lifecycle_target_lots,
+        ),
+        "current_lots": int(current_lots_for_control or 0),
+        "target_lots": int(initial_lifecycle_target_lots or 0),
+        "lots_delta": int(initial_lifecycle_target_lots or 0) - int(current_lots_for_control or 0),
+        "requires_intraday_confirmation": False,
+        "conditional_trigger_authority": False,
+        "reason_codes": [],
+        "pm_step": "step_2_initial_lifecycle_action_port_before_scorecard",
+    }
+    initial_lifecycle_action_port = classify_lifecycle_action_port(initial_lifecycle_action_contract)
+    scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
+        lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
+        alpha_setup_action_values=alpha_setup_action_values,
+    )
+    pm_learning_audit["initial_lifecycle_action_port"] = initial_lifecycle_action_port
+    pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
         analyst_signals=analyst_signals,
@@ -9778,12 +9872,12 @@ def portfolio_agent_futures(state: FundState):
         data_quality_summary=data_quality_summary_for_pm,
         adaptive_policy_state=early_adaptive_policy_state,
         alpha_setup_profiles=alpha_setup_profiles,
-        alpha_setup_action_values=alpha_setup_action_values,
+        alpha_setup_action_values=scorecard_alpha_setup_action_values,
         signal_collection_contract=signal_collection_contract,
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
     )
-    ranking_tool_result = rank_opportunities(
+    ticker_side_selection_result = select_ticker_side(
         ticker=ticker,
         analyst_signals=analyst_signals,
         signal_collection_contract=signal_collection_contract,
@@ -9792,12 +9886,12 @@ def portfolio_agent_futures(state: FundState):
         data_quality_summary=data_quality_summary_for_pm,
         adaptive_policy_state=early_adaptive_policy_state,
         alpha_setup_profiles=alpha_setup_profiles,
-        alpha_setup_action_values=alpha_setup_action_values,
+        alpha_setup_action_values=scorecard_alpha_setup_action_values,
         decision_date=trading_date,
         config=opportunity_scorecard_cfg,
         prebuilt_scorecard=opportunity_scorecard,
     )
-    opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
+    opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
     fusion_context["opportunity_scorecard"] = opportunity_scorecard
     if db and config_id:
         try:
@@ -9916,6 +10010,11 @@ def portfolio_agent_futures(state: FundState):
                 pm_learning_audit["pm_exact_alpha_setup_boundary"] = (
                     "pm_reads_pm_learning_canonical_action_value_by_exact_then_fallback_layers_after_setup_resolution"
                 )
+                scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
+                    lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
+                    alpha_setup_action_values=alpha_setup_action_values,
+                )
+                pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
                 opportunity_scorecard = build_opportunity_scorecard(
                     ticker=ticker,
                     analyst_signals=analyst_signals,
@@ -9923,12 +10022,12 @@ def portfolio_agent_futures(state: FundState):
                     data_quality_summary=data_quality_summary_for_pm,
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=alpha_setup_action_values,
+                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
                     signal_collection_contract=signal_collection_contract,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
-                ranking_tool_result = rank_opportunities(
+                ticker_side_selection_result = select_ticker_side(
                     ticker=ticker,
                     analyst_signals=analyst_signals,
                     signal_collection_contract=signal_collection_contract,
@@ -9937,12 +10036,12 @@ def portfolio_agent_futures(state: FundState):
                     data_quality_summary=data_quality_summary_for_pm,
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=alpha_setup_action_values,
+                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                     prebuilt_scorecard=opportunity_scorecard,
                 )
-                opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
+                opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
                 fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: exact alpha setup action-value PM retrieval skipped: {exc}")
@@ -10001,6 +10100,11 @@ def portfolio_agent_futures(state: FundState):
                 pm_learning_audit["similar_alpha_setup_boundary"] = (
                     "strict_history_only_prior_not_trade_authority"
                 )
+                scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
+                    lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
+                    alpha_setup_action_values=alpha_setup_action_values,
+                )
+                pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
                 opportunity_scorecard = build_opportunity_scorecard(
                     ticker=ticker,
                     analyst_signals=analyst_signals,
@@ -10008,12 +10112,12 @@ def portfolio_agent_futures(state: FundState):
                     data_quality_summary=data_quality_summary_for_pm,
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=alpha_setup_action_values,
+                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
                     signal_collection_contract=signal_collection_contract,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                 )
-                ranking_tool_result = rank_opportunities(
+                ticker_side_selection_result = select_ticker_side(
                     ticker=ticker,
                     analyst_signals=analyst_signals,
                     signal_collection_contract=signal_collection_contract,
@@ -10022,12 +10126,12 @@ def portfolio_agent_futures(state: FundState):
                     data_quality_summary=data_quality_summary_for_pm,
                     adaptive_policy_state=early_adaptive_policy_state,
                     alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=alpha_setup_action_values,
+                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
                     decision_date=trading_date,
                     config=opportunity_scorecard_cfg,
                     prebuilt_scorecard=opportunity_scorecard,
                 )
-                opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
+                opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
                 fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: similar alpha setup action-value PM retrieval skipped: {exc}")
@@ -10040,7 +10144,7 @@ def portfolio_agent_futures(state: FundState):
     ):
         learned_open_seed = _positive_open_action_value_seed(
             ticker=ticker,
-            alpha_setup_action_values=alpha_setup_action_values,
+            alpha_setup_action_values=scorecard_alpha_setup_action_values,
             analyst_signals=analyst_signals,
             opportunity_scorecard=opportunity_scorecard,
             market_confirmation=market_confirmation,
@@ -10273,12 +10377,12 @@ def portfolio_agent_futures(state: FundState):
                 data_quality_summary=data_quality_summary_for_pm,
                 adaptive_policy_state=adaptive_policy_state,
                 alpha_setup_profiles=alpha_setup_profiles,
-                alpha_setup_action_values=alpha_setup_action_values,
+                alpha_setup_action_values=scorecard_alpha_setup_action_values,
                 signal_collection_contract=signal_collection_contract,
                 decision_date=trading_date,
                 config=opportunity_scorecard_cfg,
             )
-            ranking_tool_result = rank_opportunities(
+            ticker_side_selection_result = select_ticker_side(
                 ticker=ticker,
                 analyst_signals=analyst_signals,
                 signal_collection_contract=signal_collection_contract,
@@ -10287,12 +10391,12 @@ def portfolio_agent_futures(state: FundState):
                 data_quality_summary=data_quality_summary_for_pm,
                 adaptive_policy_state=adaptive_policy_state,
                 alpha_setup_profiles=alpha_setup_profiles,
-                alpha_setup_action_values=alpha_setup_action_values,
+                alpha_setup_action_values=scorecard_alpha_setup_action_values,
                 decision_date=trading_date,
                 config=opportunity_scorecard_cfg,
                 prebuilt_scorecard=opportunity_scorecard,
             )
-            opportunity_scorecard = ranking_tool_result["opportunity_scorecard"]
+            opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
             fusion_context["opportunity_scorecard"] = opportunity_scorecard
 
         analyst_payload = [
@@ -11182,6 +11286,9 @@ def portfolio_agent_futures(state: FundState):
             else False if "conditional_trigger_authority" in control_reasons else True
         ),
     }
+    lifecycle_action_port = classify_lifecycle_action_port(lifecycle_memory_contract)
+    lifecycle_memory_contract["pm_lifecycle_action_port"] = lifecycle_action_port.get("pm_lifecycle_action_port")
+    lifecycle_memory_contract["requires_full_market_rank"] = lifecycle_action_port.get("requires_full_market_rank")
     alpha_setup_action_values, lifecycle_memory_audit = _retrieve_lifecycle_pm_memory(
         db=db,
         config_id=config_id,
@@ -11193,12 +11300,32 @@ def portfolio_agent_futures(state: FundState):
         fusion_context=fusion_context if isinstance(fusion_context, dict) else {},
         alpha_setup_action_values=alpha_setup_action_values,
     )
+    lifecycle_learning_router = route_lifecycle_learning(
+        lifecycle_port=str(lifecycle_action_port.get("pm_lifecycle_action_port") or ""),
+        action_values=alpha_setup_action_values,
+    )
+    accepted_learning_indices = {
+        int(index)
+        for index in (lifecycle_learning_router.get("accepted_indices") or [])
+        if isinstance(index, int)
+    }
+    alpha_setup_action_values = [
+        row
+        for index, row in enumerate(alpha_setup_action_values)
+        if index in accepted_learning_indices
+    ]
+    lifecycle_memory_audit["pm_lifecycle_action_port"] = lifecycle_action_port
+    lifecycle_memory_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     pm_learning_audit["final_action_memory_retrieval"] = lifecycle_memory_audit
+    pm_learning_audit["pm_lifecycle_action_port"] = lifecycle_action_port
+    pm_learning_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
     pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
     control_diagnostics["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     control_diagnostics["final_action_memory_retrieval"] = lifecycle_memory_audit
+    control_diagnostics["pm_lifecycle_action_port"] = lifecycle_action_port
+    control_diagnostics["pm_lifecycle_learning_router"] = lifecycle_learning_router
 
     plan_snapshot = _build_pm_decision_context(
         target_lots=target_lots,
@@ -11218,6 +11345,8 @@ def portfolio_agent_futures(state: FundState):
         ticker=ticker,
     )
     plan_snapshot["current_lots_before_open"] = int(current_lots)
+    plan_snapshot["pm_lifecycle_action_port"] = lifecycle_action_port
+    plan_snapshot["pm_lifecycle_learning_router"] = lifecycle_learning_router
     plan_snapshot["target_value"] = float(target_value)
     plan_snapshot["account_equity"] = float(account_equity)
     plan_snapshot["current_net_exposure"] = float(current_net_exposure)
@@ -11232,8 +11361,8 @@ def portfolio_agent_futures(state: FundState):
     plan_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
     plan_snapshot["signal_collection_contract"] = signal_collection_contract
     plan_snapshot["opportunity_scorecard"] = opportunity_scorecard
-    plan_snapshot["opportunity_ranking"] = ranking_tool_result
-    plan_snapshot["capital_allocation_reason"] = ranking_tool_result.get("capital_allocation_reason", {})
+    plan_snapshot["ticker_side_selection"] = ticker_side_selection_result
+    plan_snapshot["capital_allocation_reason"] = ticker_side_selection_result.get("capital_allocation_reason", {})
     position_sizing_result = build_position_sizing_result(
         ticker=ticker,
         current_lots=current_lots,
@@ -11251,7 +11380,7 @@ def portfolio_agent_futures(state: FundState):
         risk_level=risk_level.value,
         lots_to_trade_reason=lots_to_trade_reason,
         control_reasons=control_reasons,
-        capital_allocation_reason=ranking_tool_result.get("capital_allocation_reason", {}),
+        capital_allocation_reason=ticker_side_selection_result.get("capital_allocation_reason", {}),
     )
     plan_snapshot["position_sizing_result"] = position_sizing_result
     plan_snapshot["position_quality_controls"] = {
@@ -11500,6 +11629,8 @@ def portfolio_agent_futures(state: FundState):
             if isinstance(evidence_used.get("pm_lifecycle_learning_trace"), dict)
             else ""
         )
+        evidence_used["pm_lifecycle_action_port"] = lifecycle_action_port
+        evidence_used["pm_lifecycle_learning_router"] = lifecycle_learning_router
         evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
         final_action_contract["evidence_used"] = evidence_used
     if control_reasons or control_notes or control_diagnostics:

@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import unittest
 from pathlib import Path
 
@@ -11,7 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.pm_opportunity_ranking import (
+from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     CAPITAL_LAYER_ALPHA_SCALE,
     CAPITAL_LAYER_EXPLORATION,
     CAPITAL_RATIO_SOURCE_ALPHA_SCALE,
@@ -19,13 +19,19 @@ from tools.agent_tools.decision.pm_opportunity_ranking import (
     RANK_CAPITAL_ROLE_ALPHA_SCALE,
     RANK_CAPITAL_ROLE_EXPLORATION,
     RANK_CAPITAL_ROLE_REAL_BUDGET,
-    SIDE_PRIORITY_MEANING,
-    SIDE_PRIORITY_SEMANTICS_VERSION,
+    _clear_non_full_market_rank_fields,
+    _ensure_final_rank_score_fields,
     rank_metadata_for_row,
     rank_trace_for_row,
-    rank_opportunities,
+)
+from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
+from tools.agent_tools.decision.pm_ticker_side_selection import (
+    SIDE_PRIORITY_MEANING,
+    SIDE_PRIORITY_SEMANTICS_VERSION,
+    select_ticker_side,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
+from tools.common.final_action_semantics import lifecycle_learning_decision_contract_errors
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
@@ -154,9 +160,33 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             {item["reason"] for item in result["rejected_or_downgraded"]},
         )
 
-    def test_opportunity_ranking_selects_side_without_trade_authority(self):
+    def test_pm_main_chain_classifies_lifecycle_before_scorecard(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8-sig")
+        lifecycle_pos = source.index("initial_lifecycle_action_port = classify_lifecycle_action_port")
+        scorecard_pos = source.index("opportunity_scorecard = build_opportunity_scorecard", lifecycle_pos)
+        side_selection_pos = source.index("ticker_side_selection_result = select_ticker_side", lifecycle_pos)
+        self.assertLess(lifecycle_pos, scorecard_pos)
+        self.assertLess(lifecycle_pos, side_selection_pos)
+        self.assertIn("_route_pm_scorecard_action_values", source[lifecycle_pos:scorecard_pos])
+
+    def test_lifecycle_learning_router_routes_execution_to_trigger_profile(self):
+        result = route_lifecycle_learning(
+            lifecycle_port="new_risk",
+            action_values=[
+                {"id": "open-1", "action_value_lane": "open"},
+                {"id": "exec-1", "action_value_lane": "execution"},
+                {"id": "hold-1", "action_value_lane": "hold"},
+            ],
+        )
+        self.assertEqual([row["id"] for row in result["accepted_learning"]], ["open-1"])
+        self.assertEqual([row["id"] for row in result["trigger_profile_learning"]], ["exec-1"])
+        self.assertNotIn("exec-1", {row["id"] for row in result["rejected_learning"]})
+        self.assertTrue(result["trigger_profile_learning"][0]["not_rank_learning"])
+        self.assertFalse(result["trigger_profile_learning_direct_to_rank"])
+
+    def test_ticker_side_selection_selects_side_without_trade_authority(self):
         signal = _signal("technical", Signal.BULLISH, 0.74)
-        result = rank_opportunities(
+        result = select_ticker_side(
             ticker="RB",
             analyst_signals=[signal],
             signal_collection_contract={
@@ -182,18 +212,20 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(result["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
         self.assertEqual(result["side_priority_meaning"], SIDE_PRIORITY_MEANING)
         self.assertTrue(result["side_priority_is_not_capital_rank"])
-        self.assertTrue(result["capital_allocation_reason"]["rank_is_not_trade_authority"])
+        self.assertTrue(result["capital_allocation_reason"]["side_priority_is_not_trade_authority"])
         self.assertTrue(result["capital_allocation_reason"]["side_priority_is_not_capital_rank"])
         row = result["opportunity_scorecard"]["long"]
         self.assertNotIn("opportunity_rank", row)
+        self.assertNotIn("rank_score", row)
+        self.assertNotIn("capital_priority_score", row)
+        self.assertIn("candidate_quality", row)
         self.assertEqual(row["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
         self.assertTrue(row["side_priority_is_not_capital_rank"])
         self.assertTrue(row["side_priority_is_not_trade_authority"])
-        self.assertIn("capital_priority_score", row)
-        self.assertTrue(result["ranking_tool_trace"]["no_llm"])
+        self.assertTrue(result["ticker_side_selection_trace"]["no_llm"])
 
-    def test_opportunity_ranking_uses_ticker_side_priority_only(self):
-        result = rank_opportunities(
+    def test_ticker_side_selection_uses_ticker_side_priority_only(self):
+        result = select_ticker_side(
             ticker="EB",
             analyst_signals=[],
             signal_collection_contract={"dominant_side": "short"},
@@ -227,21 +259,21 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         scorecard = result["opportunity_scorecard"]
-        self.assertEqual(scorecard["short"]["side_priority"], 1)
-        self.assertEqual(scorecard["long"]["side_priority"], 2)
+        self.assertEqual(scorecard["long"]["side_priority"], 1)
+        self.assertEqual(scorecard["short"]["side_priority"], 2)
         self.assertNotIn("opportunity_rank", scorecard["short"])
-        self.assertEqual(rank_metadata_for_row(scorecard["short"])["rank_capital_role"], RANK_CAPITAL_ROLE_REAL_BUDGET)
-        self.assertEqual(rank_metadata_for_row(scorecard["long"])["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
+        self.assertNotIn("rank_score", scorecard["short"])
+        self.assertNotIn("capital_layer", scorecard["short"])
         self.assertNotIn("deployment_rank", scorecard["short"])
         self.assertNotIn("exploration_rank", scorecard["short"])
         self.assertEqual(
-            result["capital_allocation_reason"]["preferred_capital_priority_score"],
-            0.50,
+            result["capital_allocation_reason"]["preferred_candidate_quality"],
+            scorecard["short"]["candidate_quality"],
         )
-        self.assertEqual(result["capital_allocation_reason"]["preferred_candidate_capital_layer"], "real_budget_entry")
+        self.assertEqual(result["capital_allocation_reason"]["preferred_candidate_layer_hint"], "tradeable_candidate")
 
     def test_all_watch_for_trigger_sides_rank_by_ticker_side_priority(self):
-        result = rank_opportunities(
+        result = select_ticker_side(
             ticker="P",
             analyst_signals=[],
             signal_collection_contract={"dominant_side": "long"},
@@ -283,18 +315,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         scorecard = result["opportunity_scorecard"]
         self.assertEqual(scorecard["long"]["side_priority"], 1)
         self.assertEqual(scorecard["short"]["side_priority"], 2)
-        metadata = rank_metadata_for_row(scorecard["long"])
-        self.assertEqual(metadata["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
-        self.assertEqual(metadata["capital_layer"], CAPITAL_LAYER_EXPLORATION)
-        self.assertEqual(metadata["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
-        self.assertEqual(
-            metadata["rank_reason"],
-            "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-        )
+        self.assertEqual(scorecard["long"]["candidate_layer_hint"], "watch_for_trigger_candidate")
+        self.assertNotIn("rank_score", scorecard["long"])
+        self.assertNotIn("capital_layer", scorecard["long"])
 
     def test_open_action_value_learning_changes_new_capital_priority_only_by_lifecycle(self):
         base_signal = [_signal("technical", Signal.BULLISH, 0.72)]
-        positive = rank_opportunities(
+        positive = select_ticker_side(
             ticker="P",
             analyst_signals=base_signal,
             signal_collection_contract={"dominant_side": "long"},
@@ -320,7 +347,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             decision_date="2025-03-05",
             config={},
         )
-        negative = rank_opportunities(
+        negative = select_ticker_side(
             ticker="P",
             analyst_signals=base_signal,
             signal_collection_contract={"dominant_side": "long"},
@@ -373,13 +400,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         positive_row = positive["opportunity_scorecard"]["long"]
         negative_row = negative["opportunity_scorecard"]["long"]
-        self.assertIn("rank_score", positive_row)
-        self.assertIn("rank_score_components", positive_row)
-        self.assertGreater(positive_row["rank_score"], negative_row["rank_score"])
-        self.assertGreater(positive_row["capital_priority_score"], negative_row["capital_priority_score"])
+        self.assertNotIn("rank_score", positive_row)
+        self.assertNotIn("rank_score_components", positive_row)
+        positive_rank_row = _ensure_final_rank_score_fields(dict(positive_row), config={})
+        negative_rank_row = _ensure_final_rank_score_fields(dict(negative_row), config={})
+        self.assertGreater(positive_rank_row["rank_score"], negative_rank_row["rank_score"])
         self.assertGreater(
-            positive_row["rank_score_components"]["open_add_action_value_delta"],
-            negative_row["rank_score_components"]["open_add_action_value_delta"],
+            positive_rank_row["rank_score_components"]["open_add_action_value_delta"],
+            negative_rank_row["rank_score_components"]["open_add_action_value_delta"],
         )
         self.assertGreater(
             positive_row["opportunity_score_components"]["positive_learning"],
@@ -393,15 +421,85 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             negative_row["opportunity_score_components"]["execution_profile_learning"],
             0.0,
         )
-        impact = rank_trace_for_row(negative_row)["learning_impact_delta"]
+        impact = rank_trace_for_row(negative_rank_row)["learning_impact_delta"]
         self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
-        trace = rank_trace_for_row(negative_row)["lifecycle_learning_trace"]
+        trace = rank_trace_for_row(negative_rank_row)["lifecycle_learning_trace"]
         self.assertIn("open", trace["used_lanes"])
         self.assertIn("hold", trace["ignored_lanes"])
         self.assertIn("execution", trace["ignored_lanes"])
 
+    def test_rank_score_policy_catalog_weight_changes_rank_score(self):
+        base_signal = [_signal("technical", Signal.BULLISH, 0.72)]
+        action_values = [
+            {
+                "consumer_scope": "pm_learning",
+                "side": "long",
+                "action_value_lane": "open",
+                "action_preference": "positive_candidate_open",
+                "reward_source": "trade_episode",
+                "evidence_scope": "exact_real_state",
+                "reward_sum": 6000,
+                "reward_mean": 6000,
+                "sample_count": 3,
+                "last_sample_date": "2025-03-04",
+            }
+        ]
+        default = select_ticker_side(
+            ticker="P",
+            analyst_signals=base_signal,
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.65},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=action_values,
+            decision_date="2025-03-05",
+            config={},
+        )
+        boosted = select_ticker_side(
+            ticker="P",
+            analyst_signals=base_signal,
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.65},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=action_values,
+            decision_date="2025-03-05",
+            config={
+                "rank_score_policy": {
+                    "rank_score": {
+                        "open_add_action_value_delta": {
+                            "positive_signal_weight": 0.30,
+                        },
+                    },
+                },
+            },
+        )
+
+        default_row = _ensure_final_rank_score_fields(dict(default["opportunity_scorecard"]["long"]), config={})
+        boosted_row = _ensure_final_rank_score_fields(
+            dict(boosted["opportunity_scorecard"]["long"]),
+            config={
+                "rank_score_policy": {
+                    "rank_score": {
+                        "open_add_action_value_delta": {
+                            "positive_signal_weight": 0.30,
+                        },
+                    },
+                },
+            },
+        )
+        self.assertGreater(
+            boosted_row["rank_score_components"]["open_add_action_value_delta"],
+            default_row["rank_score_components"]["open_add_action_value_delta"],
+        )
+        self.assertGreater(boosted_row["rank_score"], default_row["rank_score"])
+
     def test_repeated_alpha_candidate_uses_same_rank_with_alpha_scale_layer(self):
-        result = rank_opportunities(
+        result = select_ticker_side(
             ticker="EB",
             analyst_signals=[],
             signal_collection_contract={"dominant_side": "short"},
@@ -437,7 +535,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         scorecard = result["opportunity_scorecard"]
         self.assertEqual(scorecard["short"]["side_priority"], 1)
-        metadata = rank_metadata_for_row(scorecard["short"])
+        self.assertNotIn("capital_layer", scorecard["short"])
+        metadata = rank_metadata_for_row(_ensure_final_rank_score_fields(dict(scorecard["short"]), config={}))
         self.assertEqual(metadata["rank_capital_role"], RANK_CAPITAL_ROLE_ALPHA_SCALE)
         self.assertEqual(metadata["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
         self.assertEqual(metadata["capital_ratio_source"], CAPITAL_RATIO_SOURCE_ALPHA_SCALE)
@@ -470,6 +569,80 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertTrue(result["no_final_action_authority"])
         self.assertTrue(result["no_direction_override_authority"])
         self.assertTrue(result["no_llm"])
+
+    def test_pm_rank_sanitation_preserves_non_rank_lifecycle_trace(self):
+        snapshot = {
+            "final_action_contract": {
+                "final_action": "hold",
+                "current_lots": 2,
+                "target_lots": 2,
+                "lots_delta": 0,
+                "learning_used": {
+                    "alpha_setup_action_values": [
+                        {"learning_lane": "hold", "action_name": "hold"},
+                    ],
+                },
+                "evidence_used": {
+                    "opportunity_rank": 1,
+                    "rank_source": "ticker_side_priority",
+                    "rank_input_components": {"old_local_rank_score": 0.77},
+                    "rank_capital_role": "best_exploration_probe_candidate",
+                    "capital_layer": "exploration_probe",
+                    "lifecycle_learning_trace": {
+                        "contract_lifecycle_port": "hold",
+                        "used_lanes": ["hold"],
+                        "execution_profile_signal_direct_to_rank": False,
+                    },
+                    "learning_impact_delta": {
+                        "hold_decision": "continue_hold",
+                        "net_lifecycle_learning_delta": 0.04,
+                    },
+                    "pm_lifecycle_learning_trace": {
+                        "contract_lifecycle_port": "hold",
+                        "used_lanes": ["hold"],
+                    },
+                    "pm_lifecycle_learning_impact_delta": {
+                        "hold_decision": "continue_hold",
+                    },
+                },
+                "capital_deployment": {
+                    "opportunity_rank": 1,
+                    "rank_source": "ticker_side_priority",
+                    "rank_input_components": {"old_local_rank_score": 0.77},
+                    "capital_layer": "exploration_probe",
+                    "selected_for_capital_deployment": False,
+                },
+            },
+            "opportunity_scorecard": {
+                "long": {
+                    "opportunity_rank": 1,
+                    "rank_source": "ticker_side_priority",
+                    "rank_input_components": {"old_local_rank_score": 0.77},
+                    "lifecycle_learning_trace": {"contract_lifecycle_port": "hold"},
+                    "learning_impact_delta": {"hold_decision": "continue_hold"},
+                }
+            },
+        }
+
+        _clear_non_full_market_rank_fields(snapshot)
+
+        contract = snapshot["final_action_contract"]
+        evidence = contract["evidence_used"]
+        deployment = contract["capital_deployment"]
+        scorecard_long = snapshot["opportunity_scorecard"]["long"]
+        self.assertNotIn("opportunity_rank", evidence)
+        self.assertNotIn("rank_source", evidence)
+        self.assertNotIn("rank_input_components", evidence)
+        self.assertNotIn("capital_layer", evidence)
+        self.assertNotIn("opportunity_rank", deployment)
+        self.assertNotIn("rank_source", deployment)
+        self.assertNotIn("rank_input_components", deployment)
+        self.assertNotIn("opportunity_rank", scorecard_long)
+        self.assertNotIn("rank_input_components", scorecard_long)
+        self.assertEqual(evidence["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(evidence["learning_impact_delta"]["hold_decision"], "continue_hold")
+        self.assertEqual(scorecard_long["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(lifecycle_learning_decision_contract_errors(contract), [])
 
     def test_portfolio_manager_no_llm_call_site_remains(self):
         text = (PROJECT_ROOT / "src" / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8")

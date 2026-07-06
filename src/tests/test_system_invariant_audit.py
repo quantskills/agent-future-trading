@@ -1069,7 +1069,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
                 "capital_deployment": {
                     "selected_for_capital_deployment": True,
-                    "capital_allocation_reason": "selected_by_pm_atomic_contract_submission:rank=unranked",
+                    "capital_allocation_reason": "unranked_new_risk_rejected_by_full_market_rank_gate",
                     "original_target_lots": -4,
                     "deployed_target_lots": -4,
                     "deployed_lots_delta": -4,

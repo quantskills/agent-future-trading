@@ -31,6 +31,7 @@ def normalize_config(config: Mapping[str, Any] | None, config_path: str | Path |
     _apply_evidence_fusion_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_portfolio_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_learning_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
+    _apply_rank_score_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_execution_catalogs(cfg, catalogs, base_path, loaded_catalogs)
     _validate_position_budget_policy(cfg)
 
@@ -254,6 +255,31 @@ def _apply_learning_policy_catalog(
         roles["learning_context"] = "learning_policy_catalog_runtime_expanded"
         roles["learning_retention"] = "learning_policy_catalog_runtime_expanded"
         roles["opportunity_ranking_learning_policy"] = "learning_policy_catalog_runtime_expanded"
+
+
+def _apply_rank_score_policy_catalog(
+    cfg: Dict[str, Any],
+    catalogs: Mapping[str, Any],
+    base_path: Path | None,
+    loaded_catalogs: Dict[str, str],
+) -> None:
+    ref = catalogs.get("rank_score_policy")
+    if not ref:
+        return
+    payload = _load_catalog(ref, base_path)
+    loaded_catalogs["rank_score_policy"] = str(_resolve_catalog_path(ref, base_path))
+    policy = payload.get("rank_score_policy")
+    if not isinstance(policy, Mapping):
+        raise ValueError("rank score policy catalog must contain rank_score_policy")
+    existing = cfg.get("rank_score_policy") if isinstance(cfg.get("rank_score_policy"), Mapping) else {}
+    cfg["rank_score_policy"] = _deep_merge(dict(policy), dict(existing or {}))
+
+    cfg.setdefault("_config_parameter_roles", {})
+    roles = cfg["_config_parameter_roles"]
+    if isinstance(roles, dict):
+        roles["rank_score_policy"] = (
+            "full_market_rank_score_weight_catalog_not_trade_authority_not_position_size"
+        )
 
 
 def _apply_execution_catalogs(

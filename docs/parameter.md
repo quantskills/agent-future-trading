@@ -47,6 +47,8 @@ rank_score =
 | 资金效率 | `capital_efficiency` | 预留小权重，40 日样本后再评估是否启用 |
 | 冲突/风险/失效边界 | `conflict_risk_invalidation_penalty` | 冲突、数据缺口、风险和失效边界不足的扣分 |
 
+权重配置入口固定为 `src/config/rank_score_policy.yaml`，由 `dev.yaml.config_catalogs.rank_score_policy` 引入并在运行时展开为 `rank_score_policy`。该 catalog 只允许微调 `rank_score` 权重和资金效率小修正，不允许改仓位参数、交易权限、`0.008` probe、`20%` 总保证金或 `0.5` 净敞口红线。样本不足 40 个干净交易日前，不应调整该 catalog。
+
 资金部署规则：
 
 - 按 `rank_score` 从高到低排出 1-N。

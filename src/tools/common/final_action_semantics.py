@@ -112,11 +112,20 @@ RANK_CAPITAL_TRACE_FIELDS = {
     "lifecycle_learning_trace",
     "learning_impact_delta",
 }
+RANK_CAPITAL_RANK_TRACE_FIELDS = {
+    "rank_input_components",
+}
+LIFECYCLE_LEARNING_TRACE_FIELDS = {
+    "lifecycle_learning_trace",
+    "learning_impact_delta",
+    "pm_lifecycle_learning_trace",
+    "pm_lifecycle_learning_impact_delta",
+}
 CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION = "agentquant.capital_priority_rank.v1"
 CAPITAL_PRIORITY_RANK_MEANING = "rank_1_is_current_highest_capital_priority_not_trade_authority"
 FULL_MARKET_RANK_SOURCE = "full_market_capital_deployment"
 FULL_MARKET_RANK_SCOPE = "daily_full_market_capital_pool"
-FULL_MARKET_RANK_GENERATOR = "workflow._apply_daily_capital_deployment"
+FULL_MARKET_RANK_GENERATOR = "pm_full_market_capital_deployment"
 RANK_CAPITAL_SOURCE_FIELDS = {
     "rank_source",
     "rank_scope",
@@ -583,7 +592,7 @@ def canonicalize_final_action_contract_for_persistence(
         rank_fields = (
             set(RANK_CAPITAL_LAYER_FIELDS)
             | set(RANK_CAPITAL_SOURCE_FIELDS)
-            | set(RANK_CAPITAL_TRACE_FIELDS)
+            | set(RANK_CAPITAL_RANK_TRACE_FIELDS)
             | {
                 "opportunity_rank",
                 "rank_semantics_version",
@@ -592,7 +601,8 @@ def canonicalize_final_action_contract_for_persistence(
                 "rank_is_not_trade_authority",
             }
         )
-        canonical.pop("opportunity_rank", None)
+        for field in rank_fields:
+            canonical.pop(field, None)
         if evidence:
             for field in rank_fields:
                 evidence.pop(field, None)

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import hashlib
 import sqlite3
@@ -85,12 +85,13 @@ from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_si
 from tools.agent_tools.analysis.analyst_signal_fusion import (
     build_opportunity_scorecard,
 )
-from tools.agent_tools.decision.pm_opportunity_ranking import (
+from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     CAPITAL_LAYER_EXPLORATION,
     CAPITAL_LAYER_REAL_BUDGET,
     CAPITAL_RATIO_SOURCE_EXPLORATION,
     RANK_CAPITAL_ROLE_EXPLORATION,
     RANK_CAPITAL_ROLE_REAL_BUDGET,
+    _ensure_final_rank_score_fields,
 )
 from tools.common.final_action_semantics import full_market_rank_source_payload
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
@@ -467,6 +468,16 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -554,7 +565,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("A", rec_low), ("B", rec_high)])
+        workflow._persist_pm_full_market_contracts([("A", rec_low), ("B", rec_high)])
 
         self.assertEqual(rec_high.signal_snapshot["opportunity_scorecard"]["short"]["opportunity_rank"], 1)
         self.assertEqual(rec_low.signal_snapshot["opportunity_scorecard"]["short"]["opportunity_rank"], 2)
@@ -614,6 +625,16 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -691,7 +712,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("P", rec_best_watch), ("M", rec_other_watch)])
+        workflow._persist_pm_full_market_contracts([("P", rec_best_watch), ("M", rec_other_watch)])
 
         contract = rec_best_watch.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
@@ -710,6 +731,16 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -774,7 +805,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         rec_rank_1 = _watch_rec("rank-1", "P", 0.82)
         rec_rank_2 = _watch_rec("rank-2", "M", 0.74)
 
-        workflow._write_daily_opportunity_ranks([("P", rec_rank_1), ("M", rec_rank_2)])
+        workflow._persist_pm_full_market_contracts([("P", rec_rank_1), ("M", rec_rank_2)])
 
         contract_1 = rec_rank_1.signal_snapshot["final_action_contract"]
         contract_2 = rec_rank_2.signal_snapshot["final_action_contract"]
@@ -808,6 +839,16 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -877,7 +918,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 )
             )
 
-        workflow._write_daily_opportunity_ranks(recommendations)
+        workflow._persist_pm_full_market_contracts(recommendations)
 
         observed = []
         for ticker, recommendation in recommendations:
@@ -901,6 +942,16 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -936,7 +987,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("J", recommendation)])
+        workflow._persist_pm_full_market_contracts([("J", recommendation)])
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(contract["final_action"], "wait")
@@ -945,60 +996,31 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0][2]["final_action_contract"]["final_action"], "wait")
 
-    def test_workflow_persists_rank_metadata_to_capital_deployment_from_existing_evidence(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        snapshot = {
-            "opportunity_scorecard": {
-                "preferred_side": "short",
-                "short": {
-                    "opportunity_score": 0.46,
-                    "capital_priority_score": 0.18,
-                    "capital_priority_tier": 1,
-                    "final_state": "watch_for_trigger",
-                },
-            },
-            "final_action_contract": {
-                "final_action": "open_probe",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "evidence_used": {
-                    "opportunity_rank": 1,
-                    "rank_capital_role": RANK_CAPITAL_ROLE_EXPLORATION,
-                    "capital_layer": CAPITAL_LAYER_EXPLORATION,
-                    "capital_ratio_source": CAPITAL_RATIO_SOURCE_EXPLORATION,
-                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                    **full_market_rank_source_payload(),
-                },
-                "capital_deployment": {
-                    "selected_for_capital_deployment": True,
-                    "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
-                    "original_target_lots": -1,
-                    "deployed_target_lots": -1,
-                    "deployed_lots_delta": -1,
-                    "opportunity_rank": 1,
-                    **full_market_rank_source_payload(),
-                },
-            },
-        }
+    def test_workflow_has_no_atomic_rank_or_contract_repair_fallback(self):
+        source = (SRC_ROOT / "graph" / "workflow.py").read_text(encoding="utf-8")
 
-        changed = workflow._ensure_atomic_capital_deployment_submission(snapshot, side="short")
-
-        self.assertTrue(changed)
-        deployment = snapshot["final_action_contract"]["capital_deployment"]
-        self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
-        self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
-        self.assertEqual(deployment["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
-        self.assertEqual(
-            deployment["rank_reason"],
-            "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-        )
+        self.assertNotIn("_ensure_atomic_capital_deployment_submission", source)
+        self.assertNotIn("_apply_daily_capital_deployment", source)
+        self.assertNotIn("_apply_deployed_target_to_snapshot", source)
+        self.assertNotIn("_clear_non_full_market_rank_fields", source)
+        self.assertNotIn("_write_daily_opportunity_ranks", source)
+        self.assertNotIn("opportunity_rank", source)
 
     def test_workflow_learning_rank_changes_final_contract_or_explains_no_effect(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -1122,7 +1144,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("EB", rec_positive), ("TA", rec_negative)])
+        workflow._persist_pm_full_market_contracts([("EB", rec_positive), ("TA", rec_negative)])
 
         positive_contract = rec_positive.signal_snapshot["final_action_contract"]
         negative_contract = rec_negative.signal_snapshot["final_action_contract"]
@@ -1140,95 +1162,41 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         )
         self.assertEqual(len(updates), 2)
 
-    def test_pm_atomic_submission_restores_unranked_new_risk_to_current_lots(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        updates = []
+    def test_unranked_new_risk_requires_pm_full_market_rank_gate(self):
+        from tools.common.final_action_semantics import full_market_rank_gate_errors
 
-        class _DB:
-            def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
-                updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
-                return True
-
-        workflow.db = _DB()
-        workflow.config = {
-            "max_total_margin_ratio": 0.20,
-            "position_budget_policy": {
-                "min_real_trade_margin_ratio": 0.008,
-                "max_single_ticker_margin_ratio": 0.13,
-            },
-            "capital_utilization_control": {"target_margin_ratio_confirmed": 0.008},
+        contract = {
+            "final_action": "open_probe",
+            "current_lots": 0,
+            "target_lots": -11,
+            "lots_delta": -11,
+            "target_margin_ratio_estimate": 0.008,
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "evidence_used": {"opportunity_score": 0.0},
+            "reason_codes": ["conditional_monitor_probe_seed"],
         }
-        workflow.init_portfolio = Portfolio(
-            id="p1",
-            cashflow=5_000_000,
-            positions={},
-            margin_used=0.0,
-            account_equity=5_000_000,
-        )
-        recommendation = FuturesRecommendation(
-            id="bare-rank",
-            status=RecommendationStatus.PENDING,
-            underlying_code="EB",
-            base_price=8000.0,
-            action=RecommendationAction.OPEN_SHORT,
-            lots=11,
-            signal_snapshot={
-                "opportunity_scorecard": {
-                    "preferred_side": "short",
-                    "short": {
-                        "opportunity_score": 0.0,
-                        "opportunity_rank": 1,
-                        "final_state": "watch_for_trigger",
-                        "conditional_monitor_candidate": True,
-                    },
-                },
-                "final_action_contract": {
-                    "final_action": "open_probe",
-                    "current_lots": 0,
-                    "target_lots": -11,
-                    "lots_delta": -11,
-                    "target_margin_ratio_estimate": 0.008,
-                    "conditional_trigger_authority": True,
-                    "requires_intraday_confirmation": True,
-                    "can_execute_without_intraday_trigger": False,
-                    "evidence_used": {
-                        "opportunity_score": 0.0,
-                        "opportunity_rank": 1,
-                        "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
-                    },
-                    "reason_codes": ["conditional_monitor_probe_seed"],
-                },
-                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 1}},
-            },
-        )
 
-        snapshot = recommendation.signal_snapshot
-        changed = workflow._ensure_atomic_capital_deployment_submission(snapshot, side="short")
-
-        self.assertTrue(changed)
-        contract = snapshot["final_action_contract"]
-        deployment = contract["capital_deployment"]
-        self.assertEqual(contract["target_lots"], 0)
-        self.assertEqual(contract["lots_delta"], 0)
-        self.assertEqual(contract["final_action"], "wait")
-        self.assertFalse(deployment["selected_for_capital_deployment"])
-        self.assertNotIn("opportunity_rank", deployment)
-        self.assertNotIn("opportunity_rank", contract.get("evidence_used", {}))
-        self.assertEqual(deployment["original_target_lots"], -11)
-        self.assertEqual(deployment["deployed_target_lots"], 0)
-        self.assertEqual(deployment["deployed_lots_delta"], 0)
         self.assertEqual(
-            deployment["capital_allocation_reason"],
-            "no_rank_no_new_exposure",
+            full_market_rank_gate_errors(contract),
+            ["new_risk_exposure_missing_full_market_rank"],
         )
-        self.assertIn("pm_full_market_capital_deployment", contract["reason_codes"])
-        self.assertIn("no_rank_no_new_exposure", contract["reason_codes"])
-
     def test_zero_score_watch_open_probe_enters_full_market_rank_queue(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
         updates = []
 
         class _DB:
+            def save_futures_recommendation(self, recommendation):
+                recommendation_id = recommendation.id or f"saved-{len(updates) + 1}"
+                updates.append((
+                    recommendation_id,
+                    recommendation.status,
+                    recommendation.signal_snapshot,
+                    {"action": recommendation.action, "lots": recommendation.lots},
+                ))
+                return recommendation_id
+
             def update_futures_recommendation_status(self, recommendation_id, status, signal_snapshot=None, **kwargs):
                 updates.append((recommendation_id, status, signal_snapshot, dict(kwargs)))
                 return True
@@ -1281,7 +1249,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        workflow._write_daily_opportunity_ranks([("HC", recommendation)])
+        workflow._persist_pm_full_market_contracts([("HC", recommendation)])
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
@@ -2027,7 +1995,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(summary["entry_quality_loss_signal"], 0.0)
         self.assertGreater(summary["trigger_quality_loss_signal"], 0.0)
         self.assertGreaterEqual(summary["net_trigger_quality_loss_signal"], 0.0)
-        self.assertLess(loss["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
+        clean_rank_row = _ensure_final_rank_score_fields(dict(clean["short"]), config=self._scorecard_config())
+        loss_rank_row = _ensure_final_rank_score_fields(dict(loss["short"]), config=self._scorecard_config())
+        self.assertLess(loss_rank_row["rank_score"], clean_rank_row["rank_score"])
 
     def test_entry_quality_outcome_top_level_payload_also_penalizes_entry_quality(self):
         signal = self._tradeable_signal()
@@ -2116,7 +2086,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(components["trigger_quality_positive_bonus"], 0.0)
         self.assertGreater(summary["trigger_quality_positive_signal"], 0.0)
         self.assertEqual(summary["net_trigger_quality_loss_signal"], 0.0)
-        self.assertGreater(positive["short"]["capital_priority_score"], clean["short"]["capital_priority_score"])
+        clean_rank_row = _ensure_final_rank_score_fields(dict(clean["short"]), config=self._scorecard_config())
+        positive_rank_row = _ensure_final_rank_score_fields(dict(positive["short"]), config=self._scorecard_config())
+        self.assertGreater(positive_rank_row["rank_score"], clean_rank_row["rank_score"])
         self.assertNotIn("opportunity_rank", positive["short"])
         self.assertEqual(
             positive["short"]["side_priority_meaning"],
@@ -3928,15 +3900,14 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         self.assertGreater(ratio, 0.0)
         self.assertEqual(row["final_state"], "tradeable_candidate")
 
-    def test_scorecard_probe_seed_prefers_capital_priority_score(self):
+    def test_scorecard_probe_seed_prefers_candidate_quality(self):
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
                 "long": {
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 2,
                     "score": 0.82,
-                    "capital_priority_score": 0.60,
-                    "capital_priority_tier": 2,
+                    "candidate_quality": 0.60,
                     "max_setup_quality": 0.70,
                     "max_business_quality": 0.70,
                     "market_confirmation_score": 0.72,
@@ -3946,8 +3917,7 @@ class PMRiskGateRegressionTest(unittest.TestCase):
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
                     "score": 0.70,
-                    "capital_priority_score": 0.91,
-                    "capital_priority_tier": 3,
+                    "candidate_quality": 0.91,
                     "max_setup_quality": 0.70,
                     "max_business_quality": 0.70,
                     "market_confirmation_score": 0.72,
@@ -3968,7 +3938,7 @@ class PMRiskGateRegressionTest(unittest.TestCase):
 
         self.assertEqual(side, "short")
         self.assertLess(ratio, 0.0)
-        self.assertEqual(row["capital_priority_score"], 0.91)
+        self.assertEqual(row["candidate_quality"], 0.91)
 
     def test_scorecard_watch_for_trigger_seed_is_conditional_monitor_candidate(self):
         side, ratio, row = _scorecard_probe_seed(
@@ -12197,6 +12167,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
                 "learning_policy",
                 "portfolio_policy",
                 "product_price_behavior_profiles",
+                "rank_score_policy",
             },
         )
         self.assertIn("product_price_behavior_profiles", cfg)
@@ -12208,6 +12179,15 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertEqual(
             cfg["_config_parameter_roles"]["evidence_fusion_policy"],
             "multidimensional_prediction_evidence_fusion_only_not_trade_authority",
+        )
+        self.assertIn("rank_score_policy", cfg)
+        self.assertEqual(
+            cfg["_config_parameter_roles"]["rank_score_policy"],
+            "full_market_rank_score_weight_catalog_not_trade_authority_not_position_size",
+        )
+        self.assertEqual(
+            cfg["rank_score_policy"]["rank_score"]["open_add_action_value_delta"]["positive_signal_weight"],
+            0.18,
         )
         self.assertEqual(cfg["max_total_margin_ratio"], 0.20)
         self.assertEqual(cfg["position_budget_policy"]["hard_max_total_margin_ratio"], 0.20)
@@ -15039,3 +15019,6 @@ class EvaluationRegressionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

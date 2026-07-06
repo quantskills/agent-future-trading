@@ -551,9 +551,9 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/graph/workflow.py",
-                ("opportunity_rank", "_apply_daily_capital_deployment"),
-                "workflow uses scores/ranks in capital deployment pass",
+                "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
+                ("opportunity_rank", "apply_full_market_capital_deployment"),
+                "PM full-market capital deployment uses score components to rank new-risk candidates",
             ),
             _rule(
                 "src/evaluation/analyze_strategy_attribution.py",
@@ -585,29 +585,29 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         contract="opportunity_scorecard",
         producers=(
             _rule(
-                "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
-                ("def rank_opportunities", "opportunity_scorecard"),
-                "opportunity ranking tool wraps reproducible scorecard and ticker side-priority output",
+                "src/tools/agent_tools/decision/pm_ticker_side_selection.py",
+                ("def select_ticker_side", "opportunity_scorecard"),
+                "ticker side selection tool wraps reproducible scorecard and ticker side-priority output",
             ),
         ),
         consumers=(
             _rule(
                 "src/agents/decision_team/portfolio_manager.py",
-                ("rank_opportunities", "opportunity_ranking"),
-                "PM consumes ranking tool output before sizing",
+                ("select_ticker_side", "opportunity_scorecard"),
+                "PM consumes ticker side selection output before sizing",
             ),
         ),
         audits=(
             _rule(
-                "docs/mechanism_multiagents.md",
-                ("opportunity_ranking", "rank_is_not_trade_authority"),
-                "mechanism document fixes ranking tool boundary",
+                "docs/mechanism_pm.md",
+                ("pm_ticker_side_selection", "side_priority"),
+                "PM mechanism document fixes ticker side selection boundary",
             ),
         ),
         tests=(
             _rule(
                 "src/tests/test_decision_workflow_tools.py",
-                ("test_opportunity_ranking_selects_side_without_trade_authority",),
+                ("test_ticker_side_selection_selects_side_without_trade_authority",),
                 "decision workflow tests cover deterministic side priority without trade authority",
             ),
         ),
@@ -616,14 +616,14 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         contract="rank_capital_layer_contract",
         producers=(
             _rule(
-                "src/tools/agent_tools/decision/pm_opportunity_ranking.py",
+                "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
                 ("def rank_metadata_for_row", "def rank_trace_for_row", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
-                "ranking helpers describe capital role, layer, ratio source, reason, rank inputs, lifecycle learning trace, and learning impact for workflow-generated rank",
+                "PM full-market rank helpers describe capital role, layer, ratio source, reason, rank inputs, lifecycle learning trace, and learning impact",
             ),
             _rule(
-                "src/graph/workflow.py",
-                ("_apply_deployed_target_to_snapshot", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
-                "workflow atomically lands full-market rank source, metadata, rank inputs, lifecycle learning trace, and learning impact in final_action_contract capital_deployment",
+                "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
+                ("_land_pm_deployment_decision_in_snapshot", "rank_input_components", "lifecycle_learning_trace", "learning_impact_delta"),
+                "PM full-market deployment lands rank source, metadata, rank inputs, lifecycle learning trace, and learning impact in final_action_contract capital_deployment",
             ),
             _rule(
                 "src/tools/agent_tools/decision/pm_contract_builder.py",
