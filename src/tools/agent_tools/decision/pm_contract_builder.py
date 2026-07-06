@@ -62,6 +62,99 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _contract_increases_new_risk(current_lots: int, target_lots: int) -> bool:
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    if target == current or target == 0:
+        return False
+    if current == 0:
+        return True
+    if (current > 0 and target < 0) or (current < 0 and target > 0):
+        return True
+    return abs(target) > abs(current)
+
+
+def _non_rank_capital_deployment_summary(
+    *,
+    current_lots: int,
+    target_lots: int,
+    control_reasons: list[str],
+) -> dict:
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    reasons = sorted({str(reason) for reason in (control_reasons or []) if str(reason)} | {"non_new_risk_no_capital_rank"})
+    return {
+        "selected_for_capital_deployment": False,
+        "deployment_required": False,
+        "new_risk_rank_required": False,
+        "capital_allocation_reason": "non_new_risk_no_capital_rank",
+        "original_target_lots": target,
+        "deployed_target_lots": target,
+        "deployed_lots_delta": target - current,
+        "reason_codes": reasons,
+        "not_second_contract": True,
+        "pm_remains_single_fund_manager": True,
+    }
+
+
+def _contract_capital_deployment(
+    *,
+    execution_fields: dict,
+    current_lots: int,
+    target_lots: int,
+    control_reasons: list[str],
+) -> dict | None:
+    deployment = execution_fields.get("capital_deployment")
+    if isinstance(deployment, dict) and deployment:
+        return dict(deployment)
+    if _contract_increases_new_risk(current_lots, target_lots):
+        return None
+    return _non_rank_capital_deployment_summary(
+        current_lots=current_lots,
+        target_lots=target_lots,
+        control_reasons=control_reasons,
+    )
+
+
+def _contract_position_sizing_result(
+    *,
+    execution_fields: dict,
+    ticker: str,
+    current_lots: int,
+    target_lots: int,
+    position_ratio: float,
+    margin_required: float,
+    account_equity: float,
+    lots_to_trade_reason: str | None,
+    control_reasons: list[str],
+) -> dict:
+    sizing = execution_fields.get("position_sizing_result")
+    if isinstance(sizing, dict) and sizing:
+        return dict(sizing)
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    return {
+        "tool": "pm_contract_builder_position_sizing_summary",
+        "ticker": ticker,
+        "current_lots": current,
+        "target_lots": target,
+        "lots_delta": target - current,
+        "lots_delta_abs": abs(target - current),
+        "target_position_ratio": float(position_ratio or 0.0),
+        "margin_required": float(margin_required or 0.0),
+        "account_equity": float(account_equity or 0.0),
+        "target_margin_ratio_estimate": (
+            abs(float(margin_required or 0.0)) / float(account_equity)
+            if _safe_float(account_equity, 0.0) > 0
+            else 0.0
+        ),
+        "lots_to_trade_reason": lots_to_trade_reason or "target_plan",
+        "control_reasons": sorted({str(reason) for reason in (control_reasons or []) if str(reason)}),
+        "no_final_action_authority": True,
+        "no_direction_override_authority": True,
+    }
+
+
 def _action_value_lane(row: dict) -> str:
     if not isinstance(row, dict):
         return ""
@@ -477,6 +570,23 @@ def build_final_action_contract(
         if is_new_capital_port and isinstance(scorecard_learning_impact, dict) and scorecard_learning_impact
         else pm_lifecycle_impact
     )
+    capital_deployment = _contract_capital_deployment(
+        execution_fields=execution_contract_payload,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        control_reasons=sorted(reason_codes),
+    )
+    position_sizing_result = _contract_position_sizing_result(
+        execution_fields=execution_contract_payload,
+        ticker=ticker,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        position_ratio=position_ratio,
+        margin_required=margin_required,
+        account_equity=account_equity,
+        lots_to_trade_reason=lots_to_trade_reason,
+        control_reasons=sorted(reason_codes),
+    )
     contract = {
         "contract_version": FINAL_ACTION_CONTRACT_VERSION,
         "ticker": ticker,
@@ -506,7 +616,6 @@ def build_final_action_contract(
             "scorecard_state": scorecard_side.get("final_state"),
             "scorecard_score": scorecard_side.get("score"),
             "opportunity_score": scorecard_side.get("opportunity_score", scorecard_side.get("score")),
-            "rank_input_components": scorecard_side.get("rank_input_components") or {},
             "lifecycle_learning_trace": lifecycle_learning_trace,
             "learning_impact_delta": learning_impact_delta,
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
@@ -573,16 +682,8 @@ def build_final_action_contract(
         "execution_profile": execution_contract_payload.get("execution_profile") or "",
         "entry_trigger": execution_contract_payload.get("entry_trigger") or "",
         "invalidation": execution_contract_payload.get("invalidation") or "",
-        "capital_deployment": (
-            execution_fields.get("capital_deployment")
-            if isinstance(execution_fields.get("capital_deployment"), dict)
-            else {}
-        ),
-        "position_sizing_result": (
-            execution_fields.get("position_sizing_result")
-            if isinstance(execution_fields.get("position_sizing_result"), dict)
-            else {}
-        ),
+        **({"capital_deployment": capital_deployment} if isinstance(capital_deployment, dict) else {}),
+        "position_sizing_result": position_sizing_result,
         "execution_requirement": (
             "intraday_trigger_required"
             if final_action in {"open_probe", "open_real", "scale"}

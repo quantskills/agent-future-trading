@@ -19,6 +19,31 @@ from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
 class PMStateTransitionMatrixTest(unittest.TestCase):
+    def _non_rank_deployment(self):
+        return {
+            "selected_for_capital_deployment": False,
+            "deployment_required": False,
+            "new_risk_rank_required": False,
+            "capital_allocation_reason": "non_new_risk_no_capital_rank",
+            "original_target_lots": 1,
+            "deployed_target_lots": 1,
+            "deployed_lots_delta": 0,
+            "reason_codes": ["non_new_risk_no_capital_rank"],
+            "not_second_contract": True,
+            "pm_remains_single_fund_manager": True,
+        }
+
+    def _position_sizing(self):
+        return {
+            "tool": "position_sizing",
+            "ticker": "BU",
+            "current_lots": 1,
+            "target_lots": 1,
+            "lots_delta": 0,
+            "target_position_ratio": 0.01,
+            "no_final_action_authority": True,
+        }
+
     def _complete_contract(self, **overrides):
         contract = {
             "ticker": "BU",
@@ -32,8 +57,8 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "invalidation": "",
             "learning_used": {},
             "evidence_used": {},
-            "capital_deployment": {},
-            "position_sizing_result": {},
+            "capital_deployment": self._non_rank_deployment(),
+            "position_sizing_result": self._position_sizing(),
         }
         contract.update(overrides)
         return contract
@@ -252,16 +277,23 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             final_entry_authority={"authority_type": "probe_entry", "reason_codes": ["minimum_one_lot_probe"]},
             control_reasons=["minimum_one_lot_probe"],
             control_diagnostics={},
-            opportunity_scorecard={"preferred_side": "long", "long": {"final_state": "probe_candidate", "score": 0.7}},
+            opportunity_scorecard={
+                "preferred_side": "long",
+                "long": {
+                    "final_state": "probe_candidate",
+                    "score": 0.7,
+                    "rank_input_components": {"old_step3_candidate_rank_score": 0.7},
+                },
+            },
             market_confirmation={"confirmation_score": 0.7},
             alpha_setup_action_values=[],
             execution_contract_fields={"execution_profile": "breakout"},
         )
         contract["entry_trigger"] = ""
         contract["invalidation"] = ""
-        contract["capital_deployment"] = {}
-        contract["position_sizing_result"] = {}
         self.assertEqual(contract["final_action"], "hold")
+        self.assertEqual(contract["capital_deployment"]["capital_allocation_reason"], "non_new_risk_no_capital_rank")
+        self.assertNotIn("rank_input_components", contract["evidence_used"])
         self.assertTrue(check_final_action_contract(contract)["ok"])
 
         bad = dict(contract)
@@ -289,6 +321,27 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("new_risk_exposure_missing_full_market_rank", result["errors"])
+
+    def test_pm_contract_self_check_rejects_empty_deployment_and_sizing_objects(self):
+        contract = self._complete_contract(capital_deployment={}, position_sizing_result={})
+
+        result = check_final_action_contract(contract)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("capital_deployment_missing", result["errors"])
+        self.assertIn("position_sizing_result_missing", result["errors"])
+
+    def test_pm_contract_self_check_rejects_non_rank_deployment_without_fixed_reason(self):
+        contract = self._complete_contract()
+        contract["capital_deployment"] = {
+            **contract["capital_deployment"],
+            "capital_allocation_reason": "generic_hold_reason",
+        }
+
+        result = check_final_action_contract(contract)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("non_rank_capital_deployment_reason_invalid", result["errors"])
 
     def test_pm_contract_self_check_requires_rank_and_pm_lifecycle_traces(self):
         complete = self._ranked_new_risk_contract()

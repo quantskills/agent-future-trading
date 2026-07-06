@@ -267,6 +267,54 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
         self.assertIn("pm_internal_candidate", recommendation.signal_snapshot)
 
+    def test_full_market_deployment_skips_non_new_risk_candidate_without_step5_fact(self):
+        snapshot = {
+            "opportunity_scorecard": {
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "final_state": "tradeable_candidate",
+                    "opportunity_score": 0.92,
+                    "score": 0.92,
+                },
+            },
+            "pm_internal_candidate": {
+                "candidate_contract": {
+                    "ticker": "RB",
+                    "current_lots": 1,
+                    "target_lots": 1,
+                    "lots_delta": 0,
+                    "final_action": "hold",
+                    "reason_codes": ["test_hold_candidate"],
+                },
+                "final_contract_builder_inputs": {
+                    "current_lots": 1,
+                    "target_lots": 1,
+                    "control_reasons": ["test_hold_candidate"],
+                },
+            },
+        }
+        recommendation = SimpleNamespace(
+            status=RecommendationStatus.PENDING,
+            source_type=RecommendationSourceType.STRATEGY,
+            signal_snapshot=snapshot,
+            underlying_code="RB",
+            base_price=3500.0,
+            action=None,
+            lots=0,
+        )
+        portfolio = SimpleNamespace(account_equity=1_000_000.0, cashflow=1_000_000.0, margin_used=0.0, positions={})
+
+        result = apply_full_market_capital_deployment(
+            generated=[("RB", recommendation)],
+            config={"max_total_margin_ratio": 0.20},
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertNotIn("pm_capital_deployment_decision", recommendation.signal_snapshot)
+        self.assertIn("pm_internal_candidate", recommendation.signal_snapshot)
+
     def test_full_market_deployment_ignores_signed_contract_without_internal_candidate(self):
         scorecard = {
             "preferred_side": "long",

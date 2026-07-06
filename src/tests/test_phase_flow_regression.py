@@ -775,6 +775,29 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 )
             )
 
+    def test_pm_step6_new_risk_requires_step5_deployment_decision(self):
+        recommendation = FuturesRecommendation(
+            underlying_code="BU",
+            base_price=3000.0,
+            signal_snapshot={
+                "pm_internal_candidate": _pm_internal_candidate_fixture(
+                    {
+                        "ticker": "BU",
+                        "current_lots": 0,
+                        "target_lots": 1,
+                        "lots_delta": 1,
+                        "final_action": "open_probe",
+                        "authority_type": "exploration_probe",
+                        "reason_codes": ["test_open_candidate"],
+                    },
+                    ticker="BU",
+                )
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "pm_step6_missing_capital_deployment_decision"):
+            _sign_pm_candidate_recommendation(recommendation)
+
     def test_pm_finalizer_requires_every_generated_candidate_to_sign(self):
         recommendation = FuturesRecommendation(
             underlying_code="BU",
@@ -816,7 +839,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     portfolio=Portfolio(id="p1", cashflow=1_000_000.0, positions={}, account_equity=1_000_000.0),
                 )
 
-    def test_pm_signer_clears_top_level_deployment_after_landing_contract(self):
+    def test_pm_signer_writes_non_rank_explanation_without_step5_deployment(self):
         recommendation = FuturesRecommendation(
             underlying_code="BU",
             base_price=3000.0,
@@ -833,14 +856,6 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     ticker="BU",
                 ),
                 "pm_internal_candidate_contract": {"not_final_action_contract": True},
-                "pm_capital_deployment_decision": {
-                    "selected_for_capital_deployment": True,
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                    "original_target_lots": 1,
-                    "deployed_target_lots": 1,
-                    "deployed_lots_delta": 0,
-                    "reason_codes": ["pm_full_market_capital_deployment"],
-                },
             },
         )
 
@@ -851,8 +866,10 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertIn("capital_deployment", snapshot["final_action_contract"])
         self.assertEqual(
             snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],
-            "not_new_or_increasing_risk_preserve_pm_contract",
+            "non_new_risk_no_capital_rank",
         )
+        self.assertFalse(snapshot["final_action_contract"]["capital_deployment"]["new_risk_rank_required"])
+        self.assertEqual(snapshot["pm_six_step_trace"]["step_5_deployment_tool"], "not_required_non_new_risk")
         self.assertNotIn("pm_internal_candidate", snapshot)
         self.assertNotIn("pm_internal_candidate_contract", snapshot)
         self.assertNotIn("pm_capital_deployment_decision", snapshot)
@@ -938,6 +955,39 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
             with self.assertRaisesRegex(RuntimeError, "PM internal candidate remained"):
+                workflow._persist_pm_full_market_contracts([("BU", recommendation)])
+
+        self.assertEqual(saved, [])
+
+    def test_workflow_persistence_requires_pm_step6_self_check_ok_before_any_save(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        saved = []
+
+        class _DB:
+            def save_futures_recommendation(self, recommendation):
+                saved.append(recommendation)
+                return "saved"
+
+        workflow.db = _DB()
+        workflow.config = {}
+        workflow.init_portfolio = Portfolio(id="p1", cashflow=1_000_000.0, positions={})
+        recommendation = FuturesRecommendation(
+            underlying_code="BU",
+            signal_snapshot={
+                "final_action_contract": {
+                    "final_action": "wait",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                },
+                "pm_six_step_trace": {
+                    "pm_contract_self_check": {"ok": False, "errors": ["capital_deployment_missing"]},
+                },
+            },
+        )
+
+        with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
+            with self.assertRaisesRegex(RuntimeError, "self-check not ok before persistence"):
                 workflow._persist_pm_full_market_contracts([("BU", recommendation)])
 
         self.assertEqual(saved, [])

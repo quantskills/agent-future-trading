@@ -531,6 +531,7 @@ def _land_pm_deployment_decision_in_snapshot(
     reason: str,
     selected: bool,
     rank: int | None,
+    side: str = "",
     deployment_extra: Dict[str, Any] | None = None,
 ) -> None:
     candidate_contract = _snapshot_pm_candidate_contract(snapshot)
@@ -574,8 +575,8 @@ def _land_pm_deployment_decision_in_snapshot(
                 inputs["control_reasons"] = sorted(deployment_reason_codes)
                 candidate["final_contract_builder_inputs"] = inputs
             snapshot["pm_internal_candidate"] = candidate
-    rank_metadata = _rank_metadata_from_snapshot(snapshot) if rank is not None else {}
-    rank_trace = _rank_trace_from_snapshot(snapshot) if rank is not None else {}
+    rank_metadata = _rank_metadata_from_snapshot(snapshot, side) if rank is not None else {}
+    rank_trace = _rank_trace_from_snapshot(snapshot, side) if rank is not None else {}
     deployment = {
         "selected_for_capital_deployment": bool(selected),
         "capital_allocation_reason": reason,
@@ -881,11 +882,41 @@ def apply_full_market_capital_deployment(
             continue
         snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
         _clear_non_full_market_rank_fields(snapshot)
+        if not contract_is_new_or_increasing_risk(snapshot):
+            recommendation.signal_snapshot = snapshot
+            continue
         side, row = _scorecard_preferred_row(snapshot)
         if side not in {"long", "short"} or not row:
+            _land_pm_deployment_decision_in_snapshot(
+                snapshot,
+                target_lots=_contract_current_lots(snapshot),
+                reason="no_rank_no_new_exposure:missing_pm_side_scorecard",
+                selected=False,
+                rank=None,
+                deployment_extra={
+                    "rank_gate": "missing_pm_side_scorecard",
+                    "new_risk_candidate_restored_to_no_new_exposure": True,
+                },
+            )
+            recommendation.signal_snapshot = snapshot
+            mark_updated(recommendation)
             continue
         _ensure_final_rank_score_fields(row, config=config)
         if not _capital_rank_eligible(snapshot, row):
+            _land_pm_deployment_decision_in_snapshot(
+                snapshot,
+                target_lots=_contract_current_lots(snapshot),
+                reason="no_rank_no_new_exposure:not_full_market_rank_eligible",
+                selected=False,
+                rank=None,
+                deployment_extra={
+                    "rank_gate": "not_full_market_rank_eligible",
+                    "scorecard_state": row.get("final_state") or row.get("opportunity_state"),
+                    "new_risk_candidate_restored_to_no_new_exposure": True,
+                },
+            )
+            recommendation.signal_snapshot = snapshot
+            mark_updated(recommendation)
             continue
         try:
             score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
@@ -943,81 +974,71 @@ def apply_full_market_capital_deployment(
         current_lots = _contract_current_lots(snapshot)
         target_lots = _contract_target_lots(snapshot)
         if not contract_is_new_or_increasing_risk(snapshot):
+            raise RuntimeError("pm_step5_rank_queue_contains_non_new_risk_candidate")
+        candidate_margin = max(float(margin_ratio or 0.0), min_probe_ratio)
+        single_ok = candidate_margin <= max_single_ratio + 1e-12
+        total_ok = used_margin_ratio + candidate_margin <= budget_ceiling + 1e-12
+        projected_net_exposure = running_net_exposure - float(current_ticker_exposure or 0.0) + float(target_position_ratio or 0.0)
+        net_ok = abs(projected_net_exposure) <= max_net_exposure + 1e-12
+        budget_detail = {
+            "rank_budget_sequence": rank,
+            "rank_score": round(float(rank_score or 0.0), 6),
+            "candidate_margin_ratio": round(candidate_margin, 6),
+            "queue_margin_ratio_before": round(used_margin_ratio, 6),
+            "queue_margin_ratio_after_if_selected": round(used_margin_ratio + candidate_margin, 6),
+            "target_margin_ratio_budget": round(budget_ceiling, 6),
+            "max_single_ticker_margin_ratio": round(max_single_ratio, 6),
+            "current_net_exposure_before": round(running_net_exposure, 6),
+            "current_ticker_exposure": round(float(current_ticker_exposure or 0.0), 6),
+            "target_position_ratio": round(float(target_position_ratio or 0.0), 6),
+            "projected_net_exposure_if_selected": round(projected_net_exposure, 6),
+            "max_net_exposure": round(max_net_exposure, 6),
+            "single_ticker_budget_ok": bool(single_ok),
+            "total_margin_budget_ok": bool(total_ok),
+            "net_exposure_budget_ok": bool(net_ok),
+        }
+        if single_ok and total_ok and net_ok:
+            used_margin_ratio += candidate_margin
+            running_net_exposure = projected_net_exposure
+            reason = (
+                "selected_by_full_market_pm_capital_queue:"
+                f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};score={score};"
+                f"target_margin_used={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
+                f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
+            )
             _land_pm_deployment_decision_in_snapshot(
                 snapshot,
                 target_lots=target_lots,
-                reason="not_new_or_increasing_risk_preserve_pm_contract",
+                reason=reason,
                 selected=True,
                 rank=rank,
-                deployment_extra={
-                    "rank_budget_sequence": rank,
-                    "rank_score": round(float(rank_score or 0.0), 6),
-                    "budget_check": "not_new_or_increasing_risk",
-                },
+                side=side,
+                deployment_extra=budget_detail,
             )
         else:
-            candidate_margin = max(float(margin_ratio or 0.0), min_probe_ratio)
-            single_ok = candidate_margin <= max_single_ratio + 1e-12
-            total_ok = used_margin_ratio + candidate_margin <= budget_ceiling + 1e-12
-            projected_net_exposure = running_net_exposure - float(current_ticker_exposure or 0.0) + float(target_position_ratio or 0.0)
-            net_ok = abs(projected_net_exposure) <= max_net_exposure + 1e-12
-            budget_detail = {
-                "rank_budget_sequence": rank,
-                "rank_score": round(float(rank_score or 0.0), 6),
-                "candidate_margin_ratio": round(candidate_margin, 6),
-                "queue_margin_ratio_before": round(used_margin_ratio, 6),
-                "queue_margin_ratio_after_if_selected": round(used_margin_ratio + candidate_margin, 6),
-                "target_margin_ratio_budget": round(budget_ceiling, 6),
-                "max_single_ticker_margin_ratio": round(max_single_ratio, 6),
-                "current_net_exposure_before": round(running_net_exposure, 6),
-                "current_ticker_exposure": round(float(current_ticker_exposure or 0.0), 6),
-                "target_position_ratio": round(float(target_position_ratio or 0.0), 6),
-                "projected_net_exposure_if_selected": round(projected_net_exposure, 6),
-                "max_net_exposure": round(max_net_exposure, 6),
-                "single_ticker_budget_ok": bool(single_ok),
-                "total_margin_budget_ok": bool(total_ok),
-                "net_exposure_budget_ok": bool(net_ok),
-            }
-            if single_ok and total_ok and net_ok:
-                used_margin_ratio += candidate_margin
-                running_net_exposure = projected_net_exposure
-                reason = (
-                    "selected_by_full_market_pm_capital_queue:"
-                    f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};score={score};"
-                    f"target_margin_used={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
-                    f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
-                )
-                _land_pm_deployment_decision_in_snapshot(
-                    snapshot,
-                    target_lots=target_lots,
-                    reason=reason,
-                    selected=True,
-                    rank=rank,
-                    deployment_extra=budget_detail,
-                )
-            else:
-                blocked = []
-                if not single_ok:
-                    blocked.append("single_ticker_budget")
-                if not total_ok:
-                    blocked.append("total_margin_budget")
-                if not net_ok:
-                    blocked.append("net_exposure_budget")
-                reason = (
-                    "not_selected_by_full_market_pm_capital_queue:"
-                    f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};"
-                    f"blocked_by={','.join(blocked) or 'unknown'};"
-                    f"capital_target_filled={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
-                    f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
-                )
-                _land_pm_deployment_decision_in_snapshot(
-                    snapshot,
-                    target_lots=current_lots,
-                    reason=reason,
-                    selected=False,
-                    rank=rank,
-                    deployment_extra=budget_detail,
-                )
+            blocked = []
+            if not single_ok:
+                blocked.append("single_ticker_budget")
+            if not total_ok:
+                blocked.append("total_margin_budget")
+            if not net_ok:
+                blocked.append("net_exposure_budget")
+            reason = (
+                "not_selected_by_full_market_pm_capital_queue:"
+                f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};"
+                f"blocked_by={','.join(blocked) or 'unknown'};"
+                f"capital_target_filled={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
+                f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
+            )
+            _land_pm_deployment_decision_in_snapshot(
+                snapshot,
+                target_lots=current_lots,
+                reason=reason,
+                selected=False,
+                rank=rank,
+                side=side,
+                deployment_extra=budget_detail,
+            )
         recommendation.signal_snapshot = snapshot
         mark_updated(recommendation)
 

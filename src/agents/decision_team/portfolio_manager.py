@@ -1167,6 +1167,44 @@ def _pm_candidate_contract(candidate: dict) -> dict:
     return dict(contract) if isinstance(contract, dict) else {}
 
 
+def _pm_step6_primary_lifecycle_port(builder_inputs: dict) -> dict:
+    execution_fields = builder_inputs.get("execution_contract_fields")
+    execution_fields = execution_fields if isinstance(execution_fields, dict) else {}
+    primary = execution_fields.get("primary_lifecycle_action_port")
+    return primary if isinstance(primary, dict) else {}
+
+
+def _pm_step6_candidate_requires_capital_deployment(candidate_contract: dict, builder_inputs: dict) -> bool:
+    primary = _pm_step6_primary_lifecycle_port(builder_inputs)
+    if "requires_full_market_rank" in primary:
+        return bool(primary.get("requires_full_market_rank"))
+    port = str(primary.get("pm_lifecycle_action_port") or "").strip().lower()
+    if port:
+        return port == "new_risk"
+    return bool(classify_lifecycle_action_port(candidate_contract).get("requires_full_market_rank"))
+
+
+def _pm_step6_non_rank_capital_deployment(candidate_contract: dict, control_reasons: list[str]) -> dict:
+    current_lots = int(candidate_contract.get("current_lots") or 0)
+    target_lots = int(candidate_contract.get("target_lots") or 0)
+    reason_codes = sorted(
+        {str(reason) for reason in (control_reasons or []) if str(reason)}
+        | {"non_new_risk_no_capital_rank"}
+    )
+    return {
+        "selected_for_capital_deployment": False,
+        "deployment_required": False,
+        "new_risk_rank_required": False,
+        "capital_allocation_reason": "non_new_risk_no_capital_rank",
+        "original_target_lots": target_lots,
+        "deployed_target_lots": target_lots,
+        "deployed_lots_delta": target_lots - current_lots,
+        "reason_codes": reason_codes,
+        "not_second_contract": True,
+        "pm_remains_single_fund_manager": True,
+    }
+
+
 def _rebuild_recommendation_decision_from_contract(
     recommendation: FuturesRecommendation,
     contract: dict,
@@ -1204,10 +1242,30 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         raise ValueError("pm_step6_missing_builder_inputs")
     if not candidate_contract:
         raise ValueError("pm_step6_missing_candidate_contract")
-    deployment = snapshot.get("pm_capital_deployment_decision")
-    deployment = deployment if isinstance(deployment, dict) else {}
+    execution_fields = builder_inputs.get("execution_contract_fields")
+    execution_fields = dict(execution_fields) if isinstance(execution_fields, dict) else {}
+    raw_deployment = snapshot.get("pm_capital_deployment_decision")
+    has_step5_deployment = isinstance(raw_deployment, dict) and bool(raw_deployment)
+    candidate_requires_capital_deployment = _pm_step6_candidate_requires_capital_deployment(
+        candidate_contract,
+        builder_inputs,
+    )
+    requires_capital_deployment = bool(candidate_requires_capital_deployment or has_step5_deployment)
+    if has_step5_deployment:
+        deployment = dict(raw_deployment)
+    elif candidate_requires_capital_deployment:
+        raise ValueError("pm_step6_missing_capital_deployment_decision")
+    else:
+        deployment = _pm_step6_non_rank_capital_deployment(
+            candidate_contract,
+            list(builder_inputs.get("control_reasons") or []),
+        )
     current_lots = int(candidate_contract.get("current_lots") or builder_inputs.get("current_lots") or 0)
-    deployed_target = deployment.get("deployed_target_lots", candidate_contract.get("target_lots"))
+    deployed_target = (
+        deployment.get("deployed_target_lots")
+        if requires_capital_deployment
+        else candidate_contract.get("target_lots")
+    )
     target_lots = int(deployed_target if deployed_target is not None else 0)
     intent = recommendation_intent_from_lots(current_lots, target_lots)
     builder_inputs["current_lots"] = current_lots
@@ -1219,8 +1277,6 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         if reason and reason not in control_reasons:
             control_reasons.append(str(reason))
     builder_inputs["control_reasons"] = control_reasons
-    execution_fields = builder_inputs.get("execution_contract_fields")
-    execution_fields = dict(execution_fields) if isinstance(execution_fields, dict) else {}
     if isinstance(execution_fields.get("rebalance_summary"), dict):
         execution_fields["rebalance_summary"] = {
             **execution_fields["rebalance_summary"],
@@ -1230,7 +1286,8 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
             "capital_deployment": deployment,
         }
     execution_fields["pm_six_step_stage"] = "step_6_final_action_contract_signed"
-    execution_fields["pm_capital_deployment_decision"] = deployment
+    execution_fields["capital_deployment"] = deployment
+    execution_fields.pop("pm_capital_deployment_decision", None)
     builder_inputs["execution_contract_fields"] = execution_fields
 
     final_action_contract = _build_final_action_contract(**builder_inputs)
@@ -1273,29 +1330,28 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         if value is not None:
             evidence_used[field] = value
     evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
-    if deployment:
-        final_action_contract["capital_deployment"] = dict(deployment)
-        rank_fields = (
-            "opportunity_rank",
-            "rank_source",
-            "rank_scope",
-            "capital_rank_generated_by",
-            "rank_capital_role",
-            "capital_layer",
-            "capital_ratio_source",
-            "rank_reason",
-            "rank_input_components",
-            "lifecycle_learning_trace",
-            "learning_impact_delta",
-            "rank_semantics_version",
-            "opportunity_rank_meaning",
-            "rank_is_capital_priority",
-            "rank_is_not_trade_authority",
-        )
-        for field in rank_fields:
-            if field in deployment:
-                evidence_used[field] = deployment[field]
-        evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
+    final_action_contract["capital_deployment"] = dict(deployment)
+    rank_fields = (
+        "opportunity_rank",
+        "rank_source",
+        "rank_scope",
+        "capital_rank_generated_by",
+        "rank_capital_role",
+        "capital_layer",
+        "capital_ratio_source",
+        "rank_reason",
+        "rank_input_components",
+        "lifecycle_learning_trace",
+        "learning_impact_delta",
+        "rank_semantics_version",
+        "opportunity_rank_meaning",
+        "rank_is_capital_priority",
+        "rank_is_not_trade_authority",
+    )
+    for field in rank_fields:
+        if field in deployment:
+            evidence_used[field] = deployment[field]
+    evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
     final_action_contract["evidence_used"] = evidence_used
     snapshot_for_check = dict(snapshot)
     snapshot_for_check["final_action_contract"] = final_action_contract
@@ -1313,9 +1369,14 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
     snapshot["final_action_contract"] = final_action_contract
     snapshot["pm_six_step_trace"] = {
         "stage": "step_6_final_action_contract_signed",
-        "step_5_deployment_tool": "pm_full_market_capital_deployment",
+        "step_5_deployment_tool": (
+            "pm_full_market_capital_deployment"
+            if requires_capital_deployment
+            else "not_required_non_new_risk"
+        ),
         "step_6_contract_builder": "pm_contract_builder",
         "pm_contract_self_check": pm_contract_self_check,
+        "requires_full_market_rank": bool(requires_capital_deployment),
         "candidate_was_internal_only": True,
     }
     snapshot.pop("pm_internal_candidate", None)

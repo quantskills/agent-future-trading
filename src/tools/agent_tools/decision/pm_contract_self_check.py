@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping
 from tools.common.contracts import pm_artifact_boundary_violations
 from tools.common.final_action_semantics import (
     contract_has_full_market_capital_rank,
+    contract_requires_full_market_capital_rank,
     full_market_rank_gate_errors,
     lifecycle_learning_decision_contract_errors,
     rank_capital_layer_contract_errors,
@@ -98,6 +99,28 @@ def _base_field_errors(contract: Mapping[str, Any]) -> List[str]:
     for field in FINAL_ACTION_CONTRACT_LIST_FIELDS:
         if field in contract and not isinstance(contract.get(field), list):
             errors.append(f"invalid_final_action_contract_{field}")
+    return errors
+
+
+def _semantic_object_errors(contract: Mapping[str, Any]) -> List[str]:
+    errors: List[str] = []
+    deployment = contract.get("capital_deployment")
+    if isinstance(deployment, Mapping):
+        if not deployment:
+            errors.append("capital_deployment_missing")
+        elif not _contract_has_any_rank(contract) and not contract_requires_full_market_capital_rank(contract):
+            if deployment.get("selected_for_capital_deployment") is not False:
+                errors.append("non_rank_capital_deployment_selected_flag_invalid")
+            if deployment.get("new_risk_rank_required") is not False:
+                errors.append("non_rank_capital_deployment_rank_required_flag_invalid")
+            reason = deployment.get("capital_allocation_reason")
+            if not _present(reason):
+                errors.append("non_rank_capital_deployment_reason_missing")
+            elif str(reason) != "non_new_risk_no_capital_rank":
+                errors.append("non_rank_capital_deployment_reason_invalid")
+    sizing = contract.get("position_sizing_result")
+    if isinstance(sizing, Mapping) and not sizing:
+        errors.append("position_sizing_result_missing")
     return errors
 
 
@@ -199,6 +222,7 @@ def check_final_action_contract(
     final_action = str(contract.get("final_action") or "").strip().lower()
     errors: List[str] = []
     errors.extend(_base_field_errors(contract))
+    errors.extend(_semantic_object_errors(contract))
     if lots_delta != target - current:
         errors.append("lots_delta_mismatch")
     expected = _expected_action(current, target, authority_type=authority_type)
