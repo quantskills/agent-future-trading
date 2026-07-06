@@ -38,7 +38,7 @@ PM 内部顺序必须固定为：
 PM 读取输入用到的工具/模块：
 
 - `signal_collector` 结构化信号快照
-- `analyst_signal_fusion`
+- `pm_signal_fusion`
 - `pm_ticker_side_selection`
 - `pm_full_market_capital_deployment`
 - `alpha_setup`
@@ -141,18 +141,30 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 
 ### 2.1 调用工具/模块
 
-主要用：
+主工具：
+
+- `pm_lifecycle_action_port.py`
+
+共享语义依赖：
 
 - `final_action_semantics`
-- `pm_contract_builder`
 
-辅助用：
+输入辅助：
 
-- `analyst_signal_fusion`
-- `alpha_setup`
-- `pm_contract_self_check`
+- `signal_collector` 结构化信号快照
+- 当前持仓状态
+- 条件字段
+- `current_lots`
+- `target_lots`
+- `lots_delta`
 
-`pm_ticker_side_selection` 不用于判断动作口。`pm_full_market_capital_deployment` 只在确认候选是新增风险动作以后，用于唯一全市场资金 rank。
+明确禁止：
+
+- `pm_contract_builder.py` 不参与动作口判断，只在第 6 步生成唯一 `final_action_contract`
+- `pm_contract_self_check.py` 不参与动作口判断，只做签约前自检
+- `pm_ticker_side_selection.py` 不参与动作口判断，只在第 3 步判断单品种方向与候选质量
+- `pm_full_market_capital_deployment.py` 不参与动作口判断，只在第 5 步处理新增风险候选的唯一全市场资金 rank 与资金部署
+- `workflow.py` 不参与动作口判断
 
 ### 2.2 交易动作分口
 
@@ -203,7 +215,7 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 
 使用：
 
-- `analyst_signal_fusion`
+- `pm_signal_fusion`
 - `alpha_setup`
 - `final_action_semantics`
 
@@ -246,7 +258,7 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 使用：
 
 - `alpha_setup`
-- `analyst_signal_fusion`
+- `pm_signal_fusion`
 - `final_action_semantics`
 - `pm_contract_builder`
 
@@ -321,7 +333,7 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 ### 4.4 怎么消费与联通
 
 - 先由 `alpha_setup` 提供产品级和 action-value 学习。
-- `analyst_signal_fusion` 把学习转成证据质量、trigger/profile、产品差异化校准。
+- `pm_signal_fusion` 把学习转成证据质量、trigger/profile、产品差异化校准。
 - `final_action_semantics` 判断学习属于哪个生命周期，防止混用。
 - `pm_contract_builder` 把被消费的学习影响写入最终合约 trace。
 - 如果是新增风险动作，`open/add` 学习再交给第 5 步进入全市场 rank。
@@ -350,7 +362,7 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 
 - `pm_full_market_capital_deployment`
 - `alpha_setup`
-- `analyst_signal_fusion`
+- `pm_signal_fusion`
 - `final_action_semantics`
 - `pm_contract_builder`
 - `pm_contract_self_check`

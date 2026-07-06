@@ -3,8 +3,8 @@
 This module is the only producer of final all-market ``opportunity_rank``.
 It does not write database rows and it is not a workflow fallback. The caller
 passes the complete PM candidate set for a trading day; the tool ranks new-risk
-candidates, consumes portfolio budgets in rank order, and returns mutated
-recommendation objects ready for persistence.
+candidates, consumes portfolio budgets in rank order, and writes PM deployment
+decisions for step 6 signing. It must not sign or repair final_action_contract.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from tools.common.final_action_semantics import (
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     RANK_CAPITAL_LAYER_FIELDS,
     RANK_CAPITAL_SOURCE_FIELDS,
-    canonicalize_final_action_contract_for_persistence,
     full_market_rank_source_payload,
     is_full_market_rank_source,
     rank_capital_layer_contract_complete,
@@ -376,20 +375,6 @@ def _rank_metadata_from_snapshot(snapshot: Dict[str, Any], side: str = "") -> Di
         if all(metadata.get(field) not in (None, "") for field in RANK_CAPITAL_LAYER_FIELDS):
             metadata.update(full_market_rank_source_payload())
             return metadata
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
-    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
-    for source in (evidence, deployment):
-        if not is_full_market_rank_source(source):
-            continue
-        recovered = {
-            field: source.get(field)
-            for field in RANK_CAPITAL_LAYER_FIELDS
-            if source.get(field) not in (None, "")
-        }
-        if all(field in recovered for field in RANK_CAPITAL_LAYER_FIELDS):
-            recovered.update(full_market_rank_source_payload())
-            return recovered
     return {}
 
 
@@ -400,32 +385,17 @@ def _rank_trace_from_snapshot(snapshot: Dict[str, Any], side: str = "") -> Dict[
         _, row = _scorecard_preferred_row(snapshot)
     if row:
         return rank_trace_for_row(row)
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
-    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
-    for source in (deployment, evidence):
-        trace = {
-            "rank_input_components": source.get("rank_input_components"),
-            "lifecycle_learning_trace": source.get("lifecycle_learning_trace"),
-            "learning_impact_delta": source.get("learning_impact_delta"),
-        }
-        if all(isinstance(value, dict) for value in trace.values()):
-            return trace
     return {}
 
 
-def _canonicalize_snapshot_final_contract(snapshot: Dict[str, Any], *, side: str = "", rank: int | None = None) -> bool:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    if not contract:
-        return False
-    canonical = canonicalize_final_action_contract_for_persistence(
-        contract,
-        rank_metadata=_rank_metadata_from_snapshot(snapshot, side),
-        opportunity_rank=rank,
-    )
-    changed = canonical != contract
-    snapshot["final_action_contract"] = canonical
-    return changed
+def _snapshot_pm_candidate_contract(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    candidate = snapshot.get("pm_internal_candidate") if isinstance(snapshot.get("pm_internal_candidate"), dict) else {}
+    contract = candidate.get("candidate_contract") if isinstance(candidate.get("candidate_contract"), dict) else {}
+    return contract if isinstance(contract, dict) else {}
+
+
+def _snapshot_trade_contract(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return _snapshot_pm_candidate_contract(snapshot)
 
 
 def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) -> None:
@@ -442,16 +412,6 @@ def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) 
         row["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
         row["rank_is_capital_priority"] = True
         row["rank_is_not_trade_authority"] = True
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    evidence_used = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
-    if isinstance(evidence_used, dict):
-        evidence_used["opportunity_rank"] = rank
-        evidence_used.update(rank_metadata)
-        evidence_used.update(rank_trace)
-        evidence_used["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
-        evidence_used["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
-        evidence_used["rank_is_capital_priority"] = True
-        evidence_used["rank_is_not_trade_authority"] = True
     active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
     active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
     if isinstance(active_opportunity, dict):
@@ -498,12 +458,6 @@ def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
         row = scorecard.get(side)
         if isinstance(row, dict):
             clear_mapping(row)
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    if contract:
-        for field in rank_fields:
-            contract.pop(field, None)
-        clear_mapping(contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {})
-        clear_mapping(contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {})
     active = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
     opportunity = active.get("opportunity") if isinstance(active.get("opportunity"), dict) else {}
     clear_mapping(opportunity)
@@ -513,7 +467,7 @@ def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
 
 
 def _contract_target_lots(snapshot: Dict[str, Any]) -> int:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = _snapshot_trade_contract(snapshot)
     try:
         return int(contract.get("target_lots") or 0)
     except (TypeError, ValueError):
@@ -521,7 +475,7 @@ def _contract_target_lots(snapshot: Dict[str, Any]) -> int:
 
 
 def _contract_current_lots(snapshot: Dict[str, Any]) -> int:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = _snapshot_trade_contract(snapshot)
     try:
         return int(contract.get("current_lots") or 0)
     except (TypeError, ValueError):
@@ -579,49 +533,49 @@ def _land_pm_deployment_decision_in_snapshot(
     rank: int | None,
     deployment_extra: Dict[str, Any] | None = None,
 ) -> None:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-    if not contract:
+    candidate_contract = _snapshot_pm_candidate_contract(snapshot)
+    if not candidate_contract:
         return
     current_lots = _contract_current_lots(snapshot)
-    original_target = int(contract.get("target_lots") or 0)
-    original_final_action = str(contract.get("final_action") or "").strip()
+    source_contract = candidate_contract
+    original_target = int(source_contract.get("target_lots") or 0)
+    original_final_action = str(source_contract.get("final_action") or "").strip()
     target_lots = int(target_lots)
     lots_delta = target_lots - current_lots
-    contract["target_lots"] = target_lots
-    contract["lots_delta"] = lots_delta
-    contract["lots_delta_abs"] = abs(lots_delta)
-    if selected and target_lots == original_target and original_final_action:
-        contract["final_action"] = original_final_action
-    elif target_lots == current_lots:
-        contract["final_action"] = "hold" if current_lots else "wait"
-    elif current_lots == 0:
-        contract["final_action"] = "open_probe"
-    elif target_lots == 0:
-        contract["final_action"] = "exit"
-    elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
-        contract["final_action"] = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
-    else:
-        contract["final_action"] = "exit"
-    reason_codes = contract.get("reason_codes") if isinstance(contract.get("reason_codes"), list) else []
-    reason_set = {str(item) for item in reason_codes if item}
-    reason_set.add("pm_full_market_capital_deployment")
+    deployment_reason_codes = set(str(item) for item in (source_contract.get("reason_codes") or []) if item)
+    deployment_reason_codes.add("pm_full_market_capital_deployment")
     if not selected and original_target != target_lots:
-        reason_set.add("capital_queue_not_selected")
-        reason_set.add("no_rank_or_budget_no_new_exposure")
-    contract["reason_codes"] = sorted(reason_set)
+        deployment_reason_codes.add("capital_queue_not_selected")
+        deployment_reason_codes.add("no_rank_or_budget_no_new_exposure")
+    candidate = snapshot.get("pm_internal_candidate") if isinstance(snapshot.get("pm_internal_candidate"), dict) else {}
+    if isinstance(candidate_contract, dict):
+        candidate_contract["target_lots"] = target_lots
+        candidate_contract["lots_delta"] = lots_delta
+        candidate_contract["lots_delta_abs"] = abs(lots_delta)
+        if selected and target_lots == original_target and original_final_action:
+            candidate_contract["final_action"] = original_final_action
+        elif target_lots == current_lots:
+            candidate_contract["final_action"] = "hold" if current_lots else "wait"
+        elif current_lots == 0:
+            candidate_contract["final_action"] = "open_probe"
+        elif target_lots == 0:
+            candidate_contract["final_action"] = "exit"
+        elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
+            candidate_contract["final_action"] = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
+        else:
+            candidate_contract["final_action"] = "exit"
+        candidate_contract["reason_codes"] = sorted(deployment_reason_codes)
+        if isinstance(candidate, dict):
+            candidate["candidate_contract"] = candidate_contract
+            inputs = candidate.get("final_contract_builder_inputs")
+            if isinstance(inputs, dict):
+                inputs["target_lots"] = target_lots
+                inputs["lots_to_trade"] = abs(lots_delta)
+                inputs["control_reasons"] = sorted(deployment_reason_codes)
+                candidate["final_contract_builder_inputs"] = inputs
+            snapshot["pm_internal_candidate"] = candidate
     rank_metadata = _rank_metadata_from_snapshot(snapshot) if rank is not None else {}
     rank_trace = _rank_trace_from_snapshot(snapshot) if rank is not None else {}
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
-    evidence["capital_allocation_reason"] = reason
-    if rank is not None:
-        evidence["opportunity_rank"] = rank
-        evidence.update(rank_metadata)
-        evidence.update(rank_trace)
-        evidence["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
-        evidence["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
-        evidence["rank_is_capital_priority"] = True
-        evidence["rank_is_not_trade_authority"] = True
-    contract["evidence_used"] = evidence
     deployment = {
         "selected_for_capital_deployment": bool(selected),
         "capital_allocation_reason": reason,
@@ -630,6 +584,7 @@ def _land_pm_deployment_decision_in_snapshot(
         "deployed_lots_delta": int(lots_delta),
         "not_second_contract": True,
         "pm_remains_single_fund_manager": True,
+        "reason_codes": sorted(deployment_reason_codes),
     }
     if rank is not None:
         deployment.update(
@@ -645,8 +600,7 @@ def _land_pm_deployment_decision_in_snapshot(
         )
     if isinstance(deployment_extra, dict):
         deployment.update(deployment_extra)
-    contract["capital_deployment"] = deployment
-    snapshot["final_action_contract"] = contract
+    snapshot["pm_capital_deployment_decision"] = deployment
     rebalance = snapshot.get("rebalance_summary") if isinstance(snapshot.get("rebalance_summary"), dict) else {}
     if rebalance:
         rebalance["target_lots"] = int(target_lots)
@@ -666,7 +620,6 @@ def _land_pm_deployment_decision_in_snapshot(
             opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
             opportunity["rank_is_capital_priority"] = True
             opportunity["rank_is_not_trade_authority"] = True
-    _canonicalize_snapshot_final_contract(snapshot, rank=rank)
 
 
 def _daily_capital_deployment_config(config: Dict[str, Any]) -> Dict[str, float]:
@@ -739,7 +692,7 @@ def _portfolio_ticker_exposure(portfolio: Portfolio, ticker: str) -> float:
 
 
 def _contract_target_position_ratio(snapshot: Dict[str, Any]) -> float:
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = _snapshot_trade_contract(snapshot)
     try:
         value = float(contract.get("target_position_ratio") or 0.0)
     except (TypeError, ValueError):
@@ -762,7 +715,7 @@ def _contract_target_position_ratio(snapshot: Dict[str, Any]) -> float:
 
 def _recommended_margin_ratio(recommendation: FuturesRecommendation, portfolio: Portfolio) -> float:
     snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = _snapshot_trade_contract(snapshot)
     try:
         estimate = float(contract.get("target_margin_ratio_estimate") or 0.0)
     except (TypeError, ValueError):
@@ -793,7 +746,7 @@ def _capital_rank_eligible(snapshot: Dict[str, Any], row: Dict[str, Any]) -> boo
     state = str(row.get("final_state") or row.get("opportunity_state") or "").strip().lower()
     if state in {"no_opportunity", "wait", "flat_wait", "blocked", "rejected"}:
         return False
-    contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+    contract = _snapshot_trade_contract(snapshot)
     final_action = str(contract.get("final_action") or "").strip().lower()
     if final_action in {"reduce", "exit", "close", "close_long", "close_short", "risk_exit"}:
         return False
@@ -919,13 +872,6 @@ def apply_full_market_capital_deployment(
             continue
         snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
         _clear_non_full_market_rank_fields(snapshot)
-        side, _ = _scorecard_preferred_row(snapshot)
-        if _canonicalize_snapshot_final_contract(snapshot, side=side):
-            recommendation.signal_snapshot = snapshot
-            action, lots = _lots_action_from_target(_contract_current_lots(snapshot), _contract_target_lots(snapshot))
-            recommendation.action = action
-            recommendation.lots = lots
-            mark_updated(recommendation)
 
     for ticker, recommendation in generated:
         if recommendation.status == RecommendationStatus.SKIPPED:
@@ -1073,10 +1019,6 @@ def apply_full_market_capital_deployment(
                     deployment_extra=budget_detail,
                 )
         recommendation.signal_snapshot = snapshot
-        _canonicalize_snapshot_final_contract(snapshot, side=side, rank=rank)
-        action, lots = _lots_action_from_target(_contract_current_lots(snapshot), _contract_target_lots(snapshot))
-        recommendation.action = action
-        recommendation.lots = lots
         mark_updated(recommendation)
 
     return {

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
+from tools.agent_tools.decision.pm_lifecycle_action_port import build_contract_lifecycle_self_check
 from tools.agent_tools.decision.pm_position_transition import final_action_from_lots
 from tools.common.order_semantics import build_lot_intent_consistency
 
@@ -26,7 +27,7 @@ def _compact_learning_trace_row(row: Any) -> dict:
     if not isinstance(row, dict):
         return {}
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    return {
+    contract = {
         "action_value_id": row.get("id") or payload.get("id"),
         "scope_key": row.get("scope_key") or payload.get("scope_key"),
         "ticker": row.get("ticker") or payload.get("ticker"),
@@ -43,6 +44,7 @@ def _compact_learning_trace_row(row: Any) -> dict:
         "last_sample_date": row.get("last_sample_date") or payload.get("last_sample_date"),
         "retrieval_match_level": row.get("retrieval_match_level") or payload.get("retrieval_match_level"),
     }
+    return contract
 
 
 def _default_learning_trace(rows: list | None, limit: int = 10) -> list:
@@ -116,6 +118,7 @@ def _pm_lifecycle_learning_trace(
     diagnostics: dict,
     selected_action_values: list,
     execution_contract_payload: dict,
+    control_reasons: list[str],
 ) -> dict:
     lifecycle_port = _contract_lifecycle_port(
         final_action=final_action,
@@ -123,10 +126,59 @@ def _pm_lifecycle_learning_trace(
         target_lots=target_lots,
         authority=authority,
     )
+    primary_lifecycle_action_port = (
+        diagnostics.get("primary_lifecycle_action_port")
+        if isinstance(diagnostics.get("primary_lifecycle_action_port"), dict)
+        else diagnostics.get("pm_lifecycle_action_port")
+        if isinstance(diagnostics.get("pm_lifecycle_action_port"), dict)
+        else {}
+    )
+    if isinstance(diagnostics.get("contract_lifecycle_self_check"), dict):
+        contract_lifecycle_self_check = diagnostics.get("contract_lifecycle_self_check")
+    elif primary_lifecycle_action_port.get("pm_lifecycle_action_port"):
+        contract_lifecycle_self_check = build_contract_lifecycle_self_check(
+            primary_lifecycle_action_port=primary_lifecycle_action_port,
+            contract_lifecycle_port=lifecycle_port,
+            reason_codes=control_reasons,
+            control_reasons=control_reasons,
+        )
+    else:
+        contract_lifecycle_self_check = {
+            "tool": "pm_lifecycle_action_port",
+            "check_type": "contract_lifecycle_self_check",
+            "status": "primary_lifecycle_action_port_missing",
+            "ok": True,
+            "self_check_only": True,
+            "does_not_route_learning": True,
+            "does_not_generate_lifecycle_semantics": True,
+            "transition_reason": "primary_lifecycle_action_port_missing",
+        }
     used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values or []) if lane})
+    lifecycle_router = diagnostics.get("pm_lifecycle_learning_router")
+    lifecycle_router = lifecycle_router if isinstance(lifecycle_router, dict) else {}
     memory_retrieval = diagnostics.get("final_action_memory_retrieval")
     memory_retrieval = memory_retrieval if isinstance(memory_retrieval, dict) else {}
-    rejected = memory_retrieval.get("rejected_action_values")
+    decision_learning_rows = (
+        lifecycle_router.get("decision_learning_rows")
+        if isinstance(lifecycle_router.get("decision_learning_rows"), list)
+        else lifecycle_router.get("accepted_learning")
+    )
+    decision_learning_rows = decision_learning_rows if isinstance(decision_learning_rows, list) else []
+    trigger_profile_learning_rows = (
+        lifecycle_router.get("trigger_profile_learning_rows")
+        if isinstance(lifecycle_router.get("trigger_profile_learning_rows"), list)
+        else lifecycle_router.get("trigger_profile_learning")
+    )
+    trigger_profile_learning_rows = (
+        trigger_profile_learning_rows if isinstance(trigger_profile_learning_rows, list) else []
+    )
+    rejected = (
+        lifecycle_router.get("rejected_learning_rows")
+        if isinstance(lifecycle_router.get("rejected_learning_rows"), list)
+        else lifecycle_router.get("rejected_learning")
+    )
+    if not isinstance(rejected, list):
+        rejected = memory_retrieval.get("rejected_action_values")
     rejected_lanes = sorted({
         lane for lane in (_action_value_lane(row) for row in (rejected or [])) if lane
     })
@@ -139,16 +191,26 @@ def _pm_lifecycle_learning_trace(
     }.get(lifecycle_port, [])
     trace = {
         "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+        "primary_lifecycle_action_port": primary_lifecycle_action_port,
         "contract_lifecycle_port": lifecycle_port,
+        "contract_lifecycle_self_check": contract_lifecycle_self_check,
+        "lifecycle_port_transition_reason": contract_lifecycle_self_check.get("transition_reason"),
         "rank_lifecycle": "open_add_new_risk" if lifecycle_port == "open_add_new_risk" else lifecycle_port,
         "used_lanes": used_lanes,
         "accepted_learning_lanes": accepted_by_port,
+        "decision_learning_rows": decision_learning_rows,
+        "trigger_profile_learning": trigger_profile_learning_rows,
+        "trigger_profile_learning_rows": trigger_profile_learning_rows,
+        "trigger_profile_indices": list(lifecycle_router.get("trigger_profile_indices") or []),
+        "rejected_learning": rejected if isinstance(rejected, list) else [],
         "rejected_learning_lanes": rejected_lanes,
         "blocked_learning_lanes": (
             ["hold", "reduce", "exit", "execution", "conditional_monitor"]
             if lifecycle_port == "open_add_new_risk"
             else ["open", "add", "scale", "increase"]
         ),
+        "execution_profile_learning_direct_to_rank": False,
+        "trigger_profile_learning_direct_to_rank": False,
         "memory_requirement_status": memory_retrieval.get("status"),
         "memory_requirements": diagnostics.get("final_action_memory_requirements")
         if isinstance(diagnostics.get("final_action_memory_requirements"), dict)
@@ -393,6 +455,7 @@ def build_final_action_contract(
         diagnostics=diagnostics,
         selected_action_values=selected_action_values,
         execution_contract_payload=execution_contract_payload,
+        control_reasons=sorted(reason_codes),
     )
     pm_lifecycle_impact = _pm_lifecycle_learning_impact_delta(
         current_lots=current_lots,
@@ -414,7 +477,7 @@ def build_final_action_contract(
         if is_new_capital_port and isinstance(scorecard_learning_impact, dict) and scorecard_learning_impact
         else pm_lifecycle_impact
     )
-    return {
+    contract = {
         "contract_version": FINAL_ACTION_CONTRACT_VERSION,
         "ticker": ticker,
         "final_action": final_action,
@@ -443,19 +506,14 @@ def build_final_action_contract(
             "scorecard_state": scorecard_side.get("final_state"),
             "scorecard_score": scorecard_side.get("score"),
             "opportunity_score": scorecard_side.get("opportunity_score", scorecard_side.get("score")),
-            "capital_priority_score": scorecard_side.get("capital_priority_score"),
-            "capital_priority_tier": scorecard_side.get("capital_priority_tier"),
             "rank_input_components": scorecard_side.get("rank_input_components") or {},
             "lifecycle_learning_trace": lifecycle_learning_trace,
             "learning_impact_delta": learning_impact_delta,
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
-            "side_priority": scorecard_side.get("side_priority"),
-            "ticker_side_priority": scorecard_side.get("ticker_side_priority"),
-            "side_priority_score": scorecard_side.get("side_priority_score"),
-            "side_priority_semantics_version": scorecard_side.get("side_priority_semantics_version"),
-            "side_priority_meaning": scorecard_side.get("side_priority_meaning"),
-            "side_priority_is_not_capital_rank": bool(scorecard_side.get("side_priority_is_not_capital_rank", True)),
-            "side_priority_is_not_trade_authority": bool(scorecard_side.get("side_priority_is_not_trade_authority", True)),
+            "analyst_direction_evidence": scorecard_side.get("analyst_direction_evidence") or {},
+            "direction_evidence_strength": scorecard_side.get("direction_evidence_strength"),
+            "direction_evidence_components": scorecard_side.get("direction_evidence_components") or {},
+            "direction_evidence_boundary": scorecard_side.get("direction_evidence_boundary"),
             "rank_capital_priority_real_budget_release": bool(
                 authority.get("rank_capital_priority_real_budget_release")
             ),
@@ -501,12 +559,30 @@ def build_final_action_contract(
                 else ""
             ),
             "learning_adjustment_summary": scorecard_side.get("learning_adjustment_summary") or {},
+            "pm_lifecycle_learning_router": (
+                diagnostics.get("pm_lifecycle_learning_router")
+                if isinstance(diagnostics.get("pm_lifecycle_learning_router"), dict)
+                else {}
+            ),
+            "trigger_profile_learning": pm_lifecycle_trace.get("trigger_profile_learning") or [],
             "pm_lifecycle_learning_trace": pm_lifecycle_trace,
             "pm_lifecycle_learning_impact_delta": pm_lifecycle_impact,
         },
         "risk_flags": sorted(reason_codes),
         **execution_fields,
-        "execution_profile": execution_contract_payload.get("execution_profile"),
+        "execution_profile": execution_contract_payload.get("execution_profile") or "",
+        "entry_trigger": execution_contract_payload.get("entry_trigger") or "",
+        "invalidation": execution_contract_payload.get("invalidation") or "",
+        "capital_deployment": (
+            execution_fields.get("capital_deployment")
+            if isinstance(execution_fields.get("capital_deployment"), dict)
+            else {}
+        ),
+        "position_sizing_result": (
+            execution_fields.get("position_sizing_result")
+            if isinstance(execution_fields.get("position_sizing_result"), dict)
+            else {}
+        ),
         "execution_requirement": (
             "intraday_trigger_required"
             if final_action in {"open_probe", "open_real", "scale"}
@@ -522,3 +598,35 @@ def build_final_action_contract(
         "single_source_of_trade_truth": True,
         "candidate_sources_do_not_bypass_contract": True,
     }
+    evidence_used = contract["evidence_used"]
+    top_level_side_priority = scorecard.get("side_priority") if isinstance(scorecard.get("side_priority"), dict) else {}
+    top_level_ticker_side_priority = (
+        scorecard.get("ticker_side_priority") if isinstance(scorecard.get("ticker_side_priority"), dict) else {}
+    )
+    pm_side_selection_present = bool(
+        scorecard_side.get("side_priority") is not None
+        or scorecard_side.get("ticker_side_priority") is not None
+        or top_level_side_priority
+        or top_level_ticker_side_priority
+    )
+    for key in (
+        "side_priority",
+        "ticker_side_priority",
+        "side_priority_score",
+        "candidate_quality",
+        "candidate_layer_hint",
+        "side_priority_semantics_version",
+        "side_priority_meaning",
+        "side_priority_is_not_capital_rank",
+        "side_priority_is_not_trade_authority",
+    ):
+        value = scorecard_side.get(key)
+        if value is None and key == "side_priority":
+            value = top_level_side_priority.get(target_side)
+        if value is None and key == "ticker_side_priority":
+            value = top_level_ticker_side_priority.get(target_side)
+        if value is None and key == "side_priority_score" and pm_side_selection_present:
+            value = scorecard_side.get("candidate_quality")
+        if value is not None and value != "":
+            evidence_used[key] = value
+    return contract

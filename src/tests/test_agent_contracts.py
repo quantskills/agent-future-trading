@@ -25,10 +25,13 @@ from agents.analysis_team.technical import (
     get_mean_reversion_signal,
 )
 from apis.router import Router
-from tools.agent_tools.analysis.analyst_signal_fusion import (
+from tools.agent_tools.decision.pm_signal_fusion import (
+    build_opportunity_scorecard,
+)
+from tools.agent_tools.decision.pm_ticker_side_selection import (
     SIDE_PRIORITY_MEANING,
     SIDE_PRIORITY_SEMANTICS_VERSION,
-    build_opportunity_scorecard,
+    select_ticker_side,
 )
 from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
 from tools.common.contracts import (
@@ -755,11 +758,14 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn("opportunity_score", row)
         self.assertIn("opportunity_score_components", row)
         self.assertNotIn("opportunity_rank", row)
-        self.assertEqual(row["side_priority"], 1)
-        self.assertEqual(row["ticker_side_priority"], 1)
-        self.assertEqual(row["side_priority_semantics_version"], SIDE_PRIORITY_SEMANTICS_VERSION)
-        self.assertEqual(row["side_priority_meaning"], SIDE_PRIORITY_MEANING)
-        self.assertTrue(row["side_priority_is_not_capital_rank"])
+        self.assertNotIn("side_priority", row)
+        self.assertNotIn("ticker_side_priority", row)
+        self.assertIn("analyst_direction_evidence", row)
+        self.assertEqual(row["analyst_direction_evidence"]["side"], "short")
+        self.assertEqual(
+            row["direction_evidence_boundary"],
+            "fusion_preserves_signal_collector_evidence_no_pm_side_selection",
+        )
         self.assertIn("capital_allocation_reason", row)
         self.assertIn("learning_adjustment_summary", row)
         self.assertTrue(row["conditional_monitor_candidate"])
@@ -852,9 +858,25 @@ class AgentContractFixtureTest(unittest.TestCase):
 
         self.assertNotIn("opportunity_rank", card["long"])
         self.assertNotIn("opportunity_rank", card["short"])
-        self.assertEqual(card["long"]["side_priority"], 1)
-        self.assertEqual(card["short"]["side_priority"], 2)
-        self.assertTrue(card["long"]["side_priority_is_not_capital_rank"])
+        self.assertNotIn("side_priority", card["long"])
+        self.assertNotIn("ticker_side_priority", card["long"])
+        selected = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[long_signal, short_signal],
+            signal_collection_contract={"dominant_side": "long"},
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.72},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            decision_date="2025-03-05",
+            config={"weak_confirmation_threshold": 0.45},
+            prebuilt_scorecard=card,
+        )
+        self.assertEqual(selected["opportunity_scorecard"]["long"]["side_priority"], 1)
+        self.assertEqual(selected["opportunity_scorecard"]["short"]["side_priority"], 2)
+        self.assertTrue(selected["opportunity_scorecard"]["long"]["side_priority_is_not_capital_rank"])
         self.assertGreater(card["long"]["opportunity_score"], card["short"]["opportunity_score"])
         self.assertIn("setup_quality", card["long"]["opportunity_score_components"])
 

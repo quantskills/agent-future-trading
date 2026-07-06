@@ -44,7 +44,7 @@ def route_lifecycle_learning(
     lifecycle_port: str,
     action_values: Iterable[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Split action-value learning into accepted and rejected lifecycle lanes."""
+    """Split action-value learning into PM lifecycle decision, trigger/profile, and rejected lanes."""
     port = _clean(lifecycle_port)
     allowed = PORT_ALLOWED_LANES.get(port, set())
     accepted: list[dict[str, Any]] = []
@@ -85,10 +85,14 @@ def route_lifecycle_learning(
         "tool": "pm_lifecycle_learning_router",
         "pm_lifecycle_action_port": port,
         "accepted_lanes": sorted(allowed),
+        "decision_learning_rows": accepted,
         "accepted_learning": accepted,
         "accepted_indices": accepted_indices,
+        "decision_learning_indices": accepted_indices,
+        "rejected_learning_rows": rejected,
         "rejected_learning": rejected,
         "rejected_indices": rejected_indices,
+        "trigger_profile_learning_rows": trigger_profile_rows,
         "trigger_profile_learning": trigger_profile_rows,
         "trigger_profile_indices": trigger_profile_indices,
         "execution_profile_learning": trigger_profile_rows,

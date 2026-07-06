@@ -72,7 +72,10 @@ from tools.agent_tools.decision.pm_reason_effects import (
 from tools.agent_tools.decision.pm_risk_controls import business_quality_position_gate
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.decision.pm_full_market_capital_deployment import apply_full_market_capital_deployment
-from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
+from tools.agent_tools.decision.pm_lifecycle_action_port import (
+    build_contract_lifecycle_self_check,
+    classify_lifecycle_action_port,
+)
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
@@ -86,7 +89,7 @@ from tools.agent_tools.decision.pm_position_transition import (
 )
 from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
 from tools.common.signal_evidence_collection import build_signal_collection_contract
-from tools.agent_tools.analysis.analyst_signal_fusion import (
+from tools.agent_tools.decision.pm_signal_fusion import (
     analyst_signal_combo as _fusion_analyst_signal_combo,
     build_opportunity_scorecard,
     build_horizon_scope,
@@ -96,12 +99,26 @@ from tools.common.alpha_setup import compact_profile_for_trace
 
 
 def finalize_pm_full_market_contracts(*, generated, config, portfolio):
-    """PM-owned finalization: full-market rank, capital deployment, and signed contracts."""
-    return apply_full_market_capital_deployment(
+    """PM-owned step 5 and step 6 finalization for all daily candidates."""
+    deployment_result = apply_full_market_capital_deployment(
         generated=generated,
         config=config,
         portfolio=portfolio,
     )
+    signed = []
+    expected_count = 0
+    for ticker, recommendation in generated:
+        expected_count += 1
+        if not _sign_pm_candidate_recommendation(recommendation):
+            raise RuntimeError(f"pm_step6_signer_returned_false:{ticker}")
+        signed.append(recommendation)
+    if len(signed) != expected_count:
+        raise RuntimeError(
+            f"pm_step6_incomplete_signed_recommendations:signed={len(signed)}:expected={expected_count}"
+        )
+    deployment_result["signed_recommendations"] = signed
+    deployment_result["pm_six_step_finalizer"] = "portfolio_manager.finalize_pm_full_market_contracts"
+    return deployment_result
 
 
 class RiskLevel(Enum):
@@ -118,10 +135,11 @@ def _sanitize_visible_text(text: str) -> str:
 def _portfolio_account_equity(portfolio) -> float:
     """Return futures account equity using cash balance plus reserved margin."""
     cash_balance = float(getattr(portfolio, "cashflow", 0.0) or 0.0)
+    positions = getattr(portfolio, "positions", {}) or {}
     reserved_margin = float(
         getattr(portfolio, "margin_used", None)
         if getattr(portfolio, "margin_used", None) is not None
-        else sum(float(getattr(pos, "margin_used", 0.0) or 0.0) for pos in portfolio.positions.values())
+        else sum(float(getattr(pos, "margin_used", 0.0) or 0.0) for pos in positions.values())
     )
     return cash_balance + reserved_margin
 
@@ -990,6 +1008,331 @@ def _build_final_action_contract(
         safe_float=_safe_float,
         futures_action_cls=FuturesAction,
     )
+
+
+def _build_pm_internal_candidate_contract(
+    *,
+    ticker: str,
+    current_lots: int,
+    target_lots: int,
+    position_ratio: float,
+    margin_required: float,
+    account_equity: float,
+    lots_to_trade: int,
+    lots_to_trade_reason: str | None,
+    recommendation_intent: dict,
+    final_entry_authority: dict | None,
+    control_reasons: list[str],
+    candidate_status: str = "normal",
+    candidate_block_type: str | None = None,
+    candidate_block_reason: str | None = None,
+) -> dict:
+    """Build PM steps 1-4 candidate intent without signing final_action_contract."""
+    authority = dict(final_entry_authority or {})
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    lots_delta = target - current
+    return {
+        "contract_version": "agentquant.pm_internal_candidate.v1",
+        "pm_step": "steps_1_4_candidate_pending_full_market_deployment",
+        "not_final_action_contract": True,
+        "candidate_status": str(candidate_status or "normal"),
+        "candidate_block_type": str(candidate_block_type or ""),
+        "candidate_block_reason": str(candidate_block_reason or ""),
+        "early_block_contract": bool(candidate_status == "blocked"),
+        "ticker": ticker,
+        "current_lots": current,
+        "target_lots": target,
+        "lots_delta": lots_delta,
+        "lots_delta_abs": abs(lots_delta),
+        "final_action": _final_action_from_lots(
+            current_lots=current,
+            target_lots=target,
+            final_entry_authority=authority,
+        ),
+        "target_position_ratio": float(position_ratio or 0.0),
+        "margin_required": float(margin_required or 0.0),
+        "account_equity": float(account_equity or 0.0),
+        "lots_to_trade": int(lots_to_trade or 0),
+        "lots_to_trade_reason": lots_to_trade_reason or "",
+        "recommendation_intent": dict(recommendation_intent or {}),
+        "authority_type": str(authority.get("authority_type") or ""),
+        "authority_decision": str(authority.get("authority_decision") or authority.get("decision") or ""),
+        "requires_intraday_confirmation": bool(authority.get("requires_intraday_confirmation")),
+        "conditional_trigger_authority": bool(authority.get("conditional_trigger_authority")),
+        "can_execute_without_intraday_trigger": bool(
+            authority.get("can_execute_without_intraday_trigger")
+            if authority.get("can_execute_without_intraday_trigger") is not None
+            else not bool(authority.get("requires_intraday_confirmation"))
+        ),
+        "entry_trigger": authority.get("entry_trigger") or authority.get("trigger") or "",
+        "reason_codes": sorted(set(str(item) for item in (control_reasons or []) if item)),
+        "single_source_of_trade_truth": False,
+        "final_action_contract_signed": False,
+    }
+
+
+def _build_blocked_pm_internal_candidate(
+    *,
+    ticker: str,
+    current_lots: int,
+    target_lots: int,
+    reason: str,
+    authority_type: str,
+    account_equity: float,
+    execution_contract_fields: dict | None = None,
+    control_diagnostics: dict | None = None,
+    opportunity_scorecard: dict | None = None,
+    market_confirmation: dict | None = None,
+    alpha_setup_action_values: list | None = None,
+) -> dict:
+    """Build the single PM internal candidate shape for hard-block paths."""
+    reason_value = str(reason or "pm_blocked_candidate")
+    current = int(current_lots or 0)
+    target = int(target_lots if target_lots is not None else current)
+    candidate_contract = _build_pm_internal_candidate_contract(
+        ticker=ticker,
+        current_lots=current,
+        target_lots=target,
+        position_ratio=0.0,
+        margin_required=0.0,
+        account_equity=float(account_equity or 1.0),
+        lots_to_trade=abs(target - current),
+        lots_to_trade_reason=reason_value,
+        recommendation_intent=recommendation_intent_from_lots(current, target),
+        final_entry_authority={
+            "authority_type": str(authority_type or "not_applicable"),
+            "authority_decision": "blocked",
+            "decision": "blocked",
+            "reason_codes": [reason_value],
+        },
+        control_reasons=[reason_value],
+        candidate_status="blocked",
+        candidate_block_type=str(authority_type or "blocked"),
+        candidate_block_reason=reason_value,
+    )
+    execution_fields = dict(execution_contract_fields or {})
+    execution_fields["pm_six_step_stage"] = "steps_1_4_blocked_candidate_generated"
+    execution_fields["candidate_status"] = "blocked"
+    execution_fields["candidate_block_type"] = str(authority_type or "blocked")
+    execution_fields["candidate_block_reason"] = reason_value
+    return {
+        "schema": "agentquant.pm_internal_candidate.v1",
+        "stage": "steps_1_4_blocked_candidate_pending_step_6_signing",
+        "candidate_status": "blocked",
+        "candidate_block_type": str(authority_type or "blocked"),
+        "candidate_block_reason": reason_value,
+        "candidate_contract": candidate_contract,
+        "final_contract_builder_inputs": {
+            "ticker": ticker,
+            "current_lots": current,
+            "target_lots": target,
+            "position_ratio": 0.0,
+            "margin_required": 0.0,
+            "account_equity": float(account_equity or 1.0),
+            "lots_to_trade": abs(target - current),
+            "lots_to_trade_reason": reason_value,
+            "recommendation_intent": recommendation_intent_from_lots(current, target),
+            "final_entry_authority": {
+                "authority_type": str(authority_type or "not_applicable"),
+                "authority_decision": "blocked",
+                "decision": "blocked",
+                "reason_codes": [reason_value],
+            },
+            "control_reasons": [reason_value],
+            "control_diagnostics": dict(control_diagnostics or {}),
+            "opportunity_scorecard": dict(opportunity_scorecard or {}),
+            "market_confirmation": dict(market_confirmation or {}),
+            "alpha_setup_action_values": list(alpha_setup_action_values or []),
+            "execution_contract_fields": execution_fields,
+        },
+        "final_action_contract_signed": False,
+    }
+
+
+def _pm_candidate_from_snapshot(snapshot: dict | None) -> dict:
+    if not isinstance(snapshot, dict):
+        return {}
+    candidate = snapshot.get("pm_internal_candidate")
+    return candidate if isinstance(candidate, dict) else {}
+
+
+def _pm_candidate_builder_inputs(candidate: dict) -> dict:
+    inputs = candidate.get("final_contract_builder_inputs")
+    return dict(inputs) if isinstance(inputs, dict) else {}
+
+
+def _pm_candidate_contract(candidate: dict) -> dict:
+    contract = candidate.get("candidate_contract")
+    return dict(contract) if isinstance(contract, dict) else {}
+
+
+def _rebuild_recommendation_decision_from_contract(
+    recommendation: FuturesRecommendation,
+    contract: dict,
+) -> FuturesDecision:
+    current_lots = int(contract.get("current_lots") or 0)
+    target_lots = int(contract.get("target_lots") or 0)
+    intent = recommendation_intent_from_lots(current_lots, target_lots)
+    action_value = str(intent.get("action") or "hold")
+    try:
+        action = FuturesAction(action_value)
+    except Exception:
+        action = FuturesAction.HOLD
+    return FuturesDecision(
+        ticker=recommendation.underlying_code,
+        action=action,
+        lots=int(intent.get("lots") or 0),
+        price=float(recommendation.open_price or recommendation.base_price or 0.0),
+        settle_price=float(recommendation.prev_close_price or recommendation.base_price or 0.0),
+        margin_rate=0.0,
+        contract_multiplier=1.0,
+        contract_code=recommendation.contract_code,
+        justification="PM step 6 final_action_contract signed after full-market capital deployment",
+    )
+
+
+def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> bool:
+    """Sign the only final_action_contract after PM step 5 deployment finishes."""
+    snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+    candidate = _pm_candidate_from_snapshot(snapshot)
+    if not candidate:
+        raise ValueError("pm_step6_missing_internal_candidate")
+    builder_inputs = _pm_candidate_builder_inputs(candidate)
+    candidate_contract = _pm_candidate_contract(candidate)
+    if not builder_inputs:
+        raise ValueError("pm_step6_missing_builder_inputs")
+    if not candidate_contract:
+        raise ValueError("pm_step6_missing_candidate_contract")
+    deployment = snapshot.get("pm_capital_deployment_decision")
+    deployment = deployment if isinstance(deployment, dict) else {}
+    current_lots = int(candidate_contract.get("current_lots") or builder_inputs.get("current_lots") or 0)
+    deployed_target = deployment.get("deployed_target_lots", candidate_contract.get("target_lots"))
+    target_lots = int(deployed_target if deployed_target is not None else 0)
+    intent = recommendation_intent_from_lots(current_lots, target_lots)
+    builder_inputs["current_lots"] = current_lots
+    builder_inputs["target_lots"] = target_lots
+    builder_inputs["lots_to_trade"] = int(intent.get("lots") or 0)
+    builder_inputs["recommendation_intent"] = intent
+    control_reasons = list(builder_inputs.get("control_reasons") or [])
+    for reason in deployment.get("reason_codes") or []:
+        if reason and reason not in control_reasons:
+            control_reasons.append(str(reason))
+    builder_inputs["control_reasons"] = control_reasons
+    execution_fields = builder_inputs.get("execution_contract_fields")
+    execution_fields = dict(execution_fields) if isinstance(execution_fields, dict) else {}
+    if isinstance(execution_fields.get("rebalance_summary"), dict):
+        execution_fields["rebalance_summary"] = {
+            **execution_fields["rebalance_summary"],
+            "target_lots": target_lots,
+            "lots_delta": target_lots - current_lots,
+            "reason": deployment.get("capital_allocation_reason") or execution_fields["rebalance_summary"].get("reason"),
+            "capital_deployment": deployment,
+        }
+    execution_fields["pm_six_step_stage"] = "step_6_final_action_contract_signed"
+    execution_fields["pm_capital_deployment_decision"] = deployment
+    builder_inputs["execution_contract_fields"] = execution_fields
+
+    final_action_contract = _build_final_action_contract(**builder_inputs)
+    final_action_contract = _finalize_hold_exit_learning_explanation(final_action_contract)
+    position_sizing_result = execution_fields.get("position_sizing_result")
+    if isinstance(position_sizing_result, dict):
+        final_action_contract["position_sizing_result"] = position_sizing_result
+    signal_ref = execution_fields.get("signal_collection_contract")
+    if isinstance(signal_ref, dict):
+        final_action_contract["signal_collection_contract_ref"] = {
+            "ticker": signal_ref.get("ticker"),
+            "trading_date": signal_ref.get("trading_date"),
+            "source_contract_count": len(signal_ref.get("source_contracts") or []),
+            "collector_decision_boundary": signal_ref.get("collector_decision_boundary"),
+        }
+    learning_trace = execution_fields.get("learning_to_position_trace")
+    if isinstance(learning_trace, dict):
+        learning_used = (
+            final_action_contract.get("learning_used")
+            if isinstance(final_action_contract.get("learning_used"), dict)
+            else {}
+        )
+        learning_used.pop("learning_to_position_trace", None)
+        learning_used["learning_to_position_summary"] = _contract_safe_learning_to_position_summary(learning_trace)
+        if isinstance(execution_fields.get("pm_landing_consistency_audit"), dict):
+            learning_used["pm_landing_consistency_audit"] = execution_fields["pm_landing_consistency_audit"]
+        final_action_contract["learning_used"] = learning_used
+    evidence_used = (
+        final_action_contract.get("evidence_used")
+        if isinstance(final_action_contract.get("evidence_used"), dict)
+        else {}
+    )
+    for field in (
+        "primary_lifecycle_action_port",
+        "contract_lifecycle_self_check",
+        "lifecycle_port_transition_reason",
+        "pm_lifecycle_learning_router",
+    ):
+        value = execution_fields.get(field)
+        if value is not None:
+            evidence_used[field] = value
+    evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
+    if deployment:
+        final_action_contract["capital_deployment"] = dict(deployment)
+        rank_fields = (
+            "opportunity_rank",
+            "rank_source",
+            "rank_scope",
+            "capital_rank_generated_by",
+            "rank_capital_role",
+            "capital_layer",
+            "capital_ratio_source",
+            "rank_reason",
+            "rank_input_components",
+            "lifecycle_learning_trace",
+            "learning_impact_delta",
+            "rank_semantics_version",
+            "opportunity_rank_meaning",
+            "rank_is_capital_priority",
+            "rank_is_not_trade_authority",
+        )
+        for field in rank_fields:
+            if field in deployment:
+                evidence_used[field] = deployment[field]
+        evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
+    final_action_contract["evidence_used"] = evidence_used
+    snapshot_for_check = dict(snapshot)
+    snapshot_for_check["final_action_contract"] = final_action_contract
+    snapshot_for_check.pop("pm_internal_candidate", None)
+    snapshot_for_check.pop("pm_internal_candidate_contract", None)
+    snapshot_for_check.pop("pm_capital_deployment_decision", None)
+    pm_contract_self_check = check_final_action_contract(
+        final_action_contract,
+        pm_artifact=snapshot_for_check,
+    )
+    if not pm_contract_self_check.get("ok"):
+        raise ValueError(
+            f"pm_final_action_contract_self_check_failed:{pm_contract_self_check.get('errors')}"
+        )
+    snapshot["final_action_contract"] = final_action_contract
+    snapshot["pm_six_step_trace"] = {
+        "stage": "step_6_final_action_contract_signed",
+        "step_5_deployment_tool": "pm_full_market_capital_deployment",
+        "step_6_contract_builder": "pm_contract_builder",
+        "pm_contract_self_check": pm_contract_self_check,
+        "candidate_was_internal_only": True,
+    }
+    snapshot.pop("pm_internal_candidate", None)
+    snapshot.pop("pm_internal_candidate_contract", None)
+    snapshot.pop("pm_capital_deployment_decision", None)
+    recommendation.signal_snapshot = snapshot
+    decision = _rebuild_recommendation_decision_from_contract(recommendation, final_action_contract)
+    recommendation.action = _to_recommendation_action(decision.action)
+    recommendation.lots = int(decision.lots or 0)
+    recommendation.justification = _build_structured_pm_justification(
+        ticker=recommendation.underlying_code,
+        decision=decision,
+        signal_snapshot=snapshot,
+    )
+    return True
+
+
 def _release_block_category(primary_reason: str, reason_summary: dict) -> str:
     reason = str(primary_reason or "").lower()
     if reason_summary.get("hard_blocks"):
@@ -1081,7 +1424,7 @@ def _build_release_ladder_diagnostics(full_config: dict | None) -> dict:
 def _build_release_block_diagnostics(
     *,
     ticker: str,
-    final_action_contract: dict | None,
+    candidate_contract: dict | None,
     final_entry_authority: dict | None,
     control_reasons: list[str] | None,
     lots_to_trade_reason: str | None,
@@ -1091,7 +1434,7 @@ def _build_release_block_diagnostics(
     full_config: dict | None,
 ) -> dict:
     """Explain why release did or did not happen without creating trade authority."""
-    contract = dict(final_action_contract) if isinstance(final_action_contract, dict) else {}
+    contract = dict(candidate_contract) if isinstance(candidate_contract, dict) else {}
     contract_reasons = contract.get("reason_codes")
     if isinstance(contract_reasons, (list, tuple, set)):
         contract_reason_items = list(contract_reasons)
@@ -1176,35 +1519,6 @@ def _build_release_block_diagnostics(
             "final_action_contract authority, lots, budget, or execution"
         ),
     }
-
-
-def _build_minimal_final_action_contract(
-    *,
-    ticker: str,
-    current_lots: int,
-    target_lots: int,
-    reason: str,
-    authority_type: str = "not_applicable",
-) -> dict:
-    recommendation_intent = recommendation_intent_from_lots(current_lots, target_lots)
-    return _build_final_action_contract(
-        ticker=ticker,
-        current_lots=int(current_lots or 0),
-        target_lots=int(target_lots or 0),
-        position_ratio=0.0,
-        margin_required=0.0,
-        account_equity=1.0,
-        lots_to_trade=abs(int(target_lots or 0) - int(current_lots or 0)),
-        lots_to_trade_reason=reason,
-        recommendation_intent=recommendation_intent,
-        final_entry_authority={"authority_type": authority_type},
-        control_reasons=[reason] if reason else [],
-        control_diagnostics={},
-        opportunity_scorecard={},
-        market_confirmation={},
-        alpha_setup_action_values=[],
-        execution_contract_fields={},
-    )
 
 
 def _finalize_hold_exit_learning_explanation(contract: dict | None) -> dict:
@@ -3018,7 +3332,7 @@ def _build_phase1_recommendation(
     morning_price_context,
     analyst_signals,
     plan_snapshot=None,
-    final_action_contract=None,
+    pm_internal_candidate=None,
     market_confirmation=None,
     full_config=None,
 ):
@@ -3097,8 +3411,9 @@ def _build_phase1_recommendation(
                 signal_snapshot["position_budget_policy"] = diagnostics["position_budget_policy"]
         if isinstance(plan_snapshot.get("release_block_diagnostics"), dict):
             signal_snapshot["release_block_diagnostics"] = plan_snapshot["release_block_diagnostics"]
-    if isinstance(final_action_contract, dict):
-        signal_snapshot["final_action_contract"] = final_action_contract
+    if isinstance(pm_internal_candidate, dict):
+        signal_snapshot["pm_internal_candidate"] = pm_internal_candidate
+        signal_snapshot["pm_six_step_stage"] = "steps_1_4_candidate_waiting_for_pm_full_market_deployment"
     if market_confirmation:
         signal_snapshot["market_confirmation"] = market_confirmation
     data_quality_summary = build_pm_data_quality_summary(analyst_signals, market_confirmation)
@@ -3129,7 +3444,9 @@ def _build_phase1_recommendation(
         str(decision_action_value).lower() in {"open_long", "open_short"}
         and int(getattr(decision, "lots", 0) or 0) > 0
     ):
-        semantic_block_reason = _structured_new_entry_block_reason(signal_snapshot.get("final_action_contract"))
+        semantic_block_reason = _structured_new_entry_block_reason(
+            _pm_candidate_contract(_pm_candidate_from_snapshot(signal_snapshot))
+        )
         text_audit_reason = _pm_new_entry_semantic_block_reason(getattr(decision, "justification", ""))
         if text_audit_reason:
             signal_snapshot["pm_raw_rationale_semantic_audit"] = {
@@ -3183,46 +3500,30 @@ def _build_phase1_recommendation(
                     controls["reasons"].append(semantic_block_reason)
                 controls.setdefault("diagnostics", {})
                 controls["diagnostics"]["pm_semantic_consistency_gate"] = semantic_gate
-        if not isinstance(signal_snapshot.get("final_action_contract"), dict):
-            current_lots_for_contract = int(
+        candidate_contract = _pm_candidate_contract(_pm_candidate_from_snapshot(signal_snapshot))
+        current_lots_for_contract = int(
+            candidate_contract.get("current_lots")
+            if candidate_contract.get("current_lots") is not None
+            else (
                 plan_snapshot.get("current_lots_before_open")
-                if isinstance(plan_snapshot, dict) and plan_snapshot.get("current_lots_before_open") is not None
+                if isinstance(plan_snapshot, dict)
                 else 0
             )
-            signal_snapshot["final_action_contract"] = _build_minimal_final_action_contract(
-                ticker=ticker,
-                current_lots=current_lots_for_contract,
-                target_lots=current_lots_for_contract,
-                reason=semantic_block_reason,
-                authority_type="watchlist_only",
-            )
-        if isinstance(signal_snapshot.get("final_action_contract"), dict):
-            contract = signal_snapshot["final_action_contract"]
-            current_lots_for_contract = int(
-                contract.get("current_lots")
-                if contract.get("current_lots") is not None
-                else (
-                    plan_snapshot.get("current_lots_before_open")
-                    if isinstance(plan_snapshot, dict)
-                    else 0
-                )
-                or 0
-            )
-            contract.update({
-                "final_action": "hold" if current_lots_for_contract else "wait",
-                "target_lots": current_lots_for_contract,
-                "lots_delta": 0,
-                "lots_delta_abs": 0,
-                "authority_type": "watchlist_only",
-                "authority_decision": "watchlist_only",
-                "max_allowed_margin_ratio": 0.0,
+            or 0
+        )
+        signal_snapshot["pm_internal_candidate"] = _build_blocked_pm_internal_candidate(
+            ticker=ticker,
+            current_lots=current_lots_for_contract,
+            target_lots=current_lots_for_contract,
+            reason=semantic_block_reason,
+            authority_type="watchlist_only",
+            account_equity=_portfolio_account_equity(portfolio),
+            execution_contract_fields={
+                **(plan_snapshot if isinstance(plan_snapshot, dict) else {}),
                 "semantic_consistency_gate": semantic_gate,
-                "single_source_of_trade_truth": True,
-            })
-            contract.setdefault("reason_codes", [])
-            if semantic_block_reason not in contract["reason_codes"]:
-                contract["reason_codes"].append(semantic_block_reason)
-            signal_snapshot["final_action_contract"] = contract
+            },
+        )
+        signal_snapshot["pm_six_step_stage"] = "steps_1_4_blocked_candidate_waiting_for_step_6_signing"
         decision = FuturesDecision(
             ticker=getattr(decision, "ticker", ticker),
             action=FuturesAction.HOLD,
@@ -3249,7 +3550,7 @@ def _build_phase1_recommendation(
             else str(decision.action)
         ),
         decision_lots=int(getattr(decision, "lots", 0) or 0),
-        final_entry_authority=signal_snapshot.get("final_action_contract"),
+        final_entry_authority=_pm_candidate_contract(_pm_candidate_from_snapshot(signal_snapshot)),
         opportunity_scorecard=signal_snapshot.get("opportunity_scorecard"),
     )
     signal_snapshot["business_quality_summary"] = summarize_business_quality(analyst_signals)
@@ -3347,7 +3648,7 @@ def _phase1_return_with_recommendation(
     morning_price_context,
     analyst_signals,
     plan_snapshot=None,
-    final_action_contract=None,
+    pm_internal_candidate=None,
     market_confirmation=None,
 ):
     """Return a phase1 decision together with the auditable recommendation artifact.
@@ -3367,7 +3668,7 @@ def _phase1_return_with_recommendation(
         morning_price_context=morning_price_context,
         analyst_signals=analyst_signals,
         plan_snapshot=plan_snapshot,
-        final_action_contract=final_action_contract,
+        pm_internal_candidate=pm_internal_candidate,
         market_confirmation=market_confirmation,
     )
     return {"decision": decision, "recommendation": recommendation}
@@ -4034,32 +4335,6 @@ def _append_unique_action_values(base_rows: list | None, extra_rows: list | None
         rows.append(normalized)
         index[key] = len(rows) - 1
     return rows
-
-
-def _route_pm_scorecard_action_values(
-    *,
-    lifecycle_port: str,
-    alpha_setup_action_values: list | None,
-) -> tuple[list[dict], dict]:
-    normalized = _normalize_alpha_setup_action_values(alpha_setup_action_values)
-    router_trace = route_lifecycle_learning(
-        lifecycle_port=lifecycle_port,
-        action_values=normalized,
-    )
-    allowed_indices = set(router_trace.get("accepted_indices") or [])
-    allowed_indices.update(router_trace.get("trigger_profile_indices") or [])
-    routed_rows = [
-        row
-        for index, row in enumerate(normalized)
-        if index in allowed_indices
-    ]
-    router_trace["scorecard_consumed_indices"] = sorted(allowed_indices)
-    router_trace["scorecard_consumed_count"] = len(routed_rows)
-    router_trace["scorecard_consumption_boundary"] = (
-        "accepted_lifecycle_rows_plus_trigger_profile_rows; "
-        "execution rows may calibrate trigger/profile but cannot directly create rank"
-    )
-    return routed_rows, router_trace
 
 
 def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
@@ -6479,10 +6754,11 @@ def _apply_alpha_setup_ev_position_control(
             "scorecard_state": layer,
             "side_priority": side_scorecard.get("side_priority"),
             "ticker_side_priority": side_scorecard.get("ticker_side_priority"),
+            "side_priority_score": side_scorecard.get("side_priority_score"),
+            "candidate_quality": side_scorecard.get("candidate_quality"),
+            "candidate_layer_hint": side_scorecard.get("candidate_layer_hint"),
             "side_priority_semantics_version": side_scorecard.get("side_priority_semantics_version"),
             "side_priority_is_not_capital_rank": bool(side_scorecard.get("side_priority_is_not_capital_rank", True)),
-            "capital_priority_score": side_scorecard.get("capital_priority_score", side_scorecard.get("score")),
-            "capital_priority_tier": side_scorecard.get("capital_priority_tier"),
             "current_confirmation_score": confirmation_score,
             "has_tradeable_support": has_tradeable_support,
             "has_monitorable_setup": has_monitorable_setup,
@@ -6791,10 +7067,11 @@ def _apply_alpha_setup_ev_position_control(
         "scorecard_state": layer,
         "side_priority": side_scorecard.get("side_priority"),
         "ticker_side_priority": side_scorecard.get("ticker_side_priority"),
+        "side_priority_score": side_scorecard.get("side_priority_score"),
+        "candidate_quality": side_scorecard.get("candidate_quality"),
+        "candidate_layer_hint": side_scorecard.get("candidate_layer_hint"),
         "side_priority_semantics_version": side_scorecard.get("side_priority_semantics_version"),
         "side_priority_is_not_capital_rank": bool(side_scorecard.get("side_priority_is_not_capital_rank", True)),
-        "capital_priority_score": side_scorecard.get("capital_priority_score", side_scorecard.get("score")),
-        "capital_priority_tier": side_scorecard.get("capital_priority_tier"),
         "scorecard_gating_failures": gating_failures,
         "current_confirmation_score": confirmation_score,
         "has_tradeable_support": has_tradeable_support,
@@ -9055,8 +9332,8 @@ def _apply_holding_rebalance_control(
     return position_ratio, reasons, notes, diagnostics
 
 
-def portfolio_agent_futures(state: FundState):
-    """Futures portfolio manager for phase1 recommendations."""
+def _run_pm_six_step_decision(state: FundState):
+    """Run PM's two-path six-step decision flow and return the phase1 artifact."""
     agent_name = AgentKey.PORTFOLIO
     portfolio = state["portfolio"]
     ticker = state["ticker"]
@@ -9237,12 +9514,17 @@ def portfolio_agent_futures(state: FundState):
             decision=hold_decision,
             morning_price_context=morning_price_context,
             analyst_signals=analyst_signals,
-            final_action_contract=_build_minimal_final_action_contract(
+            pm_internal_candidate=_build_blocked_pm_internal_candidate(
                 ticker=ticker,
                 current_lots=current_lots_for_missing_basis,
                 target_lots=current_lots_for_missing_basis,
                 reason="missing_phase1_execution_basis",
                 authority_type="data_quality_block",
+                account_equity=account_equity,
+                execution_contract_fields={
+                    "candidate_status": "blocked",
+                    "candidate_block_reason": "missing_phase1_execution_basis",
+                },
             ),
         )
         skipped_recommendation.status = RecommendationStatus.SKIPPED
@@ -9337,12 +9619,15 @@ def portfolio_agent_futures(state: FundState):
                 morning_price_context=morning_price_context,
                 analyst_signals=analyst_signals,
                 plan_snapshot=price_anomaly_snapshot,
-                final_action_contract=_build_minimal_final_action_contract(
+                pm_internal_candidate=_build_blocked_pm_internal_candidate(
                     ticker=ticker,
                     current_lots=current_lots_for_price_anomaly,
                     target_lots=current_lots_for_price_anomaly,
                     reason="data_price_anomaly",
                     authority_type="data_quality_block",
+                    account_equity=account_equity,
+                    execution_contract_fields=price_anomaly_snapshot,
+                    control_diagnostics={"data_price_anomaly": price_anomaly_snapshot.get("data_price_anomaly")},
                 ),
             )
         elif price_sanity.get("status") == "unchecked":
@@ -9403,12 +9688,17 @@ def portfolio_agent_futures(state: FundState):
                             decision=close_decision,
                             morning_price_context=morning_price_context,
                             analyst_signals=analyst_signals,
-                            final_action_contract=_build_minimal_final_action_contract(
+                            pm_internal_candidate=_build_blocked_pm_internal_candidate(
                                 ticker=ticker,
                                 current_lots=int(position.shares),
                                 target_lots=0,
                                 reason="single_position_loss_threshold",
                                 authority_type="risk_exit",
+                                account_equity=account_equity,
+                                execution_contract_fields={
+                                    "candidate_status": "blocked",
+                                    "candidate_block_reason": "single_position_loss_threshold",
+                                },
                             ),
                         )
                     else:
@@ -9436,12 +9726,17 @@ def portfolio_agent_futures(state: FundState):
                             decision=close_decision,
                             morning_price_context=morning_price_context,
                             analyst_signals=analyst_signals,
-                            final_action_contract=_build_minimal_final_action_contract(
+                            pm_internal_candidate=_build_blocked_pm_internal_candidate(
                                 ticker=ticker,
                                 current_lots=int(position.shares),
                                 target_lots=0,
                                 reason="single_position_loss_threshold",
                                 authority_type="risk_exit",
+                                account_equity=account_equity,
+                                execution_contract_fields={
+                                    "candidate_status": "blocked",
+                                    "candidate_block_reason": "single_position_loss_threshold",
+                                },
                             ),
                         )
 
@@ -9856,14 +10151,23 @@ def portfolio_agent_futures(state: FundState):
         "requires_intraday_confirmation": False,
         "conditional_trigger_authority": False,
         "reason_codes": [],
-        "pm_step": "step_2_initial_lifecycle_action_port_before_scorecard",
+        "pm_step": "step_2_primary_lifecycle_action_port_before_scorecard",
     }
-    initial_lifecycle_action_port = classify_lifecycle_action_port(initial_lifecycle_action_contract)
-    scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
-        lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
-        alpha_setup_action_values=alpha_setup_action_values,
-    )
-    pm_learning_audit["initial_lifecycle_action_port"] = initial_lifecycle_action_port
+    primary_lifecycle_action_port = classify_lifecycle_action_port(initial_lifecycle_action_contract)
+    scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    initial_lifecycle_learning_router = {
+        "tool": "pm_lifecycle_learning_router",
+        "status": "deferred_to_single_final_pm_lifecycle_learning_router",
+        "primary_lifecycle_action_port": primary_lifecycle_action_port,
+        "pm_lifecycle_action_port": primary_lifecycle_action_port.get("pm_lifecycle_action_port"),
+        "scorecard_consumption_boundary": (
+            "scorecard consumes normalized PM learning components only; lifecycle lane acceptance, "
+            "trigger/profile routing, and rejection are decided once by the PM lifecycle learning router"
+        ),
+        "writes_contract": False,
+        "writes_db": False,
+    }
+    pm_learning_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
     pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
@@ -10010,39 +10314,10 @@ def portfolio_agent_futures(state: FundState):
                 pm_learning_audit["pm_exact_alpha_setup_boundary"] = (
                     "pm_reads_pm_learning_canonical_action_value_by_exact_then_fallback_layers_after_setup_resolution"
                 )
-                scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
-                    lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
-                    alpha_setup_action_values=alpha_setup_action_values,
-                )
+                scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+                initial_lifecycle_learning_router["scorecard_consumed_count"] = len(scorecard_alpha_setup_action_values)
+                initial_lifecycle_learning_router["post_step3_exact_rows_routed_to_step4_only"] = True
                 pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
-                opportunity_scorecard = build_opportunity_scorecard(
-                    ticker=ticker,
-                    analyst_signals=analyst_signals,
-                    market_confirmation=market_confirmation,
-                    data_quality_summary=data_quality_summary_for_pm,
-                    adaptive_policy_state=early_adaptive_policy_state,
-                    alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                    signal_collection_contract=signal_collection_contract,
-                    decision_date=trading_date,
-                    config=opportunity_scorecard_cfg,
-                )
-                ticker_side_selection_result = select_ticker_side(
-                    ticker=ticker,
-                    analyst_signals=analyst_signals,
-                    signal_collection_contract=signal_collection_contract,
-                    effective_memory_summary=effective_memory_summary,
-                    market_confirmation=market_confirmation,
-                    data_quality_summary=data_quality_summary_for_pm,
-                    adaptive_policy_state=early_adaptive_policy_state,
-                    alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                    decision_date=trading_date,
-                    config=opportunity_scorecard_cfg,
-                    prebuilt_scorecard=opportunity_scorecard,
-                )
-                opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
-                fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: exact alpha setup action-value PM retrieval skipped: {exc}")
     if db and config_id:
@@ -10100,39 +10375,10 @@ def portfolio_agent_futures(state: FundState):
                 pm_learning_audit["similar_alpha_setup_boundary"] = (
                     "strict_history_only_prior_not_trade_authority"
                 )
-                scorecard_alpha_setup_action_values, initial_lifecycle_learning_router = _route_pm_scorecard_action_values(
-                    lifecycle_port=initial_lifecycle_action_port.get("pm_lifecycle_action_port") or "wait",
-                    alpha_setup_action_values=alpha_setup_action_values,
-                )
+                scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+                initial_lifecycle_learning_router["scorecard_consumed_count"] = len(scorecard_alpha_setup_action_values)
+                initial_lifecycle_learning_router["post_step3_similar_rows_routed_to_step4_only"] = True
                 pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
-                opportunity_scorecard = build_opportunity_scorecard(
-                    ticker=ticker,
-                    analyst_signals=analyst_signals,
-                    market_confirmation=market_confirmation,
-                    data_quality_summary=data_quality_summary_for_pm,
-                    adaptive_policy_state=early_adaptive_policy_state,
-                    alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                    signal_collection_contract=signal_collection_contract,
-                    decision_date=trading_date,
-                    config=opportunity_scorecard_cfg,
-                )
-                ticker_side_selection_result = select_ticker_side(
-                    ticker=ticker,
-                    analyst_signals=analyst_signals,
-                    signal_collection_contract=signal_collection_contract,
-                    effective_memory_summary=effective_memory_summary,
-                    market_confirmation=market_confirmation,
-                    data_quality_summary=data_quality_summary_for_pm,
-                    adaptive_policy_state=early_adaptive_policy_state,
-                    alpha_setup_profiles=alpha_setup_profiles,
-                    alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                    decision_date=trading_date,
-                    config=opportunity_scorecard_cfg,
-                    prebuilt_scorecard=opportunity_scorecard,
-                )
-                opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
-                fusion_context["opportunity_scorecard"] = opportunity_scorecard
         except Exception as exc:
             logger.warning(f"{ticker}: similar alpha setup action-value PM retrieval skipped: {exc}")
     holding_control_cfg = _get_holding_rebalance_config(full_config)
@@ -10369,35 +10615,9 @@ def portfolio_agent_futures(state: FundState):
                 "effective_memory_summary": pm_risk_gate_memory_result.get("effective_memory_summary") or {},
                 "retrieval_attempts": pm_risk_gate_memory_result.get("retrieval_attempts") or [],
                 "rejected_or_downgraded": pm_risk_gate_memory_result.get("rejected_or_downgraded") or [],
+                "scorecard_rerun": False,
+                "boundary": "policy_memory_controls_pm_risk_gate_and_trace_without_rerunning_step3",
             }
-            opportunity_scorecard = build_opportunity_scorecard(
-                ticker=ticker,
-                analyst_signals=analyst_signals,
-                market_confirmation=market_confirmation,
-                data_quality_summary=data_quality_summary_for_pm,
-                adaptive_policy_state=adaptive_policy_state,
-                alpha_setup_profiles=alpha_setup_profiles,
-                alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                signal_collection_contract=signal_collection_contract,
-                decision_date=trading_date,
-                config=opportunity_scorecard_cfg,
-            )
-            ticker_side_selection_result = select_ticker_side(
-                ticker=ticker,
-                analyst_signals=analyst_signals,
-                signal_collection_contract=signal_collection_contract,
-                effective_memory_summary=effective_memory_summary,
-                market_confirmation=market_confirmation,
-                data_quality_summary=data_quality_summary_for_pm,
-                adaptive_policy_state=adaptive_policy_state,
-                alpha_setup_profiles=alpha_setup_profiles,
-                alpha_setup_action_values=scorecard_alpha_setup_action_values,
-                decision_date=trading_date,
-                config=opportunity_scorecard_cfg,
-                prebuilt_scorecard=opportunity_scorecard,
-            )
-            opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
-            fusion_context["opportunity_scorecard"] = opportunity_scorecard
 
         analyst_payload = [
             signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
@@ -10783,12 +11003,17 @@ def portfolio_agent_futures(state: FundState):
                 decision=hold_decision,
                 morning_price_context=morning_price_context,
                 analyst_signals=analyst_signals,
-                final_action_contract=_build_minimal_final_action_contract(
+                pm_internal_candidate=_build_blocked_pm_internal_candidate(
                     ticker=ticker,
                     current_lots=0,
                     target_lots=0,
                     reason="danger_zone_ban",
                     authority_type="risk_block",
+                    account_equity=account_equity,
+                    execution_contract_fields={
+                        "candidate_status": "blocked",
+                        "candidate_block_reason": "danger_zone_ban",
+                    },
                 ),
             )
 
@@ -11130,12 +11355,17 @@ def portfolio_agent_futures(state: FundState):
             decision=emergency_decision,
             morning_price_context=morning_price_context,
             analyst_signals=analyst_signals,
-            final_action_contract=_build_minimal_final_action_contract(
+            pm_internal_candidate=_build_blocked_pm_internal_candidate(
                 ticker=ticker,
                 current_lots=int(current_lots or 0),
                 target_lots=0,
                 reason="emergency_risk_flatten",
                 authority_type="risk_exit" if current_lots else "risk_block",
+                account_equity=account_equity,
+                execution_contract_fields={
+                    "candidate_status": "blocked",
+                    "candidate_block_reason": "emergency_risk_flatten",
+                },
             ),
         )
         return {"decision": emergency_decision, "recommendation": recommendation}
@@ -11286,9 +11516,17 @@ def portfolio_agent_futures(state: FundState):
             else False if "conditional_trigger_authority" in control_reasons else True
         ),
     }
-    lifecycle_action_port = classify_lifecycle_action_port(lifecycle_memory_contract)
-    lifecycle_memory_contract["pm_lifecycle_action_port"] = lifecycle_action_port.get("pm_lifecycle_action_port")
-    lifecycle_memory_contract["requires_full_market_rank"] = lifecycle_action_port.get("requires_full_market_rank")
+    contract_lifecycle_self_check_port = classify_lifecycle_action_port(lifecycle_memory_contract)
+    contract_lifecycle_self_check = build_contract_lifecycle_self_check(
+        primary_lifecycle_action_port=primary_lifecycle_action_port,
+        contract_lifecycle_port=contract_lifecycle_self_check_port,
+        reason_codes=lifecycle_memory_contract.get("reason_codes"),
+        control_reasons=control_reasons,
+    )
+    lifecycle_memory_contract["primary_lifecycle_action_port"] = primary_lifecycle_action_port.get("pm_lifecycle_action_port")
+    lifecycle_memory_contract["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    lifecycle_memory_contract["requires_full_market_rank"] = primary_lifecycle_action_port.get("requires_full_market_rank")
+    pre_final_lifecycle_route_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
     alpha_setup_action_values, lifecycle_memory_audit = _retrieve_lifecycle_pm_memory(
         db=db,
         config_id=config_id,
@@ -11300,31 +11538,57 @@ def portfolio_agent_futures(state: FundState):
         fusion_context=fusion_context if isinstance(fusion_context, dict) else {},
         alpha_setup_action_values=alpha_setup_action_values,
     )
-    lifecycle_learning_router = route_lifecycle_learning(
-        lifecycle_port=str(lifecycle_action_port.get("pm_lifecycle_action_port") or ""),
-        action_values=alpha_setup_action_values,
+    final_lifecycle_route_action_values = _append_unique_action_values(
+        pre_final_lifecycle_route_action_values,
+        alpha_setup_action_values,
     )
-    accepted_learning_indices = {
+    lifecycle_learning_router = route_lifecycle_learning(
+        lifecycle_port=str(primary_lifecycle_action_port.get("pm_lifecycle_action_port") or ""),
+        action_values=final_lifecycle_route_action_values,
+    )
+    decision_learning_indices = {
         int(index)
-        for index in (lifecycle_learning_router.get("accepted_indices") or [])
+        for index in (
+            lifecycle_learning_router.get("decision_learning_indices")
+            or lifecycle_learning_router.get("accepted_indices")
+            or []
+        )
         if isinstance(index, int)
     }
+    trigger_profile_indices = {
+        int(index)
+        for index in (lifecycle_learning_router.get("trigger_profile_indices") or [])
+        if isinstance(index, int)
+    }
+    consumed_learning_indices = decision_learning_indices | trigger_profile_indices
     alpha_setup_action_values = [
         row
-        for index, row in enumerate(alpha_setup_action_values)
-        if index in accepted_learning_indices
+        for index, row in enumerate(final_lifecycle_route_action_values)
+        if index in consumed_learning_indices
     ]
-    lifecycle_memory_audit["pm_lifecycle_action_port"] = lifecycle_action_port
+    lifecycle_learning_router["contract_consumed_indices"] = sorted(consumed_learning_indices)
+    lifecycle_learning_router["contract_consumed_count"] = len(alpha_setup_action_values)
+    lifecycle_learning_router["contract_consumption_boundary"] = (
+        "decision_learning_rows plus trigger_profile_learning_rows land in PM trace; "
+        "trigger_profile_learning may tune execution/profile but cannot create open/add rank delta"
+    )
+    lifecycle_memory_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
+    lifecycle_memory_audit["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    lifecycle_memory_audit["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
     lifecycle_memory_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     pm_learning_audit["final_action_memory_retrieval"] = lifecycle_memory_audit
-    pm_learning_audit["pm_lifecycle_action_port"] = lifecycle_action_port
+    pm_learning_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
+    pm_learning_audit["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    pm_learning_audit["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
     pm_learning_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
     pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
     control_diagnostics["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     control_diagnostics["final_action_memory_retrieval"] = lifecycle_memory_audit
-    control_diagnostics["pm_lifecycle_action_port"] = lifecycle_action_port
+    control_diagnostics["primary_lifecycle_action_port"] = primary_lifecycle_action_port
+    control_diagnostics["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    control_diagnostics["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
     control_diagnostics["pm_lifecycle_learning_router"] = lifecycle_learning_router
 
     plan_snapshot = _build_pm_decision_context(
@@ -11345,7 +11609,8 @@ def portfolio_agent_futures(state: FundState):
         ticker=ticker,
     )
     plan_snapshot["current_lots_before_open"] = int(current_lots)
-    plan_snapshot["pm_lifecycle_action_port"] = lifecycle_action_port
+    plan_snapshot["primary_lifecycle_action_port"] = primary_lifecycle_action_port
+    plan_snapshot["contract_lifecycle_self_check"] = contract_lifecycle_self_check
     plan_snapshot["pm_lifecycle_learning_router"] = lifecycle_learning_router
     plan_snapshot["target_value"] = float(target_value)
     plan_snapshot["account_equity"] = float(account_equity)
@@ -11427,7 +11692,7 @@ def portfolio_agent_futures(state: FundState):
         lots=pre_open_lots,
         mode="recommendation",
     )
-    final_action_contract = _build_final_action_contract(
+    candidate_contract = _build_pm_internal_candidate_contract(
         ticker=ticker,
         current_lots=current_lots,
         target_lots=target_lots,
@@ -11439,29 +11704,12 @@ def portfolio_agent_futures(state: FundState):
         recommendation_intent=recommendation_intent,
         final_entry_authority=final_entry_authority,
         control_reasons=control_reasons,
-        control_diagnostics=control_diagnostics,
-        opportunity_scorecard=opportunity_scorecard,
-        market_confirmation=market_confirmation,
-        alpha_setup_action_values=alpha_setup_action_values,
-        execution_contract_fields=plan_snapshot,
     )
-    final_action_contract = _finalize_hold_exit_learning_explanation(final_action_contract)
-    final_action_contract["position_sizing_result"] = position_sizing_result
-    final_action_contract["signal_collection_contract_ref"] = {
-        "ticker": signal_collection_contract.get("ticker"),
-        "trading_date": signal_collection_contract.get("trading_date"),
-        "source_contract_count": len(signal_collection_contract.get("source_contracts") or []),
-        "collector_decision_boundary": signal_collection_contract.get("collector_decision_boundary"),
-    }
-    pm_contract_self_check = check_final_action_contract(final_action_contract)
-    plan_snapshot["pm_contract_self_check"] = pm_contract_self_check
-    if not pm_contract_self_check.get("ok"):
-        raise ValueError(
-            f"pm_final_action_contract_self_check_failed:{pm_contract_self_check.get('errors')}"
-        )
+    plan_snapshot["pm_internal_candidate_contract"] = candidate_contract
+    plan_snapshot["pm_six_step_stage"] = "steps_1_4_candidate_generated"
     plan_snapshot["release_block_diagnostics"] = _build_release_block_diagnostics(
         ticker=ticker,
-        final_action_contract=final_action_contract,
+        candidate_contract=candidate_contract,
         final_entry_authority=final_entry_authority,
         control_reasons=control_reasons,
         lots_to_trade_reason=lots_to_trade_reason,
@@ -11470,7 +11718,7 @@ def portfolio_agent_futures(state: FundState):
         market_confirmation=market_confirmation,
         full_config=full_config,
     )
-    plan_snapshot["final_effective_action"] = final_action_contract.get("final_action")
+    plan_snapshot["final_effective_action"] = candidate_contract.get("final_action")
     holding_diagnostics = {}
     if isinstance(control_diagnostics, dict):
         holding_diagnostics = (
@@ -11607,32 +11855,6 @@ def portfolio_agent_futures(state: FundState):
         margin_available=margin_available,
         market_confirmation=market_confirmation,
     )
-    if isinstance(final_action_contract, dict):
-        learning_used = (
-            final_action_contract.get("learning_used")
-            if isinstance(final_action_contract.get("learning_used"), dict)
-            else {}
-        )
-        learning_used.pop("learning_to_position_trace", None)
-        learning_used["learning_to_position_summary"] = _contract_safe_learning_to_position_summary(
-            plan_snapshot["learning_to_position_trace"]
-        )
-        learning_used["pm_landing_consistency_audit"] = plan_snapshot["pm_landing_consistency_audit"]
-        final_action_contract["learning_used"] = learning_used
-        evidence_used = (
-            final_action_contract.get("evidence_used")
-            if isinstance(final_action_contract.get("evidence_used"), dict)
-            else {}
-        )
-        evidence_used["pm_lifecycle_decision_port"] = (
-            (evidence_used.get("pm_lifecycle_learning_trace") or {}).get("contract_lifecycle_port")
-            if isinstance(evidence_used.get("pm_lifecycle_learning_trace"), dict)
-            else ""
-        )
-        evidence_used["pm_lifecycle_action_port"] = lifecycle_action_port
-        evidence_used["pm_lifecycle_learning_router"] = lifecycle_learning_router
-        evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
-        final_action_contract["evidence_used"] = evidence_used
     if control_reasons or control_notes or control_diagnostics:
         plan_snapshot["strategy_controls"] = {
             "reasons": sorted(set(control_reasons)),
@@ -11641,6 +11863,30 @@ def portfolio_agent_futures(state: FundState):
         }
     if ticker_perf:
         plan_snapshot["ticker_performance"] = ticker_perf
+    pm_internal_candidate = {
+        "schema": "agentquant.pm_internal_candidate.v1",
+        "stage": "steps_1_4_complete_pending_full_market_deployment",
+        "candidate_contract": candidate_contract,
+        "final_contract_builder_inputs": {
+            "ticker": ticker,
+            "current_lots": current_lots,
+            "target_lots": target_lots,
+            "position_ratio": position_risk.optimal_position_ratio,
+            "margin_required": margin_required,
+            "account_equity": account_equity,
+            "lots_to_trade": lots_to_trade,
+            "lots_to_trade_reason": lots_to_trade_reason,
+            "recommendation_intent": recommendation_intent,
+            "final_entry_authority": final_entry_authority,
+            "control_reasons": list(control_reasons),
+            "control_diagnostics": control_diagnostics,
+            "opportunity_scorecard": opportunity_scorecard,
+            "market_confirmation": market_confirmation,
+            "alpha_setup_action_values": alpha_setup_action_values,
+            "execution_contract_fields": dict(plan_snapshot),
+        },
+        "final_action_contract_signed": False,
+    }
 
     pre_open_decision = FuturesDecision(
         ticker=ticker,
@@ -11661,6 +11907,21 @@ def portfolio_agent_futures(state: FundState):
             + (f"\n{cooling_period_note}" if cooling_period_note else "")
         ),
     )
+    pending_candidate_decision = FuturesDecision(
+        ticker=ticker,
+        action=FuturesAction.HOLD,
+        lots=0,
+        price=current_price,
+        settle_price=settle_price,
+        margin_rate=margin_rate,
+        contract_multiplier=multiplier,
+        contract_code=contract_code,
+        justification=(
+            f"{position_risk.justification}\n"
+            "[PM six-step candidate: steps 1-4 complete; final action/lots will be signed "
+            "after PM full-market rank and capital deployment.]"
+        ),
+    )
     recommendation = _build_phase1_recommendation(
         config_id=config_id,
         full_config=full_config,
@@ -11668,14 +11929,20 @@ def portfolio_agent_futures(state: FundState):
         ticker=ticker,
         trading_date=trading_date,
         contract_code=contract_code,
-        decision=pre_open_decision,
+        decision=pending_candidate_decision,
         morning_price_context=morning_price_context,
         analyst_signals=analyst_signals,
         plan_snapshot=plan_snapshot,
-        final_action_contract=final_action_contract,
+        pm_internal_candidate=pm_internal_candidate,
         market_confirmation=market_confirmation if market_confirmation.get("enabled") else None,
     )
     return {"decision": pre_open_decision, "recommendation": recommendation}
+
+
+def portfolio_agent_futures(state: FundState):
+    """Futures portfolio manager entrypoint; delegates to the single six-step runner."""
+    return _run_pm_six_step_decision(state)
+
 
 def calculate_long_short_signals(
     ticker: str,

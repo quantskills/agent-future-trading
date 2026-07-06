@@ -9,8 +9,6 @@ from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
-SIDE_PRIORITY_SEMANTICS_VERSION = "agentquant.ticker_side_priority.v1"
-SIDE_PRIORITY_MEANING = "side_priority_selects_ticker_direction_not_capital_rank"
 
 def normalize_analyst_name(value: Any) -> str:
     text = str(value or "")
@@ -108,15 +106,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except Exception:
         return default
-
-
-def side_priority_semantics_payload() -> dict[str, Any]:
-    return {
-        "side_priority_semantics_version": SIDE_PRIORITY_SEMANTICS_VERSION,
-        "side_priority_meaning": SIDE_PRIORITY_MEANING,
-        "side_priority_is_not_capital_rank": True,
-        "side_priority_is_not_trade_authority": True,
-    }
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -1181,6 +1170,28 @@ def build_opportunity_scorecard(
             "opportunity_score": opportunity_score,
             "candidate_quality": candidate_quality,
             "candidate_quality_components": candidate_quality_components,
+            "direction_evidence_strength": candidate_quality,
+            "direction_evidence_components": {
+                "opportunity_score": opportunity_score,
+                "candidate_quality": candidate_quality,
+                "supporting_signal_count": support_count,
+                "supporting_analysts": sorted(set(name for name in analyst_names if name)),
+                "setup_quality": round(max_setup_quality, 4),
+                "trigger_valid": bool(trigger_valid_count > 0),
+                "invalidation_present": bool(invalidation_count > 0),
+                "conflict_count": len([item for item in gating_failures if str(item or "").strip()]),
+            },
+            "analyst_direction_evidence": {
+                "side": side,
+                "source": "pm_signal_fusion",
+                "boundary": "structured_direction_evidence_not_pm_side_selection",
+                "supporting_signal_count": support_count,
+                "supporting_analysts": sorted(set(name for name in analyst_names if name)),
+                "candidate_quality": candidate_quality,
+                "candidate_layer_hint": _candidate_layer_hint(final_state),
+                "opportunity_score": opportunity_score,
+            },
+            "direction_evidence_boundary": "fusion_preserves_signal_collector_evidence_no_pm_side_selection",
             "candidate_layer_hint": _candidate_layer_hint(final_state),
             "rank_candidate_input_components": {
                 "cold_start_evidence_quality": round(opportunity_score, 4),
@@ -1333,34 +1344,21 @@ def build_opportunity_scorecard(
         preferred_side = "long"
     elif side_rows["short"]["score"] > side_rows["long"]["score"] + 0.04:
         preferred_side = "short"
-    ranked_sides = sorted(
-        (
-            side
-            for side in ("long", "short")
-            if side_rows[side]["supporting_signal_count"] > 0
-            or side_rows[side]["final_state"] in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
-        ),
-        key=lambda item: (
-            _safe_float(side_rows[item].get("candidate_quality"), 0.0),
-            _safe_float(side_rows[item].get("opportunity_score"), 0.0),
-            int(side_rows[item].get("supporting_signal_count") or 0),
-            _safe_float(side_rows[item].get("max_setup_quality"), 0.0),
-        ),
-        reverse=True,
-    )
-    for rank, side in enumerate(ranked_sides, start=1):
-        side_rows[side]["side_priority"] = rank
-        side_rows[side]["ticker_side_priority"] = rank
-        side_rows[side].update(side_priority_semantics_payload())
-    for side in ("long", "short"):
-        side_rows[side].setdefault("side_priority", None)
-        side_rows[side].setdefault("ticker_side_priority", None)
-        side_rows[side].update(side_priority_semantics_payload())
     return {
         "version": "opportunity_scorecard_v1",
-        **side_priority_semantics_payload(),
         "ticker": ticker,
         "preferred_side": preferred_side,
+        "direction_evidence_boundary": "fusion_preserves_signal_collector_evidence_no_pm_side_selection",
+        "direction_evidence_summary": {
+            side: {
+                "direction_evidence_strength": side_rows[side].get("direction_evidence_strength"),
+                "candidate_quality": side_rows[side].get("candidate_quality"),
+                "opportunity_score": side_rows[side].get("opportunity_score"),
+                "supporting_signal_count": side_rows[side].get("supporting_signal_count"),
+                "candidate_layer_hint": side_rows[side].get("candidate_layer_hint"),
+            }
+            for side in ("long", "short")
+        },
         "market_regime": _market_regime_from_signals(signals),
         "long": side_rows["long"],
         "short": side_rows["short"],

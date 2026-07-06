@@ -144,7 +144,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "PM consumes canonical analyst evidence",
             ),
             _rule(
-                "src/tools/agent_tools/analysis/analyst_signal_fusion.py",
+                "src/tools/agent_tools/decision/pm_signal_fusion.py",
                 ("_contract_from_signal", "_signal_bool", "_signal_text"),
                 "signal fusion reads the contract before raw signal fields",
             ),
@@ -246,7 +246,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "signal collector preserves and summarizes fusion evidence without deciding trades",
             ),
             _rule(
-                "src/tools/agent_tools/analysis/analyst_signal_fusion.py",
+                "src/tools/agent_tools/decision/pm_signal_fusion.py",
                 ("build_pm_fusion_diagnostics", "pm_fusion_diagnostics"),
                 "PM scorecard consumes signal-collection fusion diagnostics as scorecard evidence",
             ),
@@ -286,8 +286,17 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         producers=(
             _rule(
                 "src/agents/decision_team/portfolio_manager.py",
-                ("def _build_final_action_contract", "def _build_minimal_final_action_contract"),
-                "PM is the only strategy final contract producer",
+                (
+                    "def _sign_pm_candidate_recommendation",
+                    "_build_final_action_contract(**builder_inputs)",
+                    'snapshot["final_action_contract"] = final_action_contract',
+                ),
+                "PM step-6 signer is the only outward final contract publication point",
+            ),
+            _rule(
+                "src/tools/agent_tools/decision/pm_contract_builder.py",
+                ("def build_final_action_contract", "FINAL_ACTION_CONTRACT_VERSION"),
+                "PM-owned contract builder constructs the final_action_contract only for step 6 signing",
             ),
         ),
         consumers=(
@@ -539,7 +548,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         contract="opportunity_score_components",
         producers=(
             _rule(
-                "src/tools/agent_tools/analysis/analyst_signal_fusion.py",
+                "src/tools/agent_tools/decision/pm_signal_fusion.py",
                 ("opportunity_score_components", "positive_learning"),
                 "signal fusion builds PM score components",
             ),

@@ -167,6 +167,13 @@ class FactEntryBoundaryTest(unittest.TestCase):
                     },
                 }
             )
+        for field in (
+            "pm_internal_candidate",
+            "pm_internal_candidate_contract",
+            "pm_capital_deployment_decision",
+        ):
+            with self.assertRaisesRegex(ValueError, "pm_artifact_forbidden_downstream_fields"):
+                validate_pm_artifact_boundary({field: {"not_final_trade_truth": True}})
 
         validate_auditor_artifact_boundary(
             {

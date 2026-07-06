@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 
 
 SIDE_PRIORITY_SEMANTICS_VERSION = "agentquant.ticker_side_priority.v1"

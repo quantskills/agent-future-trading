@@ -1,11 +1,21 @@
 import unittest
+import sys
+from pathlib import Path
+
+
+SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from agents.decision_team.auditor import audit_futures_recommendation
 from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
-from tools.agent_tools.analysis.analyst_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.decision.pm_contract_builder import build_final_action_contract
+from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
+from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
@@ -97,8 +107,27 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         side_row = scorecard["long"]
         self.assertIn("pm_fusion_diagnostics", side_row)
         self.assertIn("pm_conflict_resolution", side_row)
-        self.assertIn("side_priority", side_row)
+        self.assertIn("analyst_direction_evidence", side_row)
+        self.assertIn("direction_evidence_strength", side_row)
+        self.assertNotIn("side_priority", side_row)
         self.assertNotIn("opportunity_rank", side_row)
+        selected = select_ticker_side(
+            ticker="RB",
+            analyst_signals=signals,
+            signal_collection_contract=collection,
+            effective_memory_summary={"status": "available"},
+            market_confirmation={"confirmation_score": 0.74, "features": ["trend"], "conflicts": []},
+            data_quality_summary={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            decision_date="2025-05-06",
+            config={},
+            prebuilt_scorecard=scorecard,
+        )
+        self.assertIn("side_priority", selected["opportunity_scorecard"]["long"])
+        selected["opportunity_scorecard"]["long"]["capital_priority_score"] = 0.99
+        selected["opportunity_scorecard"]["long"]["capital_priority_tier"] = 3
         contract = build_final_action_contract(
             ticker="RB",
             current_lots=0,
@@ -121,12 +150,17 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             },
             control_reasons=[],
             control_diagnostics={},
-            opportunity_scorecard=scorecard,
+            opportunity_scorecard=selected["opportunity_scorecard"],
             market_confirmation={"confirmation_score": 0.74},
             alpha_setup_action_values=[],
         )
         self.assertIn("pm_fusion_diagnostics", contract["evidence_used"])
+        self.assertIn("analyst_direction_evidence", contract["evidence_used"])
         self.assertIn("side_priority", contract["evidence_used"])
+        self.assertIn("candidate_quality", contract["evidence_used"])
+        self.assertIn("candidate_layer_hint", contract["evidence_used"])
+        self.assertNotIn("capital_priority_score", contract["evidence_used"])
+        self.assertNotIn("capital_priority_tier", contract["evidence_used"])
         self.assertNotIn("opportunity_rank", contract["evidence_used"])
         self.assertNotIn("rank_capital_role", contract["evidence_used"])
         self.assertNotIn("capital_layer", contract["evidence_used"])
@@ -147,6 +181,80 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         audit = audit_futures_recommendation(recommendation=recommendation, full_config={"max_total_margin_ratio": 0.20})
         self.assertIn("pm_fusion_explanation_audit", audit.audit_payload)
         self.assertTrue(audit.audit_payload["pm_fusion_explanation_audit"]["auditor_boundary"].startswith("audit_pm_contract"))
+
+    def test_final_contract_preserves_execution_trigger_profile_learning_route(self):
+        action_values = [
+            {
+                "id": "open-1",
+                "ticker": "RB",
+                "side": "long",
+                "action_value_lane": "open",
+                "action_preference": "positive_candidate_open",
+                "reward_mean": 0.18,
+                "sample_count": 6,
+            },
+            {
+                "id": "exec-1",
+                "ticker": "RB",
+                "side": "long",
+                "action_value_lane": "execution",
+                "action_preference": "positive_candidate_execution",
+                "reward_mean": 0.09,
+                "sample_count": 4,
+            },
+        ]
+        router = route_lifecycle_learning(lifecycle_port="new_risk", action_values=action_values)
+        primary_port = classify_lifecycle_action_port({
+            "current_lots": 0,
+            "target_lots": 1,
+            "final_action": "open_probe",
+        })
+        contract = build_final_action_contract(
+            ticker="RB",
+            current_lots=0,
+            target_lots=1,
+            position_ratio=0.008,
+            margin_required=8000,
+            account_equity=5000000,
+            lots_to_trade=1,
+            lots_to_trade_reason="unit_test",
+            recommendation_intent={"action": "open_long", "lots": 1},
+            final_entry_authority={"authority_type": "exploration_probe", "decision": "allow_exploration_probe"},
+            control_reasons=[],
+            control_diagnostics={
+                "primary_lifecycle_action_port": primary_port,
+                "pm_lifecycle_learning_router": router,
+                "alpha_setup_ev_fusion": {
+                    "rank_score_open_add_learning_delta": 0.031,
+                    "learning_impact_delta": 0.031,
+                },
+            },
+            opportunity_scorecard={
+                "preferred_side": "long",
+                "long": {
+                    "score": 0.62,
+                    "opportunity_score": 0.62,
+                    "final_state": "probe_candidate",
+                    "opportunity_score_components": {
+                        "positive_learning": 0.031,
+                        "execution_profile_learning": 0.07,
+                    },
+                },
+            },
+            market_confirmation={"confirmation_score": 0.70},
+            alpha_setup_action_values=action_values,
+        )
+        trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+        self.assertEqual(trace["primary_lifecycle_action_port"]["pm_lifecycle_action_port"], "new_risk")
+        self.assertTrue(trace["contract_lifecycle_self_check"]["ok"])
+        self.assertEqual(trace["lifecycle_port_transition_reason"], "consistent")
+        self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["open-1"])
+        self.assertEqual([row["id"] for row in trace["trigger_profile_learning"]], ["exec-1"])
+        self.assertNotIn("exec-1", {row.get("id") for row in trace["rejected_learning"]})
+        self.assertFalse(trace["execution_profile_learning_direct_to_rank"])
+        impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
+        self.assertEqual(impact["open_add_rank_score_delta"], 0.031)
+        self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
 
     def test_reviewer_fusion_attribution_is_read_only_learning_context(self):
         attribution = build_reviewer_fusion_attribution(

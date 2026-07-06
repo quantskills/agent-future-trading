@@ -1,6 +1,8 @@
 ﻿import sys
+import copy
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +11,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from graph.constants import Signal
-from graph.schema import AnalystSignal
+from graph.schema import AnalystSignal, RecommendationSourceType, RecommendationStatus
+from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     CAPITAL_LAYER_ALPHA_SCALE,
@@ -21,8 +24,13 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     RANK_CAPITAL_ROLE_REAL_BUDGET,
     _clear_non_full_market_rank_fields,
     _ensure_final_rank_score_fields,
+    apply_full_market_capital_deployment,
     rank_metadata_for_row,
     rank_trace_for_row,
+)
+from tools.agent_tools.decision.pm_lifecycle_action_port import (
+    build_contract_lifecycle_self_check,
+    classify_lifecycle_action_port,
 )
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_ticker_side_selection import (
@@ -31,7 +39,6 @@ from tools.agent_tools.decision.pm_ticker_side_selection import (
     select_ticker_side,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
-from tools.common.final_action_semantics import lifecycle_learning_decision_contract_errors
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
@@ -162,12 +169,218 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
     def test_pm_main_chain_classifies_lifecycle_before_scorecard(self):
         source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8-sig")
-        lifecycle_pos = source.index("initial_lifecycle_action_port = classify_lifecycle_action_port")
+        lifecycle_pos = source.index("primary_lifecycle_action_port = classify_lifecycle_action_port")
         scorecard_pos = source.index("opportunity_scorecard = build_opportunity_scorecard", lifecycle_pos)
         side_selection_pos = source.index("ticker_side_selection_result = select_ticker_side", lifecycle_pos)
+        self_check_pos = source.index("contract_lifecycle_self_check = build_contract_lifecycle_self_check")
+        router_pos = source.index("lifecycle_learning_router = route_lifecycle_learning")
         self.assertLess(lifecycle_pos, scorecard_pos)
         self.assertLess(lifecycle_pos, side_selection_pos)
-        self.assertIn("_route_pm_scorecard_action_values", source[lifecycle_pos:scorecard_pos])
+        self.assertLess(lifecycle_pos, self_check_pos)
+        self.assertLess(self_check_pos, router_pos)
+        self.assertIn("primary_lifecycle_action_port.get", source[router_pos:router_pos + 250])
+        self.assertNotIn("contract_lifecycle_self_check_port.get", source[router_pos:router_pos + 250])
+        self.assertNotIn("_route_pm_scorecard_action_values", source)
+        self.assertEqual(source.count("route_lifecycle_learning("), 1)
+
+    def test_pm_main_chain_defers_final_contract_builder_to_step6_finalizer(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8-sig")
+        main_start = source.index("def _run_pm_six_step_decision")
+        main_end = source.index("def calculate_long_short_signals", main_start)
+        main_chain = source[main_start:main_end]
+        signer_start = source.index("def _sign_pm_candidate_recommendation")
+        signer_end = source.index("def _release_block_category", signer_start)
+        signer = source[signer_start:signer_end]
+
+        self.assertIn("def portfolio_agent_futures", source)
+        self.assertIn("return _run_pm_six_step_decision(state)", source)
+        self.assertIn("_build_pm_internal_candidate_contract(", main_chain)
+        self.assertIn("pm_internal_candidate=pm_internal_candidate", main_chain)
+        self.assertNotIn("final_action_contract = _build_final_action_contract(", main_chain)
+        self.assertIn("final_action_contract = _build_final_action_contract(**builder_inputs)", signer)
+        self.assertIn("snapshot.pop(\"pm_internal_candidate\", None)", signer)
+        self.assertIn("snapshot.pop(\"pm_internal_candidate_contract\", None)", signer)
+        self.assertIn("snapshot.pop(\"pm_capital_deployment_decision\", None)", signer)
+        self.assertNotIn("_build_minimal_final_action_contract", source)
+        self.assertNotIn("blocked_internal_candidate", source)
+
+    def test_full_market_deployment_writes_decision_not_final_contract_for_internal_candidate(self):
+        scorecard = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "watch_for_trigger",
+                "opportunity_score": 0.62,
+                "score": 0.62,
+                "rank_candidate_input_components": {"cold_start_evidence_quality": 0.62},
+                "lifecycle_learning_trace": {"trace_version": "test"},
+                "learning_impact_delta": {"learning_impact_delta": 0.0},
+            },
+        }
+        snapshot = {
+            "opportunity_scorecard": scorecard,
+            "pm_internal_candidate": {
+                "candidate_contract": {
+                    "ticker": "RB",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "target_position_ratio": 0.008,
+                    "final_action": "open_probe",
+                    "reason_codes": [],
+                },
+                "final_contract_builder_inputs": {
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "control_reasons": [],
+                },
+            },
+        }
+        recommendation = SimpleNamespace(
+            status=RecommendationStatus.PENDING,
+            source_type=RecommendationSourceType.STRATEGY,
+            signal_snapshot=snapshot,
+            underlying_code="RB",
+            base_price=3500.0,
+            action=None,
+            lots=0,
+        )
+        portfolio = SimpleNamespace(account_equity=1_000_000.0, cashflow=1_000_000.0, margin_used=0.0, positions={})
+
+        result = apply_full_market_capital_deployment(
+            generated=[("RB", recommendation)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertNotIn("final_action_contract", recommendation.signal_snapshot)
+        self.assertIn("pm_capital_deployment_decision", recommendation.signal_snapshot)
+        self.assertTrue(
+            recommendation.signal_snapshot["pm_capital_deployment_decision"]["selected_for_capital_deployment"]
+        )
+        self.assertIn("pm_internal_candidate", recommendation.signal_snapshot)
+
+    def test_full_market_deployment_ignores_signed_contract_without_internal_candidate(self):
+        scorecard = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "watch_for_trigger",
+                "opportunity_score": 0.62,
+                "score": 0.62,
+                "rank_candidate_input_components": {"cold_start_evidence_quality": 0.62},
+                "lifecycle_learning_trace": {"trace_version": "test"},
+                "learning_impact_delta": {"learning_impact_delta": 0.0},
+            },
+        }
+        final_contract = {
+            "ticker": "RB",
+            "current_lots": 0,
+            "target_lots": 1,
+            "target_position_ratio": 0.008,
+            "final_action": "open_probe",
+            "reason_codes": ["already_signed"],
+            "evidence_used": {"existing": True},
+        }
+        snapshot = {
+            "opportunity_scorecard": scorecard,
+            "final_action_contract": dict(final_contract),
+        }
+        recommendation = SimpleNamespace(
+            status=RecommendationStatus.PENDING,
+            source_type=RecommendationSourceType.STRATEGY,
+            signal_snapshot=snapshot,
+            underlying_code="RB",
+            base_price=3500.0,
+            action=None,
+            lots=0,
+        )
+        portfolio = SimpleNamespace(account_equity=1_000_000.0, cashflow=1_000_000.0, margin_used=0.0, positions={})
+
+        apply_full_market_capital_deployment(
+            generated=[("RB", recommendation)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(recommendation.signal_snapshot["final_action_contract"], final_contract)
+        self.assertNotIn("pm_capital_deployment_decision", recommendation.signal_snapshot)
+
+    def test_mechanism_pm_step2_documents_lifecycle_port_primary_tool(self):
+        text = (PROJECT_ROOT / "docs" / "mechanism_pm.md").read_text(encoding="utf-8-sig")
+        step2_start = text.index("## 2. 判断生命周期动作口")
+        step3_start = text.index("## 3. 判断单品种方向与候选质量")
+        step2 = text[step2_start:step3_start]
+        section_start = step2.index("### 2.1 调用工具/模块")
+        section_end = step2.index("### 2.2 交易动作分口")
+        section = step2[section_start:section_end]
+
+        self.assertIn("主工具：", section)
+        self.assertIn("`pm_lifecycle_action_port.py`", section)
+        self.assertIn("共享语义依赖：", section)
+        self.assertIn("`final_action_semantics`", section)
+        self.assertIn("输入辅助：", section)
+        self.assertIn("明确禁止：", section)
+        self.assertIn("`pm_contract_builder.py` 不参与动作口判断", section)
+        self.assertIn("只在第 6 步生成唯一 `final_action_contract`", section)
+        self.assertNotIn("- `pm_contract_builder`", section)
+        self.assertNotIn("主要用：", section)
+
+    def test_contract_lifecycle_self_check_allows_explicit_budget_transition(self):
+        primary = classify_lifecycle_action_port({
+            "current_lots": 0,
+            "target_lots": 1,
+            "final_action": "open_probe",
+        })
+        final = classify_lifecycle_action_port({
+            "current_lots": 0,
+            "target_lots": 0,
+            "final_action": "wait",
+            "reason_codes": ["no_rank_or_budget_no_new_exposure"],
+        })
+        check = build_contract_lifecycle_self_check(
+            primary_lifecycle_action_port=primary,
+            contract_lifecycle_port=final,
+            reason_codes=["no_rank_or_budget_no_new_exposure"],
+        )
+        self.assertTrue(check["ok"])
+        self.assertFalse(check["consistent"])
+        self.assertEqual(check["transition_reason"], "no_rank_or_budget_no_new_exposure")
+        self.assertTrue(check["self_check_only"])
+        self.assertTrue(check["does_not_route_learning"])
+
+    def test_contract_lifecycle_self_check_fails_unexplained_transition(self):
+        primary = classify_lifecycle_action_port({
+            "current_lots": 0,
+            "target_lots": 1,
+            "final_action": "open_probe",
+        })
+        final = classify_lifecycle_action_port({
+            "current_lots": 0,
+            "target_lots": 0,
+            "final_action": "wait",
+        })
+        check = build_contract_lifecycle_self_check(
+            primary_lifecycle_action_port=primary,
+            contract_lifecycle_port=final,
+            reason_codes=[],
+        )
+        self.assertFalse(check["ok"])
+        self.assertEqual(check["transition_reason"], "unexplained_lifecycle_port_transition")
 
     def test_lifecycle_learning_router_routes_execution_to_trigger_profile(self):
         result = route_lifecycle_learning(
@@ -178,14 +391,34 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 {"id": "hold-1", "action_value_lane": "hold"},
             ],
         )
+        self.assertEqual([row["id"] for row in result["decision_learning_rows"]], ["open-1"])
         self.assertEqual([row["id"] for row in result["accepted_learning"]], ["open-1"])
+        self.assertEqual([row["id"] for row in result["trigger_profile_learning_rows"]], ["exec-1"])
         self.assertEqual([row["id"] for row in result["trigger_profile_learning"]], ["exec-1"])
+        self.assertEqual([row["id"] for row in result["rejected_learning_rows"]], ["hold-1"])
         self.assertNotIn("exec-1", {row["id"] for row in result["rejected_learning"]})
         self.assertTrue(result["trigger_profile_learning"][0]["not_rank_learning"])
         self.assertFalse(result["trigger_profile_learning_direct_to_rank"])
 
     def test_ticker_side_selection_selects_side_without_trade_authority(self):
         signal = _signal("technical", Signal.BULLISH, 0.74)
+        raw_scorecard = build_opportunity_scorecard(
+            ticker="RB",
+            analyst_signals=[signal],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "single_side",
+                "trigger_status": "confirmed",
+                "evidence_strength": "high",
+                "evidence_conflict_level": "low",
+            },
+            market_confirmation={"confirmation_score": 0.72},
+            config={"weak_confirmation_threshold": 0.45},
+        )
+        self.assertIn("analyst_direction_evidence", raw_scorecard["long"])
+        self.assertIn("candidate_quality", raw_scorecard["long"])
+        self.assertNotIn("side_priority", raw_scorecard["long"])
+        self.assertNotIn("ticker_side_priority", raw_scorecard["long"])
         result = select_ticker_side(
             ticker="RB",
             analyst_signals=[signal],
@@ -624,25 +857,22 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             },
         }
 
+        original_contract = copy.deepcopy(snapshot["final_action_contract"])
+
         _clear_non_full_market_rank_fields(snapshot)
 
         contract = snapshot["final_action_contract"]
         evidence = contract["evidence_used"]
         deployment = contract["capital_deployment"]
         scorecard_long = snapshot["opportunity_scorecard"]["long"]
-        self.assertNotIn("opportunity_rank", evidence)
-        self.assertNotIn("rank_source", evidence)
-        self.assertNotIn("rank_input_components", evidence)
-        self.assertNotIn("capital_layer", evidence)
-        self.assertNotIn("opportunity_rank", deployment)
-        self.assertNotIn("rank_source", deployment)
-        self.assertNotIn("rank_input_components", deployment)
+        self.assertEqual(contract, original_contract)
+        self.assertIn("opportunity_rank", evidence)
+        self.assertIn("opportunity_rank", deployment)
         self.assertNotIn("opportunity_rank", scorecard_long)
         self.assertNotIn("rank_input_components", scorecard_long)
         self.assertEqual(evidence["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
         self.assertEqual(evidence["learning_impact_delta"]["hold_decision"], "continue_hold")
         self.assertEqual(scorecard_long["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
-        self.assertEqual(lifecycle_learning_decision_contract_errors(contract), [])
 
     def test_portfolio_manager_no_llm_call_site_remains(self):
         text = (PROJECT_ROOT / "src" / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8")

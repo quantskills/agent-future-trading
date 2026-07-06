@@ -101,6 +101,9 @@ PM_INTERNAL_DRAFT_FIELDS = {
     "pm_ranking_draft",
     "pm_capital_deployment_draft",
     "pm_contract_submission_draft",
+    "pm_internal_candidate",
+    "pm_internal_candidate_contract",
+    "pm_capital_deployment_decision",
     "internal_pm_draft",
 }
 

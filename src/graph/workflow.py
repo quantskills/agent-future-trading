@@ -4,18 +4,15 @@ from typing import Callable
 from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from graph.schema import (
-    AnalystSignal,
     FundState,
     Portfolio,
-    FuturesDecision,
     Position,
     FuturesRecommendation,
-    RecommendationAction,
     RecommendationSourceType,
     RecommendationStatus,
     TradingPhase,
 )
-from graph.constants import AgentKey, Signal
+from graph.constants import AgentKey
 from agents.registry import AgentRegistry
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
 from tools.agent_tools.analysis.analyst_quality import write_analyst_report
@@ -220,11 +217,32 @@ class AgentWorkflow:
             config=self.config,
             portfolio=self.init_portfolio,
         )
+        for ticker, recommendation in generated:
+            self._assert_pm_signed_recommendation_for_persistence(ticker, recommendation)
         for _, recommendation in generated:
             recommendation_id = self.db.save_futures_recommendation(recommendation)
             if not recommendation_id:
                 raise RuntimeError(f"Failed to save futures recommendation for {recommendation.underlying_code}")
             recommendation.id = recommendation_id
+
+    def _assert_pm_signed_recommendation_for_persistence(
+        self,
+        ticker: str,
+        recommendation: FuturesRecommendation,
+    ) -> None:
+        """Block persistence unless PM step 6 has signed the final contract."""
+        snapshot = recommendation.signal_snapshot
+        if not isinstance(snapshot, dict):
+            raise RuntimeError(f"{ticker} PM recommendation missing signal_snapshot after step6 finalization")
+        final_contract = snapshot.get("final_action_contract")
+        if not isinstance(final_contract, dict) or not final_contract:
+            raise RuntimeError(f"{ticker} PM recommendation missing signed final_action_contract")
+        if "pm_internal_candidate" in snapshot:
+            raise RuntimeError(f"{ticker} PM internal candidate remained after step6 signing")
+        if "pm_internal_candidate_contract" in snapshot:
+            raise RuntimeError(f"{ticker} PM internal candidate contract remained after step6 signing")
+        if "pm_capital_deployment_decision" in snapshot:
+            raise RuntimeError(f"{ticker} PM capital deployment decision remained after step6 signing")
 
     def _audit_phase1_strategy_recommendations(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         """Run the independent Auditor after PM capital deployment finalizes contracts."""
@@ -255,7 +273,7 @@ class AgentWorkflow:
                 "independent_auditor_agent": True,
                 "pm_risk_gate_is_not_auditor": True,
             }
-            recommendation.signal_snapshot = snapshot
+            setattr(recommendation, "signal_snapshot", snapshot)
             recommendation.audit_payload = audit_output.audit_payload
             if audit_output.audit_verdict in {"block", "require_review"}:
                 logger.warning(
@@ -353,155 +371,19 @@ class AgentWorkflow:
             
         logger.info(f"Active analysts for {ticker}: {self.current_analysts}")
 
-    def _coerce_phase1_recommendation(self, ticker: str, portfolio: Portfolio, decision: FuturesDecision, morning_price_context, final_state: Dict[str, Any]) -> FuturesRecommendation:
+    def _require_pm_candidate_recommendation(self, ticker: str, final_state: Dict[str, Any]) -> FuturesRecommendation:
+        """Collect PM's per-ticker candidate before full-market step 5/6 finalization."""
         recommendation = final_state.get("recommendation")
-        if recommendation:
-            if isinstance(recommendation, FuturesRecommendation):
-                return recommendation
-            return FuturesRecommendation(**recommendation)
-
-        trading_date_value = self.trading_date.strftime("%Y-%m-%d") if hasattr(self.trading_date, "strftime") else str(self.trading_date)
-        warning_message = morning_price_context.warning_message if morning_price_context else None
-        status = RecommendationStatus.PENDING
-        action = RecommendationAction.HOLD
-        lots = 0
-        contract_code = getattr(decision, "contract_code", None)
-
-        if decision is not None:
-            action_map = {
-                "open_long": RecommendationAction.OPEN_LONG,
-                "open_short": RecommendationAction.OPEN_SHORT,
-                "close_long": RecommendationAction.CLOSE_LONG,
-                "close_short": RecommendationAction.CLOSE_SHORT,
-                "hold": RecommendationAction.HOLD,
-            }
-            decision_action = getattr(decision.action, "value", decision.action)
-            action = action_map.get(str(decision_action), RecommendationAction.HOLD)
-            lots = getattr(decision, "lots", 0)
-
-        if morning_price_context is None or morning_price_context.base_price is None:
-            status = RecommendationStatus.SKIPPED
-            action = RecommendationAction.HOLD
-            lots = 0
-        signal_snapshot = final_state.get("signal_snapshot") or {}
-
-        return FuturesRecommendation(
-            config_id=self.config_id,
-            reference_portfolio_id=portfolio.id,
-            trading_date=trading_date_value,
-            effective_trade_date=trading_date_value,
-            source_type=RecommendationSourceType.STRATEGY,
-            underlying_code=ticker,
-            contract_code=contract_code,
-            action=action,
-            lots=lots,
-            base_price=morning_price_context.base_price if morning_price_context else None,
-            base_price_source=morning_price_context.base_price_source if morning_price_context else None,
-            base_price_date=morning_price_context.base_price_date if morning_price_context else None,
-            open_price=morning_price_context.open_price if morning_price_context else None,
-            prev_close_price=morning_price_context.prev_close_price if morning_price_context else None,
-            slippage_model=self.config.get("execution", {}).get("slippage_model", "tick"),
-            slippage_ticks=None,
-            slippage_amount=None,
-            execution_price=None,
-            justification=getattr(decision, "justification", "") if decision else "",
-            signal_snapshot=signal_snapshot,
-            warning_message=warning_message,
-            status=status,
-        )
-
-    def _build_missing_pre_open_reference_signals(
-        self,
-        ticker: str,
-        analysts: list[str],
-        morning_price_context,
-    ) -> list[AnalystSignal]:
-        warning_message = (
-            getattr(morning_price_context, "warning_message", None)
-            if morning_price_context is not None else None
-        )
-        reason = warning_message or "pre_open_reference_price_unavailable"
-        signals: list[AnalystSignal] = []
-        for analyst in analysts:
-            normalized_analyst = self._normalize_analyst_name(analyst)
-            signal = AnalystSignal(
-                agent_name=normalized_analyst,
-                signal=Signal.NEUTRAL,
-                confidence=0.0,
-                justification=(
-                    f"{ticker} cannot form a tradable Phase1 setup because the pre-open "
-                    f"reference price is unavailable: {reason}"
-                ),
-                data_cutoff="pre_open",
-                no_lookahead_status="ok",
-                determinism_mode="deterministic_data_gate",
-                horizon_class="flat",
-                analyst_horizon="flat",
-                decision_horizon="flat",
-                execution_horizon="flat",
-                validation_horizon="flat",
-                expected_horizon_days=0,
-                market_regime="unknown",
-                setup_type="data_unavailable_no_trade",
-                data_freshness="missing",
-                evidence_quality="low",
-                business_quality_score=0.0,
-                data_coverage_score=0.0,
-                tradeability_reason="pre_open_reference_price_unavailable",
-                opportunity_type="no_trade",
-                opportunity_state="no_opportunity",
-                setup_quality_score=0.0,
-                entry_quality="poor",
-                setup_quality_notes=["pre_open_reference_price_unavailable"],
-                entry_trigger="none",
-                exit_hint="none",
-                holding_period_hint="flat",
-                factor_focus=["pandaai_market_data"],
-                neutral_reason="pre_open_reference_price_unavailable",
-                missing_evidence=["pre_open_reference_price"],
-                would_change_view_if="PandaAI returns a valid previous trading day close for Phase1 planning",
-                neutral_opportunity_bucket="low_tradeability",
-                neutral_trigger_condition="valid_pre_open_reference_price",
-                counterfactual_side="flat",
-                neutral_watchlist_priority="none",
-                do_not_trade_reason="pre_open_reference_price_unavailable",
-                metadata={
-                    "data_usage_summary": {
-                        "ticker": ticker,
-                        "analyst": normalized_analyst,
-                        "pandaai_pre_open_reference": {
-                            "available": False,
-                            "used_in_signal": True,
-                            "reason": reason,
-                        },
-                    },
-                    "no_trade_reason": "pre_open_reference_price_unavailable",
-                    "no_trade_category": "data",
-                    "phase1_signal_contract": "complete_no_trade_signal",
-                    "warning_message": warning_message,
-                },
-            )
-            signals.append(signal)
-        self._validate_phase1_analyst_outputs(ticker, analysts, signals)
-        return signals
-
-    def _build_signal_snapshot_from_signals(self, analyst_signals: list[AnalystSignal]) -> Dict[str, Any]:
-        snapshot: Dict[str, Any] = {}
-        for signal in analyst_signals or []:
-            analyst = self._normalize_analyst_name(getattr(signal, "agent_name", ""))
-            snapshot[analyst] = {
-                "signal": getattr(getattr(signal, "signal", None), "value", getattr(signal, "signal", "")),
-                "confidence": getattr(signal, "confidence", None),
-                "horizon_class": getattr(signal, "horizon_class", "unknown"),
-                "opportunity_state": getattr(signal, "opportunity_state", "watch_for_trigger"),
-                "opportunity_type": getattr(signal, "opportunity_type", "unknown"),
-                "setup_type": getattr(signal, "setup_type", "unknown"),
-                "trigger_valid": getattr(signal, "trigger_valid", False),
-                "tradeability_reason": getattr(signal, "tradeability_reason", ""),
-                "neutral_reason": getattr(signal, "neutral_reason", ""),
-                "metadata": getattr(signal, "metadata", {}) or {},
-            }
-        return snapshot
+        if not recommendation:
+            raise RuntimeError(f"{ticker} phase1 PM did not return a FuturesRecommendation candidate")
+        if isinstance(recommendation, FuturesRecommendation):
+            candidate = recommendation
+        else:
+            candidate = FuturesRecommendation.model_validate(recommendation)
+        snapshot = candidate.signal_snapshot
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("pm_internal_candidate"), dict):
+            raise RuntimeError(f"{ticker} phase1 PM recommendation missing pm_internal_candidate")
+        return candidate
 
     def _build_futures_phase1_state(self, ticker: str, portfolio: Portfolio, morning_price_context):
         return FundState(
@@ -605,13 +487,13 @@ class AgentWorkflow:
         state["num_tickers"] = len(self.tickers)
         state["decision"] = None
         state["recommendation"] = None
+        collector_output = signal_collector_agent(state)
+        state.update(collector_output)
         self._validate_phase1_analyst_outputs(
             str(state.get("ticker") or ""),
             list(state.get("enabled_analysts") or self.workflow_analysts),
             list(state.get("analyst_signals") or []),
         )
-        collector_output = signal_collector_agent(state)
-        state.update(collector_output)
         return portfolio_agent_futures(state)
 
     def _prefetch_pre_open_reference_prices(self, timings: Dict[str, float]) -> Dict[str, Any]:
@@ -747,12 +629,31 @@ class AgentWorkflow:
 
         return portfolio
 
-    def _apply_virtual_recommendation_to_portfolio(self, portfolio: Portfolio, recommendation: FuturesRecommendation) -> Portfolio:
+    def _project_signed_contract_to_virtual_portfolio(self, portfolio: Portfolio, recommendation: FuturesRecommendation) -> Portfolio:
+        """Project a signed PM contract into the Phase1 planning portfolio.
+
+        This is a read-only projection of ``final_action_contract`` into an
+        in-memory planning portfolio. It must not infer strategy, complete a
+        missing contract, or derive target lots from recommendation action/lots.
+        """
         if recommendation.status == RecommendationStatus.SKIPPED:
             return portfolio
 
-        signal_snapshot = recommendation.signal_snapshot or {}
         ticker = recommendation.underlying_code
+        source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+        if source_type != RecommendationSourceType.STRATEGY.value:
+            return portfolio
+        signed_snapshot = recommendation.signal_snapshot or {}
+
+        final_contract = (
+            signed_snapshot.get("final_action_contract")
+            if isinstance(signed_snapshot, dict) and isinstance(signed_snapshot.get("final_action_contract"), dict)
+            else {}
+        )
+        if not final_contract:
+            raise RuntimeError(f"{ticker}: strategy recommendation missing signed final_action_contract")
+        if final_contract.get("target_lots") is None:
+            raise RuntimeError(f"{ticker}: signed final_action_contract missing target_lots")
 
         contract_info = FuturesContractInfoCache.get_contract_info(ticker)
         if not contract_info:
@@ -764,56 +665,26 @@ class AgentWorkflow:
         position = portfolio.positions[ticker]
         position.contract_multiplier = contract_info.get("contract_multiplier")
         reference_price = float(getattr(recommendation, "base_price", None) or 0.0)
-        target_lots = None
-        current_shares = int(getattr(position, "shares", 0) or 0)
-        source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
-
-        if source_type == RecommendationSourceType.STRATEGY.value:
-            final_contract = (
-                signal_snapshot.get("final_action_contract")
-                if isinstance(signal_snapshot, dict) and isinstance(signal_snapshot.get("final_action_contract"), dict)
-                else {}
-            )
-            if not final_contract:
-                logger.warning(
-                    f"{ticker}: strategy recommendation without final_action_contract is not "
-                    "applied to the virtual Phase1 planning portfolio"
-                )
-                return portfolio
-            target_lots = int(final_contract.get("target_lots") if final_contract.get("target_lots") is not None else current_shares)
-        else:
-            action = getattr(recommendation.action, "value", recommendation.action)
-            lots = int(recommendation.lots or 0)
-            if action == RecommendationAction.CLOSE_LONG.value:
-                target_lots = max(0, current_shares - lots)
-            elif action == RecommendationAction.CLOSE_SHORT.value:
-                target_lots = min(0, current_shares + lots)
-            elif action == RecommendationAction.OPEN_LONG.value:
-                target_lots = lots
-            elif action == RecommendationAction.OPEN_SHORT.value:
-                target_lots = -lots
-            else:
-                target_lots = current_shares
+        projected_lots = int(final_contract.get("target_lots") or 0)
 
         if reference_price <= 0:
             return portfolio
 
-        position.shares = target_lots
-        if target_lots == 0:
+        position.shares = projected_lots
+        if projected_lots == 0:
             position.value = 0.0
             position.margin_used = 0.0
             position.entry_price = None
             position.unrealized_pnl = 0.0
             return self._refresh_portfolio_account_fields(portfolio)
-            return portfolio
 
         margin_rate = (
             contract_info.get("margin_rate_long")
-            if target_lots > 0 else contract_info.get("margin_rate_short")
+            if projected_lots > 0 else contract_info.get("margin_rate_short")
         )
         position.entry_price = reference_price
         position.margin_rate = margin_rate
-        position.value = abs(target_lots) * reference_price * contract_info["contract_multiplier"]
+        position.value = abs(projected_lots) * reference_price * contract_info["contract_multiplier"]
         position.margin_used = position.value * margin_rate
         return self._refresh_portfolio_account_fields(portfolio)
 
@@ -870,33 +741,30 @@ class AgentWorkflow:
             self._timed_call(timings, "load_analysts", self.load_analysts, ticker)
             morning_price_context = morning_contexts.get(ticker)
             if morning_price_context is None or morning_price_context.base_price is None:
-                analyst_signals = self._build_missing_pre_open_reference_signals(
-                    ticker=ticker,
-                    analysts=self.current_analysts.copy(),
-                    morning_price_context=morning_price_context,
+                warning_message = (
+                    getattr(morning_price_context, "warning_message", None)
+                    if morning_price_context is not None else None
                 )
-                missing_basis_state = {
-                    "ticker": ticker,
-                    "portfolio": portfolio,
-                    "trading_date": self.trading_date,
-                    "full_config": self.config,
-                    "analyst_signals": analyst_signals,
-                    "analyst_outputs": [],
-                    "signal_snapshot": self._build_signal_snapshot_from_signals(analyst_signals),
-                }
+                missing_basis_state = self._build_futures_phase1_state(ticker, portfolio, morning_price_context)
+                missing_basis_state["pre_open_reference_price_unavailable"] = True
+                missing_basis_state["pre_open_reference_price_unavailable_reason"] = (
+                    warning_message or "pre_open_reference_price_unavailable"
+                )
+                missing_basis_state["pre_open_reference_price_unavailable_warning"] = warning_message
+                final_state = self._timed_call(
+                    timings,
+                    "portfolio_manager",
+                    self._run_phase1_portfolio_only,
+                    missing_basis_state,
+                    portfolio,
+                )
                 self._timed_call(
                     timings,
                     "save_missing_basis_analyst_outputs",
                     self._save_prefetched_analyst_outputs,
-                    missing_basis_state,
+                    final_state,
                 )
-                recommendation = self._coerce_phase1_recommendation(
-                    ticker=ticker,
-                    portfolio=portfolio,
-                    decision=None,
-                    morning_price_context=morning_price_context,
-                    final_state=missing_basis_state,
-                )
+                recommendation = self._require_pm_candidate_recommendation(ticker=ticker, final_state=final_state)
                 generated_recommendations.append((ticker, recommendation))
                 logger.warning(f"{ticker} phase1 skipped: {recommendation.warning_message}")
                 logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
@@ -936,14 +804,7 @@ class AgentWorkflow:
                 logger.error(f"Error running futures phase1 workflow: {e}")
                 raise RuntimeError(f"Failed to generate futures phase1 recommendation for {ticker}")
 
-            decision = final_state.get("decision")
-            recommendation = self._coerce_phase1_recommendation(
-                ticker=ticker,
-                portfolio=portfolio,
-                decision=decision,
-                morning_price_context=morning_price_context,
-                final_state=final_state,
-            )
+            recommendation = self._require_pm_candidate_recommendation(ticker=ticker, final_state=final_state)
             generated_recommendations.append((ticker, recommendation))
 
             logger.log_portfolio(f"{ticker} phase1 recommendation collected", portfolio)
@@ -960,7 +821,7 @@ class AgentWorkflow:
         portfolio = phase1_planning_portfolio
         for _, recommendation in generated_recommendations:
             if recommendation.status != RecommendationStatus.SKIPPED:
-                portfolio = self._apply_virtual_recommendation_to_portfolio(portfolio, recommendation)
+                portfolio = self._project_signed_contract_to_virtual_portfolio(portfolio, recommendation)
         logger.log_portfolio("Phase1 Intraday Portfolio", portfolio)
         elapsed = perf_counter() - start_time
         if self._phase1_timing_enabled():
