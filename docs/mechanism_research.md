@@ -35,7 +35,7 @@ Phase1 投资组合经理 final_action_contract
 研究结果进入交易链路只有两条合法路径：
 
 1. 分析师消费本专业校准类结构化研究，输出更干净的 `action_evidence_contract`。
-2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再通过 `opportunity_ranking`、`position_sizing` 和唯一 `final_action_contract` 落地。
+2. 投资组合经理经 `decision_memory_retrieval` 消费交易决策类结构化研究，再按 PM 六步机制通过生命周期路由、新增风险 Step5 全市场资金部署和唯一 `final_action_contract` 落地。
 
 信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
@@ -43,7 +43,7 @@ Phase1 投资组合经理 final_action_contract
 
 `product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究，下一交易日由 `learning_context` 和 `analyst_learning_calibration` 进入 `technical`、`fundamental`、`commodity_news` 的证据判断；静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
 
-`evidence_fusion_policy_catalog.yaml` 是多维证据融合预测协议配置，不是研究库，不随回测自动改写。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval` 和 `opportunity_ranking` 消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
+`evidence_fusion_policy_catalog.yaml` 是多维证据融合预测协议配置，不是研究库，不随回测自动改写。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval`、生命周期学习路由和必要的新增风险 Step5 资金部署消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
 
 ## 二、Phase4 与研究学习分工
 
@@ -65,10 +65,10 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
 | `alpha_setup_action_value` | open/add/hold/reduce/exit/execution/conditional_monitor 分动作结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action lane 使用 |
 | `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
-| `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
+| `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` 和 PM Step5 新增风险资金部署机制消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
 | `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
 | `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | 投资组合经理经 `decision_memory_retrieval` 消费后写入未来合约执行字段 | 只能影响未来 `final_action_contract.execution_profile/entry_trigger`，不改方向、不改手数；交易员不直接读取 |
-| `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` / `opportunity_ranking` 间接消费 | 只影响未来证据解释、排序分项和冲突处理偏好；不创建交易权限，不改当天事实 |
+| `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval`、PM 生命周期路由和必要的 Step5 资金部署间接消费 | 只影响未来证据解释、排序分项和冲突处理偏好；不创建交易权限，不改当天事实 |
 
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
@@ -154,8 +154,9 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 ```text
 signal_collection_contract
 -> decision_memory_retrieval.effective_memory_summary
--> opportunity_ranking.opportunity_scorecard / opportunity_rank
--> position_sizing.position_sizing_result
+-> PM Step3/Step4 candidate_quality / lifecycle_learning_trace
+-> PM Step5 pm_full_market_capital_deployment（仅新增风险）
+-> PM Step6 position_sizing_result / contract self-check
 -> portfolio_manager.final_action_contract
 ```
 
@@ -166,7 +167,7 @@ Reviewer fusion_attribution_label
 -> Researcher evidence_fusion_attribution
 -> 下一交易日 decision_memory_retrieval / analyst_learning_calibration
 -> signal_collection_contract.evidence_fusion
--> opportunity_ranking.pm_fusion_diagnostics
+-> PM scorecard.pm_fusion_diagnostics
 -> portfolio_manager.final_action_contract.evidence_used.pm_fusion_diagnostics
 ```
 
@@ -201,7 +202,7 @@ Reviewer fusion_attribution_label
 
 当前系统使用结构化检索和轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action lane 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
 
-同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing`、`final_action_contract`、审计员、交易员和保证金硬上限。
+同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `decision_memory_retrieval`、PM 生命周期路由、必要的 Step5 全市场资金部署、Step6 `final_action_contract`、审计员、交易员和保证金硬上限。
 
 研究结果不得使用未来行情污染当下决策。回测可以一次性跑多日，但每个具体回测日内部必须按 `proposal.py -> order.py -> settlement.py -> validate_phase_flow.py -> researcher_learning.py` 的时间顺序复刻真实交易流程。
 

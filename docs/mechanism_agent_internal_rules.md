@@ -276,7 +276,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 ```text
 三类分析师 action_evidence_contract
 -> 去重、保留来源、对齐方向/触发/失效/冲突/缺失
--> signal_collection_contract
+-> signal_collection_contract（producer="signal_collector"，collector_decision_boundary="no_trade_authority"）
 ```
 
 如果配置只启用一个或两个分析师，信号收集员只按已启用分析师收集证据；未启用分析师不记为缺失。已启用但没有输出的分析师，必须写入 `missing_evidence=missing_analyst:*`，不能伪造补齐。
@@ -295,6 +295,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 证据强弱摘要 | `evidence_strength` | 只能来自分析师置信度和证据质量，不是 PM score/rank |
 | 商品差异化 profile 使用痕迹 | `source_contracts.product_profile_evidence`、`evidence_items.product_profile_id` | 只保真传递，不重新解释、不评分、不生成交易动作 |
 | 多维融合证据 | `source_contracts.fusion_evidence`、`evidence_items.fusion_evidence`、`evidence_fusion` | 只保真汇总证据强弱、时效、一致性、冲突、确认需求和缺失证据，不生成 PM score/rank、不生成交易动作 |
+| 生产者和权限边界 | `producer`、`collector_decision_boundary` | 固定为 `signal_collector` 和 `no_trade_authority`，供 PM 入口校验 |
 
 ### 5.2 聚合状态规则
 
@@ -341,21 +342,27 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 PM 不调用 LLM。PM 是唯一 `final_action_contract` 签发者。PM 的职责不是“再次理解文本”，而是把信号收集员的结构化证据、账户/持仓、市场确认、研究记忆和资金风控，确定性转换成唯一交易合约。
 
-PM 内部必须拆成五层：
+PM 内部固定为六步：
 
 ```text
-证据读取层 -> 机会状态层 -> 学习/排序层 -> 资金/风险层 -> 最终合约层
+1. 读取标准输入
+2. 生成主生命周期动作口
+3. 选择单品种代表方向和候选质量
+4. 按生命周期消费学习
+5. 新增风险进入全市场资金 rank 与资金部署
+6. 签发唯一 final_action_contract 并自检
 ```
 
 ### 6.1 输入读取边界
 
 | 输入 | PM 可以做 | PM 不能做 |
 |---|---|---|
-| `signal_collection_contract` | 读取方向、触发、setup、失效边界、冲突、缺失、证据强弱、`evidence_fusion` | 重新解释分析师自由文本 |
+| `signal_collection_contract` | 只读取 `signal_collector` 已签出的结构化预测证据包，要求 `producer="signal_collector"` 且 `collector_decision_boundary="no_trade_authority"` | 在 PM 内重建证据包，或重新解释分析师自由文本 |
 | 账户、持仓、合约、保证金 | 计算当前手数、风险、可用预算 | 伪造成交或结算 |
 | `decision_memory_retrieval` 输出 | 读取有效 action-value、profile、剔除原因、学习摘要 | 直接查研究 DB 原始记录 |
-| `opportunity_ranking` 输出 | 排序、解释资金优先级 | 让 rank 替代 `target_lots` |
-| `position_sizing` 输出 | 计算目标手数建议 | 让 sizing 工具签最终合约 |
+| `pm_ticker_side_selection` 输出 | 读取单品种方向优先级、候选质量和候选层级提示 | 把单品种方向优先级写成最终全市场 rank |
+| `pm_full_market_capital_deployment` 输出 | 只在新增风险路径读取全市场资金 rank、部署结论和 rank trace | 让 rank 替代 `target_lots`，或给非新增风险伪造 rank |
+| `pm_position_sizing` 输出 | 计算目标手数建议并交给 PM 第 6 步签约 | 让 sizing 工具签最终合约 |
 
 PM 必须通过 `src/tools/common/evidence_fusion_semantics.py` 把 `signal_collection_contract.evidence_fusion` 转成 `pm_fusion_diagnostics`。PM 只能把该诊断写入 `opportunity_scorecard` 分项和 `final_action_contract.evidence_used.pm_fusion_diagnostics`，并在 `pm_conflict_resolution` 解释主要冲突、反向证据和必要确认。PM 不能因为融合工具存在而调用 LLM、绕过 `decision_memory_retrieval`、跳过资金/风险计算或让融合分项直接生成 `target_lots`。
 
@@ -367,35 +374,32 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 
 ```text
 1. 读取标准输入
-2. 硬门控预检
-3. 持仓处理通道
-4. 新开仓候选处理通道
-5. 学习和排序
-6. 资金和手数
-7. 最终合约签发
-8. 合约自检
+2. 生成 primary_lifecycle_action_port
+3. 生成 side_priority / ticker_side_priority / candidate_quality
+4. 按生命周期消费学习
+5. 新增风险全市场资金 rank 与部署
+6. 生成唯一 final_action_contract 并自检
 ```
 
 | 顺序 | 阶段 | 对应工具/入口 | 必须做 | 禁止 |
 |---|---|---|---|---|
-| 1 | 读取标准输入 | `signal_evidence_collection.build_signal_collection_contract`、账户/持仓/行情读取入口 | 只读 `signal_collection_contract`、账户、持仓、合约、市场数据 | 直接查研究 DB；读取上游内部草稿 |
-| 2 | 硬门控预检 | `reason_effects.reason_effect_summary`、`hard_risk_rules`、`invalidation_policy` | 先检查未来函数、合约非法、价格异常、保证金硬风险、必需字段缺失、失效边界缺失 | 在硬门控未通过前放大、加仓或释放真实开仓 |
-| 3 | 持仓处理通道 | `pm_position_transition`、`position_lifecycle`、持仓风险规则 | 对已有仓位先判断 `hold/add/scale/reduce/exit`，保护退出和风险处置优先 | 用新开仓规则误杀持仓，或用新开仓信号覆盖退出 |
-| 4 | 新开仓候选处理通道 | `pm_state_transition`、`invalidation_policy`、`capital_deployment_policy` | 对无仓或反手后的新机会判断 `no_opportunity/watch_for_trigger/probe_candidate/tradeable_candidate` | 把 `watch_for_trigger` 直接清成普通 `wait/0`，或直接成交 |
-| 5 | 学习和排序 | `decision_memory_retrieval.retrieve_pm_memory`、`opportunity_ranking.rank_opportunities` | 只用有效摘要、action-value、剔除原因和 ranking 结果调整优先级 | 让 rank 或学习记录绕过当前证据、失效边界和硬门控 |
-| 6 | 资金和手数 | `position_sizing.build_position_sizing_result`、`capital_deployment_policy`、PM 资金规则 | 用资金预算、风险上限、最小可交易单位计算 `target_lots`、`target_position_ratio`、`lots_delta` | 让分析师、信号收集员、审计员或研究员决定手数 |
-| 7 | 最终合约签发 | `pm_contract_builder` 和 PM 推荐事实写入口 | PM 统一写 `final_action_contract`，包括动作、手数、触发、失效、资金理由、reason code | 分散写多个交易合约，或让 Trader/Reviewer 补签合约 |
-| 8 | 合约自检 | `pm_contract_self_check`、`tools.common.contracts` 合约解析/执行摘要 | 校验 `lots_delta = target_lots - current_lots`、动作与手数一致、条件触发字段一致 | 带不一致合约进入审计员或交易员 |
+| 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据 | 在 PM 内调用证据包 builder；直接查研究 DB；读取上游内部草稿 |
+| 2 | 主生命周期动作口 | `pm_lifecycle_action_port`、持仓变化和条件字段 | 先判定当前 candidate 属于新增风险还是非新增风险，并生成唯一 `primary_lifecycle_action_port` | 在后续步骤重新生成第二套生命周期口 |
+| 3 | 单品种方向与候选质量 | `pm_ticker_side_selection`、`pm_signal_fusion`、市场确认和数据质量 | 只生成 `side_priority`、`ticker_side_priority`、`side_priority_score`、`candidate_quality`、`candidate_layer_hint` | 写 `opportunity_rank`、`capital_priority_score`、`capital_priority_tier` 或最终资金部署事实 |
+| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 open/add/hold/reduce/exit/execution/conditional_monitor lane 消费学习，并保留安全 trace | 拿开仓学习解释退出，拿 execution 学习给开仓权限，或把原始研究对象写入 artifact |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理 `open/open_probe/open_real/add/scale/increase/reverse/conditional open` 等新增风险候选，生成唯一全市场 `opportunity_rank`、`rank_score`、`capital_deployment` 和 rank trace | 让非新增风险进入资金 rank；伪造空 deployment；把 Step3/4 候选字段当最终 rank trace |
+| 6 | 最终合约签发与自检 | `pm_contract_builder`、`pm_contract_self_check`、PM 推荐事实写入口 | PM 原子签出唯一 `final_action_contract`，写清动作、手数、触发、失效、资金或非 rank 理由、生命周期学习 trace 和 reason code | 分散写多个交易合约；保存 `pm_internal_candidate`、`pm_capital_deployment_decision` 等中间态；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
 
-1. 持仓处理必须早于新开仓候选；已有仓位的保护、减仓、退出不能被新开仓观察规则覆盖。
-2. 硬门控必须早于学习释放；正向 action-value 或 rank 不能释放硬风险。
-3. `watch_for_trigger` 的条件触发出口必须早于最终清零；合格条件触发候选不能被普通 `wait/0` 吞掉。
-4. 手数计算必须晚于机会状态和学习排序；分析师证据不能直接决定手数。
-5. 最终合约自检失败时必须停止保存 PM 推荐，不能把不一致合约交给审计员兜底。
+1. 第 2 步生命周期口必须早于方向选择、学习消费和 rank；后续步骤只能读取它，不能重判第二套口径。
+2. 非新增风险动作走 `1 -> 2 -> 3 -> 4 -> 6`，包括 `wait/hold/reduce/exit/close/risk_exit`；它们不得伪造全市场 rank 或资金部署。
+3. 新增风险动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`；缺 Step5 资金部署事实时不能签出新增风险最终合约。
+4. `watch_for_trigger` 的条件触发出口必须由 PM 在唯一合约中写明 `conditional_trigger_authority`、触发条件和失效边界；Trader 未触发不得成交。
+5. 手数计算必须晚于生命周期口、候选质量、学习路由和必要的全市场资金部署；分析师证据不能直接决定手数。
+6. 最终合约自检失败时必须停止保存 PM 推荐，不能把不一致合约交给审计员兜底。
 
-PM 内部可以分步生成评分草稿、排序草稿和资金部署草稿，但这些草稿只能存在 PM 内部内存中，不得写入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。对外事实入口只有最终合约提交器。最终合约提交必须是原子动作：凡最终 `final_action_contract` 中出现 `opportunity_rank`，或合约属于新开、加仓、扩大交易、条件监控，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化和资金部署 reason code；不得把裸 rank 或半成品资金部署交给 Auditor、Trader、Reviewer、Researcher 或 Protocol Governor。
+PM 内部可以分步生成评分草稿、排序草稿、资金部署草稿和签约候选，但这些草稿只能存在 PM 内部内存中，不得写入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。对外事实入口只有第 6 步签出的唯一 `final_action_contract`。最终合约提交必须是原子动作：凡最终 `final_action_contract` 属于新增风险并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；非新增风险合约必须写明非 rank 生命周期解释和学习 trace，不得把裸 rank、空 deployment 或 PM 中间态交给 Auditor、Trader、Reviewer、Researcher 或 Protocol Governor。
 
 ### 6.3 配置参数对应关系
 
@@ -518,13 +522,15 @@ watch_for_trigger 候选被压成受控观察/条件触发候选。
 PM 不能：
 
 - 调 LLM；
+- 在缺 `signal_collection_contract` 时自行重建证据包；
 - 绕过 `decision_memory_retrieval` 直接读研究 DB；
 - 把 `signal_collection_contract` 当交易合约；
 - 让 `opportunity_rank` 替代 `target_lots`；
 - 签第二套交易计划；
 - 跳过审计员；
 - 让学习记忆单独创造交易权限；
-- 把无触发、无失效边界的机会写成可成交合约。
+- 把无触发、无失效边界的机会写成可成交合约；
+- 把 `pm_internal_candidate`、`pm_capital_deployment_decision` 等 Step6 前中间态保存为跨智能体事实。
 
 ## 七、审计员内部机制
 
@@ -753,7 +759,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | neutral 观察研究 | 分析师 | 区分合理中性、证据缺口、错过机会风险、观察触发条件 | 不能把 neutral 直接变成交易动作 |
 | 执行学习 | PM 写入未来执行字段后由 Trader 执行 | 改善触发、成交方式、追价、未成交处理和执行 profile | Trader 不能直接读研究库 |
 | 持仓/退出学习 | PM 经 `decision_memory_retrieval` | 改善 hold、reduce、exit、保护盈利、止损和反手判断 | 历史 hold/exit 不能直接证明新开仓可行 |
-| 排序偏好研究 | PM 经 `opportunity_ranking` | 改善高低 rank、资金优先级、候选入选顺序 | rank 不是交易权限，不能替代 `target_lots` |
+| 排序偏好研究 | PM 经 `decision_memory_retrieval` 与 Step5 全市场资金部署机制 | 改善高低 rank、资金优先级、候选入选顺序 | rank 不是交易权限，不能替代 `target_lots` |
 | 资金部署反馈 | PM 和机制审计 | 判断资金是否放到更强机会、是否长期停留 probe、是否该放大 alpha | 不能越过保证金硬上限或审计员 |
 | adaptive policy state | PM 经 `decision_memory_retrieval`；分析师只读安全校准摘要 | 记录 protect/cap/probe/watchlist 等未来策略状态 | 必须被当日证据、失效边界、资金和审计再验证 |
 | 运营/风控事件研究 | PM、会计师、复盘员、机制审计按职责读取 | 记录换月、强平、保证金风险、合约切换成本 | 不能写成策略 alpha 正负样本 |

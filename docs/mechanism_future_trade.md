@@ -15,13 +15,13 @@
 7. **业务机制必须可审计**：每笔推荐、盘中触发、成交流水、结算记录、品种日 PnL、完整交易日志和 Phase4 验收结果都要能回查，便于确认是否记错账、算错账或发生未来函数。
 8. **最终交易真相只认结构化出口**：新开仓、条件 probe、放大、减仓、持有和退出必须落到投资组合经理签发的唯一 `final_action_contract` 及其内部权限字段、交易员执行结果和会计结算结果。普通策略单先由投资组合经理生成唯一 `final_action_contract`，经审计员审核后再交给交易员执行。投资组合经理不调用 LLM；自然语言、内部草稿和日志不是成交、审计、评估或学习的兜底事实来源。仅有 `direction_context`、`opportunity_state=no_opportunity` 或普通观察状态的机会，不能被最小手数、旧 probe seed 或软门控释放绕成真实开仓。
 9. **策略单与运营风控单分账**：`source_type=strategy` 只走投资组合经理、审计员、交易员的策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，由执行/结算链独立处理、独立核算，不写入策略 alpha 学习，也不能塞进策略 `final_action_contract`。
-10. **机会排序服务资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对全市场候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，用于决定资金为什么优先给某些机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。这些字段不是第二套交易权限，交易员也不能按排名自行改方向或手数。
+10. **机会排序只服务新增风险资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对新增风险候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，用于决定资金为什么优先给某些新增风险机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。非新增风险动作只写生命周期解释和学习 trace，不伪造 rank 或资金部署。这些字段不是第二套交易权限，交易员也不能按排名自行改方向或手数。
 
 ## 二、已经代码落地的实际业务运行机制
 
 ### 1. 四阶段业务流
 
-- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出 `signal_collection_contract`；投资组合经理通过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 后签发每个品种的唯一 `final_action_contract`。全市场当前可交易候选和条件监控候选必须进入 `opportunity_scorecard` 做评分和排名，再决定哪些候选获得资金或条件监控；普通策略执行依据只能是唯一 `final_action_contract` 及其内部权限字段；投资组合经理内部草稿只用于本地推演和日志留痕，不能成为交易员或研究员的事实入口。`watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会，可由投资组合经理写入同一张 `final_action_contract` 的条件监控 probe。
+- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `producer="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步签发每个品种的唯一 `final_action_contract`。PM 先判断生命周期动作口：`open/open_probe/open_real/add/scale/increase/reverse/conditional open` 等新增风险候选必须进入 Step5 全市场资金 rank 与部署，`wait/hold/reduce/exit/close/risk_exit` 等非新增风险动作直接进入 Step6 签约并写清非 rank 生命周期解释。普通策略执行依据只能是唯一 `final_action_contract` 及其内部权限字段；投资组合经理内部草稿只用于本地推演和日志留痕，不能成为交易员或研究员的事实入口。`watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会，只有被 PM 签成同一张 `final_action_contract` 的条件监控 probe 后，才允许交易员盘中监控触发。
 - **Phase2 盘中执行**：交易员读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。交易员不能从投资组合经理文本、旧 probe 标记或最小一手机制自行创造策略方向，只能执行投资组合经理和审计员已授权计划。
 - **Phase3 日终结算**：会计师回放当日成交流水，使用同日官方结算价逐日盯市，更新官方组合、日结算、品种日 PnL 和交易流水结算价；结算后发现换月需要时，只能生成下一交易日执行的 rollover 运营单，不能反向影响当天盘前策略。
 - **Phase4 复盘验收**：复盘员检查 Phase1-3 完整性、账务一致性、交易流水入账、分析师信号落库完整性、投资组合经理机会评分/排名与资金分配理由、完整交易日志；研究员在 Phase4 验证后通过独立入口输出结构化研究信息，供未来交易日使用。未完成交易日会被 `incomplete_trading_day_phase` 硬拦，不能作为策略结论或学习样本。
@@ -118,7 +118,7 @@
 
 - 研究员可以研究交易员的未成交、涨跌停、盘中触发失败、执行价问题和 no-trade 原因，但不能回写当日交易流水。
 - 交易员会输出 `execution_result` 和 `execution_learning_trace`，记录盘中触发/未成交原因和执行状态。这些内容只供未来研究员研究择时和执行质量，不改变当日成交、手续费、保证金或结算。
-- 交易员和会计师的事实会与投资组合经理的 `opportunity_score/opportunity_rank/capital_allocation_reason` 一起进入复盘员/研究员复盘，用来判断高排名候选是否真正比低排名候选更有正期望、资金是否向强 alpha 迁移。该复盘只能通过未来 `decision_memory_retrieval`、`opportunity_ranking` 和唯一 `final_action_contract` 影响投资组合经理，不能改写当日交易事实。
+- 交易员和会计师的事实会与投资组合经理的 `opportunity_score/opportunity_rank/capital_allocation_reason` 一起进入复盘员/研究员复盘，用来判断高排名候选是否真正比低排名候选更有正期望、资金是否向强 alpha 迁移。该复盘只能通过未来 `decision_memory_retrieval`、PM 生命周期路由、必要的 Step5 全市场资金部署和唯一 `final_action_contract` 影响投资组合经理，不能改写当日交易事实。
 - 亏损模板、tail-loss、alpha promotion 和机会层级只能影响未来交易日的投资组合经理工具链判断，不能改写历史账务、手续费、保证金、结算价或持仓事实。
 - 仅有方向背景、普通观察或 `opportunity_state=no_opportunity/watch_for_trigger` 且缺少合规条件监控授权的机会，默认只能观察或等待触发，不能直接生成真实新开仓。若后续当日结构化证据重新证明 `setup_quality_ok=true` 且 `current_trigger_confirmed/trigger_valid` 确认当前触发，或由投资组合经理在同一张 `final_action_contract` 内生成合规条件监控 probe，才可进入配置允许的 `authority_type=exploration_probe` 或正常仓位审查，并仍必须经过审计员、交易员的盘中触发、涨跌停、临近交割、保证金和订单语义约束。
 - 盈利同作用域仓位若当日证据仍成立，可通过投资组合经理持仓生命周期机制少减仓或继续持有；亏损仓不受该机制保护，仍必须按当日证据、失效边界和风控再验证。

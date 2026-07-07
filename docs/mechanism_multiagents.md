@@ -52,24 +52,22 @@ mechanism_effectiveness_audit
 | 顺序 | 阶段 | 执行者 | 是否调用 LLM | 必须输出 | 下游 | 硬边界 |
 |---|---|---|---|---|---|---|
 | 1 | 盘前预测证据分析 | `technical` 技术面分析师、`fundamental` 基本面分析师、`commodity_news` 期货新闻面分析师 | 是 | `action_evidence_contract` | `signal_collector` 信号收集员 | 只能输出结构化预测证据，不能输出手数、仓位、最终交易动作 |
-| 2 | 盘前预测信号收集 | `signal_collector` 信号收集员 | 否 | `signal_collection_contract` | `portfolio_manager` 投资组合经理 | 只整理三类分析师结构化预测证据，不读研究库，不输出 score/rank/手数/交易动作 |
-| 3 | 历史学习读取 | `decision_memory_retrieval` | 否 | `effective_memory_summary`、有效 action-value 列表、剔除/降级原因 | `portfolio_manager` 投资组合经理 | 只能读取结构化研究信息；空历史不能挡真实历史；不能输出手数或交易动作 |
-| 4 | 机会评分排序 | `opportunity_ranking` | 否 | `opportunity_scorecard`、`opportunity_score_components`、`opportunity_rank`、`capital_allocation_reason` | `portfolio_manager` 投资组合经理 | rank 只解释资金优先级，不是交易权限，不能输出最终手数或最终合约 |
-| 5 | 手数计算 | `position_sizing` | 否 | `position_sizing_result` | `portfolio_manager` 投资组合经理 | 只按评分、资金、持仓、风控算目标手数建议；不能改方向，不能签合约 |
-| 6 | 签发唯一交易合约 | `portfolio_manager` 投资组合经理 | 否 | `final_action_contract` | `auditor` 审计员 | 只能由投资组合经理签发唯一策略合约；不得调用 LLM；不得生成第二套交易计划 |
-| 7 | 合约审计 | `auditor` 审计员 | 否 | `audit_verdict`、审计 payload | `trader` 交易员 / 投资组合经理记录 | 只审合约，不改方向、不改手数、不新建合约 |
-| 8 | 合约执行 | `trader` 交易员 | 否 | `execution_result`、`execution_learning_trace` | `accountant` 会计师、`reviewer` 复盘员、`researcher` 研究员 | 只执行审计通过的 `final_action_contract` 及合约内 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能读研究库、action-value、`strategy_memory` 或 `adaptive_policy_state` 下单或放宽触发 |
-| 9 | 结算入账 | `accountant` 会计师 | 否 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 | `reviewer` 复盘员 | 只按成交和结算事实入账，不能用学习或 LLM 改账 |
-| 10 | 复盘归因 | `reviewer` 复盘员 | 否 | Phase4 验收、交易日志、事实归因、研究输入材料 | `researcher` 研究员 | 只复盘事实，不下单，不写最终 action-value，不触发研究员 LLM |
-| 11 | 研究学习 | `researcher` 研究员 / `run/research/researcher_learning.py` | 可调但受限 | 结构化研究成果：分析师校准类研究、交易决策类 action-value、profile、state | 分析师 / `decision_memory_retrieval` | 只在复盘员 Phase4 验证完成后运行；不能修改当天合约、手数或交易员权限 |
-| 12 | 协议治理 | `protocol_governor` 协议管理员及控制审计 | 否 | 契约覆盖、机制断链、系统不变量、回测前/每日非策略风险报告 | 开发与回测闸门 | 只治理链路和字段，不参与收益判断或交易动作 |
+| 2 | 盘前预测信号收集 | `signal_collector` 信号收集员 | 否 | `signal_collection_contract`，必须带 `producer="signal_collector"` 和 `collector_decision_boundary="no_trade_authority"` | `portfolio_manager` 投资组合经理 | 只整理三类分析师结构化预测证据，不读研究库，不输出 score/rank/手数/交易动作 |
+| 3 | PM 六步策略决策 | `portfolio_manager` 投资组合经理及其确定性工具 | 否 | `FuturesRecommendation`、唯一 `final_action_contract`、`pm_six_step_trace` | `auditor` 审计员 | PM 内部按 `docs/mechanism_pm.md` 执行 1-6 步；新增风险才进 Step5 全市场 rank，非新增风险直接 Step6；不得重建 `signal_collection_contract` 或保存中间候选 |
+| 4 | 合约审计 | `auditor` 审计员 | 否 | `audit_verdict`、审计 payload | `trader` 交易员 / 投资组合经理记录 | 只审 PM 已签合约，不改方向、不改手数、不新建合约 |
+| 5 | 合约执行 | `trader` 交易员 | 否 | `execution_result`、`execution_learning_trace` | `accountant` 会计师、`reviewer` 复盘员、`researcher` 研究员 | 只执行审计通过的 `final_action_contract` 及合约内 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能读研究库、action-value、`strategy_memory` 或 `adaptive_policy_state` 下单或放宽触发 |
+| 6 | 结算入账 | `accountant` 会计师 | 否 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 | `reviewer` 复盘员 | 只按成交和结算事实入账，不能用学习或 LLM 改账 |
+| 7 | 复盘归因 | `reviewer` 复盘员 | 否 | Phase4 验收、交易日志、事实归因、研究输入材料 | `researcher` 研究员 | 只复盘事实，不下单，不写最终 action-value，不触发研究员 LLM |
+| 8 | 研究学习 | `researcher` 研究员 / `run/research/researcher_learning.py` | 可调但受限 | 结构化研究成果：分析师校准类研究、交易决策类 action-value、profile、state | 分析师 / `decision_memory_retrieval` | 只在复盘员 Phase4 验证完成后运行；不能修改当天合约、手数或交易员权限 |
+| 9 | 协议治理 | `protocol_governor` 协议管理员及控制审计 | 否 | 契约覆盖、机制断链、系统不变量、回测前/每日非策略风险报告 | 开发与回测闸门 | 只治理链路和字段，不参与收益判断或交易动作 |
 
 固定工作流禁止以下旁路：
 
 - 投资组合经理直接把分析师自由文本当交易依据；
 - `signal_collector` 信号收集员直接读取研究库或混入历史学习结论；
+- 投资组合经理在缺 `signal_collection_contract` 时自行重建证据包；
 - 投资组合经理绕过 `decision_memory_retrieval` 直接解析研究记录；
-- `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 生成 `final_action_contract`；
+- `decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_full_market_capital_deployment`、`pm_position_sizing` 生成 `final_action_contract`；
 - 审计员、交易员、会计师、复盘员、研究员改写投资组合经理的交易方向或目标手数；
 - 复盘员入口调用研究员学习或任何 LLM 研究函数；
 - 交易员使用 `opportunity_rank`、`opportunity_score`、`learning_used` 或研究记录作为下单权限；
@@ -139,8 +137,8 @@ Phase4 完成后，研究学习单独运行：
 | `technical` 技术面分析师 | 行情、技术指标、商品价格行为 profile、技术学习校准、数据截止时间 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、技术方向、触发、失效边界、证据强弱、假突破风险 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据；投资组合经理不直接把技术文本当交易权限 |
 | `fundamental` 基本面分析师 | 库存、仓单、基差、供需、产业数据、商品价格行为 profile、基本面学习校准 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、基本面方向、驱动、数据质量、反向压制、失效边界 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
 | `commodity_news` 期货新闻面分析师 | 新闻、事件、政策、舆情、商品价格行为 profile、新闻学习校准 | `AnalystSignal`、`action_evidence_contract`、`product_profile_evidence`、`fusion_evidence`、事件方向、催化质量、时效、确认条件、一次性冲击风险 | 是 | 手数、仓位比例、最终交易动作、`final_action_contract` | `signal_collector` 读取结构化证据 |
-| `signal_collector` 信号收集员 | 三类分析师的结构化预测证据、`product_profile_evidence` 和 `fusion_evidence` | `signal_collection_contract`：统一结构化预测证据包，至少包含来源引用、逐条证据、方向、触发状态、证据强弱、时效、一致性、冲突、确认需求、缺失、风险、失效边界、profile 使用痕迹和 `evidence_fusion` | 否 | 历史学习结论、score/rank、仓位比例、手数、交易动作、`final_action_contract` | 投资组合经理读取盘前统一结构化预测证据包 |
-| `portfolio_manager` 投资组合经理 | `signal_collection_contract`、`evidence_fusion`、账户、持仓、合约信息、市场确认、投资组合经理工具输出、资金与风控配置 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、资金部署理由、`pm_fusion_diagnostics`、`pm_conflict_resolution` | 否 | LLM 自由判断、第二套交易计划、绕过审计员的交易权限、对外持久化 PM 内部草稿 | 审计员只审这张合约；交易员只执行这张合约 |
+| `signal_collector` 信号收集员 | 三类分析师的结构化预测证据、`product_profile_evidence` 和 `fusion_evidence` | `signal_collection_contract`：统一结构化预测证据包，至少包含 `producer="signal_collector"`、`collector_decision_boundary="no_trade_authority"`、来源引用、逐条证据、方向、触发状态、证据强弱、时效、一致性、冲突、确认需求、缺失、风险、失效边界、profile 使用痕迹和 `evidence_fusion` | 否 | 历史学习结论、score/rank、仓位比例、手数、交易动作、`final_action_contract` | 投资组合经理只读取盘前统一结构化预测证据包；缺包或 producer 不合法应 fail-fast |
+| `portfolio_manager` 投资组合经理 | `signal_collection_contract`、`evidence_fusion`、账户、持仓、合约信息、市场确认、投资组合经理六步工具输出、资金与风控配置 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、必要的 `opportunity_rank`、`position_sizing_result`、`capital_deployment`、资金或非 rank 理由、`pm_fusion_diagnostics`、`pm_conflict_resolution`、`pm_six_step_trace` | 否 | LLM 自由判断、第二套交易计划、绕过审计员的交易权限、重建 `signal_collection_contract`、对外持久化 PM 内部草稿或候选 | 审计员只审这张合约；交易员只执行这张合约 |
 | `auditor` 审计员 | 投资组合经理的 `final_action_contract`、`pm_fusion_diagnostics`、账户、持仓、保证金、数据质量、硬风险边界 | `audit_verdict`、hard/soft risk reasons、审计 payload、`pm_fusion_explanation_audit` | 否 | 重新融合证据、改手数、改方向、新建合约、生成交易动作 | 投资组合经理记录审计结果；交易员只执行审过的合约 |
 | `trader` 交易员 | 审计通过的 `final_action_contract`、合约化执行触发规则、盘中行情、执行配置 | 成交/未成交、`execution_result`、`execution_learning_trace` | 否 | 改投资组合经理方向、改投资组合经理手数、直接读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发 | 复盘员/研究员读取执行事实 |
 | `accountant` 会计师 | 成交、持仓、结算价、手续费、滑点、保证金率、合约乘数 | `daily_settlement`、PnL、费用、保证金、账户权益、持仓状态 | 否 | LLM 调账、学习改账、交易动作 | 复盘员使用结算事实 |
@@ -174,8 +172,8 @@ Phase4 完成后，研究学习单独运行：
 | 系统事实类型 | 唯一授权事实入口 | 允许写入的事实 | 只能读不能写的模块 | 禁止行为 |
 |---|---|---|---|---|
 | 预测证据事实 | 技术面分析师、基本面分析师、期货新闻面分析师的分析师输出入口 | `AnalystSignal`、`action_evidence_contract`、方向、触发、证据强弱、失效边界、数据质量 | 信号收集员、投资组合经理、审计员、复盘员、研究员、控制审计 | 写手数、仓位、最终交易动作、`final_action_contract` |
-| 信号收集事实 | `signal_collector` 信号收集员输出入口 | `signal_collection_contract`、来源引用、逐条证据、共识/冲突、缺失、风险、失效边界 | 投资组合经理、审计员、复盘员、研究员、控制审计 | 写历史学习结论、score/rank、手数、交易动作、`final_action_contract` |
-| 策略交易事实 | `portfolio_manager` 投资组合经理唯一合约写入入口 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment` | 审计员、交易员、会计师、复盘员、研究员、控制审计 | 由非 PM 模块新建、复制成第二套、改写或补写交易合约；PM 内部草稿进入 DB/artifact/payload |
+| 信号收集事实 | `signal_collector` 信号收集员输出入口 | `signal_collection_contract`、`producer="signal_collector"`、来源引用、逐条证据、共识/冲突、缺失、风险、失效边界 | 投资组合经理、审计员、复盘员、研究员、控制审计 | 写历史学习结论、score/rank、手数、交易动作、`final_action_contract`；由 PM 或其他模块重建证据包 |
+| 策略交易事实 | `portfolio_manager` 投资组合经理唯一合约写入入口 | `FuturesRecommendation`、唯一 `final_action_contract`、`learning_used`、`opportunity_scorecard`、必要的 `opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment`、`pm_six_step_trace` | 审计员、交易员、会计师、复盘员、研究员、控制审计 | 由非 PM 模块新建、复制成第二套、改写或补写交易合约；PM 内部草稿、`pm_internal_candidate`、`pm_capital_deployment_decision` 进入 DB/artifact/payload |
 | 审计事实 | `auditor` 审计员审计结果写入入口 | `audit_verdict`、hard/soft risk reasons、只读审计 payload | 投资组合经理、交易员、复盘员、控制审计 | 改方向、改手数、新建合约、直接消费研究记忆改交易权限 |
 | 执行事实 | `trader` 交易员执行结果写入入口 | 成交/未成交、触发事实、`execution_result`、`execution_learning_trace`、执行必要字段摘要 | 会计师、复盘员、研究员、控制审计 | 保存完整 PM 合约镜像、保存 PM 学习/排名/资金解释字段、读取研究库下单 |
 | 结算事实 | `accountant` 会计师结算写入入口 | `daily_settlement`、PnL、手续费、滑点、保证金、权益、持仓状态 | 复盘员、研究员、控制审计 | 用 LLM、学习或复盘改账；写交易动作或研究学习字段 |
@@ -188,8 +186,8 @@ Phase4 完成后，研究学习单独运行：
 | 系统事实类型 | 授权入口 | DB 表 | artifact / payload 载体 | 后续代码收口目标 |
 |---|---|---|---|---|
 | 预测证据事实 | 分析师结构化输出入口 | 分析师信号/上下文相关表 | 分析师报告 artifact、`action_evidence_contract`、`artifact_json` | 分析师输出统一经过结构化证据构造与校验；禁止分析师 artifact 或 payload 携带手数、仓位或最终交易动作。 |
-| 信号收集事实 | `signal_collector` 信号收集员输出入口 | 信号收集或推荐前上下文记录 | `signal_collection_contract`、来源引用、证据摘要 payload | 信号收集员只聚合分析师正式输出；禁止读取研究库、写 score/rank、写手数或生成交易合约。 |
-| 策略交易事实 | `portfolio_manager` 投资组合经理推荐/合约写入入口 | `futures_recommendation` | PM recommendation artifact、`signal_snapshot`、`final_action_contract` payload | 完整 `final_action_contract` 只能由 PM 推荐写入路径产生；其他阶段只能引用 `recommendation_id`、路径或执行必要摘要。 |
+| 信号收集事实 | `signal_collector` 信号收集员输出入口 | 信号收集或推荐前上下文记录 | `signal_collection_contract`、来源引用、证据摘要 payload | 信号收集员只聚合分析师正式输出并写 `producer="signal_collector"`；禁止读取研究库、写 score/rank、写手数、生成交易合约或让 PM 代建证据包。 |
+| 策略交易事实 | `portfolio_manager` 投资组合经理推荐/合约写入入口 | `futures_recommendation` | PM recommendation artifact、`signal_snapshot.final_action_contract`、`final_action_contract` payload | 完整 `final_action_contract` 只能由 PM 第 6 步推荐写入路径产生；其他阶段只能引用 `recommendation_id`、路径或执行必要摘要；`signal_snapshot` 不得保留 PM 中间候选或部署决策对象。 |
 | 审计事实 | `auditor` 审计结果写入入口 | 推荐记录中的审计结果或审计 payload 载体 | `audit_verdict`、`audit_payload`、risk reasons | 审计员只写审计结论和风险原因；不得写新合约、改目标手数或直接消费研究记忆改交易权限。 |
 | 执行事实 | `trader` 交易员执行写入入口 | `futures_transactions`、`futures_intraday_decision` | `execution_result`、`execution_learning_trace`、Phase2 execution artifact、transaction audit payload | Phase2 和 transaction payload 只能保存执行事实、触发事实和执行必要摘要；禁止镜像完整 PM 合约、PM 学习、排名或资金解释字段。 |
 | 结算事实 | `accountant` 会计师结算写入入口 | `daily_settlement`、持仓/组合结算相关表 | settlement payload、positions snapshot、结算日志 | 结算只能由成交、结算价、费用、保证金和持仓事实计算；禁止学习、LLM 或复盘改账。 |
@@ -265,22 +263,50 @@ Phase4 完成后，研究学习单独运行：
 - 不输出 `target_lots`、`lots_delta`、`final_action`；
 - 不把 `execution` 学习当成交易员权限；execution 学习必须先由投资组合经理写入 `final_action_contract.execution_profile/entry_trigger` 后才影响交易员执行。
 
-### `opportunity_ranking`
+### `pm_ticker_side_selection`
 
 输入：
 
 - `signal_collection_contract`；
-- `effective_memory_summary`；
-- 市场确认、数据质量、当前持仓、资金边界；
-- 投资组合经理配置中的评分和资金部署规则。
+- `pm_fusion_diagnostics`；
+- 当前持仓、市场确认、数据质量；
+- `decision_memory_retrieval` 输出的安全学习摘要。
 
 输出：
 
 - `opportunity_scorecard`；
 - `opportunity_score_components`；
+- `side_priority`；
+- `ticker_side_priority`；
+- `side_priority_score`；
+- `candidate_quality`；
+- `candidate_layer_hint`；
+- 候选降级、缺失、冲突或方向选择原因。
+
+边界：
+
+- 不调用 LLM；
+- 只做 PM 第 3 步单品种方向选择和候选质量判断；
+- 不输出 `opportunity_rank`、`rank_score`、`capital_priority_score`、`capital_priority_tier`；
+- 不输出最终手数、资金部署事实或最终合约；
+- 不把 Step3/4 候选输入字段搬成最终 rank trace。
+
+### `pm_full_market_capital_deployment`
+
+输入：
+
+- PM 第 2 步主生命周期动作口；
+- PM 第 3 步代表候选和候选质量；
+- PM 第 4 步 open/add 新增风险学习 trace；
+- 账户资金、持仓、保证金、净敞口和资金部署配置。
+
+输出：
+
+- `opportunity_rank`；
+- `rank_score`；
+- `rank_score_components`；
 - `capital_priority_score`；
 - `capital_priority_tier`；
-- `opportunity_rank`；
 - `rank_capital_role`；
 - `capital_layer`；
 - `capital_ratio_source`；
@@ -288,35 +314,33 @@ Phase4 完成后，研究学习单独运行：
 - `rank_input_components`；
 - `lifecycle_learning_trace`；
 - `learning_impact_delta`；
+- `capital_deployment`；
 - `capital_allocation_reason`；
-- 未入选或降级原因。
+- 未入选或预算未分配原因。
 
 边界：
 
 - 不调用 LLM；
-- 评分和排序必须可复现；
-- 系统只保留一个 rank：`opportunity_rank=1` 固定表示当前最高资金优先级；
-- `capital_priority_score/tier` 只是唯一 rank 的排序输入和解释字段，不是第二套 rank；
-- rank 不是交易权限，只能供投资组合经理资金部署使用；
+- 只在 PM 第 5 步处理新增风险候选；
+- 新增风险包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`；
+- 非新增风险 `wait/hold/reduce/exit/close/risk_exit` 不进入该工具，不伪造 rank 或 deployment；
+- 系统只保留一个全市场资金 rank：`opportunity_rank=1` 固定表示当前最高资金优先级；
+- `rank=1` 不是交易权限，只能由 PM 第 6 步和唯一 `final_action_contract` 原子落地；
 - 资金层级和 rank 解耦：`rank=1` 决定“谁最值得占用资金”，`capital_layer` 决定“占用多少资金”；
-- 当所有候选都是 `watch_for_trigger` 时，也必须按证据质量、触发完整度、失效边界、冲突程度、产品级学习、trigger 历史表现和资金效率排出 1 到 N；`rank=1` 只是最值得按既有 `probe_margin_ratio=0.008` 小额探针试的候选，不能因为排第一自动升仓或变成真实资金；
-- 所有新增风险敞口候选，包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`，必须先进入全市场资金候选池；分数为 0 的 `watch_for_trigger` 也必须排序，不能绕过 rank 直接保留新增 `target_lots`；
-- `rank=1` 可以支持 PM 最终出口释放 `real_budget_entry`，但必须同时满足 `tradeable_candidate`、当前开仓证据、失效边界、无技术反对和硬风险通过；
-- 反复验证有 alpha 的候选可以通过同一个 rank 进入 `alpha_scale_entry`，但必须由产品级学习和当前证据共同支持，不能硬编码品种好坏；
-- 亏损开仓 episode 必须经 Researcher 写入 `entry_quality_outcome`，由 PM 在下一轮 scorecard 中转成 `entry_quality_loss_penalty` / `trigger_quality_loss_penalty`，只降低入场质量、触发质量、资金优先级和真实部署资格，不生成硬阻断；
-- 盈利开仓 episode 必须同样反写到触发质量，PM 用 `trigger_quality_positive_bonus` 与 `net_trigger_quality_loss_signal` 校准同类 trigger，避免只收紧坏触发而不放大好触发；
-- 不能输出最终手数或最终合约。
+- 分数为 0 但仍保留新增风险意图的条件候选，也必须先进入全市场资金池；未部署时最终合约必须还原为不新增风险，并写清原因；
+- `rank=1` 可以支持 PM 最终出口释放 `real_budget_entry` 或 `alpha_scale_entry`，但必须同时满足当前证据、失效边界、学习质量、资金和硬风险边界；
+- 不能输出最终合约，不能绕过 PM 第 6 步自检。
 
-排名至少由以下分项组成：
+全市场 rank 至少由以下分项组成：
 
 - 现实预测证据：方向一致性、触发状态、证据强弱、证据冲突、缺失证据、数据质量、失效边界；
 - 历史研究记忆：真实交易收益、action preference、样本数、最近样本时间、是否过期、是否同品种同方向同 setup；
-- 账户与持仓状态：已有仓位、浮盈浮亏、保证金占用、净敞口、是否处于减仓/退出生命周期；
+- 账户与持仓状态：已有仓位、浮盈浮亏、保证金占用、净敞口、是否处于新增风险生命周期；
 - 风控与市场确认：硬风险、软风险、流动性、盘中确认要求。
 
-研究记忆只影响评分分项，不单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
+研究记忆只影响评分和 rank 分项，不单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
 
-### `position_sizing`
+### `pm_position_sizing`
 
 输入：
 
@@ -339,7 +363,7 @@ Phase4 完成后，研究学习单独运行：
 - 不签发 `final_action_contract`；
 - 不绕过审计员。
 
-投资组合经理使用三个工具输出后，仍由投资组合经理自己决定 `final_action`，并把 `current_lots/target_lots/lots_delta/final_action` 写入唯一 `final_action_contract`。
+投资组合经理使用这些 PM 内部工具输出后，仍由第 6 步自己决定 `final_action`，并把 `current_lots/target_lots/lots_delta/final_action` 写入唯一 `final_action_contract`。任何工具输出都不是对外交易事实，只有 PM 签出的最终合约才是策略交易事实。
 
 ## 七、完整链路图
 
@@ -377,15 +401,23 @@ Phase4 完成后，研究学习单独运行：
                          |                      |
                          v                      |
       +--------------------------------+         |
-      | opportunity_ranking             |         |
+      | pm_ticker_side_selection        |         |
       | 不调 LLM                       |         |
-      | 输出 scorecard/rank/reason      |         |
+      | 输出 scorecard/side_priority    |         |
+      | no_final_rank_authority         |         |
+      +--------------------------------+         |
+                         |                      |
+                         v                      |
+      +--------------------------------+         |
+      | pm_full_market_capital_deployment |
+      | 不调 LLM                       |         |
+      | 新增风险才输出 rank/deployment |
       | rank_is_not_trade_authority     |         |
       +--------------------------------+         |
                          |                      |
                          v                      |
       +--------------------------------+         |
-      | position_sizing                 |         |
+      | pm_position_sizing              |         |
       | 不调 LLM                       |         |
       | 输出 position_sizing_result     |         |
       | no_final_action_authority       |         |
@@ -468,7 +500,7 @@ Phase4 完成后，研究学习单独运行：
 
 | artifact 所属阶段 | 可以保存 | 禁止保存 |
 |---|---|---|
-| PM recommendation artifact | 完整 `final_action_contract`、`learning_used`、`opportunity_scorecard`、`opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment` | 第二套交易计划、交易员执行结果、收盘后事实、PM 内部评分/排序/资金部署草稿 |
+| PM recommendation artifact | 完整 `final_action_contract`、`learning_used`、`opportunity_scorecard`、必要的 `opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment`、`pm_six_step_trace` | 第二套交易计划、交易员执行结果、收盘后事实、PM 内部评分/排序/资金部署草稿、`pm_internal_candidate`、`pm_capital_deployment_decision` |
 | Auditor artifact | `audit_verdict`、hard/soft risk reasons、审计 payload、对 PM 合约的只读审计摘要 | 改写后的方向、改写后的手数、新建合约、研究库原始记录 |
 | Trader / Phase2 artifact | 执行事实、触发事实、成交/未成交、`execution_result`、`execution_learning_trace`、来自 PM 合约的执行必要字段摘要 | 完整 `final_action_contract` 镜像、`position_sizing_result`、`capital_allocation_reason`、`opportunity_rank`、`opportunity_score`、`opportunity_score_components`、`learning_used`、`learning_adjustment_summary` |
 | Transaction audit payload | 交易执行审计摘要、保证金审计、成交事实、执行触发事实 | 完整 `final_action_contract` 镜像、PM 学习解释、PM 排名解释、PM 资金部署解释 |
@@ -518,6 +550,7 @@ Phase4 完成后，研究学习单独运行：
 - `missing_evidence`、`data_quality_flags`；
 - `setup_types`、`horizon_scope`；
 - `invalidation_summary`；
+- `producer="signal_collector"`；
 - `collector_decision_boundary="no_trade_authority"`。
 
 `signal_collection_contract` 不是交易合约，不能含 `target_lots`、`lots_delta`、`final_action`、`target_position_ratio`。
@@ -556,8 +589,9 @@ Phase4 完成后，研究学习单独运行：
 | `signal_collector` 信号收集员 | 无 | 不调用 LLM，只做确定性证据收集 | LLM 自由判断、研究结论、rank、手数、交易动作 |
 | `portfolio_manager` 投资组合经理 | 无 | 不调用 LLM，只用工具和规则签唯一合约 | LLM 自由判断或提示词驱动手数 |
 | `decision_memory_retrieval` | 无 | 确定性读取结构化研究信息 | 自由文本记忆解释、交易动作、手数 |
-| `opportunity_ranking` | 无 | 确定性评分和排序 | 最终手数、最终合约、交易动作 |
-| `position_sizing` | 无 | 确定性计算目标手数建议 | 改方向、签合约、绕过审计员 |
+| `pm_ticker_side_selection` | 无 | PM 第 3 步确定性方向选择和候选质量判断 | 最终 rank、最终手数、最终合约、交易动作 |
+| `pm_full_market_capital_deployment` | 无 | PM 第 5 步只对新增风险候选做全市场资金 rank 和部署 | 非新增风险伪 rank、最终手数、最终合约、交易动作 |
+| `pm_position_sizing` | 无 | 确定性计算目标手数建议 | 改方向、签合约、绕过审计员 |
 | `auditor` 审计员 | 无 | 确定性审计最终合约 | 改方向、改手数、新建合约 |
 | `trader` 交易员 | 无 | 执行审过的最终合约和合约化触发规则 | 改方向、改手数、读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发 |
 | `accountant` 会计师 | 无 | 按成交和结算事实入账 | LLM 调账、学习改账、交易动作 |
@@ -572,10 +606,10 @@ Phase4 完成后，研究学习单独运行：
 
 | 场景 | 合约要求 | 学习落地要求 |
 |---|---|---|
-| 开仓/加仓 | `target_lots` 绝对值大于 `current_lots`，`final_action=open/add` 或对应 signed lots | 正向 open 学习可进 score/rank，但必须有盘前预测证据、资金和审计员通过 |
-| 条件监控 | `requires_intraday_confirmation=true`，`can_execute_without_intraday_trigger=false` | 审计通过且仍保留新增风险敞口时，交易员必须先写盘中触发或未触发结果；只有触发后才运行最终下单安全闸 |
-| 持仓 | `target_lots == current_lots` 或有限调整 | 若有 hold/exit 学习，必须写明继续持有或不减仓原因 |
-| 减仓/退出 | `target_lots` 向 0 收敛，`final_action=reduce/exit` | exit/保护学习应落到目标手数下降或明确解释 |
+| 开仓/加仓/扩大/反手 | `target_lots` 绝对值大于 `current_lots` 或目标方向反转，`final_action=open/open_probe/open_real/add/scale/increase/reverse` | 属于新增风险，必须有 Step5 全市场 rank、`capital_deployment` 和 lifecycle learning trace；正向 open/add 学习只能经 PM 合约落地 |
+| 条件开仓/条件监控 | `requires_intraday_confirmation=true`，`can_execute_without_intraday_trigger=false` | 若最终合约仍保留新增风险敞口，必须有 Step5 rank/deployment，交易员先写盘中触发或未触发结果；只有触发后才运行最终下单安全闸 |
+| 持仓 | `target_lots == current_lots` 或有限调整 | 非新增风险，不要求 `opportunity_rank`；若有 hold/exit 学习，必须写明继续持有或不减仓原因 |
+| 减仓/退出 | `target_lots` 向 0 收敛，`final_action=reduce/exit/close/risk_exit` | 非新增风险，不要求 `opportunity_rank`；exit/保护学习应落到目标手数下降或明确解释 |
 | 未入选候选 | `target_lots` 不因该候选变化 | 必须写 `capital_allocation_reason` 或未入选原因 |
 
 减仓/退出不是新增风险资金部署，不强制要求 `opportunity_rank`。开仓/加仓、扩大交易、反手和条件开仓必须先通过全市场资金 rank；没有 `rank_source=full_market_capital_deployment` 的最终合约不得保留新增 `target_lots`，必须还原到 `current_lots` 并写入 `no_rank_no_new_exposure`。开仓/加仓、扩大交易、条件监控和资金部署场景必须保留 score/rank/资金理由，并且 `opportunity_rank`、资金部署结论、部署前后手数、资金理由必须在同一张最终 `final_action_contract` 中原子落地。PM 内部评分草稿、排序草稿和资金部署草稿不得被任何下游智能体读取，也不得进入跨智能体消息。
