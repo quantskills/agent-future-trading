@@ -29,7 +29,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     rank_trace_for_row,
 )
 from tools.agent_tools.decision.pm_lifecycle_action_port import (
-    build_contract_lifecycle_self_check,
+    build_lifecycle_transition_diagnostic,
     classify_lifecycle_action_port,
 )
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
@@ -174,14 +174,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         lifecycle_pos = source.index("primary_lifecycle_action_port = classify_lifecycle_action_port")
         scorecard_pos = source.index("opportunity_scorecard = build_opportunity_scorecard", lifecycle_pos)
         side_selection_pos = source.index("ticker_side_selection_result = select_ticker_side", lifecycle_pos)
-        self_check_pos = source.index("contract_lifecycle_self_check = build_contract_lifecycle_self_check")
+        diagnostic_pos = source.index("lifecycle_transition_diagnostic = build_lifecycle_transition_diagnostic")
         router_pos = source.index("lifecycle_learning_router = route_lifecycle_learning")
         self.assertLess(lifecycle_pos, scorecard_pos)
         self.assertLess(lifecycle_pos, side_selection_pos)
-        self.assertLess(lifecycle_pos, self_check_pos)
-        self.assertLess(self_check_pos, router_pos)
+        self.assertLess(lifecycle_pos, diagnostic_pos)
+        self.assertLess(diagnostic_pos, router_pos)
         self.assertIn("primary_lifecycle_action_port.get", source[router_pos:router_pos + 250])
-        self.assertNotIn("contract_lifecycle_self_check_port.get", source[router_pos:router_pos + 250])
+        self.assertNotIn("lifecycle_transition_diagnostic_port.get", source[router_pos:router_pos + 250])
         self.assertNotIn("_route_pm_scorecard_action_values", source)
         self.assertEqual(source.count("route_lifecycle_learning("), 1)
 
@@ -392,7 +392,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertNotIn("- `pm_contract_builder`", section)
         self.assertNotIn("主要用：", section)
 
-    def test_contract_lifecycle_self_check_allows_explicit_budget_transition(self):
+    def test_lifecycle_transition_diagnostic_allows_explicit_budget_transition(self):
         primary = classify_lifecycle_action_port({
             "current_lots": 0,
             "target_lots": 1,
@@ -404,18 +404,20 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             "final_action": "wait",
             "reason_codes": ["no_rank_or_budget_no_new_exposure"],
         })
-        check = build_contract_lifecycle_self_check(
+        check = build_lifecycle_transition_diagnostic(
             primary_lifecycle_action_port=primary,
             contract_lifecycle_port=final,
             reason_codes=["no_rank_or_budget_no_new_exposure"],
         )
         self.assertTrue(check["ok"])
+        self.assertEqual(check["diagnostic_type"], "lifecycle_transition_diagnostic")
         self.assertFalse(check["consistent"])
         self.assertEqual(check["transition_reason"], "no_rank_or_budget_no_new_exposure")
-        self.assertTrue(check["self_check_only"])
+        self.assertTrue(check["diagnostic_only"])
+        self.assertTrue(check["not_final_contract_gate"])
         self.assertTrue(check["does_not_route_learning"])
 
-    def test_contract_lifecycle_self_check_fails_unexplained_transition(self):
+    def test_lifecycle_transition_diagnostic_marks_unexplained_transition(self):
         primary = classify_lifecycle_action_port({
             "current_lots": 0,
             "target_lots": 1,
@@ -426,7 +428,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             "target_lots": 0,
             "final_action": "wait",
         })
-        check = build_contract_lifecycle_self_check(
+        check = build_lifecycle_transition_diagnostic(
             primary_lifecycle_action_port=primary,
             contract_lifecycle_port=final,
             reason_codes=[],

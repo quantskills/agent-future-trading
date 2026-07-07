@@ -437,6 +437,60 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("mechanism_action_value_not_read_by_pm", "\n".join(report.hard_failures))
 
+    def test_pm_learning_safe_summary_satisfies_landing_without_raw_row_copy(self):
+        db_path = self._make_db()
+        self._insert_action_value(db_path)
+        rank_trace = self._rank_trace()
+        self._insert_recommendation(
+            db_path,
+            rec_id="rb-open-learning-summary",
+            ticker="RB",
+            contract={
+                "ticker": "RB",
+                "current_lots": 0,
+                "target_lots": -1,
+                "lots_delta": -1,
+                "final_action": "open_probe",
+                "evidence_used": {
+                    "opportunity_rank": 1,
+                    "capital_allocation_reason": "selected_by_full_market_rank",
+                    **rank_trace,
+                    "opportunity_score_components": {
+                        "positive_learning": 0.12,
+                        "negative_learning": 0.0,
+                        "execution_profile_learning": 0.0,
+                        "recent_tail_loss_penalty": 0.0,
+                    },
+                },
+                "capital_deployment": {
+                    "opportunity_rank": 1,
+                    **rank_trace,
+                    "selected_for_capital_deployment": True,
+                    "deployed_target_lots": -1,
+                    "original_target_lots": -1,
+                    "capital_allocation_reason": "selected_by_full_market_rank",
+                },
+                "learning_used": {
+                    "pm_lifecycle_learning_trace": {
+                        "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+                        "contract_lifecycle_port": "open_add_new_risk",
+                        "used_lanes": ["open"],
+                    },
+                    "pm_lifecycle_learning_impact_delta": {
+                        "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
+                        "positive_learning": 0.12,
+                    },
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        failures = "\n".join(report.hard_failures)
+        self.assertNotIn("mechanism_action_value_not_read_by_pm", failures)
+        self.assertNotIn("mechanism_matching_action_value_not_landed_in_pm", failures)
+
     def test_exit_current_position_side_learning_lands_with_memory_side_role(self):
         db_path = self._make_db()
         self._insert_action_value(
@@ -911,7 +965,7 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("mechanism_learning_score_missing_rank", "\n".join(report.hard_failures))
 
-    def test_unselected_conditional_candidate_does_not_require_rank_or_intraday_result(self):
+    def test_unselected_no_new_exposure_candidate_does_not_require_rank_or_intraday_result(self):
         db_path = self._make_db()
         self._insert_recommendation(
             db_path,
@@ -923,11 +977,10 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 "target_lots": 0,
                 "lots_delta": 0,
                 "final_action": "wait",
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
+                "conditional_trigger_authority": False,
+                "requires_intraday_confirmation": False,
                 "can_execute_without_intraday_trigger": False,
                 "reason_codes": [
-                    "conditional_trigger_authority",
                     "no_rank_no_new_exposure",
                     "capital_queue_not_selected",
                 ],
@@ -957,6 +1010,47 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         failures = "\n".join(report.hard_failures)
         self.assertNotIn("mechanism_learning_score_missing_rank", failures)
         self.assertNotIn("mechanism_conditional_probe_missing_intraday_result", failures)
+
+    def test_unselected_no_new_exposure_with_intraday_flags_hard_fails(self):
+        db_path = self._make_db()
+        self._insert_recommendation(
+            db_path,
+            rec_id="unselected-conditional-stale-trigger",
+            ticker="HC",
+            contract={
+                "ticker": "HC",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "final_action": "wait",
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
+                "can_execute_without_intraday_trigger": False,
+                "reason_codes": [
+                    "no_rank_no_new_exposure",
+                    "capital_queue_not_selected",
+                ],
+                "evidence_used": {
+                    "opportunity_score": 0.0,
+                    "capital_priority_score": 0.0,
+                    "opportunity_score_components": {},
+                },
+                "capital_deployment": {
+                    "selected_for_capital_deployment": False,
+                    "original_target_lots": -11,
+                    "deployed_target_lots": 0,
+                    "deployed_lots_delta": 0,
+                    "capital_allocation_reason": "no_rank_no_new_exposure",
+                },
+            },
+        )
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        failures = "\n".join(report.hard_failures)
+        self.assertIn("mechanism_unselected_no_new_exposure_requires_intraday_confirmation", failures)
+        self.assertIn("mechanism_unselected_no_new_exposure_conditional_trigger_authority", failures)
 
     def test_ranked_open_contract_without_capital_deployment_hard_fails(self):
         db_path = self._make_db()

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping
 from tools.common.contracts import pm_artifact_boundary_violations
 from tools.common.final_action_semantics import (
     contract_has_full_market_capital_rank,
+    contract_increases_risk_position,
     contract_requires_full_market_capital_rank,
     full_market_rank_gate_errors,
     lifecycle_learning_decision_contract_errors,
@@ -42,6 +43,10 @@ FINAL_ACTION_CONTRACT_DICT_FIELDS = (
 )
 
 FINAL_ACTION_CONTRACT_LIST_FIELDS = ("reason_codes",)
+STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
+    "no_rank_no_new_exposure",
+    "no_rank_or_budget_no_new_exposure",
+)
 
 
 def _as_int(value: Any) -> int:
@@ -88,6 +93,28 @@ def _contract_has_any_rank(contract: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_step5_undeployed_no_new_exposure_reason(value: Any) -> bool:
+    reason = str(value or "").strip().lower()
+    return any(
+        reason == prefix or reason.startswith(f"{prefix}:")
+        for prefix in STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES
+    )
+
+
+def _step5_undeployed_no_new_exposure_errors(
+    contract: Mapping[str, Any],
+    deployment: Mapping[str, Any],
+) -> List[str]:
+    errors: List[str] = []
+    if deployment.get("selected_for_capital_deployment") is not False:
+        errors.append("undeployed_new_risk_selected_flag_invalid")
+    if contract_increases_risk_position(contract):
+        errors.append("undeployed_new_risk_contract_still_increases_risk")
+    if not _is_step5_undeployed_no_new_exposure_reason(deployment.get("capital_allocation_reason")):
+        errors.append("undeployed_new_risk_capital_deployment_reason_invalid")
+    return errors
+
+
 def _base_field_errors(contract: Mapping[str, Any]) -> List[str]:
     errors: List[str] = []
     for field in FINAL_ACTION_CONTRACT_REQUIRED_FIELDS:
@@ -108,6 +135,8 @@ def _semantic_object_errors(contract: Mapping[str, Any]) -> List[str]:
     if isinstance(deployment, Mapping):
         if not deployment:
             errors.append("capital_deployment_missing")
+        elif _is_step5_undeployed_no_new_exposure_reason(deployment.get("capital_allocation_reason")):
+            errors.extend(_step5_undeployed_no_new_exposure_errors(contract, deployment))
         elif not _contract_has_any_rank(contract) and not contract_requires_full_market_capital_rank(contract):
             if deployment.get("selected_for_capital_deployment") is not False:
                 errors.append("non_rank_capital_deployment_selected_flag_invalid")
@@ -229,11 +258,14 @@ def check_final_action_contract(
     if final_action != expected:
         errors.append("final_action_mismatch")
     requires_intraday = bool(contract.get("requires_intraday_confirmation"))
+    conditional_authority = bool(contract.get("conditional_trigger_authority"))
     can_execute_without_trigger = bool(contract.get("can_execute_without_intraday_trigger"))
     if requires_intraday and can_execute_without_trigger:
         errors.append("conditional_trigger_conflict")
     if requires_intraday and target == current:
         errors.append("conditional_trigger_without_lot_delta")
+    if conditional_authority and target == current:
+        errors.append("conditional_trigger_authority_without_lot_delta")
     if final_action in {"open_probe", "open_real", "scale"} and requires_intraday:
         entry_trigger = str(contract.get("entry_trigger") or "").strip()
         if not entry_trigger or entry_trigger == "unknown":
@@ -246,15 +278,6 @@ def check_final_action_contract(
         if isinstance(evidence.get("lifecycle_learning_trace"), dict)
         else {}
     )
-    contract_lifecycle_self_check = (
-        evidence.get("contract_lifecycle_self_check")
-        if isinstance(evidence.get("contract_lifecycle_self_check"), dict)
-        else lifecycle_trace.get("contract_lifecycle_self_check")
-        if isinstance(lifecycle_trace.get("contract_lifecycle_self_check"), dict)
-        else {}
-    )
-    if contract_lifecycle_self_check and not bool(contract_lifecycle_self_check.get("ok")):
-        errors.append("contract_lifecycle_self_check_failed")
     errors.extend(full_market_rank_gate_errors(contract))
     errors.extend(rank_capital_layer_contract_errors(contract))
     errors.extend(_rank_score_trace_errors(contract))

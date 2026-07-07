@@ -133,6 +133,15 @@ Researcher 基于复盘材料、交易过程和交易结果形成结构化研究
 
 `workflow` 只能保存，不能改语义，不能把候选、草稿或中间诊断伪装成最终交易事实。
 
+PM strategy recommendation 保存前必须通过只读 hard gate：
+
+- `signal_snapshot.final_action_contract` 必须存在且为 PM Step6 已签出的最终合约。
+- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`。
+- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`。
+- `signal_snapshot` 不得残留 `pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision` 或 PM draft 字段。
+
+`workflow` 只检查这些条件，不修合同、不补字段、不把 Step2/Step3/Step4 的诊断对象保存成最终交易事实。
+
 ### 2.5 触发审计和执行
 
 PM 签出合约后，`workflow` 触发 PG/Auditor 检查；审计通过后，触发 Trader 执行；执行后，触发 Accountant 结算；最后触发 Reviewer/Researcher 复盘学习。

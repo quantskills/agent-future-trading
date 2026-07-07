@@ -190,10 +190,6 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             calls.append("protocol")
             return {"ok": True, "errors": [], "warnings": []}
 
-        def fake_coverage(_repo_root):
-            calls.append("coverage")
-            return _Report()
-
         def fake_acceptance(**_kwargs):
             calls.append("acceptance")
             return _Report()
@@ -205,15 +201,14 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             pre_gate,
             "_run_protocol_preflight",
             side_effect=fake_protocol,
-        ), patch.object(pre_gate, "audit_contract_coverage", side_effect=fake_coverage), patch.object(
-            pre_gate,
-            "run_pre_backtest_acceptance",
-            side_effect=fake_acceptance,
-        ):
+        ), patch.object(pre_gate, "run_pre_backtest_acceptance", side_effect=fake_acceptance):
             result = pre_gate.main()
 
         self.assertEqual(result, 0)
-        self.assertEqual(calls, ["init_database", "unittest", "protocol", "coverage", "acceptance"])
+        self.assertEqual(
+            calls,
+            ["init_database", "unittest", "unittest", "protocol", "acceptance"],
+        )
 
     def test_backtest_pre_backtest_command_uses_integrated_gate(self):
         import run.backtest as backtest

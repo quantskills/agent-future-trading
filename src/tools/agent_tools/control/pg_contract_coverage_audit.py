@@ -357,6 +357,64 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
     ),
     ContractCoverageSpec(
+        contract="pm_six_step_trace",
+        producers=(
+            _rule(
+                "src/agents/decision_team/portfolio_manager.py",
+                (
+                    'snapshot["pm_six_step_trace"]',
+                    '"step6_contract_generation_check": step6_contract_generation_check',
+                    '"pm_contract_self_check": pm_contract_self_check',
+                ),
+                "PM step-6 signer writes the final generation check and final contract self-check trace",
+            ),
+        ),
+        consumers=(
+            _rule(
+                "src/graph/workflow.py",
+                (
+                    'trace = snapshot.get("pm_six_step_trace")',
+                    "step6_contract_generation_check",
+                    "pm_contract_self_check",
+                ),
+                "workflow reads both PM step-6 gates before persistence",
+            ),
+        ),
+        audits=(
+            _rule(
+                "src/tools/agent_tools/control/pg_system_invariants.py",
+                (
+                    "strategy_recommendation_pm_step6_generation_check_missing",
+                    "strategy_recommendation_pm_six_step_self_check_missing",
+                ),
+                "daily system invariants audit both PM step-6 gates after persistence",
+            ),
+            _rule(
+                "docs/unified_field_semantics.md",
+                (
+                    "pm_six_step_trace.step6_contract_generation_check",
+                    "pm_six_step_trace.pm_contract_self_check",
+                ),
+                "field semantics register both PM step-6 final gates",
+            ),
+        ),
+        tests=(
+            _rule(
+                "src/tests/test_pre_backtest_pm_workflow_contracts.py",
+                ("step6_contract_generation_check", "pm_contract_self_check"),
+                "pre-backtest PM/workflow gate covers both step-6 trace checks",
+            ),
+            _rule(
+                "src/tests/test_system_invariant_audit.py",
+                (
+                    "test_system_invariant_audit_rejects_missing_step6_generation_check",
+                    "test_system_invariant_audit_rejects_failed_step6_generation_check",
+                ),
+                "system invariant tests cover missing and failed step-6 generation checks",
+            ),
+        ),
+    ),
+    ContractCoverageSpec(
         contract="artifact_phase_boundary",
         producers=(
             _rule(

@@ -384,11 +384,11 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 顺序 | 阶段 | 对应工具/入口 | 必须做 | 禁止 |
 |---|---|---|---|---|
 | 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据 | 在 PM 内调用证据包 builder；直接查研究 DB；读取上游内部草稿 |
-| 2 | 主生命周期动作口 | `pm_lifecycle_action_port`、持仓变化和条件字段 | 先判定当前 candidate 属于新增风险还是非新增风险，并生成唯一 `primary_lifecycle_action_port` | 在后续步骤重新生成第二套生命周期口 |
+| 2 | 主生命周期动作口 | `pm_lifecycle_action_port`、持仓变化和条件字段 | 先判定当前 candidate 属于新增风险还是非新增风险，并生成唯一 `primary_lifecycle_action_port`，只作为 PM 内部分流、学习路由和 provenance trace | 把 Step2 结果写入 `final_action_contract.evidence_used`，或把它拿来和 Step6 最终合约比较后作为最终失败依据 |
 | 3 | 单品种方向与候选质量 | `pm_ticker_side_selection`、`pm_signal_fusion`、市场确认和数据质量 | 只生成 `side_priority`、`ticker_side_priority`、`side_priority_score`、`candidate_quality`、`candidate_layer_hint` | 写 `opportunity_rank`、`capital_priority_score`、`capital_priority_tier` 或最终资金部署事实 |
 | 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 open/add/hold/reduce/exit/execution/conditional_monitor lane 消费学习，并保留安全 trace | 拿开仓学习解释退出，拿 execution 学习给开仓权限，或把原始研究对象写入 artifact |
 | 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理 `open/open_probe/open_real/add/scale/increase/reverse/conditional open` 等新增风险候选，生成唯一全市场 `opportunity_rank`、`rank_score`、`capital_deployment` 和 rank trace | 让非新增风险进入资金 rank；伪造空 deployment；把 Step3/4 候选字段当最终 rank trace |
-| 6 | 最终合约签发与自检 | `pm_contract_builder`、`pm_contract_self_check`、PM 推荐事实写入口 | PM 原子签出唯一 `final_action_contract`，写清动作、手数、触发、失效、资金或非 rank 理由、生命周期学习 trace 和 reason code | 分散写多个交易合约；保存 `pm_internal_candidate`、`pm_capital_deployment_decision` 等中间态；让 Trader/Reviewer 补签合约 |
+| 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、PM 推荐事实写入口 | PM 原子签出唯一 `final_action_contract`，写清动作、手数、触发、失效、资金或非 rank 理由、生命周期学习 trace 和 reason code，并通过最终合约生成合法性检查和最终合约自身边界检查 | 分散写多个交易合约；保存 `pm_internal_candidate`、`pm_capital_deployment_decision` 等中间态；让 Trader/Reviewer 补签合约；把 Step2 与 Step6 的动作差异作为最终失败依据 |
 
 顺序硬规则：
 
@@ -397,7 +397,7 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 3. 新增风险动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`；缺 Step5 资金部署事实时不能签出新增风险最终合约。
 4. `watch_for_trigger` 的条件触发出口必须由 PM 在唯一合约中写明 `conditional_trigger_authority`、触发条件和失效边界；Trader 未触发不得成交。
 5. 手数计算必须晚于生命周期口、候选质量、学习路由和必要的全市场资金部署；分析师证据不能直接决定手数。
-6. 最终合约自检失败时必须停止保存 PM 推荐，不能把不一致合约交给审计员兜底。
+6. `pm_six_step_trace.step6_contract_generation_check` 或 `pm_six_step_trace.pm_contract_self_check` 失败时必须停止保存 PM 推荐，不能把非法合约交给审计员兜底。
 
 PM 内部可以分步生成评分草稿、排序草稿、资金部署草稿和签约候选，但这些草稿只能存在 PM 内部内存中，不得写入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。对外事实入口只有第 6 步签出的唯一 `final_action_contract`。最终合约提交必须是原子动作：凡最终 `final_action_contract` 属于新增风险并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；非新增风险合约必须写明非 rank 生命周期解释和学习 trace，不得把裸 rank、空 deployment 或 PM 中间态交给 Auditor、Trader、Reviewer、Researcher 或 Protocol Governor。
 

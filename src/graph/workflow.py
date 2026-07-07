@@ -247,6 +247,9 @@ class AgentWorkflow:
         check = trace.get("pm_contract_self_check") if isinstance(trace, dict) else None
         if not isinstance(check, dict) or check.get("ok") is not True:
             raise RuntimeError(f"{ticker} PM final_action_contract self-check not ok before persistence")
+        generation_check = trace.get("step6_contract_generation_check") if isinstance(trace, dict) else None
+        if not isinstance(generation_check, dict) or generation_check.get("ok") is not True:
+            raise RuntimeError(f"{ticker} PM step6 contract generation check not ok before persistence")
 
     def _audit_phase1_strategy_recommendations(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         """Run the independent Auditor after PM capital deployment finalizes contracts."""

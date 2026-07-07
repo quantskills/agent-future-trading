@@ -245,9 +245,12 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             alpha_setup_action_values=action_values,
         )
         trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
-        self.assertEqual(trace["primary_lifecycle_action_port"]["pm_lifecycle_action_port"], "new_risk")
-        self.assertTrue(trace["contract_lifecycle_self_check"]["ok"])
-        self.assertEqual(trace["lifecycle_port_transition_reason"], "consistent")
+        self.assertEqual(trace["contract_lifecycle_port"], "open_add_new_risk")
+        self.assertNotIn("primary_lifecycle_action_port", trace)
+        self.assertNotIn("contract_lifecycle_self_check", trace)
+        self.assertNotIn("lifecycle_port_transition_reason", trace)
+        self.assertNotIn("lifecycle_transition_diagnostic", trace)
+        self.assertNotIn("lifecycle_transition_reason", trace)
         self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["open-1"])
         self.assertEqual([row["id"] for row in trace["trigger_profile_learning"]], ["exec-1"])
         self.assertNotIn("exec-1", {row.get("id") for row in trace["rejected_learning"]})

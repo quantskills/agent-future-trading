@@ -58,6 +58,14 @@ FORBIDDEN_RUNTIME_FIELD_TOKENS = {
     "shadow_",
 }
 
+PM_FINAL_ARTIFACT_FORBIDDEN_FIELD_TOKENS = {
+    "contract_lifecycle_self_check",
+    "historical_lifecycle_transition_diagnostic",
+    "initial_primary_lifecycle_action_port",
+    "lifecycle_port_transition_reason",
+    "lifecycle_transition_diagnostic",
+}
+
 RUNTIME_FIELD_SCAN_ROOTS = (
     "agents",
     "tools",
@@ -295,3 +303,16 @@ def find_forbidden_artifact_field_keys(
             path = f"{prefix}[{index}]" if prefix else f"[{index}]"
             found.extend(find_forbidden_artifact_field_keys(item, tokens=token_set, prefix=path))
     return found
+
+
+def find_forbidden_pm_final_artifact_field_keys(
+    value: Any,
+    *,
+    prefix: str = "",
+) -> List[str]:
+    """Find retired PM lifecycle self-check fields in persisted PM artifacts."""
+    return find_forbidden_artifact_field_keys(
+        value,
+        tokens=PM_FINAL_ARTIFACT_FORBIDDEN_FIELD_TOKENS,
+        prefix=prefix,
+    )

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
-from tools.agent_tools.decision.pm_lifecycle_action_port import build_contract_lifecycle_self_check
 from tools.agent_tools.decision.pm_position_transition import final_action_from_lots
 from tools.common.order_semantics import build_lot_intent_consistency
 
@@ -219,33 +218,6 @@ def _pm_lifecycle_learning_trace(
         target_lots=target_lots,
         authority=authority,
     )
-    primary_lifecycle_action_port = (
-        diagnostics.get("primary_lifecycle_action_port")
-        if isinstance(diagnostics.get("primary_lifecycle_action_port"), dict)
-        else diagnostics.get("pm_lifecycle_action_port")
-        if isinstance(diagnostics.get("pm_lifecycle_action_port"), dict)
-        else {}
-    )
-    if isinstance(diagnostics.get("contract_lifecycle_self_check"), dict):
-        contract_lifecycle_self_check = diagnostics.get("contract_lifecycle_self_check")
-    elif primary_lifecycle_action_port.get("pm_lifecycle_action_port"):
-        contract_lifecycle_self_check = build_contract_lifecycle_self_check(
-            primary_lifecycle_action_port=primary_lifecycle_action_port,
-            contract_lifecycle_port=lifecycle_port,
-            reason_codes=control_reasons,
-            control_reasons=control_reasons,
-        )
-    else:
-        contract_lifecycle_self_check = {
-            "tool": "pm_lifecycle_action_port",
-            "check_type": "contract_lifecycle_self_check",
-            "status": "primary_lifecycle_action_port_missing",
-            "ok": True,
-            "self_check_only": True,
-            "does_not_route_learning": True,
-            "does_not_generate_lifecycle_semantics": True,
-            "transition_reason": "primary_lifecycle_action_port_missing",
-        }
     used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values or []) if lane})
     lifecycle_router = diagnostics.get("pm_lifecycle_learning_router")
     lifecycle_router = lifecycle_router if isinstance(lifecycle_router, dict) else {}
@@ -284,10 +256,7 @@ def _pm_lifecycle_learning_trace(
     }.get(lifecycle_port, [])
     trace = {
         "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
-        "primary_lifecycle_action_port": primary_lifecycle_action_port,
         "contract_lifecycle_port": lifecycle_port,
-        "contract_lifecycle_self_check": contract_lifecycle_self_check,
-        "lifecycle_port_transition_reason": contract_lifecycle_self_check.get("transition_reason"),
         "rank_lifecycle": "open_add_new_risk" if lifecycle_port == "open_add_new_risk" else lifecycle_port,
         "used_lanes": used_lanes,
         "accepted_learning_lanes": accepted_by_port,

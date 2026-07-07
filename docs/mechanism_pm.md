@@ -22,7 +22,7 @@ PM 内部顺序必须固定为：
 3. 判断单品种方向与候选质量：调用 `pm_ticker_side_selection.py`。
 4. 按生命周期消费学习：调用 `pm_lifecycle_learning_router.py`。
 5. 新增风险进入全市场 rank 与资金部署：调用 `pm_full_market_capital_deployment.py`。
-6. 生成唯一 `final_action_contract`：调用 `pm_contract_builder.py` 和 `pm_contract_self_check.py`。
+6. 生成唯一 `final_action_contract`：调用 `pm_contract_builder.py`，写入 `pm_six_step_trace.step6_contract_generation_check`，并调用 `pm_contract_self_check.py`。
 
 一句话：`workflow.py` 调 PM，PM 内部自己按六步调工具。`workflow.py` 管阶段，PM 管策略。
 
@@ -161,7 +161,7 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 明确禁止：
 
 - `pm_contract_builder.py` 不参与动作口判断，只在第 6 步生成唯一 `final_action_contract`
-- `pm_contract_self_check.py` 不参与动作口判断，只做签约前自检
+- `pm_contract_self_check.py` 不参与动作口判断，只做最终合约自身机制边界检查
 - `pm_ticker_side_selection.py` 不参与动作口判断，只在第 3 步判断单品种方向与候选质量
 - `pm_full_market_capital_deployment.py` 不参与动作口判断，只在第 5 步处理新增风险候选的唯一全市场资金 rank 与资金部署
 - `workflow.py` 不参与动作口判断
@@ -501,6 +501,13 @@ PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
 
 `pm_full_market_capital_deployment` 的结果如果已经在第 5 步生成，只能作为全市场资金 rank 结果写入合约；第 6 步不能重新排名。
 
+第 6 步最终闸门固定为两道检查：
+
+- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`
+- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`
+
+其中 `step6_contract_generation_check` 只检查最终合约是否由合法 PM 机制生成；`pm_contract_self_check` 只检查最终合约自身字段、rank/非 rank/Step5 未部署边界和 artifact 污染。两者都不比较 Step2 的 `primary_lifecycle_action_port` 与 Step6 最终合约是否一致。Step2 到 Step6 的变化只能作为 PM 内部 provenance trace，不参与最终合约失败判断。
+
 ### 6.2 final_action_contract 回答什么
 
 第 6 步生成的 `final_action_contract` 是 PM 签出的唯一交易事实，必须写清：
@@ -608,10 +615,14 @@ trace 是 PM 对“自己如何使用学习”的安全摘要，必须能回答�
 `pm_contract_self_check` 必须检查：
 
 - 最终合约字段完整
+- `capital_deployment` 和 `position_sizing_result` 语义完整，不能用空对象冒充事实
 - 走 rank 的合约有资金 rank trace 和生命周期学习 trace
 - 非 rank 但消费学习的合约有生命周期学习 trace
+- Step5 未部署新增风险必须还原为 `wait/hold`、`target_lots=current_lots`、`lots_delta=0`，且不得残留盘中触发执行权限
 - PM artifact 没有越界研究事实对象
 - `final_action` 与 `current_lots` / `target_lots` / `lots_delta` 一致
+
+`pm_contract_self_check` 不读取 `final_action_contract.evidence_used.contract_lifecycle_self_check`，也不把 Step2 与 Step6 的生命周期差异作为最终失败依据。
 
 ### 6.8 2025-03-27 错误提醒
 

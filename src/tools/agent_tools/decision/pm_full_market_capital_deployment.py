@@ -1024,7 +1024,8 @@ def apply_full_market_capital_deployment(
             if not net_ok:
                 blocked.append("net_exposure_budget")
             reason = (
-                "not_selected_by_full_market_pm_capital_queue:"
+                "no_rank_or_budget_no_new_exposure:"
+                "not_selected_by_full_market_pm_capital_queue;"
                 f"rank={rank};rank_score={rank_score};capital_priority_score={priority_score};"
                 f"blocked_by={','.join(blocked) or 'unknown'};"
                 f"capital_target_filled={used_margin_ratio:.4f}/{budget_ceiling:.4f};"

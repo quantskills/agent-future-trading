@@ -96,6 +96,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     RANK_CAPITAL_ROLE_REAL_BUDGET,
     _ensure_final_rank_score_fields,
 )
+from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.common.final_action_semantics import full_market_rank_source_payload
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
@@ -188,6 +189,7 @@ def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecar
     execution_fields = dict(execution_fields or {})
     execution_fields.pop("final_action_contract", None)
     execution_fields.setdefault("pm_six_step_stage", "steps_1_4_candidate_generated")
+    primary_lifecycle_action_port = classify_lifecycle_action_port(contract)
     return {
         "schema": "agentquant.pm_internal_candidate.v1",
         "stage": "steps_1_4_complete_pending_full_market_deployment",
@@ -219,7 +221,7 @@ def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecar
                 ),
             },
             "control_reasons": list(contract.get("reason_codes") or []),
-            "control_diagnostics": {},
+            "control_diagnostics": {"primary_lifecycle_action_port": primary_lifecycle_action_port},
             "opportunity_scorecard": dict(scorecard or {}),
             "market_confirmation": {},
             "alpha_setup_action_values": [],
@@ -797,6 +799,132 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "pm_step6_missing_capital_deployment_decision"):
             _sign_pm_candidate_recommendation(recommendation)
+
+    def test_pm_step6_uses_post_gate_candidate_not_stale_primary_lifecycle_rank_trace(self):
+        stale_primary_lifecycle_trace = {
+            "pm_lifecycle_action_port": "new_risk",
+            "requires_full_market_rank": True,
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
+        }
+        recommendation = FuturesRecommendation(
+            underlying_code="ZN",
+            base_price=24200.0,
+            signal_snapshot={
+                "pm_internal_candidate": _pm_internal_candidate_fixture(
+                    {
+                        "ticker": "ZN",
+                        "current_lots": 0,
+                        "target_lots": 0,
+                        "lots_delta": 0,
+                        "final_action": "wait",
+                        "reason_codes": ["risk_gate_flat_target_no_new_exposure"],
+                    },
+                    ticker="ZN",
+                    execution_fields={
+                        "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
+                        "lifecycle_transition_diagnostic": {
+                            "tool": "pm_lifecycle_action_port",
+                            "diagnostic_type": "lifecycle_transition_diagnostic",
+                            "primary_lifecycle_action_port": "new_risk",
+                            "expected_contract_lifecycle_port": "open_add_new_risk",
+                            "actual_contract_lifecycle_port": "wait",
+                            "consistent": False,
+                            "ok": False,
+                            "transition_reason": "unexplained_lifecycle_port_transition",
+                        },
+                        "risk_gate_note": "RiskGate received flat target; no new exposure required",
+                    },
+                )
+            },
+        )
+
+        finalize_pm_full_market_contracts(
+            generated=[("ZN", recommendation)],
+            config={"max_total_margin_ratio": 0.20},
+            portfolio=Portfolio(id="p1", cashflow=5_000_000.0, positions={}, account_equity=5_000_000.0),
+        )
+
+        snapshot = recommendation.signal_snapshot
+        contract = snapshot["final_action_contract"]
+        deployment = contract["capital_deployment"]
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertEqual(deployment["capital_allocation_reason"], "non_new_risk_no_capital_rank")
+        self.assertFalse(deployment["new_risk_rank_required"])
+        self.assertFalse(deployment["selected_for_capital_deployment"])
+        generation_check = snapshot["pm_six_step_trace"]["step6_contract_generation_check"]
+        self.assertTrue(generation_check["ok"])
+        self.assertTrue(generation_check["candidate_requires_step5"] is False)
+        self.assertNotIn("contract_lifecycle_self_check", contract["evidence_used"])
+        self.assertNotIn("lifecycle_transition_diagnostic", contract["evidence_used"])
+        self.assertNotIn("historical_lifecycle_transition_diagnostic", contract["evidence_used"])
+        self.assertNotIn("primary_lifecycle_action_port", contract["evidence_used"])
+        self.assertNotIn("initial_primary_lifecycle_action_port", contract["evidence_used"])
+        self.assertEqual(snapshot["pm_six_step_trace"]["step_5_deployment_tool"], "not_required_non_new_risk")
+        self.assertTrue(snapshot["pm_six_step_trace"]["pm_contract_self_check"]["ok"])
+        self.assertNotIn("pm_capital_deployment_decision", snapshot)
+        self.assertNotIn("pm_internal_candidate", snapshot)
+        self.assertNotIn("opportunity_rank", contract)
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+        self.assertNotIn("opportunity_rank", deployment)
+        self.assertNotIn("rank_input_components", contract["evidence_used"])
+
+    def test_pm_step6_ignores_stale_lifecycle_transition_reason_when_final_candidate_is_flat(self):
+        stale_primary_lifecycle_trace = {
+            "pm_lifecycle_action_port": "new_risk",
+            "requires_full_market_rank": True,
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
+        }
+        recommendation = FuturesRecommendation(
+            underlying_code="ZN",
+            base_price=24200.0,
+            signal_snapshot={
+                "pm_internal_candidate": _pm_internal_candidate_fixture(
+                    {
+                        "ticker": "ZN",
+                        "current_lots": 0,
+                        "target_lots": 0,
+                        "lots_delta": 0,
+                        "final_action": "wait",
+                        "reason_codes": [],
+                    },
+                    ticker="ZN",
+                    execution_fields={
+                        "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
+                        "lifecycle_transition_diagnostic": {
+                            "tool": "pm_lifecycle_action_port",
+                            "diagnostic_type": "lifecycle_transition_diagnostic",
+                            "primary_lifecycle_action_port": "new_risk",
+                            "expected_contract_lifecycle_port": "open_add_new_risk",
+                            "actual_contract_lifecycle_port": "wait",
+                            "consistent": False,
+                            "ok": False,
+                            "transition_reason": "unexplained_lifecycle_port_transition",
+                        },
+                    },
+                )
+            },
+        )
+
+        finalize_pm_full_market_contracts(
+            generated=[("ZN", recommendation)],
+            config={"max_total_margin_ratio": 0.20},
+            portfolio=Portfolio(id="p1", cashflow=5_000_000.0, positions={}, account_equity=5_000_000.0),
+        )
+
+        snapshot = recommendation.signal_snapshot
+        contract = snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertNotIn("contract_lifecycle_self_check", contract["evidence_used"])
+        self.assertNotIn("lifecycle_transition_diagnostic", contract["evidence_used"])
+        self.assertTrue(snapshot["pm_six_step_trace"]["step6_contract_generation_check"]["ok"])
 
     def test_pm_finalizer_requires_every_generated_candidate_to_sign(self):
         recommendation = FuturesRecommendation(

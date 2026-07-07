@@ -67,6 +67,26 @@ CHECKED_SCENARIOS = {
     SCENARIO_FLAT_WAIT: "flat/no-action candidate with prior learning must explain why it did not affect deployment",
 }
 CONDITIONAL_FINAL_ACTIONS = {"conditional_probe", "conditional_monitor", "watch_trigger"}
+STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
+    "no_rank_no_new_exposure",
+    "no_rank_or_budget_no_new_exposure",
+)
+SAFE_PM_LEARNING_SUMMARY_FIELDS = {
+    "pm_lifecycle_learning_trace",
+    "pm_lifecycle_learning_impact_delta",
+    "lifecycle_learning_trace",
+    "learning_impact_delta",
+    "learning_adjustment_summary",
+    "memory_requirements",
+}
+EXPLICIT_LEARNING_UNUSED_FIELDS = {
+    "learning_exclusion_reason",
+    "learning_not_used_reason",
+    "learning_rejected_reason",
+    "learning_unused_reason",
+}
+
+
 @dataclass
 class MechanismEffectivenessAuditReport:
     ok: bool
@@ -409,6 +429,34 @@ def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]
     return [_dict(row) for row in rows if isinstance(row, dict)]
 
 
+def _has_safe_pm_learning_summary_or_explanation(contract: Dict[str, Any]) -> bool:
+    learning = _dict(contract.get("learning_used"))
+    evidence = _dict(contract.get("evidence_used"))
+    deployment = _dict(contract.get("capital_deployment"))
+    for field in SAFE_PM_LEARNING_SUMMARY_FIELDS:
+        value = learning.get(field)
+        if value not in (None, "", {}, []):
+            return True
+    for container in (learning, evidence, deployment):
+        for field in EXPLICIT_LEARNING_UNUSED_FIELDS:
+            value = container.get(field)
+            if value not in (None, "", {}, []):
+                return True
+    reason_codes = {_lower(item) for item in contract.get("reason_codes") or [] if _lower(item)}
+    if reason_codes & {
+        "learning_not_used",
+        "learning_rejected",
+        "learning_unused",
+        "negative_learning_block",
+        "no_matching_pm_learning",
+    }:
+        return True
+    reason = _capital_allocation_reason(contract)
+    if not contract_increases_risk_position(contract) and _is_step5_undeployed_no_new_exposure_reason(reason):
+        return True
+    return False
+
+
 def _learning_components(contract: Dict[str, Any]) -> Dict[str, float]:
     evidence = _dict(contract.get("evidence_used"))
     components = _dict(evidence.get("opportunity_score_components"))
@@ -701,6 +749,14 @@ def _capital_allocation_reason(contract: Dict[str, Any]) -> str:
     )
 
 
+def _is_step5_undeployed_no_new_exposure_reason(reason: str) -> bool:
+    reason = _lower(reason)
+    return any(
+        reason == prefix or reason.startswith(f"{prefix}:")
+        for prefix in STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES
+    )
+
+
 def _audit_recommendation_mechanisms(
     *,
     recommendations: Dict[str, Dict[str, Any]],
@@ -755,10 +811,11 @@ def _audit_recommendation_mechanisms(
         contract_rows = _contract_action_value_rows(contract)
         components = _learning_components(contract)
         components_nonzero = _learning_components_nonzero(components)
+        has_learning_summary_or_explanation = _has_safe_pm_learning_summary_or_explanation(contract)
 
-        if prior_rows and not contract_rows:
+        if prior_rows and not contract_rows and not has_learning_summary_or_explanation:
             hard_failures.append(f"mechanism_action_value_not_read_by_pm:{label}:side={side or 'missing'}")
-        elif prior_rows and not _contract_rows_include_prior(contract_rows, prior_rows):
+        elif prior_rows and not _contract_rows_include_prior(contract_rows, prior_rows) and not has_learning_summary_or_explanation:
             hard_failures.append(f"mechanism_matching_action_value_not_landed_in_pm:{label}:side={side or 'missing'}")
 
         for row in contract_rows:
@@ -836,6 +893,17 @@ def _audit_recommendation_mechanisms(
         selected = _capital_deployment_selected(contract)
         if selected is False and not reason:
             hard_failures.append(f"mechanism_unselected_candidate_missing_capital_reason:{label}:rank={rank or 'missing'}")
+        if _is_unselected_no_new_exposure_candidate(contract):
+            if not _is_step5_undeployed_no_new_exposure_reason(reason):
+                hard_failures.append(
+                    f"mechanism_unselected_no_new_exposure_reason_invalid:{label}:reason={reason or 'missing'}"
+                )
+            if contract_increases_risk_position(contract):
+                hard_failures.append(f"mechanism_unselected_no_new_exposure_still_increases_risk:{label}")
+            if bool(contract.get("requires_intraday_confirmation")):
+                hard_failures.append(f"mechanism_unselected_no_new_exposure_requires_intraday_confirmation:{label}")
+            if bool(contract.get("conditional_trigger_authority")):
+                hard_failures.append(f"mechanism_unselected_no_new_exposure_conditional_trigger_authority:{label}")
 
         if (
             _has_hold_exit_learning(contract)

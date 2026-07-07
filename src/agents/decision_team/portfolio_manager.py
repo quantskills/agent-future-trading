@@ -73,7 +73,7 @@ from tools.agent_tools.decision.pm_risk_controls import business_quality_positio
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.decision.pm_full_market_capital_deployment import apply_full_market_capital_deployment
 from tools.agent_tools.decision.pm_lifecycle_action_port import (
-    build_contract_lifecycle_self_check,
+    build_lifecycle_transition_diagnostic,
     classify_lifecycle_action_port,
 )
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
@@ -1166,20 +1166,10 @@ def _pm_candidate_contract(candidate: dict) -> dict:
     return dict(contract) if isinstance(contract, dict) else {}
 
 
-def _pm_step6_primary_lifecycle_port(builder_inputs: dict) -> dict:
-    execution_fields = builder_inputs.get("execution_contract_fields")
-    execution_fields = execution_fields if isinstance(execution_fields, dict) else {}
-    primary = execution_fields.get("primary_lifecycle_action_port")
-    return primary if isinstance(primary, dict) else {}
-
-
 def _pm_step6_candidate_requires_capital_deployment(candidate_contract: dict, builder_inputs: dict) -> bool:
-    primary = _pm_step6_primary_lifecycle_port(builder_inputs)
-    if "requires_full_market_rank" in primary:
-        return bool(primary.get("requires_full_market_rank"))
-    port = str(primary.get("pm_lifecycle_action_port") or "").strip().lower()
-    if port:
-        return port == "new_risk"
+    # Step 6 signs the post-gate candidate. Earlier lifecycle traces remain
+    # diagnostic only and must not resurrect a new-risk requirement after
+    # risk gates have already restored the target to current lots.
     return bool(classify_lifecycle_action_port(candidate_contract).get("requires_full_market_rank"))
 
 
@@ -1201,6 +1191,232 @@ def _pm_step6_non_rank_capital_deployment(candidate_contract: dict, control_reas
         "reason_codes": reason_codes,
         "not_second_contract": True,
         "pm_remains_single_fund_manager": True,
+    }
+
+
+def _pm_step6_is_undeployed_new_risk_no_exposure(deployment: dict, *, current_lots: int, target_lots: int) -> bool:
+    if not isinstance(deployment, dict) or deployment.get("selected_for_capital_deployment") is not False:
+        return False
+    if int(target_lots or 0) != int(current_lots or 0):
+        return False
+    reason = str(deployment.get("capital_allocation_reason") or "").strip().lower()
+    return (
+        reason == "no_rank_no_new_exposure"
+        or reason.startswith("no_rank_no_new_exposure:")
+        or reason == "no_rank_or_budget_no_new_exposure"
+        or reason.startswith("no_rank_or_budget_no_new_exposure:")
+    )
+
+
+def _pm_step6_clear_undeployed_conditional_authority(
+    *,
+    builder_inputs: dict,
+    execution_fields: dict,
+    control_reasons: list[str],
+) -> list[str]:
+    authority = builder_inputs.get("final_entry_authority")
+    authority = dict(authority) if isinstance(authority, dict) else {}
+    authority["conditional_trigger_authority"] = False
+    authority["requires_intraday_confirmation"] = False
+    authority["can_execute_without_intraday_trigger"] = False
+    authority["authority_type"] = "not_applicable"
+    authority["authority_decision"] = "not_selected_for_capital_deployment"
+    authority["decision"] = "not_selected_for_capital_deployment"
+    authority["requires_authority"] = False
+    authority["open_action_evidence"] = False
+    authority["strong_current_evidence"] = False
+    authority["rank_capital_priority_real_budget_release"] = False
+    authority["reason_codes"] = [
+        str(reason)
+        for reason in (authority.get("reason_codes") or [])
+        if str(reason) != "conditional_trigger_authority"
+    ]
+    builder_inputs["final_entry_authority"] = authority
+    execution_fields["conditional_trigger_authority"] = False
+    execution_fields["requires_intraday_confirmation"] = False
+    execution_fields["can_execute_without_intraday_trigger"] = False
+    execution_fields["undeployed_new_risk_no_intraday_trigger_required"] = True
+    return [str(reason) for reason in control_reasons if str(reason) != "conditional_trigger_authority"]
+
+
+def _pm_step6_expected_final_action(current_lots: int, target_lots: int, authority_type: str = "") -> str:
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    authority = str(authority_type or "").strip().lower()
+    if current == target:
+        return "hold" if current else "wait"
+    if current == 0 and target != 0:
+        return "open_real" if authority == "real_budget_entry" else "open_probe"
+    if target == 0 and current != 0:
+        return "exit"
+    if (current > 0 and target > 0) or (current < 0 and target < 0):
+        return "scale" if abs(target) > abs(current) else "reduce"
+    return "exit"
+
+
+def _pm_step6_has_final_rank_trace(final_action_contract: dict) -> bool:
+    evidence = final_action_contract.get("evidence_used")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    deployment = final_action_contract.get("capital_deployment")
+    deployment = deployment if isinstance(deployment, dict) else {}
+    rank_fields = {
+        "opportunity_rank",
+        "rank_score",
+        "rank_source",
+        "rank_scope",
+        "capital_rank_generated_by",
+        "rank_capital_role",
+        "capital_layer",
+        "capital_ratio_source",
+        "rank_reason",
+        "rank_input_components",
+        "rank_semantics_version",
+        "opportunity_rank_meaning",
+        "rank_is_capital_priority",
+        "rank_is_not_trade_authority",
+    }
+    for container in (final_action_contract, evidence, deployment):
+        for field in rank_fields:
+            value = container.get(field)
+            if value not in (None, "", [], {}):
+                return True
+    return False
+
+
+def _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract: dict) -> None:
+    evidence = final_action_contract.get("evidence_used")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    for field in (
+        "contract_lifecycle_self_check",
+        "historical_lifecycle_transition_diagnostic",
+        "initial_primary_lifecycle_action_port",
+        "primary_lifecycle_action_port",
+        "lifecycle_port_transition_reason",
+        "lifecycle_transition_diagnostic",
+        "lifecycle_transition_reason",
+    ):
+        evidence.pop(field, None)
+
+    trace_targets = []
+    learning = final_action_contract.get("learning_used")
+    learning = learning if isinstance(learning, dict) else {}
+    lifecycle_trace = learning.get("pm_lifecycle_learning_trace")
+    if isinstance(lifecycle_trace, dict):
+        trace_targets.append(lifecycle_trace)
+    evidence_lifecycle_trace = evidence.get("lifecycle_learning_trace")
+    if isinstance(evidence_lifecycle_trace, dict):
+        nested = evidence_lifecycle_trace.get("pm_final_contract_lifecycle_trace")
+        if isinstance(nested, dict):
+            trace_targets.append(nested)
+        elif (
+            evidence_lifecycle_trace.get("trace_version") == "agentquant.pm_lifecycle_learning_trace.v1"
+            or "contract_lifecycle_port" in evidence_lifecycle_trace
+        ):
+            trace_targets.append(evidence_lifecycle_trace)
+    evidence_pm_trace = evidence.get("pm_lifecycle_learning_trace")
+    if isinstance(evidence_pm_trace, dict):
+        trace_targets.append(evidence_pm_trace)
+    for trace in trace_targets:
+        for field in (
+            "contract_lifecycle_self_check",
+            "historical_lifecycle_transition_diagnostic",
+            "initial_primary_lifecycle_action_port",
+            "primary_lifecycle_action_port",
+            "lifecycle_port_transition_reason",
+            "lifecycle_transition_diagnostic",
+            "lifecycle_transition_reason",
+        ):
+            trace.pop(field, None)
+    final_action_contract["evidence_used"] = evidence
+    final_action_contract["learning_used"] = learning
+
+
+def _pm_step6_build_contract_generation_check(
+    *,
+    candidate_contract: dict,
+    final_action_contract: dict,
+    deployment: dict,
+    candidate_requires_capital_deployment: bool,
+    has_step5_deployment: bool,
+) -> dict:
+    errors: list[str] = []
+    current_lots = int(final_action_contract.get("current_lots") or 0)
+    target_lots = int(final_action_contract.get("target_lots") or 0)
+    lots_delta = int(final_action_contract.get("lots_delta") or 0)
+    final_action = str(final_action_contract.get("final_action") or "").strip().lower()
+    authority_type = str(final_action_contract.get("authority_type") or "").strip().lower()
+    expected_action = _pm_step6_expected_final_action(current_lots, target_lots, authority_type)
+    final_port = classify_lifecycle_action_port(final_action_contract)
+    final_requires_capital_deployment = bool(final_port.get("requires_full_market_rank"))
+    deployment_reason = str(deployment.get("capital_allocation_reason") or "").strip().lower()
+    undeployed_new_risk_no_exposure = _pm_step6_is_undeployed_new_risk_no_exposure(
+        deployment,
+        current_lots=current_lots,
+        target_lots=target_lots,
+    )
+
+    if lots_delta != target_lots - current_lots:
+        errors.append("step6_generation_lots_delta_mismatch")
+    if final_action != expected_action:
+        errors.append("step6_generation_final_action_mismatch")
+    if final_requires_capital_deployment and not has_step5_deployment:
+        errors.append("step6_generation_new_risk_missing_step5_deployment")
+    if not final_requires_capital_deployment and not has_step5_deployment and _pm_step6_has_final_rank_trace(final_action_contract):
+        errors.append("step6_generation_non_rank_contract_has_rank_trace")
+    if not isinstance(deployment, dict) or not deployment:
+        errors.append("step6_generation_capital_deployment_missing")
+    elif not deployment_reason:
+        errors.append("step6_generation_capital_deployment_reason_missing")
+
+    if undeployed_new_risk_no_exposure:
+        if final_action not in {"wait", "hold"}:
+            errors.append("step6_generation_undeployed_new_risk_action_not_wait_or_hold")
+        if target_lots != current_lots:
+            errors.append("step6_generation_undeployed_new_risk_target_not_restored")
+        if lots_delta != 0:
+            errors.append("step6_generation_undeployed_new_risk_lots_delta_not_zero")
+        if bool(final_action_contract.get("requires_intraday_confirmation")):
+            errors.append("step6_generation_undeployed_new_risk_intraday_confirmation_residue")
+        if bool(final_action_contract.get("conditional_trigger_authority")):
+            errors.append("step6_generation_undeployed_new_risk_trigger_authority_residue")
+        if bool(final_action_contract.get("can_execute_without_intraday_trigger")):
+            errors.append("step6_generation_undeployed_new_risk_direct_execute_residue")
+    elif candidate_requires_capital_deployment and has_step5_deployment and deployment.get("selected_for_capital_deployment") is False:
+        errors.append("step6_generation_rejected_step5_deployment_without_no_exposure_reason")
+
+    if any(
+        field in final_action_contract
+        for field in (
+            "pm_internal_candidate",
+            "pm_internal_candidate_contract",
+            "pm_capital_deployment_decision",
+            "pm_internal_draft",
+            "pm_scoring_draft",
+            "pm_ranking_draft",
+            "pm_capital_deployment_draft",
+        )
+    ):
+        errors.append("step6_generation_final_contract_contains_pm_internal_state")
+
+    candidate_port = classify_lifecycle_action_port(candidate_contract)
+    return {
+        "tool": "pm_step6_contract_generation_check",
+        "ok": not errors,
+        "errors": errors,
+        "candidate_lifecycle_port": candidate_port.get("pm_lifecycle_action_port"),
+        "candidate_requires_step5": bool(candidate_requires_capital_deployment),
+        "final_lifecycle_port": final_port.get("pm_lifecycle_action_port"),
+        "final_requires_step5": bool(final_requires_capital_deployment),
+        "step5_deployment_present": bool(has_step5_deployment),
+        "step5_undeployed_no_new_exposure": bool(undeployed_new_risk_no_exposure),
+        "expected_final_action": expected_action,
+        "actual_final_action": final_action,
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "lots_delta": lots_delta,
+        "writes_db": False,
+        "writes_contract": False,
+        "no_llm": True,
     }
 
 
@@ -1275,6 +1491,16 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
     for reason in deployment.get("reason_codes") or []:
         if reason and reason not in control_reasons:
             control_reasons.append(str(reason))
+    if _pm_step6_is_undeployed_new_risk_no_exposure(
+        deployment,
+        current_lots=current_lots,
+        target_lots=target_lots,
+    ):
+        control_reasons = _pm_step6_clear_undeployed_conditional_authority(
+            builder_inputs=builder_inputs,
+            execution_fields=execution_fields,
+            control_reasons=control_reasons,
+        )
     builder_inputs["control_reasons"] = control_reasons
     if isinstance(execution_fields.get("rebalance_summary"), dict):
         execution_fields["rebalance_summary"] = {
@@ -1320,15 +1546,11 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         else {}
     )
     for field in (
-        "primary_lifecycle_action_port",
-        "contract_lifecycle_self_check",
-        "lifecycle_port_transition_reason",
         "pm_lifecycle_learning_router",
     ):
         value = execution_fields.get(field)
         if value is not None:
             evidence_used[field] = value
-    evidence_used["pm_lifecycle_trace_landed_in_contract"] = True
     final_action_contract["capital_deployment"] = dict(deployment)
     rank_fields = (
         "opportunity_rank",
@@ -1352,6 +1574,18 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
             evidence_used[field] = deployment[field]
     evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
     final_action_contract["evidence_used"] = evidence_used
+    _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract)
+    step6_contract_generation_check = _pm_step6_build_contract_generation_check(
+        candidate_contract=candidate_contract,
+        final_action_contract=final_action_contract,
+        deployment=deployment,
+        candidate_requires_capital_deployment=candidate_requires_capital_deployment,
+        has_step5_deployment=has_step5_deployment,
+    )
+    if not step6_contract_generation_check.get("ok"):
+        raise ValueError(
+            f"pm_step6_contract_generation_check_failed:{step6_contract_generation_check.get('errors')}"
+        )
     snapshot_for_check = dict(snapshot)
     snapshot_for_check["final_action_contract"] = final_action_contract
     snapshot_for_check.pop("pm_internal_candidate", None)
@@ -1374,6 +1608,7 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
             else "not_required_non_new_risk"
         ),
         "step_6_contract_builder": "pm_contract_builder",
+        "step6_contract_generation_check": step6_contract_generation_check,
         "pm_contract_self_check": pm_contract_self_check,
         "requires_full_market_rank": bool(requires_capital_deployment),
         "candidate_was_internal_only": True,
@@ -11570,15 +11805,15 @@ def _run_pm_six_step_decision(state: FundState):
             else False if "conditional_trigger_authority" in control_reasons else True
         ),
     }
-    contract_lifecycle_self_check_port = classify_lifecycle_action_port(lifecycle_memory_contract)
-    contract_lifecycle_self_check = build_contract_lifecycle_self_check(
+    lifecycle_transition_diagnostic_port = classify_lifecycle_action_port(lifecycle_memory_contract)
+    lifecycle_transition_diagnostic = build_lifecycle_transition_diagnostic(
         primary_lifecycle_action_port=primary_lifecycle_action_port,
-        contract_lifecycle_port=contract_lifecycle_self_check_port,
+        contract_lifecycle_port=lifecycle_transition_diagnostic_port,
         reason_codes=lifecycle_memory_contract.get("reason_codes"),
         control_reasons=control_reasons,
     )
     lifecycle_memory_contract["primary_lifecycle_action_port"] = primary_lifecycle_action_port.get("pm_lifecycle_action_port")
-    lifecycle_memory_contract["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    lifecycle_memory_contract["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic
     lifecycle_memory_contract["requires_full_market_rank"] = primary_lifecycle_action_port.get("requires_full_market_rank")
     pre_final_lifecycle_route_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
     alpha_setup_action_values, lifecycle_memory_audit = _retrieve_lifecycle_pm_memory(
@@ -11627,22 +11862,22 @@ def _run_pm_six_step_decision(state: FundState):
         "trigger_profile_learning may tune execution/profile but cannot create open/add rank delta"
     )
     lifecycle_memory_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
-    lifecycle_memory_audit["contract_lifecycle_self_check"] = contract_lifecycle_self_check
-    lifecycle_memory_audit["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
+    lifecycle_memory_audit["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic
+    lifecycle_memory_audit["lifecycle_transition_reason"] = lifecycle_transition_diagnostic.get("transition_reason")
     lifecycle_memory_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     pm_learning_audit["final_action_memory_retrieval"] = lifecycle_memory_audit
     pm_learning_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
-    pm_learning_audit["contract_lifecycle_self_check"] = contract_lifecycle_self_check
-    pm_learning_audit["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
+    pm_learning_audit["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic
+    pm_learning_audit["lifecycle_transition_reason"] = lifecycle_transition_diagnostic.get("transition_reason")
     pm_learning_audit["pm_lifecycle_learning_router"] = lifecycle_learning_router
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
     pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
     control_diagnostics["final_action_memory_requirements"] = lifecycle_memory_audit.get("memory_requirements", {})
     control_diagnostics["final_action_memory_retrieval"] = lifecycle_memory_audit
     control_diagnostics["primary_lifecycle_action_port"] = primary_lifecycle_action_port
-    control_diagnostics["contract_lifecycle_self_check"] = contract_lifecycle_self_check
-    control_diagnostics["lifecycle_port_transition_reason"] = contract_lifecycle_self_check.get("transition_reason")
+    control_diagnostics["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic
+    control_diagnostics["lifecycle_transition_reason"] = lifecycle_transition_diagnostic.get("transition_reason")
     control_diagnostics["pm_lifecycle_learning_router"] = lifecycle_learning_router
 
     plan_snapshot = _build_pm_decision_context(
@@ -11664,7 +11899,7 @@ def _run_pm_six_step_decision(state: FundState):
     )
     plan_snapshot["current_lots_before_open"] = int(current_lots)
     plan_snapshot["primary_lifecycle_action_port"] = primary_lifecycle_action_port
-    plan_snapshot["contract_lifecycle_self_check"] = contract_lifecycle_self_check
+    plan_snapshot["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic
     plan_snapshot["pm_lifecycle_learning_router"] = lifecycle_learning_router
     plan_snapshot["target_value"] = float(target_value)
     plan_snapshot["account_equity"] = float(account_equity)

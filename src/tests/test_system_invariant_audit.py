@@ -99,6 +99,74 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
         }
 
+    def _stamp_signed_pm_contract(self, contract: dict, *, self_check_ok: bool = True) -> dict:
+        current_lots = int(contract.get("current_lots") or 0)
+        target_lots = int(contract.get("target_lots") or 0)
+        lots_delta = int(contract.get("lots_delta") if contract.get("lots_delta") is not None else target_lots - current_lots)
+        evidence = contract.setdefault("evidence_used", {})
+        contract.setdefault("reason_codes", [])
+        contract.setdefault("execution_profile", "fixture_execution_profile")
+        contract.setdefault("entry_trigger", "fixture_entry_trigger")
+        contract.setdefault("invalidation", "fixture_invalidation")
+        contract.setdefault("learning_used", {})
+        contract.setdefault(
+            "position_sizing_result",
+            {
+                "sizing_method": "fixture_pm_signed_contract",
+                "current_lots": current_lots,
+                "target_lots": target_lots,
+                "lots_delta": lots_delta,
+            },
+        )
+        deployment = contract.setdefault(
+            "capital_deployment",
+            {
+                "selected_for_capital_deployment": False,
+                "new_risk_rank_required": False,
+                "capital_allocation_reason": "non_new_risk_no_capital_rank",
+            },
+        )
+        evidence.setdefault(
+            "pm_lifecycle_learning_trace",
+            {
+                "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+                "contract_lifecycle_port": "open_add_new_risk" if lots_delta else "hold",
+                "used_lanes": [],
+                "execution_profile_signal_direct_to_rank": False,
+            },
+        )
+        evidence.setdefault(
+            "pm_lifecycle_learning_impact_delta",
+            {
+                "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
+                "execution_profile_learning_direct_to_rank": False,
+                "lots_delta": lots_delta,
+            },
+        )
+        for container in (evidence, deployment):
+            rank_inputs = container.get("rank_input_components")
+            if isinstance(rank_inputs, dict) and "rank_score" not in rank_inputs:
+                rank_inputs["rank_score"] = rank_inputs.get("opportunity_score") or rank_inputs.get("capital_priority_score") or 0.0
+        return contract
+
+    def _stamp_signed_pm_payload(self, payload: dict, *, self_check_ok: bool = True) -> dict:
+        contract = payload.get("final_action_contract")
+        if isinstance(contract, dict):
+            self._stamp_signed_pm_contract(contract, self_check_ok=self_check_ok)
+        payload["pm_six_step_trace"] = {
+            "step6_contract_generation_check": {
+                "tool": "pm_step6_contract_generation_check",
+                "ok": True,
+                "errors": [],
+            },
+            "pm_contract_self_check": {
+                "tool": "pm_contract_self_check",
+                "ok": bool(self_check_ok),
+                "errors": [] if self_check_ok else ["fixture_pm_contract_self_check_failed"],
+            }
+        }
+        return payload
+
     def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
         db_path = SRC_ROOT / "assets" / "agentquant.db"
         if not db_path.exists():
@@ -398,6 +466,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "execution_translation": {"intraday_execution": {"trigger_passed": True}},
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         transaction_payload = {
             "trade_contract_audit": {
                 "single_source_of_trade_truth": True,
@@ -520,6 +589,135 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "recommendation_top_level_action_lots_must_match_final_contract",
             report.metadata["pm_learning_ranking_audit_boundaries"],
         )
+
+    def test_system_invariant_audit_fails_strategy_recommendation_missing_snapshot_final_contract(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload.pop("final_action_contract", None)
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("strategy_recommendation_missing_signal_snapshot_final_action_contract") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_persisted_pm_intermediate_state(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_internal_candidate"] = {"candidate_contract": {"target_lots": 1}}
+            payload["pm_capital_deployment_decision"] = {"selected_for_capital_deployment": True}
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("pm_artifact_forbidden_internal_draft_field") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_failed_pm_six_step_self_check(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_six_step_trace"]["pm_contract_self_check"]["ok"] = False
+            payload["pm_six_step_trace"]["pm_contract_self_check"]["errors"] = ["fixture_failure"]
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("strategy_recommendation_pm_six_step_self_check_failed") for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_missing_step6_generation_check(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_six_step_trace"].pop("step6_contract_generation_check", None)
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("strategy_recommendation_pm_step6_generation_check_missing" in error for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_failed_step6_generation_check(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_six_step_trace"]["step6_contract_generation_check"]["ok"] = False
+            payload["pm_six_step_trace"]["step6_contract_generation_check"]["errors"] = [
+                "fixture_generation_failure"
+            ]
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("strategy_recommendation_pm_step6_generation_check_failed" in error for error in report.errors),
+            report.to_dict(),
+        )
+
+    def test_system_invariant_audit_rejects_legacy_lifecycle_field_in_final_contract_evidence(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            evidence = payload["final_action_contract"].setdefault("evidence_used", {})
+            evidence["contract_lifecycle_self_check"] = {"ok": False}
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("strategy_recommendation_pm_legacy_lifecycle_field") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(any("contract_lifecycle_self_check" in error for error in report.errors), report.to_dict())
+
+    def test_system_invariant_audit_rejects_legacy_lifecycle_field_in_pm_six_step_trace(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+
+        def mutate(payload):
+            payload["pm_six_step_trace"]["lifecycle_transition_diagnostic"] = {
+                "diagnostic_type": "lifecycle_transition_diagnostic",
+            }
+
+        self._mutate_recommendation_payload(db_path, mutate)
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("strategy_recommendation_pm_legacy_lifecycle_field") for error in report.errors),
+            report.to_dict(),
+        )
+        self.assertTrue(any("lifecycle_transition_diagnostic" in error for error in report.errors), report.to_dict())
 
     def test_system_invariant_audit_accepts_empty_database_before_fresh_backtest(self):
         tmpdir = tempfile.TemporaryDirectory()
@@ -754,9 +952,9 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "target_lots": 0,
                 "lots_delta": 0,
                 "authority_type": "not_applicable",
-                "reason_codes": ["capital_queue_not_selected"],
+                "reason_codes": ["no_rank_or_budget_no_new_exposure"],
                 "evidence_used": {
-                    "capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking",
+                    "capital_allocation_reason": "no_rank_or_budget_no_new_exposure:capital_queue_not_selected",
                     "opportunity_score_components": {
                         "positive_learning": 0.12,
                         "negative_learning": 0.0,
@@ -766,7 +964,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
                 "capital_deployment": {
                     "selected_for_capital_deployment": False,
-                    "capital_allocation_reason": "capital_queue_not_selected_after_full_market_ranking",
+                    "capital_allocation_reason": "no_rank_or_budget_no_new_exposure:capital_queue_not_selected",
                     "original_target_lots": 1,
                     "deployed_target_lots": 0,
                     "deployed_lots_delta": 0,
@@ -782,6 +980,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             }
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -1367,6 +1566,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             }
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -1673,6 +1873,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         conn = sqlite3.connect(db_path)
         try:
             now = datetime.utcnow().isoformat()
@@ -2110,6 +2311,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
             payload = _with_auditor_approval(payload)
+            payload = self._stamp_signed_pm_payload(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
@@ -2192,6 +2394,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "execution_translation": {"intraday_execution": {"trigger_passed": True}},
             }
             payload = _with_auditor_approval(payload)
+            payload = self._stamp_signed_pm_payload(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 (_dumps(payload), _dumps(payload)),
@@ -2903,6 +3106,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
@@ -2949,6 +3153,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             },
         }
         payload = _with_auditor_approval(payload)
+        payload = self._stamp_signed_pm_payload(payload)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
@@ -3643,6 +3848,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 },
             }
             payload = _with_auditor_approval(payload)
+            payload = self._stamp_signed_pm_payload(payload)
             conn.execute(
                 "UPDATE futures_recommendation SET trading_date=?, effective_trade_date=?, action=?, lots=?, signal_snapshot=?, audit_payload=? WHERE id='rec1'",
                 ("2025-03-04", "2025-03-04", "close_short", 1, _dumps(payload), _dumps(payload)),

@@ -10,6 +10,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.agent_tools.decision.pm_contract_builder import build_final_action_contract
 from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
+from tools.agent_tools.decision.pm_lifecycle_action_port import (
+    build_lifecycle_transition_diagnostic,
+    classify_lifecycle_action_port,
+)
 from tools.agent_tools.decision.pm_position_transition import classify_position_transition
 from tools.agent_tools.decision.pm_state_transition import (
     classify_new_entry_transition,
@@ -43,6 +47,16 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "target_position_ratio": 0.01,
             "no_final_action_authority": True,
         }
+
+    def _lifecycle_transition_diagnostic(self, contract, primary_contract=None, reason_codes=None):
+        primary = classify_lifecycle_action_port(primary_contract or contract)
+        final = classify_lifecycle_action_port(contract)
+        return build_lifecycle_transition_diagnostic(
+            primary_lifecycle_action_port=primary,
+            contract_lifecycle_port=final,
+            reason_codes=reason_codes or contract.get("reason_codes") or [],
+            control_reasons=reason_codes or contract.get("reason_codes") or [],
+        )
 
     def _complete_contract(self, **overrides):
         contract = {
@@ -108,6 +122,58 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             capital_deployment=dict(rank_trace),
             position_sizing_result={"target_lots": 1, "target_position_ratio": 0.01},
         )
+
+    def _undeployed_step5_contract(self):
+        rank_trace = self._rank_trace()
+        rank_trace["opportunity_rank"] = 2
+        deployment = {
+            **rank_trace,
+            "selected_for_capital_deployment": False,
+            "capital_allocation_reason": (
+                "no_rank_or_budget_no_new_exposure:"
+                "not_selected_by_full_market_pm_capital_queue;rank=2"
+            ),
+            "original_target_lots": 1,
+            "deployed_target_lots": 0,
+            "deployed_lots_delta": 0,
+            "reason_codes": ["no_rank_or_budget_no_new_exposure"],
+        }
+        pm_trace = {
+            "contract_lifecycle_port": "wait",
+            "transition_reason": "no_rank_or_budget_no_new_exposure",
+        }
+        contract = self._complete_contract(
+            final_action="wait",
+            current_lots=0,
+            target_lots=0,
+            lots_delta=0,
+            reason_codes=["no_rank_or_budget_no_new_exposure"],
+            learning_used={
+                "pm_lifecycle_learning_trace": pm_trace,
+                "pm_lifecycle_learning_impact_delta": {"deployment": "not_selected"},
+            },
+            evidence_used={
+                **rank_trace,
+                "pm_lifecycle_learning_trace": pm_trace,
+                "pm_lifecycle_learning_impact_delta": {"deployment": "not_selected"},
+            },
+            capital_deployment=deployment,
+            position_sizing_result={"target_lots": 0, "target_position_ratio": 0.0},
+            conditional_trigger_authority=False,
+            requires_intraday_confirmation=False,
+            can_execute_without_intraday_trigger=False,
+        )
+        diagnostic = self._lifecycle_transition_diagnostic(
+            contract,
+            primary_contract={
+                "current_lots": 0,
+                "target_lots": 1,
+                "final_action": "open_probe",
+            },
+            reason_codes=["no_rank_or_budget_no_new_exposure"],
+        )
+        self.assertTrue(diagnostic["diagnostic_only"])
+        return contract
 
     def test_watch_for_trigger_complete_setup_becomes_conditional_contract_candidate(self):
         result = classify_new_entry_transition(
@@ -343,9 +409,37 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("non_rank_capital_deployment_reason_invalid", result["errors"])
 
+    def test_pm_contract_self_check_allows_step5_undeployed_new_risk_when_restored_to_wait(self):
+        contract = self._undeployed_step5_contract()
+
+        result = check_final_action_contract(contract)
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
+
+    def test_pm_contract_self_check_rejects_undeployed_new_risk_that_still_requires_intraday_trigger(self):
+        contract = self._undeployed_step5_contract()
+        contract["conditional_trigger_authority"] = True
+        contract["requires_intraday_confirmation"] = True
+        contract["can_execute_without_intraday_trigger"] = False
+
+        result = check_final_action_contract(contract)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("conditional_trigger_without_lot_delta", result["errors"])
+
     def test_pm_contract_self_check_requires_rank_and_pm_lifecycle_traces(self):
         complete = self._ranked_new_risk_contract()
         self.assertTrue(check_final_action_contract(complete)["ok"])
+
+        missing_rank_trace = copy.deepcopy(complete)
+        missing_rank_trace["evidence_used"].pop("rank_input_components")
+        missing_rank_trace["capital_deployment"].pop("rank_input_components")
+        rank_trace_errors = check_final_action_contract(missing_rank_trace)["errors"]
+        self.assertTrue(any("rank_input_components_missing" in error for error in rank_trace_errors))
 
         missing_lifecycle = copy.deepcopy(complete)
         missing_lifecycle["evidence_used"].pop("lifecycle_learning_trace")
@@ -388,6 +482,8 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract["learning_used"]["pm_lifecycle_learning_impact_delta"] = {
             "hold_decision": "continue_hold",
         }
+        diagnostic = self._lifecycle_transition_diagnostic(contract)
+        self.assertTrue(diagnostic["diagnostic_only"])
         self.assertTrue(check_final_action_contract(contract)["ok"])
 
     def test_pm_contract_self_check_rejects_raw_research_objects_in_pm_artifact(self):

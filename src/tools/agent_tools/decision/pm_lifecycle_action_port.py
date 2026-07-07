@@ -24,19 +24,13 @@ CONTRACT_LIFECYCLE_BY_PRIMARY_PORT = {
 }
 
 _EXPLICIT_TRANSITION_REASONS = {
+    "risk_gate_flat_target_no_new_exposure": "risk_gate_flat_target_no_new_exposure",
     "no_rank_no_new_exposure": "no_rank_no_new_exposure",
     "no_rank_or_budget_no_new_exposure": "no_rank_or_budget_no_new_exposure",
     "capital_queue_not_selected": "capital_queue_not_selected",
-    "budget_insufficient": "budget_or_margin_control",
-    "margin_insufficient": "budget_or_margin_control",
-    "pre_execution_margin_insufficient": "budget_or_margin_control",
-    "hard_risk_block": "hard_risk_or_authority_control",
-    "pm_risk_gate_block": "hard_risk_or_authority_control",
-    "risk_gate_block": "hard_risk_or_authority_control",
-    "watch_for_trigger_block": "trigger_or_confirmation_control",
-    "current_confirmation_missing": "trigger_or_confirmation_control",
-    "conditional_trigger_not_confirmed": "trigger_or_confirmation_control",
-    "no_intraday_trigger": "trigger_or_confirmation_control",
+    "budget_insufficient": "budget_insufficient",
+    "pm_risk_gate_block": "pm_risk_gate_block",
+    "hard_risk_block": "hard_risk_block",
 }
 
 
@@ -142,17 +136,18 @@ def _reason_set(*values: Any) -> set[str]:
     return reasons
 
 
-def build_contract_lifecycle_self_check(
+def build_lifecycle_transition_diagnostic(
     *,
     primary_lifecycle_action_port: Mapping[str, Any] | str | None,
     contract_lifecycle_port: Mapping[str, Any] | str | None,
     reason_codes: Any = None,
     control_reasons: Any = None,
 ) -> dict[str, Any]:
-    """Check final contract lifecycle against PM's primary lifecycle action port.
+    """Build a PM-internal lifecycle transition diagnostic.
 
-    This is a self-check only. It does not choose the lifecycle port, route
-    learning, rank candidates, deploy capital, mutate lots, or sign contracts.
+    This is provenance for PM's learning/diagnostic path only. It does not
+    gate final contracts, route learning, rank candidates, deploy capital,
+    mutate lots, or sign contracts.
     """
     primary_payload = (
         primary_lifecycle_action_port
@@ -177,20 +172,29 @@ def build_contract_lifecycle_self_check(
         reasons = _reason_set(reason_codes, control_reasons)
         transition_reason = "unexplained_lifecycle_port_transition"
         for reason in sorted(reasons):
-            if reason in _EXPLICIT_TRANSITION_REASONS:
-                transition_reason = _EXPLICIT_TRANSITION_REASONS[reason]
+            matched_reason = next(
+                (
+                    accepted
+                    for accepted in _EXPLICIT_TRANSITION_REASONS
+                    if reason == accepted or reason.startswith(f"{accepted}:")
+                ),
+                "",
+            )
+            if matched_reason:
+                transition_reason = _EXPLICIT_TRANSITION_REASONS[matched_reason]
                 break
         ok = transition_reason != "unexplained_lifecycle_port_transition"
     return {
         "tool": "pm_lifecycle_action_port",
-        "check_type": "contract_lifecycle_self_check",
+        "diagnostic_type": "lifecycle_transition_diagnostic",
         "primary_lifecycle_action_port": primary_port,
         "expected_contract_lifecycle_port": expected_contract_lifecycle,
         "actual_contract_lifecycle_port": actual_contract_lifecycle,
         "consistent": expected_contract_lifecycle == actual_contract_lifecycle,
         "ok": ok,
         "transition_reason": transition_reason,
-        "self_check_only": True,
+        "diagnostic_only": True,
+        "not_final_contract_gate": True,
         "does_not_route_learning": True,
         "does_not_generate_lifecycle_semantics": True,
         "writes_db": False,

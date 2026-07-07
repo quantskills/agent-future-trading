@@ -264,6 +264,20 @@
 
 （1）收口 `signal_collection_contract` 生产者边界。修改：`portfolio_manager.py`、`signal_evidence_collection.py`、`pg_contract_coverage_audit.py` 和回归测试。原因：`signal_collection_contract` 只能由 `signal_collector` 产出，PM 缺包、producer 非 `signal_collector` 或 boundary 非 `no_trade_authority` 必须 fail-fast，不能在 PM 内重建证据包。
 
+（2）修正 Step5 未部署新增风险候选进入 Step6 的自检语义。修改：`portfolio_manager.py`、`pm_full_market_capital_deployment.py`、`pm_contract_self_check.py` 和 PM 状态转移回归测试。原因：新增风险候选进入全市场 rank 后若因预算或 rank 未部署，最终合约必须还原为无新增风险敞口并清除盘中触发执行权限；self-check 只接受 `no_rank_no_new_exposure` / `no_rank_or_budget_no_new_exposure` 系列原因，不再误按普通非新增风险路径要求 `non_new_risk_no_capital_rank`。
+
+（3）修正 PM Step6 对旧生命周期 trace 的误用。修改：`portfolio_manager.py` 和 Phase1 回归测试。原因：Step6 是否需要第 5 步资金部署只能按 Step4/门控后的最终 `candidate_contract` 判定；当 RiskGate 已把候选压回 `target_lots=current_lots`、`lots_delta=0`、`final_action=wait/hold` 时，旧 `primary_lifecycle_action_port.requires_full_market_rank=true` 只能作为历史诊断，不能反向要求 `pm_capital_deployment_decision`。
+
+（4）修正 PM Step6 最终合约自检制度。修改：`portfolio_manager.py`、`pm_contract_builder.py`、`pm_contract_self_check.py`、`workflow.py` 和回归测试。原因：废掉“Step2 生命周期结果 vs Step6 最终合约”的比较式自检；Step6 改为在 `pm_six_step_trace.step6_contract_generation_check` 中检查最终合约生成合法性，`check_final_action_contract()` 只检查最终合约自身和 rank/非 rank/Step5 未部署边界，不再读取 `evidence_used.contract_lifecycle_self_check` 作为最终失败依据。
+
+（5）把 PM/workflow 确定性协议检测接入常态回测前检测。修改：`pre_backtest_test.py`、新增 `test_pre_backtest_pm_workflow_contracts.py` 和 CLI 回归测试。原因：回测前总门必须静态验证 PM 三类合约矩阵、Step6 生命周期自检、workflow 保存前只读闸门、Signal Collector/PM 边界、rank 与中间态字段边界；该 gate 不跑真实交易日、不调 LLM、不读真实行情、不写真实 DB。
+
+（6）补齐 PM/workflow 重构后的运行期只读审计。修改：`pg_system_invariants.py` 和系统不变量回归测试。原因：每日回测后检测必须在真实 DB/artifact 中 fail-fast 发现缺 `final_action_contract`、PM 中间态残留、`pm_six_step_trace.pm_contract_self_check` 失败、`pm_six_step_trace.step6_contract_generation_check` 缺失或失败，以及非 rank/Step5 未部署新增风险合约边界漂移；该审计只读，不修合同、不补字段。
+
+（7）统一 PM Step6 自检语义、代码命名和机制文档。修改：`pm_lifecycle_action_port.py`、`portfolio_manager.py`、PM/workflow/字段语义相关测试、`unified_field_semantics.md`、`mechanism_pm.md`、`mechanism_workflow.md`、`mechanism_agent_internal_rules.md`。原因：旧 `build_contract_lifecycle_self_check()` 改名为内部 `build_lifecycle_transition_diagnostic()`，只作为 PM 内部 provenance；最终合约不再保存或读取 `contract_lifecycle_self_check`、`historical_lifecycle_transition_diagnostic`、`initial_primary_lifecycle_action_port`、`lifecycle_port_transition_reason`，最终闸门统一为 `pm_six_step_trace.step6_contract_generation_check.ok == true` 与 `pm_six_step_trace.pm_contract_self_check.ok == true`。
+
+（8）统一 PM/workflow 重塑后的回测前检测、每日后置审计和 PG 旁路审计。修改：`pg_system_invariants.py`、`pg_unified_field_audit.py`、`pg_contract_coverage_audit.py`、`pg_mechanism_effectiveness_audit.py`、`pre_backtest_test.py` 和相关控制测试。原因：检测层只认 `pm_six_step_trace.step6_contract_generation_check` 与 `pm_contract_self_check` 两个最终闸门，保存后旧 lifecycle compare 字段必须 hard fail，contract coverage 不再重复运行，机制有效性审计只检查机制连通和未部署候选/条件监控真实边界。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

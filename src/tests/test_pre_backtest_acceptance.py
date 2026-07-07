@@ -344,6 +344,18 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 self.assertIn(category, INVARIANT_TO_CHECKS[prefix])
         self.assertEqual(INVARIANT_TO_CHECK["unified_field_artifact_forbidden_field"], "unified_field_semantics")
         self.assertEqual(INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"], "pm_opportunity_routing")
+        self.assertEqual(
+            INVARIANT_TO_CHECK["strategy_recommendation_pm_step6_generation_check_missing"],
+            "single_trade_exit",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["strategy_recommendation_pm_step6_generation_check_failed"],
+            "single_trade_exit",
+        )
+        self.assertEqual(
+            INVARIANT_TO_CHECK["strategy_recommendation_pm_legacy_lifecycle_field"],
+            "single_trade_exit",
+        )
 
     def test_acceptance_maps_preference_landing_failure_to_learning_landing(self):
         self.assertEqual(

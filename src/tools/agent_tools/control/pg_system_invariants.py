@@ -16,7 +16,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_db_schema_contract import audit_db_schema_contract
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
-from tools.agent_tools.control.pg_unified_field_audit import find_forbidden_artifact_field_keys
+from tools.agent_tools.control.pg_unified_field_audit import (
+    find_forbidden_artifact_field_keys,
+    find_forbidden_pm_final_artifact_field_keys,
+)
+from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
 from tools.common.order_semantics import (
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
@@ -141,6 +145,9 @@ PM_INTERNAL_DRAFT_FIELDS = {
     "pm_ranking_draft",
     "pm_capital_deployment_draft",
     "pm_contract_submission_draft",
+    "pm_internal_candidate",
+    "pm_internal_candidate_contract",
+    "pm_capital_deployment_decision",
     "internal_pm_draft",
 }
 TRADE_INTENT_FIELDS = {
@@ -273,6 +280,22 @@ CURRENT_ENTRY_TRIGGER_MARKERS = {
     "当前跌破",
     "触发成立",
 }
+STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
+    "no_rank_no_new_exposure",
+    "no_rank_or_budget_no_new_exposure",
+)
+FINAL_RANK_TRACE_FIELDS = {
+    "capital_layer",
+    "capital_rank_generated_by",
+    "capital_ratio_source",
+    "opportunity_rank",
+    "rank_capital_role",
+    "rank_input_components",
+    "rank_reason",
+    "rank_scope",
+    "rank_score",
+    "rank_source",
+}
 
 CURRENT_CONFIRMATION_FIELD_NAMES = {
     "current_trigger_confirmed",
@@ -305,6 +328,14 @@ ERROR_CATEGORY_PREFIXES = {
         "recommendation_final_action_contract_missing_fields",
         "recommendation_final_action_contract_lots_delta_mismatch",
         "recommendation_final_action_contract_action_mismatch",
+        "strategy_recommendation_missing_signal_snapshot_final_action_contract",
+        "strategy_recommendation_pm_contract_self_check_failed",
+        "strategy_recommendation_pm_contract_runtime_boundary_failed",
+        "strategy_recommendation_pm_legacy_lifecycle_field",
+        "strategy_recommendation_pm_six_step_self_check_missing",
+        "strategy_recommendation_pm_six_step_self_check_failed",
+        "strategy_recommendation_pm_step6_generation_check_missing",
+        "strategy_recommendation_pm_step6_generation_check_failed",
         "recommendation_top_level_action_lots_mismatch_final_action_contract",
         "strategy_recommendation_non_strategy_final_action_contract",
         "opportunity_ranking_field_used_in_execution_trade_intent",
@@ -933,11 +964,13 @@ def _audit_recommendation_final_contract_consistency(
     errors: List[str],
 ) -> None:
     for recommendation_id, recommendation in recommendations.items():
-        contract = _contract_from_recommendation(recommendation)
         source_type = _source_type(recommendation)
         action = _lower(recommendation.get("action"))
         ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
         label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
+        snapshot = _dict(recommendation.get("signal_snapshot"))
+        snapshot_contract = _dict(snapshot.get("final_action_contract"))
+        contract = _contract_from_recommendation(recommendation)
         if source_type == ROLLOVER_SOURCE_TYPE:
             trading_day = _date10(recommendation.get("trading_date"))
             effective_day = _date10(recommendation.get("effective_trade_date"))
@@ -953,6 +986,11 @@ def _audit_recommendation_final_contract_consistency(
             if contract:
                 errors.append(f"forced_risk_recommendation_must_not_use_strategy_final_action_contract:{label}")
             continue
+        if source_type == STRATEGY_SOURCE_TYPE and not snapshot_contract:
+            errors.append(f"strategy_recommendation_missing_signal_snapshot_final_action_contract:{label}")
+            continue
+        if source_type == STRATEGY_SOURCE_TYPE:
+            contract = snapshot_contract
         if not contract:
             continue
         ticker = ticker or contract.get("ticker")
@@ -963,6 +1001,43 @@ def _audit_recommendation_final_contract_consistency(
                 f"{label}:contract_type={contract.get('contract_type')}"
             )
             continue
+        if source_type == STRATEGY_SOURCE_TYPE:
+            pm_trace = _dict(snapshot.get("pm_six_step_trace"))
+            legacy_hits = []
+            legacy_hits.extend(
+                find_forbidden_pm_final_artifact_field_keys(
+                    contract,
+                    prefix="signal_snapshot.final_action_contract",
+                )
+            )
+            legacy_hits.extend(
+                find_forbidden_pm_final_artifact_field_keys(
+                    pm_trace,
+                    prefix="signal_snapshot.pm_six_step_trace",
+                )
+            )
+            if legacy_hits:
+                errors.append(
+                    "strategy_recommendation_pm_legacy_lifecycle_field:"
+                    f"{label}:{sorted(set(legacy_hits))}"
+                )
+            pm_check = _dict(pm_trace.get("pm_contract_self_check"))
+            if not pm_check:
+                errors.append(f"strategy_recommendation_pm_six_step_self_check_missing:{label}")
+            elif pm_check.get("ok") is not True:
+                errors.append(f"strategy_recommendation_pm_six_step_self_check_failed:{label}")
+            generation_check = _dict(pm_trace.get("step6_contract_generation_check"))
+            if not generation_check:
+                errors.append(f"strategy_recommendation_pm_step6_generation_check_missing:{label}")
+            elif generation_check.get("ok") is not True:
+                errors.append(f"strategy_recommendation_pm_step6_generation_check_failed:{label}")
+            self_check = check_final_action_contract(contract, snapshot=snapshot)
+            if self_check.get("ok") is not True:
+                encoded = ",".join(str(item) for item in self_check.get("errors") or [])
+                errors.append(f"strategy_recommendation_pm_contract_self_check_failed:{label}:errors={encoded}")
+            extra_boundary_errors = _pm_runtime_contract_boundary_errors(contract)
+            for error in extra_boundary_errors:
+                errors.append(f"strategy_recommendation_pm_contract_runtime_boundary_failed:{label}:{error}")
         if source_type in OPERATIONAL_SOURCE_TYPES:
             continue
         required = {"current_lots", "target_lots", "lots_delta", "final_action"}
@@ -998,6 +1073,56 @@ def _audit_recommendation_final_contract_consistency(
                 f"{label}:expected={expected_action}/{expected_lots}:actual={action}/{actual_lots}:"
                 f"current={current_lots}:target={target_lots}"
             )
+
+
+def _capital_allocation_reason_from_contract(contract: Dict[str, Any]) -> str:
+    deployment = _dict(contract.get("capital_deployment"))
+    evidence = _dict(contract.get("evidence_used"))
+    return _lower(
+        deployment.get("capital_allocation_reason")
+        or evidence.get("capital_allocation_reason")
+        or contract.get("capital_allocation_reason")
+    )
+
+
+def _is_step5_undeployed_no_new_exposure_reason(reason: str) -> bool:
+    reason = _lower(reason)
+    return any(reason == prefix or reason.startswith(f"{prefix}:") for prefix in STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES)
+
+
+def _final_rank_trace_hits(contract: Dict[str, Any]) -> List[str]:
+    hits: List[str] = []
+    containers = {
+        "final_action_contract": contract,
+        "final_action_contract.evidence_used": _dict(contract.get("evidence_used")),
+        "final_action_contract.capital_deployment": _dict(contract.get("capital_deployment")),
+    }
+    for prefix, container in containers.items():
+        for field in sorted(FINAL_RANK_TRACE_FIELDS):
+            value = container.get(field)
+            if value not in (None, "", {}, []):
+                hits.append(f"{prefix}.{field}")
+    return hits
+
+
+def _pm_runtime_contract_boundary_errors(contract: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    reason = _capital_allocation_reason_from_contract(contract)
+    deployment = _dict(contract.get("capital_deployment"))
+    if reason == "non_new_risk_no_capital_rank":
+        rank_hits = _final_rank_trace_hits(contract)
+        if rank_hits:
+            errors.append(f"non_rank_final_contract_contains_rank_trace:{rank_hits}")
+    if _is_step5_undeployed_no_new_exposure_reason(reason):
+        if bool(contract.get("requires_intraday_confirmation")):
+            errors.append("undeployed_new_risk_requires_intraday_confirmation")
+        if bool(contract.get("conditional_trigger_authority")):
+            errors.append("undeployed_new_risk_conditional_trigger_authority")
+        if contract_increases_risk_position(contract):
+            errors.append("undeployed_new_risk_contract_still_increases_risk")
+        if deployment.get("selected_for_capital_deployment") is not False:
+            errors.append("undeployed_new_risk_selected_flag_invalid")
+    return errors
 
 
 def _auditor_verdict_from_recommendation(recommendation: Dict[str, Any]) -> str:

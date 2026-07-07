@@ -20,27 +20,32 @@ SRC_ROOT = RUN_DIR.parent
 PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from agents.control_team.protocol_governor import ProtocolGovernor
-from tools.agent_tools.control.pg_contract_coverage_audit import audit_contract_coverage
 from tools.agent_tools.control.pg_pre_backtest_acceptance import run_pre_backtest_acceptance
 from util.config_normalizer import normalize_config
 
 
 PRE_BACKTEST_TEST_MODULES = [
-    "tests.test_fact_entry_boundaries",
-    "tests.test_accountant_settlement_formulas",
-    "tests.test_final_action_semantics",
-    "tests.test_pm_watch_for_trigger_release",
-    "tests.test_pm_state_transition_matrix",
-    "tests.test_analyst_output_landing",
-    "tests.test_analyst_product_price_behavior_profile",
-    "tests.test_evidence_fusion_semantics",
-    "tests.test_system_invariant_audit",
-    "tests.test_mechanism_effectiveness_audit",
-    "tests.test_contract_coverage_audit",
-    "tests.test_pre_backtest_acceptance",
-    "tests.test_protocol_governor",
+    "src.tests.test_fact_entry_boundaries",
+    "src.tests.test_accountant_settlement_formulas",
+    "src.tests.test_final_action_semantics",
+    "src.tests.test_pm_watch_for_trigger_release",
+    "src.tests.test_pm_state_transition_matrix",
+    "src.tests.test_analyst_output_landing",
+    "src.tests.test_analyst_product_price_behavior_profile",
+    "src.tests.test_evidence_fusion_semantics",
+    "src.tests.test_system_invariant_audit",
+    "src.tests.test_mechanism_effectiveness_audit",
+    "src.tests.test_contract_coverage_audit",
+    "src.tests.test_pre_backtest_acceptance",
+    "src.tests.test_protocol_governor",
+]
+
+PM_WORKFLOW_CONTRACT_GATE_MODULES = [
+    "src.tests.test_pre_backtest_pm_workflow_contracts",
 ]
 
 
@@ -132,8 +137,8 @@ def main() -> int:
         init_database()
 
     unittest_report = _run_unittest_modules(PRE_BACKTEST_TEST_MODULES)
+    pm_workflow_contract_gate = _run_unittest_modules(PM_WORKFLOW_CONTRACT_GATE_MODULES)
     protocol_report = _run_protocol_preflight(args, config_path, cfg)
-    coverage_report = audit_contract_coverage(PROJECT_ROOT).to_dict()
     acceptance_report = run_pre_backtest_acceptance(
         config_path=config_path,
         db_path=Path(args.db_path),
@@ -152,13 +157,13 @@ def main() -> int:
         "contract_version": "agentquant.pre_backtest_test.v1",
         "ok": bool(
             unittest_report.get("ok")
+            and pm_workflow_contract_gate.get("ok")
             and protocol_report.get("ok")
-            and coverage_report.get("ok")
             and acceptance_report.get("ok")
         ),
         "unittest": unittest_report,
+        "pm_workflow_contract_gate": pm_workflow_contract_gate,
         "protocol_preflight": protocol_report,
-        "contract_coverage": coverage_report,
         "pre_backtest_acceptance": acceptance_report,
     }
 
@@ -167,7 +172,12 @@ def main() -> int:
     else:
         print("AgentQuant pre-backtest test gate")
         print(f"  ok: {report['ok']}")
-        for key in ("unittest", "protocol_preflight", "contract_coverage", "pre_backtest_acceptance"):
+        for key in (
+            "unittest",
+            "pm_workflow_contract_gate",
+            "protocol_preflight",
+            "pre_backtest_acceptance",
+        ):
             section = report[key]
             print(f"  {key}: ok={section.get('ok')}")
             for error in section.get("errors") or section.get("failures") or []:

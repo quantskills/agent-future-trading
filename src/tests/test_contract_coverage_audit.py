@@ -173,6 +173,20 @@ class ContractCoverageAuditTest(unittest.TestCase):
         self.assertIn("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", consumer_paths)
         self.assertNotIn("src/tools/agent_tools/research/reviewer_phase4_review.py", consumer_paths)
 
+    def test_pm_six_step_trace_has_producer_consumer_audit_and_test_coverage(self):
+        spec = next(spec for spec in CONTRACT_SPECS if spec.contract == "pm_six_step_trace")
+
+        producer_paths = {rule.path for rule in spec.producers}
+        consumer_paths = {rule.path for rule in spec.consumers}
+        audit_paths = {rule.path for rule in spec.audits}
+        test_paths = {rule.path for rule in spec.tests}
+
+        self.assertIn("src/agents/decision_team/portfolio_manager.py", producer_paths)
+        self.assertIn("src/graph/workflow.py", consumer_paths)
+        self.assertIn("src/tools/agent_tools/control/pg_system_invariants.py", audit_paths)
+        self.assertIn("src/tests/test_pre_backtest_pm_workflow_contracts.py", test_paths)
+        self.assertIn("src/tests/test_system_invariant_audit.py", test_paths)
+
 
 if __name__ == "__main__":
     unittest.main()
