@@ -3425,6 +3425,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             },
             "router": None,
         }
+        state.update(signal_collector_agent(state))
 
         with patch(
             "agents.decision_team.portfolio_manager.get_db",
@@ -10118,6 +10119,58 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(blocked_contract["lots_delta_abs"], 0)
         self.assertEqual(blocked_contract["candidate_status"], "blocked")
         self.assertFalse(snapshot["active_opportunity_audit"]["decision"]["lands_position"])
+
+    def test_pm_requires_signal_collection_contract_from_signal_collector(self):
+        portfolio = Portfolio(
+            id="portfolio-1",
+            cashflow=1_000_000,
+            account_equity=1_000_000,
+            cash_available=1_000_000,
+            positions={},
+            margin_used=0.0,
+            margin_available=1_000_000,
+            margin_ratio=0.0,
+        )
+        signals = [
+            AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.5),
+            AnalystSignal(agent_name="fundamental", signal=Signal.BEARISH, confidence=0.6),
+            AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.4),
+        ]
+        state = {
+            "portfolio": portfolio,
+            "ticker": "J",
+            "trading_date": datetime(2025, 5, 9),
+            "analyst_signals": signals,
+            "llm_config": {"provider": "fake", "model": "fake"},
+            "num_tickers": 15,
+            "enabled_analysts": ["technical", "fundamental", "commodity_news"],
+            "config_id": "cfg",
+            "phase": "phase1",
+            "morning_price_context": SimpleNamespace(
+                base_price=500.0,
+                base_price_source="t_minus_1_close_fallback",
+                base_price_date="2025-05-08",
+                open_price=None,
+                prev_close_price=1478.0,
+                warning_message=None,
+            ),
+            "config": {"max_total_margin_ratio": 0.20, "max_single_margin_ratio": 0.12},
+            "full_config": {"learning": {"enabled": False}},
+            "router": None,
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "pm_missing_signal_collection_contract_from_signal_collector"):
+            portfolio_agent_futures(state)
+
+        state["signal_collection_contract"] = {
+            "contract_version": "agentquant.signal_collection.v1",
+            "producer": "portfolio_manager",
+            "collector_decision_boundary": "no_trade_authority",
+            "ticker": "J",
+            "trading_date": "2025-05-09",
+        }
+        with self.assertRaisesRegex(RuntimeError, "pm_invalid_signal_collection_contract_producer"):
+            portfolio_agent_futures(state)
 
     def test_phase1_semantic_gate_does_not_block_triggered_exploration_probe(self):
         portfolio = SimpleNamespace(id="pf1")

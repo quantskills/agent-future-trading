@@ -74,6 +74,11 @@ def _write_minimal_covered_repo(root: Path) -> None:
     )
     _append_text(
         root,
+        "src/tools/common/signal_evidence_collection.py",
+        '"producer": "signal_collector"',
+    )
+    _append_text(
+        root,
         "src/tools/agent_tools/decision/pm_decision_memory_retrieval.py",
         'consumer_scope="pm_learning"\n_consumer_scope\nnon_pm_learning_scope',
     )
@@ -114,6 +119,23 @@ class ContractCoverageAuditTest(unittest.TestCase):
         report = audit_contract_coverage(PROJECT_ROOT)
 
         self.assertTrue(report.ok, report.to_dict())
+
+    def test_contract_coverage_rejects_pm_signal_collection_builder(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            _write_minimal_covered_repo(repo)
+            _append_text(
+                repo,
+                "src/agents/decision_team/portfolio_manager.py",
+                "from tools.common.signal_evidence_collection import build_signal_collection_contract\n"
+                "signal_collection_contract = build_signal_collection_contract()",
+            )
+
+            report = audit_contract_coverage(repo)
+
+        self.assertFalse(report.ok)
+        self.assertIn("signal_collection_contract_pm_imports_builder", report.errors)
+        self.assertIn("signal_collection_contract_pm_builds_contract", report.errors)
 
     def test_contract_coverage_detects_bare_execution_learning_trace_writer(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

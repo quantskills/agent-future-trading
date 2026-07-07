@@ -270,6 +270,7 @@ def build_signal_collection_contract(
 
     return {
         "contract_version": "agentquant.signal_collection.v1",
+        "producer": "signal_collector",
         "ticker": ticker,
         "trading_date": str(trading_date),
         "source_contracts": source_contracts,

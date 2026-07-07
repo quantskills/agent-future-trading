@@ -88,7 +88,6 @@ from tools.agent_tools.decision.pm_position_transition import (
     final_action_from_lots as _pm_tool_final_action_from_lots,
 )
 from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
-from tools.common.signal_evidence_collection import build_signal_collection_contract
 from tools.agent_tools.decision.pm_signal_fusion import (
     analyst_signal_combo as _fusion_analyst_signal_combo,
     build_opportunity_scorecard,
@@ -9411,19 +9410,13 @@ def _run_pm_six_step_decision(state: FundState):
             "portfolio_agent_futures only supports phase1 pre-open recommendation flow."
         )
     _validate_required_analyst_signals(ticker, enabled_analysts, analyst_signals)
-    signal_collection_contract = (
-        state.get("signal_collection_contract")
-        if isinstance(state.get("signal_collection_contract"), dict)
-        else {}
-    )
-    if not signal_collection_contract:
-        signal_collection_contract = build_signal_collection_contract(
-            ticker=ticker,
-            trading_date=trading_date,
-            analyst_signals=analyst_signals,
-            enabled_analysts=enabled_analysts,
-        )
-        state["signal_collection_contract"] = signal_collection_contract
+    signal_collection_contract = state.get("signal_collection_contract")
+    if not isinstance(signal_collection_contract, dict) or not signal_collection_contract:
+        raise RuntimeError("pm_missing_signal_collection_contract_from_signal_collector")
+    if str(signal_collection_contract.get("collector_decision_boundary") or "").strip().lower() != "no_trade_authority":
+        raise RuntimeError("pm_invalid_signal_collection_contract_boundary")
+    if str(signal_collection_contract.get("producer") or "").strip().lower() != "signal_collector":
+        raise RuntimeError("pm_invalid_signal_collection_contract_producer")
 
     cfg = state.get("config", {})
     db = get_db()

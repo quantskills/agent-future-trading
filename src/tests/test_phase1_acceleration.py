@@ -11,7 +11,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from graph.constants import Signal
-from graph.schema import AnalystSignal, FuturesAction, RecommendationStatus
+from graph.schema import AnalystSignal, FuturesAction, FuturesRecommendation, RecommendationAction, RecommendationStatus
 from graph.workflow import AgentWorkflow
 from database.artifact_store import load_externalized_json
 from database.sqlite_helper import SQLiteDB
@@ -143,10 +143,54 @@ class Phase1AccelerationTest(unittest.TestCase):
         def fake_pm(state):
             pm_order.append(state["ticker"])
             ticker = state["ticker"]
+            recommendation = FuturesRecommendation(
+                config_id="cfg",
+                reference_portfolio_id="p1",
+                trading_date="2025-01-02",
+                effective_trade_date="2025-01-02",
+                underlying_code=ticker,
+                contract_code=f"{ticker}01",
+                action=RecommendationAction.HOLD,
+                lots=0,
+                base_price=100.0,
+                justification="test PM candidate",
+                signal_snapshot={
+                    "pm_internal_candidate": {
+                        "schema": "agentquant.pm_internal_candidate.v1",
+                        "candidate_contract": {
+                            "ticker": ticker,
+                            "contract_code": f"{ticker}01",
+                            "final_action": "wait",
+                            "current_lots": 0,
+                            "target_lots": 0,
+                            "lots_delta": 0,
+                            "reason_codes": ["test_pm_candidate"],
+                        },
+                        "final_contract_builder_inputs": {"ticker": ticker},
+                    }
+                },
+            )
             return {
                 "decision": SimpleNamespace(action=FuturesAction.HOLD, lots=0, contract_code=f"{ticker}01"),
-                "recommendation": None,
+                "recommendation": recommendation,
             }
+
+        def fake_finalize_pm_contracts(*, generated, config, portfolio):
+            for ticker, recommendation in generated:
+                recommendation.signal_snapshot = {
+                    "final_action_contract": {
+                        "ticker": ticker,
+                        "contract_code": f"{ticker}01",
+                        "final_action": "wait",
+                        "current_lots": 0,
+                        "target_lots": 0,
+                        "lots_delta": 0,
+                        "reason_codes": ["test_pm_final_contract"],
+                    },
+                    "pm_six_step_trace": {
+                        "pm_contract_self_check": {"ok": True, "tool": "pm_contract_self_check"}
+                    },
+                }
 
         with patch("graph.workflow.get_db", return_value=fake_db), patch(
             "graph.workflow.Router", _FakeRouter
@@ -155,6 +199,9 @@ class Phase1AccelerationTest(unittest.TestCase):
             return_value={"contract_multiplier": 10, "margin_rate_long": 0.1, "margin_rate_short": 0.1},
         ), patch("graph.workflow.AgentRegistry.get_agent_func_by_key", side_effect=fake_get_agent_func), patch(
             "agents.decision_team.portfolio_manager.portfolio_agent_futures", side_effect=fake_pm
+        ), patch(
+            "agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts",
+            side_effect=fake_finalize_pm_contracts,
         ):
             workflow = AgentWorkflow(self._config(), "cfg")
             elapsed = workflow.run("cfg")

@@ -114,6 +114,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         self.assertEqual(contract["contract_version"], "agentquant.signal_collection.v1")
+        self.assertEqual(contract["producer"], "signal_collector")
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         self.assertEqual(contract["dominant_side"], "short")
         self.assertEqual(len(contract["source_contracts"]), 3)
@@ -138,6 +139,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             enabled_analysts=["technical", "fundamental", "commodity_news"],
         )
         self.assertTrue(contract["no_trade_authority"])
+        self.assertEqual(contract["producer"], "signal_collector")
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         for forbidden in ("final_action", "target_lots", "lots_delta", "margin_required", "authority_type"):
             self.assertNotIn(forbidden, contract)
@@ -203,6 +205,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertIn("snapshot.pop(\"pm_capital_deployment_decision\", None)", signer)
         self.assertNotIn("_build_minimal_final_action_contract", source)
         self.assertNotIn("blocked_internal_candidate", source)
+        self.assertNotIn("build_signal_collection_contract(", source)
+        self.assertNotIn("from tools.common.signal_evidence_collection import build_signal_collection_contract", source)
 
     def test_full_market_deployment_writes_decision_not_final_contract_for_internal_candidate(self):
         scorecard = {

@@ -104,8 +104,13 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         consumers=(
             _rule(
                 "src/agents/decision_team/portfolio_manager.py",
-                ("signal_collection_contract", "build_signal_collection_contract"),
-                "PM consumes the signal collection contract before signing final authority",
+                (
+                    "signal_collection_contract",
+                    "pm_missing_signal_collection_contract_from_signal_collector",
+                    "collector_decision_boundary",
+                    "pm_invalid_signal_collection_contract_producer",
+                ),
+                "PM only consumes the signal collection contract produced by signal_collector",
             ),
         ),
         audits=(
@@ -976,6 +981,19 @@ def _scan_scope_boundaries(repo_root: Path) -> List[str]:
     return errors
 
 
+def _scan_signal_collection_producer_boundary(repo_root: Path) -> List[str]:
+    errors: List[str] = []
+    pm_text = _read_text(repo_root, "src/agents/decision_team/portfolio_manager.py")
+    signal_text = _read_text(repo_root, "src/tools/common/signal_evidence_collection.py")
+    if "from tools.common.signal_evidence_collection import build_signal_collection_contract" in pm_text:
+        errors.append("signal_collection_contract_pm_imports_builder")
+    if "build_signal_collection_contract(" in pm_text:
+        errors.append("signal_collection_contract_pm_builds_contract")
+    if '"producer": "signal_collector"' not in signal_text:
+        errors.append("signal_collection_contract_missing_signal_collector_producer")
+    return errors
+
+
 def _scan_active_docs_for_old_trade_contract_terms(repo_root: Path) -> List[str]:
     errors: List[str] = []
     forbidden = (
@@ -1044,6 +1062,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
     errors.extend(_scan_bare_writes(repo_root))
     errors.extend(_scan_alpha_setup_action_value_insert_paths(repo_root))
     errors.extend(_scan_scope_boundaries(repo_root))
+    errors.extend(_scan_signal_collection_producer_boundary(repo_root))
     errors.extend(_scan_active_docs_for_old_trade_contract_terms(repo_root))
     errors.extend(_scan_config_prompt_alignment(repo_root))
 
@@ -1062,6 +1081,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
             "producer_consumer_fidelity_tests",
             "bare_contract_writes",
             "consumer_scope_boundaries",
+            "signal_collection_producer_boundary",
             "field_table_registration",
             "config_prompt_doc_alignment",
         ],

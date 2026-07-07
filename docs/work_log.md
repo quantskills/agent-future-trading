@@ -260,6 +260,10 @@
 
 （6）收口 workflow 智能体输出零生产边界。修改：`workflow.py`、`signal_collector.py`，新增 `signal_collection_data_unavailable.py`，同步阶段流回归测试。原因：workflow 不能生产任何智能体输出；缺盘前基准价时只设置上下文缺失标志并调度 `signal_collector`，由 signal_collector 签出结构化不可用信号，再交 PM 签唯一合约。
 
+==========2026年07月07日==========
+
+（1）收口 `signal_collection_contract` 生产者边界。修改：`portfolio_manager.py`、`signal_evidence_collection.py`、`pg_contract_coverage_audit.py` 和回归测试。原因：`signal_collection_contract` 只能由 `signal_collector` 产出，PM 缺包、producer 非 `signal_collector` 或 boundary 非 `no_trade_authority` 必须 fail-fast，不能在 PM 内重建证据包。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。
