@@ -500,9 +500,9 @@ def write_alpha_setup_profiles(
         if not ticker:
             continue
         side = _review_helpers._recommendation_side(recommendation, snapshot)
+        semantic_state = derive_research_fact_state(final_contract, {})
         if side not in {"long", "short"}:
-            target_lots_for_side = _review_helpers._safe_int(final_contract.get("target_lots"))
-            preferred = "long" if target_lots_for_side > 0 else "short" if target_lots_for_side < 0 else "flat"
+            preferred = str(semantic_state.get("contract_side") or "flat")
             side = preferred if preferred in {"long", "short"} else "flat"
         if side not in {"long", "short"}:
             continue
@@ -555,13 +555,13 @@ def write_alpha_setup_profiles(
             opportunity_state=opportunity_state,
         )
         sector = _review_helpers._sector_for_ticker(cfg, ticker)
-        target_lots = _review_helpers._safe_int(final_contract.get("target_lots"))
-        current_lots = _review_helpers._safe_int(final_contract.get("current_lots"), 0)
+        target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
+        current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
         contract_intent = recommendation_intent_from_lots(
             current_lots=current_lots,
             target_lots=target_lots,
         )
-        contract_action_taken = str(contract_intent.get("action") or "hold")
+        contract_action_taken = str(semantic_state.get("action") or contract_intent.get("action") or "hold")
         executed_lots = sum(abs(_review_helpers._safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
         tx_daily_pnl = sum(_review_helpers._safe_float(tx.get("daily_pnl")) for tx in txs if isinstance(tx, dict))
         tx_commission = sum(_review_helpers._safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
@@ -616,7 +616,8 @@ def write_alpha_setup_profiles(
             "source_type": "trade_episode" if episode_sample and source_type == "trade" else source_type,
             "recommendation_id": rec_id,
             "action_taken": contract_action_taken,
-            "pm_action": final_contract.get("final_action") or contract_action_taken,
+            "pm_action": semantic_state.get("action") or contract_action_taken,
+            "final_action_semantics": semantic_state,
             "auditor_decision": (
                 str(final_contract.get("audit_verdict") or final_contract.get("auditor_decision") or "")
             ),

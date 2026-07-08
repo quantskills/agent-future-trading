@@ -701,13 +701,8 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         consumers=(
             _rule(
                 "src/tools/agent_tools/decision/pm_contract_self_check.py",
-                ("rank_capital_layer_contract_errors", "rank_input_components_missing"),
+                ("rank_capital_layer_contract_errors", "rank_input_components"),
                 "PM-owned final contract self-check validates ranked contract completeness",
-            ),
-            _rule(
-                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
-                ("def _capital_layer", "diagnostic_low_rank_outperformed_top_rank"),
-                "mechanism diagnostics bucket rank performance by capital layer without deciding PM contract validity",
             ),
         ),
         audits=(

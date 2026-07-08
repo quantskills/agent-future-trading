@@ -3,13 +3,14 @@ from __future__ import annotations
 """Read-only mechanism effectiveness audit for completed backtest windows.
 
 The system invariant audit answers whether records violate hard contracts.
-This module answers a different question: did the already-designed learning,
-ranking, deployment, conditional-monitor, and hold/exit mechanisms actually
-connect across persisted artifacts?
+This module answers a different question: did the already-designed artifact
+chain connect across persisted records?
 
 It is deliberately side-effect free. It never writes to the database, changes a
 contract, creates trade authority, or evaluates strategy profitability as a
-pass/fail condition.
+pass/fail condition. It also does not re-judge PM rank, deployment, or reason
+semantics; PM-owned self-check results are the authority for PM contract
+validity.
 """
 
 import json
@@ -23,7 +24,6 @@ from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.common.final_action_semantics import (
     contract_reduces_or_exits_position,
     contract_requires_conditional_intraday_result,
-    is_conditional_monitor_contract,
 )
 
 
@@ -40,7 +40,6 @@ CHECKED_SCENARIOS = {
     SCENARIO_POSITION_HOLD: "PM signed a hold style final_action_contract for an existing position",
     SCENARIO_FLAT_WAIT: "PM signed a flat wait/hold final_action_contract",
 }
-CONDITIONAL_FINAL_ACTIONS = {"conditional_probe", "conditional_monitor", "watch_trigger"}
 
 
 @dataclass
@@ -106,21 +105,6 @@ def _int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except Exception:
         return default
-
-
-def _float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    if isinstance(value, str) and not value.strip():
-        return default
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def _text_blob(*values: Any) -> str:
-    return " ".join(str(value or "") for value in values).lower()
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -253,52 +237,6 @@ def _load_action_values(conn: sqlite3.Connection, *, config_id: str) -> List[Dic
     return values
 
 
-def _load_daily_settlements(
-    conn: sqlite3.Connection,
-    *,
-    config_id: str,
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> List[Dict[str, Any]]:
-    if not _table_exists(conn, "daily_settlement") or not _table_exists(conn, "portfolio"):
-        return []
-    date_sql, params = _date_filter_sql("ds", start_date, end_date)
-    rows = conn.execute(
-        f"""
-        SELECT ds.*
-        FROM daily_settlement ds
-        JOIN portfolio p ON ds.portfolio_id = p.id
-        WHERE p.config_id = ?{date_sql}
-        ORDER BY ds.trading_date ASC
-        """,
-        (config_id, *params),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def _load_ticker_daily_pnl(
-    conn: sqlite3.Connection,
-    *,
-    config_id: str,
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> List[Dict[str, Any]]:
-    if not _table_exists(conn, "ticker_daily_pnl") or not _table_exists(conn, "portfolio"):
-        return []
-    date_sql, params = _date_filter_sql("tdp", start_date, end_date)
-    rows = conn.execute(
-        f"""
-        SELECT tdp.*
-        FROM ticker_daily_pnl tdp
-        JOIN portfolio p ON tdp.portfolio_id = p.id
-        WHERE p.config_id = ?{date_sql}
-        ORDER BY tdp.trading_date ASC, tdp.ticker ASC
-        """,
-        (config_id, *params),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
 def _contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = _dict(recommendation.get("signal_snapshot"))
     audit_payload = _dict(recommendation.get("audit_payload"))
@@ -307,33 +245,6 @@ def _contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, A
         if contract:
             return contract
     return {}
-
-
-def _rank_value(contract: Dict[str, Any]) -> Optional[int]:
-    evidence = _dict(contract.get("evidence_used"))
-    deployment = _dict(contract.get("capital_deployment"))
-    raw = deployment.get("opportunity_rank")
-    if raw in (None, ""):
-        raw = evidence.get("opportunity_rank")
-    try:
-        return int(raw)
-    except Exception:
-        return None
-
-
-def _capital_layer(contract: Dict[str, Any]) -> str:
-    deployment = _dict(contract.get("capital_deployment"))
-    evidence = _dict(contract.get("evidence_used"))
-    return _lower(deployment.get("capital_layer") or evidence.get("capital_layer"))
-
-
-def _opportunity_score(contract: Dict[str, Any]) -> Optional[float]:
-    evidence = _dict(contract.get("evidence_used"))
-    raw = evidence.get("opportunity_score")
-    try:
-        return float(raw)
-    except Exception:
-        return None
 
 
 def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
@@ -358,10 +269,6 @@ def _scenario_for_contract(contract: Dict[str, Any]) -> str:
     if _int(contract.get("current_lots")) != 0:
         return SCENARIO_POSITION_HOLD
     return SCENARIO_FLAT_WAIT
-
-
-def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:
-    return is_conditional_monitor_contract(contract)
 
 
 def _requires_conditional_intraday_result(contract: Dict[str, Any]) -> bool:
@@ -433,26 +340,6 @@ def _auditor_block_reason_present(recommendation: Dict[str, Any]) -> bool:
     return False
 
 
-def _capital_deployment_selected(contract: Dict[str, Any]) -> Optional[bool]:
-    deployment = _dict(contract.get("capital_deployment"))
-    if not deployment:
-        return None
-    if "selected_for_capital_deployment" not in deployment:
-        return None
-    return bool(deployment.get("selected_for_capital_deployment"))
-
-
-def _capital_allocation_reason(contract: Dict[str, Any]) -> str:
-    evidence = _dict(contract.get("evidence_used"))
-    deployment = _dict(contract.get("capital_deployment"))
-    return str(
-        evidence.get("capital_allocation_reason")
-        or deployment.get("capital_allocation_reason")
-        or contract.get("capital_allocation_reason")
-        or ""
-    )
-
-
 def _audit_recommendation_mechanisms(
     *,
     recommendations: Dict[str, Dict[str, Any]],
@@ -510,75 +397,6 @@ def _audit_recommendation_mechanisms(
                     hard_failures.append(f"mechanism_conditional_probe_auditor_block_missing_reason:{label}")
             elif not _has_intraday_decision(intraday_decisions, recommendation_id):
                 hard_failures.append(f"mechanism_conditional_probe_missing_intraday_result:{label}")
-
-        score = _opportunity_score(contract)
-        rank = _rank_value(contract)
-        selected = _capital_deployment_selected(contract)
-        reason = _capital_allocation_reason(contract)
-        if rank is not None and score is not None and selected is False and rank <= 3:
-            diagnostics.append(f"diagnostic_top_rank_not_deployed:{label}:rank={rank}:score={score}:reason={reason or 'missing'}")
-
-
-def _audit_capital_deployment_diagnostics(
-    daily_settlements: List[Dict[str, Any]],
-    diagnostics: List[str],
-) -> None:
-    ratios = [_float(row.get("margin_ratio")) for row in daily_settlements if row.get("margin_ratio") is not None]
-    if not ratios:
-        return
-    average = sum(ratios) / len(ratios)
-    if average < 0.008:
-        diagnostics.append(f"diagnostic_low_average_margin_utilization:avg={average:.6f}:days={len(ratios)}")
-
-
-def _audit_rank_pnl_diagnostics(
-    recommendations: Dict[str, Dict[str, Any]],
-    ticker_daily_pnl: List[Dict[str, Any]],
-    diagnostics: List[str],
-) -> None:
-    pnl_by_day_ticker = {
-        (_date10(row.get("trading_date")), str(row.get("ticker") or "").upper()): {
-            "daily_pnl": _float(row.get("daily_pnl")),
-            "new_position_pnl": _float(row.get("new_position_pnl")),
-        }
-        for row in ticker_daily_pnl
-    }
-    top_rank_pnls_by_layer: Dict[str, List[float]] = {}
-    low_rank_pnls_by_layer: Dict[str, List[float]] = {}
-    for recommendation_id, recommendation in recommendations.items():
-        contract = _contract_from_recommendation(recommendation)
-        rank = _rank_value(contract)
-        if rank is None:
-            continue
-        scenario = _scenario_for_contract(contract)
-        if scenario not in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}:
-            continue
-        layer = _capital_layer(contract)
-        if layer not in {"exploration_probe", "real_budget_entry", "alpha_scale_entry"}:
-            continue
-        day = _date10(recommendation.get("trading_date"))
-        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-        pnl_row = pnl_by_day_ticker.get((day, ticker))
-        if pnl_row is None:
-            continue
-        pnl = pnl_row["new_position_pnl"]
-        if rank <= 3:
-            top_rank_pnls_by_layer.setdefault(layer, []).append(pnl)
-        elif rank >= 6:
-            low_rank_pnls_by_layer.setdefault(layer, []).append(pnl)
-    for layer in sorted(set(top_rank_pnls_by_layer) | set(low_rank_pnls_by_layer)):
-        top_rank_pnls = top_rank_pnls_by_layer.get(layer, [])
-        low_rank_pnls = low_rank_pnls_by_layer.get(layer, [])
-        if top_rank_pnls and sum(top_rank_pnls) < 0:
-            diagnostics.append(
-                "diagnostic_top_rank_bucket_negative_new_position_pnl:"
-                f"layer={layer}:pnl={sum(top_rank_pnls):.2f}:count={len(top_rank_pnls)}"
-            )
-        if top_rank_pnls and low_rank_pnls and sum(top_rank_pnls) < sum(low_rank_pnls):
-            diagnostics.append(
-                "diagnostic_low_rank_outperformed_top_rank:"
-                f"layer={layer}:top={sum(top_rank_pnls):.2f}:low={sum(low_rank_pnls):.2f}"
-            )
 
 
 def audit_mechanism_effectiveness(
@@ -656,18 +474,6 @@ def audit_mechanism_effectiveness(
             end_date=end_date,
         )
         action_values = _load_action_values(conn, config_id=resolved_config_id)
-        daily_settlements = _load_daily_settlements(
-            conn,
-            config_id=resolved_config_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        ticker_daily_pnl = _load_ticker_daily_pnl(
-            conn,
-            config_id=resolved_config_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
     finally:
         conn.close()
 
@@ -682,14 +488,10 @@ def audit_mechanism_effectiveness(
         diagnostics=diagnostics,
         scenario_counts=scenario_counts,
     )
-    _audit_capital_deployment_diagnostics(daily_settlements, diagnostics)
-    _audit_rank_pnl_diagnostics(recommendations, ticker_daily_pnl, diagnostics)
     counts = {
         "recommendations": len(recommendations),
         "action_values": len(action_values),
         "intraday_decisions": len(intraday_decisions),
-        "daily_settlements": len(daily_settlements),
-        "ticker_daily_pnl": len(ticker_daily_pnl),
         "hard_failures": len(hard_failures),
         "diagnostics": len(diagnostics),
         "scenarios": dict(sorted(scenario_counts.items())),

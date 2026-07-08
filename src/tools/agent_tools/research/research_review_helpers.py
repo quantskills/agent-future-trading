@@ -28,6 +28,11 @@ from util.learning_attribution import (
 )
 from tools.common.contracts import final_action_contract_from_snapshot
 from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
+from tools.common.final_action_semantics import (
+    classify_final_action_contract,
+    derive_memory_requirements,
+    derive_review_expectation,
+)
 from tools.common.learning_contract import CONTRACT_KEY
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
@@ -319,11 +324,14 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     position_budget = snapshot.get("position_budget_policy") if isinstance(snapshot.get("position_budget_policy"), dict) else {}
     final_trade_authority = contract
     ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
-    target_lots = _safe_int(contract.get("target_lots"))
-    current_lots = _safe_int(contract.get("current_lots"))
+    semantic_view = _final_action_semantic_view(contract, execution_result)
+    target_lots = _safe_int(semantic_view.get("target_lots"))
+    current_lots = _safe_int(semantic_view.get("current_lots"))
     target_ratio = _safe_float(contract.get("target_position_ratio"))
     current_ratio = 0.0
-    target_side = _target_side_from_ratio(target_lots if target_lots else target_ratio)
+    target_side = str(semantic_view.get("contract_side") or "flat")
+    if target_side not in {"long", "short"} and abs(target_ratio) > 1e-12:
+        target_side = _target_side_from_ratio(target_ratio)
     no_trade_reason = (
         execution_result.get("no_trade_reason")
         or ((contract.get("reason_codes") or [None])[-1] if isinstance(contract.get("reason_codes"), list) else None)
@@ -418,9 +426,10 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
         "margin_required": 0.0,
         "target_lots": target_lots,
         "current_lots": current_lots,
-        "tradable_lots": abs(_safe_int(contract.get("lots_delta"))),
+        "tradable_lots": abs(_safe_int(semantic_view.get("lots_delta"))),
         "no_trade_reason": no_trade_reason,
-        "rebalance_action_type": str(contract.get("final_action") or ""),
+        "rebalance_action_type": str(semantic_view.get("action") or ""),
+        "final_action_semantics": semantic_view,
         "confirmation_score": confirmation_score,
         "signal_confidence": _safe_float(_first_analyst_field(snapshot, "confidence")),
         "auditor_decision": auditor_decision,
@@ -813,6 +822,36 @@ def _target_side_from_ratio(value: Any) -> str:
     return "flat"
 
 
+def _final_action_semantic_view(
+    contract: Dict[str, Any],
+    execution_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the read-only common semantic view used by review/research tools."""
+    contract = contract if isinstance(contract, dict) else {}
+    execution_result = execution_result if isinstance(execution_result, dict) else {}
+    semantics = classify_final_action_contract(contract)
+    memory = derive_memory_requirements(contract)
+    review = derive_review_expectation(contract, execution_result)
+    contract_side = memory.get("target_side") or memory.get("current_position_side") or "flat"
+    return {
+        "source": "final_action_semantics",
+        "action": semantics.get("action"),
+        "current_lots": semantics.get("current_lots"),
+        "target_lots": semantics.get("target_lots"),
+        "lots_delta": semantics.get("lots_delta"),
+        "lifecycle_state": semantics.get("lifecycle_state"),
+        "execution_permission": semantics.get("execution_permission"),
+        "requires_intraday_result": semantics.get("requires_intraday_result"),
+        "target_side": memory.get("target_side"),
+        "current_position_side": memory.get("current_position_side"),
+        "contract_side": contract_side,
+        "contract_side_role": memory.get("contract_side_role"),
+        "required_memory_lanes": memory.get("required_memory_lanes") or [],
+        "required_memory_side_roles": memory.get("required_memory_side_roles") or [],
+        "review_expectation": review,
+    }
+
+
 def _signal_side(signal: Any) -> str:
     return SIDE_BY_SIGNAL.get(str(signal), "neutral")
 
@@ -1072,11 +1111,9 @@ def _action_name(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> st
 
 def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
     contract = final_action_contract_from_snapshot(snapshot)
-    target_lots = contract.get("target_lots") if isinstance(contract, dict) else None
-    if target_lots is not None:
-        side = _target_side_from_ratio(target_lots)
-        if side in {"long", "short", "flat"}:
-            return side
+    side = _final_action_semantic_view(contract).get("contract_side")
+    if side in {"long", "short", "flat"}:
+        return str(side)
     return "unknown"
 
 
@@ -1777,7 +1814,7 @@ def _candidate_side_from_snapshot(snapshot: Dict[str, Any]) -> str:
     if short_votes > long_votes and short_votes > 0:
         return "short"
     contract = final_action_contract_from_snapshot(snapshot)
-    side = _target_side_from_ratio(contract.get("target_lots"))
+    side = _final_action_semantic_view(contract).get("contract_side")
     return side if side in {"long", "short"} else "flat"
 
 

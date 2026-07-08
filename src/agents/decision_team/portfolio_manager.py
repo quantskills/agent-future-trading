@@ -1286,7 +1286,7 @@ def _pm_step6_has_final_rank_trace(final_action_contract: dict) -> bool:
 def _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract: dict) -> None:
     evidence = final_action_contract.get("evidence_used")
     evidence = evidence if isinstance(evidence, dict) else {}
-    for field in (
+    legacy_lifecycle_fields = (
         "contract_lifecycle_self_check",
         "historical_lifecycle_transition_diagnostic",
         "initial_primary_lifecycle_action_port",
@@ -1294,7 +1294,8 @@ def _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract: dict) -> 
         "lifecycle_port_transition_reason",
         "lifecycle_transition_diagnostic",
         "lifecycle_transition_reason",
-    ):
+    )
+    for field in legacy_lifecycle_fields:
         evidence.pop(field, None)
 
     trace_targets = []
@@ -1316,16 +1317,14 @@ def _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract: dict) -> 
     evidence_pm_trace = evidence.get("pm_lifecycle_learning_trace")
     if isinstance(evidence_pm_trace, dict):
         trace_targets.append(evidence_pm_trace)
+    memory_retrieval = learning.get("memory_retrieval")
+    if isinstance(memory_retrieval, dict):
+        trace_targets.append(memory_retrieval)
+    final_action_memory_retrieval = learning.get("final_action_memory_retrieval")
+    if isinstance(final_action_memory_retrieval, dict):
+        trace_targets.append(final_action_memory_retrieval)
     for trace in trace_targets:
-        for field in (
-            "contract_lifecycle_self_check",
-            "historical_lifecycle_transition_diagnostic",
-            "initial_primary_lifecycle_action_port",
-            "primary_lifecycle_action_port",
-            "lifecycle_port_transition_reason",
-            "lifecycle_transition_diagnostic",
-            "lifecycle_transition_reason",
-        ):
+        for field in legacy_lifecycle_fields:
             trace.pop(field, None)
     final_action_contract["evidence_used"] = evidence
     final_action_contract["learning_used"] = learning

@@ -1265,20 +1265,6 @@ def _audit_pm_learning_transport_and_contract_effect(
                 )
 
 
-def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
-    evidence = _dict(contract.get("evidence_used"))
-    deployment = _dict(contract.get("capital_deployment"))
-    raw = (
-        deployment.get("opportunity_rank")
-        if deployment.get("opportunity_rank") not in (None, "")
-        else evidence.get("opportunity_rank")
-    )
-    try:
-        return int(raw)
-    except Exception:
-        return None
-
-
 def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
     found: List[str] = []
     if isinstance(value, dict):

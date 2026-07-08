@@ -63,6 +63,7 @@ from tools.common.contracts import (
 )
 from tools.common.final_action_semantics import (
     authority_allows_entry,
+    contract_increases_risk_position,
     contract_requires_conditional_intraday_result,
 )
 from agents.decision_team.auditor import audit_verdict_allows_trader
@@ -412,13 +413,13 @@ def _final_entry_authority_consistency(snapshot: Dict[str, Any]) -> Dict[str, An
 def _requires_entry_authority(current_lots: int, target_lots: int) -> bool:
     current_lots = int(current_lots or 0)
     target_lots = int(target_lots or 0)
-    if target_lots == 0 or target_lots == current_lots:
-        return False
-    if current_lots == 0:
-        return True
-    if (current_lots > 0) != (target_lots > 0):
-        return True
-    return abs(target_lots) > abs(current_lots)
+    return contract_increases_risk_position(
+        {
+            "current_lots": current_lots,
+            "target_lots": target_lots,
+            "lots_delta": target_lots - current_lots,
+        }
+    )
 
 
 def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
@@ -426,6 +427,7 @@ def _authority_allows_entry(authority: Dict[str, Any]) -> bool:
 
 
 def _target_lots_without_new_entry(current_lots: int, target_lots: int) -> int:
+    """Project an execution-safe target after common semantics flags new entry."""
     current_lots = int(current_lots or 0)
     target_lots = int(target_lots or 0)
     if not _requires_entry_authority(current_lots, target_lots):

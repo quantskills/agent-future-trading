@@ -17,7 +17,11 @@ from tools.common.contracts import (
     validate_auditor_artifact_boundary,
     validate_final_action_contract,
 )
-from tools.common.final_action_semantics import audit_pm_memory_consumption, derive_protocol_semantic_checks
+from tools.common.final_action_semantics import (
+    audit_pm_memory_consumption,
+    contract_increases_risk_position,
+    derive_protocol_semantic_checks,
+)
 from tools.common.evidence_fusion_semantics import audit_pm_fusion_explanation
 
 
@@ -91,24 +95,8 @@ def _final_contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[
     return final_action_contract_from_snapshot(_recommendation_snapshot(recommendation))
 
 
-def _contract_target_lots(contract: Dict[str, Any]) -> int:
-    return _safe_int(contract.get("target_lots"), 0)
-
-
-def _contract_current_lots(contract: Dict[str, Any]) -> int:
-    return _safe_int(contract.get("current_lots"), 0)
-
-
 def _is_new_or_increasing_exposure(contract: Dict[str, Any]) -> bool:
-    current_lots = _contract_current_lots(contract)
-    target_lots = _contract_target_lots(contract)
-    if target_lots == current_lots or target_lots == 0:
-        return False
-    if current_lots == 0:
-        return True
-    if (current_lots > 0) != (target_lots > 0):
-        return True
-    return abs(target_lots) > abs(current_lots)
+    return contract_increases_risk_position(contract)
 
 
 def _hard_margin_limit(config: Dict[str, Any]) -> float:

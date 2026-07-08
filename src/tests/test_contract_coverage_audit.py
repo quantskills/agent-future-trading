@@ -187,6 +187,13 @@ class ContractCoverageAuditTest(unittest.TestCase):
         self.assertIn("src/tests/test_pre_backtest_pm_workflow_contracts.py", test_paths)
         self.assertIn("src/tests/test_system_invariant_audit.py", test_paths)
 
+    def test_rank_capital_layer_contract_stays_pm_owned(self):
+        spec = next(spec for spec in CONTRACT_SPECS if spec.contract == "rank_capital_layer_contract")
+        consumer_paths = {rule.path for rule in spec.consumers}
+
+        self.assertIn("src/tools/agent_tools/decision/pm_contract_self_check.py", consumer_paths)
+        self.assertNotIn("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", consumer_paths)
+
 
 if __name__ == "__main__":
     unittest.main()

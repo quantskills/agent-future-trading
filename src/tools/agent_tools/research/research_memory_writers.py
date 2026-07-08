@@ -41,6 +41,7 @@ from util.logger import logger
 from tools.common.neutral_accountability import build_neutral_accountability_summary
 from tools.common.final_action_semantics import (
     canonical_action_preference_for_action_value,
+    derive_research_fact_state,
     validate_action_value_write_consistency,
 )
 
@@ -1764,13 +1765,19 @@ def _write_research_position_feedback(
         executed_lots = sum(abs(_safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
         tx_pnl = sum(_safe_float(tx.get("realized_pnl")) for tx in txs if isinstance(tx, dict))
         tx_commission = sum(_safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
+        execution_result = _execution_result_from_snapshot(snapshot)
+        semantic_state = derive_research_fact_state(final_contract, execution_result)
         position_effect = {
-            "current_lots": final_contract.get("current_lots"),
-            "target_lots": final_contract.get("target_lots"),
-            "lots_delta": final_contract.get("lots_delta"),
+            "current_lots": semantic_state.get("current_lots"),
+            "target_lots": semantic_state.get("target_lots"),
+            "lots_delta": semantic_state.get("lots_delta"),
             "final_target_position_ratio": final_contract.get("target_position_ratio"),
-            "final_action": final_contract.get("final_action"),
-            "source": "final_action_contract",
+            "final_action": semantic_state.get("action"),
+            "lifecycle_state": semantic_state.get("lifecycle_state"),
+            "contract_side": semantic_state.get("contract_side"),
+            "memory_side_role": semantic_state.get("memory_side_role"),
+            "required_memory_lanes": semantic_state.get("required_memory_lanes") or [],
+            "source": "final_action_semantics.research_fact_state",
         }
         opportunity_to_position = {
             "action_candidates": action_candidates,
@@ -1780,7 +1787,6 @@ def _write_research_position_feedback(
         current_lots = _safe_int(position_effect.get("current_lots"), 0)
         delta_lots = _safe_int(position_effect.get("lots_delta"), target_lots - current_lots)
         target_ratio = _safe_float(position_effect.get("final_target_position_ratio"), 0.0)
-        execution_result = _execution_result_from_snapshot(snapshot)
         no_trade_reason = str(
             execution_result.get("no_trade_reason")
             or ((final_contract.get("reason_codes") or [None])[-1] if isinstance(final_contract.get("reason_codes"), list) else "")
@@ -1808,11 +1814,11 @@ def _write_research_position_feedback(
             "pm_effect": position_effect,
             "opportunity_to_position": opportunity_to_position,
             "auditor_effect": {
-                "decision": final_contract.get("authority_type") or final_contract.get("final_action"),
-                "action": final_contract.get("final_action"),
+                "decision": final_contract.get("authority_type") or semantic_state.get("action"),
+                "action": semantic_state.get("action"),
                 "position_ratio_multiplier": None,
                 "diagnostics": learning_used,
-                "source": "final_action_contract",
+                "source": "final_action_semantics.research_fact_state",
             },
             "trader_effect": {
                 "transaction_count": len(txs),

@@ -278,6 +278,16 @@
 
 （8）统一 PM/workflow 重塑后的回测前检测、每日后置审计和 PG 旁路审计。修改：`pg_system_invariants.py`、`pg_unified_field_audit.py`、`pg_contract_coverage_audit.py`、`pg_mechanism_effectiveness_audit.py`、`pre_backtest_test.py` 和相关控制测试。原因：检测层只认 `pm_six_step_trace.step6_contract_generation_check` 与 `pm_contract_self_check` 两个最终闸门，保存后旧 lifecycle compare 字段必须 hard fail，contract coverage 不再重复运行，机制有效性审计只检查机制连通和未部署候选/条件监控真实边界。
 
+==========2026年07月08日==========
+
+（1）接入智能体出口契约洁净与下游统一语义理解的回测前 fixture 检测。修改：`portfolio_manager.py`、`pre_backtest_test.py`，新增 `test_agent_output_contract_boundary.py`。原因：内部推理、路由、学习和自检机制继续保留，但各智能体对外 artifact 必须按白名单投影；PM 最终合约清除 `learning_used.memory_retrieval` 等保存路径中的旧生命周期内部诊断字段，Signal Collector 固定 `producer=signal_collector` 与 `collector_decision_boundary=no_trade_authority`，Trader/Accountant/Reviewer/Researcher 的输出边界由 fixture 在回测前验证，并统一通过 `final_action_semantics.py` 与 `evidence_fusion_semantics.py` 理解上游输出。
+
+（2）收住各智能体对上游信息的统一理解入口。修改：`final_action_semantics.py`、`auditor.py`、`trader.py`、`research_review_helpers.py`、`research_learning.py`、`research_memory_writers.py` 和 `test_agent_output_contract_boundary.py`。原因：分析师继续通过分析师学习上下文/校准工具消费研究，Signal Collector 继续通过证据融合语义产出无交易权限证据包，PM 继续只消费 Signal Collector 证据包与 PM 学习路由；Auditor/Trader/Reviewer/Researcher 对 `final_action_contract` 的手数、方向、生命周期、执行权限和研究归因解释统一回收到 `final_action_semantics.py`、`contracts.py`、`order_semantics.py`，避免下游重新私写 PM 字段解释器，同时不改变 PM 六步机制和交易策略逻辑。
+
+（3）对齐 PG 旁路审计与当前智能体出口/理解边界。修改：`pg_mechanism_effectiveness_audit.py`、`pg_contract_coverage_audit.py`、`pg_system_invariants.py` 和相关控制测试。原因：PG 每日机制审计只检查 `final_action_contract`、`signal_collection_contract` 安全摘要、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和条件合约执行链路，不再复判 PM 内部 rank、资金部署或 reason 语义；rank 合约完整性仍由 PM self-check 和回测前 fixture 覆盖。
+
+（4）小幅放宽分析师学习上下文召回数量。修改：`learning_policy_catalog.yaml`。原因：将 `learning_context.exploratory_memory.max_episode_items`、`max_no_trade_items` 和 `alpha_setup_profile.max_items` 从 3 调整为 5，让分析师校准能看到更多近期 episode、no-trade 和 setup profile 摘要，同时不改变 action-value 权限边界。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

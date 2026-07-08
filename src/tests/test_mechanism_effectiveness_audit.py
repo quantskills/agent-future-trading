@@ -200,6 +200,28 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.counts.get("scenarios", {}).get("flat_wait"), 1)
 
+    def test_does_not_rejudge_pm_rank_deployment_or_reason_semantics(self):
+        db_path = self._make_db()
+        contract = self._contract(
+            evidence_used={"opportunity_score": 98.0, "opportunity_rank": 1},
+            capital_deployment={
+                "selected_for_capital_deployment": False,
+                "new_risk_rank_required": False,
+                "deployment_required": False,
+                "opportunity_rank": 1,
+                "capital_allocation_reason": "non_new_risk_no_capital_rank",
+                "original_target_lots": 0,
+                "deployed_target_lots": 0,
+                "deployed_lots_delta": 0,
+            },
+        )
+        self._insert_recommendation(db_path, snapshot=self._snapshot(contract))
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual([], report.diagnostics)
+
     def test_rejects_missing_signal_collection_contract(self):
         db_path = self._make_db()
         snapshot = self._snapshot(self._contract(), signal_contract={})

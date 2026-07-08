@@ -399,9 +399,9 @@ learning_context:
   exploratory_memory:
     # 注入相似交易和假设，并控制数量防止过拟合与 prompt 膨胀。
     enabled: true
-    max_episode_items: 3
+    max_episode_items: 5
     max_episode_chars: 600
-    max_no_trade_items: 3
+    max_no_trade_items: 5
     max_no_trade_chars: 500
     max_hypothesis_items: 3
     max_hypothesis_hint_items: 5
@@ -409,7 +409,7 @@ learning_context:
     alpha_setup_profile:
       # Prompt 中只放少量 Alpha Setup 档案，避免记忆膨胀；候选档案不能直接支撑仓位。
       enabled: true
-      max_items: 3
+      max_items: 5
       max_chars: 420
 
 learning_retention:

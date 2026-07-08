@@ -1800,7 +1800,14 @@ def derive_review_expectation(
     memory_audit = audit_pm_memory_consumption(contract)
     return {
         "contract": "final_action_semantics.review_expectation.v1",
+        "action": semantics["action"],
+        "current_lots": semantics["current_lots"],
+        "target_lots": semantics["target_lots"],
+        "lots_delta": semantics["lots_delta"],
         "lifecycle_state": semantics["lifecycle_state"],
+        "target_side": memory["target_side"],
+        "current_position_side": memory["current_position_side"],
+        "contract_side_role": memory["contract_side_role"],
         "requires_intraday_result": semantics["requires_intraday_result"],
         "settlement_basis": accounting["settlement_basis"],
         "required_pm_memory": memory["required_pm_memory"],
@@ -1819,13 +1826,31 @@ def derive_research_fact_state(
     semantics = classify_final_action_contract(contract)
     memory = derive_memory_requirements(contract)
     execution_result = execution_result if isinstance(execution_result, Mapping) else {}
+    contract_side = memory["target_side"] or memory["current_position_side"] or "flat"
     return {
         "contract": "final_action_semantics.research_fact_state.v1",
         "learning_source": "phase4_completed_facts",
+        "action": semantics["action"],
+        "current_lots": semantics["current_lots"],
+        "target_lots": semantics["target_lots"],
+        "lots_delta": semantics["lots_delta"],
         "lifecycle_state": semantics["lifecycle_state"],
         "execution_outcome": execution_result.get("outcome") or execution_result.get("status") or "",
+        "target_side": memory["target_side"],
+        "current_position_side": memory["current_position_side"],
+        "contract_side": contract_side,
         "memory_side_role": memory["contract_side_role"],
         "required_memory_lanes": memory["required_memory_lanes"],
+        "position_effect": {
+            "current_lots": semantics["current_lots"],
+            "target_lots": semantics["target_lots"],
+            "lots_delta": semantics["lots_delta"],
+            "final_action": semantics["action"],
+            "lifecycle_state": semantics["lifecycle_state"],
+            "contract_side": contract_side,
+            "memory_side_role": memory["contract_side_role"],
+            "source": "final_action_semantics.research_fact_state",
+        },
         "can_mutate_same_day_trade_facts": False,
     }
 
