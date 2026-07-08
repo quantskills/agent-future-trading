@@ -10,11 +10,13 @@
 
 样本不足前，不允许因为单日或少数品种盈亏直接改参数。至少 30 个交易日后才允许做第一轮复核；至少 40 个交易日后才允许微调 rank 分数权重和学习修正强度。
 
-## 不动的硬边界
+## 不动的账户硬边界与计划预算口径
 
-- `max_total_margin_ratio = 0.20`：组合总保证金硬上限 20%。
-- `probe_margin_ratio / min_real_trade_margin_ratio = 0.008`：小探针资金底线不因 rank 高低自动提高。
-- 现有 probe / normal / strong 资金层级参数不因短样本调整。
+- 账户硬边界：`max_total_margin_ratio = 0.20`、`position_budget_policy.hard_max_total_margin_ratio = 0.20`，组合总保证金不得突破 20%。
+- PM 签约/部署阶段单品种资金硬约束：`position_budget_policy.max_single_ticker_margin_ratio`。它约束 PM 计划和签约，不作为 Reviewer/PG 日终收益审判线。
+- PM 计划预算参数：`max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_*`、`warning_target_margin_ratio_max`、`recovery_*`。这些参数服务 PM Step5 rank、资金部署、资金层级和复盘归因；真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时，只进入 Reviewer `budget_drift_diagnostics`、warning、事实归因和 Researcher input，不作为 Phase4 hard fail 或 PG 交易语义复判。
+- `probe_margin_ratio / min_real_trade_margin_ratio = 0.008`：小探针计划资金层级和真实交易最小保证金门槛不因 rank 高低自动提高。
+- 现有 probe / normal / strong 计划资金层级参数不因短样本调整。
 - 手续费、滑点、合约乘数、保证金率属于交易事实，不因策略表现调参。
 - PM、Auditor、Trader、Accountant、Researcher 边界不因调参改变。
 - hard fail 只用于非策略错误，不能为改善收益而降级。
@@ -47,7 +49,7 @@ rank_score =
 | 资金效率 | `capital_efficiency` | 预留小权重，40 日样本后再评估是否启用 |
 | 冲突/风险/失效边界 | `conflict_risk_invalidation_penalty` | 冲突、数据缺口、风险和失效边界不足的扣分 |
 
-权重配置入口固定为 `src/config/rank_score_policy.yaml`，由 `dev.yaml.config_catalogs.rank_score_policy` 引入并在运行时展开为 `rank_score_policy`。该 catalog 只允许微调 `rank_score` 权重和资金效率小修正，不允许改仓位参数、交易权限、`0.008` probe、`20%` 总保证金或 `0.5` 净敞口红线。样本不足 40 个干净交易日前，不应调整该 catalog。
+权重配置入口固定为 `src/config/rank_score_policy.yaml`，由 `dev.yaml.config_catalogs.rank_score_policy` 引入并在运行时展开为 `rank_score_policy`。该 catalog 只允许微调 `rank_score` 权重和资金效率小修正，不允许改仓位参数、交易权限、`0.008` probe、`20%` 总保证金硬边界或 `0.5` 净敞口计划预算。样本不足 40 个干净交易日前，不应调整该 catalog。
 
 资金部署规则：
 
@@ -56,7 +58,7 @@ rank_score =
 - `watch_for_trigger / exploration_probe` 仍使用原 0.008 小探针资金层。
 - `tradeable_candidate` 才能进入 normal 真实资金层。
 - 反复验证有 alpha 的候选才允许进入 strong / scale 资金层。
-- 资金按 rank 顺序逐个占用预算；触及总保证金、单品种或净敞口限制后，后续候选还原为 wait/hold，并写入 `no_rank_or_budget_no_new_exposure`。
+- 资金按 rank 顺序逐个占用 PM 计划预算；触及总保证金硬边界、单品种签约/部署约束或净敞口计划预算后，后续候选还原为 wait/hold，并写入 `no_rank_or_budget_no_new_exposure`。
 
 ## 30 个交易日后复核
 

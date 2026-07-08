@@ -79,6 +79,46 @@ def _write_minimal_covered_repo(root: Path) -> None:
     )
     _append_text(
         root,
+        "src/run/pre_backtest_test.py",
+        '"src.tests.test_reviewer_transaction_log_readability"',
+    )
+    _append_text(
+        root,
+        "src/tests/test_reviewer_transaction_log_readability.py",
+        "\n".join(
+            [
+                "完整交易日志",
+                'output_path.write_text(report_text, encoding="utf-8")',
+                "5. Signal Summary",
+                "TradingPhase.PHASE4",
+            ]
+        ),
+    )
+    _append_text(
+        root,
+        "src/tools/agent_tools/research/reviewer_phase4_review.py",
+        "\n".join(
+            [
+                "budget_drift_diagnostics",
+                '"reviewer_hard_gate": False',
+                'output_path.write_text(report_text, encoding="utf-8")',
+            ]
+        ),
+    )
+    _append_text(
+        root,
+        "src/llm/prompt.py",
+        "\n".join(
+            [
+                "budget_drift_diagnostics",
+                "reviewer_hard_gate=false",
+                "not final_action_contract invalidation",
+                "not same-day trade authority",
+            ]
+        ),
+    )
+    _append_text(
+        root,
         "src/tools/agent_tools/decision/pm_decision_memory_retrieval.py",
         'consumer_scope="pm_learning"\n_consumer_scope\nnon_pm_learning_scope',
     )
@@ -193,6 +233,28 @@ class ContractCoverageAuditTest(unittest.TestCase):
 
         self.assertIn("src/tools/agent_tools/decision/pm_contract_self_check.py", consumer_paths)
         self.assertNotIn("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", consumer_paths)
+
+    def test_contract_coverage_requires_reviewer_log_readability_pre_backtest_gate(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            _write_minimal_covered_repo(repo)
+            (repo / "src" / "run" / "pre_backtest_test.py").write_text(
+                "PRE_BACKTEST_TEST_MODULES = []",
+                encoding="utf-8",
+            )
+
+            report = audit_contract_coverage(repo)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(
+                error.startswith(
+                    "reviewer_pre_backtest_boundary_missing:src/run/pre_backtest_test.py"
+                )
+                for error in report.errors
+            ),
+            report.to_dict(),
+        )
 
 
 if __name__ == "__main__":

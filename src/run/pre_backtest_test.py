@@ -40,6 +40,7 @@ PRE_BACKTEST_TEST_MODULES = [
     "src.tests.test_analyst_product_price_behavior_profile",
     "src.tests.test_agent_output_contract_boundary",
     "src.tests.test_evidence_fusion_semantics",
+    "src.tests.test_reviewer_transaction_log_readability",
     "src.tests.test_system_invariant_audit",
     "src.tests.test_mechanism_effectiveness_audit",
     "src.tests.test_contract_coverage_audit",

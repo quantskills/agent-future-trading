@@ -288,6 +288,14 @@
 
 （4）小幅放宽分析师学习上下文召回数量。修改：`learning_policy_catalog.yaml`。原因：将 `learning_context.exploratory_memory.max_episode_items`、`max_no_trade_items` 和 `alpha_setup_profile.max_items` 从 3 调整为 5，让分析师校准能看到更多近期 episode、no-trade 和 setup profile 摘要，同时不改变 action-value 权限边界。
 
+（5）修正 Reviewer Phase4 对 PM 计划预算参数的复盘口径。修改：`reviewer_phase4_review.py`、`test_phase_flow_regression.py`、`mechanism_agent_internal_rules.md`、`mechanism_research.md` 和 `mechanism_multiagents.md`。原因：`max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`strong_opportunity_*` 等属于 PM Step5 计划预算/资金层级参数，真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时只进入 `budget_drift_diagnostics`、warning 和事实归因，不再触发 Phase4 hard fail；账户级保证金硬上限、阶段断链、成交/结算不一致、越权成交和 artifact 污染仍保持 hard fail。
+
+（6）同步 Researcher 提示词到 Reviewer 预算漂移事实归因口径。修改：`prompt.py` 和 `test_agent_output_contract_boundary.py`。原因：研究员 LLM 读取 `budget_drift_diagnostics`、warning 和事实归因时，只能把 PM 计划预算漂移当作未来研究输入，不能当作 PM 合约失效、日终交易违规、交易权限或绕过 `final_action_contract` 的依据。
+
+（7）对齐资金配置注释、主配置布局和参数文档口径。修改：`dev.yaml` 布局/注释和 `parameter.md`。原因：明确 `max_total_margin_ratio`、`hard_max_total_margin_ratio` 是账户保证金硬边界，`max_net_exposure`、`target_margin_ratio_*`、`probe/normal/deployable/exceptional/recovery` 等是 PM Step5 计划预算、资金层级和复盘归因参数，避免后续再把计划预算漂移误当 Reviewer/PG 日终 hard fail，同时保留 TQXAI 作为停用备用 LLM 通道。
+
+（8）收住回测前检测与 PG 旁路审计对齐当前系统。修改：`pre_backtest_test.py`、`test_reviewer_transaction_log_readability.py`、`pg_contract_coverage_audit.py` 和 `test_contract_coverage_audit.py`。原因：回测前总门接入 Reviewer 交易日志可读性 gate；契约覆盖固定 Reviewer 预算漂移事实归因、Researcher 提示词边界和 UTF-8 日志输出；PG 仍只验协议边界、PM 自检结果和 artifact 污染，不复判 PM 内部 rank/reason/deployment，也不把 PM 计划预算漂移当 hard fail。
+
 ==========当前验证口径==========
 
 （1）回测前总门：`src/run/pre_backtest_test.py`。

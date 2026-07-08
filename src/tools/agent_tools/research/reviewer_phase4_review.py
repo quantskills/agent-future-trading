@@ -167,6 +167,82 @@ def _position_exposures(positions: Dict[str, Any], account_equity: float) -> tup
     return net_exposure, single_exposures
 
 
+PM_PLAN_BUDGET_PARAMETER_FAMILIES = (
+    "net_exposure_control.max_net_exposure",
+    "capital_utilization_control.target_margin_ratio_*",
+    "position_budget_policy.probe_margin_ratio",
+    "position_budget_policy.probe_margin_max_ratio",
+    "position_budget_policy.normal/deployable/exceptional_margin_ratio*",
+    "capital_utilization_control.strong_opportunity_target_margin_ratio_*",
+    "net_exposure_control.strong_opportunity_max_net_exposure",
+    "net_exposure_control.warning_target_margin_ratio_max",
+    "net_exposure_control.recovery_*",
+)
+
+
+def _net_exposure_drift_context(recommendations: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    reason_counts: Counter = Counter()
+    untriggered_conditional_legs: List[str] = []
+    conditional_reason_set = {"intraday_trigger_not_met", "intraday_opening_range_incomplete"}
+    for recommendation in recommendations or []:
+        ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
+        reason = _resolve_no_trade_reason(recommendation, has_transactions=False)
+        if reason:
+            reason_counts[reason] += 1
+        if reason in conditional_reason_set and ticker:
+            untriggered_conditional_legs.append(ticker)
+    if untriggered_conditional_legs:
+        drift_reason = "conditional_leg_not_triggered_caused_realized_budget_drift"
+        executed_subset_effect = "executed_subset_excludes_untriggered_conditional_offset_legs"
+    else:
+        drift_reason = "realized_execution_path_differs_from_pm_planned_budget"
+        executed_subset_effect = "executed_subset_or_settlement_prices_changed_realized_budget"
+    return {
+        "drift_reason": drift_reason,
+        "untriggered_conditional_legs": sorted(set(untriggered_conditional_legs)),
+        "executed_subset_effect": executed_subset_effect,
+        "no_trade_reason_counts": dict(sorted(reason_counts.items())),
+    }
+
+
+def _append_budget_drift_diagnostic(
+    *,
+    trading_date: str,
+    planned_budget_parameter: str,
+    planned_budget_limit: float,
+    realized_value: float,
+    active_budget_mode: str,
+    active_budget_source: str,
+    recommendations: Optional[List[Dict[str, Any]]],
+    warnings: List[str],
+    budget_drift_diagnostics: Optional[List[Dict[str, Any]]],
+) -> None:
+    context = _net_exposure_drift_context(recommendations)
+    diagnostic = {
+        "type": "pm_plan_budget_drift",
+        "trading_date": trading_date,
+        "planned_budget_parameter": planned_budget_parameter,
+        "planned_budget_limit": round(float(planned_budget_limit), 6),
+        "realized_value": round(float(realized_value), 6),
+        "absolute_drift": round(abs(float(realized_value)) - float(planned_budget_limit), 6),
+        "active_budget_mode": active_budget_mode,
+        "active_budget_source": active_budget_source,
+        "drift_reason": context["drift_reason"],
+        "untriggered_conditional_legs": context["untriggered_conditional_legs"],
+        "executed_subset_effect": context["executed_subset_effect"],
+        "no_trade_reason_counts": context["no_trade_reason_counts"],
+        "pm_plan_budget_parameters_not_reviewer_hard_gate": list(PM_PLAN_BUDGET_PARAMETER_FAMILIES),
+        "reviewer_hard_gate": False,
+    }
+    if budget_drift_diagnostics is not None:
+        budget_drift_diagnostics.append(diagnostic)
+    warnings.append(
+        f"PM plan budget drift on {trading_date}: {planned_budget_parameter} "
+        f"limit={planned_budget_limit:.2%}, realized={realized_value:.2%}, "
+        f"drift_reason={context['drift_reason']}; reviewer_hard_gate=false"
+    )
+
+
 def _apply_net_exposure_review(
     *,
     trading_date: str,
@@ -175,6 +251,7 @@ def _apply_net_exposure_review(
     warnings: List[str],
     errors: List[str],
     recommendations: Optional[List[Dict[str, Any]]] = None,
+    budget_drift_diagnostics: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     net_exposure_config = cfg.get("net_exposure_control") or cfg.get("risk_control", {}).get("net_exposure_control", {})
     base_max_net_exposure = float(net_exposure_config.get("max_net_exposure", 0.50))
@@ -209,24 +286,59 @@ def _apply_net_exposure_review(
                 cap_mode = "alpha_release"
                 cap_source = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "")
 
-    drift_tolerance = float(net_exposure_config.get("phase4_drift_tolerance", 0.01))
-    hard_limit = max_net_exposure + max(0.001, drift_tolerance)
-
-    if abs(net_exposure) > hard_limit:
-        errors.append(
-            f"net exposure exceeds cap on {trading_date}: "
-            f"{net_exposure:.2%} > {max_net_exposure:.2%}"
-        )
-    elif abs(net_exposure) > max_net_exposure + 0.001:
-        warnings.append(
-            f"net exposure drifted above cap on {trading_date} but stayed within tolerance: "
-            f"{net_exposure:.2%} <= {hard_limit:.2%}"
+    if abs(net_exposure) > max_net_exposure + 0.001:
+        _append_budget_drift_diagnostic(
+            trading_date=trading_date,
+            planned_budget_parameter="net_exposure_control.max_net_exposure",
+            planned_budget_limit=max_net_exposure,
+            realized_value=abs(net_exposure),
+            active_budget_mode=cap_mode,
+            active_budget_source=cap_source,
+            recommendations=recommendations,
+            warnings=warnings,
+            budget_drift_diagnostics=budget_drift_diagnostics,
         )
     elif cap_mode == "alpha_release" and abs(net_exposure) > base_max_net_exposure + 0.001:
         source_text = f" via {cap_source}" if cap_source else ""
         warnings.append(
             f"net exposure above base cap on {trading_date} but within dynamic alpha-release cap"
             f"{source_text}: {net_exposure:.2%} <= {max_net_exposure:.2%}"
+        )
+
+
+def _account_margin_hard_limit(cfg: Dict[str, Any]) -> float:
+    candidates: List[float] = []
+    for value in (
+        cfg.get("max_total_margin_ratio"),
+        (cfg.get("position_budget_policy") or {}).get("hard_max_total_margin_ratio"),
+        (cfg.get("capital_utilization_control") or {}).get("max_margin_ratio_after_scaling"),
+    ):
+        ratio = _safe_float(value, 0.0)
+        if ratio > 0.0:
+            candidates.append(ratio)
+    return min(candidates) if candidates else 0.20
+
+
+def _apply_account_margin_hard_gate(
+    *,
+    trading_date: str,
+    cfg: Dict[str, Any],
+    settlement_row: Dict[str, Any],
+    errors: List[str],
+) -> None:
+    account_equity = _futures_account_equity(
+        settlement_row.get("current_balance"),
+        settlement_row.get("current_margin"),
+    )
+    if account_equity <= 0:
+        return
+    current_margin = _safe_float(settlement_row.get("current_margin"), 0.0)
+    realized_margin_ratio = current_margin / account_equity
+    hard_limit = _account_margin_hard_limit(cfg)
+    if realized_margin_ratio > hard_limit + 0.001:
+        errors.append(
+            f"account margin hard limit exceeded on {trading_date}: "
+            f"{realized_margin_ratio:.2%} > {hard_limit:.2%}"
         )
 
 
@@ -547,6 +659,7 @@ def _build_summary_payload(
     capital_deployment_state: Optional[Dict[str, Any]] = None,
     neutral_accountability: Optional[Dict[str, Any]] = None,
     extra_audit: Optional[Dict[str, Any]] = None,
+    budget_drift_diagnostics: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     capital_diagnostics = {}
     if isinstance(capital_deployment_state, dict):
@@ -584,6 +697,7 @@ def _build_summary_payload(
         },
         "warnings": warnings,
         "errors": errors,
+        "budget_drift_diagnostics": budget_drift_diagnostics or [],
         "market_confirmation_quality": market_confirmation_quality or {},
         "capital_deployment_diagnostics": capital_diagnostics,
         "neutral_accountability": neutral_accountability or {},
@@ -1175,6 +1289,7 @@ def run_phase4_review(
     expected_tickers = len(cfg.get("tickers", []))
     errors: List[str] = []
     warnings: List[str] = []
+    budget_drift_diagnostics: List[Dict[str, Any]] = []
 
     phase1 = db.get_trading_day_phase(config_id, trading_date, TradingPhase.PHASE1)
     phase2 = db.get_trading_day_phase(config_id, trading_date, TradingPhase.PHASE2)
@@ -1342,6 +1457,12 @@ def run_phase4_review(
                     f"settlement equity formula mismatch: actual_change={actual_equity_change:.2f}, "
                     f"expected_change={expected_equity_change:.2f}"
                 )
+            _apply_account_margin_hard_gate(
+                trading_date=trading_date,
+                cfg=cfg,
+                settlement_row=settlement_row,
+                errors=errors,
+            )
 
             if latest_portfolio and _normalize_date(latest_portfolio.get("trading_date")) == trading_date:
                 account_equity = current_account_equity
@@ -1372,6 +1493,7 @@ def run_phase4_review(
                     warnings=warnings,
                     errors=errors,
                     recommendations=strategy_recommendations,
+                    budget_drift_diagnostics=budget_drift_diagnostics,
                 )
 
                 max_single_config = cfg.get("risk_control", {}).get("max_single_position_ratio", {})
@@ -1463,6 +1585,7 @@ def run_phase4_review(
             market_confirmation_quality=market_confirmation_quality,
             capital_deployment_state=capital_preview,
             neutral_accountability=neutral_accountability_preview,
+            budget_drift_diagnostics=budget_drift_diagnostics,
             extra_audit={
                 "signal_persistence": signal_persistence_audit,
                 "signal_data_lineage": data_lineage_audit,

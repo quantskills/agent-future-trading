@@ -105,6 +105,7 @@ from tools.agent_tools.execution.accountant_futures_settlement import FuturesDai
 from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
 from tools.agent_tools.execution.trader_entry_timing import phase2_entry_audit
 from tools.agent_tools.research.reviewer_phase4_review import (
+    _apply_account_margin_hard_gate,
     _apply_net_exposure_review,
     _build_daily_transaction_report,
     _build_capital_deployment_diagnostics,
@@ -4683,6 +4684,7 @@ class ValidationRegressionTest(unittest.TestCase):
     def test_net_exposure_review_allows_small_phase4_drift_with_warning(self):
         warnings = []
         errors = []
+        diagnostics = []
 
         _apply_net_exposure_review(
             trading_date="2025-01-14",
@@ -4690,15 +4692,20 @@ class ValidationRegressionTest(unittest.TestCase):
             net_exposure=0.5085,
             warnings=warnings,
             errors=errors,
+            budget_drift_diagnostics=diagnostics,
         )
 
         self.assertEqual(errors, [])
         self.assertEqual(len(warnings), 1)
-        self.assertIn("stayed within tolerance", warnings[0])
+        self.assertIn("PM plan budget drift", warnings[0])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertFalse(diagnostics[0]["reviewer_hard_gate"])
+        self.assertEqual(diagnostics[0]["planned_budget_parameter"], "net_exposure_control.max_net_exposure")
 
-    def test_net_exposure_review_rejects_material_phase4_breach(self):
+    def test_net_exposure_review_records_material_budget_drift_without_phase4_error(self):
         warnings = []
         errors = []
+        diagnostics = []
 
         _apply_net_exposure_review(
             trading_date="2025-01-14",
@@ -4706,11 +4713,43 @@ class ValidationRegressionTest(unittest.TestCase):
             net_exposure=0.525,
             warnings=warnings,
             errors=errors,
+            budget_drift_diagnostics=diagnostics,
         )
 
-        self.assertEqual(warnings, [])
-        self.assertEqual(len(errors), 1)
-        self.assertIn("net exposure exceeds cap", errors[0])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["realized_value"], 0.525)
+        self.assertIn(
+            "position_budget_policy.probe_margin_ratio",
+            diagnostics[0]["pm_plan_budget_parameters_not_reviewer_hard_gate"],
+        )
+
+    def test_net_exposure_review_attributes_conditional_leg_budget_drift(self):
+        warnings = []
+        errors = []
+        diagnostics = []
+
+        _apply_net_exposure_review(
+            trading_date="2025-03-25",
+            cfg={"net_exposure_control": {"max_net_exposure": 0.50}},
+            net_exposure=0.5376,
+            warnings=warnings,
+            errors=errors,
+            budget_drift_diagnostics=diagnostics,
+            recommendations=[
+                {
+                    "underlying_code": "BU",
+                    "signal_snapshot": json.dumps(
+                        {"execution_result": {"no_trade_reason": "intraday_trigger_not_met"}}
+                    ),
+                }
+            ],
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(diagnostics[0]["drift_reason"], "conditional_leg_not_triggered_caused_realized_budget_drift")
+        self.assertEqual(diagnostics[0]["untriggered_conditional_legs"], ["BU"])
 
     def test_net_exposure_review_uses_dynamic_alpha_release_cap(self):
         warnings = []
@@ -4742,6 +4781,23 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(warnings), 1)
         self.assertIn("dynamic alpha-release cap", warnings[0])
+
+    def test_account_margin_hard_gate_rejects_real_account_boundary_breach(self):
+        errors = []
+
+        _apply_account_margin_hard_gate(
+            trading_date="2025-01-14",
+            cfg={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {"hard_max_total_margin_ratio": 0.20},
+                "capital_utilization_control": {"max_margin_ratio_after_scaling": 0.20},
+            },
+            settlement_row={"current_balance": 780000.0, "current_margin": 220000.0},
+            errors=errors,
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("account margin hard limit exceeded", errors[0])
 
     def test_market_confirmation_quality_warnings_are_aggregated_by_status(self):
         recommendations = [

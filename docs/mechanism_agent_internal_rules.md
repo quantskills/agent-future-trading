@@ -415,14 +415,15 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | 正向学习释放 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.alpha_setup_ev_fusion` | `positive_expectancy_multiplier`、`min_action_value_samples`、`min_action_value_confidence`、`require_tradeable_support_for_release`、`require_invalidation_for_release` | 只能提高 PM 优先级或释放仓位层级；不能单独生成动作、手数或交易权限 |
 | 条件触发候选 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.watch_for_trigger_new_entry` | `semantic_role`、`requires_final_contract_authority`、`allow_probe`、`probe_max_ratio`、`probe_floor_ratio` | 只允许 PM 写入需要盘中确认的条件触发合约；Trader 未触发不得成交 |
 | 失效边界控制 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.holding_rebalance_control.position_lifecycle` | `require_pretrade_invalidation_for_new_entry`、`missing_invalidation_cap_multiplier`、`missing_invalidation_probe_max_ratio` | 新开/加仓必须有失效边界；缺失时只能降级或阻断，不能正常开仓 |
-| 硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破 |
-| 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control / net_exposure_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling`、`max_net_exposure`、`strong_opportunity_max_net_exposure` | 只作为账户级风险边界；不能创建交易机会 |
+| 账户硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破；复盘员可把真实账户保证金硬线突破作为 Phase4 hard fail |
+| PM 计划预算和复盘诊断 | `src/config/dev.yaml: position_budget_policy / capital_utilization_control / net_exposure_control` | `max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_margin_ratio*`、`warning_target_margin_ratio_max`、`recovery_*` | 只服务 PM Step5 计划预算、rank/部署和资金层级；真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时，复盘员只能写事实归因/预警，不能作为日终 hard fail |
+| 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling` | 只作为账户级风险边界或降级依据；不能创建交易机会 |
 | 市场确认和冲突降级 | `src/config/portfolio_policy_catalog.yaml: market_confirmation` | `min_confirmation_score_for_new_entry`、`quality_gate_cap_multiplier`、`conflict_cap_multiplier`、`data_gap_cap_multiplier` | 只确认、降级或阻断当前机会；不能替代分析师 setup 或 PM 合约 |
 | PM 内部风险门槛 | `src/config/portfolio_policy_catalog.yaml: pm_risk_gate` | `quality_gate.*`、`cold_start.*`、`attribution_feedback.*` | 只影响 PM 签约前的风险降级或阻断；不是独立审计员写入口，不能让审计员直接改 PM 手数 |
 
 配置硬规则：
 
-1. `dev.yaml` 中的资金保护区参数是硬边界，学习机制、配置整理和门控优化不得自动改值。
+1. `dev.yaml` 中的账户硬资金上限是硬边界，学习机制、配置整理和门控优化不得自动改值；PM 计划预算参数只能用于计划、部署、预警和复盘归因，不能被复盘员或 PG 当作日终交易违规裁决线。
 2. `portfolio_policy_catalog.yaml` 只定义 PM 如何解释证据、学习、市场确认和质量门槛；最终交易事实仍只能来自 `final_action_contract`。
 3. `learning_policy_catalog.yaml` 只定义研究学习如何生成和保留；不能直接改变当日 PM 手数、Trader 执行或 Accountant 结算。
 4. `execution_*_catalog.yaml` 只定义手续费、滑点和退出执行事实；不能产生 PM 交易动作。

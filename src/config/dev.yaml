@@ -1,11 +1,16 @@
-# AgentQuant 主配置：只保留运行入口、交易宇宙、LLM 路由和资金红线。
-# 机制说明见 docs/mechanism_*.md；策略细节见 config_catalogs 对应 catalog。
-# 学习结果写入数据库 overlay/state，不自动改写本 YAML。
-# 交易动作只能来自 PM 的 final_action_contract。
-# 不在本文件硬编码具体品种好坏、方向偏好或回测学习结果。
+# AgentQuant 主配置
+# 本文件只负责运行入口、catalog 索引、账户/资金参数、交易宇宙和 LLM 路由。
+# 机制说明见 docs/mechanism_*.md；字段语义见 docs/unified_field_semantics.md；
+# 策略细节、学习策略、数据策略和 rank 权重由 config_catalogs 指向的 catalog 展开。
+#
+# 硬边界：
+# - 交易动作只能来自 PM 签出的 final_action_contract。
+# - 学习结果写入数据库 overlay/state，不自动改写本 YAML。
+# - 本文件不硬编码具体品种好坏、方向偏好或回测学习结果。
+# - 只区分账户硬边界和 PM 计划预算，不把计划预算漂移当日终 hard fail。
 
 # ---------------------------------------------------------------------------
-# 0. Catalog 索引
+# 0. Catalog 索引：主配置只挂载目录，不在这里展开策略细节
 # ---------------------------------------------------------------------------
 
 config_catalogs:
@@ -21,7 +26,7 @@ config_catalogs:
   evidence_fusion_policy: evidence_fusion_policy_catalog.yaml
 
 # ---------------------------------------------------------------------------
-# 1. 运行加速与数据预取
+# 1. 运行加速与数据预取：只影响性能和数据准备，不改变交易权限
 # ---------------------------------------------------------------------------
 
 runtime:
@@ -43,7 +48,7 @@ runtime:
     output_dir: src/logs/data_quality
 
 # ---------------------------------------------------------------------------
-# 2. 控制组协议治理
+# 2. 控制组协议治理：PG 只做协议边界和 artifact 审计，不生成交易事实
 # ---------------------------------------------------------------------------
 
 control_governance:
@@ -77,25 +82,35 @@ control_governance:
     protocol_governor_allowed_namespaces: [control, database]
 
 # ---------------------------------------------------------------------------
-# 3. 实验、账户与资金红线
+# 3. 实验账户与资金控制
 # ---------------------------------------------------------------------------
 
+# 3.1 实验账户基础
 exp_name: "agentquant-futures-trading-2025"
 cashflow: 5000000
 market_type: "china_futures"
 
+# 3.2 账户/组合保证金硬边界
+# 账户/组合保证金硬边界：真实账户保证金占用不得突破。
+# 这是 Phase4 可 hard fail 的账户硬线，不是 PM 资金层级目标。
 max_total_margin_ratio: 0.20
 
+# 3.3 PM Step5 资金部署预算和签约约束
+# 该段服务 PM 计划、rank 资金部署和 Step6 签约；不由 Reviewer/PG 复判收益表现。
 position_budget_policy:
   enabled: true
   basis: margin
   capital_base: account_equity
+  # 账户/组合保证金硬边界：PM 签约、Auditor 复核、Trader 执行与 Reviewer 结算验收都必须守住。
   hard_max_total_margin_ratio: 0.20
   min_real_trade_margin_ratio: 0.008
   min_real_trade_margin_abs: 40000
   apply_min_to_new_entries_only: true
   require_final_trade_authority: true
   block_below_min_when_cannot_scale: true
+  # PM Step5 计划预算/资金层级参数：决定 probe/normal/deployable/exceptional 的计划保证金层级。
+  # 真实成交后因条件腿未触发、成交子集、价格变化或滑点导致偏离时，只进入 Reviewer
+  # budget_drift_diagnostics / warning / factual attribution / Researcher input，不作为 Phase4 或 PG 日终 hard fail。
   probe_margin_ratio: 0.008
   probe_margin_max_ratio: 0.015
   normal_trade_margin_ratio: 0.030
@@ -104,8 +119,11 @@ position_budget_policy:
   deployable_margin_max_ratio: 0.120
   exceptional_margin_ratio: 0.075
   exceptional_margin_max_ratio: 0.130
+  # PM 签约/资金部署阶段的单品种资金硬约束；Reviewer/PG 不用它复判日终策略违规或收益表现。
   max_single_ticker_margin_ratio: 0.130
 
+# 3.4 分析师证据权重入口
+# 该段只作为 PM 证据路由/先验设置；分析师仍不能生成手数、保证金或 final_action_contract。
 analyst_weight_policy:
   enabled: true
   mode: evidence_router
@@ -118,6 +136,8 @@ analyst_weight_policy:
   strategic_view_cannot_open_position: true
   watch_for_trigger_cannot_open_position: true
 
+# 3.5 账户风险状态与软降级比例
+# 该段用于 PM/Auditor/Trader 风险状态识别和降级，不创建新交易权限。
 risk_control:
   warning_ratio: 0.70
   danger_ratio: 0.50
@@ -133,26 +153,32 @@ risk_control:
     warning: 0.08
     danger: 0.05
 
+# 3.6 PM Step5 净敞口计划预算
+# 该段用于组合计划净敞口和强机会预算释放；真实执行后的偏离只进入复盘归因。
 net_exposure_control:
+  # PM Step5 净敞口计划预算和强机会释放参数。
+  # 实际执行路径偏离计划净敞口时，Reviewer 只做预算漂移事实归因，不把它当日终交易违规。
   max_net_exposure: 0.50
   strong_opportunity_max_net_exposure: 2.00
   symmetric_scaling: true
 
 # ---------------------------------------------------------------------------
-# 4. 数据配置入口
+# 4. 数据配置入口：真实数据策略由 catalog 展开
 # ---------------------------------------------------------------------------
 
-# 数据、市场确认和 PM 策略细节由 catalog 展开。
+# 数据、市场确认、商品画像、证据融合和 PM 策略细节由 config_catalogs 对应 catalog 展开。
 
 # ---------------------------------------------------------------------------
-# 5. 回撤控制
+# 5. 回撤、冷却与恢复期预算
 # ---------------------------------------------------------------------------
 
+# 回撤状态用于风险降级、冷却和恢复期计划预算；不生成交易事实。
 drawdown_control:
   enabled: true
   warning_drawdown: 0.07
   hard_drawdown: 0.10
   warning_cap_multiplier: 0.60
+  # PM 计划预算/恢复期资金层级参数；真实执行后偏离只进入复盘归因，不作为日终 hard fail。
   warning_target_margin_ratio_max: 0.04
   initial_hard_cooldown_days: 1
   first_probe_loss_cooldown_days: 2
@@ -167,10 +193,12 @@ drawdown_control:
   recovery_probe_block_weak_memory: true
 
 # ---------------------------------------------------------------------------
-# 6. 资金利用目标
+# 6. PM 资金利用目标与强机会释放
 # ---------------------------------------------------------------------------
 
 # 策略性资金部署、学习、排名和触发质量规则由 portfolio/learning catalog 展开。
+# 以下 target/strong/max-scaling 参数用于 PM Step5 计划预算、rank/部署和资金利用目标。
+# 真实成交后的预算漂移只进入 Reviewer budget_drift_diagnostics、warning、事实归因和 Researcher input。
 
 capital_utilization_control:
   enabled: true
@@ -221,9 +249,10 @@ capital_utilization_control:
   same_side_add_on_match_tolerance: 0.0005
 
 # ---------------------------------------------------------------------------
-# 7. 执行与结算
+# 7. 执行、保证金、换约与审计日志
 # ---------------------------------------------------------------------------
 
+# 执行层只消费审计通过的 final_action_contract；不能改 PM 目标手数或方向。
 execution:
   limit_lock:
     enabled: true
@@ -256,13 +285,15 @@ execution:
 rollover:
   mode: reconcile_with_strategy
 
+# 审计日志配置只影响记录细节，不改变审计裁决或交易权限。
 audit:
   log_technical_price_window: true
 
 # ---------------------------------------------------------------------------
-# 8. 交易宇宙、分析师与 LLM
+# 8. 交易宇宙、启用分析师与 LLM 路由
 # ---------------------------------------------------------------------------
 
+# 8.1 交易宇宙
 tickers:
   - BU
   - C
@@ -280,13 +311,18 @@ tickers:
   - TA
   - ZN
 
+# 8.2 工作流模式
+# planner 当前封存，false 是唯一合法运行口径。
 planner_mode: false
 
+# 8.3 启用分析师
 workflow_analysts:
   - commodity_news
   - fundamental
   - technical
 
+# 8.4 分析师 LLM 输出后处理边界
+# 分析师可用 LLM 形成结构化证据，但不能输出手数、保证金或 final_action_contract。
 analyst_llm:
   mode: cloud_only
   cloud_model: null
@@ -299,6 +335,8 @@ analyst_llm:
   stale_fundamental_freshness_score: 0.45
   cap_stale_fundamental_confidence: 0.30
 
+# 8.5 LLM 主通道与备用通道
+# 当前启用 CodexOpenAI；TQXAI 作为第二 LLM 通道保留但停用，不删除、不自动切换。
 llm:
   # 当前主路由：CodexOpenAI / gpt-5.5 / medium reasoning；API key 只读 .env。
   provider: "CodexOpenAI"

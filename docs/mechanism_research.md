@@ -47,7 +47,7 @@ Phase1 投资组合经理 final_action_contract
 
 ## 二、Phase4 与研究学习分工
 
-复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、合约、成交、结算是否一致，完整交易日志是否输出，字段语义和阶段状态是否可审计。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。
+复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、合约、成交、结算是否一致，完整交易日志是否输出，字段语义和阶段状态是否可审计。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。`max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`strong_opportunity_*`、`recovery_*` 等 PM 计划预算参数在真实成交后出现偏离时，只能进入复盘事实归因、warning 和研究输入材料；复盘员不能把这类计划预算偏离当作日终 hard fail 或策略违规裁决。账户保证金硬上限、阶段断链、成交/结算不一致、越权成交和 artifact 污染仍属于 Phase4 hard fail。
 
 Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_memory` 刷新、学习 retention 清理、研究表写入或任何未来学习状态更新。
 

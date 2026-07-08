@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.execution_team import trader as trader_agent
 from agents.decision_team.portfolio_manager import _pm_step6_strip_legacy_lifecycle_self_check
+from llm.prompt import build_researcher_causal_review_prompt
 from tools.agent_tools.research import research_review_helpers
 from tools.common.contracts import (
     final_contract_execution_fields,
@@ -421,6 +422,26 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
             "lifecycle_transition_reason",
         ):
             self.assertNotIn(forbidden, research_sources)
+
+    def test_researcher_prompt_treats_budget_drift_as_factual_research_input(self):
+        prompt = build_researcher_causal_review_prompt("{}")
+
+        self.assertIn("budget_drift_diagnostics", prompt)
+        self.assertIn("PM plan budget drift", prompt)
+        self.assertIn("factual attribution", prompt)
+        self.assertIn("research input", prompt)
+        self.assertIn("reviewer_hard_gate=false", prompt)
+        self.assertIn("max_net_exposure", prompt)
+        self.assertIn("target_margin_ratio_*", prompt)
+        self.assertIn("probe_margin_ratio", prompt)
+        self.assertIn("strong_opportunity_*", prompt)
+        self.assertIn("recovery_*", prompt)
+        self.assertIn("not final_action_contract invalidation", prompt)
+        self.assertIn("not a day-end trade violation", prompt)
+        self.assertIn("not same-day trade authority", prompt)
+        self.assertIn("cannot bypass final_action_contract", prompt)
+        self.assertIn("research diagnostics only", prompt)
+        self.assertIn("Do not use this review to rejudge PM contract legality", prompt)
 
 
 if __name__ == "__main__":

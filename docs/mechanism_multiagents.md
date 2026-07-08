@@ -105,7 +105,7 @@ Phase4 完成后，研究学习单独运行：
 - Phase1 是盘前决策，只能使用盘前或决策时点前可见的信息，禁止读取当天盘中结果、收盘结果或未来交易日信息。
 - Phase2 是开盘后/盘中执行，只能按审计通过的 `final_action_contract` 和盘中触发条件执行，不能重新生成策略方向或手数。
 - Phase3 是收盘后结算，只能按 Phase2 成交、结算价、手续费、滑点、保证金率和合约乘数入账。
-- Phase4 是收盘后复盘验收，只能检查推荐、合约、成交、结算和阶段状态，并输出完整交易日志与事实归因。
+- Phase4 是收盘后复盘验收，只能检查推荐、合约、成交、结算和阶段状态，并输出完整交易日志与事实归因。PM 计划预算参数在真实执行后发生偏离时只进入事实归因和研究输入材料；复盘员不得把计划预算偏离当作新的交易违规裁决或日终 hard fail。
 - Phase4 可以输出完整交易日志和复盘事实材料，但不能输出 `action-value`、`strategy_memory`、`adaptive_policy_state`、`capital_deployment_state` 等未来研究状态。
 - Phase4 标记 completed 只更新阶段状态，不触发 `strategy_memory` 刷新、学习 retention 清理或任何研究表写入。
 - 研究学习只能在 Phase4 完成后运行，输出的结构化研究信息只允许影响未来交易日；研究信息持久化统一由 `researcher_learning.py` 和 `research_memory_writers` 承担。

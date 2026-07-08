@@ -1098,6 +1098,38 @@ def _scan_config_prompt_alignment(repo_root: Path) -> List[str]:
     return errors
 
 
+def _scan_reviewer_pre_backtest_boundary(repo_root: Path) -> List[str]:
+    errors: List[str] = []
+    checks = {
+        "src/run/pre_backtest_test.py": (
+            "src.tests.test_reviewer_transaction_log_readability",
+        ),
+        "src/tests/test_reviewer_transaction_log_readability.py": (
+            "完整交易日志",
+            'output_path.write_text(report_text, encoding="utf-8")',
+            "5. Signal Summary",
+            "TradingPhase.PHASE4",
+        ),
+        "src/tools/agent_tools/research/reviewer_phase4_review.py": (
+            "budget_drift_diagnostics",
+            '"reviewer_hard_gate": False',
+            'output_path.write_text(report_text, encoding="utf-8")',
+        ),
+        "src/llm/prompt.py": (
+            "budget_drift_diagnostics",
+            "reviewer_hard_gate=false",
+            "not final_action_contract invalidation",
+            "not same-day trade authority",
+        ),
+    }
+    for rel, patterns in checks.items():
+        text = _read_text(repo_root, rel)
+        for pattern in patterns:
+            if pattern not in text:
+                errors.append(f"reviewer_pre_backtest_boundary_missing:{rel}:{pattern}")
+    return errors
+
+
 def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditReport:
     repo_root = Path(repo_root).resolve()
     matrix = [_row_for_spec(repo_root, spec) for spec in CONTRACT_SPECS]
@@ -1113,6 +1145,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
     errors.extend(_scan_signal_collection_producer_boundary(repo_root))
     errors.extend(_scan_active_docs_for_old_trade_contract_terms(repo_root))
     errors.extend(_scan_config_prompt_alignment(repo_root))
+    errors.extend(_scan_reviewer_pre_backtest_boundary(repo_root))
 
     metadata: Dict[str, object] = {
         "repo_root": str(repo_root),
@@ -1132,6 +1165,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
             "signal_collection_producer_boundary",
             "field_table_registration",
             "config_prompt_doc_alignment",
+            "reviewer_pre_backtest_boundary",
         ],
     }
     return ContractCoverageAuditReport(
