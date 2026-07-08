@@ -638,3 +638,11 @@ Phase4 完成后，研究学习单独运行：
 - `no_final_action_authority`
 
 这些标记必须由文档、代码和测试同时覆盖。缺任一项，视为版本级契约覆盖失败。
+
+## PG 与多智能体边界补充（2026-07-07）
+
+PG 仍管理全系统协议边界，但不替任何业务智能体做业务判断。Signal Collector 侧只检查证据包 producer、`collector_decision_boundary=no_trade_authority` 以及 PM 未重建证据包；Auditor 侧只检查审计对象来自 PM 已签合约且没有改写 `final_action_contract`；Trader 侧只检查执行消费审计通过合约且没有改写 PM 交易事实；Accountant 侧只检查结算/PnL/组合状态边界；Reviewer 侧只检查复盘边界；Researcher 侧只检查未来学习记忆边界。
+
+对 PM，PG 定死只检查输出边界：是否有 `final_action_contract`、是否有 `pm_six_step_trace`、`pm_contract_self_check.ok` 是否为 true、`step6_contract_generation_check.ok` 是否为 true，以及是否无 PM 中间态污染。rank、非 rank、部署、不部署和 reason code 的业务语义由 PM 自检承担，PG 不复刻。
+
+回测前入口只运行静态检查、fixture、fake DB 和 PG 工具自测；每日回测后入口只读真实 DB/artifact 并调用 PG 审计工具 fail-fast。两个入口都不在脚本内实现审计规则。

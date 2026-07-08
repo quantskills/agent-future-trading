@@ -287,3 +287,5 @@
 （3）结构测试重点：事实入口、合约解析、artifact 边界、结算公式、研究写入、控制组只读、PM 状态转换、分析师输出落地。
 
 （4）回测前验收只检查系统可运行性、字段/schema/权限/硬数据/边界和确定性转换规则，不评价策略收益。
+
+（5）重塑 PG 旁路审计、回测前检测、每日回测后检测与相关测试边界。修改：`pg_system_invariants.py`、`pg_mechanism_effectiveness_audit.py`、`pg_contract_coverage_audit.py`、`pg_pre_backtest_acceptance.py`、`pre_backtest_test.py` 和相关控制测试。原因：PG 定死只验协议边界、artifact 污染、唯一交易事实和 PM 自检结果，不再复刻 PM 内部交易语义；回测前入口只编排静态/fixture/fake DB 检查，每日后置入口只读真实 DB/artifact 调 PG 工具 fail-fast，测试文件只验证工具判定，不成为第二套审计。

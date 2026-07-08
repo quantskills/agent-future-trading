@@ -897,3 +897,11 @@ src/run/backtest_daily_test.py
 3. 每个交易日后需要读取真实产物的 audit，加入 `src/run/backtest_daily_test.py`；不要把可静态证明的 unittest 放进每日入口。
 4. 测试文件负责断言规则；运行脚本只负责编排，不能写业务测试逻辑。
 5. 任何会影响交易状态流转、reason code 语义、配置门控或 LLM 输出落地的修改，必须同时更新本映射表。
+
+## PG 审计边界补充（2026-07-07）
+
+Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
+
+PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、残留 `pm_internal_candidate` / `pm_internal_candidate_contract` / `pm_capital_deployment_decision` / PM draft 字段，或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 生成检查和 PM 合约自检负责。
+
+测试体系按职责分层：`src/tests` 只构造样本并断言对应工具是否判对；`src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py` 只负责编排，不写审计规则。PG 专用审计规则只放在 `src/tools/agent_tools/control/pg_*.py`。

@@ -249,3 +249,9 @@ Reviewer fusion_attribution_label
 - 分析师证据不再出现“等待确认文字 + trigger_valid=true”。
 - 条件 probe 未触发不会被写成真实开仓结果。
 - 投资组合经理排序字段只出现在 scorecard、`final_action_contract.evidence_used/learning_used`、复盘和评估诊断中，没有成为顶层交易权限。
+
+## 研究机制审计边界补充（2026-07-07）
+
+PG 可以审计研究记忆是否按未来学习边界写入、是否未污染当日交易、是否未被 Trader/Accountant 直接消费；但 PG 不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit，也不判断 PM 为什么 rank 或不 rank。PM 对研究成果的消费是否形成合法交易事实，由 `pm_six_step_trace.pm_contract_self_check` 和 `pm_six_step_trace.step6_contract_generation_check` 表达。
+
+`pg_mechanism_effectiveness_audit.py` 的 hard fail 只表示机制链路断开、必要 artifact 缺失、PM 自检失败、条件监控缺少执行事实等协议问题。排序收益、学习效果、资金部署质量属于诊断或研究分析，不作为 PG 替代 PM 的交易语义判定。

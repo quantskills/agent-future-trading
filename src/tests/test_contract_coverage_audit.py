@@ -169,8 +169,8 @@ class ContractCoverageAuditTest(unittest.TestCase):
         consumer_paths = {rule.path for rule in learning_spec.consumers}
 
         self.assertIn("src/tools/common/final_action_semantics.py", consumer_paths)
-        self.assertIn("src/tools/agent_tools/control/pg_system_invariants.py", consumer_paths)
-        self.assertIn("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", consumer_paths)
+        self.assertIn("src/tools/agent_tools/decision/pm_contract_self_check.py", consumer_paths)
+        self.assertNotIn("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", consumer_paths)
         self.assertNotIn("src/tools/agent_tools/research/reviewer_phase4_review.py", consumer_paths)
 
     def test_pm_six_step_trace_has_producer_consumer_audit_and_test_coverage(self):

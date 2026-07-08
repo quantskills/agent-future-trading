@@ -21,70 +21,26 @@ from typing import Any, Dict, Iterable, List, Optional
 from database.artifact_store import load_externalized_json
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.common.final_action_semantics import (
-    ACTION_PREFERENCE_VALUES,
-    contract_consumes_hold_exit_pm_learning,
-    contract_increases_risk_position,
-    contract_is_unselected_no_new_exposure_candidate,
     contract_reduces_or_exits_position,
     contract_requires_conditional_intraday_result,
-    derive_memory_requirements,
-    has_valid_generic_no_change_explanation,
-    has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
-    lane_matches_memory_requirement,
-    lifecycle_learning_decision_contract_errors,
-    rank_lifecycle_learning_route_errors,
 )
 
 
 STRATEGY_SOURCE_TYPE = "strategy"
-PROTECTIVE_PREFERENCES = {"tail_loss_protect", "negative_hold_revalidate", "negative_revalidate"}
-POSITIVE_PREFERENCES = {
-    "positive_candidate_open",
-    "positive_candidate_hold",
-    "positive_candidate_exit",
-    "positive_candidate_execution",
-}
-REAL_REWARD_SOURCE_MARKERS = {"episode", "real"}
-LEARNING_COMPONENT_FIELDS = {
-    "positive_learning",
-    "negative_learning",
-    "execution_profile_learning",
-    "recent_tail_loss_penalty",
-}
 SCENARIO_OPEN_INCREASE = "open_increase"
 SCENARIO_CONDITIONAL_MONITOR = "conditional_monitor"
 SCENARIO_REDUCE_EXIT = "reduce_exit"
 SCENARIO_POSITION_HOLD = "position_hold"
-SCENARIO_UNSELECTED_CANDIDATE = "unselected_candidate"
 SCENARIO_FLAT_WAIT = "flat_wait"
 CHECKED_SCENARIOS = {
-    SCENARIO_OPEN_INCREASE: "open/add/scale learning must land in score/rank and then the single final_action_contract",
-    SCENARIO_CONDITIONAL_MONITOR: "conditional probe learning must land in score/rank and Trader must record triggered/not_triggered",
-    SCENARIO_REDUCE_EXIT: "hold/exit learning must land in target_lots reduction, exit action, or an explicit lifecycle explanation",
-    SCENARIO_POSITION_HOLD: "hold/exit learning must either preserve a valid hold or explain why no position change happened",
-    SCENARIO_UNSELECTED_CANDIDATE: "ranked candidate not deployed must carry capital_allocation_reason",
-    SCENARIO_FLAT_WAIT: "flat/no-action candidate with prior learning must explain why it did not affect deployment",
+    SCENARIO_OPEN_INCREASE: "PM signed an open/add/scale style final_action_contract",
+    SCENARIO_CONDITIONAL_MONITOR: "PM signed a conditional-monitor contract that may require Trader intraday result",
+    SCENARIO_REDUCE_EXIT: "PM signed a reduce/exit style final_action_contract",
+    SCENARIO_POSITION_HOLD: "PM signed a hold style final_action_contract for an existing position",
+    SCENARIO_FLAT_WAIT: "PM signed a flat wait/hold final_action_contract",
 }
 CONDITIONAL_FINAL_ACTIONS = {"conditional_probe", "conditional_monitor", "watch_trigger"}
-STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
-    "no_rank_no_new_exposure",
-    "no_rank_or_budget_no_new_exposure",
-)
-SAFE_PM_LEARNING_SUMMARY_FIELDS = {
-    "pm_lifecycle_learning_trace",
-    "pm_lifecycle_learning_impact_delta",
-    "lifecycle_learning_trace",
-    "learning_impact_delta",
-    "learning_adjustment_summary",
-    "memory_requirements",
-}
-EXPLICIT_LEARNING_UNUSED_FIELDS = {
-    "learning_exclusion_reason",
-    "learning_not_used_reason",
-    "learning_rejected_reason",
-    "learning_unused_reason",
-}
 
 
 @dataclass
@@ -353,116 +309,6 @@ def _contract_from_recommendation(recommendation: Dict[str, Any]) -> Dict[str, A
     return {}
 
 
-def _payload_or_row_value(row: Dict[str, Any], key: str, *aliases: str) -> Any:
-    payload = _dict(row.get("payload"))
-    for name in (key, *aliases):
-        value = row.get(name)
-        if value not in (None, ""):
-            return value
-    for name in (key, *aliases):
-        value = payload.get(name)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def _row_preference(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "action_preference"))
-
-
-def _row_reward_source(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "reward_source", "source_reward_type", "reward_kind"))
-
-
-def _row_evidence_scope(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "evidence_scope", "amplification_scope_quality"))
-
-
-def _row_lane(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "action_value_lane", "source_action_value_lane", "action_name"))
-
-
-def _row_consumer_scope(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "consumer_scope", "learning_consumer_scope") or "pm_learning")
-
-
-def _row_memory_side_role(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "memory_side_role"))
-
-
-def _row_has_reward(row: Dict[str, Any]) -> bool:
-    return (
-        _payload_or_row_value(row, "reward_sum") is not None
-        or _payload_or_row_value(row, "reward_mean") is not None
-        or _payload_or_row_value(row, "win_rate") is not None
-    )
-
-
-def _row_is_real(row: Dict[str, Any]) -> bool:
-    source = _row_reward_source(row)
-    return any(marker in source for marker in REAL_REWARD_SOURCE_MARKERS)
-
-
-def _row_has_pm_canonical_fields(row: Dict[str, Any]) -> bool:
-    return bool(
-        _row_consumer_scope(row) == "pm_learning"
-        and _row_preference(row)
-        and _row_reward_source(row)
-        and _row_evidence_scope(row)
-        and _row_lane(row)
-        and _row_has_reward(row)
-    )
-
-
-def _lane_matches_requirement(row: Dict[str, Any], lane: str) -> bool:
-    required = _lower(lane)
-    if not required:
-        return True
-    return lane_matches_memory_requirement(required, _row_lane(row))
-
-
-def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]]:
-    learning = _dict(contract.get("learning_used"))
-    rows = learning.get("alpha_setup_action_values")
-    if not isinstance(rows, list):
-        return []
-    return [_dict(row) for row in rows if isinstance(row, dict)]
-
-
-def _has_safe_pm_learning_summary_or_explanation(contract: Dict[str, Any]) -> bool:
-    learning = _dict(contract.get("learning_used"))
-    evidence = _dict(contract.get("evidence_used"))
-    deployment = _dict(contract.get("capital_deployment"))
-    for field in SAFE_PM_LEARNING_SUMMARY_FIELDS:
-        value = learning.get(field)
-        if value not in (None, "", {}, []):
-            return True
-    for container in (learning, evidence, deployment):
-        for field in EXPLICIT_LEARNING_UNUSED_FIELDS:
-            value = container.get(field)
-            if value not in (None, "", {}, []):
-                return True
-    reason_codes = {_lower(item) for item in contract.get("reason_codes") or [] if _lower(item)}
-    if reason_codes & {
-        "learning_not_used",
-        "learning_rejected",
-        "learning_unused",
-        "negative_learning_block",
-        "no_matching_pm_learning",
-    }:
-        return True
-    reason = _capital_allocation_reason(contract)
-    if not contract_increases_risk_position(contract) and _is_step5_undeployed_no_new_exposure_reason(reason):
-        return True
-    return False
-
-
-def _learning_components(contract: Dict[str, Any]) -> Dict[str, float]:
-    evidence = _dict(contract.get("evidence_used"))
-    components = _dict(evidence.get("opportunity_score_components"))
-    return {field: _float(components.get(field)) for field in LEARNING_COMPONENT_FIELDS}
-
-
 def _rank_value(contract: Dict[str, Any]) -> Optional[int]:
     evidence = _dict(contract.get("evidence_used"))
     deployment = _dict(contract.get("capital_deployment"))
@@ -490,126 +336,16 @@ def _opportunity_score(contract: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-def _recommendation_side(recommendation: Dict[str, Any], contract: Dict[str, Any]) -> str:
-    target = _int(contract.get("target_lots"))
-    current = _int(contract.get("current_lots"))
-    if target:
-        return "long" if target > 0 else "short"
-    if current:
-        return "long" if current > 0 else "short"
-    side = _lower(_dict(contract.get("action_evidence_contract")).get("side") or contract.get("side"))
-    return side if side in {"long", "short"} else ""
-
-
-def _matches_action_value_scope(row: Dict[str, Any], *, ticker: str, side: str, decision_date: str) -> bool:
-    if not ticker or side not in {"long", "short"} or not decision_date:
-        return False
-    row_ticker = str(row.get("ticker") or "").upper()
-    row_side = _lower(row.get("side"))
-    if row_ticker not in {ticker.upper(), "*"}:
-        return False
-    if row_side not in {side, "*", "both", "any"}:
-        return False
-    sample_day = _date10(row.get("last_sample_date"))
-    return bool(sample_day and sample_day < decision_date)
-
-
-def _prior_real_action_values(
-    action_values: Iterable[Dict[str, Any]],
-    *,
-    ticker: str,
-    side: str,
-    decision_date: str,
-    lane: str = "",
-    memory_side_role: str = "",
-) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for row in action_values:
-        if not _matches_action_value_scope(row, ticker=ticker, side=side, decision_date=decision_date):
-            continue
-        if not _lane_matches_requirement(row, lane):
-            continue
-        row_role = _row_memory_side_role(row)
-        if row_role and memory_side_role and row_role != _lower(memory_side_role):
-            continue
-        preference = _row_preference(row)
-        if preference not in ACTION_PREFERENCE_VALUES:
-            continue
-        if _row_consumer_scope(row) != "pm_learning":
-            continue
-        if not _row_is_real(row):
-            continue
-        rows.append(row)
-    return rows
-
-
-def _dedupe_action_rows(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
-    fallback = 0
-    for row in rows:
-        key = (
-            str(row.get("id") or _payload_or_row_value(row, "id") or f"row-{fallback}"),
-            str(row.get("scope_key") or _payload_or_row_value(row, "scope_key") or ""),
-            str(row.get("side") or _payload_or_row_value(row, "side") or ""),
-            _row_lane(row),
-            _row_preference(row),
-        )
-        fallback += 1
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped
-
-
-def _contract_rows_include_prior(contract_rows: Iterable[Dict[str, Any]], prior_rows: Iterable[Dict[str, Any]]) -> bool:
-    contract_rows_list = list(contract_rows)
-    contract_keys = {
-        (
-            str(row.get("scope_key") or _payload_or_row_value(row, "scope_key") or ""),
-            str(row.get("action_name") or _payload_or_row_value(row, "action_name") or ""),
-            _row_preference(row),
-        )
-        for row in contract_rows_list
-    }
-    canonical_preferences = {
-        _row_preference(row)
-        for row in contract_rows_list
-        if _row_preference(row) in ACTION_PREFERENCE_VALUES and _row_has_pm_canonical_fields(row)
-    }
-    for row in prior_rows:
-        preference = _row_preference(row)
-        key = (
-            str(row.get("scope_key") or _payload_or_row_value(row, "scope_key") or ""),
-            str(row.get("action_name") or _payload_or_row_value(row, "action_name") or ""),
-            preference,
-        )
-        if key in contract_keys:
-            return True
-        if preference and preference in canonical_preferences:
-            return True
-    return False
-
-
-def _learning_components_nonzero(components: Dict[str, float]) -> bool:
-    return any(abs(value) > 1e-12 for value in components.values())
-
-
-def _contract_lots_changed(contract: Dict[str, Any]) -> bool:
-    return _int(contract.get("target_lots")) != _int(contract.get("current_lots")) or _lower(contract.get("final_action")) not in {"", "hold", "wait"}
-
-
 def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
-    return contract_increases_risk_position(contract)
+    current = _int(contract.get("current_lots"))
+    target = _int(contract.get("target_lots"))
+    if current == 0:
+        return target != 0
+    return abs(target) > abs(current) or (target and current and (target > 0) != (current > 0))
 
 
 def _contract_reduces_or_exits_position(contract: Dict[str, Any]) -> bool:
     return contract_reduces_or_exits_position(contract)
-
-
-def _contract_has_no_change_explanation(contract: Dict[str, Any]) -> bool:
-    return has_valid_generic_no_change_explanation(contract)
 
 
 def _scenario_for_contract(contract: Dict[str, Any]) -> str:
@@ -619,37 +355,9 @@ def _scenario_for_contract(contract: Dict[str, Any]) -> str:
         return SCENARIO_REDUCE_EXIT
     if _contract_increases_risk(contract):
         return SCENARIO_OPEN_INCREASE
-    if _capital_deployment_selected(contract) is False:
-        return SCENARIO_UNSELECTED_CANDIDATE
     if _int(contract.get("current_lots")) != 0:
         return SCENARIO_POSITION_HOLD
     return SCENARIO_FLAT_WAIT
-
-
-def _hold_exit_has_explanation(contract: Dict[str, Any]) -> bool:
-    return has_valid_hold_exit_no_change_explanation(contract)
-
-
-def _has_hold_exit_learning(contract: Dict[str, Any]) -> bool:
-    return contract_consumes_hold_exit_pm_learning(contract)
-
-
-def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bool:
-    for row in rows:
-        preference = _row_preference(row)
-        lane = _row_lane(row)
-        if preference in {"negative_hold_revalidate", "tail_loss_protect", "positive_candidate_exit"}:
-            return True
-        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
-            return True
-    return False
-
-
-def _hold_exit_landed_in_position(contract: Dict[str, Any]) -> bool:
-    current = _int(contract.get("current_lots"))
-    if current == 0:
-        return True
-    return contract_reduces_or_exits_position(contract)
 
 
 def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:
@@ -658,10 +366,6 @@ def _is_conditional_monitor(contract: Dict[str, Any]) -> bool:
 
 def _requires_conditional_intraday_result(contract: Dict[str, Any]) -> bool:
     return contract_requires_conditional_intraday_result(contract)
-
-
-def _is_unselected_no_new_exposure_candidate(contract: Dict[str, Any]) -> bool:
-    return contract_is_unselected_no_new_exposure_candidate(contract)
 
 
 def _has_intraday_decision(intraday_decisions: Iterable[Dict[str, Any]], recommendation_id: str) -> bool:
@@ -749,14 +453,6 @@ def _capital_allocation_reason(contract: Dict[str, Any]) -> str:
     )
 
 
-def _is_step5_undeployed_no_new_exposure_reason(reason: str) -> bool:
-    reason = _lower(reason)
-    return any(
-        reason == prefix or reason.startswith(f"{prefix}:")
-        for prefix in STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES
-    )
-
-
 def _audit_recommendation_mechanisms(
     *,
     recommendations: Dict[str, Dict[str, Any]],
@@ -766,152 +462,46 @@ def _audit_recommendation_mechanisms(
     diagnostics: List[str],
     scenario_counts: Dict[str, int],
 ) -> None:
-    rank_pnl_rows: List[tuple[int, float, str]] = []
     for recommendation_id, recommendation in recommendations.items():
         if _lower(recommendation.get("source_type") or STRATEGY_SOURCE_TYPE) != STRATEGY_SOURCE_TYPE:
             continue
+        snapshot = _dict(recommendation.get("signal_snapshot"))
         contract = _contract_from_recommendation(recommendation)
         if not contract:
+            ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "")
+            day = _date10(recommendation.get("trading_date") or recommendation.get("effective_trade_date"))
+            hard_failures.append(f"mechanism_pm_final_action_contract_missing:{day}:{ticker}:{recommendation_id}")
             continue
         scenario = _scenario_for_contract(contract)
         scenario_counts[scenario] = scenario_counts.get(scenario, 0) + 1
         ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker") or "")
         day = _date10(recommendation.get("trading_date") or recommendation.get("effective_trade_date"))
         label = f"{day}:{ticker}:{recommendation_id}"
-        side = _recommendation_side(recommendation, contract)
-        memory_requirements = derive_memory_requirements(contract)
-        required_memory = [
-            item for item in (memory_requirements.get("required_pm_memory") or [])
-            if isinstance(item, dict) and item.get("must_land_in_pm_contract")
-        ]
-        if not required_memory and side in {"long", "short"}:
-            required_memory = [{
-                "side": side,
-                "lane": "",
-                "memory_side_role": "",
-                "must_land_in_pm_contract": True,
-            }]
-        prior_rows_by_requirement: List[Dict[str, Any]] = []
-        for requirement in required_memory:
-            req_side = _lower(requirement.get("side")) or side
-            if req_side not in {"long", "short"}:
-                continue
-            req_lane = _lower(requirement.get("lane") or requirement.get("learning_lane"))
-            req_role = _lower(requirement.get("memory_side_role"))
-            requirement_prior_rows = _prior_real_action_values(
-                action_values,
-                ticker=ticker,
-                side=req_side,
-                decision_date=day,
-                lane=req_lane,
-                memory_side_role=req_role,
-            )
-            prior_rows_by_requirement.extend(requirement_prior_rows)
-        prior_rows = _dedupe_action_rows(prior_rows_by_requirement)
-        contract_rows = _contract_action_value_rows(contract)
-        components = _learning_components(contract)
-        components_nonzero = _learning_components_nonzero(components)
-        has_learning_summary_or_explanation = _has_safe_pm_learning_summary_or_explanation(contract)
+        signal_contract = _dict(snapshot.get("signal_collection_contract"))
+        if not signal_contract:
+            hard_failures.append(f"mechanism_signal_collection_contract_missing:{label}")
+        else:
+            producer = _lower(signal_contract.get("producer"))
+            boundary = _lower(signal_contract.get("collector_decision_boundary"))
+            if producer != "signal_collector":
+                hard_failures.append(f"mechanism_signal_collection_contract_invalid_producer:{label}:{producer or 'missing'}")
+            if boundary != "no_trade_authority":
+                hard_failures.append(f"mechanism_signal_collection_contract_invalid_boundary:{label}:{boundary or 'missing'}")
 
-        if prior_rows and not contract_rows and not has_learning_summary_or_explanation:
-            hard_failures.append(f"mechanism_action_value_not_read_by_pm:{label}:side={side or 'missing'}")
-        elif prior_rows and not _contract_rows_include_prior(contract_rows, prior_rows) and not has_learning_summary_or_explanation:
-            hard_failures.append(f"mechanism_matching_action_value_not_landed_in_pm:{label}:side={side or 'missing'}")
-
-        for row in contract_rows:
-            if _row_consumer_scope(row) != "pm_learning":
-                hard_failures.append(
-                    f"mechanism_pm_consumed_non_pm_learning:{label}:{_row_consumer_scope(row) or 'missing'}"
-                )
-            preference = _row_preference(row)
-            if preference in ACTION_PREFERENCE_VALUES and not _row_has_pm_canonical_fields(row):
-                hard_failures.append(
-                    f"mechanism_pm_action_value_missing_canonical_fields:{label}:{preference or 'missing'}"
-                )
-
-        prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(prior_rows)
-        hold_exit_failure = f"mechanism_hold_exit_learning_not_landed:{label}"
-        learning_should_land_in_score = scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}
-        if prior_rows and learning_should_land_in_score and not components_nonzero:
-            hard_failures.append(f"mechanism_pm_learning_not_in_score:{label}:side={side or 'missing'}")
-        if (
-            prior_rows
-            and not learning_should_land_in_score
-            and scenario in {SCENARIO_FLAT_WAIT, SCENARIO_UNSELECTED_CANDIDATE}
-            and not components_nonzero
-            and not _capital_allocation_reason(contract)
-            and not _contract_has_no_change_explanation(contract)
-        ):
-            hard_failures.append(f"mechanism_pm_learning_not_explained_for_no_deployment:{label}:side={side or 'missing'}")
-        if (
-            prior_rows
-            and prior_hold_exit_learning
-            and not components_nonzero
-            and not _contract_reduces_or_exits_position(contract)
-            and not _hold_exit_has_explanation(contract)
-            and hold_exit_failure not in hard_failures
-        ):
-            hard_failures.append(hold_exit_failure)
-
-        rank = _rank_value(contract)
-        rank_route_errors = rank_lifecycle_learning_route_errors(contract)
-        if rank_route_errors:
-            hard_failures.append(
-                f"mechanism_rank_lifecycle_learning_route_invalid:{label}:errors={','.join(rank_route_errors)}"
-            )
-        lifecycle_route_errors = lifecycle_learning_decision_contract_errors(contract)
-        if lifecycle_route_errors:
-            hard_failures.append(
-                f"mechanism_lifecycle_learning_contract_trace_invalid:{label}:errors={','.join(lifecycle_route_errors)}"
-            )
-        if (
-            components_nonzero
-            and rank is None
-            and scenario in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}
-            and not _is_unselected_no_new_exposure_candidate(contract)
-        ):
-            hard_failures.append(f"mechanism_learning_score_missing_rank:{label}")
-
-        deployment = _dict(contract.get("capital_deployment"))
-        reason = _capital_allocation_reason(contract)
-        rank_deployment_scenario = scenario in {
-            SCENARIO_OPEN_INCREASE,
-            SCENARIO_CONDITIONAL_MONITOR,
-            SCENARIO_UNSELECTED_CANDIDATE,
-        }
-        if rank is not None and rank_deployment_scenario and not deployment:
-            hard_failures.append(f"mechanism_rank_missing_capital_deployment:{label}:rank={rank}")
-        if (
-            rank is not None
-            and rank_deployment_scenario
-            and not _contract_lots_changed(contract)
-            and not reason
-            and not _contract_has_no_change_explanation(contract)
-        ):
-            hard_failures.append(f"mechanism_rank_without_contract_effect_or_reason:{label}:rank={rank}")
-
-        selected = _capital_deployment_selected(contract)
-        if selected is False and not reason:
-            hard_failures.append(f"mechanism_unselected_candidate_missing_capital_reason:{label}:rank={rank or 'missing'}")
-        if _is_unselected_no_new_exposure_candidate(contract):
-            if not _is_step5_undeployed_no_new_exposure_reason(reason):
-                hard_failures.append(
-                    f"mechanism_unselected_no_new_exposure_reason_invalid:{label}:reason={reason or 'missing'}"
-                )
-            if contract_increases_risk_position(contract):
-                hard_failures.append(f"mechanism_unselected_no_new_exposure_still_increases_risk:{label}")
-            if bool(contract.get("requires_intraday_confirmation")):
-                hard_failures.append(f"mechanism_unselected_no_new_exposure_requires_intraday_confirmation:{label}")
-            if bool(contract.get("conditional_trigger_authority")):
-                hard_failures.append(f"mechanism_unselected_no_new_exposure_conditional_trigger_authority:{label}")
-
-        if (
-            _has_hold_exit_learning(contract)
-            and not _hold_exit_landed_in_position(contract)
-            and not _hold_exit_has_explanation(contract)
-            and hold_exit_failure not in hard_failures
-        ):
-            hard_failures.append(hold_exit_failure)
+        pm_trace = _dict(snapshot.get("pm_six_step_trace"))
+        if not pm_trace:
+            hard_failures.append(f"mechanism_pm_six_step_trace_missing:{label}")
+        else:
+            pm_check = _dict(pm_trace.get("pm_contract_self_check"))
+            generation_check = _dict(pm_trace.get("step6_contract_generation_check"))
+            if not pm_check:
+                hard_failures.append(f"mechanism_pm_contract_self_check_missing:{label}")
+            elif pm_check.get("ok") is not True:
+                hard_failures.append(f"mechanism_pm_contract_self_check_failed:{label}")
+            if not generation_check:
+                hard_failures.append(f"mechanism_pm_step6_generation_check_missing:{label}")
+            elif generation_check.get("ok") is not True:
+                hard_failures.append(f"mechanism_pm_step6_generation_check_failed:{label}")
 
         if _requires_conditional_intraday_result(contract):
             auditor_verdict = _auditor_verdict_from_recommendation(recommendation)
@@ -922,6 +512,9 @@ def _audit_recommendation_mechanisms(
                 hard_failures.append(f"mechanism_conditional_probe_missing_intraday_result:{label}")
 
         score = _opportunity_score(contract)
+        rank = _rank_value(contract)
+        selected = _capital_deployment_selected(contract)
+        reason = _capital_allocation_reason(contract)
         if rank is not None and score is not None and selected is False and rank <= 3:
             diagnostics.append(f"diagnostic_top_rank_not_deployed:{label}:rank={rank}:score={score}:reason={reason or 'missing'}")
 
@@ -958,7 +551,7 @@ def _audit_rank_pnl_diagnostics(
         if rank is None:
             continue
         scenario = _scenario_for_contract(contract)
-        if scenario not in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR, SCENARIO_UNSELECTED_CANDIDATE}:
+        if scenario not in {SCENARIO_OPEN_INCREASE, SCENARIO_CONDITIONAL_MONITOR}:
             continue
         layer = _capital_layer(contract)
         if layer not in {"exploration_probe", "real_budget_entry", "alpha_scale_entry"}:
@@ -1009,13 +602,11 @@ def audit_mechanism_effectiveness(
             "diagnostic": "mechanism_connected_but_effect_or_quality_needs_strategy_analysis",
         },
         "checked_chain": [
-            "action_value_to_pm",
-            "pm_learning_to_score",
-            "score_to_rank",
-            "rank_to_final_action_contract",
-            "hold_exit_learning_to_position",
-            "conditional_probe_to_trader_result",
-            "capital_deployment_explainability",
+            "signal_collector_contract_to_pm",
+            "pm_step6_final_action_contract",
+            "pm_step6_generation_check",
+            "pm_contract_self_check",
+            "conditional_monitor_to_trader_result",
         ],
         "checked_scenarios": dict(CHECKED_SCENARIOS),
     }

@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -18,76 +17,7 @@ def _dumps(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
-    def _rank_trace(self) -> dict:
-        return {
-            "rank_input_components": {
-                "capital_priority_tier": 1,
-                "capital_priority_score": 0.42,
-                "watch_priority_score": 0.61,
-                "opportunity_score": 0.48,
-            },
-            "lifecycle_learning_trace": {
-                "rank_lifecycle": "open_add_new_risk",
-                "allowed_learning_lanes": ["open", "add", "scale", "increase"],
-                "blocked_learning_lanes": ["hold", "reduce", "exit", "execution", "conditional_monitor"],
-                "used_lanes": ["open"],
-                "ignored_lanes": [],
-                "execution_profile_signal_direct_to_rank": False,
-            },
-            "learning_impact_delta": {
-                "positive_learning": 0.12,
-                "negative_learning": 0.0,
-                "entry_quality_loss_penalty": 0.0,
-                "trigger_quality_positive_bonus": 0.0,
-                "trigger_quality_loss_penalty": 0.0,
-                "net_rank_learning_delta": 0.12,
-                "execution_profile_learning_direct_to_rank": False,
-            },
-        }
-
-    def _lifecycle_trace(self, port: str, lanes: list[str]) -> dict:
-        return {
-            "lifecycle_learning_trace": {
-                "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
-                "contract_lifecycle_port": port,
-                "rank_lifecycle": port,
-                "used_lanes": lanes,
-                "accepted_learning_lanes": lanes,
-                "blocked_learning_lanes": ["open", "add", "scale", "increase"],
-                "execution_profile_signal_direct_to_rank": False,
-            },
-            "learning_impact_delta": {
-                "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
-                "execution_profile_learning_direct_to_rank": False,
-                "lots_delta": 0,
-            },
-        }
-
-    def test_known_backtest_dates_do_not_crash_after_semantics_dependency_migration(self):
-        db_path = SRC_ROOT / "assets" / "agentquant.db"
-        if not db_path.exists():
-            self.skipTest("local backtest database is not present")
-        for trading_date in ("2025-03-12", "2025-03-20", "2025-03-24"):
-            with self.subTest(trading_date=trading_date):
-                report = audit_mechanism_effectiveness(
-                    db_path=db_path,
-                    exp_name="agentquant-futures-trading-2025",
-                    start_date=trading_date,
-                    end_date=trading_date,
-                )
-                report_dict = report.to_dict()
-                self.assertIn("ok", report_dict)
-                metadata = report_dict.get("metadata", {})
-                warnings = report_dict.get("warnings", [])
-                if any(str(item).startswith("config_not_found_empty_db:") for item in warnings):
-                    self.assertIn(
-                        "empty_db_no_mechanism_records_to_audit",
-                        metadata.get("record_boundary", ""),
-                    )
-                    continue
-                self.assertTrue(metadata.get("config_id"))
-
+class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
     def _make_db(self) -> Path:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -140,30 +70,16 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     scope_key TEXT NOT NULL,
                     ticker TEXT NOT NULL DEFAULT '*',
                     side TEXT NOT NULL DEFAULT '*',
-                    horizon_class TEXT NOT NULL DEFAULT '*',
-                    market_regime TEXT NOT NULL DEFAULT '*',
-                    setup_type TEXT NOT NULL DEFAULT '*',
-                    data_combo TEXT NOT NULL DEFAULT '*',
                     action_name TEXT NOT NULL,
                     sample_count INTEGER DEFAULT 0,
                     reward_sum REAL DEFAULT 0,
-                    reward_mean REAL DEFAULT 0,
-                    win_rate REAL DEFAULT 0,
-                    confidence_score REAL DEFAULT 0,
                     action_preference TEXT DEFAULT '',
                     reward_source TEXT DEFAULT '',
-                    evidence_scope TEXT DEFAULT '',
-                    action_value_lane TEXT DEFAULT '',
                     consumer_scope TEXT DEFAULT 'pm_learning',
-                    learning_lane TEXT DEFAULT '',
-                    retrieval_key TEXT DEFAULT '',
-                    fallback_retrieval_key TEXT DEFAULT '',
-                    execution_retrieval_key TEXT DEFAULT '',
-                    max_position_impact REAL DEFAULT 0,
+                    action_value_lane TEXT DEFAULT '',
                     last_sample_date TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    valid_until TEXT,
                     active INTEGER DEFAULT 1,
                     payload_json TEXT
                 );
@@ -193,74 +109,69 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                 """
             )
             conn.execute("INSERT INTO config(id, exp_name) VALUES ('cfg', 'test-exp')")
-            conn.execute("INSERT INTO portfolio(id, config_id) VALUES ('p1', 'cfg')")
+            conn.execute("INSERT INTO portfolio(id, config_id) VALUES ('pf', 'cfg')")
             conn.commit()
         finally:
             conn.close()
         return db_path
 
-    def _insert_action_value(
+    def _contract(self, **overrides) -> dict:
+        contract = {
+            "contract_type": "strategy",
+            "ticker": "J",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "final_action": "wait",
+            "reason_codes": ["non_new_risk_no_capital_rank"],
+            "evidence_used": {},
+            "capital_deployment": {
+                "selected_for_capital_deployment": False,
+                "new_risk_rank_required": False,
+                "deployment_required": False,
+                "capital_allocation_reason": "non_new_risk_no_capital_rank",
+                "original_target_lots": 0,
+                "deployed_target_lots": 0,
+                "deployed_lots_delta": 0,
+            },
+            "learning_used": {},
+        }
+        contract.update(overrides)
+        return contract
+
+    def _snapshot(
         self,
-        db_path: Path,
+        contract: dict,
         *,
-        ticker: str = "RB",
-        side: str = "short",
-        preference: str = "positive_candidate_open",
-        action_name: str = "open",
-        action_value_lane: str = "open",
-        memory_side_role: str = "",
-        reward_sum: float = 1200.0,
-        last_sample_date: str = "2025-03-03",
-    ) -> None:
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute(
-                """
-                INSERT INTO alpha_setup_action_value(
-                    id, config_id, scope_key, ticker, side, horizon_class,
-                    market_regime, setup_type, data_combo, action_name, sample_count,
-                    reward_sum, reward_mean, win_rate, confidence_score,
-                    action_preference, reward_source, evidence_scope, action_value_lane,
-                    max_position_impact, last_sample_date, created_at, updated_at,
-                    valid_until, active, payload_json
-                )
-                VALUES (
-                    'av1', 'cfg', 'RB|short|trend', ?, ?, 'short_term',
-                    'trend', 'trend_breakout', '*', ?, 3,
-                    ?, ?, 0.67, 0.8,
-                    ?, 'complete_episode', 'exact_real_state', ?,
-                    0.02, ?, '2025-03-03T15:00:00', '2025-03-03T15:00:00',
-                    NULL, 1, '{}'
-                )
-                """,
-                (
-                    ticker,
-                    side,
-                    action_name,
-                    reward_sum,
-                    reward_sum / 3.0,
-                    preference,
-                    action_value_lane,
-                    last_sample_date,
-                ),
-            )
-            if memory_side_role:
-                conn.execute(
-                    "UPDATE alpha_setup_action_value SET payload_json=? WHERE id='av1'",
-                    (_dumps({"memory_side_role": memory_side_role}),),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        signal_contract: dict | None = None,
+        pm_self_check_ok: bool = True,
+        generation_check_ok: bool = True,
+    ) -> dict:
+        return {
+            "final_action_contract": contract,
+            "signal_collection_contract": signal_contract
+            if signal_contract is not None
+            else {
+                "producer": "signal_collector",
+                "collector_decision_boundary": "no_trade_authority",
+            },
+            "pm_six_step_trace": {
+                "pm_contract_self_check": {"ok": pm_self_check_ok, "errors": [] if pm_self_check_ok else ["fixture_failure"]},
+                "step6_contract_generation_check": {
+                    "ok": generation_check_ok,
+                    "errors": [] if generation_check_ok else ["fixture_generation_failure"],
+                },
+            },
+        }
 
     def _insert_recommendation(
         self,
         db_path: Path,
         *,
-        rec_id: str,
-        ticker: str,
-        contract: dict,
-        trading_date: str = "2025-03-04",
+        rec_id: str = "rec-1",
+        ticker: str = "J",
+        snapshot: dict,
+        audit_payload: dict | None = None,
     ) -> None:
         conn = sqlite3.connect(db_path)
         try:
@@ -271,975 +182,122 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
                     effective_trade_date, source_type, underlying_code,
                     action, lots, signal_snapshot, audit_payload, status, created_at
                 )
-                VALUES (?, 'cfg', 'p1', ?, ?,
-                    'strategy', ?, 'hold', 0, ?, '{}', 'pending', ?)
+                VALUES (?, 'cfg', 'pf', '2025-03-25', '2025-03-25',
+                    'strategy', ?, 'hold', 0, ?, ?, 'pending', '2025-03-25T09:00:00')
                 """,
-                (rec_id, trading_date, trading_date, ticker, _dumps({"final_action_contract": contract}), f"{trading_date}T09:00:00"),
+                (rec_id, ticker, _dumps(snapshot), _dumps(audit_payload or {})),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def test_hard_fails_when_real_action_value_never_reaches_pm_score(self):
+    def test_accepts_signed_pm_contract_without_rejudging_pm_reason(self):
         db_path = self._make_db()
-        self._insert_action_value(db_path)
-        self._insert_recommendation(
-            db_path,
-            rec_id="r1",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "evidence_used": {
-                    "opportunity_rank": 1,
-                    "opportunity_score_components": {
-                        "positive_learning": 0,
-                        "negative_learning": 0,
-                        "execution_profile_learning": 0,
-                        "recent_tail_loss_penalty": 0,
-                    },
-                },
-                "capital_deployment": {
-                    "opportunity_rank": 1,
-                    "capital_layer": "exploration_probe",
-                    "rank_capital_role": "best_exploration_probe_candidate",
-                    "capital_ratio_source": "probe_margin_ratio_0.008",
-                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                    **self._rank_trace(),
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": -1,
-                    "original_target_lots": -1,
-                },
-                "learning_used": {},
-            },
+        self._insert_recommendation(db_path, snapshot=self._snapshot(self._contract()))
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(report.counts.get("scenarios", {}).get("flat_wait"), 1)
+
+    def test_rejects_missing_signal_collection_contract(self):
+        db_path = self._make_db()
+        snapshot = self._snapshot(self._contract(), signal_contract={})
+        self._insert_recommendation(db_path, snapshot=snapshot)
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("mechanism_signal_collection_contract_missing") for error in report.hard_failures),
+            report.to_dict(),
         )
+
+    def test_rejects_invalid_signal_collection_boundary(self):
+        db_path = self._make_db()
+        snapshot = self._snapshot(
+            self._contract(),
+            signal_contract={"producer": "portfolio_manager", "collector_decision_boundary": "trade_authority"},
+        )
+        self._insert_recommendation(db_path, snapshot=snapshot)
 
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertFalse(report.ok)
         joined = "\n".join(report.hard_failures)
-        self.assertIn("mechanism_action_value_not_read_by_pm", joined)
-        self.assertIn("mechanism_pm_learning_not_in_score", joined)
+        self.assertIn("mechanism_signal_collection_contract_invalid_producer", joined)
+        self.assertIn("mechanism_signal_collection_contract_invalid_boundary", joined)
 
-    def test_hold_exit_learning_can_land_in_exit_contract_without_open_score_components(self):
+    def test_rejects_failed_pm_trace_checks(self):
         db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="M",
-            side="long",
-            preference="tail_loss_protect",
-            action_name="exit",
-            action_value_lane="exit",
-            reward_sum=-3721.0,
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="m-exit",
-            ticker="M",
-            contract={
-                "ticker": "M",
-                "current_lots": 4,
-                "target_lots": 0,
-                "lots_delta": -4,
-                "final_action": "exit",
-                "reason_codes": [
-                    "flat_target",
-                    "pm_full_market_capital_deployment",
-                    "position_lifecycle_loss_revalidation_failed",
-                ],
-                "action_candidates": [
-                    {
-                        "action": "exit",
-                        "classification": "loss_revalidation_failed",
-                        "decision": "exit_failed_loss_revalidation",
-                        "source": "position_lifecycle",
-                        "status": "applied",
-                    }
-                ],
-                "evidence_used": {
-                    "opportunity_score_components": {},
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                    **self._lifecycle_trace("reduce_exit", ["exit"]),
-                },
-                "capital_deployment": {
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": 0,
-                    "original_target_lots": 0,
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "M|long|trend",
-                            "ticker": "M",
-                            "side": "long",
-                            "action_name": "exit",
-                            "action_preference": "tail_loss_protect",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "exit",
-                            "learning_lane": "exit",
-                            "reward_sum": -3721.0,
-                            "reward_mean": -3721.0,
-                            "sample_count": 1,
-                            "win_rate": 0.0,
-                            "last_sample_date": "2025-03-03",
-                        }
-                    ]
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        self.assertIn("reduce_exit", report.metadata.get("checked_scenarios", {}))
-        self.assertEqual(report.counts.get("scenarios", {}).get("reduce_exit"), 1)
-
-    def test_exit_current_position_side_learning_must_reach_pm_contract(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="RB",
-            side="long",
-            preference="tail_loss_protect",
-            action_name="exit",
-            action_value_lane="exit",
-            reward_sum=-1993.34,
-            last_sample_date="2025-03-03",
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="rb-exit-missing-learning",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 13,
-                "target_lots": 0,
-                "lots_delta": -13,
-                "final_action": "exit",
-                "reason_codes": ["new_position_loss_revalidation_failed"],
-                "evidence_used": {
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                    "opportunity_score_components": {},
-                    **self._lifecycle_trace("reduce_exit", ["exit"]),
-                },
-                "learning_used": {"alpha_setup_action_values": []},
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        self.assertIn("mechanism_action_value_not_read_by_pm", "\n".join(report.hard_failures))
-
-    def test_pm_learning_safe_summary_satisfies_landing_without_raw_row_copy(self):
-        db_path = self._make_db()
-        self._insert_action_value(db_path)
-        rank_trace = self._rank_trace()
-        self._insert_recommendation(
-            db_path,
-            rec_id="rb-open-learning-summary",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "evidence_used": {
-                    "opportunity_rank": 1,
-                    "capital_allocation_reason": "selected_by_full_market_rank",
-                    **rank_trace,
-                    "opportunity_score_components": {
-                        "positive_learning": 0.12,
-                        "negative_learning": 0.0,
-                        "execution_profile_learning": 0.0,
-                        "recent_tail_loss_penalty": 0.0,
-                    },
-                },
-                "capital_deployment": {
-                    "opportunity_rank": 1,
-                    **rank_trace,
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": -1,
-                    "original_target_lots": -1,
-                    "capital_allocation_reason": "selected_by_full_market_rank",
-                },
-                "learning_used": {
-                    "pm_lifecycle_learning_trace": {
-                        "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
-                        "contract_lifecycle_port": "open_add_new_risk",
-                        "used_lanes": ["open"],
-                    },
-                    "pm_lifecycle_learning_impact_delta": {
-                        "trace_version": "agentquant.pm_lifecycle_learning_impact.v1",
-                        "positive_learning": 0.12,
-                    },
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        failures = "\n".join(report.hard_failures)
-        self.assertNotIn("mechanism_action_value_not_read_by_pm", failures)
-        self.assertNotIn("mechanism_matching_action_value_not_landed_in_pm", failures)
-
-    def test_exit_current_position_side_learning_lands_with_memory_side_role(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="RB",
-            side="long",
-            preference="tail_loss_protect",
-            action_name="exit",
-            action_value_lane="exit",
-            reward_sum=-1993.34,
-            last_sample_date="2025-03-03",
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="rb-exit-with-learning",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 13,
-                "target_lots": 0,
-                "lots_delta": -13,
-                "final_action": "exit",
-                "reason_codes": ["new_position_loss_revalidation_failed"],
-                "evidence_used": {
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                    "opportunity_score_components": {},
-                    **self._lifecycle_trace("reduce_exit", ["exit"]),
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "RB|long|trend",
-                            "ticker": "RB",
-                            "side": "long",
-                            "action_name": "exit",
-                            "action_preference": "tail_loss_protect",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "exit",
-                            "learning_lane": "exit",
-                            "memory_side_role": "current_position_side",
-                            "reward_sum": -1993.34,
-                            "reward_mean": -1993.34,
-                            "sample_count": 1,
-                            "win_rate": 0.0,
-                            "last_sample_date": "2025-03-03",
-                        }
-                    ]
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-
-    def test_prior_open_learning_does_not_trigger_exit_action_value_read_failure(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="RB",
-            side="short",
-            preference="positive_candidate_open",
-            action_name="open",
-            action_value_lane="open",
-            memory_side_role="current_position_side",
-            reward_sum=1200.0,
-            last_sample_date="2025-03-03",
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="rb-exit-with-only-open-prior",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": -2,
-                "target_lots": 0,
-                "lots_delta": 2,
-                "final_action": "exit",
-                "reason_codes": ["not_new_or_increasing_exposure"],
-                "evidence_used": {
-                    "capital_allocation_reason": "not_new_or_increasing_risk_preserve_pm_contract",
-                    "opportunity_score_components": {},
-                },
-                "learning_used": {"alpha_setup_action_values": []},
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        joined = "\n".join(report.hard_failures)
-        self.assertNotIn("mechanism_action_value_not_read_by_pm", joined)
-        self.assertNotIn("mechanism_matching_action_value_not_landed_in_pm", joined)
-
-    def test_hold_exit_learning_fails_when_position_does_not_change_without_explanation(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="M",
-            side="long",
-            preference="tail_loss_protect",
-            action_name="exit",
-            action_value_lane="exit",
-            reward_sum=-3721.0,
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="m-hold-bad",
-            ticker="M",
-            contract={
-                "ticker": "M",
-                "current_lots": 4,
-                "target_lots": 4,
-                "lots_delta": 0,
-                "final_action": "hold",
-                "reason_codes": ["pm_full_market_capital_deployment"],
-                "evidence_used": {
-                    "opportunity_rank": 8,
-                    "opportunity_score_components": {},
-                },
-                "capital_deployment": {
-                    "opportunity_rank": 8,
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": 4,
-                    "original_target_lots": 4,
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "M|long|trend",
-                            "ticker": "M",
-                            "side": "long",
-                            "action_name": "exit",
-                            "action_preference": "tail_loss_protect",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "exit",
-                            "learning_lane": "exit",
-                            "reward_sum": -3721.0,
-                            "reward_mean": -3721.0,
-                            "sample_count": 1,
-                            "win_rate": 0.0,
-                            "last_sample_date": "2025-03-03",
-                        }
-                    ]
-                },
-            },
-        )
+        snapshot = self._snapshot(self._contract(), pm_self_check_ok=False, generation_check_ok=False)
+        self._insert_recommendation(db_path, snapshot=snapshot)
 
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertFalse(report.ok)
         joined = "\n".join(report.hard_failures)
-        self.assertIn("mechanism_hold_exit_learning_not_landed", joined)
-        self.assertEqual(
-            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
-            1,
-            report.to_dict(),
-        )
-        self.assertEqual(report.counts.get("scenarios", {}).get("position_hold"), 1)
+        self.assertIn("mechanism_pm_contract_self_check_failed", joined)
+        self.assertIn("mechanism_pm_step6_generation_check_failed", joined)
 
-    def test_hold_exit_learning_accepts_holding_period_control_explanation(self):
+    def test_conditional_contract_requires_trader_intraday_result_when_not_blocked(self):
         db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="SR",
-            side="long",
-            preference="negative_hold_revalidate",
-            action_name="observe",
-            action_value_lane="hold",
-            memory_side_role="current_position_side",
-            reward_sum=-300.0,
-            last_sample_date="2025-03-04",
+        contract = self._contract(
+            final_action="conditional_probe",
+            target_lots=1,
+            lots_delta=1,
+            requires_intraday_confirmation=True,
+            conditional_trigger_authority=True,
+            can_execute_without_intraday_trigger=False,
+            execution_requirement="intraday_trigger_required",
         )
         self._insert_recommendation(
             db_path,
-            rec_id="sr-hold-period",
-            ticker="SR",
-            trading_date="2025-03-13",
-            contract={
-                "ticker": "SR",
-                "current_lots": 2,
-                "target_lots": 2,
-                "lots_delta": 0,
-                "final_action": "hold",
-                "reason_codes": ["flat_target", "holding_period_control", "position_matched"],
-                "evidence_used": {
-                    "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
-                    "opportunity_score_components": {},
-                    **self._lifecycle_trace("hold", ["hold"]),
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "SR|long|hold",
-                            "ticker": "SR",
-                            "side": "long",
-                            "action_name": "observe",
-                            "action_preference": "negative_hold_revalidate",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "hold",
-                            "learning_lane": "hold",
-                            "memory_side_role": "current_position_side",
-                            "reward_sum": -300.0,
-                            "reward_mean": -300.0,
-                            "sample_count": 1,
-                            "win_rate": 0.0,
-                            "last_sample_date": "2025-03-04",
-                        }
-                    ]
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-
-    def test_hold_exit_learning_rejects_position_matched_as_only_explanation(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="SR",
-            side="long",
-            preference="negative_hold_revalidate",
-            action_name="observe",
-            action_value_lane="hold",
-            memory_side_role="current_position_side",
-            reward_sum=-300.0,
-            last_sample_date="2025-03-04",
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="sr-position-matched-only",
-            ticker="SR",
-            trading_date="2025-03-13",
-            contract={
-                "ticker": "SR",
-                "current_lots": 2,
-                "target_lots": 2,
-                "lots_delta": 0,
-                "final_action": "hold",
-                "reason_codes": ["position_matched"],
-                "evidence_used": {
-                    "opportunity_score_components": {},
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "SR|long|hold",
-                            "ticker": "SR",
-                            "side": "long",
-                            "action_name": "observe",
-                            "action_preference": "negative_hold_revalidate",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "hold",
-                            "learning_lane": "hold",
-                            "memory_side_role": "current_position_side",
-                            "reward_sum": -300.0,
-                            "reward_mean": -300.0,
-                            "sample_count": 1,
-                            "win_rate": 0.0,
-                            "last_sample_date": "2025-03-04",
-                        }
-                    ]
-                },
-            },
+            rec_id="conditional-1",
+            ticker="CU",
+            snapshot=self._snapshot(contract),
+            audit_payload={"producer": "auditor", "audit_verdict": "approve"},
         )
 
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertFalse(report.ok)
-        self.assertIn("mechanism_hold_exit_learning_not_landed", "\n".join(report.hard_failures))
-        self.assertEqual(
-            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
-            1,
+        self.assertTrue(
+            any(error.startswith("mechanism_conditional_probe_missing_intraday_result") for error in report.hard_failures),
             report.to_dict(),
         )
 
-    def test_positive_exit_learning_hold_without_lifecycle_explanation_fails_once(self):
+    def test_conditional_contract_with_intraday_result_passes_chain_check(self):
         db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="EB",
-            side="short",
-            preference="positive_candidate_exit",
-            action_name="exit",
-            action_value_lane="exit",
-            memory_side_role="current_position_side",
-            reward_sum=2626.06,
-            last_sample_date="2025-03-25",
+        contract = self._contract(
+            final_action="conditional_probe",
+            target_lots=1,
+            lots_delta=1,
+            requires_intraday_confirmation=True,
+            conditional_trigger_authority=True,
+            can_execute_without_intraday_trigger=False,
+            execution_requirement="intraday_trigger_required",
         )
         self._insert_recommendation(
             db_path,
-            rec_id="eb-positive-exit-hold",
-            ticker="EB",
-            trading_date="2025-03-26",
-            contract={
-                "ticker": "EB",
-                "current_lots": -12,
-                "target_lots": -12,
-                "lots_delta": 0,
-                "final_action": "hold",
-                "reason_codes": ["position_matched", "reverse_requires_stronger_evidence"],
-                "evidence_used": {
-                    "opportunity_rank": 3,
-                    "opportunity_score_components": {},
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "EB|short|exit",
-                            "ticker": "EB",
-                            "side": "short",
-                            "action_name": "exit",
-                            "action_preference": "positive_candidate_exit",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "exit",
-                            "learning_lane": "exit",
-                            "memory_side_role": "current_position_side",
-                            "reward_sum": 2626.06,
-                            "reward_mean": 2626.06,
-                            "sample_count": 1,
-                            "win_rate": 1.0,
-                            "last_sample_date": "2025-03-25",
-                        }
-                    ]
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        self.assertEqual(
-            sum(1 for failure in report.hard_failures if failure.startswith("mechanism_hold_exit_learning_not_landed")),
-            1,
-            report.to_dict(),
-        )
-
-    def test_reduce_contract_with_learning_components_does_not_require_rank(self):
-        db_path = self._make_db()
-        self._insert_action_value(
-            db_path,
-            ticker="C",
-            side="long",
-            preference="positive_candidate_open",
-            action_name="open",
-            action_value_lane="open",
-            reward_sum=865.63,
-            last_sample_date="2025-03-06",
-        )
-        self._insert_recommendation(
-            db_path,
-            rec_id="c-protective-reduce",
-            ticker="C",
-            contract={
-                "ticker": "C",
-                "current_lots": 30,
-                "target_lots": 14,
-                "lots_delta": -16,
-                "final_action": "reduce",
-                "reason_codes": [
-                    "not_new_or_increasing_exposure",
-                    "winning_template_continuation_protective_reduce",
-                ],
-                "action_candidates": [
-                    {
-                        "action": "reduce",
-                        "decision": "protective_reduce_no_continuation",
-                        "source": "hold_exit_profit_protection",
-                        "status": "applied",
-                    }
-                ],
-                "evidence_used": {
-                    "opportunity_rank": None,
-                    "opportunity_score": 0.0,
-                    "capital_allocation_reason": "not_allocated_missing_invalidation_boundary",
-                    **self._lifecycle_trace("reduce_exit", ["exit"]),
-                    "opportunity_score_components": {
-                        "positive_learning": 0.0025,
-                        "negative_learning": 0.0,
-                        "execution_profile_learning": 0.0021,
-                        "recent_tail_loss_penalty": 0.0,
-                    },
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "C|long|event_short|range|news_event_setup",
-                            "ticker": "C",
-                            "side": "long",
-                            "action_name": "exit",
-                            "action_preference": "positive_candidate_exit",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "exit",
-                            "learning_lane": "exit",
-                            "reward_sum": 865.63,
-                            "reward_mean": 865.63,
-                            "sample_count": 1,
-                            "win_rate": 1.0,
-                            "last_sample_date": "2025-03-06",
-                        }
-                    ]
-                },
-            },
-            trading_date="2025-03-07",
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        self.assertEqual(report.counts.get("scenarios", {}).get("reduce_exit"), 1)
-
-    def test_open_learning_components_still_require_rank(self):
-        db_path = self._make_db()
-        self._insert_action_value(db_path)
-        self._insert_recommendation(
-            db_path,
-            rec_id="open-learning-no-rank",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "evidence_used": {
-                    "opportunity_score": 0.42,
-                    "opportunity_score_components": {
-                        "positive_learning": 0.12,
-                        "negative_learning": 0.0,
-                        "execution_profile_learning": 0.0,
-                        "recent_tail_loss_penalty": 0.0,
-                    },
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "RB|short|trend",
-                            "ticker": "RB",
-                            "side": "short",
-                            "action_name": "open",
-                            "action_preference": "positive_candidate_open",
-                            "reward_source": "complete_episode",
-                            "evidence_scope": "exact_real_state",
-                            "consumer_scope": "pm_learning",
-                            "action_value_lane": "open",
-                            "reward_sum": 1200.0,
-                            "sample_count": 3,
-                            "win_rate": 0.67,
-                            "last_sample_date": "2025-03-03",
-                        }
-                    ]
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        self.assertIn("mechanism_learning_score_missing_rank", "\n".join(report.hard_failures))
-
-    def test_unselected_no_new_exposure_candidate_does_not_require_rank_or_intraday_result(self):
-        db_path = self._make_db()
-        self._insert_recommendation(
-            db_path,
-            rec_id="unselected-conditional-no-new-exposure",
-            ticker="HC",
-            contract={
-                "ticker": "HC",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "final_action": "wait",
-                "conditional_trigger_authority": False,
-                "requires_intraday_confirmation": False,
-                "can_execute_without_intraday_trigger": False,
-                "reason_codes": [
-                    "no_rank_no_new_exposure",
-                    "capital_queue_not_selected",
-                ],
-                "evidence_used": {
-                    "opportunity_score": 0.0,
-                    "capital_priority_score": 0.0,
-                    "opportunity_score_components": {
-                        "positive_learning": 0.12,
-                        "negative_learning": 0.0,
-                        "execution_profile_learning": 0.0,
-                        "recent_tail_loss_penalty": 0.0,
-                    },
-                },
-                "capital_deployment": {
-                    "selected_for_capital_deployment": False,
-                    "original_target_lots": -11,
-                    "deployed_target_lots": 0,
-                    "deployed_lots_delta": 0,
-                    "capital_allocation_reason": "no_rank_no_new_exposure",
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        failures = "\n".join(report.hard_failures)
-        self.assertNotIn("mechanism_learning_score_missing_rank", failures)
-        self.assertNotIn("mechanism_conditional_probe_missing_intraday_result", failures)
-
-    def test_unselected_no_new_exposure_with_intraday_flags_hard_fails(self):
-        db_path = self._make_db()
-        self._insert_recommendation(
-            db_path,
-            rec_id="unselected-conditional-stale-trigger",
-            ticker="HC",
-            contract={
-                "ticker": "HC",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "final_action": "wait",
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
-                "can_execute_without_intraday_trigger": False,
-                "reason_codes": [
-                    "no_rank_no_new_exposure",
-                    "capital_queue_not_selected",
-                ],
-                "evidence_used": {
-                    "opportunity_score": 0.0,
-                    "capital_priority_score": 0.0,
-                    "opportunity_score_components": {},
-                },
-                "capital_deployment": {
-                    "selected_for_capital_deployment": False,
-                    "original_target_lots": -11,
-                    "deployed_target_lots": 0,
-                    "deployed_lots_delta": 0,
-                    "capital_allocation_reason": "no_rank_no_new_exposure",
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        failures = "\n".join(report.hard_failures)
-        self.assertIn("mechanism_unselected_no_new_exposure_requires_intraday_confirmation", failures)
-        self.assertIn("mechanism_unselected_no_new_exposure_conditional_trigger_authority", failures)
-
-    def test_ranked_open_contract_without_capital_deployment_hard_fails(self):
-        db_path = self._make_db()
-        self._insert_recommendation(
-            db_path,
-            rec_id="ranked-open-no-deployment",
-            ticker="EB",
-            contract={
-                "ticker": "EB",
-                "current_lots": 0,
-                "target_lots": -11,
-                "lots_delta": -11,
-                "final_action": "open_probe",
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
-                "can_execute_without_intraday_trigger": False,
-                "evidence_used": {
-                    "opportunity_score": 0.0,
-                    "opportunity_rank": 1,
-                    "capital_allocation_reason": "monitorable_conditional_candidate_selected_only_if_pm_capital_queue_allows",
-                    "opportunity_score_components": {},
-                },
-                "learning_used": {"alpha_setup_action_values": []},
-            },
-            trading_date="2025-03-03",
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        self.assertIn(
-            "mechanism_rank_missing_capital_deployment:2025-03-03:EB:ranked-open-no-deployment:rank=1",
-            "\n".join(report.hard_failures),
-        )
-
-    def test_diagnostics_do_not_fail_when_mechanism_is_connected_but_rank_loses_money(self):
-        db_path = self._make_db()
-        self._insert_action_value(db_path)
-        self._insert_recommendation(
-            db_path,
-            rec_id="r2",
-            ticker="RB",
-            contract={
-                "ticker": "RB",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "evidence_used": {
-                    "opportunity_score": 0.88,
-                    "opportunity_rank": 1,
-                    "capital_allocation_reason": "selected_by_full_market_rank",
-                    **self._rank_trace(),
-                    "opportunity_score_components": {
-                        "positive_learning": 0.24,
-                        "negative_learning": 0,
-                        "execution_profile_learning": 0.0,
-                        "recent_tail_loss_penalty": 0,
-                    },
-                },
-                "capital_deployment": {
-                    "opportunity_rank": 1,
-                    "capital_layer": "exploration_probe",
-                    "rank_capital_role": "best_exploration_probe_candidate",
-                    "capital_ratio_source": "probe_margin_ratio_0.008",
-                    "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                    **self._rank_trace(),
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": -1,
-                    "original_target_lots": -1,
-                    "capital_allocation_reason": "selected_by_full_market_rank",
-                },
-                "learning_used": {
-                    "alpha_setup_action_values": [
-                        {
-                            "scope_key": "RB|short|trend",
-                            "action_name": "open",
-                            "action_preference": "positive_candidate_open",
-                            "reward_source": "complete_episode",
-                            "evidence_scope": "exact_real_state",
-                            "action_value_lane": "open",
-                            "reward_sum": 1200.0,
-                            "sample_count": 3,
-                            "win_rate": 0.67,
-                            "last_sample_date": "2025-03-03",
-                        }
-                    ]
-                },
-            },
+            rec_id="conditional-1",
+            ticker="CU",
+            snapshot=self._snapshot(contract),
+            audit_payload={"producer": "auditor", "audit_verdict": "approve"},
         )
         conn = sqlite3.connect(db_path)
         try:
-            conn.execute(
-                "INSERT INTO ticker_daily_pnl VALUES ('pnl1','p1','2025-03-04','RB',-500,-500,0,1,3600,3550,'2025-03-04T15:00:00')"
-            )
-            conn.execute(
-                "INSERT INTO daily_settlement VALUES ('ds1','p1','2025-03-04',1000000,1000,0.001,-500,'2025-03-04T15:00:00')"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        self.assertTrue(any(item.startswith("diagnostic_top_rank_bucket_negative_new_position_pnl") for item in report.diagnostics))
-        self.assertTrue(any(item.startswith("diagnostic_low_average_margin_utilization") for item in report.diagnostics))
-
-    def test_hard_fails_conditional_probe_without_intraday_result(self):
-        db_path = self._make_db()
-        self._insert_recommendation(
-            db_path,
-            rec_id="r3",
-            ticker="HC",
-            contract={
-                "ticker": "HC",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
-                "can_execute_without_intraday_trigger": False,
-                "evidence_used": {
-                    "opportunity_rank": 2,
-                    "capital_allocation_reason": "selected_conditional_monitor",
-                    **self._rank_trace(),
-                    "opportunity_score_components": {},
-                },
-                "capital_deployment": {
-                    "opportunity_rank": 2,
-                    **self._rank_trace(),
-                    "selected_for_capital_deployment": True,
-                    "deployed_target_lots": -1,
-                    "original_target_lots": -1,
-                },
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertFalse(report.ok)
-        self.assertIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
-
-    def test_auditor_blocked_conditional_probe_does_not_require_intraday_result(self):
-        db_path = self._make_db()
-        contract = {
-            "ticker": "HC",
-            "current_lots": 0,
-            "target_lots": -1,
-            "lots_delta": -1,
-            "final_action": "open_probe",
-            "conditional_trigger_authority": True,
-            "requires_intraday_confirmation": True,
-            "can_execute_without_intraday_trigger": False,
-            "evidence_used": {
-                "opportunity_rank": 2,
-                "capital_allocation_reason": "selected_conditional_monitor",
-                **self._rank_trace(),
-                "opportunity_score_components": {},
-            },
-            "capital_deployment": {
-                "opportunity_rank": 2,
-                **self._rank_trace(),
-                "selected_for_capital_deployment": True,
-                "deployed_target_lots": -1,
-                "original_target_lots": -1,
-            },
-        }
-        conn = sqlite3.connect(db_path)
-        try:
-            audit_payload = {
-                "final_action_contract": contract,
-                "independent_auditor": {
-                    "audit_verdict": "block",
-                    "hard_risk_reasons": ["missing_margin_or_price_boundary"],
-                },
-            }
             conn.execute(
                 """
-                INSERT INTO futures_recommendation(
-                    id, config_id, reference_portfolio_id, trading_date,
-                    effective_trade_date, source_type, underlying_code,
-                    action, lots, signal_snapshot, audit_payload, status, created_at
+                INSERT INTO futures_intraday_decision(
+                    id, config_id, trading_date, recommendation_id, ticker,
+                    decision, trigger_reason, features_json, created_at
                 )
-                VALUES ('blocked-conditional', 'cfg', 'p1', '2025-03-04', '2025-03-04',
-                    'strategy', 'HC', 'hold', 0, ?, ?, 'blocked', '2025-03-04T09:00:00')
-                """,
-                (_dumps({"final_action_contract": contract}), _dumps(audit_payload)),
+                VALUES (
+                    'id1', 'cfg', '2025-03-25', 'conditional-1', 'CU',
+                    'skip', 'not_triggered', '{}', '2025-03-25T10:00:00'
+                )
+                """
             )
             conn.commit()
         finally:
@@ -1248,44 +306,6 @@ class MechanismEffectivenessAuditRegressionTest(unittest.TestCase):
         report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
 
         self.assertTrue(report.ok, report.to_dict())
-        self.assertNotIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
-
-    def test_cli_returns_zero_for_diagnostics_and_nonzero_for_hard_fail(self):
-        db_path = self._make_db()
-        self._insert_recommendation(
-            db_path,
-            rec_id="r4",
-            ticker="HC",
-            contract={
-                "ticker": "HC",
-                "current_lots": 0,
-                "target_lots": -1,
-                "lots_delta": -1,
-                "final_action": "open_probe",
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
-                "can_execute_without_intraday_trigger": False,
-                "evidence_used": {"opportunity_rank": 1, "opportunity_score_components": {}},
-                "capital_deployment": {"opportunity_rank": 1, "selected_for_capital_deployment": True},
-            },
-        )
-
-        report = audit_mechanism_effectiveness(db_path=db_path, config_id="cfg")
-
-        self.assertFalse(report.ok)
-        self.assertIn("mechanism_conditional_probe_missing_intraday_result", "\n".join(report.hard_failures))
-
-    def test_empty_database_without_config_is_ready_for_fresh_backtest(self):
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        db_path = Path(tmpdir.name) / "agentquant.db"
-        sqlite3.connect(db_path).close()
-
-        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
-
-        self.assertTrue(report.ok, report.to_dict())
-        self.assertIn("empty_db_no_mechanism_records_to_audit", report.metadata.get("record_boundary", ""))
-        self.assertTrue(any(item.startswith("config_not_found_empty_db:") for item in report.warnings))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -53,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run AgentQuant pre-backtest test gate.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config, e.g. config/dev.yaml")
     parser.add_argument("--local-db", action="store_true")
-    parser.add_argument("--db-path", type=str, default=str(SRC_ROOT / "assets" / "agentquant.db"))
+    parser.add_argument("--db-path", type=str, default=None)
     parser.add_argument("--config-id", type=str, default=None)
     parser.add_argument("--exp-name", type=str, default=None)
     parser.add_argument("--start-date", type=str, default=None)
@@ -82,6 +84,152 @@ def _load_config(config_path: Path) -> dict:
     with config_path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     return normalize_config(raw, config_path)
+
+
+def _create_pre_backtest_fake_db(db_path: Path, *, exp_name: str) -> Path:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE config (
+                id TEXT PRIMARY KEY,
+                exp_name TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE portfolio (
+                id TEXT PRIMARY KEY,
+                config_id TEXT,
+                current_balance REAL DEFAULT 0
+            );
+            CREATE TABLE futures_recommendation (
+                id TEXT,
+                config_id TEXT,
+                trading_date TEXT,
+                effective_trade_date TEXT,
+                source_type TEXT,
+                underlying_code TEXT,
+                action TEXT,
+                lots INTEGER,
+                status TEXT,
+                audit_payload TEXT,
+                signal_snapshot TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE futures_transactions (
+                id TEXT,
+                portfolio_id TEXT,
+                config_id TEXT,
+                recommendation_id TEXT,
+                trading_date TEXT,
+                ticker TEXT,
+                action TEXT,
+                lots INTEGER,
+                execution_price REAL,
+                contract_multiplier REAL,
+                margin_rate REAL,
+                margin_used REAL,
+                audit_payload TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE futures_intraday_decision (
+                id TEXT,
+                config_id TEXT,
+                trading_date TEXT,
+                recommendation_id TEXT,
+                ticker TEXT,
+                decision TEXT,
+                trigger_reason TEXT,
+                features_json TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE alpha_setup_action_value (
+                id TEXT PRIMARY KEY,
+                config_id TEXT,
+                scope_key TEXT,
+                ticker TEXT,
+                side TEXT,
+                horizon_class TEXT,
+                market_regime TEXT,
+                setup_type TEXT,
+                action_name TEXT,
+                sample_count INTEGER,
+                reward_sum REAL,
+                reward_mean REAL,
+                win_rate REAL,
+                action_preference TEXT,
+                reward_source TEXT,
+                evidence_scope TEXT,
+                action_value_lane TEXT,
+                consumer_scope TEXT DEFAULT 'pm_learning',
+                learning_lane TEXT,
+                memory_side_role TEXT DEFAULT '',
+                retrieval_key TEXT,
+                fallback_retrieval_key TEXT,
+                execution_retrieval_key TEXT,
+                last_sample_date TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                active INTEGER,
+                payload_json TEXT
+            );
+            CREATE TABLE adaptive_policy_state (
+                id TEXT PRIMARY KEY,
+                config_id TEXT,
+                ticker TEXT,
+                side TEXT,
+                policy_type TEXT,
+                policy_action TEXT,
+                source_trading_date TEXT,
+                active INTEGER,
+                payload_json TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE daily_settlement (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT,
+                trading_date TEXT,
+                daily_pnl REAL,
+                commission REAL,
+                current_balance REAL,
+                current_margin REAL,
+                margin_ratio REAL,
+                positions_snapshot TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE researcher_llm_notes (
+                id TEXT PRIMARY KEY,
+                config_id TEXT,
+                trading_date TEXT,
+                evidence_pack_id TEXT,
+                ticker TEXT,
+                raw_prompt TEXT,
+                raw_response TEXT,
+                created_at TEXT,
+                payload_json TEXT
+            );
+            CREATE TABLE trading_day_phase (
+                id TEXT PRIMARY KEY,
+                config_id TEXT,
+                trading_date TEXT,
+                phase TEXT,
+                status TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                message TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO config(id, exp_name, updated_at) VALUES ('prebacktest-cfg', ?, 'prebacktest')",
+            (exp_name,),
+        )
+        conn.execute(
+            "INSERT INTO portfolio(id, config_id, current_balance) VALUES ('prebacktest-pf', 'prebacktest-cfg', 0)",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 def _run_unittest_modules(modules: list[str]) -> dict:
@@ -131,17 +279,22 @@ def main() -> int:
     args = parse_args()
     config_path = _resolve_config_path(args.config)
     cfg = _load_config(config_path)
-    if args.local_db:
-        from database.sqlite_setup import init_database
-
-        init_database()
+    temp_db_dir: tempfile.TemporaryDirectory[str] | None = None
+    if args.db_path:
+        acceptance_db_path = Path(args.db_path)
+    else:
+        temp_db_dir = tempfile.TemporaryDirectory()
+        acceptance_db_path = _create_pre_backtest_fake_db(
+            Path(temp_db_dir.name) / "pre_backtest_acceptance.db",
+            exp_name=str(cfg.get("exp_name") or "prebacktest"),
+        )
 
     unittest_report = _run_unittest_modules(PRE_BACKTEST_TEST_MODULES)
     pm_workflow_contract_gate = _run_unittest_modules(PM_WORKFLOW_CONTRACT_GATE_MODULES)
     protocol_report = _run_protocol_preflight(args, config_path, cfg)
     acceptance_report = run_pre_backtest_acceptance(
         config_path=config_path,
-        db_path=Path(args.db_path),
+        db_path=acceptance_db_path,
         repo_root=PROJECT_ROOT,
         assets_dir=SRC_ROOT / "assets",
         deepfund_python=Path(args.deepfund_python),
@@ -151,6 +304,8 @@ def main() -> int:
         end_date=args.end_date,
         check_llm_auth=bool(args.check_llm_auth),
     ).to_dict()
+    if temp_db_dir is not None:
+        temp_db_dir.cleanup()
 
     report = {
         "agent_name": "protocol_governor",

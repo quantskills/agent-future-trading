@@ -224,3 +224,11 @@ artifact 边界校验必须按值类型和载体语义识别事实，不能只�
 - 学习是否按生命周期正确落地；
 - 减仓/退出不被开仓 rank 规则误杀；
 - 条件监控必须写出盘中触发或未触发事实。
+
+## PG 审计数据模型补充（2026-07-07）
+
+PG 审计读取的是已落地 artifact 和数据库事实，不生成新的交易事实。对 futures recommendation 的 PM 部分，运行期审计只承认四类保存链字段：`signal_snapshot.final_action_contract`、`signal_snapshot.pm_six_step_trace.pm_contract_self_check`、`signal_snapshot.pm_six_step_trace.step6_contract_generation_check`、`signal_snapshot.signal_collection_contract`。
+
+PM 中间态字段不得成为保存 artifact：`pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision`、`pm_internal_draft`、`pm_scoring_draft`、`pm_ranking_draft`、`pm_capital_deployment_draft`。PG 可以检查这些字段是否污染保存结果，但不能根据 PM reason code 重新推断交易动作是否正确。
+
+回测前检测不读取真实行情、不调 LLM、不写真实 DB；真实行情覆盖、执行、结算和复盘事实只在实际运行或每日后置只读审计中检查。

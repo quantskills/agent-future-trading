@@ -493,13 +493,8 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         audits=(
             _rule(
                 "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("pm_learning_components_zero_despite_prior_real_action_value", "pm_consumed_non_pm_learning_action_value"),
-                "daily audit checks action-value landing into PM scoring",
-            ),
-            _rule(
-                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
-                ("mechanism_pm_learning_not_in_score",),
-                "mechanism audit checks PM learning-to-score connectivity",
+                ("pm_action_value_missing_canonical_fields", "pm_consumed_non_pm_learning_action_value"),
+                "daily audit checks persisted PM learning row shape and consumer-scope boundary, not PM scoring effect",
             ),
         ),
         tests=(
@@ -636,7 +631,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         audits=(
             _rule(
                 "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("learning_components_only_inside_opportunity_score_components",),
+                ("opportunity_learning_component_used_as_trade_intent",),
                 "daily audit keeps learning components diagnostic only",
             ),
         ),
@@ -705,14 +700,14 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("rank_capital_layer_contract_errors", "pm_rank_capital_layer_contract_incomplete"),
-                "daily hard gate rejects ranked contracts missing capital-layer semantics",
+                "src/tools/agent_tools/decision/pm_contract_self_check.py",
+                ("rank_capital_layer_contract_errors", "rank_input_components_missing"),
+                "PM-owned final contract self-check validates ranked contract completeness",
             ),
             _rule(
                 "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
                 ("def _capital_layer", "diagnostic_low_rank_outperformed_top_rank"),
-                "mechanism diagnostics bucket rank performance by capital layer",
+                "mechanism diagnostics bucket rank performance by capital layer without deciding PM contract validity",
             ),
         ),
         audits=(
@@ -729,9 +724,14 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         tests=(
             _rule(
-                "src/tests/test_system_invariant_audit.py",
-                ("test_system_invariant_audit_rejects_rank_missing_capital_layer_contract",),
-                "system invariant test catches ranked contracts missing capital-layer fields",
+                "src/tests/test_pm_state_transition_matrix.py",
+                ("test_pm_contract_self_check_requires_rank_and_pm_lifecycle_traces",),
+                "PM self-check tests catch ranked contracts missing capital-layer fields",
+            ),
+            _rule(
+                "src/tests/test_pre_backtest_pm_workflow_contracts.py",
+                ("rank_input_components_missing",),
+                "pre-backtest fixture covers PM/workflow rejection of incomplete ranked contracts",
             ),
             _rule(
                 "src/tests/test_phase_flow_regression.py",
@@ -792,28 +792,23 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "shared final-action semantics consumes PM learning_used for deterministic memory coverage checks",
             ),
             _rule(
-                "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("contract.get(\"learning_used\")", "has_valid_generic_no_change_explanation"),
-                "system invariant audit consumes learning_used through the shared semantic interpreter",
-            ),
-            _rule(
-                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
-                ("contract.get(\"learning_used\")", "has_valid_generic_no_change_explanation"),
-                "mechanism audit consumes learning_used through the shared semantic interpreter",
+                "src/tools/agent_tools/decision/pm_contract_self_check.py",
+                ("learning_used", "pm_lifecycle_learning_trace"),
+                "PM-owned self-check validates learning trace boundaries inside the final contract",
             ),
         ),
         audits=(
             _rule(
                 "src/tools/agent_tools/control/pg_system_invariants.py",
-                ("pm_learning_signal_without_contract_effect_or_explanation",),
-                "daily audit checks learning signals affect or explain the contract",
+                ("pm_action_value_missing_canonical_fields", "pm_consumed_non_pm_learning_action_value"),
+                "daily audit checks only persisted PM learning row shape and consumer-scope boundary",
             ),
         ),
         tests=(
             _rule(
                 "src/tests/test_system_invariant_audit.py",
-                ("pm_learning_signal_without_contract_effect_or_explanation",),
-                "system audit tests cover learning-used contract effect",
+                ("pm_action_value_missing_canonical_fields", "pm_consumed_non_pm_learning_action_value"),
+                "system audit tests cover persisted learning row shape and consumer-scope boundary",
             ),
         ),
     ),

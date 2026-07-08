@@ -20,27 +20,14 @@ from tools.agent_tools.control.pg_unified_field_audit import (
     find_forbidden_artifact_field_keys,
     find_forbidden_pm_final_artifact_field_keys,
 )
-from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
 from tools.common.order_semantics import (
     phase2_order_intent_from_lots,
     recommendation_intent_from_lots,
 )
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
-    contract_consumes_hold_exit_pm_learning,
-    full_market_rank_gate_errors,
-    contract_increases_risk_position,
-    contract_reduces_or_exits_position,
-    derive_memory_requirements,
-    has_active_opportunity_rejection,
     has_open_transaction_blocker,
-    has_valid_generic_no_change_explanation,
-    has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
-    lane_matches_memory_requirement,
-    lifecycle_learning_decision_contract_errors,
-    rank_capital_layer_contract_errors,
-    rank_lifecycle_learning_route_errors,
     validate_final_action_lot_transition,
 )
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
@@ -62,41 +49,21 @@ TRIGGER_PASSED_REASONS = {
     "intraday_event_immediate_execution",
 }
 REAL_REWARD_SOURCE_MARKERS = {"episode", "real"}
-ACTION_PREFERENCE_LANDING_TERMS = {
-    "positive_candidate_open": {"positive_candidate_open", "real_budget_entry", "exploration_probe", "open_real", "open_probe"},
-    "positive_candidate_hold": {"positive_candidate_hold", "hold", "position_matched", "continue"},
-    "positive_candidate_exit": {"positive_candidate_exit", "exit", "close", "reduce", "scale_down", "protect"},
-    "positive_candidate_execution": {
-        "positive_candidate_execution",
-        "execution_profile",
-        "breakout",
-        "pullback",
-        "vwap",
-        "opening_range",
-        "event_immediate",
-    },
-    "negative_revalidate": {"negative_revalidate", "revalidate", "wait", "watchlist", "cap", "demote", "reduce", "exit"},
-    "negative_hold_revalidate": {"negative_hold_revalidate", "revalidate", "protect", "reduce", "exit", "scale_down"},
-    "tail_loss_protect": {"tail_loss_protect", "tail_loss", "protect", "protective", "reduce", "exit", "scale_down", "stop_loss"},
-}
 OPPORTUNITY_SCORE_COMPONENT_FIELDS = {
     "positive_learning",
     "negative_learning",
     "execution_profile_learning",
     "recent_tail_loss_penalty",
 }
-PM_LEARNING_RANKING_AUDIT_BOUNDARIES = [
-    "learning_components_only_inside_opportunity_score_components",
+PROTOCOL_AUDIT_BOUNDARIES = [
+    "learning_components_remain_diagnostic_not_trade_authority",
     "ranking_fields_cannot_create_trade_authority",
     "final_action_contract_remains_single_trade_truth",
     "recommendation_top_level_action_lots_must_match_final_contract",
     "incomplete_trading_day_cannot_enter_strategy_evaluation",
     "pm_action_value_transport_must_preserve_preference_reward_and_scope",
-    "matching_real_action_value_must_land_in_pm_score_components",
-    "profile_prior_cannot_substitute_for_action_value_learning",
-    "learning_signal_must_explain_contract_no_change",
-    "rank_change_must_explain_contract_no_change",
-    "hold_exit_learning_must_explain_position_no_change",
+    "pg_reads_pm_step6_self_checks_not_pm_internal_trade_semantics",
+    "protocol_governor_checks_artifact_boundaries_not_strategy_profitability",
 ]
 OPEN_AMPLIFICATION_EFFECTS = {
     "open_amplification",
@@ -280,23 +247,6 @@ CURRENT_ENTRY_TRIGGER_MARKERS = {
     "当前跌破",
     "触发成立",
 }
-STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
-    "no_rank_no_new_exposure",
-    "no_rank_or_budget_no_new_exposure",
-)
-FINAL_RANK_TRACE_FIELDS = {
-    "capital_layer",
-    "capital_rank_generated_by",
-    "capital_ratio_source",
-    "opportunity_rank",
-    "rank_capital_role",
-    "rank_input_components",
-    "rank_reason",
-    "rank_scope",
-    "rank_score",
-    "rank_source",
-}
-
 CURRENT_CONFIRMATION_FIELD_NAMES = {
     "current_trigger_confirmed",
     "short_term_trigger_confirmed",
@@ -311,11 +261,9 @@ CURRENT_CONFIRMATION_FIELD_NAMES = {
 }
 ERROR_CATEGORY_PREFIXES = {
     "unified_field_semantics": UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES,
-    "pm_opportunity_routing": {
+    "evidence_trigger_boundary": {
         "trigger_valid_without_current_trigger_confirmed",
         "setup_quality_ok_used_as_current_trigger",
-        "conditional_monitor_candidate_silent_wait",
-        "high_quality_opportunity_silent_wait",
         "opportunity_ranking_field_top_level_trade_authority",
     },
     "single_trade_exit": {
@@ -358,17 +306,11 @@ ERROR_CATEGORY_PREFIXES = {
         "action_value_missing_consumer_scope",
         "trader_execution_learning_trace_missing_scope",
         "trader_execution_learning_trace_wrong_scope",
-        "pm_learning_components_zero_despite_prior_real_action_value",
-        "profile_adjustment_substituted_for_missing_action_value_learning",
-        "pm_learning_signal_without_contract_effect_or_explanation",
-        "pm_rank_changed_without_contract_effect",
-        "pm_hold_exit_learning_without_contract_effect_or_explanation",
         "positive_open_action_value_not_open_preference",
         "positive_exit_action_value_not_exit_preference",
         "negative_action_value_not_protective_preference",
         "positive_open_from_non_exact_scope",
         "positive_open_from_non_real_reward_source",
-        "action_preferences_exist_but_no_final_action_contract_mentions_them",
         "adaptive_policy_release_not_validated",
         "adaptive_policy_unknown_action",
         "adaptive_policy_fast_candidate_not_probe_only",
@@ -1031,13 +973,6 @@ def _audit_recommendation_final_contract_consistency(
                 errors.append(f"strategy_recommendation_pm_step6_generation_check_missing:{label}")
             elif generation_check.get("ok") is not True:
                 errors.append(f"strategy_recommendation_pm_step6_generation_check_failed:{label}")
-            self_check = check_final_action_contract(contract, snapshot=snapshot)
-            if self_check.get("ok") is not True:
-                encoded = ",".join(str(item) for item in self_check.get("errors") or [])
-                errors.append(f"strategy_recommendation_pm_contract_self_check_failed:{label}:errors={encoded}")
-            extra_boundary_errors = _pm_runtime_contract_boundary_errors(contract)
-            for error in extra_boundary_errors:
-                errors.append(f"strategy_recommendation_pm_contract_runtime_boundary_failed:{label}:{error}")
         if source_type in OPERATIONAL_SOURCE_TYPES:
             continue
         required = {"current_lots", "target_lots", "lots_delta", "final_action"}
@@ -1073,56 +1008,6 @@ def _audit_recommendation_final_contract_consistency(
                 f"{label}:expected={expected_action}/{expected_lots}:actual={action}/{actual_lots}:"
                 f"current={current_lots}:target={target_lots}"
             )
-
-
-def _capital_allocation_reason_from_contract(contract: Dict[str, Any]) -> str:
-    deployment = _dict(contract.get("capital_deployment"))
-    evidence = _dict(contract.get("evidence_used"))
-    return _lower(
-        deployment.get("capital_allocation_reason")
-        or evidence.get("capital_allocation_reason")
-        or contract.get("capital_allocation_reason")
-    )
-
-
-def _is_step5_undeployed_no_new_exposure_reason(reason: str) -> bool:
-    reason = _lower(reason)
-    return any(reason == prefix or reason.startswith(f"{prefix}:") for prefix in STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES)
-
-
-def _final_rank_trace_hits(contract: Dict[str, Any]) -> List[str]:
-    hits: List[str] = []
-    containers = {
-        "final_action_contract": contract,
-        "final_action_contract.evidence_used": _dict(contract.get("evidence_used")),
-        "final_action_contract.capital_deployment": _dict(contract.get("capital_deployment")),
-    }
-    for prefix, container in containers.items():
-        for field in sorted(FINAL_RANK_TRACE_FIELDS):
-            value = container.get(field)
-            if value not in (None, "", {}, []):
-                hits.append(f"{prefix}.{field}")
-    return hits
-
-
-def _pm_runtime_contract_boundary_errors(contract: Dict[str, Any]) -> List[str]:
-    errors: List[str] = []
-    reason = _capital_allocation_reason_from_contract(contract)
-    deployment = _dict(contract.get("capital_deployment"))
-    if reason == "non_new_risk_no_capital_rank":
-        rank_hits = _final_rank_trace_hits(contract)
-        if rank_hits:
-            errors.append(f"non_rank_final_contract_contains_rank_trace:{rank_hits}")
-    if _is_step5_undeployed_no_new_exposure_reason(reason):
-        if bool(contract.get("requires_intraday_confirmation")):
-            errors.append("undeployed_new_risk_requires_intraday_confirmation")
-        if bool(contract.get("conditional_trigger_authority")):
-            errors.append("undeployed_new_risk_conditional_trigger_authority")
-        if contract_increases_risk_position(contract):
-            errors.append("undeployed_new_risk_contract_still_increases_risk")
-        if deployment.get("selected_for_capital_deployment") is not False:
-            errors.append("undeployed_new_risk_selected_flag_invalid")
-    return errors
 
 
 def _auditor_verdict_from_recommendation(recommendation: Dict[str, Any]) -> str:
@@ -1338,172 +1223,14 @@ def _action_value_memory_side_role(row: Dict[str, Any]) -> str:
     return _lower(_payload_or_row_value(row, "memory_side_role"))
 
 
-def _action_value_matches_requirement(
-    row: Dict[str, Any],
-    *,
-    ticker: str,
-    side: str,
-    decision_date: str,
-    lane: str,
-    memory_side_role: str,
-) -> bool:
-    target_ticker = _lower(ticker).upper()
-    target_side = _lower(side)
-    decision_day = _date10(decision_date)
-    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
-        return False
-    row_ticker = str(row.get("ticker") or "").upper()
-    row_side = _lower(row.get("side"))
-    if row_ticker not in {target_ticker, "*"}:
-        return False
-    if row_side not in {target_side, "*", "both", "any"}:
-        return False
-    sample_day = _date10(row.get("last_sample_date"))
-    if not sample_day or sample_day >= decision_day:
-        return False
-    preference = _lower(_payload_or_row_value(row, "action_preference"))
-    if preference not in ACTION_PREFERENCE_VALUES:
-        return False
-    if _action_value_consumer_scope(row) != "pm_learning":
-        return False
-    payload = _dict(row.get("payload"))
-    reward_source = _lower(row.get("reward_source")) or _effective_reward_source(payload)
-    if not any(marker in reward_source for marker in REAL_REWARD_SOURCE_MARKERS):
-        return False
-    if not lane_matches_memory_requirement(lane, _action_value_lane(row)):
-        return False
-    required_role = _lower(memory_side_role)
-    row_role = _action_value_memory_side_role(row)
-    if required_role and row_role and row_role != required_role:
-        return False
-    return True
-
-
-def _real_action_values_for_memory_requirements(
-    action_values: List[Dict[str, Any]],
-    *,
-    contract: Dict[str, Any],
-    ticker: str,
-    side: str,
-    decision_date: str,
-) -> List[Dict[str, Any]]:
-    requirements = derive_memory_requirements(contract)
-    required_memory = [
-        item for item in (requirements.get("must_land_in_pm_contract") or [])
-        if isinstance(item, dict) and item.get("must_land_in_pm_contract")
-    ]
-    matched: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for requirement in required_memory:
-        req_side = _lower(requirement.get("side")) or _lower(side)
-        req_lane = _lower(requirement.get("lane") or requirement.get("learning_lane"))
-        req_role = _lower(requirement.get("memory_side_role"))
-        if req_side not in {"long", "short"} or not req_lane:
-            continue
-        for row in action_values:
-            if not _action_value_matches_requirement(
-                row,
-                ticker=ticker,
-                side=req_side,
-                decision_date=decision_date,
-                lane=req_lane,
-                memory_side_role=req_role,
-            ):
-                continue
-            row_id = str(
-                row.get("id")
-                or _payload_or_row_value(row, "id")
-                or "|".join([
-                    str(row.get("scope_key") or ""),
-                    str(row.get("ticker") or ""),
-                    str(row.get("side") or ""),
-                    _action_value_lane(row),
-                    _lower(_payload_or_row_value(row, "action_preference")),
-                ])
-            )
-            if row_id in seen:
-                continue
-            seen.add(row_id)
-            matched.append(row)
-    return matched
-
-
-def _real_action_value_available_before(
-    action_values: List[Dict[str, Any]],
-    *,
-    ticker: str,
-    side: str,
-    decision_date: str,
-) -> bool:
-    target_ticker = _lower(ticker).upper()
-    target_side = _lower(side)
-    decision_day = _date10(decision_date)
-    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
-        return False
-    for row in action_values:
-        row_ticker = str(row.get("ticker") or "").upper()
-        row_side = _lower(row.get("side"))
-        if row_ticker not in {target_ticker, "*"}:
-            continue
-        if row_side not in {target_side, "*", "both", "any"}:
-            continue
-        sample_day = _date10(row.get("last_sample_date"))
-        if not sample_day or sample_day >= decision_day:
-            continue
-        preference = _lower(row.get("action_preference") or _payload_or_row_value(row, "action_preference"))
-        if preference not in ACTION_PREFERENCE_VALUES:
-            continue
-        payload = _dict(row.get("payload"))
-        reward_source = _lower(row.get("reward_source")) or _effective_reward_source(payload)
-        if any(marker in reward_source for marker in REAL_REWARD_SOURCE_MARKERS):
-            return True
-    return False
-
-
 def _contract_increases_risk(contract: Dict[str, Any]) -> bool:
-    return contract_increases_risk_position(contract)
-
-
-def _prior_real_action_value_is_hold_exit(
-    action_values: List[Dict[str, Any]],
-    *,
-    ticker: str,
-    side: str,
-    decision_date: str,
-) -> bool:
-    target_ticker = _lower(ticker).upper()
-    target_side = _lower(side)
-    decision_day = _date10(decision_date)
-    if not target_ticker or target_side not in {"long", "short"} or not decision_day:
-        return False
-    for row in action_values:
-        row_ticker = str(row.get("ticker") or "").upper()
-        row_side = _lower(row.get("side"))
-        if row_ticker not in {target_ticker, "*"}:
-            continue
-        if row_side not in {target_side, "*", "both", "any"}:
-            continue
-        sample_day = _date10(row.get("last_sample_date"))
-        if not sample_day or sample_day >= decision_day:
-            continue
-        preference = _lower(row.get("action_preference") or _payload_or_row_value(row, "action_preference"))
-        lane = _lower(row.get("action_value_lane") or _payload_or_row_value(row, "action_value_lane", "action_name"))
-        if preference in {"tail_loss_protect", "negative_hold_revalidate", "positive_candidate_exit"}:
-            return True
-        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
-            return True
-    return False
-
-
-def _prior_rows_include_hold_exit_learning(rows: Iterable[Dict[str, Any]]) -> bool:
-    for row in rows:
-        preference = _lower(_payload_or_row_value(row, "action_preference"))
-        lane = _action_value_lane(row)
-        if preference in {"tail_loss_protect", "negative_hold_revalidate", "positive_candidate_exit"}:
-            return True
-        if lane in {"hold", "exit"} and preference in ACTION_PREFERENCE_VALUES:
-            return True
-    return False
+    current_lots = _int(contract.get("current_lots"))
+    target_lots = _int(contract.get("target_lots"), current_lots)
+    if current_lots == 0:
+        return target_lots != 0
+    if current_lots > 0:
+        return target_lots > current_lots or target_lots < 0
+    return target_lots < current_lots or target_lots > 0
 
 
 def _audit_pm_learning_transport_and_contract_effect(
@@ -1512,6 +1239,8 @@ def _audit_pm_learning_transport_and_contract_effect(
     errors: List[str],
     warnings: List[str],
 ) -> None:
+    _ = action_values
+    _ = warnings
     for recommendation_id, recommendation in recommendations.items():
         if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
             continue
@@ -1534,104 +1263,6 @@ def _audit_pm_learning_transport_and_contract_effect(
                     "pm_action_value_missing_canonical_fields:"
                     f"{label}:{preference}:missing_preference_reward_scope_or_source"
                 )
-        target_lots = _int(contract.get("target_lots"))
-        current_lots = _int(contract.get("current_lots"))
-        side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
-        if not side and current_lots:
-            side = "long" if current_lots > 0 else "short"
-        components = _contract_learning_components(contract)
-        learning_all_zero = all(abs(value) <= 1e-12 for value in components.values())
-        decision_date = str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or "")
-        required_prior_rows = _real_action_values_for_memory_requirements(
-            action_values,
-            contract=contract,
-            ticker=str(ticker),
-            side=side,
-            decision_date=decision_date,
-        )
-        prior_real_action_value_available = bool(required_prior_rows)
-        prior_hold_exit_learning = _prior_rows_include_hold_exit_learning(required_prior_rows)
-        hold_exit_error = (
-            "pm_hold_exit_learning_without_contract_effect_or_explanation:"
-            f"{label}:target_lots={target_lots}:current_lots={current_lots}"
-        )
-        if (
-            prior_real_action_value_available
-            and learning_all_zero
-            and (_contract_increases_risk(contract) or not prior_hold_exit_learning)
-        ):
-            errors.append(
-                "pm_learning_components_zero_despite_prior_real_action_value:"
-                f"{label}:side={side or 'missing'}"
-            )
-        if (
-            prior_real_action_value_available
-            and prior_hold_exit_learning
-            and learning_all_zero
-            and _hold_exit_learning_has_no_contract_effect(contract)
-            and not _hold_exit_learning_has_contract_explanation(contract)
-            and hold_exit_error not in errors
-        ):
-            errors.append(hold_exit_error)
-        alpha_profile_adjustment = float(
-            _dict(_dict(contract.get("evidence_used")).get("opportunity_score_components")).get("alpha_profile_adjustment")
-            or 0.0
-        )
-        if alpha_profile_adjustment > 0.015 and learning_all_zero:
-            errors.append(
-                "profile_adjustment_substituted_for_missing_action_value_learning:"
-                f"{label}:alpha_profile_adjustment={alpha_profile_adjustment}"
-            )
-        learning_summary = _dict(_dict(contract.get("learning_used")).get("learning_adjustment_summary"))
-        learning_signal_present = any(
-            abs(float(learning_summary.get(key) or 0.0)) > 1e-12
-            for key in (
-                "positive_learning_signal",
-                "negative_learning_signal",
-                "execution_profile_learning_signal",
-                "recent_tail_loss_signal",
-            )
-        )
-        if learning_signal_present and int(contract.get("target_lots") or 0) == int(contract.get("current_lots") or 0):
-            if not _learning_no_change_has_contract_explanation(contract):
-                errors.append(
-                    "pm_learning_signal_without_contract_effect_or_explanation:"
-                    f"{label}:final_action={_lower(contract.get('final_action')) or 'missing'}"
-                )
-        rank_value = _rank_value_from_contract(contract)
-        rank_contract_errors = rank_capital_layer_contract_errors(contract)
-        if rank_contract_errors:
-            errors.append(
-                "pm_rank_capital_layer_contract_incomplete:"
-                f"{label}:missing={','.join(rank_contract_errors)}"
-            )
-        rank_route_errors = rank_lifecycle_learning_route_errors(contract)
-        if rank_route_errors:
-            errors.append(
-                "pm_rank_lifecycle_learning_route_invalid:"
-                f"{label}:errors={','.join(rank_route_errors)}"
-            )
-        lifecycle_route_errors = lifecycle_learning_decision_contract_errors(contract)
-        if lifecycle_route_errors:
-            errors.append(
-                "pm_lifecycle_learning_contract_trace_invalid:"
-                f"{label}:errors={','.join(lifecycle_route_errors)}"
-            )
-        rank_gate_errors = full_market_rank_gate_errors(contract)
-        if rank_gate_errors:
-            errors.append(
-                "pm_new_risk_missing_full_market_rank:"
-                f"{label}:missing={','.join(rank_gate_errors)}"
-            )
-        if rank_value is not None and _rank_has_no_contract_effect(contract):
-            if not _learning_no_change_has_contract_explanation(contract):
-                errors.append(
-                    "pm_rank_changed_without_contract_effect:"
-                    f"{label}:rank={rank_value}:final_action={_lower(contract.get('final_action')) or 'missing'}"
-                )
-        if _protective_hold_exit_learning_present(contract) and _hold_exit_learning_has_no_contract_effect(contract):
-            if not _hold_exit_learning_has_contract_explanation(contract) and hold_exit_error not in errors:
-                errors.append(hold_exit_error)
 
 
 def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
@@ -1646,77 +1277,6 @@ def _rank_value_from_contract(contract: Dict[str, Any]) -> Optional[int]:
         return int(raw)
     except Exception:
         return None
-
-
-def _audit_daily_full_market_rank_uniqueness(
-    recommendations: Dict[str, Dict[str, Any]],
-    errors: List[str],
-) -> None:
-    ranks_by_day: Dict[str, List[tuple[int, str]]] = {}
-    for recommendation_id, recommendation in recommendations.items():
-        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
-            continue
-        contract = _contract_from_recommendation(recommendation)
-        rank = _rank_value_from_contract(contract)
-        if rank is None:
-            continue
-        day = str(recommendation.get("trading_date") or recommendation.get("effective_trade_date") or "")[:10]
-        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or contract.get("ticker") or ""
-        label = f"{day}:{ticker}:{recommendation_id}"
-        ranks_by_day.setdefault(day, []).append((rank, label))
-    for day, rows in sorted(ranks_by_day.items()):
-        seen: Dict[int, List[str]] = {}
-        for rank, label in rows:
-            seen.setdefault(rank, []).append(label)
-        for rank, labels in sorted(seen.items()):
-            if len(labels) > 1:
-                errors.append(
-                    "pm_full_market_rank_duplicate:"
-                    f"{day}:rank={rank}:recommendations={','.join(labels)}"
-                )
-        rank_one = seen.get(1, [])
-        if len(rank_one) > 1:
-            errors.append(
-                "pm_full_market_rank_one_not_unique:"
-                f"{day}:recommendations={','.join(rank_one)}"
-            )
-
-
-def _rank_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
-    deployment = _dict(contract.get("capital_deployment"))
-    if not deployment:
-        return True
-    original = _int(deployment.get("original_target_lots"))
-    deployed = _int(deployment.get("deployed_target_lots"))
-    target = _int(contract.get("target_lots"))
-    current = _int(contract.get("current_lots"))
-    selected = bool(deployment.get("selected_for_capital_deployment"))
-    if original != deployed:
-        return False
-    if target != current:
-        return False
-    if selected and target:
-        return False
-    return True
-
-
-def _protective_hold_exit_learning_present(contract: Dict[str, Any]) -> bool:
-    return contract_consumes_hold_exit_pm_learning(contract)
-
-
-def _hold_exit_learning_has_no_contract_effect(contract: Dict[str, Any]) -> bool:
-    current_lots = _int(contract.get("current_lots"))
-    if not current_lots:
-        return False
-    return not contract_reduces_or_exits_position(contract)
-
-
-def _hold_exit_learning_has_contract_explanation(contract: Dict[str, Any]) -> bool:
-    return has_valid_hold_exit_no_change_explanation(contract)
-
-
-def _learning_no_change_has_contract_explanation(contract: Dict[str, Any]) -> bool:
-    return has_valid_generic_no_change_explanation(contract)
 
 
 def _find_forbidden_diagnostic_fields(value: Any, *, prefix: str = "") -> List[str]:
@@ -1977,53 +1537,6 @@ def _audit_action_evidence_trigger_consistency(
                         if error_type not in seen_error_types:
                             errors.append(f"{error_type}:{label}:{artifact_name}:{path}")
                             seen_error_types.add(error_type)
-
-
-def _contract_has_conditional_trigger_authority(contract: Dict[str, Any]) -> bool:
-    return is_conditional_monitor_contract(contract)
-
-
-def _active_opportunity_has_explicit_rejection(
-    active_audit: Dict[str, Any],
-    contract: Dict[str, Any],
-) -> bool:
-    return has_active_opportunity_rejection(active_audit, contract)
-
-
-def _audit_active_opportunity_routing(
-    recommendations: Dict[str, Dict[str, Any]],
-    errors: List[str],
-) -> None:
-    for recommendation_id, recommendation in recommendations.items():
-        if _source_type(recommendation) != STRATEGY_SOURCE_TYPE:
-            continue
-        snapshot = _dict(recommendation.get("signal_snapshot"))
-        active_audit = _dict(snapshot.get("active_opportunity_audit"))
-        if not active_audit:
-            continue
-        opportunity = _dict(active_audit.get("opportunity"))
-        contract = _contract_from_recommendation(recommendation)
-        ticker = recommendation.get("underlying_code") or recommendation.get("ticker") or ""
-        label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
-        conditional_count = _int(opportunity.get("conditional_monitor_candidate_count"))
-        high_quality_present = bool(opportunity.get("high_quality_present"))
-        final_action = _lower(contract.get("final_action"))
-        if conditional_count > 0:
-            if _contract_has_conditional_trigger_authority(contract):
-                continue
-            if _active_opportunity_has_explicit_rejection(active_audit, contract):
-                continue
-            errors.append(f"conditional_monitor_candidate_silent_wait:{label}:count={conditional_count}")
-            continue
-        if high_quality_present and final_action in {"", "wait", "hold"}:
-            if _active_opportunity_has_explicit_rejection(active_audit, contract):
-                continue
-            errors.append(f"high_quality_opportunity_silent_wait:{label}:final_action={final_action or 'missing'}")
-
-
-def _contract_mentions_preference(contract: Dict[str, Any], preference_names: Iterable[str]) -> bool:
-    haystack = json.dumps(contract, ensure_ascii=False, sort_keys=True, default=str).lower()
-    return any(name and name.lower() in haystack for name in preference_names)
 
 
 def _effective_reward_source(payload: Dict[str, Any]) -> str:
@@ -2341,71 +1854,6 @@ def _audit_adaptive_policy_states(policy_rows: List[Dict[str, Any]], errors: Lis
             errors.append(f"adaptive_policy_fast_candidate_not_probe_only:{label}:{action or 'missing'}")
 
 
-def _audit_recommendation_preference_landing(
-    recommendations: Dict[str, Dict[str, Any]],
-    action_values: List[Dict[str, Any]],
-    transactions: List[Dict[str, Any]],
-    errors: List[str],
-    warnings: List[str],
-) -> None:
-    preference_sample_dates: Dict[str, List[str]] = {}
-    for row in action_values:
-        preference = _lower(_dict(row.get("payload")).get("action_preference"))
-        if preference not in ACTION_PREFERENCE_VALUES:
-            continue
-        preference_sample_dates.setdefault(preference, []).append(_date10(row.get("last_sample_date")))
-    preference_names = set(preference_sample_dates)
-    if not preference_names:
-        return
-    unlanded_preferences: List[str] = []
-    deferred_preferences: List[str] = []
-    for preference, sample_dates in preference_sample_dates.items():
-        terms = ACTION_PREFERENCE_LANDING_TERMS.get(preference, {preference})
-        downstream_seen = False
-        landed = False
-        for recommendation in recommendations.values():
-            recommendation_date = _date10(recommendation.get("effective_trade_date") or recommendation.get("trading_date"))
-            if not any(sample_date and recommendation_date and recommendation_date > sample_date for sample_date in sample_dates):
-                continue
-            contract = _contract_from_recommendation(recommendation)
-            downstream_seen = downstream_seen or bool(contract)
-            if contract and _contract_mentions_preference(contract, terms):
-                landed = True
-                break
-        if not landed:
-            downstream_seen = downstream_seen or any(
-                any(
-                    sample_date
-                    and _date10(transaction.get("trading_date"))
-                    and _date10(transaction.get("trading_date")) > sample_date
-                    for sample_date in sample_dates
-                )
-                for transaction in transactions
-            )
-        if landed:
-            continue
-        if downstream_seen:
-            unlanded_preferences.append(preference)
-        else:
-            deferred_preferences.append(preference)
-
-    if unlanded_preferences:
-        known_dates = sorted({date for dates in preference_sample_dates.values() for date in dates if date})
-        message = (
-            "action_preferences_exist_but_no_final_action_contract_mentions_them:"
-            f"preferences={sorted(unlanded_preferences)}:"
-            f"sample_window={known_dates[0] if known_dates else 'missing'}..{known_dates[-1] if known_dates else 'missing'}"
-        )
-        errors.append(message)
-    elif deferred_preferences:
-        known_dates = sorted({date for dates in preference_sample_dates.values() for date in dates if date})
-        warnings.append(
-            "action_preferences_exist_but_no_downstream_final_action_contract_yet:"
-            f"preferences={sorted(deferred_preferences)}:"
-            f"sample_window={known_dates[0] if known_dates else 'missing'}..{known_dates[-1] if known_dates else 'missing'}"
-        )
-
-
 def _audit_trading_day_phase_completion(
     phases: List[Dict[str, Any]],
     recommendations: Dict[str, Dict[str, Any]],
@@ -2566,17 +2014,14 @@ def audit_system_invariants(
     )
     _audit_opportunity_ranking_boundary(recommendations, errors, transactions)
     _audit_pm_learning_transport_and_contract_effect(recommendations, action_values, errors, warnings)
-    _audit_daily_full_market_rank_uniqueness(recommendations, errors)
     _audit_unified_field_artifacts(recommendations, errors)
     _audit_action_evidence_trigger_consistency(recommendations, errors)
-    _audit_active_opportunity_routing(recommendations, errors)
     _audit_release_block_diagnostics(recommendations, errors)
     _audit_transaction_final_contract_consistency(transactions, recommendations, errors, warnings)
     _audit_open_transactions(transactions, recommendations, errors, warnings)
     _audit_intraday_triggers(transactions, recommendations, intraday_decisions, errors)
     _audit_action_values(action_values, errors, warnings)
     _audit_adaptive_policy_states(adaptive_policy_states, errors, warnings)
-    _audit_recommendation_preference_landing(recommendations, action_values, transactions, errors, warnings)
 
     counts = {
         "recommendations": len(recommendations),
@@ -2593,7 +2038,7 @@ def audit_system_invariants(
         "system_invariants_only; no strategy profitability judgment; "
         "does_not_create_trade_authority_or_modify_lots"
     )
-    metadata["pm_learning_ranking_audit_boundaries"] = list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES)
+    metadata["protocol_audit_boundaries"] = list(PROTOCOL_AUDIT_BOUNDARIES)
     error_categories = categorize_invariant_errors(errors)
     metadata["error_categories"] = error_categories
     metadata["failed_categories"] = sorted(error_categories)

@@ -285,7 +285,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 "contract_coverage",
                 "unified_field_semantics",
                 "single_trade_exit",
-                "pm_opportunity_routing",
+                "evidence_trigger_boundary",
                 "trader_trigger_parity",
                 "learning_landing",
                 "capital_boundary",
@@ -314,26 +314,18 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             "single_trade_exit",
         )
 
-    def test_acceptance_maps_pm_routing_invariants_to_pm_opportunity_routing(self):
-        self.assertEqual(
-            INVARIANT_TO_CHECK["conditional_monitor_candidate_silent_wait"],
-            "pm_opportunity_routing",
-        )
-        self.assertEqual(
-            INVARIANT_TO_CHECK["high_quality_opportunity_silent_wait"],
-            "pm_opportunity_routing",
-        )
+    def test_acceptance_maps_evidence_trigger_invariants_to_boundary_check(self):
         self.assertEqual(
             INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"],
-            "pm_opportunity_routing",
+            "evidence_trigger_boundary",
         )
         self.assertEqual(
             INVARIANT_TO_CHECK["setup_quality_ok_used_as_current_trigger"],
-            "pm_opportunity_routing",
+            "evidence_trigger_boundary",
         )
         self.assertEqual(
             INVARIANT_TO_CHECK["opportunity_ranking_field_top_level_trade_authority"],
-            "pm_opportunity_routing",
+            "evidence_trigger_boundary",
         )
 
     def test_acceptance_invariant_mapping_reuses_system_audit_categories(self):
@@ -343,7 +335,10 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             for prefix in prefixes:
                 self.assertIn(category, INVARIANT_TO_CHECKS[prefix])
         self.assertEqual(INVARIANT_TO_CHECK["unified_field_artifact_forbidden_field"], "unified_field_semantics")
-        self.assertEqual(INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"], "pm_opportunity_routing")
+        self.assertEqual(
+            INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"],
+            "evidence_trigger_boundary",
+        )
         self.assertEqual(
             INVARIANT_TO_CHECK["strategy_recommendation_pm_step6_generation_check_missing"],
             "single_trade_exit",
@@ -359,19 +354,15 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
 
     def test_acceptance_maps_preference_landing_failure_to_learning_landing(self):
         self.assertEqual(
-            INVARIANT_TO_CHECK["action_preferences_exist_but_no_final_action_contract_mentions_them"],
-            "learning_landing",
-        )
-        self.assertEqual(
             INVARIANT_TO_CHECK["opportunity_learning_component_used_as_trade_intent"],
             "learning_landing",
         )
         self.assertEqual(
-            INVARIANT_TO_CHECK["pm_rank_changed_without_contract_effect"],
+            INVARIANT_TO_CHECK["pm_action_value_missing_canonical_fields"],
             "learning_landing",
         )
         self.assertEqual(
-            INVARIANT_TO_CHECK["pm_hold_exit_learning_without_contract_effect_or_explanation"],
+            INVARIANT_TO_CHECK["pm_consumed_non_pm_learning_action_value"],
             "learning_landing",
         )
 
@@ -421,15 +412,15 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             )
             self.assertIn(
                 "recommendation_top_level_action_lots_must_match_final_contract",
-                report.metadata["pm_learning_ranking_audit_boundaries"],
+                report.metadata["protocol_audit_boundaries"],
             )
             self.assertIn(
-                "learning_components_only_inside_opportunity_score_components",
-                report.checks["learning_landing"].metadata["pm_learning_ranking_audit_boundaries"],
+                "learning_components_remain_diagnostic_not_trade_authority",
+                report.checks["learning_landing"].metadata["protocol_audit_boundaries"],
             )
             self.assertIn(
                 "final_action_contract_remains_single_trade_truth",
-                report.checks["single_trade_exit"].metadata["pm_learning_ranking_audit_boundaries"],
+                report.checks["single_trade_exit"].metadata["protocol_audit_boundaries"],
             )
         finally:
             Path(db_path).unlink(missing_ok=True)
@@ -514,94 +505,6 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertIn("data_time_boundary", report.failed_checks)
             self.assertTrue(
                 any(error.startswith("data_time_boundary:incomplete_trading_day_phase:2025-03-10:") for error in report.errors),
-                report.to_dict(),
-            )
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_fails_pm_conditional_monitor_silent_wait_before_backtest(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        now = datetime.utcnow().isoformat()
-        payload = {
-            "final_action_contract": {
-                "contract_type": "strategy",
-                "final_action": "wait",
-                "authority_type": "watchlist_only",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "reason_codes": ["pm_watch_for_trigger_probe_cap"],
-                "single_source_of_trade_truth": True,
-                "candidate_sources_do_not_bypass_contract": True,
-            },
-            "active_opportunity_audit": {
-                "decision": {
-                    "action": "hold",
-                    "lots": 0,
-                    "lands_position": False,
-                    "authority_type": "watchlist_only",
-                    "reason": "pm_watch_for_trigger_probe_cap",
-                },
-                "opportunity": {
-                    "conditional_monitor_candidate_count": 1,
-                    "high_quality_present": True,
-                },
-                "conditional_monitor_candidates": [
-                    {
-                        "analyst": "technical",
-                        "signal": "Bearish",
-                        "opportunity_state": "watch_for_trigger",
-                        "setup_quality_ok": True,
-                        "trigger_valid": False,
-                        "invalidation_present": True,
-                        "entry_trigger": "wait for post-open break below support",
-                        "conditional_monitor_candidate": True,
-                    }
-                ],
-            },
-        }
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute(
-                """
-                INSERT INTO futures_recommendation(
-                    id, config_id, trading_date, action, status, audit_payload, signal_snapshot, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("rec-pm-routing", "cfg", "2025-03-10", "hold", "skipped", _dumps(payload), _dumps(payload), now),
-            )
-            conn.executemany(
-                "INSERT INTO trading_day_phase VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    ("p1", "cfg", "2025-03-10", "phase1", "completed", now, now, ""),
-                    ("p2", "cfg", "2025-03-10", "phase2", "completed", now, now, ""),
-                    ("p3", "cfg", "2025-03-10", "phase3", "completed", now, now, ""),
-                    ("p4", "cfg", "2025-03-10", "phase4", "completed", now, now, ""),
-                ],
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    check_llm_auth=False,
-                )
-            self.assertFalse(report.ok)
-            self.assertIn("pm_opportunity_routing", report.failed_checks)
-            self.assertTrue(
-                any(
-                    error.startswith(
-                        "pm_opportunity_routing:conditional_monitor_candidate_silent_wait:2025-03-10:"
-                    )
-                    for error in report.errors
-                ),
                 report.to_dict(),
             )
         finally:
@@ -740,44 +643,10 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         finally:
             Path(db_path).unlink(missing_ok=True)
 
-    def test_acceptance_fails_weekend_only_backtest_window_before_backtest_loop(self):
+    def test_acceptance_passes_static_backtest_window_without_market_data_read(self):
         db_path = self._make_db(with_negative_exit_weak_prior=False)
         try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.return_value = []
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    start_date="2025-03-01",
-                    end_date="2025-03-02",
-                    check_llm_auth=False,
-                )
-
-            self.assertFalse(report.ok)
-            self.assertIn("data_time_boundary", report.failed_checks)
-            self.assertTrue(
-                any("no_trading_days_in_backtest_window:2025-03-01:2025-03-02" in error for error in report.errors),
-                report.to_dict(),
-            )
-            self.assertFalse(report.metadata["strategy_profitability_checked"])
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_passes_backtest_window_with_resolved_trading_day(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
-                    self._market_quote_side_effect()
-                )
+            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
                 report = run_pre_backtest_acceptance(
                     config_path=SRC_ROOT / "config" / "dev.yaml",
                     db_path=db_path,
@@ -792,144 +661,8 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
 
             self.assertTrue(report.ok, report.to_dict())
             data_check = report.checks["data_time_boundary"]
-            self.assertEqual(data_check.metadata["trading_day_count"], 1)
-            self.assertEqual(data_check.metadata["first_trading_day"], "2025-03-03")
-            self.assertEqual(data_check.metadata["last_trading_day"], "2025-03-03")
-            self.assertTrue(data_check.metadata["active_universe_market_data_checked"])
-            self.assertEqual(data_check.metadata["active_universe_ticker_count"], 15)
-            self.assertEqual(data_check.metadata["ticker_market_coverage"]["BU"]["missing_settle_price_days"], 0)
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_fails_when_any_active_ticker_lacks_market_rows(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
-                    self._market_quote_side_effect({"C": "missing"})
-                )
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    start_date="2025-03-01",
-                    end_date="2025-03-03",
-                    check_llm_auth=False,
-                )
-
-            self.assertFalse(report.ok)
-            self.assertIn("data_time_boundary", report.failed_checks)
-            self.assertTrue(
-                any(error == "data_time_boundary:market_data_missing_for_ticker:C:2025-03-01:2025-03-03" for error in report.errors),
-                report.to_dict(),
-            )
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_fails_when_any_active_ticker_lacks_settle_price(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
-                    self._market_quote_side_effect({"CF": "missing_settle"})
-                )
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    start_date="2025-03-01",
-                    end_date="2025-03-03",
-                    check_llm_auth=False,
-                )
-
-            self.assertFalse(report.ok)
-            self.assertIn("data_time_boundary", report.failed_checks)
-            self.assertTrue(
-                any(
-                    error
-                    == "data_time_boundary:market_data_missing_settle_price:CF:count=1:first=2025-03-03:last=2025-03-03"
-                    for error in report.errors
-                ),
-                report.to_dict(),
-            )
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_fails_when_any_active_ticker_lacks_contract_mapping(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
-                    self._market_quote_side_effect({"EB": "missing_contract"})
-                )
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    start_date="2025-03-01",
-                    end_date="2025-03-03",
-                    check_llm_auth=False,
-                )
-
-            self.assertFalse(report.ok)
-            self.assertIn("data_time_boundary", report.failed_checks)
-            self.assertTrue(
-                any(
-                    error
-                    == "data_time_boundary:market_data_missing_contract_mapping:EB:count=1:first=2025-03-03:last=2025-03-03"
-                    for error in report.errors
-                ),
-                report.to_dict(),
-            )
-        finally:
-            Path(db_path).unlink(missing_ok=True)
-
-    def test_acceptance_fails_when_any_active_ticker_lacks_open_or_close_price(self):
-        db_path = self._make_db(with_negative_exit_weak_prior=False)
-        try:
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False), patch(
-                "tools.agent_tools.control.pg_pre_backtest_acceptance.Router"
-            ) as router_cls:
-                router_cls.return_value.api.get_futures_daily_candles_optimized.side_effect = (
-                    self._market_quote_side_effect({"RB": "missing_open"})
-                )
-                report = run_pre_backtest_acceptance(
-                    config_path=SRC_ROOT / "config" / "dev.yaml",
-                    db_path=db_path,
-                    exp_name="agentquant-test",
-                    repo_root=PROJECT_ROOT,
-                    deepfund_python=Path(sys.executable),
-                    assets_dir=SRC_ROOT / "assets",
-                    start_date="2025-03-01",
-                    end_date="2025-03-03",
-                    check_llm_auth=False,
-                )
-
-            self.assertFalse(report.ok)
-            self.assertIn("data_time_boundary", report.failed_checks)
-            self.assertTrue(
-                any(
-                    error
-                    == "data_time_boundary:market_data_missing_open_or_close_price:RB:count=1:first=2025-03-03:last=2025-03-03"
-                    for error in report.errors
-                ),
-                report.to_dict(),
-            )
+            self.assertFalse(data_check.metadata["real_market_data_read"])
+            self.assertEqual(data_check.metadata["ticker_count"], 15)
         finally:
             Path(db_path).unlink(missing_ok=True)
 

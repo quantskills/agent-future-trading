@@ -1003,7 +1003,11 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("sqlite_missing", "\n".join(report.get("warnings") or []))
         metadata = report.get("metadata") or {}
         self.assertIn("mechanism_effectiveness_only", metadata.get("audit_boundary", ""))
-        self.assertIn("action_value_to_pm", metadata.get("checked_chain") or [])
+        checked_chain = metadata.get("checked_chain") or []
+        self.assertIn("signal_collector_contract_to_pm", checked_chain)
+        self.assertIn("pm_step6_generation_check", checked_chain)
+        self.assertIn("pm_contract_self_check", checked_chain)
+        self.assertNotIn("action_value_to_pm", checked_chain)
         self.assertNotIn("final_action", report)
         self.assertNotIn("target_lots", report)
         self.assertNotIn("lots_delta", report)

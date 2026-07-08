@@ -12,13 +12,12 @@ than another bug-discovery pass?
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import yaml
 
-from apis.router import APISource, Router
 from tools.agent_tools.control.pg_agent_cards import build_default_agent_cards, validate_agent_capability
 from tools.agent_tools.control.pg_contract_coverage_audit import audit_contract_coverage
 from tools.agent_tools.control.pg_db_schema_contract import audit_db_schema_contract
@@ -26,7 +25,7 @@ from tools.agent_tools.control.pg_preflight import run_preflight_checks
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.agent_tools.control.pg_system_invariants import (
     ERROR_CATEGORY_PREFIXES,
-    PM_LEARNING_RANKING_AUDIT_BOUNDARIES,
+    PROTOCOL_AUDIT_BOUNDARIES,
     audit_system_invariants,
     categorize_invariant_errors,
 )
@@ -53,7 +52,7 @@ ACCEPTANCE_CHECKS = (
     "contract_coverage",
     "unified_field_semantics",
     "single_trade_exit",
-    "pm_opportunity_routing",
+    "evidence_trigger_boundary",
     "trader_trigger_parity",
     "learning_landing",
     "capital_boundary",
@@ -62,7 +61,7 @@ ACCEPTANCE_CHECKS = (
 
 _INVARIANT_CHECK_PRIORITY = (
     "single_trade_exit",
-    "pm_opportunity_routing",
+    "evidence_trigger_boundary",
     "trader_trigger_parity",
     "learning_landing",
     "data_time_boundary",
@@ -332,115 +331,6 @@ def _parse_window_date(value: str, field_name: str, errors: List[str]) -> Option
         return None
 
 
-def _quote_day(quote: Any) -> Optional[str]:
-    value = getattr(quote, "trade_date", None)
-    if value is None:
-        return None
-    text = str(value)[:10]
-    return text if text else None
-
-
-def _positive_quote_price(quote: Any, field_name: str) -> bool:
-    value = getattr(quote, field_name, None)
-    try:
-        return value is not None and float(value) > 0
-    except (TypeError, ValueError):
-        return False
-
-
-def _has_contract_mapping(quote: Any) -> bool:
-    return bool(str(getattr(quote, "ticker", "") or "").strip())
-
-
-def _coverage_error(
-    code: str,
-    ticker: str,
-    days: List[str],
-    *,
-    extra: Optional[str] = None,
-) -> str:
-    if not days:
-        return f"{code}:{ticker}:count=0"
-    suffix = f"count={len(days)}:first={days[0]}:last={days[-1]}"
-    if extra:
-        suffix = f"{suffix}:{extra}"
-    return f"{code}:{ticker}:{suffix}"
-
-
-def _market_data_universe_coverage_check(
-    *,
-    router: Router,
-    tickers: List[str],
-    parsed_start: datetime,
-    parsed_end: datetime,
-    start_date: str,
-    end_date: str,
-    expected_trade_days: List[str],
-    seed_quotes: Optional[Dict[str, List[Any]]] = None,
-) -> tuple[List[str], Dict[str, Any]]:
-    errors: List[str] = []
-    coverage: Dict[str, Any] = {}
-    expected_day_set = set(expected_trade_days)
-    seed_quotes = dict(seed_quotes or {})
-
-    for raw_ticker in tickers:
-        ticker = str(raw_ticker or "").strip()
-        if not ticker:
-            errors.append("blank_ticker_in_backtest_universe")
-            continue
-        try:
-            quotes = seed_quotes.get(ticker)
-            if quotes is None:
-                quotes = router.api.get_futures_daily_candles_optimized(
-                    underlying_code=ticker,
-                    is_main=1,
-                    start_date=parsed_start,
-                    end_date=parsed_end + timedelta(days=1),
-                )
-            quote_by_day: Dict[str, Any] = {}
-            for quote in quotes or []:
-                day = _quote_day(quote)
-                if not day or day < start_date or day > end_date:
-                    continue
-                quote_by_day.setdefault(day, quote)
-
-            available_days = sorted(quote_by_day)
-            missing_days = sorted(expected_day_set - set(available_days))
-            missing_settle_days = sorted(
-                day for day, quote in quote_by_day.items() if not _positive_quote_price(quote, "settle_price")
-            )
-            missing_open_close_days = sorted(
-                day
-                for day, quote in quote_by_day.items()
-                if not _positive_quote_price(quote, "open_price") or not _positive_quote_price(quote, "close_price")
-            )
-            missing_contract_days = sorted(day for day, quote in quote_by_day.items() if not _has_contract_mapping(quote))
-
-            coverage[ticker] = {
-                "rows": len(available_days),
-                "expected_trading_days": len(expected_trade_days),
-                "missing_trading_days": len(missing_days),
-                "missing_settle_price_days": len(missing_settle_days),
-                "missing_open_or_close_days": len(missing_open_close_days),
-                "missing_contract_mapping_days": len(missing_contract_days),
-            }
-            if not available_days:
-                errors.append(f"market_data_missing_for_ticker:{ticker}:{start_date}:{end_date}")
-                continue
-            if missing_days:
-                errors.append(_coverage_error("market_data_missing_trading_days", ticker, missing_days))
-            if missing_settle_days:
-                errors.append(_coverage_error("market_data_missing_settle_price", ticker, missing_settle_days))
-            if missing_open_close_days:
-                errors.append(_coverage_error("market_data_missing_open_or_close_price", ticker, missing_open_close_days))
-            if missing_contract_days:
-                errors.append(_coverage_error("market_data_missing_contract_mapping", ticker, missing_contract_days))
-        except Exception as exc:
-            errors.append(f"market_data_coverage_check_failed:{ticker}:{type(exc).__name__}:{exc}")
-
-    return errors, coverage
-
-
 def _trading_window_check(cfg: Dict[str, Any], start_date: Optional[str], end_date: Optional[str]) -> AcceptanceCheck:
     metadata: Dict[str, Any] = {
         "covered_by": [
@@ -448,11 +338,12 @@ def _trading_window_check(cfg: Dict[str, Any], start_date: Optional[str], end_da
             "system_invariant_learning_dates",
             "runtime_data_cutoff_contracts",
             "trading_day_window_resolution",
-            "active_universe_market_data_coverage",
         ],
         "strategy_profitability_checked": False,
         "date_window_checked": bool(start_date or end_date),
         "fundamental_news_daily_coverage_hard_required": False,
+        "real_market_data_read": False,
+        "boundary": "static_date_and_config_check_only_no_market_data_read",
     }
     errors: List[str] = []
 
@@ -480,72 +371,14 @@ def _trading_window_check(cfg: Dict[str, Any], start_date: Optional[str], end_da
     if not tickers:
         return _fail_check("data_time_boundary", ["no_tickers_for_trading_day_check"], metadata=metadata)
 
-    anchor_ticker = str(tickers[0])
     market_type = str(cfg.get("market_type") or "china_futures")
-    metadata.update({"anchor_ticker": anchor_ticker, "market_type": market_type})
+    metadata.update({"ticker_count": len(tickers), "market_type": market_type})
     if market_type != "china_futures":
         return _fail_check(
             "data_time_boundary",
             [f"unsupported_market_type_for_trading_day_check:{market_type}"],
             metadata=metadata,
         )
-
-    try:
-        router = Router(source=APISource.PANDAAI, market_type=market_type)
-        quotes = list(
-            router.api.get_futures_daily_candles_optimized(
-                underlying_code=anchor_ticker,
-                is_main=1,
-                start_date=parsed_start,
-                end_date=parsed_end + timedelta(days=1),
-            )
-            or []
-        )
-    except Exception as exc:
-        return _fail_check(
-            "data_time_boundary",
-            [f"trading_day_window_check_failed:{type(exc).__name__}:{exc}"],
-            metadata=metadata,
-        )
-
-    trade_days = sorted({day for quote in (quotes or []) if (day := _quote_day(quote))})
-    trade_days = [day for day in trade_days if start_date <= day <= end_date]
-    metadata.update(
-        {
-            "trading_day_count": len(trade_days),
-            "first_trading_day": trade_days[0] if trade_days else None,
-            "last_trading_day": trade_days[-1] if trade_days else None,
-        }
-    )
-    if not trade_days:
-        return _fail_check(
-            "data_time_boundary",
-            [f"no_trading_days_in_backtest_window:{start_date}:{end_date}:anchor={anchor_ticker}"],
-            metadata=metadata,
-        )
-
-    coverage_errors, ticker_coverage = _market_data_universe_coverage_check(
-        router=router,
-        tickers=tickers,
-        parsed_start=parsed_start,
-        parsed_end=parsed_end,
-        start_date=start_date,
-        end_date=end_date,
-        expected_trade_days=trade_days,
-        seed_quotes={anchor_ticker: quotes},
-    )
-    metadata.update(
-        {
-            "active_universe_market_data_checked": True,
-            "active_universe_ticker_count": len(tickers),
-            "active_universe_market_data_boundary": (
-                "daily_main_contract_open_close_settle_price_and_contract_mapping_required"
-            ),
-            "ticker_market_coverage": ticker_coverage,
-        }
-    )
-    if coverage_errors:
-        return _fail_check("data_time_boundary", coverage_errors, metadata=metadata)
 
     return _pass_check("data_time_boundary", metadata=metadata)
 
@@ -684,7 +517,7 @@ def _checks_from_invariants(
     for name in (
         "unified_field_semantics",
         "single_trade_exit",
-        "pm_opportunity_routing",
+        "evidence_trigger_boundary",
         "trader_trigger_parity",
         "learning_landing",
         "audit_explainability",
@@ -696,8 +529,8 @@ def _checks_from_invariants(
             "strategy_profitability_checked": False,
             "system_invariant_failed_categories": list(invariant_report.metadata.get("failed_categories") or []),
         }
-        if name in {"pm_opportunity_routing", "learning_landing", "single_trade_exit"}:
-            metadata["pm_learning_ranking_audit_boundaries"] = list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES)
+        if name in {"evidence_trigger_boundary", "learning_landing", "single_trade_exit"}:
+            metadata["protocol_audit_boundaries"] = list(PROTOCOL_AUDIT_BOUNDARIES)
         if name == "unified_field_semantics":
             metadata["source_of_truth"] = "docs/unified_field_semantics.md"
             metadata["unified_field_semantics_audit"] = dict(
@@ -843,7 +676,7 @@ def run_pre_backtest_acceptance(
         "config_path": str(config_path),
         "db_path": str(db_path),
         "acceptance_checks": list(ACCEPTANCE_CHECKS),
-        "pm_learning_ranking_audit_boundaries": list(PM_LEARNING_RANKING_AUDIT_BOUNDARIES),
+        "protocol_audit_boundaries": list(PROTOCOL_AUDIT_BOUNDARIES),
         "strategy_profitability_checked": False,
         "decision": "ready_for_strategy_backtest" if ok else "not_ready_for_backtest",
         "boundary": "system_readiness_only_not_strategy_profitability",
