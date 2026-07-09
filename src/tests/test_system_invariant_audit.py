@@ -283,6 +283,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     setup_type TEXT NOT NULL DEFAULT '*',
                     data_combo TEXT NOT NULL DEFAULT '*',
                     action_name TEXT NOT NULL,
+                    canonical_action_family TEXT DEFAULT '',
                     sample_count INTEGER DEFAULT 0,
                     reward_sum REAL DEFAULT 0,
                     reward_mean REAL DEFAULT 0,
@@ -427,6 +428,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "alpha_setup_action_values": [
                     {
                         "action_preference": "positive_candidate_open",
+                        "canonical_action_family": "open_add_new_risk",
                         "reward_sum": 1200.0,
                         "reward_mean": 1200.0,
                         "win_rate": 1.0,
@@ -509,8 +511,8 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 INSERT INTO alpha_setup_action_value(
                     id, config_id, scope_key, ticker, side, setup_type, action_name, sample_count,
-                    reward_sum, action_preference, last_sample_date, created_at, updated_at, active, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    canonical_action_family, reward_sum, action_preference, last_sample_date, created_at, updated_at, active, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "av1",
@@ -521,13 +523,21 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "trend_breakout",
                     "open",
                     1,
+                    "open_add_new_risk",
                     1200.0,
                     "positive_candidate_open",
                     "2025-03-03",
                     datetime.utcnow().isoformat(),
                     datetime.utcnow().isoformat(),
                     1,
-                    _dumps({"action_preference": "positive_candidate_open", "amplification_scope_quality": "exact_real_state", "reward_source": "trade_episode"}),
+                    _dumps({
+                        "action_preference": "positive_candidate_open",
+                        "canonical_action_family": "open_add_new_risk",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "amplification_scope_quality": "exact_real_state",
+                        "reward_source": "trade_episode",
+                    }),
                 ),
             )
             conn.commit()
@@ -586,6 +596,51 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         self.assertIn(
             "recommendation_top_level_action_lots_must_match_final_contract",
             report.metadata["protocol_audit_boundaries"],
+        )
+
+    def test_system_invariant_audit_accepts_add_or_open_positive_open_family(self):
+        db_path = self._make_db()
+        self._insert_good_open(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE alpha_setup_action_value
+                SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
+                    canonical_action_family=?, action_value_lane=?, learning_lane=?,
+                    action_preference=?, last_sample_date=?, payload_json=?
+                WHERE id='av1'
+                """,
+                (
+                    "M",
+                    "long",
+                    "M|long|news_event_setup",
+                    "news_event_setup",
+                    "add_or_open",
+                    "open_add_new_risk",
+                    "open",
+                    "open",
+                    "positive_candidate_open",
+                    "2025-03-25",
+                    _dumps({
+                        "action_preference": "positive_candidate_open",
+                        "canonical_action_family": "open_add_new_risk",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "amplification_scope_quality": "exact_real_state",
+                        "reward_source": "trade_episode",
+                    }),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertFalse(
+            any(error.startswith("action_value_open_preference_on_non_open_lane") for error in report.errors),
+            report.to_dict(),
         )
 
     def test_system_invariant_audit_fails_strategy_recommendation_missing_snapshot_final_contract(self):
@@ -1039,6 +1094,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "ticker": "SR",
             "side": "long",
             "action_name": "observe",
+            "canonical_action_family": "observe",
             "action_preference": "negative_hold_revalidate",
             "action_value_lane": "hold",
             "learning_lane": "hold",
@@ -1111,10 +1167,10 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 INSERT INTO alpha_setup_action_value(
                     id, config_id, scope_key, ticker, side, action_name, sample_count,
-                    reward_sum, reward_mean, win_rate, confidence_score, action_preference,
+                    canonical_action_family, reward_sum, reward_mean, win_rate, confidence_score, action_preference,
                     reward_source, evidence_scope, action_value_lane, consumer_scope,
                     learning_lane, memory_side_role, last_sample_date, created_at, updated_at, active, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "sr-hold-av",
@@ -1124,6 +1180,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "long",
                     "observe",
                     1,
+                    "observe",
                     -100.0,
                     -100.0,
                     0.0,
@@ -1139,7 +1196,14 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     now,
                     now,
                     1,
-                    "{}",
+                    _dumps({
+                        "canonical_action_family": "observe",
+                        "action_value_lane": "hold",
+                        "learning_lane": "hold",
+                        "action_preference": "negative_hold_revalidate",
+                        "reward_source": "real_trade",
+                        "evidence_scope": "exact_real_state",
+                    }),
                 ),
             )
             conn.commit()
@@ -1186,6 +1250,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "ticker": "M",
                         "side": "long",
                         "action_name": "exit",
+                        "canonical_action_family": "reduce_exit",
                         "action_preference": "tail_loss_protect",
                         "reward_source": "real_trade",
                         "evidence_scope": "exact_real_state",
@@ -1239,7 +1304,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 UPDATE alpha_setup_action_value
                 SET scope_key=?, ticker=?, side=?, setup_type=?, action_name=?, reward_sum=?,
                     reward_mean=?, win_rate=?, action_preference=?, reward_source=?, evidence_scope=?,
-                    action_value_lane=?, consumer_scope=?, learning_lane=?, last_sample_date=?, updated_at=?,
+                    canonical_action_family=?, action_value_lane=?, consumer_scope=?, learning_lane=?, last_sample_date=?, updated_at=?,
                     payload_json=?
                 WHERE id='av1'
                 """,
@@ -1255,6 +1320,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "tail_loss_protect",
                     "real_trade",
                     "exact_real_state",
+                    "reduce_exit",
                     "exit",
                     "pm_learning",
                     "exit",
@@ -1263,9 +1329,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     _dumps(
                         {
                             "action_preference": "tail_loss_protect",
+                            "canonical_action_family": "reduce_exit",
                             "reward_source": "real_trade",
                             "evidence_scope": "exact_real_state",
                             "action_value_lane": "exit",
+                            "learning_lane": "exit",
                         }
                     ),
                 ),
@@ -2798,11 +2866,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertIn(
-            "action_value_missing_action_preference:RB:short:trend_breakout:open:2025-03-03:missing_action_preference",
+            "action_value_unknown_action_preference:RB:short:trend_breakout:open:2025-03-03:observe_or_probe",
             report.errors,
         )
         self.assertIn(
-            "positive_open_action_value_not_open_preference:RB:short:trend_breakout:open:2025-03-03:missing_action_preference",
+            "positive_open_action_value_not_open_preference:RB:short:trend_breakout:open:2025-03-03:observe_or_probe",
             report.errors,
         )
 
@@ -2910,7 +2978,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
+                    canonical_action_family=?, reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
@@ -2919,11 +2987,15 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "BU|short|flat|choppy|fundamental_timing_setup",
                     "fundamental_timing_setup",
                     "open",
+                    "open_add_new_risk",
                     85.0,
-                    "weak_prior",
+                    "",
                     "2025-03-17",
                     _dumps(
                         {
+                            "canonical_action_family": "open_add_new_risk",
+                            "action_value_lane": "open",
+                            "learning_lane": "open",
                             "prior_role": "weak_prior_not_action_preference",
                             "amplification_scope_quality": "similar_sql_prior",
                             "reward_source": "similar_sql_prior",
@@ -2964,12 +3036,14 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         "alpha_setup_action_values": [
                             {
                                 "action_preference": "tail_loss_protect",
+                                "canonical_action_family": "reduce_exit",
                                 "reward_sum": -1200.0,
                                 "reward_mean": -1200.0,
                                 "win_rate": 0.0,
                                 "reward_source": "trade_episode",
                                 "evidence_scope": "partial_real_state",
                                 "action_value_lane": "exit",
+                                "learning_lane": "exit",
                             }
                         ]
                     },
@@ -2989,17 +3063,21 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             conn.execute(
                 """
                 UPDATE alpha_setup_action_value
-                SET action_name=?, reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
+                SET action_name=?, canonical_action_family=?, reward_sum=?, action_preference=?, last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
                 (
                     "exit",
+                    "reduce_exit",
                     -1200.0,
                     "tail_loss_protect",
                     "2025-03-03",
                     _dumps(
                         {
                             "action_preference": "tail_loss_protect",
+                            "canonical_action_family": "reduce_exit",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
                             "amplification_scope_quality": "partial_real_state",
                             "reward_source": "trade_episode",
                         }
@@ -3151,7 +3229,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
+                    canonical_action_family=?, reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -3161,6 +3239,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "SR|long|flat|trend|fundamental_timing_setup",
                     "fundamental_timing_setup",
                     "exit",
+                    "reduce_exit",
                     235.0,
                     235.0,
                     1.0,
@@ -3169,6 +3248,9 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     _dumps(
                         {
                             "action_preference": "weak_prior",
+                            "canonical_action_family": "reduce_exit",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
                             "amplification_scope_quality": "partial_real_state",
                             "real_trade_reward_count": 1,
                             "reward_source": "real_trade",
@@ -3201,7 +3283,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
+                    canonical_action_family=?, reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -3210,6 +3292,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "long",
                     "SR|long|flat|trend|execution_exit_immediate_setup",
                     "execution_exit_immediate_setup",
+                    "execution",
                     "execution",
                     235.0,
                     235.0,
@@ -3247,7 +3330,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
+                    canonical_action_family=?, reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -3257,6 +3340,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "SR|long|flat|trend|fundamental_timing_setup",
                     "fundamental_timing_setup",
                     "exit",
+                    "reduce_exit",
                     235.0,
                     235.0,
                     1.0,
@@ -3265,6 +3349,9 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     _dumps(
                         {
                             "action_preference": "positive_candidate_exit",
+                            "canonical_action_family": "reduce_exit",
+                            "action_value_lane": "exit",
+                            "learning_lane": "exit",
                             "amplification_scope_quality": "partial_real_state",
                             "reward_source": "real_trade",
                             "usage_boundary": {
@@ -3296,7 +3383,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 """
                 UPDATE alpha_setup_action_value
                 SET ticker=?, side=?, scope_key=?, setup_type=?, action_name=?,
-                    reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
+                    canonical_action_family=?, reward_sum=?, reward_mean=?, win_rate=?, action_preference=?,
                     last_sample_date=?, payload_json=?
                 WHERE id='av1'
                 """,
@@ -3306,6 +3393,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     "SR|long|flat|trend|execution_exit_immediate_setup",
                     "execution_exit_immediate_setup",
                     "execution",
+                    "execution",
                     235.0,
                     235.0,
                     1.0,
@@ -3314,6 +3402,9 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                     _dumps(
                         {
                             "action_preference": "positive_candidate_execution",
+                            "canonical_action_family": "execution",
+                            "action_value_lane": "execution",
+                            "learning_lane": "execution",
                             "amplification_scope_quality": "partial_real_state",
                             "reward_source": "real_trade",
                             "usage_boundary": {

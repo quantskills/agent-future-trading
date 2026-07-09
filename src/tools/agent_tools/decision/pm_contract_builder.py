@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List
 
 from tools.agent_tools.decision.pm_position_transition import final_action_from_lots
+from tools.common.final_action_semantics import canonical_action_value_lane
 from tools.common.order_semantics import build_lot_intent_consistency
 
 
@@ -33,7 +34,9 @@ def _compact_learning_trace_row(row: Any) -> dict:
         "side": row.get("side") or payload.get("side"),
         "setup_type": row.get("setup_type") or payload.get("setup_type"),
         "action_name": row.get("action_name") or payload.get("action_name"),
+        "canonical_action_family": row.get("canonical_action_family") or payload.get("canonical_action_family"),
         "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
+        "action_value_lane": row.get("action_value_lane") or payload.get("action_value_lane"),
         "action_preference": row.get("action_preference") or payload.get("action_preference"),
         "memory_side_role": row.get("memory_side_role") or payload.get("memory_side_role"),
         "reward_mean": row.get("reward_mean") or payload.get("reward_mean"),
@@ -158,16 +161,13 @@ def _action_value_lane(row: dict) -> str:
     if not isinstance(row, dict):
         return ""
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    for key in ("learning_lane", "action_value_lane", "lane", "action_name"):
+    for key in ("learning_lane", "action_value_lane", "lane"):
         value = _clean_text(row.get(key) or payload.get(key))
         if value:
-            if value in {"scale", "increase"}:
-                return "add"
-            if value in {"close", "decrease"}:
-                return "exit"
-            if "execution" in value or "trigger" in value or "fill" in value:
-                return "execution"
             return value
+    action = _clean_text(row.get("action_name") or payload.get("action_name"))
+    if action:
+        return canonical_action_value_lane(action)
     return ""
 
 

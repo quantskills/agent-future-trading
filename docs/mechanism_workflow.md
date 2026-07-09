@@ -138,7 +138,10 @@ PM strategy recommendation 保存前必须通过只读 hard gate：
 - `signal_snapshot.final_action_contract` 必须存在且为 PM Step6 已签出的最终合约。
 - `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`。
 - `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`。
+- `signal_snapshot.signal_collection_contract` 必须存在，且是 PM 从 workflow state 读取到的 signal_collector 原始 `signal_collection_contract` 快照，保留 `producer="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。
 - `signal_snapshot` 不得残留 `pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision` 或 PM draft 字段。
+
+当前第一阶段没有独立 signal_collector artifact，PM final `signal_snapshot.signal_collection_contract` 保存完整原始 SCC 供 PG、Reviewer 和 Researcher 审计追溯；这不是 PM 重建证据包，也不是第二套字段语义。后续如果信号收集员独立落 artifact，可再收敛为 artifact path / id / sha256 强引用，但强引用不是本阶段目标。
 
 `workflow` 只检查这些条件，不修合同、不补字段、不把 Step2/Step3/Step4 的诊断对象保存成最终交易事实。
 

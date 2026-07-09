@@ -40,7 +40,9 @@ from util.futures_trade_pairs import summarize_trade_pairs
 from util.logger import logger
 from tools.common.neutral_accountability import build_neutral_accountability_summary
 from tools.common.final_action_semantics import (
+    canonical_action_family,
     canonical_action_preference_for_action_value,
+    canonical_action_value_lane,
     derive_research_fact_state,
     validate_action_value_write_consistency,
 )
@@ -599,6 +601,7 @@ def _upsert_alpha_setup_profile(cursor: sqlite3.Cursor, *, record: Mapping[str, 
 
 
 PM_CONSUMABLE_ACTION_VALUE_REQUIRED_FIELDS = (
+    "canonical_action_family",
     "action_value_lane",
     "learning_lane",
     "consumer_scope",
@@ -630,6 +633,24 @@ def _normalize_pm_consumable_action_value_record(record: Mapping[str, Any]) -> D
         return normalized
     payload = _review_helpers._json_loads(normalized.get("payload_json"))
     payload = payload if isinstance(payload, dict) else {}
+    action_name = normalized.get("action_name") or payload.get("action_name")
+    family = normalized.get("canonical_action_family") or payload.get("canonical_action_family")
+    if not family:
+        family = canonical_action_family(action_name)
+    lane = (
+        normalized.get("action_value_lane")
+        or normalized.get("learning_lane")
+        or payload.get("action_value_lane")
+        or payload.get("learning_lane")
+    )
+    if not lane:
+        lane = canonical_action_value_lane(action_name)
+    normalized["canonical_action_family"] = family
+    normalized["action_value_lane"] = lane
+    normalized["learning_lane"] = normalized.get("learning_lane") or payload.get("learning_lane") or lane
+    payload["canonical_action_family"] = family
+    payload["action_value_lane"] = normalized["action_value_lane"]
+    payload["learning_lane"] = normalized["learning_lane"]
     canonical_preference = canonical_action_preference_for_action_value(normalized)
     current_preference = str(
         normalized.get("action_preference")
@@ -646,16 +667,11 @@ def _normalize_pm_consumable_action_value_record(record: Mapping[str, Any]) -> D
     missing = _pm_consumable_action_value_missing_fields(normalized)
     consistency = validate_action_value_write_consistency(normalized)
     errors = list(consistency.get("errors") or [])
-    if not missing and not errors:
-        return normalized
-
-    if missing:
-        payload["pm_consumable_rejected_missing_fields"] = missing
-    if errors:
-        payload["pm_consumable_rejected_consistency_errors"] = errors
-    payload["original_consumer_scope"] = "pm_learning"
-    payload["consumer_scope"] = "research_diagnostics"
-    normalized["consumer_scope"] = "research_diagnostics"
+    if missing or errors:
+        raise ValueError(
+            "pm_consumable_action_value_contract_invalid:"
+            f"missing={missing}:errors={errors}"
+        )
     normalized["payload_json"] = _json_dumps(payload)
     return normalized
 
@@ -668,12 +684,13 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             id, config_id, scope_key, ticker, side, horizon_class, market_regime,
             setup_type, data_combo, action_name, sample_count, reward_sum,
             reward_mean, win_rate, confidence_score, action_preference,
+            canonical_action_family,
             reward_source, evidence_scope, action_value_lane,
             consumer_scope, learning_lane, memory_side_role, retrieval_key,
             fallback_retrieval_key, execution_retrieval_key,
             max_position_impact, last_sample_date, created_at, updated_at,
             valid_until, active, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
         ON CONFLICT(config_id, scope_key, action_name)
         DO UPDATE SET
             sample_count=excluded.sample_count,
@@ -682,6 +699,7 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             win_rate=excluded.win_rate,
             confidence_score=excluded.confidence_score,
             action_preference=excluded.action_preference,
+            canonical_action_family=excluded.canonical_action_family,
             reward_source=excluded.reward_source,
             evidence_scope=excluded.evidence_scope,
             action_value_lane=excluded.action_value_lane,
@@ -715,6 +733,7 @@ def _upsert_alpha_setup_action_value(cursor: sqlite3.Cursor, *, record: Mapping[
             record.get("win_rate"),
             record.get("confidence_score"),
             record.get("action_preference"),
+            record.get("canonical_action_family"),
             record.get("reward_source"),
             record.get("evidence_scope"),
             record.get("action_value_lane"),

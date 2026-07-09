@@ -26,8 +26,12 @@ from tools.common.order_semantics import (
 )
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
+    ACTION_FAMILY_EXECUTION,
+    ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    ACTION_FAMILY_REDUCE_EXIT,
     has_open_transaction_blocker,
     is_conditional_monitor_contract,
+    validate_action_preference_family_consistency,
     validate_final_action_lot_transition,
 )
 from tools.common.adaptive_policy_safety import adaptive_policy_runtime_decision
@@ -1187,9 +1191,10 @@ def _contract_action_value_rows(contract: Dict[str, Any]) -> List[Dict[str, Any]
 def _action_value_row_has_pm_canonical_fields(row: Dict[str, Any]) -> bool:
     return bool(
         _payload_or_row_value(row, "action_preference")
+        and _payload_or_row_value(row, "canonical_action_family")
         and _payload_or_row_value(row, "reward_source")
         and _payload_or_row_value(row, "evidence_scope", "amplification_scope_quality")
-        and _payload_or_row_value(row, "action_value_lane", "source_action_value_lane", "action_name")
+        and _payload_or_row_value(row, "action_value_lane", "source_action_value_lane")
         and (
             _payload_or_row_value(row, "reward_sum") is not None
             or _payload_or_row_value(row, "reward_mean") is not None
@@ -1216,7 +1221,11 @@ def _payload_or_row_value(row: Dict[str, Any], key: str, *aliases: str) -> Any:
 
 
 def _action_value_lane(row: Dict[str, Any]) -> str:
-    return _lower(_payload_or_row_value(row, "learning_lane", "action_value_lane", "action_name"))
+    return _lower(_payload_or_row_value(row, "learning_lane", "action_value_lane", "source_action_value_lane"))
+
+
+def _action_value_family(row: Dict[str, Any]) -> str:
+    return _lower(_payload_or_row_value(row, "canonical_action_family", "source_canonical_action_family"))
 
 
 def _action_value_memory_side_role(row: Dict[str, Any]) -> str:
@@ -1251,7 +1260,7 @@ def _audit_pm_learning_transport_and_contract_effect(
         label = f"{recommendation.get('trading_date')}:{ticker}:{recommendation_id}"
         rows = _contract_action_value_rows(contract)
         for row in rows:
-            preference = _lower(row.get("action_preference"))
+            preference = _lower(_payload_or_row_value(row, "action_preference"))
             consumer_scope = _action_value_consumer_scope(row)
             if consumer_scope != "pm_learning":
                 errors.append(
@@ -1261,7 +1270,13 @@ def _audit_pm_learning_transport_and_contract_effect(
             if preference in ACTION_PREFERENCE_VALUES and not _action_value_row_has_pm_canonical_fields(row):
                 errors.append(
                     "pm_action_value_missing_canonical_fields:"
-                    f"{label}:{preference}:missing_preference_reward_scope_or_source"
+                    f"{label}:{preference}:missing_family_preference_reward_scope_or_source"
+                )
+            semantic_validation = validate_action_preference_family_consistency(row)
+            for semantic_error in semantic_validation.get("errors") or []:
+                errors.append(
+                    "pm_action_value_family_preference_mismatch:"
+                    f"{label}:{preference or 'missing_preference'}:{semantic_error}"
                 )
 
 
@@ -1564,6 +1579,13 @@ def _action_value_usage_boundary_label(row: Dict[str, Any], action_name: str) ->
     return f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:{row.get('last_sample_date')}"
 
 
+def _action_value_semantic_row(row: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    semantic_row = dict(row or {})
+    semantic_payload = dict(payload or {})
+    semantic_row["payload"] = semantic_payload
+    return semantic_row
+
+
 def _audit_action_value_usage_boundary(
     row: Dict[str, Any],
     payload: Dict[str, Any],
@@ -1580,22 +1602,16 @@ def _audit_action_value_usage_boundary(
     allowed = _usage_boundary_terms(payload, "allowed_effects")
     forbidden = _usage_boundary_terms(payload, "forbidden_effects")
     usable_by = _usage_boundary_terms(payload, "usable_by")
-    lane = _lower(payload.get("action_value_lane") or _nested_value(payload, "usage_boundary", "lane") or action_name)
+    lane = _action_value_lane(_action_value_semantic_row(row, payload))
+    family = _action_value_family(_action_value_semantic_row(row, payload))
 
-    if action_preference == "positive_candidate_open" and action_name != "open":
-        errors.append(f"action_value_open_preference_on_non_open_lane:{label}:{action_name}")
-    if action_preference == "positive_candidate_exit" and action_name not in {"exit", "reduce", "reduce_or_exit", "close", "close_or_reduce", "flatten"}:
-        errors.append(f"action_value_exit_preference_on_non_exit_lane:{label}:{action_name}")
-    if action_preference == "positive_candidate_execution" and action_name != "execution":
-        errors.append(f"action_value_execution_preference_on_non_execution_lane:{label}:{action_name}")
-
-    if action_name in {"exit", "reduce", "reduce_or_exit", "close", "close_or_reduce", "flatten"} or lane == "exit":
+    if family == ACTION_FAMILY_REDUCE_EXIT:
         bad = sorted(allowed & OPEN_AMPLIFICATION_EFFECTS)
         for effect in bad:
             errors.append(f"action_value_usage_boundary_forbids_exit_as_open_amplifier:{label}:{effect}")
         if "open_amplification" not in forbidden:
             errors.append(f"action_value_usage_boundary_missing_exit_open_amplification_forbidden:{label}")
-    if action_name == "execution" or lane == "execution":
+    if family == ACTION_FAMILY_EXECUTION or lane == "execution":
         bad = sorted(allowed & EXECUTION_INTENT_MUTATION_EFFECTS)
         for effect in bad:
             errors.append(f"action_value_usage_boundary_forbids_execution_changing_trade_intent:{label}:{effect}")
@@ -1757,7 +1773,15 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
                 f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:"
                 f"{row.get('last_sample_date')}:{row_action_preference}!={payload_action_preference}"
             )
-        action_preference = payload_action_preference
+        row_family = _lower(row.get("canonical_action_family"))
+        payload_family = _lower(payload.get("canonical_action_family"))
+        if row_family and payload_family and row_family != payload_family:
+            errors.append(
+                "canonical_action_family_column_payload_mismatch:"
+                f"{row.get('ticker')}:{row.get('side')}:{row.get('setup_type')}:{action_name}:"
+                f"{row.get('last_sample_date')}:{row_family}!={payload_family}"
+            )
+        action_preference = payload_action_preference or row_action_preference
         scope_quality = _lower(payload.get("amplification_scope_quality") or payload.get("sample_scope"))
         reward_source = _effective_reward_source(payload)
         has_real_reward_facts = _has_real_reward_facts(payload, reward_source)
@@ -1772,28 +1796,41 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
 
         if sample_count <= 0:
             continue
-        if action_name in {"open", "hold", "exit", "execution"} and reward_sum != 0:
+        semantic_row = _action_value_semantic_row(row, payload)
+        semantic_validation = validate_action_preference_family_consistency(semantic_row)
+        family = _action_value_family(semantic_row)
+        if not family:
+            errors.append(f"action_value_missing_canonical_action_family:{label}")
+        for semantic_error in semantic_validation.get("errors") or []:
+            if semantic_error == "missing_canonical_action_family":
+                continue
+            errors.append(f"action_value_family_preference_mismatch:{label}:{semantic_error}")
+        if reward_sum != 0:
             if not action_preference and not weak_prior_context:
                 errors.append(f"action_value_missing_action_preference:{label}:missing_action_preference")
-            if (
-                action_preference
-                and action_preference not in ACTION_PREFERENCE_VALUES
-            ):
+            if action_preference and action_preference not in ACTION_PREFERENCE_VALUES:
                 errors.append(f"action_value_unknown_action_preference:{label}:{action_preference}")
             if (
-                action_name == "open"
+                family == ACTION_FAMILY_OPEN_ADD_NEW_RISK
                 and reward_sum > 0
                 and action_preference not in {"positive_candidate_open"}
                 and has_real_reward_facts
             ):
                 errors.append(f"positive_open_action_value_not_open_preference:{label}:{action_preference or 'missing_action_preference'}")
             if (
-                action_name == "exit"
+                family == ACTION_FAMILY_REDUCE_EXIT
                 and reward_sum > 0
                 and action_preference not in {"positive_candidate_exit"}
                 and has_real_reward_facts
             ):
                 errors.append(f"positive_exit_action_value_not_exit_preference:{label}:{action_preference or 'missing_action_preference'}")
+            if (
+                family == ACTION_FAMILY_EXECUTION
+                and reward_sum > 0
+                and action_preference not in {"positive_candidate_execution"}
+                and has_real_reward_facts
+            ):
+                errors.append(f"positive_execution_action_value_not_execution_preference:{label}:{action_preference or 'missing_action_preference'}")
             if (
                 reward_sum < 0
                 and action_preference not in {"negative_revalidate", "negative_hold_revalidate", "tail_loss_protect"}

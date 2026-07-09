@@ -29,6 +29,8 @@ from util.learning_attribution import (
 from tools.common.contracts import final_action_contract_from_snapshot
 from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from tools.common.final_action_semantics import (
+    canonical_action_family,
+    canonical_action_value_lane,
     classify_final_action_contract,
     derive_memory_requirements,
     derive_review_expectation,
@@ -833,9 +835,22 @@ def _final_action_semantic_view(
     memory = derive_memory_requirements(contract)
     review = derive_review_expectation(contract, execution_result)
     contract_side = memory.get("target_side") or memory.get("current_position_side") or "flat"
+    action_family = canonical_action_family(
+        semantics.get("action"),
+        current_lots=semantics.get("current_lots"),
+        target_lots=semantics.get("target_lots"),
+    )
+    action_value_lane = canonical_action_value_lane(
+        semantics.get("action"),
+        current_lots=semantics.get("current_lots"),
+        target_lots=semantics.get("target_lots"),
+    )
     return {
         "source": "final_action_semantics",
         "action": semantics.get("action"),
+        "canonical_action_family": action_family,
+        "action_value_lane": action_value_lane,
+        "learning_lane": action_value_lane,
         "current_lots": semantics.get("current_lots"),
         "target_lots": semantics.get("target_lots"),
         "lots_delta": semantics.get("lots_delta"),

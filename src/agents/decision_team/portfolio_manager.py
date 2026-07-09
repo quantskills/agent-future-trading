@@ -1,6 +1,7 @@
 ﻿import json
 import re
 import math
+from copy import deepcopy
 from datetime import datetime
 from enum import Enum
 from graph.constants import AgentKey
@@ -1080,6 +1081,7 @@ def _build_blocked_pm_internal_candidate(
     authority_type: str,
     account_equity: float,
     execution_contract_fields: dict | None = None,
+    signal_collection_contract: dict | None = None,
     control_diagnostics: dict | None = None,
     opportunity_scorecard: dict | None = None,
     market_confirmation: dict | None = None,
@@ -1111,6 +1113,8 @@ def _build_blocked_pm_internal_candidate(
         candidate_block_reason=reason_value,
     )
     execution_fields = dict(execution_contract_fields or {})
+    if signal_collection_contract is not None:
+        execution_fields["signal_collection_contract"] = deepcopy(signal_collection_contract)
     execution_fields["pm_six_step_stage"] = "steps_1_4_blocked_candidate_generated"
     execution_fields["candidate_status"] = "blocked"
     execution_fields["candidate_block_type"] = str(authority_type or "blocked")
@@ -1164,6 +1168,17 @@ def _pm_candidate_builder_inputs(candidate: dict) -> dict:
 def _pm_candidate_contract(candidate: dict) -> dict:
     contract = candidate.get("candidate_contract")
     return dict(contract) if isinstance(contract, dict) else {}
+
+
+def _require_step6_signal_collection_contract(signal_collection_contract: object) -> dict:
+    contract = signal_collection_contract if isinstance(signal_collection_contract, dict) else {}
+    if not contract:
+        raise ValueError("pm_step6_missing_signal_collection_contract_from_signal_collector")
+    if str(contract.get("collector_decision_boundary") or "").strip().lower() != "no_trade_authority":
+        raise ValueError("pm_step6_invalid_signal_collection_contract_boundary")
+    if str(contract.get("producer") or "").strip().lower() != "signal_collector":
+        raise ValueError("pm_step6_invalid_signal_collection_contract_producer")
+    return contract
 
 
 def _pm_step6_candidate_requires_capital_deployment(candidate_contract: dict, builder_inputs: dict) -> bool:
@@ -1458,6 +1473,9 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         raise ValueError("pm_step6_missing_candidate_contract")
     execution_fields = builder_inputs.get("execution_contract_fields")
     execution_fields = dict(execution_fields) if isinstance(execution_fields, dict) else {}
+    signal_collection_contract = _require_step6_signal_collection_contract(
+        execution_fields.get("signal_collection_contract")
+    )
     raw_deployment = snapshot.get("pm_capital_deployment_decision")
     has_step5_deployment = isinstance(raw_deployment, dict) and bool(raw_deployment)
     candidate_requires_capital_deployment = _pm_step6_candidate_requires_capital_deployment(
@@ -1519,14 +1537,12 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
     position_sizing_result = execution_fields.get("position_sizing_result")
     if isinstance(position_sizing_result, dict):
         final_action_contract["position_sizing_result"] = position_sizing_result
-    signal_ref = execution_fields.get("signal_collection_contract")
-    if isinstance(signal_ref, dict):
-        final_action_contract["signal_collection_contract_ref"] = {
-            "ticker": signal_ref.get("ticker"),
-            "trading_date": signal_ref.get("trading_date"),
-            "source_contract_count": len(signal_ref.get("source_contracts") or []),
-            "collector_decision_boundary": signal_ref.get("collector_decision_boundary"),
-        }
+    final_action_contract["signal_collection_contract_ref"] = {
+        "ticker": signal_collection_contract.get("ticker"),
+        "trading_date": signal_collection_contract.get("trading_date"),
+        "source_contract_count": len(signal_collection_contract.get("source_contracts") or []),
+        "collector_decision_boundary": signal_collection_contract.get("collector_decision_boundary"),
+    }
     learning_trace = execution_fields.get("learning_to_position_trace")
     if isinstance(learning_trace, dict):
         learning_used = (
@@ -1585,6 +1601,7 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
         raise ValueError(
             f"pm_step6_contract_generation_check_failed:{step6_contract_generation_check.get('errors')}"
         )
+    snapshot["signal_collection_contract"] = deepcopy(signal_collection_contract)
     snapshot_for_check = dict(snapshot)
     snapshot_for_check["final_action_contract"] = final_action_contract
     snapshot_for_check.pop("pm_internal_candidate", None)
@@ -3699,6 +3716,8 @@ def _build_phase1_recommendation(
         factor_focus.extend([str(item) for item in (contract.get("factor_focus") or [])])
         evidence_conflicts.extend([str(item) for item in (contract.get("current_evidence_conflict") or [])])
     if plan_snapshot:
+        if isinstance(plan_snapshot.get("signal_collection_contract"), dict):
+            signal_snapshot["signal_collection_contract"] = deepcopy(plan_snapshot["signal_collection_contract"])
         if isinstance(plan_snapshot.get("strategy_controls"), dict):
             diagnostics = plan_snapshot["strategy_controls"].get("diagnostics") or {}
             if isinstance(diagnostics.get("position_budget_policy"), dict):
@@ -3812,6 +3831,11 @@ def _build_phase1_recommendation(
             reason=semantic_block_reason,
             authority_type="watchlist_only",
             account_equity=_portfolio_account_equity(portfolio),
+            signal_collection_contract=(
+                signal_snapshot.get("signal_collection_contract")
+                if isinstance(signal_snapshot.get("signal_collection_contract"), dict)
+                else None
+            ),
             execution_contract_fields={
                 **(plan_snapshot if isinstance(plan_snapshot, dict) else {}),
                 "semantic_consistency_gate": semantic_gate,
@@ -9809,6 +9833,7 @@ def _run_pm_six_step_decision(state: FundState):
                 reason="missing_phase1_execution_basis",
                 authority_type="data_quality_block",
                 account_equity=account_equity,
+                signal_collection_contract=signal_collection_contract,
                 execution_contract_fields={
                     "candidate_status": "blocked",
                     "candidate_block_reason": "missing_phase1_execution_basis",
@@ -9914,6 +9939,7 @@ def _run_pm_six_step_decision(state: FundState):
                     reason="data_price_anomaly",
                     authority_type="data_quality_block",
                     account_equity=account_equity,
+                    signal_collection_contract=signal_collection_contract,
                     execution_contract_fields=price_anomaly_snapshot,
                     control_diagnostics={"data_price_anomaly": price_anomaly_snapshot.get("data_price_anomaly")},
                 ),
@@ -9983,6 +10009,7 @@ def _run_pm_six_step_decision(state: FundState):
                                 reason="single_position_loss_threshold",
                                 authority_type="risk_exit",
                                 account_equity=account_equity,
+                                signal_collection_contract=signal_collection_contract,
                                 execution_contract_fields={
                                     "candidate_status": "blocked",
                                     "candidate_block_reason": "single_position_loss_threshold",
@@ -10021,6 +10048,7 @@ def _run_pm_six_step_decision(state: FundState):
                                 reason="single_position_loss_threshold",
                                 authority_type="risk_exit",
                                 account_equity=account_equity,
+                                signal_collection_contract=signal_collection_contract,
                                 execution_contract_fields={
                                     "candidate_status": "blocked",
                                     "candidate_block_reason": "single_position_loss_threshold",
@@ -11298,6 +11326,7 @@ def _run_pm_six_step_decision(state: FundState):
                     reason="danger_zone_ban",
                     authority_type="risk_block",
                     account_equity=account_equity,
+                    signal_collection_contract=signal_collection_contract,
                     execution_contract_fields={
                         "candidate_status": "blocked",
                         "candidate_block_reason": "danger_zone_ban",
@@ -11650,6 +11679,7 @@ def _run_pm_six_step_decision(state: FundState):
                 reason="emergency_risk_flatten",
                 authority_type="risk_exit" if current_lots else "risk_block",
                 account_equity=account_equity,
+                signal_collection_contract=signal_collection_contract,
                 execution_contract_fields={
                     "candidate_status": "blocked",
                     "candidate_block_reason": "emergency_risk_flatten",

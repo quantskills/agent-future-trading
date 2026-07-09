@@ -12,8 +12,10 @@ from tools.common.final_action_semantics import (
     action_value_matches_contract_memory_requirement,
     audit_pm_memory_consumption,
     authority_allows_entry,
+    canonical_action_family,
     canonicalize_final_action_contract_for_persistence,
     canonical_action_preference_for_action_value,
+    canonical_action_value_lane,
     classify_analyst_evidence,
     classify_final_action_contract,
     classify_final_action_reason_codes,
@@ -41,6 +43,7 @@ from tools.common.final_action_semantics import (
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
     requires_intraday_result,
+    validate_action_preference_family_consistency,
     validate_action_value_write_consistency,
     validate_final_action_lot_transition,
     validate_signal_collection,
@@ -74,6 +77,60 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "execution_profile_learning_direct_to_rank": False,
             },
         }
+
+    def test_action_value_canonical_family_and_preference_consistency(self):
+        self.assertEqual(canonical_action_family("add_or_open"), "open_add_new_risk")
+        self.assertEqual(canonical_action_value_lane("add_or_open"), "open")
+        self.assertEqual(
+            canonical_action_value_lane("add_or_open", current_lots=2, target_lots=3),
+            "add",
+        )
+        self.assertEqual(
+            canonical_action_value_lane("close_or_reduce", current_lots=3, target_lots=1),
+            "reduce",
+        )
+        self.assertEqual(canonical_action_value_lane("decrease_position"), "reduce")
+        self.assertTrue(validate_action_preference_family_consistency({
+            "action_name": "add_or_open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "action_preference": "positive_candidate_open",
+        })["ok"])
+        self.assertTrue(validate_action_preference_family_consistency({
+            "action_name": "reduce_or_exit",
+            "canonical_action_family": "reduce_exit",
+            "action_value_lane": "exit",
+            "learning_lane": "exit",
+            "action_preference": "positive_candidate_exit",
+        })["ok"])
+        self.assertTrue(validate_action_preference_family_consistency({
+            "action_name": "execution",
+            "canonical_action_family": "execution",
+            "action_value_lane": "execution",
+            "learning_lane": "execution",
+            "action_preference": "positive_candidate_execution",
+        })["ok"])
+
+    def test_action_value_family_consistency_hard_fails_bad_or_missing_family(self):
+        invalid = validate_action_preference_family_consistency({
+            "action_name": "hold",
+            "canonical_action_family": "hold",
+            "action_value_lane": "hold",
+            "learning_lane": "hold",
+            "action_preference": "positive_candidate_open",
+        })
+        self.assertFalse(invalid["ok"])
+        self.assertIn("positive_open_family_mismatch", invalid["errors"])
+
+        missing = validate_action_preference_family_consistency({
+            "action_name": "add_or_open",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "action_preference": "positive_candidate_open",
+        })
+        self.assertFalse(missing["ok"])
+        self.assertIn("missing_canonical_action_family", missing["errors"])
 
     def _conditional_contract(self) -> dict:
         return {
@@ -644,6 +701,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "ticker": "C",
                 "side": "long",
                 "action_name": "open",
+                "canonical_action_family": "open_add_new_risk",
                 "learning_lane": "open",
                 "action_value_lane": "open",
                 "memory_side_role": "target_side",
@@ -659,6 +717,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "ticker": "C",
                 "side": "long",
                 "action_name": "execution",
+                "canonical_action_family": "execution",
                 "learning_lane": "execution",
                 "action_value_lane": "execution",
                 "memory_side_role": "historical_sample_side",
@@ -674,6 +733,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "ticker": "C",
                 "side": "short",
                 "action_name": "hold",
+                "canonical_action_family": "hold",
                 "learning_lane": "hold",
                 "action_value_lane": "hold",
                 "memory_side_role": "current_position_side",

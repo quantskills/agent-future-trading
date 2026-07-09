@@ -6,6 +6,11 @@ from datetime import date, datetime
 from typing import Any, Iterable, Mapping
 
 from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
+from tools.common.final_action_semantics import (
+    ACTION_FAMILY_EXECUTION,
+    ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    validate_action_preference_family_consistency,
+)
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
@@ -511,12 +516,14 @@ def _action_value_learning_summary(
     used_lanes: set[str] = set()
     ignored_lanes: set[str] = set()
     lifecycle = _clean_key(decision_lifecycle) or "open_add_new_risk"
-    open_rank_lanes = {"", "open", "add", "scale", "increase"}
-    blocked_open_rank_lanes = {"hold", "reduce", "exit", "execution", "conditional_monitor"}
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
         payload = _row_payload(row)
+        semantic_validation = validate_action_preference_family_consistency({**dict(row), "payload": payload})
+        if not semantic_validation.get("ok"):
+            ignored_lanes.add("semantic_contract_error")
+            continue
         product_key = payload.get("product_learning_performance_key")
         if not isinstance(product_key, Mapping):
             product_key = {}
@@ -538,13 +545,11 @@ def _action_value_learning_summary(
         )
         if not action_preference:
             continue
-        lane = _clean_key(_row_value(row, payload, "action_value_lane", "action_name", default=""))
-        lane_is_execution_profile = lifecycle == "open_add_new_risk" and lane == "execution"
-        if lifecycle == "open_add_new_risk" and lane in blocked_open_rank_lanes and not lane_is_execution_profile:
-            ignored_lanes.add(lane or "unknown")
-            continue
-        if lifecycle == "open_add_new_risk" and lane not in open_rank_lanes and not lane_is_execution_profile:
-            ignored_lanes.add(lane or "unknown")
+        family = _clean_key(_row_value(row, payload, "canonical_action_family", "source_canonical_action_family", default=""))
+        lane = _clean_key(_row_value(row, payload, "learning_lane", "action_value_lane", default=""))
+        lane_is_execution_profile = lifecycle == "open_add_new_risk" and family == ACTION_FAMILY_EXECUTION
+        if lifecycle == "open_add_new_risk" and family != ACTION_FAMILY_OPEN_ADD_NEW_RISK and not lane_is_execution_profile:
+            ignored_lanes.add(lane or family or "unknown")
             continue
         scope = _clean_key(
             _row_value(row, payload, "amplification_scope_quality", "source_quality", "evidence_scope", default="unknown")

@@ -159,6 +159,7 @@ def _create_pre_backtest_fake_db(db_path: Path, *, exp_name: str) -> Path:
                 reward_mean REAL,
                 win_rate REAL,
                 action_preference TEXT,
+                canonical_action_family TEXT,
                 reward_source TEXT,
                 evidence_scope TEXT,
                 action_value_lane TEXT,

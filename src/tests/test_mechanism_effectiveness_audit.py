@@ -74,9 +74,11 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
                     sample_count INTEGER DEFAULT 0,
                     reward_sum REAL DEFAULT 0,
                     action_preference TEXT DEFAULT '',
+                    canonical_action_family TEXT DEFAULT '',
                     reward_source TEXT DEFAULT '',
                     consumer_scope TEXT DEFAULT 'pm_learning',
                     action_value_lane TEXT DEFAULT '',
+                    learning_lane TEXT DEFAULT '',
                     last_sample_date TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -235,6 +237,27 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
             report.to_dict(),
         )
 
+    def test_rejects_signal_collection_ref_as_primary_evidence(self):
+        db_path = self._make_db()
+        contract = self._contract(
+            signal_collection_contract_ref={
+                "ticker": "J",
+                "trading_date": "2025-03-25",
+                "source_contract_count": 3,
+                "collector_decision_boundary": "no_trade_authority",
+            }
+        )
+        snapshot = self._snapshot(contract, signal_contract={})
+        self._insert_recommendation(db_path, snapshot=snapshot)
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.startswith("mechanism_signal_collection_contract_missing") for error in report.hard_failures),
+            report.to_dict(),
+        )
+
     def test_rejects_invalid_signal_collection_boundary(self):
         db_path = self._make_db()
         snapshot = self._snapshot(
@@ -249,6 +272,30 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
         joined = "\n".join(report.hard_failures)
         self.assertIn("mechanism_signal_collection_contract_invalid_producer", joined)
         self.assertIn("mechanism_signal_collection_contract_invalid_boundary", joined)
+
+    def test_rejects_pm_fields_inside_signal_collection_contract(self):
+        db_path = self._make_db()
+        snapshot = self._snapshot(
+            self._contract(),
+            signal_contract={
+                "producer": "signal_collector",
+                "collector_decision_boundary": "no_trade_authority",
+                "evidence_strength_score": 0.62,
+                "multi_evidence_consensus_score": 0.55,
+                "evidence_items": [{"analyst": "technical", "opportunity_rank": 1}],
+                "target_lots": 2,
+            },
+        )
+        self._insert_recommendation(db_path, snapshot=snapshot)
+
+        report = audit_mechanism_effectiveness(db_path=db_path, exp_name="test-exp")
+
+        self.assertFalse(report.ok)
+        joined = "\n".join(report.hard_failures)
+        self.assertIn("mechanism_signal_collection_contract_contains_pm_fields", joined)
+        self.assertIn("target_lots", joined)
+        self.assertIn("evidence_items[0].opportunity_rank", joined)
+        self.assertNotIn("evidence_strength_score", joined)
 
     def test_rejects_failed_pm_trace_checks(self):
         db_path = self._make_db()

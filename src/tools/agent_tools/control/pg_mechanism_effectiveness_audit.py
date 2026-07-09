@@ -40,6 +40,28 @@ CHECKED_SCENARIOS = {
     SCENARIO_POSITION_HOLD: "PM signed a hold style final_action_contract for an existing position",
     SCENARIO_FLAT_WAIT: "PM signed a flat wait/hold final_action_contract",
 }
+SIGNAL_COLLECTION_FORBIDDEN_PM_FIELDS = {
+    "final_action",
+    "target_lots",
+    "lots_delta",
+    "target_position_ratio",
+    "opportunity_rank",
+    "opportunity_score",
+    "opportunity_score_components",
+    "rank_score",
+    "rank_source",
+    "rank_scope",
+    "rank_input_components",
+    "rank_capital_role",
+    "capital_rank_generated_by",
+    "capital_layer",
+    "capital_deployment",
+    "capital_allocation_reason",
+    "position_sizing_result",
+    "learning_used",
+    "final_action_contract",
+    "pm_six_step_trace",
+}
 
 
 @dataclass
@@ -86,6 +108,24 @@ def _safe_json(value: Any, artifact_path: Optional[str] = None, sha256: Optional
 
 def _dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _forbidden_signal_collection_pm_fields(value: Any) -> List[str]:
+    hits: List[str] = []
+
+    def visit(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if str(key) in SIGNAL_COLLECTION_FORBIDDEN_PM_FIELDS:
+                    hits.append(child_path)
+                visit(child, child_path)
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                visit(child, f"{path}[{index}]")
+
+    visit(value, "")
+    return sorted(set(hits))
 
 
 def _lower(value: Any) -> str:
@@ -374,6 +414,12 @@ def _audit_recommendation_mechanisms(
                 hard_failures.append(f"mechanism_signal_collection_contract_invalid_producer:{label}:{producer or 'missing'}")
             if boundary != "no_trade_authority":
                 hard_failures.append(f"mechanism_signal_collection_contract_invalid_boundary:{label}:{boundary or 'missing'}")
+            forbidden_fields = _forbidden_signal_collection_pm_fields(signal_contract)
+            if forbidden_fields:
+                hard_failures.append(
+                    "mechanism_signal_collection_contract_contains_pm_fields:"
+                    f"{label}:{','.join(forbidden_fields)}"
+                )
 
         pm_trace = _dict(snapshot.get("pm_six_step_trace"))
         if not pm_trace:

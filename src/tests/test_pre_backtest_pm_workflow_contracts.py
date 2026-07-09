@@ -173,6 +173,7 @@ def _recommendation(
         lots=abs(int(contract.get("target_lots") or 0) - int(contract.get("current_lots") or 0)),
         signal_snapshot={
             "opportunity_scorecard": dict(scorecard or {}),
+            "signal_collection_contract": _signal_collection_contract(ticker),
             "pm_internal_candidate": _pm_internal_candidate(
                 contract,
                 ticker=ticker,
@@ -273,6 +274,11 @@ class PreBacktestPMWorkflowContractGateTest(unittest.TestCase):
         self.assertFalse(non_rank_contract["capital_deployment"]["new_risk_rank_required"])
         self.assertNotIn("opportunity_rank", non_rank_contract["evidence_used"])
         self.assertTrue(non_rank.signal_snapshot["pm_six_step_trace"]["pm_contract_self_check"]["ok"])
+        self.assertEqual(non_rank.signal_snapshot["signal_collection_contract"]["producer"], "signal_collector")
+        self.assertEqual(
+            non_rank.signal_snapshot["signal_collection_contract"]["collector_decision_boundary"],
+            "no_trade_authority",
+        )
 
         deployed_contract = deployed.signal_snapshot["final_action_contract"]
         deployed_evidence = deployed_contract["evidence_used"]

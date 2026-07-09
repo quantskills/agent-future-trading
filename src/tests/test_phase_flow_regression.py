@@ -162,6 +162,19 @@ class _FakeRouter:
         return quotes
 
 
+def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
+    return {
+        "contract_version": "agentquant.signal_collection.v1",
+        "producer": "signal_collector",
+        "collector_decision_boundary": "no_trade_authority",
+        "ticker": ticker,
+        "trading_date": "2025-03-25",
+        "source_contracts": [],
+        "evidence_items": [],
+        "evidence_fusion": {},
+    }
+
+
 def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecard: dict | None = None, execution_fields: dict | None = None) -> dict:
     contract = dict(contract or {})
     current_lots = int(contract.get("current_lots") or 0)
@@ -189,6 +202,10 @@ def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecar
     account_equity = 1_000_000.0
     execution_fields = dict(execution_fields or {})
     execution_fields.pop("final_action_contract", None)
+    execution_fields.setdefault(
+        "signal_collection_contract",
+        _signal_collection_contract_fixture(ticker or contract.get("ticker") or "BU"),
+    )
     execution_fields.setdefault("pm_six_step_stage", "steps_1_4_candidate_generated")
     primary_lifecycle_action_port = classify_lifecycle_action_port(contract)
     return {
@@ -778,6 +795,31 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 )
             )
 
+    def test_pm_step6_requires_signal_collection_contract_from_builder_inputs(self):
+        recommendation = FuturesRecommendation(
+            underlying_code="BU",
+            signal_snapshot={
+                "pm_internal_candidate": {
+                    "candidate_contract": {
+                        "ticker": "BU",
+                        "current_lots": 0,
+                        "target_lots": 0,
+                        "lots_delta": 0,
+                        "final_action": "wait",
+                    },
+                    "final_contract_builder_inputs": {
+                        "ticker": "BU",
+                        "current_lots": 0,
+                        "target_lots": 0,
+                        "execution_contract_fields": {},
+                    },
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "pm_step6_missing_signal_collection_contract_from_signal_collector"):
+            _sign_pm_candidate_recommendation(recommendation)
+
     def test_pm_step6_new_risk_requires_step5_deployment_decision(self):
         recommendation = FuturesRecommendation(
             underlying_code="BU",
@@ -992,6 +1034,12 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         snapshot = recommendation.signal_snapshot
         self.assertIn("final_action_contract", snapshot)
+        self.assertEqual(snapshot["signal_collection_contract"]["producer"], "signal_collector")
+        self.assertEqual(
+            snapshot["signal_collection_contract"]["collector_decision_boundary"],
+            "no_trade_authority",
+        )
+        self.assertIn("evidence_items", snapshot["signal_collection_contract"])
         self.assertIn("capital_deployment", snapshot["final_action_contract"])
         self.assertEqual(
             snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],

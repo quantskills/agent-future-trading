@@ -62,6 +62,8 @@ class FakeMemoryDB:
                 "horizon_class": kwargs.get("horizon_class") or "short",
                 "market_regime": kwargs.get("market_regime") or "trend",
                 "setup_type": kwargs.get("setup_type") or "trend_breakout",
+                "action_name": "add_or_open",
+                "canonical_action_family": "open_add_new_risk",
                 "action_value_lane": "open",
                 "action_preference": "positive_candidate_open",
                 "reward_source": "trade_episode",
@@ -440,9 +442,27 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         result = route_lifecycle_learning(
             lifecycle_port="new_risk",
             action_values=[
-                {"id": "open-1", "action_value_lane": "open"},
-                {"id": "exec-1", "action_value_lane": "execution"},
-                {"id": "hold-1", "action_value_lane": "hold"},
+                {
+                    "id": "open-1",
+                    "action_name": "add_or_open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                },
+                {
+                    "id": "exec-1",
+                    "action_name": "execution",
+                    "canonical_action_family": "execution",
+                    "action_value_lane": "execution",
+                    "action_preference": "positive_candidate_execution",
+                },
+                {
+                    "id": "hold-1",
+                    "action_name": "hold",
+                    "canonical_action_family": "hold",
+                    "action_value_lane": "hold",
+                    "action_preference": "negative_hold_revalidate",
+                },
             ],
         )
         self.assertEqual([row["id"] for row in result["decision_learning_rows"]], ["open-1"])
@@ -621,6 +641,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 {
                     "consumer_scope": "pm_learning",
                     "side": "long",
+                    "action_name": "add_or_open",
+                    "canonical_action_family": "open_add_new_risk",
                     "action_value_lane": "open",
                     "action_preference": "positive_candidate_open",
                     "reward_source": "trade_episode",
@@ -647,6 +669,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 {
                     "consumer_scope": "pm_learning",
                     "side": "long",
+                    "action_name": "add_or_open",
+                    "canonical_action_family": "open_add_new_risk",
                     "action_value_lane": "open",
                     "action_preference": "negative_revalidate",
                     "reward_source": "trade_episode",
@@ -659,6 +683,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 {
                     "consumer_scope": "pm_learning",
                     "side": "long",
+                    "action_name": "hold",
+                    "canonical_action_family": "hold",
                     "action_value_lane": "hold",
                     "action_preference": "positive_candidate_hold",
                     "reward_source": "trade_episode",
@@ -671,6 +697,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 {
                     "consumer_scope": "pm_learning",
                     "side": "long",
+                    "action_name": "execution",
+                    "canonical_action_family": "execution",
                     "action_value_lane": "execution",
                     "action_preference": "positive_candidate_execution",
                     "reward_source": "trade_episode",
@@ -721,6 +749,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             {
                 "consumer_scope": "pm_learning",
                 "side": "long",
+                "action_name": "add_or_open",
+                "canonical_action_family": "open_add_new_risk",
                 "action_value_lane": "open",
                 "action_preference": "positive_candidate_open",
                 "reward_source": "trade_episode",
@@ -866,7 +896,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "lots_delta": 0,
                 "learning_used": {
                     "alpha_setup_action_values": [
-                        {"learning_lane": "hold", "action_name": "hold"},
+                        {
+                            "learning_lane": "hold",
+                            "action_value_lane": "hold",
+                            "action_name": "hold",
+                            "canonical_action_family": "hold",
+                            "action_preference": "negative_hold_revalidate",
+                        },
                     ],
                 },
                 "evidence_used": {

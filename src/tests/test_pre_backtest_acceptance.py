@@ -141,6 +141,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     reward_mean REAL,
                     win_rate REAL,
                     action_preference TEXT,
+                    canonical_action_family TEXT,
                     reward_source TEXT,
                     evidence_scope TEXT,
                     action_value_lane TEXT,
@@ -211,9 +212,9 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     """
                     INSERT INTO alpha_setup_action_value(
                         id, config_id, scope_key, ticker, side, setup_type, action_name,
-                        sample_count, reward_sum, action_preference, last_sample_date,
+                        sample_count, reward_sum, action_preference, canonical_action_family, last_sample_date,
                         created_at, updated_at, active, payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         "av-bu-exit",
@@ -226,6 +227,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                         1,
                         -3917.83,
                         "cap_reduce_or_revalidate",
+                        "reduce_exit",
                         "2025-03-10",
                         now,
                         now,
@@ -233,6 +235,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                         _dumps(
                             {
                                 "action_preference": "weak_prior",
+                                "canonical_action_family": "reduce_exit",
                                 "amplification_scope_quality": "partial_real_state",
                                 "real_trade_reward_count": 1,
                                 "loss_reward_count": 1,

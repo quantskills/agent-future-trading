@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.common.final_action_semantics import validate_action_preference_family_consistency
 
 
 _MATCH_PRIORITY = {
@@ -79,7 +80,8 @@ def _key(row: Mapping[str, Any]) -> tuple:
         _text(row.get("horizon_class") or payload.get("horizon_class")).lower(),
         _text(row.get("market_regime") or payload.get("market_regime")).lower(),
         _text(row.get("setup_type") or payload.get("setup_type")).lower(),
-        _text(row.get("action_value_lane") or row.get("learning_lane") or payload.get("action_value_lane")).lower(),
+        _text(row.get("canonical_action_family") or payload.get("canonical_action_family")).lower(),
+        _text(row.get("learning_lane") or row.get("action_value_lane") or payload.get("learning_lane") or payload.get("action_value_lane")).lower(),
     )
 
 
@@ -112,6 +114,11 @@ def _normalize(row: Mapping[str, Any], *, match_level: str, match_reason: str) -
         payload["retrieval_match_reason"] = match_reason
         normalized["payload"] = payload
     return normalized
+
+
+def _family_consistency_errors(row: Mapping[str, Any]) -> list[str]:
+    validation = validate_action_preference_family_consistency(row)
+    return list(validation.get("errors") or [])
 
 
 def _merge_quality_first(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
@@ -242,6 +249,16 @@ def retrieve_pm_memory(
             normalized = _normalize(row, match_level=match_level, match_reason=reason)
             if _is_empty_shell(normalized):
                 rejected.append({"id": normalized.get("id"), "reason": "empty_shell_downgraded_not_blocking"})
+                kept.append(normalized)
+                continue
+            semantic_errors = _family_consistency_errors(normalized)
+            if semantic_errors:
+                rejected.append({
+                    "id": normalized.get("id"),
+                    "reason": "action_value_family_consistency_error",
+                    "errors": semantic_errors,
+                })
+                continue
             kept.append(normalized)
         attempts.append({
             "match_level": match_level,

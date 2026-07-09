@@ -238,6 +238,7 @@ class SQLiteDB(BaseDB):
                     "max_position_impact": "REAL DEFAULT 0",
                     "last_sample_date": "TEXT",
                     "action_preference": "TEXT DEFAULT ''",
+                    "canonical_action_family": "TEXT DEFAULT ''",
                     "reward_source": "TEXT DEFAULT ''",
                     "evidence_scope": "TEXT DEFAULT ''",
                     "action_value_lane": "TEXT DEFAULT ''",
@@ -2947,6 +2948,12 @@ class SQLiteDB(BaseDB):
                 payload.get("action_value_lane")
                 or payload.get("source_action_value_lane")
                 or item.get("action_name")
+                or ""
+            )
+        if not item.get("canonical_action_family"):
+            item["canonical_action_family"] = (
+                payload.get("canonical_action_family")
+                or payload.get("source_canonical_action_family")
                 or ""
             )
         if not item.get("consumer_scope"):

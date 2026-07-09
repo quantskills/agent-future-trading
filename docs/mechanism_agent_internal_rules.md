@@ -901,8 +901,20 @@ src/run/backtest_daily_test.py
 
 ## PG 审计边界补充（2026-07-07）
 
-Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
+Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_snapshot.signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
 
-PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、残留 `pm_internal_candidate` / `pm_internal_candidate_contract` / `pm_capital_deployment_decision` / PM draft 字段，或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 生成检查和 PM 合约自检负责。
+PG 对 `signal_snapshot.signal_collection_contract` 只审存在性、`producer="signal_collector"`、`collector_decision_boundary="no_trade_authority"`，以及 SCC 内不得出现 PM 越权字段，例如 `final_action`、`target_lots`、`lots_delta`、`opportunity_rank`、`opportunity_score`、`rank_score`、`position_sizing_result`、`capital_deployment`、`final_action_contract` 或 `pm_six_step_trace`。`final_action_contract.signal_collection_contract_ref` 只是摘要，不是主证据，不能替代完整 SCC。
+
+PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、缺完整 SCC 或 SCC producer/boundary/越权字段非法、残留 `pm_internal_candidate` / `pm_internal_candidate_contract` / `pm_capital_deployment_decision` / PM draft 字段，或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 生成检查和 PM 合约自检负责。
 
 测试体系按职责分层：`src/tests` 只构造样本并断言对应工具是否判对；`src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py` 只负责编排，不写审计规则。PG 专用审计规则只放在 `src/tools/agent_tools/control/pg_*.py`。
+
+## Action-Value 动作语义补充（2026-07-09）
+
+action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释。统一解释工具是 `src/tools/common/final_action_semantics.py`，完整业务表见 `docs/action_value_canonical_action_family.md`。
+
+Researcher 写 `alpha_setup_action_value` 时必须保存 `canonical_action_family`、`action_value_lane` 和 `learning_lane`；PM 通过 `decision_memory_retrieval`、`pm_lifecycle_learning_router` 和合约构造链路消费这些 canonical 字段；Reviewer 复盘归因时只能用这些字段理解历史动作属于开仓/加仓、持仓、减仓/退出、条件监控还是执行质量；PG 只审 family/lane/preference 一致性和缺字段 hard fail。各模块不得维护私有字符串集合来猜 `add_or_open`、`reduce_or_exit`、`execution` 等动作含义。
+
+`positive_candidate_open` 只允许落在 `canonical_action_family=open_add_new_risk` 且 lane 属于 `open/add/scale/increase` 的记录；`positive_candidate_exit` 只允许落在 `canonical_action_family=reduce_exit` 且 lane 属于 `reduce/exit` 的记录；`positive_candidate_execution` 只允许落在 `canonical_action_family=execution` 且 lane 为 `execution` 的记录。缺 `canonical_action_family`，或 family/lane/preference 不一致，属于系统字段语义 hard error。
+
+学习偏向不是明日执行指令。PM 可以把 open/add 学习用于同生命周期评分、rank 或降级，把 reduce/exit 学习用于释放风险判断，把 execution 学习用于未来 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，但任何 action-value 都不能直接生成 `final_action`、方向、手数或资金部署。Trader 仍只执行审计通过后的 `final_action_contract`；Accountant 不消费 action-value。

@@ -18,6 +18,11 @@ from tools.common.learning_contract import (
     CONTRACT_KEY,
     build_next_round_memory_contract,
 )
+from tools.common.final_action_semantics import (
+    canonical_action_family,
+    canonical_action_value_lane,
+    validate_action_preference_family_consistency,
+)
 from tools.agent_tools.research import research_memory_writers
 
 
@@ -417,16 +422,7 @@ INCOMPLETE_STATE_TOKENS = {"", "*", "unknown"}
 
 
 def _action_value_lane(action_name: Any) -> str:
-    action = _clean_token(action_name, "unknown")
-    if action in {"open", "add", "add_or_open", "increase", "increase_position", "reverse"}:
-        return "open"
-    if action in {"hold", "hold_position", "continue_hold", "observe", "watchlist"}:
-        return "hold"
-    if action in {"exit", "close", "reduce", "reduce_or_exit", "close_or_reduce", "flatten"}:
-        return "exit"
-    if "execution" in action or "trigger" in action or "fill" in action:
-        return "execution"
-    return "observe"
+    return canonical_action_value_lane(action_name)
 
 
 def _memory_side_role_for_action(action_name: Any) -> str:
@@ -475,6 +471,7 @@ def _action_value_usage_boundary(
     reward_source: str,
 ) -> Dict[str, Any]:
     lane = _action_value_lane(action_name)
+    family = canonical_action_family(action_name)
     forbidden_common = [
         "direct_trade_authority",
         "bypass_final_action_contract",
@@ -482,7 +479,7 @@ def _action_value_usage_boundary(
         "bypass_trader",
         "same_day_decision_use",
     ]
-    if lane == "open":
+    if family == "open_add_new_risk":
         allowed = ["open_preference", "probe_candidate"]
         if (
             action_preference == "positive_candidate_open"
@@ -492,6 +489,7 @@ def _action_value_usage_boundary(
             allowed.extend(["real_budget_entry_candidate", "scale_candidate"])
         return {
             "contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+            "canonical_action_family": family,
             "lane": lane,
             "usable_by": ["portfolio_manager", "auditor", "protocol_governor"],
             "allowed_effects": allowed,
@@ -502,9 +500,10 @@ def _action_value_usage_boundary(
             "must_flow_through_final_action_contract": True,
             "does_not_create_trade_authority": True,
         }
-    if lane == "hold":
+    if family == "hold":
         return {
             "contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+            "canonical_action_family": family,
             "lane": lane,
             "usable_by": ["portfolio_manager", "auditor", "protocol_governor"],
             "allowed_effects": ["hold_preference", "position_lifecycle_preference", "profit_giveback_context"],
@@ -515,9 +514,10 @@ def _action_value_usage_boundary(
             "must_flow_through_final_action_contract": True,
             "does_not_create_trade_authority": True,
         }
-    if lane == "exit":
+    if family == "reduce_exit":
         return {
             "contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+            "canonical_action_family": family,
             "lane": lane,
             "usable_by": ["portfolio_manager", "auditor", "protocol_governor"],
             "allowed_effects": ["protect_profit", "reduce_or_exit_preference", "stop_or_revalidation_context"],
@@ -537,9 +537,10 @@ def _action_value_usage_boundary(
             "must_flow_through_final_action_contract": True,
             "does_not_create_trade_authority": True,
         }
-    if lane == "execution":
+    if family == "execution":
         return {
             "contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+            "canonical_action_family": family,
             "lane": lane,
             "usable_by": ["trader", "portfolio_manager", "auditor", "protocol_governor"],
             "allowed_effects": ["execution_profile_preference", "trigger_method_preference", "execution_quality_context"],
@@ -561,6 +562,7 @@ def _action_value_usage_boundary(
         }
     return {
         "contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+        "canonical_action_family": family,
         "lane": lane,
         "usable_by": ["analysis_team", "portfolio_manager", "protocol_governor"],
         "allowed_effects": ["evidence_quality_context"],
@@ -581,6 +583,7 @@ def _signal_calibration_contract(
     reward_source: str,
 ) -> Dict[str, Any]:
     lane = _action_value_lane(action_name)
+    family = canonical_action_family(action_name)
     preference_text = str(action_preference or "").lower()
     if lane in {"exit", "reduce"} and preference_text.startswith("positive_"):
         calibration_bias = "questions_same_side_continuation"
@@ -595,6 +598,7 @@ def _signal_calibration_contract(
     return {
         "contract_version": "agentquant.analysis_signal_calibration.v1",
         "source_action_value_contract": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
+        "source_canonical_action_family": family,
         "consumer_scope": "analyst_calibration",
         "source_action_value_lane": lane,
         "source_action_preference": action_preference,
@@ -669,24 +673,26 @@ def _action_preference_from_stats(
 ) -> str:
     """Convert settled reward facts into an action preference, not a new gate."""
     action = _clean_token(action_name, "unknown")
+    family = canonical_action_family(action)
+    lane = canonical_action_value_lane(action)
     exact_real = amplification_scope_quality == "exact_real_state" and real_trade_reward_count > 0
     has_real_reward = real_trade_reward_count > 0
     positive = reward_sum > 0 and reward_mean > 0 and win_rate > 0
     negative = reward_sum < 0 or reward_mean < 0 or loss_reward_count > 0
     tail_loss = tail_loss_count > 0 or worst_reward <= -1000.0
     if positive and has_real_reward:
-        if action in {"open", "add", "add_or_open", "increase", "increase_position"}:
+        if family == "open_add_new_risk" and lane in {"open", "add", "scale", "increase"}:
             return "positive_candidate_open"
-        if exact_real and action in {"hold", "hold_position", "continue_hold"}:
+        if exact_real and family == "hold":
             return "positive_candidate_hold"
-        if action in {"exit", "close", "reduce", "reduce_or_exit", "close_or_reduce", "flatten"}:
+        if family == "reduce_exit" and lane in {"reduce", "exit"}:
             return "positive_candidate_exit"
-        if "execution" in action or "trigger" in action or "fill" in action:
+        if family == "execution" and lane == "execution":
             return "positive_candidate_execution"
     if has_real_reward and tail_loss:
         return "tail_loss_protect"
     if has_real_reward and negative:
-        if action in {"hold", "hold_position", "continue_hold", "observe", "watchlist"}:
+        if family in {"hold", "observe", "no_trade"}:
             return "negative_hold_revalidate"
         return "negative_revalidate"
     return ""
@@ -1205,7 +1211,8 @@ def _upsert_action_values(
             tail_loss_count=tail_loss_count,
             worst_reward=worst_reward,
         )
-        action_value_lane = _action_value_lane(action_name)
+        canonical_family = canonical_action_family(action_name)
+        action_value_lane = canonical_action_value_lane(action_name)
         consumer_scope = _learning_consumer_scope(action_name)
         memory_side_role = _memory_side_role_for_action(action_name)
         retrieval_keys = _learning_retrieval_keys(
@@ -1229,6 +1236,7 @@ def _upsert_action_values(
             "research_output_contract_version": RESEARCH_ACTION_VALUE_CONTRACT_VERSION,
             "scope_key": scope_key,
             "action_name": action_name,
+            "canonical_action_family": canonical_family,
             "action_value_lane": action_value_lane,
             "consumer_scope": consumer_scope,
             "learning_lane": action_value_lane,
@@ -1280,6 +1288,20 @@ def _upsert_action_values(
             "bandit_style_update": True,
             "future_only": True,
         }
+        consistency = validate_action_preference_family_consistency(
+            {
+                "action_name": action_name,
+                "canonical_action_family": canonical_family,
+                "action_value_lane": action_value_lane,
+                "learning_lane": action_value_lane,
+                "action_preference": action_preference,
+            }
+        )
+        if not consistency.get("ok"):
+            raise ValueError(
+                "alpha_setup_action_value_semantic_contract_failed:"
+                + ",".join(str(error) for error in consistency.get("errors") or [])
+            )
         research_memory_writers.upsert_alpha_setup_action_value(
             cursor,
             record={
@@ -1293,6 +1315,7 @@ def _upsert_action_values(
                 "setup_type": str(profile_scope.get("setup_type") or "*"),
                 "data_combo": str(profile_scope.get("data_combo") or "*"),
                 "action_name": action_name,
+                "canonical_action_family": canonical_family,
                 "sample_count": sample_count,
                 "reward_sum": reward_sum,
                 "reward_mean": reward_mean,

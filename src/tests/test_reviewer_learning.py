@@ -2944,65 +2944,62 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_researcher_downgrades_incomplete_pm_consumable_action_value(self):
+    def test_researcher_fail_fasts_incomplete_pm_consumable_action_value(self):
         from tools.agent_tools.research import research_memory_writers
 
         conn = self._connection()
         try:
             cursor = conn.cursor()
-            research_memory_writers.upsert_alpha_setup_action_value(
-                cursor,
-                record={
-                    "id": "av-incomplete",
-                    "config_id": "cfg",
-                    "scope_key": "RB|long|short|trend|setup",
-                    "ticker": "RB",
-                    "side": "long",
-                    "horizon_class": "short",
-                    "market_regime": "trend",
-                    "setup_type": "breakout",
-                    "data_combo": "technical",
-                    "action_name": "open",
-                    "sample_count": 2,
-                    "reward_sum": 3000.0,
-                    "reward_mean": 1500.0,
-                    "win_rate": 0.5,
-                    "confidence_score": 0.7,
-                    "action_preference": "positive_candidate_open",
-                    "reward_source": "real_trade",
-                    "evidence_scope": "exact_real_state",
-                    "action_value_lane": "open",
-                    "consumer_scope": "pm_learning",
-                    "learning_lane": "open",
-                    "retrieval_key": "rb-long-open",
-                    "fallback_retrieval_key": "rb-long",
-                    "execution_retrieval_key": "rb-execution",
-                    "max_position_impact": 0.02,
-                    "last_sample_date": "2025-03-04",
-                    "created_at": "2025-03-05T00:00:00+00:00",
-                    "updated_at": "2025-03-05T00:00:00+00:00",
-                    "valid_until": "2025-04-04",
-                    "payload_json": json.dumps(
-                        {
-                            "action_value_lane": "open",
-                            "learning_lane": "open",
-                            "consumer_scope": "pm_learning",
-                            "last_sample_date": "2025-03-04",
-                            "valid_until": "2025-04-04",
-                            "reward_source": "real_trade",
-                            "evidence_scope": "exact_real_state",
-                        }
-                    ),
-                },
-            )
+            with self.assertRaises(ValueError):
+                research_memory_writers.upsert_alpha_setup_action_value(
+                    cursor,
+                    record={
+                        "id": "av-incomplete",
+                        "config_id": "cfg",
+                        "scope_key": "RB|long|short|trend|setup",
+                        "ticker": "RB",
+                        "side": "long",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "breakout",
+                        "data_combo": "technical",
+                        "action_name": "open",
+                        "sample_count": 2,
+                        "reward_sum": 3000.0,
+                        "reward_mean": 1500.0,
+                        "win_rate": 0.5,
+                        "confidence_score": 0.7,
+                        "action_preference": "positive_candidate_open",
+                        "reward_source": "real_trade",
+                        "evidence_scope": "exact_real_state",
+                        "action_value_lane": "open",
+                        "consumer_scope": "pm_learning",
+                        "learning_lane": "open",
+                        "retrieval_key": "rb-long-open",
+                        "fallback_retrieval_key": "rb-long",
+                        "execution_retrieval_key": "rb-execution",
+                        "max_position_impact": 0.02,
+                        "last_sample_date": "2025-03-04",
+                        "created_at": "2025-03-05T00:00:00+00:00",
+                        "updated_at": "2025-03-05T00:00:00+00:00",
+                        "valid_until": "2025-04-04",
+                        "payload_json": json.dumps(
+                            {
+                                "action_value_lane": "open",
+                                "learning_lane": "open",
+                                "consumer_scope": "pm_learning",
+                                "last_sample_date": "2025-03-04",
+                                "valid_until": "2025-04-04",
+                                "reward_source": "real_trade",
+                                "evidence_scope": "exact_real_state",
+                            }
+                        ),
+                    },
+                )
             row = cursor.execute(
-                "SELECT consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-incomplete'"
+                "SELECT id FROM alpha_setup_action_value WHERE id='av-incomplete'"
             ).fetchone()
-
-            payload = load_externalized_json(row["payload_json"])
-            self.assertEqual(row["consumer_scope"], "research_diagnostics")
-            self.assertIn("memory_side_role", payload["pm_consumable_rejected_missing_fields"])
-            self.assertEqual(payload["original_consumer_scope"], "pm_learning")
+            self.assertIsNone(row)
         finally:
             conn.close()
 
@@ -3061,18 +3058,20 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
             )
             row = cursor.execute(
-                "SELECT action_preference, consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-eb-open-positive'"
+                "SELECT action_preference, canonical_action_family, consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-eb-open-positive'"
             ).fetchone()
 
             payload = load_externalized_json(row["payload_json"])
             self.assertEqual(row["action_preference"], "positive_candidate_open")
+            self.assertEqual(row["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(row["consumer_scope"], "pm_learning")
             self.assertEqual(payload["action_preference"], "positive_candidate_open")
+            self.assertEqual(payload["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(payload["original_action_preference"], "tail_loss_protect")
         finally:
             conn.close()
 
-    def test_researcher_downgrades_execution_action_value_from_pm_learning(self):
+    def test_researcher_keeps_execution_action_value_as_pm_learning_profile(self):
         from tools.agent_tools.research import research_memory_writers
 
         conn = self._connection()
@@ -3127,13 +3126,14 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 },
             )
             row = cursor.execute(
-                "SELECT consumer_scope, payload_json FROM alpha_setup_action_value WHERE id='av-c-execution'"
+                "SELECT consumer_scope, canonical_action_family, payload_json FROM alpha_setup_action_value WHERE id='av-c-execution'"
             ).fetchone()
 
             payload = load_externalized_json(row["payload_json"])
-            self.assertEqual(row["consumer_scope"], "research_diagnostics")
-            self.assertIn("pm_learning_execution_lane_not_allowed", payload["pm_consumable_rejected_consistency_errors"])
-            self.assertEqual(payload["original_consumer_scope"], "pm_learning")
+            self.assertEqual(row["consumer_scope"], "pm_learning")
+            self.assertEqual(row["canonical_action_family"], "execution")
+            self.assertEqual(payload["canonical_action_family"], "execution")
+            self.assertEqual(payload["action_value_lane"], "execution")
         finally:
             conn.close()
 
@@ -5046,15 +5046,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             action_values = cursor.execute(
                 """
-                SELECT action_name, scope_key, reward_sum, sample_count, payload_json
+                SELECT action_name, canonical_action_family, scope_key, reward_sum, sample_count, payload_json
                 FROM alpha_setup_action_value
                 WHERE config_id='cfg'
                 ORDER BY action_name
                 """
             ).fetchall()
             by_action = {row["action_name"]: row for row in action_values}
-            self.assertIn("open", by_action)
+            self.assertIn("add_or_open", by_action)
             self.assertIn("execution", by_action)
+            self.assertEqual(by_action["add_or_open"]["canonical_action_family"], "open_add_new_risk")
             self.assertIn("execution_breakout_setup", by_action["execution"]["scope_key"])
             self.assertLess(by_action["execution"]["reward_sum"], 0)
             self.assertEqual(by_action["execution"]["sample_count"], 1)
@@ -5583,14 +5584,17 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             row = cursor.execute(
                 """
-                SELECT action_preference, payload_json
+                SELECT action_name, canonical_action_family, action_preference, payload_json
                 FROM alpha_setup_action_value
-                WHERE config_id='cfg' AND action_name='open'
+                WHERE config_id='cfg' AND canonical_action_family='open_add_new_risk'
                 """
             ).fetchone()
+            self.assertEqual(row["action_name"], "add_or_open")
+            self.assertEqual(row["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(row["action_preference"], "positive_candidate_open")
             payload = load_externalized_json(row["payload_json"])
             self.assertEqual(payload["action_preference"], "positive_candidate_open")
+            self.assertEqual(payload["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(payload["amplification_scope_quality"], "exact_real_state")
             self.assertEqual(payload["reward_source"], "real_trade")
             self.assertEqual(payload["sample_source"], "real_trade")
@@ -6133,7 +6137,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 FROM alpha_setup_sample
                 WHERE config_id='cfg'
                   AND recommendation_id='rec-p-episode'
-                  AND action_taken='open_long'
+                  AND source_type='trade_episode'
                 """
             ).fetchone()
             self.assertEqual(sample["source_type"], "trade_episode")
@@ -6146,11 +6150,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             row = cursor.execute(
                 """
-                SELECT action_preference, reward_sum, reward_mean, payload_json
+                SELECT action_name, canonical_action_family, action_preference, reward_sum, reward_mean, payload_json
                 FROM alpha_setup_action_value
-                WHERE config_id='cfg' AND action_name='open'
+                WHERE config_id='cfg' AND canonical_action_family='open_add_new_risk'
                 """
             ).fetchone()
+            self.assertEqual(row["action_name"], "add_or_open")
+            self.assertEqual(row["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(row["action_preference"], "positive_candidate_open")
             self.assertEqual(row["reward_sum"], 14640.0)
             payload = load_externalized_json(row["payload_json"])

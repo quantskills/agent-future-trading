@@ -621,6 +621,7 @@ def _release_block_summary_from_recommendations(recommendations: List[Dict[str, 
 
 
 def _action_value_summary_from_recommendations(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    family_counts: Counter = Counter()
     lane_counts: Counter = Counter()
     preference_counts: Counter = Counter()
     scope_quality_counts: Counter = Counter()
@@ -645,11 +646,14 @@ def _action_value_summary_from_recommendations(recommendations: List[Dict[str, A
             if not isinstance(item, dict):
                 continue
             total += 1
-            lane = str(item.get("action_name") or "unknown")
+            family = str(item.get("canonical_action_family") or "missing")
+            action_name = str(item.get("action_name") or "unknown")
+            lane = str(item.get("learning_lane") or item.get("action_value_lane") or "unknown")
             preference = str(item.get("action_preference") or "").strip()
             scope_quality = str(item.get("amplification_scope_quality") or "unknown")
             reward_source = str(item.get("reward_source") or item.get("source") or "unknown")
             source = str(item.get("source") or "unknown")
+            family_counts[family] += 1
             lane_counts[lane] += 1
             scope_quality_counts[scope_quality] += 1
             reward_source_counts[reward_source] += 1
@@ -663,7 +667,9 @@ def _action_value_summary_from_recommendations(recommendations: List[Dict[str, A
                     "trading_date": _normalize_date(recommendation.get("trading_date")),
                     "ticker": item.get("ticker"),
                     "side": item.get("side"),
-                    "action_name": lane,
+                    "canonical_action_family": family,
+                    "action_name": action_name,
+                    "action_value_lane": lane,
                     "action_preference": preference or "none",
                     "scope_quality": scope_quality,
                     "reward_source": reward_source,
@@ -673,6 +679,7 @@ def _action_value_summary_from_recommendations(recommendations: List[Dict[str, A
 
     return {
         "total": total,
+        "canonical_action_family_counts": dict(family_counts.most_common()),
         "lane_counts": dict(lane_counts.most_common()),
         "action_preference_counts": dict(preference_counts.most_common()),
         "scope_quality_counts": dict(scope_quality_counts.most_common()),

@@ -190,7 +190,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | `daily_settlement` / `ticker_daily_pnl` | 会计师结算事实 | `trading_date` | 会计师结算入口 | PnL、手续费、保证金、权益、持仓快照、分品种盈亏 | 学习字段、LLM 字段、交易授权、研究结论 |
 | `trading_day_phase` | 阶段状态事实 | `trading_date` | 四阶段运行脚本 | Phase1/2/3/4 的 started/completed/failed 状态和消息 | 研究表写入、学习刷新、策略记忆 retention 清理 |
 | 复盘日志 artifact / Phase4 payload | 复盘事实和事实归因 | `trading_date` | 复盘员 Phase4 入口 | 链路验收、交易日志、事实归因、上游事实 ID/path 或必要摘要 | 写 action-value、写策略记忆、改推荐、改成交、改结算 |
-| `alpha_setup_action_value` | 交易决策类和校准类结构化研究成果 | `last_sample_date` | 研究员学习入口 / `research_memory_writers` | action-value、消费边界、奖励来源、证据作用域、PM 合约作为学习证据 | 修改当天 PM 合约、成交、结算或复盘事实 |
+| `alpha_setup_action_value` | 交易决策类和校准类结构化研究成果 | `last_sample_date` | 研究员学习入口 / `research_memory_writers` | action-value、`canonical_action_family`、`action_value_lane/learning_lane`、消费边界、奖励来源、证据作用域、PM 合约作为学习证据 | 修改当天 PM 合约、成交、结算或复盘事实；从裸 `action_name` 私自猜动作家族 |
 | `adaptive_policy_state` | 未来可用的结构化研究状态 | `source_trading_date` | 研究员学习入口 / `research_memory_writers` | 研究状态、策略校准状态、来源交易日、研究 payload | 交易员直接读取下单或放宽触发；Phase4 自动刷新 |
 | `researcher_llm_notes` | 研究员 LLM 研究 notes | `trading_date` | 研究员学习入口 | 研究输入、研究输出、结构化研究 payload、raw prompt/response | 当天交易指令、手数、成交、结算改写 |
 

@@ -148,7 +148,7 @@ Phase4 完成后，研究学习单独运行：
 
 字段语义以 `docs/unified_field_semantics.md` 为唯一来源。允许为全系统改造新增字段，但必须同一轮同步完成：统一字段语义表、生产端、消费端、提示词、测试和契约覆盖闸门。缺任一项都视为语义漂移。
 
-`src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期和交易生命周期记忆语义的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发、已触发成交，以及该合约必须读取的 `action_value_lane` 和 `memory_side_role`。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
+`src/tools/common/final_action_semantics.py` 是 `final_action_contract` 全生命周期和交易生命周期记忆语义的唯一共享解释器。PM、Auditor、Trader、Accountant、Reviewer、Researcher、Protocol Governor 及控制审计只能通过该工具解释条件监控、直接执行、普通持有、硬阻断、软降级、新开仓、扩大交易、减仓、退出、未触发、已触发成交，以及 action-value 的 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference`。分析师和 `signal_collector` 不生成交易权限；它们通过提示词、落地校验和信号收集边界禁止输出 `final_action_contract`、`conditional_trigger_authority`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`reason_codes`、手数、保证金和最终交易动作。
 
 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的商品差异化分析协议工具。它读取 `src/config/product_price_behavior_profiles.yaml`，把每个品种的趋势惯性、波动特征、产业链确认、季节窗口、假突破风险和适用 setup 格式化给 `technical`、`fundamental`、`commodity_news`，并落成 `product_profile_evidence`。它只改变分析证据层的证据强调与确认纪律；PM 只通过 `signal_collection_contract` 把它当证据上下文读取，Auditor、Trader、Accountant 不直接读取、不解释、不执行该 profile。
 
@@ -187,7 +187,7 @@ Phase4 完成后，研究学习单独运行：
 |---|---|---|---|---|
 | 预测证据事实 | 分析师结构化输出入口 | 分析师信号/上下文相关表 | 分析师报告 artifact、`action_evidence_contract`、`artifact_json` | 分析师输出统一经过结构化证据构造与校验；禁止分析师 artifact 或 payload 携带手数、仓位或最终交易动作。 |
 | 信号收集事实 | `signal_collector` 信号收集员输出入口 | 信号收集或推荐前上下文记录 | `signal_collection_contract`、来源引用、证据摘要 payload | 信号收集员只聚合分析师正式输出并写 `producer="signal_collector"`；禁止读取研究库、写 score/rank、写手数、生成交易合约或让 PM 代建证据包。 |
-| 策略交易事实 | `portfolio_manager` 投资组合经理推荐/合约写入入口 | `futures_recommendation` | PM recommendation artifact、`signal_snapshot.final_action_contract`、`final_action_contract` payload | 完整 `final_action_contract` 只能由 PM 第 6 步推荐写入路径产生；其他阶段只能引用 `recommendation_id`、路径或执行必要摘要；`signal_snapshot` 不得保留 PM 中间候选或部署决策对象。 |
+| 策略交易事实 | `portfolio_manager` 投资组合经理推荐/合约写入入口 | `futures_recommendation` | PM recommendation artifact、`signal_snapshot.final_action_contract`、`signal_snapshot.pm_six_step_trace`、`signal_snapshot.signal_collection_contract`、`final_action_contract` payload | 完整 `final_action_contract` 只能由 PM 第 6 步推荐写入路径产生；当前第一阶段 PM final `signal_snapshot.signal_collection_contract` 保存 workflow state 中 signal_collector 原始 SCC 作为上游输入快照，保留 `producer="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`；其他阶段只能引用 `recommendation_id`、路径或执行必要摘要；`signal_snapshot` 不得保留 PM 中间候选或部署决策对象。 |
 | 审计事实 | `auditor` 审计结果写入入口 | 推荐记录中的审计结果或审计 payload 载体 | `audit_verdict`、`audit_payload`、risk reasons | 审计员只写审计结论和风险原因；不得写新合约、改目标手数或直接消费研究记忆改交易权限。 |
 | 执行事实 | `trader` 交易员执行写入入口 | `futures_transactions`、`futures_intraday_decision` | `execution_result`、`execution_learning_trace`、Phase2 execution artifact、transaction audit payload | Phase2 和 transaction payload 只能保存执行事实、触发事实和执行必要摘要；禁止镜像完整 PM 合约、PM 学习、排名或资金解释字段。 |
 | 结算事实 | `accountant` 会计师结算写入入口 | `daily_settlement`、持仓/组合结算相关表 | settlement payload、positions snapshot、结算日志 | 结算只能由成交、结算价、费用、保证金和持仓事实计算；禁止学习、LLM 或复盘改账。 |
@@ -211,7 +211,7 @@ Phase4 完成后，研究学习单独运行：
 下游只读消费
 ```
 
-同一事实可以有多种载体，但不能有多个入口。例如完整 `final_action_contract` 可以在 PM recommendation DB 记录、PM recommendation artifact 或 PM payload 中保存；但它不能被交易员 Phase2 artifact、transaction audit payload、复盘 artifact 或研究 artifact 复制成自己的事实输出。下游如需追溯来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径、摘要字段或执行必要字段摘要。
+同一事实可以有多种载体，但不能有多个入口。例如完整 `final_action_contract` 可以在 PM recommendation DB 记录、PM recommendation artifact 或 PM payload 中保存；但它不能被交易员 Phase2 artifact、transaction audit payload、复盘 artifact 或研究 artifact 复制成自己的事实输出。当前尚无独立 signal_collector artifact 时，PM final `signal_snapshot.signal_collection_contract` 可以保存完整原始 SCC 作为上游输入快照，生产者仍是 `signal_collector`，PM 不得重建或改写；后续独立 signal_collector artifact 建成后，可改为 path / id / sha256 强引用。下游如需追溯来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径、摘要字段或执行必要字段摘要。
 
 边界检查必须区分“事实对象”和“摘要/状态/错误/引用”。字段名本身不等于事实对象；非空 dict/list 结构才可能承载可被下游消费的事实对象。例如 `selected_counts.alpha_setup_action_value=0`、`source_status.alpha_setup_action_value="empty"`、`source_errors.adaptive_policy_state="db_unavailable"` 或上游 ID/path 只是计数、状态、错误或引用摘要，不是研究事实进入 PM artifact。真正的 `alpha_setup_action_value`、`adaptive_policy_state` 或 `researcher_llm_notes` 对象仍只能由研究员学习入口写入。
 
@@ -252,7 +252,7 @@ Phase4 完成后，研究学习单独运行：
 
 - `effective_memory_summary`；
 - 有效 action-value 列表；
-- `action_preference`、`reward_source`、`evidence_scope`、`action_value_lane`、`memory_side_role`、`reward_sum/reward_mean`、`last_sample_date`；
+- `action_preference`、`canonical_action_family`、`reward_source`、`evidence_scope`、`action_value_lane`、`learning_lane`、`memory_side_role`、`reward_sum/reward_mean`、`last_sample_date`；
 - 过期、空壳、非 `pm_learning` scope、未来数据、弱先验的剔除或降级原因。
 
 边界：
@@ -500,7 +500,7 @@ Phase4 完成后，研究学习单独运行：
 
 | artifact 所属阶段 | 可以保存 | 禁止保存 |
 |---|---|---|
-| PM recommendation artifact | 完整 `final_action_contract`、`learning_used`、`opportunity_scorecard`、必要的 `opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment`、`pm_six_step_trace` | 第二套交易计划、交易员执行结果、收盘后事实、PM 内部评分/排序/资金部署草稿、`pm_internal_candidate`、`pm_capital_deployment_decision` |
+| PM recommendation artifact | 完整 `final_action_contract`、`learning_used`、`opportunity_scorecard`、必要的 `opportunity_rank`、`position_sizing_result`、`capital_allocation_reason`、`capital_deployment`、`pm_six_step_trace`、作为上游输入快照保存的完整原始 `signal_snapshot.signal_collection_contract` | 第二套交易计划、交易员执行结果、收盘后事实、PM 内部评分/排序/资金部署草稿、`pm_internal_candidate`、`pm_capital_deployment_decision`、由 PM 重建或改写的 `signal_collection_contract`、在 SCC 内写入手数/rank/score/资金部署/`final_action_contract` |
 | Auditor artifact | `audit_verdict`、hard/soft risk reasons、审计 payload、对 PM 合约的只读审计摘要 | 改写后的方向、改写后的手数、新建合约、研究库原始记录 |
 | Trader / Phase2 artifact | 执行事实、触发事实、成交/未成交、`execution_result`、`execution_learning_trace`、来自 PM 合约的执行必要字段摘要 | 完整 `final_action_contract` 镜像、`position_sizing_result`、`capital_allocation_reason`、`opportunity_rank`、`opportunity_score`、`opportunity_score_components`、`learning_used`、`learning_adjustment_summary` |
 | Transaction audit payload | 交易执行审计摘要、保证金审计、成交事实、执行触发事实 | 完整 `final_action_contract` 镜像、PM 学习解释、PM 排名解释、PM 资金部署解释 |
@@ -511,6 +511,8 @@ Phase4 完成后，研究学习单独运行：
 核心规则：
 
 - 完整 `final_action_contract` 只能作为 PM recommendation artifact 的策略交易事实保存。
+- 当前第一阶段 PM recommendation artifact 必须保存完整原始 `signal_snapshot.signal_collection_contract`，它是 signal_collector 的上游证据事实快照，不是 PM 输出事实；`final_action_contract.signal_collection_contract_ref` 只能作为摘要，不能替代主证据。
+- 后续如果 signal_collector 独立落 artifact，PM recommendation artifact 可改为保存可校验 path / id / sha256 强引用，但不得新增第二套字段语义。
 - 交易员仍然读取审计通过后的 `final_action_contract` 执行，但 Phase2 artifact 不能把完整 PM 合约复制成自己的输出。
 - 下游 artifact 如需说明来源，应使用 `recommendation_id`、`source_artifacts`、artifact 路径或执行字段摘要，而不是复制 PM 的学习、排名和资金解释字段。
 - `system_invariant_audit.py` 必须检查执行 artifact 中是否出现 PM 排名、学习或资金解释字段与交易意图字段同节点混用；出现时属于非策略 hard error。

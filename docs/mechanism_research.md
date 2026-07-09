@@ -63,7 +63,7 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 | `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
-| `alpha_setup_action_value` | open/add/hold/reduce/exit/execution/conditional_monitor 分动作结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action lane 使用 |
+| `alpha_setup_action_value` | 按 `canonical_action_family` 与 open/add/hold/reduce/exit/execution/conditional_monitor lane 分账的动作学习结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action family/lane 使用 |
 | `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
 | `opportunity_ranking_preference` | 投资组合经理排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` 和 PM Step5 新增风险资金部署机制消费；研究员复核 | 只影响未来机会评分和资金部署优先级，不生成交易权限 |
 | `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
@@ -73,6 +73,10 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
 ## 四、action-value 语义
+
+action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释，统一工具是 `src/tools/common/final_action_semantics.py`，完整映射见 `docs/action_value_canonical_action_family.md`。Researcher 写入时必须保存 canonical family 和 lane；PM、Reviewer、Researcher 后续链路和 PG 审计不得各自维护私有字符串集合来猜动作含义。
+
+学习偏向不是明日执行指令。`positive_candidate_open` 只能说明同 family/lane 的历史样本支持 open/add 新增风险候选，不能让交易员直接下单；具体执行动作仍只能来自 PM 当日 `final_action_contract`。
 
 固定 `action_preference` 词表只允许：
 
@@ -94,6 +98,7 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 - `id`；
 - `action_preference`；
+- `canonical_action_family`；
 - `reward_source`；
 - `evidence_scope`；
 - `action_value_lane`；
@@ -216,7 +221,7 @@ Reviewer fusion_attribution_label
 4. `final_action_contract` 是否仍由盘前预测证据、研究分项、资金风控和审计共同决定，而不是被学习单独覆盖。
 5. 交易员是否只按审计通过的合约和合约化触发规则执行或跳过。
 6. 会计师是否按事实结算。
-7. 研究员是否按 open/add/hold/reduce/exit/conditional_monitor/execution 分账并带 `memory_side_role` 更新 action-value。
+7. 研究员是否按 `canonical_action_family` 和 open/add/hold/reduce/exit/conditional_monitor/execution lane 分账并带 `memory_side_role` 更新 action-value。
 
 如果学习只增加解释文本，却没有在未来同作用域、合规边界内改善开仓、持仓、退出、执行质量或资金部署质量，就不能认为研究机制已经贡献收益。
 
@@ -235,7 +240,7 @@ Reviewer fusion_attribution_label
 回测前应确认：
 
 - `pg_contract_coverage_audit.py` 通过，确认 action-value、learning trace、score components、唯一合约和执行结果等核心契约都有生产、消费、审计和测试覆盖。
-- 研究员 -> 投资组合经理的 action-value 边界必须通过 `decision_memory_retrieval` 保真测试，证明真实 canonical 记录不会丢失 `id/action_preference/reward_source/evidence_scope/action_value_lane/reward`，也不会被空壳 trace 或空历史覆盖。
+- 研究员 -> 投资组合经理的 action-value 边界必须通过 `decision_memory_retrieval` 保真测试，证明真实 canonical 记录不会丢失 `id/action_preference/canonical_action_family/reward_source/evidence_scope/action_value_lane/learning_lane/reward`，也不会被空壳 trace 或空历史覆盖。
 - 投资组合经理不直接调用研究库读取函数；研究消费入口只保留 `decision_memory_retrieval`。
 - 审计员输入不含 `strategy_memory` 或 `adaptive_policy_state`。
 - 交易员执行入口不含研究库、action-value、`strategy_memory` 或 `adaptive_policy_state` 消费权限。

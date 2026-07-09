@@ -2,7 +2,7 @@
 
 本文件是 AI 协助开发 AgentQuant 时必须遵守的最高工作手册。处理本项目时，无论是回答问题、改代码、改配置、改提示词、改文档、排查回测、评估策略表现，还是判断“下一步该怎么做”，都必须先按本手册校准边界、证据和验收路径。
 
-核心原则：`docs/mechanism_multiagents.md` 定义当前启用智能体的固定工作流；`docs/unified_field_semantics.md` 是唯一字段语义来源；`docs/mechanism_research.md` 定义研究、记忆和学习消费边界。AI 协助开发时不能按旧口径、个人推测或局部函数名改系统。
+核心原则：`docs/mechanism_multiagents.md` 定义当前启用智能体的固定工作流；`docs/mechanism_workflow.md` 定义 workflow 只编排不决策；`docs/mechanism_pm.md` 定义 PM 六步主链与唯一合约签发；`docs/unified_field_semantics.md` 是唯一字段语义来源；`docs/mechanism_research.md` 定义研究、记忆和学习消费边界。AI 协助开发时不能按旧口径、个人推测或局部函数名改系统。
 
 `AGENTS.md` 是辅助开发手册，不是普通机制文档。除非用户本人明确要求修改、对齐或更新本文件，否则不要主动改动它；发现本文件与代码或机制文档不一致时，先向用户说明不一致和建议改法，不直接修改。
 
@@ -45,6 +45,8 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 纯文字润色、错别字和不改变机制含义的格式调整，不属于系统实际运行方式任务。
 
 - `docs/mechanism_multiagents.md`：当前启用智能体、固定工作流、LLM 边界、工具边界、研究信息消费边界。
+- `docs/mechanism_workflow.md`：workflow 编排边界，只负责调度、传递、保存、触发和阻断，不生成策略、rank、合约、资金部署或 fallback 修复。
+- `docs/mechanism_pm.md`：PM 六步主链、生命周期动作口、全市场资金部署、Step6 合约签发与自检。
 - `docs/mechanism_agent_internal_rules.md`：各智能体内部状态流转、确定性规则引擎和 LLM 输出落地契约。
 - `docs/unified_field_semantics.md`：唯一字段语义表；新增字段必须先在这里登记。
 - `docs/mechanism_research.md`：研究员、复盘员、action-value、记忆读取和未来学习消费机制。
@@ -56,10 +58,12 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 
 1. 当前代码事实和测试；
 2. `mechanism_multiagents.md` 固定工作流；
-3. `unified_field_semantics.md` 字段语义；
-4. `mechanism_agent_internal_rules.md` 智能体内部转换规则；
-5. 其他机制文档；
-6. 历史 work log。
+3. `mechanism_workflow.md` workflow 编排边界；
+4. `mechanism_pm.md` PM 六步与唯一合约边界；
+5. `unified_field_semantics.md` 字段语义；
+6. `mechanism_agent_internal_rules.md` 智能体内部转换规则；
+7. 其他机制文档；
+8. 历史 work log。
 
 如果文档落后于代码事实，先说明不一致，再按当前任务范围同步文档或代码。
 
@@ -67,6 +71,8 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 
 - `docs/work_log.md`：行为代码/配置工作日志；
 - `docs/mechanism_multiagents.md`：多智能体固定工作流、边界和协作；
+- `docs/mechanism_workflow.md`：workflow 编排边界和禁止事项；
+- `docs/mechanism_pm.md`：PM 六步、资金部署、最终合约生成和自检机制；
 - `docs/mechanism_research.md`：研究、记忆、action-value 和学习闭环；
 - `docs/mechanism_data_model.md`：数据与模型调用机制；
 - `docs/mechanism_future_trade.md`：期货交易业务机制；
@@ -83,6 +89,7 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 - `src/agents/decision_team/signal_collector.py`：信号收集员；
 - `src/agents/decision_team/portfolio_manager.py`：投资组合经理，唯一交易合约签发；
 - `src/agents/decision_team/auditor.py`：审计员；
+- `src/graph/workflow.py`：Phase1 workflow 编排层，只调度、传递和保存事实，不生成 PM 交易语义；
 - `src/agents/execution_team/trader.py`：交易员；
 - `src/agents/execution_team/accountant.py`：会计师；
 - `src/agents/research_team/reviewer.py`：复盘员；
@@ -123,7 +130,7 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 
 | 阶段 | 现实含义 | 运行脚本 | 智能体/主流程 | 输出 |
 |---|---|---|---|---|
-| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：技术面分析师、基本面分析师、期货新闻面分析师、信号收集员、投资组合经理 | `final_action_contract`、策略推荐 |
+| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：技术面分析师、基本面分析师、期货新闻面分析师、信号收集员、投资组合经理、审计员 | `final_action_contract`、`audit_verdict`、策略推荐 |
 | Phase2 | 开盘后/盘中执行 | `src/run/order.py` | 交易员 | 成交/未成交、`execution_result`、`futures_transactions` |
 | Phase3 | 收盘后结算 | `src/run/settlement.py` | 会计师 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 |
 | Phase4 | 收盘后复盘验收 | `src/run/validate_phase_flow.py` | 复盘员 | Phase4 验收、完整交易日志、事实归因、研究输入材料 |
@@ -134,6 +141,8 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 旧 `planner` 是封存开发组件，不属于当前启用智能体和固定工作流。`planner_mode=false` 是当前唯一合法运行配置；`planner_mode=true` 必须 fail-fast。
 
 `preflight` 的 LLM auth probe 是环境认证探针，不是协议管理员的交易链路 LLM 调用，也不是 Phase1-Phase4 智能体。
+
+workflow 是编排层，不是决策层。它可以调度 Agent、传递状态、保存事实、触发审计和阻断异常，但不能生成或修补研究结论、机会排序、资金部署、PM 合约、审计结论，也不能把 PM 中间态保存为对外事实。
 
 ## 7. 启用智能体边界
 
@@ -185,34 +194,47 @@ AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，
 
 - `signal_collection_contract`；
 - 账户、持仓、合约信息、市场确认；
-- `decision_memory_retrieval` 输出；
-- `opportunity_ranking` 输出；
-- `position_sizing` 输出；
+- `decision_memory_retrieval` / `effective_memory_summary`；
+- `pm_lifecycle_action_port` 输出；
+- `pm_ticker_side_selection` 输出；
+- `pm_lifecycle_learning_router` 输出；
+- 新增风险路径上的 `pm_full_market_capital_deployment` 输出；
+- `pm_position_sizing` / `build_position_sizing_result` 输出；
 - 资金与风控配置。
 
 固定输出：
 
 - `FuturesRecommendation`；
 - 唯一 `final_action_contract`；
+- `pm_six_step_trace`；
 - `learning_used`；
 - `opportunity_scorecard`；
-- `opportunity_rank`；
+- 必要时的 `opportunity_rank`；
 - `position_sizing_result`；
+- `capital_deployment`；
 - `capital_allocation_reason`。
 
 投资组合经理研究消费入口只有 `decision_memory_retrieval`。投资组合经理不直接查研究表，不直接解析原始研究记录，不直接用空历史覆盖真实历史。
 
-投资组合经理的确定性工具链固定为：
+投资组合经理的确定性工具链固定为 PM 六步：
 
-```text
-signal_collection_contract
--> decision_memory_retrieval
--> opportunity_ranking
--> position_sizing
--> portfolio_manager 签发 final_action_contract
-```
+1. 读取 `signal_collection_contract`、账户、持仓、合约、行情与配置；
+2. 通过 `pm_lifecycle_action_port` 判断开仓、加仓、减仓、平仓、持有、观察等生命周期动作口；
+3. 通过 `pm_ticker_side_selection` 判断单品种方向与候选质量；
+4. 通过 `pm_lifecycle_learning_router` 按生命周期动作消费有效记忆；
+5. 仅在新增风险路径调用 `pm_full_market_capital_deployment` 做全市场 rank 与资金部署；
+6. 通过 `pm_contract_builder` 生成唯一 `final_action_contract`，并调用 `pm_contract_self_check` 写入 `pm_six_step_trace.step6_contract_generation_check` 与 `pm_six_step_trace.pm_contract_self_check`。
 
-`decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 不能签发 `final_action_contract`。最终交易什么、交易多少，只能由投资组合经理根据工具输出和规则写入唯一合约。
+非新增风险路径必须跳过 Step5，执行 `1 -> 2 -> 3 -> 4 -> 6`；新增风险路径执行 `1 -> 2 -> 3 -> 4 -> 5 -> 6`。
+
+`decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_full_market_capital_deployment`、`pm_position_sizing` 只能提供 PM 内部输入，不能签发或修补 `final_action_contract`。最终交易什么、交易多少，只能由投资组合经理根据工具输出和规则写入唯一合约。
+
+PM 输出进入 workflow 前必须满足：
+
+- `signal_snapshot.final_action_contract` 存在；
+- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`；
+- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`；
+- 不向对外 `signal_snapshot` 泄漏 `pm_internal_candidate`、`pm_capital_deployment_decision`、PM draft contract 等内部中间态。
 
 ### 7.4 `auditor` 审计员
 
@@ -333,7 +355,7 @@ signal_collection_contract
 
 - 分析师只输出结构化预测证据；
 - 信号收集员只输出统一结构化预测证据包；
-- 投资组合经理使用 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 后签发唯一合约；
+- 投资组合经理按 PM 六步消费 `decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_lifecycle_learning_router`、必要时的 `pm_full_market_capital_deployment` 与 `pm_position_sizing` 后签发唯一合约；
 - 审计员只审这张合约；
 - 交易员只执行审计通过后的这张合约和合约化触发规则；
 - 会计师只按成交和结算事实入账；
@@ -345,7 +367,8 @@ signal_collection_contract
 - 投资组合经理直接把分析师自由文本当交易依据；
 - 信号收集员直接读研究库；
 - 投资组合经理绕过 `decision_memory_retrieval` 直接解析研究记录；
-- `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 生成 `final_action_contract`；
+- `decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_full_market_capital_deployment`、`pm_position_sizing` 生成或修补 `final_action_contract`；
+- workflow 生成 rank、部署资金、补 PM 字段、修 PM 合约或保存 PM 中间态；
 - 审计员、交易员、会计师、复盘员、研究员改写投资组合经理的交易方向或目标手数；
 - 复盘员入口调用研究员学习或任何 LLM 研究函数；
 - 交易员使用 `opportunity_rank`、`opportunity_score`、`learning_used` 或研究记录作为下单权限；
@@ -412,6 +435,8 @@ signal_collection_contract
 
 - `docs/work_log.md`；
 - `docs/mechanism_multiagents.md`；
+- `docs/mechanism_workflow.md`；
+- `docs/mechanism_pm.md`；
 - `docs/unified_field_semantics.md`；
 - 相关 `.py`、`.yaml/.yml`、提示词、测试和机制文档；
 - 最近回测记录和系统审计结果，如果任务与回测表现有关。
@@ -425,7 +450,7 @@ signal_collection_contract
 ```text
 分析师证据
 -> signal_collector
--> 投资组合经理工具链与唯一合约
+-> 投资组合经理 PM 六步工具链与唯一合约
 -> 审计员审计
 -> 交易员执行
 -> 会计师结算
@@ -443,6 +468,7 @@ signal_collection_contract
 - 不新增兜底逻辑掩盖错误；
 - 不用旧字段绕过唯一合约；
 - 不让控制组写交易策略；
+- 不让 workflow 生成 rank、部署资金、补 PM 字段、修 PM 合约或保存 PM 中间态；
 - 不让分析师给仓位；
 - 不让信号收集员读研究库；
 - 不让投资组合经理绕过 `decision_memory_retrieval` 读研究；
@@ -508,6 +534,10 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.p
 - capital_boundary；
 - audit_explainability。
 
+当前 `src/run/pre_backtest_test.py` 还编排 PM/workflow 合约静态闸门，尤其是 `src.tests.test_pre_backtest_pm_workflow_contracts`。新增或修改 PM、workflow、信号快照、审计边界时，必须优先保证该闸门仍能证明：workflow 不生成 PM 交易语义，PM Step6 合约检查存在且为真，PM 内部中间态不落入对外快照。
+
+`src/run/backtest_daily_test.py` 面向真实数据库和真实 artifact 做运行前检查，不承载静态代码扫描职责；不要把 pre-backtest 静态闸门迁移到 daily gate。
+
 验收通过只表示系统 readiness，不表示策略一定盈利。
 
 ## 13. 回测中与回测后判断
@@ -540,7 +570,16 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.p
 
 - `src/tests/test_agent_contracts.py`；
 - `src/tests/test_phase_flow_regression.py`；
-- `src/tests/test_decision_workflow_tools.py`;
+- `src/tests/test_decision_workflow_tools.py`；
+- `src/tests/test_fact_entry_boundaries.py`；
+- `src/tests/test_final_action_semantics.py`；
+- `src/tests/test_agent_output_contract_boundary.py`；
+- `src/tests/test_pre_backtest_pm_workflow_contracts.py`；
+- `src/tests/test_reviewer_transaction_log_readability.py`；
+- `src/tests/test_pm_state_transition_matrix.py`；
+- `src/tests/test_pm_watch_for_trigger_release.py`；
+- `src/tests/test_analyst_output_landing.py`；
+- `src/tests/test_evidence_fusion_semantics.py`；
 - `src/tests/test_pre_backtest_acceptance.py`；
 - `src/tests/test_protocol_governor.py`；
 - `src/tests/test_protocol_preflight_cli.py`；
@@ -565,7 +604,7 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.p
 - 新日期段必须追加在已有最后一个日期段之后、`==========当前验证口径==========` 之前。
 - 不得把新日期段插到文件顶部、插到历史日期之前，或改变既有日期段顺序。
 - 更新后必须用 `rg -n "^==========[0-9]{4}年[0-9]{2}月[0-9]{2}日==========|^==========当前验证口径==========" docs\work_log.md` 或等价命令核对日期顺序。
-- 最终回复必须说明 `docs/work_log.md` 更新位置，例如 `docs/work_log.md:217`。
+- 若本次按规则需要更新 `docs/work_log.md`，最终回复必须说明更新位置，例如 `docs/work_log.md:217`；纯文档、README 或 AGENTS 对齐且不改变系统行为时不更新 work_log，也不需要给出 work_log 位置。
 
 必须记录的情况：
 

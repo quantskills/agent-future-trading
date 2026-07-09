@@ -80,8 +80,37 @@ ACTIVE_OPPORTUNITY_REJECTION_REASONS = GENERIC_NO_CHANGE_EXPLANATION_REASONS | {
 }
 
 MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
-PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "conditional_monitor"}
+PM_MEMORY_LANES = {"open", "add", "scale", "increase", "hold", "reduce", "exit", "execution", "conditional_monitor"}
 PM_ACTION_VALUE_CONSUMER_SCOPE = "pm_learning"
+ACTION_FAMILY_OPEN_ADD_NEW_RISK = "open_add_new_risk"
+ACTION_FAMILY_REDUCE_EXIT = "reduce_exit"
+ACTION_FAMILY_EXECUTION = "execution"
+ACTION_FAMILY_HOLD = "hold"
+ACTION_FAMILY_NO_TRADE = "no_trade"
+ACTION_FAMILY_OBSERVE = "observe"
+ACTION_FAMILY_CONDITIONAL_MONITOR = "conditional_monitor"
+ACTION_VALUE_FAMILIES = {
+    ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    ACTION_FAMILY_REDUCE_EXIT,
+    ACTION_FAMILY_EXECUTION,
+    ACTION_FAMILY_HOLD,
+    ACTION_FAMILY_NO_TRADE,
+    ACTION_FAMILY_OBSERVE,
+    ACTION_FAMILY_CONDITIONAL_MONITOR,
+}
+OPEN_ADD_NEW_RISK_ACTION_NAMES = (
+    OPEN_ACTIONS
+    | INCREASE_ACTIONS
+    | {"add_or_open", "increase_position", "new_or_adjust", "reverse"}
+)
+REDUCE_EXIT_ACTION_NAMES = (
+    DECREASE_ACTIONS
+    | EXIT_ACTIONS
+    | {"reduce_or_exit", "close_or_reduce", "close", "decrease_position"}
+)
+EXECUTION_ACTION_NAMES = {"execution", "intraday", "trigger", "fill"}
+HOLD_ACTION_NAMES = {"hold", "hold_position", "continue_hold"}
+OBSERVE_ACTION_NAMES = {"observe", "watchlist"}
 POSITIVE_OPEN_ACTION_PREFERENCES = {"positive_candidate_open"}
 POSITIVE_HOLD_ACTION_PREFERENCES = {"positive_candidate_hold"}
 POSITIVE_EXIT_ACTION_PREFERENCES = {"positive_candidate_exit"}
@@ -1433,8 +1462,187 @@ def _row_covers_requirement(row: Mapping[str, Any], requirement: Mapping[str, An
     return _lane_matches_requirement(row_lane, required_lane)
 
 
+def canonical_action_family(
+    action_name: Any,
+    current_lots: int | None = None,
+    target_lots: int | None = None,
+) -> str:
+    """Return the canonical action family used by action-value learning."""
+    action = _clean(action_name)
+    if not action:
+        return ACTION_FAMILY_NO_TRADE
+    if (
+        action in EXECUTION_ACTION_NAMES
+        or "execution" in action
+        or "intraday" in action
+        or "trigger" in action
+        or "fill" in action
+    ):
+        return ACTION_FAMILY_EXECUTION
+    if action in CONDITIONAL_ACTIONS:
+        return ACTION_FAMILY_CONDITIONAL_MONITOR
+    if action in OPEN_ADD_NEW_RISK_ACTION_NAMES:
+        return ACTION_FAMILY_OPEN_ADD_NEW_RISK
+    if action in REDUCE_EXIT_ACTION_NAMES:
+        return ACTION_FAMILY_REDUCE_EXIT
+    if action in HOLD_ACTION_NAMES:
+        return ACTION_FAMILY_HOLD
+    if action in NO_TRADE_ACTIONS:
+        return ACTION_FAMILY_NO_TRADE
+    if action in OBSERVE_ACTION_NAMES:
+        return ACTION_FAMILY_OBSERVE
+
+    if current_lots is not None or target_lots is not None:
+        current = _int(current_lots)
+        target = _int(target_lots)
+        if target == current:
+            return ACTION_FAMILY_HOLD if current else ACTION_FAMILY_NO_TRADE
+        if current == 0 and target != 0:
+            return ACTION_FAMILY_OPEN_ADD_NEW_RISK
+        if current != 0 and target == 0:
+            return ACTION_FAMILY_REDUCE_EXIT
+        if current != 0 and abs(target) > abs(current):
+            return ACTION_FAMILY_OPEN_ADD_NEW_RISK
+        if current != 0 and abs(target) < abs(current):
+            return ACTION_FAMILY_REDUCE_EXIT
+        if current * target < 0:
+            return ACTION_FAMILY_OPEN_ADD_NEW_RISK
+    return ACTION_FAMILY_OBSERVE
+
+
+def canonical_action_value_lane(
+    action_name: Any,
+    current_lots: int | None = None,
+    target_lots: int | None = None,
+) -> str:
+    """Return the canonical learning lane for an action-value action."""
+    action = _clean(action_name)
+    family = canonical_action_family(
+        action,
+        current_lots=current_lots,
+        target_lots=target_lots,
+    )
+    if family == ACTION_FAMILY_OPEN_ADD_NEW_RISK:
+        current = _int(current_lots, 0) if current_lots is not None else 0
+        target = _int(target_lots, 0) if target_lots is not None else 0
+        if action in {"add", "scale", "increase", "increase_position"}:
+            return "add"
+        if action == "add_or_open" and current and abs(target) > abs(current):
+            return "add"
+        return "open"
+    if family == ACTION_FAMILY_REDUCE_EXIT:
+        current = _int(current_lots, 0) if current_lots is not None else 0
+        target = _int(target_lots, 0) if target_lots is not None else 0
+        if action in {
+            "reduce",
+            "trim",
+            "decrease",
+            "reduce_position",
+            "scale_down",
+            "reduce_only",
+            "decrease_position",
+        }:
+            return "reduce"
+        if action in {"reduce_or_exit", "close_or_reduce"} and current and target and abs(target) < abs(current):
+            return "reduce"
+        return "exit"
+    if family == ACTION_FAMILY_EXECUTION:
+        return "execution"
+    if family == ACTION_FAMILY_HOLD:
+        return "hold"
+    if family == ACTION_FAMILY_CONDITIONAL_MONITOR:
+        return "conditional_monitor"
+    if family == ACTION_FAMILY_NO_TRADE:
+        return "hold"
+    return "conditional_monitor" if action in CONDITIONAL_ACTIONS else "hold"
+
+
 def _action_value_lane(row: Mapping[str, Any]) -> str:
-    return _row_text(row, "learning_lane") or _row_text(row, "action_value_lane") or _row_text(row, "action_name")
+    return (
+        _row_text(row, "learning_lane")
+        or _row_text(row, "action_value_lane")
+        or canonical_action_value_lane(
+            _row_text(row, "action_name"),
+            current_lots=row.get("current_lots"),
+            target_lots=row.get("target_lots"),
+        )
+    )
+
+
+def _row_action_family(row: Mapping[str, Any]) -> str:
+    return _row_text(row, "canonical_action_family")
+
+
+def validate_action_preference_family_consistency(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate persisted action-value family/lane/preference semantics."""
+    row = row if isinstance(row, Mapping) else {}
+    action = _row_text(row, "action_name")
+    family = _row_action_family(row)
+    lane = _action_value_lane(row)
+    preference = _row_text(row, "action_preference")
+    expected_family = (
+        canonical_action_family(
+            action,
+            current_lots=row.get("current_lots"),
+            target_lots=row.get("target_lots"),
+        )
+        if action
+        else ""
+    )
+    errors: list[str] = []
+
+    if not family:
+        errors.append("missing_canonical_action_family")
+    elif family not in ACTION_VALUE_FAMILIES:
+        errors.append("unknown_canonical_action_family")
+    elif action and expected_family and family != expected_family:
+        errors.append("canonical_action_family_mismatch")
+
+    if not lane:
+        errors.append("missing_action_value_lane")
+    elif family == ACTION_FAMILY_OPEN_ADD_NEW_RISK and lane not in {"open", "add", "scale", "increase"}:
+        errors.append("open_family_invalid_lane")
+    elif family == ACTION_FAMILY_REDUCE_EXIT and lane not in {"reduce", "exit"}:
+        errors.append("reduce_exit_family_invalid_lane")
+    elif family == ACTION_FAMILY_EXECUTION and lane != "execution":
+        errors.append("execution_family_invalid_lane")
+    elif family == ACTION_FAMILY_HOLD and lane != "hold":
+        errors.append("hold_family_invalid_lane")
+    elif family == ACTION_FAMILY_CONDITIONAL_MONITOR and lane != "conditional_monitor":
+        errors.append("conditional_monitor_family_invalid_lane")
+
+    if preference == "positive_candidate_open":
+        if family != ACTION_FAMILY_OPEN_ADD_NEW_RISK:
+            errors.append("positive_open_family_mismatch")
+        if lane not in {"open", "add", "scale", "increase"}:
+            errors.append("positive_open_lane_mismatch")
+    elif preference == "positive_candidate_exit":
+        if family != ACTION_FAMILY_REDUCE_EXIT:
+            errors.append("positive_exit_family_mismatch")
+        if lane not in {"reduce", "exit"}:
+            errors.append("positive_exit_lane_mismatch")
+    elif preference == "positive_candidate_execution":
+        if family != ACTION_FAMILY_EXECUTION:
+            errors.append("positive_execution_family_mismatch")
+        if lane != "execution":
+            errors.append("positive_execution_lane_mismatch")
+    elif preference == "positive_candidate_hold":
+        if family != ACTION_FAMILY_HOLD:
+            errors.append("positive_hold_family_mismatch")
+        if lane != "hold":
+            errors.append("positive_hold_lane_mismatch")
+
+    return {
+        "contract": "final_action_semantics.action_preference_family_consistency.v1",
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "action_name": action,
+        "canonical_action_family": family,
+        "expected_canonical_action_family": expected_family,
+        "action_value_lane": lane,
+        "learning_lane": lane,
+        "action_preference": preference,
+    }
 
 
 def _has_real_reward_source(row: Mapping[str, Any]) -> bool:
@@ -1452,6 +1660,11 @@ def canonical_action_preference_for_action_value(row: Mapping[str, Any] | None) 
     row = row if isinstance(row, Mapping) else {}
     action = _row_text(row, "action_name")
     lane = _action_value_lane(row)
+    family = _row_action_family(row) or canonical_action_family(
+        action,
+        current_lots=row.get("current_lots"),
+        target_lots=row.get("target_lots"),
+    )
     reward_sum = _float(row.get("reward_sum"), 0.0)
     reward_mean = _float(row.get("reward_mean"), 0.0)
     preference = _row_text(row, "action_preference")
@@ -1459,16 +1672,16 @@ def canonical_action_preference_for_action_value(row: Mapping[str, Any] | None) 
     positive = has_real_reward and reward_sum > 0 and reward_mean >= 0
     negative = has_real_reward and (reward_sum < 0 or reward_mean < 0)
 
-    if positive and (action in {"open", "add", "add_or_open", "increase", "increase_position"} or lane in {"open", "add", "scale", "increase"}):
+    if positive and family == ACTION_FAMILY_OPEN_ADD_NEW_RISK and lane in {"open", "add", "scale", "increase"}:
         return "positive_candidate_open"
-    if positive and (action in {"exit", "close", "reduce", "reduce_or_exit", "close_or_reduce", "flatten"} or lane in {"exit", "reduce"}):
+    if positive and family == ACTION_FAMILY_REDUCE_EXIT and lane in {"exit", "reduce"}:
         return "positive_candidate_exit"
-    if positive and (action == "execution" or lane == "execution" or "execution" in action or "trigger" in action or "fill" in action):
+    if positive and family == ACTION_FAMILY_EXECUTION and lane == "execution":
         return "positive_candidate_execution"
     if negative:
         if preference in PROTECTIVE_ACTION_PREFERENCES:
             return preference
-        if action in {"hold", "hold_position", "continue_hold", "observe", "watchlist"} or lane == "hold":
+        if family in {ACTION_FAMILY_HOLD, ACTION_FAMILY_OBSERVE, ACTION_FAMILY_NO_TRADE} or lane == "hold":
             return "negative_hold_revalidate"
         return "negative_revalidate"
     return preference
@@ -1484,12 +1697,11 @@ def validate_action_value_write_consistency(row: Mapping[str, Any] | None) -> di
     role = _row_text(row, "memory_side_role")
     preference = _row_text(row, "action_preference")
     canonical_preference = canonical_action_preference_for_action_value(row)
+    family_validation = validate_action_preference_family_consistency(row)
     reward_sum = _float(row.get("reward_sum"), 0.0)
-    errors: list[str] = []
+    errors: list[str] = list(family_validation.get("errors") or [])
 
     if consumer_scope == PM_ACTION_VALUE_CONSUMER_SCOPE:
-        if lane == "execution" or action == "execution":
-            errors.append("pm_learning_execution_lane_not_allowed")
         if lane and lane not in PM_MEMORY_LANES:
             errors.append("pm_learning_lane_not_allowed")
         if side and side not in {"long", "short", "*"}:
@@ -1519,6 +1731,9 @@ def validate_action_value_write_consistency(row: Mapping[str, Any] | None) -> di
         "consumer_scope": consumer_scope,
         "memory_side_role": role,
         "action_preference": preference,
+        "canonical_action_family": family_validation.get("canonical_action_family"),
+        "expected_canonical_action_family": family_validation.get("expected_canonical_action_family"),
+        "action_value_lane": family_validation.get("action_value_lane"),
         "canonical_action_preference": canonical_preference,
     }
 
@@ -1827,10 +2042,23 @@ def derive_research_fact_state(
     memory = derive_memory_requirements(contract)
     execution_result = execution_result if isinstance(execution_result, Mapping) else {}
     contract_side = memory["target_side"] or memory["current_position_side"] or "flat"
+    action_family = canonical_action_family(
+        semantics["action"],
+        current_lots=semantics["current_lots"],
+        target_lots=semantics["target_lots"],
+    )
+    action_value_lane = canonical_action_value_lane(
+        semantics["action"],
+        current_lots=semantics["current_lots"],
+        target_lots=semantics["target_lots"],
+    )
     return {
         "contract": "final_action_semantics.research_fact_state.v1",
         "learning_source": "phase4_completed_facts",
         "action": semantics["action"],
+        "canonical_action_family": action_family,
+        "action_value_lane": action_value_lane,
+        "learning_lane": action_value_lane,
         "current_lots": semantics["current_lots"],
         "target_lots": semantics["target_lots"],
         "lots_delta": semantics["lots_delta"],
@@ -1846,6 +2074,9 @@ def derive_research_fact_state(
             "target_lots": semantics["target_lots"],
             "lots_delta": semantics["lots_delta"],
             "final_action": semantics["action"],
+            "canonical_action_family": action_family,
+            "action_value_lane": action_value_lane,
+            "learning_lane": action_value_lane,
             "lifecycle_state": semantics["lifecycle_state"],
             "contract_side": contract_side,
             "memory_side_role": memory["contract_side_role"],
