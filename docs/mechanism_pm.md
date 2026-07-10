@@ -1,658 +1,599 @@
-# PM 内部工作流机制
+# PM 内部机制
 
-本文固定 PM 内部工作流口径。PM 是唯一组合决策者和唯一 `final_action_contract` 签发者；工具和模块只提供结构化输入、语义判断、合约构造、自检和全市场资金 rank 支撑，不替代 PM 生成交易事实。
-PM 的生产端、artifact 落点、下游消费、自检、pre-backtest fixture 和 daily PG 审计边界统一锚定 `docs/matrix_chain_contract.md`；本文只说明 PM 六步和自检细节。
+## 一、输入
 
-PM 内部 6 步流程固定为：
+### 1. 统一证据输入
 
-1. 读取输入
-2. 判断生命周期动作口
-3. 判断单品种方向与候选质量
-4. 按生命周期消费学习
-5. 新增风险进入全市场资金 rank 与资金部署
-6. 生成唯一 `final_action_contract`
+内容：`signal_collection_contract`
 
-## PM 内部统筹调度边界
+生产者：`signal_collector_agent`
 
-PM 内部 6 步由 `portfolio_manager.py` 作为 PM 主入口统筹，调用 PM 自己的确定性工具完成，不由 `workflow.py` 拆开调度。
+传递者：`workflow` 编排层。`workflow` 不是智能体，只负责把 signal collector 产物写入运行时 state。
 
-PM 内部顺序必须固定为：
+接收位置：`state["signal_collection_contract"]`
 
-1. 读取输入：结构化信号、持仓、配置、学习、episode 反馈。
-2. 判断生命周期动作口：调用 `pm_lifecycle_action_port.py`。
-3. 判断单品种方向与候选质量：调用 `pm_ticker_side_selection.py`。
-4. 按生命周期消费学习：调用 `pm_lifecycle_learning_router.py`。
-5. 新增风险进入全市场 rank 与资金部署：调用 `pm_full_market_capital_deployment.py`。
-6. 生成唯一 `final_action_contract`：调用 `pm_contract_builder.py`，写入 `pm_six_step_trace.step6_contract_generation_check`，并调用 `pm_contract_self_check.py`。
+### 2. 产品身份输入
 
-一句话：`workflow.py` 调 PM，PM 内部自己按六步调工具。`workflow.py` 管阶段，PM 管策略。
+内容：`ticker`、`trading_date`、`config_id`
 
-分流逻辑固定为：
+生产者：`workflow` 编排层
 
-- 如果是 `hold` / `reduce` / `exit` / `wait` 这类非新增风险动作，走 `1 -> 2 -> 3 -> 4 -> 6`，不经过全市场资金 rank。
-- 如果是 `open` / `open_probe` / `add` / `scale` / `reverse` / `conditional open` 这类新增风险动作，走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，必须经过全市场资金 rank 和预算部署后，才能签最终合约。
+接收位置：`state["ticker"]`、`state["trading_date"]`、`state["config_id"]`
 
-所以第 6 步才是 PM 内部最后一步：无论走不走 rank，最终都必须落到唯一 `final_action_contract`。
+### 3. 账户和持仓输入
 
-## 1. 读取输入
+内容：`portfolio`
 
-PM 读取输入用到的工具/模块：
+生产者：DB 最新结算组合
 
-- `signal_collector` 结构化信号快照
-- `pm_signal_fusion`
-- `pm_ticker_side_selection`
-- `pm_full_market_capital_deployment`
-- `alpha_setup`
-- `pm_contract_builder`
-- `final_action_semantics`
-- `pm_contract_self_check`
+传递者：`workflow` 编排层
 
-### 1.1 结构化信号快照
+接收位置：`state["portfolio"]`
 
-从 `signal_collector` 输出中按 `ticker` 读取当天结构化字段：
+### 4. 盘前价格输入
 
-- 方向
-- 证据强弱
-- `setup`
-- `trigger`
-- `invalidation`
-- 冲突
-- `confirmation requirement`
+内容：`morning_price_context`
 
-PM 只读结构化字段，不把分析师自由文本当交易指令。
+生产者：`workflow` 编排层调用 `Router.resolve_pre_open_reference_price`
 
-### 1.2 当前持仓
+接收位置：`state["morning_price_context"]`
 
-从 portfolio / position 状态中按 `ticker` 读取：
+价格口径：Phase1 盘前计划参考价，当前代码取上一交易日收盘价，字段为 `base_price`、`base_price_source`、`base_price_date`、`prev_close_price`。
 
-- `current_lots`
-- `current_side`
-- `holding_days`
-- `entry_price`
-- 未实现盈亏
-- 当前保证金占用
+### 5. 运行配置输入
 
-这些字段用于判断有仓/无仓，以及后续生命周期动作口。
+内容：`config`、`full_config`
 
-### 1.3 资金与风险配置
+生产者：`workflow` 编排层
 
-从 `dev.yaml` / `portfolio_policy_catalog.yaml` 读取：
+接收位置：`state["config"]`、`state["full_config"]`
 
-- 总保证金上限
-- 单品种上限
-- 净敞口上限
-- `probe=0.008`
-- `real budget` / `alpha scale` 资金层级参数
+### 6. 合约基础信息输入
 
-PM 只能读配置参数，不能临时编仓位参数。
+内容：合约乘数、保证金率、主力合约信息
 
-### 1.4 产品级学习
+生产者：合约信息缓存
 
-从 `alpha_setup_profile` / 产品级动态学习读取：
+### 7. 学习成果输入
 
-- 产品
-- 方向
-- `setup`
-- `trigger`
-- `evidence_combo`
-- 历史表现
-- 资金部署结果
+内容：action-value、setup/profile、历史 episode 摘要
 
-读取时按 `ticker + side + setup + trigger + evidence_combo` 匹配，只做产品差异化和策略表现校准，不直接生成交易权限。
+生产者：Researcher 写入 research DB
 
-### 1.5 action-value 学习
+### 8. 分析师信号引用
 
-从 `alpha_setup_action_value` 读取：
+内容：`analyst_signals`
 
-- `open/add` 学习
-- `hold` 学习
-- `reduce/exit` 学习
-- `execution` 学习
-- `conditional_monitor` 学习
-- `reward`
-- `outcome`
-- `action_preference`
+生产者：三类分析师
 
-读取时按生命周期消费：
+传递者：`workflow` 编排层
 
-- `open/add` 给新增风险 rank
-- `hold` 给持仓
-- `reduce/exit` 给释放资金
-- `execution` 给 trigger/profile
-- `conditional_monitor` 给条件监控质量
+接收位置：`state["analyst_signals"]`
 
-不同生命周期不能混用。
+定死边界：
 
-### 1.6 历史 episode 反馈
+`state["signal_collection_contract"]` 是 PM 交易证据主入口。
 
-从 Researcher 写回的已完成或可归因 episode 中读取：
+`state["analyst_signals"]` 不是 PM 交易证据入口。
 
-- 交易后收益
-- 亏损 episode
-- `trigger` 有效性
-- `entry quality`
-- `exit quality`
-- `deployment outcome`
+PM 不直接读取行情原始序列、基本面原始数据、新闻原文作为交易判断输入；这些信息先由分析师结构化，再由 signal collector 汇总进 `signal_collection_contract`。
 
-这些反馈用于修正下一轮证据质量、`rank_score`、持仓/退出/trigger 判断，不改当日已经发生的交易事实。
+## 二、输出
 
-## 2. 判断生命周期动作口
+### 1. 最终合约
 
-PM 判断生命周期动作口时，按 6 大块里的第 2 块固定执行。
+#### 1.1 传出方式
 
-### 2.1 调用工具/模块
+最终合约只由 PM 第 6 步一次性生成。
 
-主工具：
+最终合约先进入内存中的 `FuturesRecommendation.signal_snapshot.final_action_contract`。
 
-- `pm_lifecycle_action_port.py`
+`workflow` 只接收 PM 返回的 `FuturesRecommendation`，再负责保存 DB 和本地 artifact。
 
-共享语义依赖：
+最终合约生成时不读取 DB 中已经落盘的 PM 输出，不读取本地 artifact，不读取运行日志。
 
-- `final_action_semantics`
+#### 1.2 包含内容
 
-输入辅助：
+`final_action_contract` 必须包含：
 
-- `signal_collector` 结构化信号快照
-- 当前持仓状态
-- 条件字段
+- `contract_version`
+- `producer`
+- `trading_date`
+- `config_id`
+- `ticker`
+- `underlying_code`
+- `contract_code`
+- `source_type`
+- `final_action`
+- `action_family`
+- `contract_lifecycle_port`
 - `current_lots`
 - `target_lots`
 - `lots_delta`
-
-明确禁止：
-
-- `pm_contract_builder.py` 不参与动作口判断，只在第 6 步生成唯一 `final_action_contract`
-- `pm_contract_self_check.py` 不参与动作口判断，只做最终合约自身机制边界检查
-- `pm_ticker_side_selection.py` 不参与动作口判断，只在第 3 步判断单品种方向与候选质量
-- `pm_full_market_capital_deployment.py` 不参与动作口判断，只在第 5 步处理新增风险候选的唯一全市场资金 rank 与资金部署
-- `workflow.py` 不参与动作口判断
-
-### 2.2 交易动作分口
-
-新增风险口：走 rank。
-
-- `open`
-- `open_probe`
-- `open_real`
-- `add`
-- `scale`
-- `increase`
-- `reverse`
-- `conditional open`
-
-非新增风险口：不走 rank。
-
-- `wait`
-- `hold`
-- `reduce`
-- `exit`
-- `close`
-- `risk_exit`
-
-条件监控口：分两种。
-
-- 保留新增风险意图：走 rank，并要求 Trader 写盘中触发结果。
-- 已打回观察或 `no_rank_no_new_exposure`：不走 rank，不要求 Trader 盘中结果。
-
-### 2.3 判断方法
-
-按 `current_lots`、`target_lots`、`lots_delta` 和条件字段判断：
-
-- `current_lots=0` 且 `target_lots=0`：`wait`
-- `current_lots=0` 且 `target_lots!=0`：`open` / `open_probe` / `conditional open`，属于新增风险，必须走 rank
-- `current_lots!=0` 且 `target_lots=current_lots`：`hold`
-- `current_lots!=0` 且 `target_lots=0`：`exit` / `close` / `risk_exit`
-- 同方向持仓，`abs(target_lots) < abs(current_lots)`：`reduce`
-- 同方向持仓，`abs(target_lots) > abs(current_lots)`：`add` / `scale` / `increase`，属于新增风险，必须走 rank
-- `current_lots` 和 `target_lots` 方向相反：`reverse`，属于新增风险，必须走 rank
-- 有 `requires_intraday_confirmation=true` 且仍保留新增 `target_lots`：条件开仓，走 rank，并要求 Trader 写触发/未触发结果
-- 已被还原成 `target_lots=current_lots` 或 `target_lots=0`，且原因是 `no_rank_no_new_exposure` / `no_rank_or_budget_no_new_exposure`：未部署条件候选，不走 rank
-
-一句话：PM 先用持仓变化和条件字段判断动作口；只有会新增风险敞口的动作进入唯一全市场 rank，持仓、减仓、退出、等待不抢新资金 rank。
-
-## 3. 判断单品种方向与候选质量
-
-### 3.1 调用工具/模块
-
-使用：
-
-- `pm_signal_fusion`
-- `alpha_setup`
-- `final_action_semantics`
-
-不调用 `pm_full_market_capital_deployment`。`pm_full_market_capital_deployment` 只用于第五步全市场资金 rank。
-
-### 3.2 判断内容
-
-方向判断：
-
-对单个 `ticker` 判断当天应偏 `long`、`short` 还是 `flat`。
-
-候选质量判断：
-
-判断该方向是否具备候选资格，依据包括证据强度、三类分析师一致性、`setup` 清晰度、`trigger` 明确度、`invalidation` 明确度、冲突程度、产品级 profile 是否支持。
-
-### 3.3 输出边界
-
-这一步只能形成 PM 内部方向判断结果：
-
+- `position_change_direction`
+- `side`
+- `direction`
+- `direction_source`
+- `authority`
+- `execution_trigger_state`
+- `execution_trigger_condition`
+- `execution_timing_rule`
+- `conditional_trigger_authority`
+- `trigger_valid_until`
+- `trigger_cancel_condition`
+- `invalidation_boundary`
+- `risk_boundary`
+- `stop_reference`
+- `risk_reason_codes`
+- `do_not_trade_reason`
+- `rejection_reason`
+- `base_price`
+- `base_price_source`
+- `base_price_date`
+- `prev_close_price`
+- `price_basis_warning`
+- `contract_multiplier`
+- `margin_rate`
+- `notional_value`
+- `estimated_margin`
+- `margin_delta`
+- `post_trade_margin_estimate`
+- `evidence_used`
+- `evidence_understanding`
+- `signal_collection_contract_ref`
+- `evidence_alignment_state`
+- `multi_evidence_consensus_score`
+- `cross_analyst_conflict_count`
+- `missing_evidence_count`
+- `resolution_effect`
+- `learning_used`
+- `alpha_setup_action_values`
+- `memory_retrieval`
+- `lifecycle_learning_trace`
+- `decision_learning_rows`
+- `trigger_profile_learning_rows`
+- `opportunity_rank`
+- `rank_source`
+- `rank_lifecycle`
 - `side_priority`
 - `ticker_side_priority`
 - `side_priority_score`
-
-禁止输出：
-
-- `opportunity_rank`
-- `capital_layer`
-- `real_budget_entry`
-- 最终 `target_lots`
-- 资金部署结论
-
-一句话：第三步只判断“这个产品偏多、偏空还是不做，以及候选质量够不够”，不判断“全市场谁最值得投钱”。
-
-## 4. 按生命周期消费学习
-
-这一点只回答：这些学习应该影响哪个决策口。
-
-### 4.1 调用工具/模块
-
-使用：
-
-- `alpha_setup`
-- `pm_signal_fusion`
-- `final_action_semantics`
-- `pm_contract_builder`
-
-不调用 `pm_full_market_capital_deployment` 做全生命周期学习消费。
-
-`pm_full_market_capital_deployment` 只在第 5 步消费 `open/add` 学习，用于新增风险全市场资金 rank。
-
-### 4.2 全周期动作划分
-
-新增风险动作：
-
-- `open`
-- `open_probe`
-- `open_real`
-- `add`
-- `scale`
-- `increase`
-- `reverse`
-
-持仓动作：
-
-- `hold`
-
-释放资金动作：
-
-- `reduce`
-- `exit`
-- `close`
-- `risk_exit`
-
-条件监控动作：
-
-- `conditional open`
-- `conditional_monitor`
-
-执行触发动作：
-
-- `execution`
-
-### 4.3 消费哪些学习结论
-
-新增风险动作消费：
-
-消费 `open/add/scale/increase` 学习：历史收益、亏损 episode、`entry quality`、`deployment outcome`、产品/setup/trigger 同类表现。
-
-影响：新增风险候选质量、后续 `rank_score`、是否具备 `real_budget_entry` / `alpha_scale` 候选资格。
-
-持仓动作消费：
-
-消费 `hold` 学习：继续持有是否有效、盈利持仓是否应保护、趋势持仓是否应延续、忽略 `exit` 学习是否需要解释。
-
-影响：是否继续持有、是否写合法继续持有解释、是否保护性不动仓。
-
-释放资金动作消费：
-
-消费 `reduce/exit` 学习：退出是否有效、减仓是否保护收益、亏损 revalidation 是否失败、继续持有是否风险更大。
-
-影响：是否减仓、是否退出、是否释放资金、是否保留仓位并写合法解释。
-
-条件监控动作消费：
-
-消费 `conditional_monitor` 学习：条件候选是否值得继续监控、触发要求是否需要加强、未部署候选是否只保留观察。
-
-影响：是否保留条件开仓意图、是否要求盘中触发、是否打回观察。
-
-执行触发动作消费：
-
-消费 `execution` 学习：trigger/profile 历史质量，例如 breakout、pullback、intraday confirmation 的有效性。
-
-影响：trigger/profile 校准、触发要求、执行画像；不能直接生成交易权限，不能直接进入新资金 rank。
-
-### 4.4 怎么消费与联通
-
-- 先由 `alpha_setup` 提供产品级和 action-value 学习。
-- `pm_signal_fusion` 把学习转成证据质量、trigger/profile、产品差异化校准。
-- `final_action_semantics` 判断学习属于哪个生命周期，防止混用。
-- `pm_contract_builder` 把被消费的学习影响写入最终合约 trace。
-- 如果是新增风险动作，`open/add` 学习再交给第 5 步进入全市场 rank。
-- 如果是非新增风险动作，学习直接影响持仓、减仓、退出或条件监控决策，然后进入第 6 步生成最终合约。
-
-一句话：第四步不是排名，也不是下单；它只把不同生命周期的学习接到对应决策口，确保 `open/add` 影响新资金，`hold` 影响持仓，`reduce/exit` 影响释放资金，`execution` 只影响 trigger/profile。
-
-## 5. 新增风险进入全市场资金 rank 与资金部署
-
-这一点只处理新增风险动作：
-
-- `open`
-- `open_probe`
-- `open_real`
-- `add`
-- `scale`
-- `increase`
-- `reverse`
-- `conditional open`
-
-非新增风险动作不进这里。
-
-### 5.1 调用工具/模块
-
-使用：
-
-- `pm_full_market_capital_deployment`
-- `alpha_setup`
-- `pm_signal_fusion`
-- `final_action_semantics`
-- `pm_contract_builder`
-- `pm_contract_self_check`
-
-评分配置读取：
-
-- `src/config/rank_score_policy.yaml`
-
-该配置只控制 `rank_score` 分项权重和资金效率小修正，不创建交易权限，不改变仓位参数，不覆盖 `0.008` probe、`20%` 总资金占用率或 `0.5` 净敞口红线。
-
-### 5.2 唯一原则
-
-`rank=1` 永远表示：当天全市场最值得占用资金、最可能盈利的产品机会。
-
-排名越靠前，不是“字段更好看”，而是综合判断它更可能赚钱。
-
-资金层级不由 rank 自动改变：试探仓仍是试探仓，正常仓仍是正常仓，放大仓仍是放大仓。
-
-### 5.3 排名怎么决定
-
-`rank_score` 应该由这些部分组成：
-
-- 当前结构化证据强度
-- 三类分析师方向一致性
-- `setup` 清晰度
-- `trigger` 明确度
-- `invalidation` 明确度
-- 冲突程度
-- 产品级 profile 支持度
-- 同产品/方向/setup/trigger/evidence_combo 历史表现
-- `open/add` action-value 学习修正
-- execution/trigger 质量修正
-- 资金效率修正
-- 风险和失效边界惩罚
-
-### 5.4 冷启动怎么排
-
-没有足够学习记录时，先靠冷启动证据质量排：
-
-- 三类分析师越一致，越靠前
-- 证据越强，越靠前
-- `setup` 越清楚，越靠前
-- `trigger` 越客观可判断，越靠前
-- `invalidation` 越明确，越靠前
-- 冲突越少，越靠前
-- 产品 profile 越支持，越靠前
-
-这时 rank 解决的是：第一批最值得小仓试探的是谁。
-
-### 5.5 有学习记录后怎么排
-
-有历史 episode / action-value 后，rank 必须被强化学习修正：
-
-- 同类 `open/add` 赚钱：提高 rank
-- 同类 `open/add` 亏钱：降低 rank
-- 同类 `trigger` 有效：提高 trigger/profile 分
-- 同类 `trigger` 失效：降低 trigger/profile 分
-- 同类 `deployment outcome` 好：提高真实资金或放大资金候选资格
-- 同类 `entry quality` 差：降低 rank 或保留观察
-
-这时 rank 解决的是：哪些产品已经从“看起来好”变成“历史证明更可能赚钱”。
-
-### 5.6 资金层级天然顺序
-
-资金层级进入同一套 rank，但层级有天然优先级：
-
-- `alpha_scale`：最高，因为反复验证有 alpha
-- `real_budget_entry`：第二，因为已有学习和证据支持正常交易
-- `exploration_probe`：第三，因为只是小仓试探
-
-所以同等条件下：
-
-- `alpha_scale` 排在 `real_budget_entry` 前面
-- `real_budget_entry` 排在 `exploration_probe` 前面
-
-但不能因为 probe 排名高，就把它升级成 normal 或 alpha。
-
-也不能因为 alpha 排名低，就把它降成 probe。层级由证据和学习决定，rank 决定同一资金池里的资金优先级。
-
-### 5.7 资金部署怎么挂钩
-
-按 rank 顺序部署：
-
-- `rank=1` 先占用预算
-- `rank=2` 再占用剩余预算
-- `rank=3` 继续占用剩余预算
-- 直到触碰预算线，后续候选还原为 `wait` / `no_rank_or_budget_no_new_exposure`
-
-必须守住两条预算线：
-
-- 总资金占用率不超过 `20%`
-- 多空净敞口平衡不超过 `0.5`
-
-`probe=0.008` 也必须守住：
-
-- probe 还是 `0.008`
-- 不能因为 rank 高升到 `0.01`
-- 不能因为预算紧降到更低
-- 预算不够就不部署，不能缩水部署
-
-### 5.8 最终结果
-
-第 5 步输出给第 6 步的是资金部署结果：
-
-- 谁进入 rank
-- rank 是多少
-- `rank_score` 为什么这样
-- 资金层级是什么
-- 使用哪个资金比例来源
-- 预算是否足够
-- 如果预算不够，为什么还原 wait
-- 学习如何影响 rank
-
-一句话：第五步就是把所有新增风险候选放进同一个全市场资金池，按“最可能盈利”排序，再按 rank 顺序占用资金；守住 `20%` 总资金占用、`0.5` 净敞口和仓位参数边界，probe 永远还是 `0.008`。
-
-## 6. 生成唯一 final_action_contract
-
-第 6 步是 PM 的最终签出点。它同时回答两件事：
-
-- 这个 `ticker` 最终签出的唯一交易事实是什么。
-- PM artifact 里可以输出什么，不能输出什么。
-
-### 6.1 调用工具/模块
-
-使用：
-
-- `pm_contract_builder`
-- `final_action_semantics`
-- `pm_contract_self_check`
-- `alpha_setup`
-
-不调用：
-
-- `pm_full_market_capital_deployment` 重新排名
-- Trader / Accountant / Auditor 工具改合约
-
-`pm_full_market_capital_deployment` 的结果如果已经在第 5 步生成，只能作为全市场资金 rank 结果写入合约；第 6 步不能重新排名。
-
-第 6 步最终闸门固定为两道检查：
-
-- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`
-- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`
-
-其中 `step6_contract_generation_check` 只检查最终合约是否由合法 PM 机制生成；`pm_contract_self_check` 只检查最终合约自身字段、rank/非 rank/Step5 未部署边界和 artifact 污染。两者都不比较 Step2 的 `primary_lifecycle_action_port` 与 Step6 最终合约是否一致。Step2 到 Step6 的变化只能作为 PM 内部 provenance trace，不参与最终合约失败判断。
-
-### 6.2 final_action_contract 回答什么
-
-第 6 步生成的 `final_action_contract` 是 PM 签出的唯一交易事实，必须写清：
-
-- `final_action`
-- `current_lots`
-- `target_lots`
-- `lots_delta`
-- `reason_codes`
-- `execution_profile`
-- `entry_trigger`
-- `invalidation`
-- `learning_used`
-- `evidence_used`
+- `scorecard_score`
+- `scorecard_preferred_side`
 - `capital_deployment`
-- `position_sizing_result`
-
-### 6.3 走 rank 的新增风险动作输出什么
-
-如果是 `open` / `open_probe` / `add` / `scale` / `reverse` / `conditional open`，最终合约必须同时带两类 trace。
-
-资金 rank trace：
-
-- `opportunity_rank`
-- `rank_source=full_market_capital_deployment`
-- `rank_score`
-- `rank_input_components`
-- `rank_capital_role`
 - `capital_layer`
-- `capital_ratio_source`
-- `rank_reason`
+- `budget_approved`
+- `budget_rejection_reason`
+- `allocated_budget`
+- `target_margin`
+- `position_sizing_result`
+- `sizing_method`
+- `sizing_constraints`
+- `max_lots_allowed`
+- `target_lots_before_constraints`
+- `target_lots_after_constraints`
+- `lineage`
+- `source_lineage_context`
+- `generated_at`
+- `pm_contract_generation_mode`
 
-生命周期学习 trace：
+#### 1.3 来源
 
-- `lifecycle_learning_trace`
-- `learning_impact_delta`
-- `pm_lifecycle_learning_trace`
-- `pm_lifecycle_learning_impact_delta`
+最终合约内容只来自 PM 内部候选状态。
 
-走 rank 的合约必须能说明：
+各内容来源固定：
 
-- 为什么这个候选这么排
-- 分数来自哪些证据和学习
-- 学习让分数加了还是扣了
-- 资金层级是什么
-- 使用哪个资金比例来源
-- 最终为什么保留或还原目标手数
+产品、日期、配置、合约身份：来自 `state["ticker"]`、`state["trading_date"]`、`state["config_id"]` 和合约信息缓存。
 
-### 6.4 不走 rank 的非新增风险动作输出什么
+`final_action`、`current_lots`、`target_lots`、`lots_delta`：来自第 6 步对最终候选状态的合约化结果。
 
-如果是 `hold` / `reduce` / `exit` / `wait` / `close` / `risk_exit`，最终合约不能有新资金 rank。
+方向、交易状态、生命周期口：来自第 2、3 步写回的候选状态。
 
-但只要消费了生命周期学习，必须保留：
+执行触发条件：来自 SCC 中的 trigger 信息和第 3 步交易状态判断。
 
-- `lifecycle_learning_trace`
-- `learning_impact_delta`
-- `pm_lifecycle_learning_trace`
-- `pm_lifecycle_learning_impact_delta`
+失效边界、风险边界：来自 SCC 的 invalidation、risk 信息。
 
-非 rank 合约必须能说明：
+计划参考价：来自 `morning_price_context`。
 
-- 哪些学习被消费
-- 哪些学习被拒绝
-- 学习影响的是持仓、减仓、退出、等待还是条件监控
-- 为什么不进入新资金 rank
-- 如果继续持有，是否合法解释不动仓
-- 如果减仓或退出，是否是释放资金动作
+合约基础信息：来自 `FuturesContractInfoCache.get_contract_info`。
 
-### 6.5 PM artifact 边界
+证据摘要：来自第 1 步 `evidence_understanding`。
 
-最终合约和 PM artifact 只能写安全摘要，不能写 Researcher 原始事实对象。
+学习使用摘要：来自第 4 步学习检索结果。
 
-允许写：
+排名与预算分配摘要：来自第 5 步新增风险排序与预算分配结果。
 
-- 学习条数
-- 生命周期 `lane`
-- `scope`
+仓位测算结果：来自第 5 步 position sizing 结果。
+
+来源链路：来自 SCC source refs、分析师引用完整性校验和 PM 生成上下文。
+
+### 2. 物理材料输出
+
+#### 2.1 返回对象
+
+##### 2.1.1 落点
+
+PM 第 6 步返回给 `workflow` 的内存对象：`FuturesRecommendation`。
+
+##### 2.1.2 包含内容
+
+- `id`
+- `config_id`
+- `reference_portfolio_id`
+- `trading_date`
+- `effective_trade_date`
+- `source_type`
+- `underlying_code`
+- `from_contract`
+- `to_contract`
+- `contract_code`
+- `action`
+- `lots`
+- `base_price`
+- `base_price_source`
+- `base_price_date`
+- `open_price`
+- `prev_close_price`
+- `slippage_model`
+- `slippage_ticks`
+- `slippage_amount`
+- `execution_price`
+- `justification`
+- `signal_snapshot`
+- `audit_payload`
+- `warning_message`
 - `status`
-- `delta`
-- `reason`
-- 使用/拒绝摘要
-- trace 是否已落合约
+- `created_at`
 
-禁止写：
+##### 2.1.3 来源
 
-- `adaptive_policy_state`
-- `strategy_memory`
-- `adaptive_policy_scope.policies`
-- Researcher 原始策略行
-- 原始学习 rows 全量对象
+来自 PM 第 6 步对最终候选状态的合约化结果。
 
-### 6.6 trace 是什么
+`FuturesRecommendation` 是 PM 对 `workflow` 的直接返回值，不是缓存、DB 记录或本地 artifact。
 
-trace 不是原始研究事实对象。
+`workflow` 接收后，才把它保存为 `futures_recommendation` DB 记录和本地 recommendation artifact。
 
-trace 是 PM 对“自己如何使用学习”的安全摘要，必须能回答：
+#### 2.2 DB 推荐记录
 
-- 这条合约用了哪个生命周期的学习
-- 学习影响了哪个决策口
-- 学习影响方向是加分、扣分、保护性持有、释放资金还是触发校准
-- 学习是否改变 rank、资金层级、目标手数、持仓解释或触发要求
+##### 2.2.1 落点
 
-最终 `final_action_contract` 中的 `decision_learning_rows` 只能是第 6 步根据最终 `final_action`、`current_lots`、`target_lots`、执行权限和 rank 状态重新路由出的最终决策层学习证据。Step1-Step5 的中间生命周期 trace 只能作为 provenance / diagnostics 安全摘要保留，不能直接复制为最终 `decision_learning_rows`。
+`futures_recommendation` 表。
 
-`trigger_profile_learning_rows` 与 `decision_learning_rows` 分层不变：execution / trigger / profile 学习可以留在 `trigger_profile_learning_rows` 供审计和研究查看，但不能进入最终决策层、不能直接改变 rank、手数、方向、资金部署或最终动作。
+##### 2.2.2 包含内容
 
-### 6.7 自检要求
+- `id`
+- `config_id`
+- `reference_portfolio_id`
+- `trading_date`
+- `effective_trade_date`
+- `source_type`
+- `underlying_code`
+- `from_contract`
+- `to_contract`
+- `contract_code`
+- `action`
+- `lots`
+- `base_price`
+- `base_price_source`
+- `base_price_date`
+- `open_price`
+- `prev_close_price`
+- `slippage_model`
+- `slippage_ticks`
+- `slippage_amount`
+- `execution_price`
+- `justification`
+- `status`
+- `warning_message`
+- `signal_snapshot`
+- `signal_snapshot_artifact_path`
+- `signal_snapshot_sha256`
+- `signal_snapshot_size`
+- `signal_snapshot_summary_json`
+- `audit_payload`
+- `audit_payload_artifact_path`
+- `audit_payload_sha256`
+- `audit_payload_size`
+- `audit_payload_summary_json`
+- `created_at`
 
-`pm_contract_self_check` 必须检查：
+##### 2.2.3 来源
 
-- 最终合约字段完整
-- `capital_deployment` 和 `position_sizing_result` 语义完整，不能用空对象冒充事实
-- 走 rank 的合约有资金 rank trace 和生命周期学习 trace
-- 非 rank 但消费学习的合约有生命周期学习 trace
-- Step5 未部署新增风险必须还原为 `wait/hold`、`target_lots=current_lots`、`lots_delta=0`，且不得残留盘中触发执行权限
-- PM artifact 没有越界研究事实对象
-- `final_action` 与 `current_lots` / `target_lots` / `lots_delta` 一致
-- 生命周期学习污染只检查 Step6 final lifecycle trace 的 `decision_learning_rows`；rank 外层 trace、Step2 router 结果、deployment 旧 trace 和其他中间态 trace 不能作为最终决策层学习行
-- `trigger_profile_learning_rows` 可保留 execution/profile 学习用于审计和研究，但 `execution_profile_learning_direct_to_rank` 与 `trigger_profile_learning_direct_to_rank` 必须为 `false`
-- 当 `learning_used.alpha_setup_action_values` 非空时，最终合约必须同时保留 `decision_learning_rows` 与 `trigger_profile_learning_rows`，自检不得从完整 action-value 列表反推决策层学习行
+来自 `workflow` 接收的 `FuturesRecommendation`，由保存层写入 `futures_recommendation` 表。
 
-`pm_contract_self_check` 不读取 `final_action_contract.evidence_used.contract_lifecycle_self_check`，也不把 Step2 与 Step6 的生命周期差异作为最终失败依据。
+其中 `action`、`lots`、`base_price`、`signal_snapshot` 必须由 `final_action_contract` 对齐生成。
 
-### 6.8 PM action-value artifact boundary
+#### 2.3 signal_snapshot
 
-`final_action_contract.learning_used.alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表。该列表中每一行必须满足 `canonical_action_value == true`、`canonical_action_family` 非空、`action_preference` 非空、`action_value_lane` 非空、`learning_lane` 非空。
+##### 2.3.1 落点
 
-缺 canonical 字段、缺 `action_preference`、`canonical_action_value == false` 的 `similar_sql_prior` / fallback prior 不是 PM scoring evidence。PM 已经带入候选学习集合的这类行，Step6 必须从 `alpha_setup_action_values` 剔除，只能保留在 `learning_used.memory_retrieval.rejected_or_downgraded`，原因固定为 `incomplete_prior_not_pm_scoring_evidence`。
+`futures_recommendation.signal_snapshot`。
 
-`pm_contract_self_check` 必须 hard fail：`alpha_setup_action_values` 中存在 incomplete prior、缺 canonical 字段、缺 preference、缺 lane、`canonical_action_value_source=incomplete_trace_not_for_pm_scoring`。
+##### 2.3.2 包含内容
 
-该诊断链不改变 `final_action`、`target_lots`、rank、手数、资金部署、SCC、PG daily audit、Trader、Reviewer、Researcher 链路。
+- 三类分析师结构化信号快照。
+- `pm_raw_rationale`
+- `signal_collection_contract`
+- `position_budget_policy`
+- `release_block_diagnostics`
+- `market_confirmation`
+- `data_quality_summary`
+- `data_quality_summary_path`
+- `horizon_scope`
+- `opportunity_scorecard`
+- `pm_raw_rationale_semantic_audit`
+- `pm_semantic_consistency_gate`
+- `active_opportunity_audit`
+- `business_quality_summary`
+- `trade_research_contracts`
+- `pm_research_contract_summary`
+- `pm_internal_message_contract`
+- `pm_internal_message_validation_errors`
+- `audit`
+- `pm_justification_contract`
+- snapshot header / lineage contract
+- `final_action_contract`
+- `pm_six_step_trace`
+- `auditor`
+- 必要的 recommendation-level 摘要字段
 
-### 6.9 2025-03-27 错误提醒
+##### 2.3.3 来源
 
-2025-03-27 的 C / HC / M 报错说明：
+`signal_collection_contract` 来自 `state["signal_collection_contract"]` 原始 SCC。
 
-非 rank 动作如果消费了学习，最终合约里的 `lifecycle_learning_trace` 不能漏掉，也不能在落盘或清理 rank 字段时被误删。
+`final_action_contract` 来自第 6 步最终合约。
 
-PG 对 `lifecycle_learning_trace_missing` hard fail 是合理的，因为它证明 PM 消费了学习，但最终合约没有留下可审计 trace。
+`pm_six_step_trace` 来自 PM 内部候选状态演化摘要。
 
-这个错误提醒两条边界：
+`auditor` 来自独立 Auditor 审计结果。
 
-- 走 rank 的合约必须同时带完整资金 rank 语义和生命周期学习 trace。
-- 不走 rank 但消费学习的合约必须保留生命周期学习 trace。
+recommendation-level 摘要字段来自最终合约，不另造第二套事实。
 
-一句话：第 6 步是 PM 的最终签出点；走 rank 的合约必须同时带完整资金 rank 语义和生命周期学习 trace，非 rank 但消费学习的合约必须保留生命周期学习 trace；所有 PM artifact 只能写安全摘要，不能搬 Researcher 原始事实对象。
+#### 2.4 本地 recommendation artifact
+
+##### 2.4.1 落点
+
+`src/logs/artifacts/{config_id}/{trading_date}/recommendation/`
+
+##### 2.4.2 包含内容
+
+- recommendation payload JSON
+- signal_snapshot JSON
+- audit_payload JSON
+- final_action_contract
+- pm_six_step_trace
+- signal_collection_contract
+- auditor
+- signal_snapshot_artifact_path
+- signal_snapshot_sha256
+- signal_snapshot_size
+- signal_snapshot_summary_json
+- audit_payload_artifact_path
+- audit_payload_sha256
+- audit_payload_size
+- audit_payload_summary_json
+
+##### 2.4.3 来源
+
+来自保存层对 `signal_snapshot`、`audit_payload` 等大 JSON 的 externalize 外置镜像。
+
+本地 recommendation artifact 不是 PM 再生成的第二份输出。
+
+本地 artifact 是 DB 输出的可读镜像，不参与交易决策。
+
+#### 2.5 运行日志
+
+##### 2.5.1 落点
+
+`src/logs/` 下运行日志。
+
+##### 2.5.2 包含内容
+
+- `trading_date`
+- `config_id`
+- `ticker`
+- `run_id`
+- `log_namespace`
+- `pm_progress`
+- `pm_step_progress`
+- `scc_read_validation_result`
+- `input_missing_block_reason`
+- `pre_open_reference_price_missing_reason`
+- `contract_info_missing_reason`
+- `data_quality_summary_path`
+- `memory_retrieval_summary`
+- `full_market_rank_start_finish`
+- `capital_deployment_result`
+- `final_contract_generation_result`
+- `pm_contract_self_check_result`
+- `auditor_result_summary`
+- `db_persistence_result`
+- `artifact_externalization_result`
+- `contract_generation_block_reason`
+- `persistence_block_reason`
+- `error_stack`
+- `exception_context`
+- `runtime_elapsed`
+- `runtime_notice`
+
+##### 2.5.3 来源
+
+来自 PM、workflow、Auditor、持久化过程的 logger。
+
+运行日志只用于排查，不是交易事实来源。
+
+### 3. 定死口径
+
+PM 只有第 6 步生成最终合约。
+
+PM 第 6 步对外返回 `FuturesRecommendation`。
+
+`FuturesRecommendation.signal_snapshot` 承载最终合约、原始 SCC 快照和 PM 摘要 trace。
+
+DB 记录、本地 artifact 和运行日志都由 workflow / 保存层基于 `FuturesRecommendation` 物理化生成，不是 PM 第二次输出。
+
+Step1 到 Step5 不输出物理交易事实。
+
+Step1 到 Step5 只更新同一个 PM 内部候选状态。
+
+排名和预算分配是内部候选状态的一部分，不是独立输出。
+
+最终合约生成时只读取内部候选状态。
+
+最终合约生成时不读取已落盘 DB 输出。
+
+最终合约生成时不读取本地 artifact。
+
+最终合约生成时不读取运行日志。
+
+DB、artifact、日志都是最终合约生成之后的物理材料。
+
+`final_action_contract` 是唯一交易真相。
+
+`signal_snapshot.signal_collection_contract` 是 PM 使用的原始 SCC 快照。
+
+`pm_six_step_trace` 只解释候选状态演化，不生成交易动作。
+
+recommendation-level 摘要字段必须来自 `final_action_contract`，不能形成第二套交易事实。
+
+## 三、内部结构
+
+### 1. 读取统一证据
+
+#### 1.1 读取入口
+
+PM 从 `state["signal_collection_contract"]` 读取统一证据。
+
+PM 从 `state["ticker"]`、`state["trading_date"]`、`state["config_id"]` 读取产品身份。
+
+PM 从 `state["portfolio"]` 读取账户、持仓、权益、保证金和可用风险空间。
+
+PM 从 `state["morning_price_context"]` 读取 Phase1 盘前计划参考价。
+
+PM 从 `state["config"]`、`state["full_config"]` 读取风险参数、预算参数和 PM 策略参数。
+
+PM 按 `ticker` 调 `FuturesContractInfoCache.get_contract_info` 读取合约乘数、保证金率和主力合约信息。
+
+PM 从 `state["analyst_signals"]` 读取 SCC 来源引用材料。
+
+#### 1.2 输入校验
+
+PM 校验 SCC 的 `producer="signal_collector"`。
+
+PM 校验 SCC 的 `collector_decision_boundary="no_trade_authority"`。
+
+PM 校验 SCC 与 `analyst_signals` 的来源引用完整。
+
+PM 校验 `morning_price_context.base_price` 能作为 Phase1 盘前计划参考价。
+
+PM 校验合约基础信息存在，且能支持手数、保证金和风险测算。
+
+#### 1.3 PM 如何理解 SCC
+
+PM 对 SCC 的理解写入 `evidence_understanding`：
+
+- `preferred_direction`：多、空、退出、观望。
+- `trigger_state`：已触发、等待触发、未触发。
+- `trigger_condition`：进入交易需要满足的触发条件。
+- `evidence_strength`：证据强弱。
+- `evidence_quality`：证据质量。
+- `alignment_state`：证据一致性。
+- `conflict_summary`：主要冲突。
+- `confirmation_requirements`：仍需确认的条件。
+- `missing_evidence`：缺失证据。
+- `risk_factors`：主要风险。
+- `invalidation_boundary`：失效边界。
+- `profile_usage`：profile 使用痕迹。
+- `evidence_fusion_summary`：融合摘要。
+
+PM 只解释 SCC 已经给出的结构化证据，不回读分析师原始文本，不补造 SCC 没有给出的交易证据。
+
+#### 1.4 PM 如何理解账户、价格、合约和配置
+
+PM 对账户和持仓的理解写入 `position_context`：
+
+- 当前手数。
+- 当前方向。
+- 当前保证金占用。
+- 可用风险空间。
+- 当前仓位与 SCC 方向的关系。
+
+PM 对盘前价格的理解写入 `price_basis_context`：
+
+- `base_price`。
+- `base_price_source`。
+- `base_price_date`。
+- `prev_close_price`。
+- `warning_message`。
+- Phase1 价格只用于计划测算，不代表真实成交价。
+
+PM 对合约信息的理解写入 `contract_context`：
+
+- 合约乘数。
+- 保证金率。
+- 主力合约信息。
+- 合约基础校验结果。
+
+PM 对运行参数的理解写入 `config_context`：
+
+- 单品种风险上限。
+- 总保证金上限。
+- 预算分配参数。
+- PM 策略参数。
+
+#### 1.5 PM 如何理解分析师信号引用
+
+PM 对分析师信号引用的理解写入 `source_lineage_context`：
+
+- 分析师输出是否齐全。
+- SCC 来源引用是否能对应分析师输出。
+- artifact 引用是否完整。
+- 该部分只证明 SCC 来源完整，不生成交易判断。
+
+#### 1.6 本步输出
+
+PM 把上述理解写入同一个产品候选状态。
+
+候选状态是 PM 内部主链对象，后续步骤继续改写同一个对象，不再另起一套交易事实。
+
+本步输出不是最终合约。
+
+候选状态继续传入第 2 步。
+
+最终物理输出只来自第 6 步后的 `FuturesRecommendation`：原始 SCC 进入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，可执行交易事实进入 `FuturesRecommendation.signal_snapshot.final_action_contract`，候选状态演化摘要进入 `FuturesRecommendation.signal_snapshot.pm_six_step_trace`。
+
+DB 记录和本地 artifact 由 workflow / 保存层基于 `FuturesRecommendation` 持久化生成，不是本步输出。
+
+#### 1.7 禁止项
+
+PM 不改写 SCC。
+
+PM 不重建 SCC。
+
+PM 不从 `state["analyst_signals"]` 判断方向、触发、风险、失效边界。
+
+PM 不直接读取行情原始序列、基本面原始数据、新闻原文作为交易判断输入。
+
+PM 不读取已落盘 DB 推荐记录作为本次最终合约输入。
+
+PM 不读取本地 recommendation artifact 作为本次最终合约输入。
+
+PM 不读取运行日志作为本次最终合约输入。
+
+PM 不在第 1 步输出 `FuturesRecommendation`。
+
+PM 不在第 1 步输出 `final_action_contract`。
+
+PM 不在第 1 步输出 DB 记录、本地 artifact 或运行日志物理事实。
+
+PM 不把第 1 步候选状态暴露给 workflow、Auditor、Trader、Reviewer、Researcher 或 PG 作为外部事实。
+
+### 2. 判断产品方向
+
+### 3. 结合持仓确定交易状态
+
+### 4. 读取学习成果修正候选质量
+
+### 5. 新增风险排序与预算分配
+
+### 6. 生成唯一最终交易合约
