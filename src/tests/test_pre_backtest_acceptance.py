@@ -286,7 +286,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 "agent_boundaries",
                 "structured_io",
                 "contract_coverage",
-                "unified_field_semantics",
+                "matrix_field_semantics",
                 "single_trade_exit",
                 "evidence_trigger_boundary",
                 "trader_trigger_parity",
@@ -337,7 +337,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
         for category, prefixes in ERROR_CATEGORY_PREFIXES.items():
             for prefix in prefixes:
                 self.assertIn(category, INVARIANT_TO_CHECKS[prefix])
-        self.assertEqual(INVARIANT_TO_CHECK["unified_field_artifact_forbidden_field"], "unified_field_semantics")
+        self.assertEqual(INVARIANT_TO_CHECK["matrix_field_artifact_forbidden_field"], "matrix_field_semantics")
         self.assertEqual(
             INVARIANT_TO_CHECK["trigger_valid_without_current_trigger_confirmed"],
             "evidence_trigger_boundary",
@@ -410,8 +410,8 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertIn("environment_api", report.checks)
             self.assertIn("learning_landing", report.checks)
             self.assertEqual(
-                report.checks["unified_field_semantics"].metadata["source_of_truth"],
-                "docs/unified_field_semantics.md",
+                report.checks["matrix_field_semantics"].metadata["source_of_truth"],
+                "docs/matrix_field_semantics.md",
             )
             self.assertIn(
                 "recommendation_top_level_action_lots_must_match_final_contract",
@@ -577,18 +577,18 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                     check_llm_auth=False,
                 )
             self.assertFalse(report.ok)
-            self.assertIn("unified_field_semantics", report.failed_checks)
-            semantics = report.checks["unified_field_semantics"]
+            self.assertIn("matrix_field_semantics", report.failed_checks)
+            semantics = report.checks["matrix_field_semantics"]
             self.assertFalse(semantics.ok, report.to_dict())
-            self.assertEqual(semantics.metadata["source_of_truth"], "docs/unified_field_semantics.md")
+            self.assertEqual(semantics.metadata["source_of_truth"], "docs/matrix_field_semantics.md")
             self.assertFalse(
-                semantics.metadata["unified_field_semantics_audit"].get("ok"),
+                semantics.metadata["matrix_field_semantics_audit"].get("ok"),
                 report.to_dict(),
             )
             self.assertTrue(
                 any(
                     error.startswith(
-                        "unified_field_semantics:trigger_valid_without_current_trigger_confirmed:"
+                        "matrix_field_semantics:trigger_valid_without_current_trigger_confirmed:"
                     )
                     for error in report.errors
                 ),

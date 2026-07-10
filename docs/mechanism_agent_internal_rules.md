@@ -2,7 +2,7 @@
 
 更新时间：2026-06-27
 
-本文定义 AgentQuant 各智能体内部如何把输入转换成正式输出。`mechanism_multiagents.md` 规定“谁负责什么、上下游怎么走”；本文规定“智能体内部怎样转，哪些状态必须落到什么输出”。本文不新增交易字段，不替代 `unified_field_semantics.md`，不改变固定工作流。
+本文定义 AgentQuant 各智能体内部如何把输入转换成正式输出。`mechanism_multiagents.md` 规定“谁负责什么、上下游怎么走”；本文规定“智能体内部怎样转，哪些状态必须落到什么输出”。本文不新增交易字段，不替代 `matrix_field_semantics.md`，不改变固定工作流。
 
 本文作用：给开发和审查代码时使用，专门约束每个智能体内部转换机制，防止输入已经正确、字段已经统一，但智能体内部规则把状态转错、写错或层层门控压死交易。本文不评价收益，不新增交易权限，不限制 LLM 的推理过程；它只规定 LLM 推理结果和确定性规则结果如何落到正式结构化输出。
 
@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 修改任一智能体内部规则 | 一、二、三 | 对应智能体章节 | 十三 |
 | 修改 PM 状态流转、资金或手数 | 二、三 | 六 | 十三 |
-| 修改 LLM 提示词或解析器 | 三、四、十一 | `unified_field_semantics.md` | 十三 |
+| 修改 LLM 提示词或解析器 | 三、四、十一 | `matrix_field_semantics.md` | 十三 |
 | 修改 reason code | 二的 `reason code` 语义表 | 对应智能体章节 | 十三 |
 | 修改配置参数 | 六的配置参数对应关系 | `dev.yaml` / catalog YAML | 十三 |
 | 修改测试或回测前检测 | 十三 | 十二 | `pre_backtest_test.py` / `backtest_daily_test.py` |
@@ -843,8 +843,8 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 5. 每个软门控必须说明正向出口：降级、条件触发、缩手数、补证据或等待。
 6. 每个硬门控必须说明阻断理由和恢复条件。
 7. 新增测试必须覆盖正向路径和负向路径。
-8. 修改内部转换机制时，必须先对照 `docs/unified_field_semantics.md`，确认字段含义、产生者、消费者和可跨阶段范围一致。
-9. 不能为了局部规则复用含义不匹配的旧字段或 reason code；如果确实需要新增字段，必须先更新 `docs/unified_field_semantics.md`，再更新提示词、配置、测试和本文。
+8. 修改内部转换机制时，必须先对照 `docs/matrix_field_semantics.md`，确认字段含义、产生者、消费者和可跨阶段范围一致。
+9. 不能为了局部规则复用含义不匹配的旧字段或 reason code；确需新增字段时，必须先更新 `docs/matrix_field_semantics.md`，再更新提示词、配置、测试和本文。
 10. 功能语义必须前后一致：同一字段不能在分析师侧表示机会状态，在 PM 侧又表示最终动作；同一 reason code 不能在一个函数中表示候选，在另一个函数中表示阻断。
 
 ### 13.1 测试映射表
@@ -911,7 +911,7 @@ PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合�
 
 ## Action-Value 动作语义补充（2026-07-09）
 
-action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释。统一解释工具是 `src/tools/common/final_action_semantics.py`，完整业务表见 `docs/action_value_canonical_action_family.md`。
+action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释。统一解释工具是 `src/tools/common/final_action_semantics.py`，完整动作矩阵见 `docs/matrix_action_canonical.md`。
 
 Researcher 写 `alpha_setup_action_value` 时必须保存 `canonical_action_family`、`action_value_lane` 和 `learning_lane`；PM 通过 `decision_memory_retrieval`、`pm_lifecycle_learning_router` 和合约构造链路消费这些 canonical 字段；Reviewer 复盘归因时只能用这些字段理解历史动作属于开仓/加仓、持仓、减仓/退出、条件监控还是执行质量；PG 只审 family/lane/preference 一致性和缺字段 hard fail。各模块不得维护私有字符串集合来猜 `add_or_open`、`reduce_or_exit`、`execution` 等动作含义。
 

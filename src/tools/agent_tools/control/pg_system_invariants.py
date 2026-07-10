@@ -27,6 +27,7 @@ from tools.common.order_semantics import (
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
     ACTION_FAMILY_EXECUTION,
+    ACTION_FAMILY_OBSERVE,
     ACTION_FAMILY_OPEN_ADD_NEW_RISK,
     ACTION_FAMILY_REDUCE_EXIT,
     has_open_transaction_blocker,
@@ -53,6 +54,18 @@ TRIGGER_PASSED_REASONS = {
     "intraday_event_immediate_execution",
 }
 REAL_REWARD_SOURCE_MARKERS = {"episode", "real"}
+OBSERVE_ALLOWED_ACTION_PREFERENCES = {
+    "",
+    "negative_hold_revalidate",
+    "negative_revalidate",
+    "tail_loss_protect",
+}
+OBSERVE_FORBIDDEN_POSITIVE_ACTION_PREFERENCES = {
+    "positive_candidate_open",
+    "positive_candidate_exit",
+    "positive_candidate_execution",
+    "positive_candidate_hold",
+}
 OPPORTUNITY_SCORE_COMPONENT_FIELDS = {
     "positive_learning",
     "negative_learning",
@@ -146,7 +159,7 @@ ARTIFACT_PHASE_BOUNDARY_ERROR_PREFIXES = {
     "researcher_artifact_forbidden_trade_fact_mutation",
 }
 UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES = {
-    "unified_field_artifact_forbidden_field",
+    "matrix_field_artifact_forbidden_field",
     "release_block_diagnostics_contains_trade_action_fields",
     "action_evidence_contract_pending_trigger_marked_valid",
     "trigger_valid_without_current_trigger_confirmed",
@@ -264,7 +277,7 @@ CURRENT_CONFIRMATION_FIELD_NAMES = {
     "current_entry_confirmed",
 }
 ERROR_CATEGORY_PREFIXES = {
-    "unified_field_semantics": UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES,
+    "matrix_field_semantics": UNIFIED_FIELD_SEMANTIC_ERROR_PREFIXES,
     "evidence_trigger_boundary": {
         "trigger_valid_without_current_trigger_confirmed",
         "setup_quality_ok_used_as_current_trigger",
@@ -321,7 +334,7 @@ ERROR_CATEGORY_PREFIXES = {
         "opportunity_learning_component_used_as_trade_intent",
     },
     "structured_io": {
-        "unified_field_artifact_forbidden_field",
+        "matrix_field_artifact_forbidden_field",
         "accountant_artifact_forbidden_learning_field",
         "accountant_artifact_forbidden_trade_action_mutation",
         "reviewer_artifact_forbidden_action_value_write",
@@ -379,7 +392,7 @@ def categorize_invariant_errors(errors: Iterable[str]) -> Dict[str, List[str]]:
     return categories
 
 
-def _unified_field_semantics_audit_summary(errors: Iterable[str]) -> Dict[str, Any]:
+def _matrix_field_semantics_audit_summary(errors: Iterable[str]) -> Dict[str, Any]:
     semantic_errors: List[str] = []
     for error in errors or []:
         prefix = str(error).split(":", 1)[0]
@@ -387,7 +400,7 @@ def _unified_field_semantics_audit_summary(errors: Iterable[str]) -> Dict[str, A
             semantic_errors.append(str(error))
     return {
         "ok": not semantic_errors,
-        "source_of_truth": "docs/unified_field_semantics.md",
+        "source_of_truth": "docs/matrix_field_semantics.md",
         "error_count": len(semantic_errors),
         "errors": semantic_errors,
         "checked_boundaries": [
@@ -1228,6 +1241,10 @@ def _action_value_family(row: Dict[str, Any]) -> str:
     return _lower(_payload_or_row_value(row, "canonical_action_family", "source_canonical_action_family"))
 
 
+def _action_value_explicit_lane(row: Dict[str, Any], key: str, *aliases: str) -> str:
+    return _lower(_payload_or_row_value(row, key, *aliases))
+
+
 def _action_value_memory_side_role(row: Dict[str, Any]) -> str:
     return _lower(_payload_or_row_value(row, "memory_side_role"))
 
@@ -1331,7 +1348,7 @@ def _audit_unified_field_artifacts(
             forbidden = find_forbidden_artifact_field_keys(artifact)
             if forbidden:
                 errors.append(
-                    "unified_field_artifact_forbidden_field:"
+                    "matrix_field_artifact_forbidden_field:"
                     f"{label}:{artifact_name}:{sorted(set(forbidden))}"
                 )
 
@@ -1799,14 +1816,33 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
         semantic_row = _action_value_semantic_row(row, payload)
         semantic_validation = validate_action_preference_family_consistency(semantic_row)
         family = _action_value_family(semantic_row)
+        action_value_lane = _action_value_explicit_lane(semantic_row, "action_value_lane", "source_action_value_lane")
+        learning_lane = _action_value_explicit_lane(semantic_row, "learning_lane")
+        observe_hold_action_value = (
+            family == ACTION_FAMILY_OBSERVE
+            and action_value_lane == "hold"
+            and learning_lane == "hold"
+        )
         if not family:
             errors.append(f"action_value_missing_canonical_action_family:{label}")
         for semantic_error in semantic_validation.get("errors") or []:
             if semantic_error == "missing_canonical_action_family":
                 continue
             errors.append(f"action_value_family_preference_mismatch:{label}:{semantic_error}")
+        if family == ACTION_FAMILY_OBSERVE:
+            if not observe_hold_action_value:
+                errors.append(
+                    "observe_action_value_invalid_lane:"
+                    f"{label}:{action_value_lane or 'missing_action_value_lane'}:"
+                    f"{learning_lane or 'missing_learning_lane'}"
+                )
+            if action_preference in OBSERVE_FORBIDDEN_POSITIVE_ACTION_PREFERENCES:
+                errors.append(f"observe_action_value_positive_preference_forbidden:{label}:{action_preference}")
+            elif action_preference not in OBSERVE_ALLOWED_ACTION_PREFERENCES:
+                errors.append(f"observe_action_value_invalid_action_preference:{label}:{action_preference}")
         if reward_sum != 0:
-            if not action_preference and not weak_prior_context:
+            observe_empty_preference_allowed = observe_hold_action_value and not action_preference
+            if not action_preference and not weak_prior_context and not observe_empty_preference_allowed:
                 errors.append(f"action_value_missing_action_preference:{label}:missing_action_preference")
             if action_preference and action_preference not in ACTION_PREFERENCE_VALUES:
                 errors.append(f"action_value_unknown_action_preference:{label}:{action_preference}")
@@ -1835,6 +1871,7 @@ def _audit_action_values(action_values: List[Dict[str, Any]], errors: List[str],
                 reward_sum < 0
                 and action_preference not in {"negative_revalidate", "negative_hold_revalidate", "tail_loss_protect"}
                 and has_real_reward_facts
+                and not observe_empty_preference_allowed
             ):
                 errors.append(f"negative_action_value_not_protective_preference:{label}:{action_preference or 'missing_action_preference'}")
         if action_preference == "positive_candidate_open":
@@ -1954,7 +1991,7 @@ def audit_system_invariants(
                 "audit_boundary": "no_trade_records_to_audit",
                 "error_categories": {},
                 "failed_categories": [],
-                "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
             },
         )
 
@@ -1973,7 +2010,7 @@ def audit_system_invariants(
                         "record_boundary": "empty_db_no_invariant_records_to_audit",
                         "error_categories": {},
                         "failed_categories": [],
-                        "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                        "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
                     },
                 )
             return InvariantAuditReport(
@@ -1983,7 +2020,7 @@ def audit_system_invariants(
                     "db_path": str(db_path),
                     "error_categories": categorize_invariant_errors([f"config_not_found:{exp_name or config_id or 'missing'}"]),
                     "failed_categories": ["audit_explainability"],
-                    "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                    "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
                 },
             )
         metadata["config_id"] = resolved_config_id
@@ -2002,7 +2039,7 @@ def audit_system_invariants(
                     "schema_contract": dict(schema_report.metadata),
                     "error_categories": categories,
                     "failed_categories": sorted(categories),
-                    "unified_field_semantics_audit": _unified_field_semantics_audit_summary([]),
+                    "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
                 },
             )
         recommendations = _load_recommendations(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
@@ -2065,7 +2102,7 @@ def audit_system_invariants(
     error_categories = categorize_invariant_errors(errors)
     metadata["error_categories"] = error_categories
     metadata["failed_categories"] = sorted(error_categories)
-    metadata["unified_field_semantics_audit"] = _unified_field_semantics_audit_summary(errors)
+    metadata["matrix_field_semantics_audit"] = _matrix_field_semantics_audit_summary(errors)
     return InvariantAuditReport(ok=not errors, errors=errors, warnings=warnings, counts=counts, metadata=metadata)
 
 

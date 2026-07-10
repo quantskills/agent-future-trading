@@ -124,7 +124,7 @@ def _write_minimal_covered_repo(root: Path) -> None:
     )
     _append_text(
         root,
-        "docs/unified_field_semantics.md",
+        "docs/matrix_field_semantics.md",
         "\n".join(
             [
                 "action_evidence_contract",

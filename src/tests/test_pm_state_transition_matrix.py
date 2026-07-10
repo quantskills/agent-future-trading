@@ -481,7 +481,15 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract = self._complete_contract(
             learning_used={
                 "alpha_setup_action_values": [
-                    {"learning_lane": "hold", "action_name": "hold", "action_preference": "hold"},
+                    {
+                        "id": "hold-av-1",
+                        "canonical_action_value": True,
+                        "canonical_action_family": "hold",
+                        "learning_lane": "hold",
+                        "action_value_lane": "hold",
+                        "action_name": "hold",
+                        "action_preference": "positive_candidate_hold",
+                    },
                 ]
             },
         )
@@ -518,6 +526,57 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         diagnostic = self._lifecycle_transition_diagnostic(contract)
         self.assertTrue(diagnostic["diagnostic_only"])
         self.assertTrue(check_final_action_contract(contract)["ok"])
+
+    def test_pm_contract_self_check_rejects_incomplete_prior_in_formal_action_values(self):
+        contract = self._complete_contract(
+            learning_used={
+                "alpha_setup_action_values": [
+                    {
+                        "ticker": "*",
+                        "side": "short",
+                        "setup_type": "*",
+                        "action_name": "open",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "canonical_action_value": False,
+                        "canonical_action_value_source": "incomplete_trace_not_for_pm_scoring",
+                        "evidence_scope": "similar_sql_prior",
+                    },
+                ],
+                "pm_lifecycle_learning_trace": {
+                    "contract_lifecycle_port": "hold",
+                    "used_lanes": ["hold"],
+                    "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
+                    "trigger_profile_learning_rows": [],
+                    "execution_profile_learning_direct_to_rank": False,
+                    "trigger_profile_learning_direct_to_rank": False,
+                },
+                "pm_lifecycle_learning_impact_delta": {
+                    "hold_decision": "continue_hold",
+                },
+            },
+            evidence_used={
+                "lifecycle_learning_trace": {
+                    "contract_lifecycle_port": "hold",
+                    "used_lanes": ["hold"],
+                    "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
+                    "trigger_profile_learning_rows": [],
+                    "execution_profile_learning_direct_to_rank": False,
+                    "trigger_profile_learning_direct_to_rank": False,
+                    "execution_profile_signal_direct_to_rank": False,
+                },
+                "learning_impact_delta": {"hold_decision": "continue_hold"},
+            },
+        )
+
+        result = check_final_action_contract(contract)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("alpha_setup_action_value_not_canonical:0", result["errors"])
+        self.assertIn("alpha_setup_action_value_missing_canonical_action_family:0", result["errors"])
+        self.assertIn("alpha_setup_action_value_missing_action_preference:0", result["errors"])
+        self.assertIn("alpha_setup_action_value_incomplete_similar_sql_prior:0", result["errors"])
+        self.assertIn("alpha_setup_action_value_incomplete_trace_not_for_pm_scoring:0", result["errors"])
 
     def test_pm_contract_self_check_rejects_raw_research_objects_in_pm_artifact(self):
         contract = self._complete_contract()

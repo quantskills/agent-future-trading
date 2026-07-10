@@ -2,7 +2,7 @@
 
 更新时间：2026-06-27
 
-本文档记录 AgentQuant 当前数据入口、模型调用边界、结构化输出要求和回测验收要求。它和 `docs/mechanism_multiagents.md`、`docs/unified_field_semantics.md` 共同约束代码、提示词、工具和审计。
+本文档记录 AgentQuant 当前数据入口、模型调用边界、结构化输出要求和回测验收要求。它和 `docs/mechanism_multiagents.md`、`docs/matrix_field_semantics.md` 共同约束代码、提示词、工具和审计。
 
 ## 一、数据调用原则
 
@@ -178,7 +178,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 系统事实指已经被授权事实入口正式写入 DB、artifact 或 payload，且作为下游可信事实被消费的结构化结果。DB、artifact 和 payload 只是事实载体，不是新的事实来源；同一类事实必须服从同一个授权写入口和同一套字段语义。
 
-控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 `src/tools/agent_tools/control/pg_db_schema_contract.py` 和 `docs/unified_field_semantics.md` 检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
+控制审计、机制审计和回测前验收只能读取已由授权事实入口产生的标准事实，并按 `src/tools/agent_tools/control/pg_db_schema_contract.py` 和 `docs/matrix_field_semantics.md` 检查；不能生成业务事实，不能写业务表，不能猜测 DB 字段，不能创建交易权限。
 
 | 事实载体 | 保存的系统事实 | 标准日期字段 | 授权写入口 | 允许保存 | 禁止保存或改写 |
 |---|---|---|---|---|---|

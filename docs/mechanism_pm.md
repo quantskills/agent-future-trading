@@ -631,7 +631,17 @@ trace 是 PM 对“自己如何使用学习”的安全摘要，必须能回答�
 
 `pm_contract_self_check` 不读取 `final_action_contract.evidence_used.contract_lifecycle_self_check`，也不把 Step2 与 Step6 的生命周期差异作为最终失败依据。
 
-### 6.8 2025-03-27 错误提醒
+### 6.8 PM action-value artifact boundary
+
+`final_action_contract.learning_used.alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表。该列表中每一行必须满足 `canonical_action_value == true`、`canonical_action_family` 非空、`action_preference` 非空、`action_value_lane` 非空、`learning_lane` 非空。
+
+缺 canonical 字段、缺 `action_preference`、`canonical_action_value == false` 的 `similar_sql_prior` / fallback prior 不是 PM scoring evidence。PM 已经带入候选学习集合的这类行，Step6 必须从 `alpha_setup_action_values` 剔除，只能保留在 `learning_used.memory_retrieval.rejected_or_downgraded`，原因固定为 `incomplete_prior_not_pm_scoring_evidence`。
+
+`pm_contract_self_check` 必须 hard fail：`alpha_setup_action_values` 中存在 incomplete prior、缺 canonical 字段、缺 preference、缺 lane、`canonical_action_value_source=incomplete_trace_not_for_pm_scoring`。
+
+该诊断链不改变 `final_action`、`target_lots`、rank、手数、资金部署、SCC、PG daily audit、Trader、Reviewer、Researcher 链路。
+
+### 6.9 2025-03-27 错误提醒
 
 2025-03-27 的 C / HC / M 报错说明：
 

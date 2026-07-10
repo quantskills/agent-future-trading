@@ -65,6 +65,7 @@ from agents.decision_team.portfolio_manager import (
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
     _append_unique_action_values,
+    _attach_incomplete_prior_diagnostics_to_builder_inputs,
     _normalize_alpha_setup_action_value,
     _select_learning_trace_action_values,
     finalize_pm_full_market_contracts,
@@ -2707,6 +2708,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "market_regime": "choppy",
             "setup_type": "breakdown",
             "action_name": "execution",
+            "canonical_action_family": "execution",
             "action_value_lane": "execution",
             "learning_lane": "execution",
             "consumer_scope": "pm_learning",
@@ -2743,6 +2745,115 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             self.assertEqual(merged[0]["reward_mean"], 199.62)
             self.assertEqual(trace[0]["id"], "av-hc-execution-real")
             self.assertEqual(trace[0]["action_preference"], "positive_candidate_execution")
+
+    def test_pm_artifact_excludes_incomplete_prior_from_formal_action_values(self):
+        canonical = {
+            "id": "av-j-open-real",
+            "scope_key": "J|short|short|trend|news_event_setup|open",
+            "ticker": "J",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "news_event_setup",
+            "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "consumer_scope": "pm_learning",
+            "action_preference": "positive_candidate_open",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_mean": 880.0,
+            "reward_sum": 880.0,
+            "win_rate": 1.0,
+            "sample_count": 1,
+        }
+        weak_prior = {
+            "scope_key": "*|short|short|trend|news_event_setup|open",
+            "ticker": "*",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "*",
+            "action_name": "open",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "consumer_scope": "pm_learning",
+            "reward_source": "similar_sql_prior",
+            "evidence_scope": "similar_sql_prior",
+            "reward_mean": 120.0,
+            "reward_sum": 240.0,
+            "sample_count": 2,
+            "retrieval_match_level": "similar",
+            "retrieval_match_reason": "similar_setup_samples",
+            "payload": {
+                "prior_role": "weak_prior_not_action_preference",
+                "canonical_action_preference_source": "none_for_similar_sql_prior",
+            },
+        }
+
+        formal = _select_learning_trace_action_values([weak_prior, canonical], limit=10)
+        updated_inputs = _attach_incomplete_prior_diagnostics_to_builder_inputs({
+            "alpha_setup_action_values": [weak_prior, canonical],
+            "control_diagnostics": {
+                "final_action_memory_retrieval": {
+                    "tool": "decision_memory_retrieval",
+                    "rejected_or_downgraded": [],
+                }
+            },
+        })
+        rejected = updated_inputs["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
+
+        self.assertEqual([row["id"] for row in formal], ["av-j-open-real"])
+        self.assertEqual(formal[0]["canonical_action_family"], "open_add_new_risk")
+        self.assertEqual(formal[0]["action_preference"], "positive_candidate_open")
+        self.assertTrue(formal[0]["canonical_action_value"])
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["reason"], "incomplete_prior_not_pm_scoring_evidence")
+        self.assertTrue(rejected[0]["diagnostic_only"])
+        self.assertEqual(rejected[0]["evidence_scope"], "similar_sql_prior")
+
+    def test_pm_artifact_filters_2025_03_26_missing_family_prior_rows(self):
+        rows = []
+        for ticker in ("I", "J", "RB", "SR"):
+            rows.append({
+                "id": f"{ticker.lower()}-2025-03-26-similar-prior",
+                "scope_key": f"*|short|short|trend|news_event_setup|{ticker}",
+                "ticker": ticker,
+                "side": "short",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "setup_type": "*",
+                "action_name": "execution",
+                "action_value_lane": "execution",
+                "learning_lane": "execution",
+                "consumer_scope": "pm_learning",
+                "reward_source": "similar_sql_prior",
+                "evidence_scope": "similar_sql_prior",
+                "reward_mean": 1.0,
+                "reward_sum": 1.0,
+                "sample_count": 1,
+                "retrieval_match_level": "similar",
+                "retrieval_match_reason": "similar_setup_samples",
+                "payload": {
+                    "prior_role": "weak_prior_not_action_preference",
+                    "canonical_action_preference_source": "none_for_similar_sql_prior",
+                },
+            })
+
+        formal = _select_learning_trace_action_values(rows, limit=10)
+        updated_inputs = _attach_incomplete_prior_diagnostics_to_builder_inputs({
+            "alpha_setup_action_values": rows,
+            "control_diagnostics": {"final_action_memory_retrieval": {"tool": "decision_memory_retrieval"}},
+        })
+        rejected = updated_inputs["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
+
+        self.assertEqual(formal, [])
+        self.assertEqual({row["ticker"] for row in rejected}, {"I", "J", "RB", "SR"})
+        self.assertEqual(
+            {row["reason"] for row in rejected},
+            {"incomplete_prior_not_pm_scoring_evidence"},
+        )
 
     def test_pm_action_value_retrieval_uses_fallback_key_without_scope_drift(self):
         class FakeDB:

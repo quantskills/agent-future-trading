@@ -616,8 +616,8 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertEqual(digest["sample_count"], 1)
         conn.close()
 
-    def test_unified_field_semantics_uses_current_settlement_and_researcher_notes(self):
-        semantics_path = SRC_ROOT.parent / "docs" / "unified_field_semantics.md"
+    def test_matrix_field_semantics_uses_current_settlement_and_researcher_notes(self):
+        semantics_path = SRC_ROOT.parent / "docs" / "matrix_field_semantics.md"
         text = semantics_path.read_text(encoding="utf-8-sig")
         self.assertIn("`daily_settlement`", text)
         self.assertIn("Researcher LLM notes", text)

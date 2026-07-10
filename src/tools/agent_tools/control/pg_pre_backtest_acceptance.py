@@ -50,7 +50,7 @@ ACCEPTANCE_CHECKS = (
     "agent_boundaries",
     "structured_io",
     "contract_coverage",
-    "unified_field_semantics",
+    "matrix_field_semantics",
     "single_trade_exit",
     "evidence_trigger_boundary",
     "trader_trigger_parity",
@@ -65,7 +65,7 @@ _INVARIANT_CHECK_PRIORITY = (
     "trader_trigger_parity",
     "learning_landing",
     "data_time_boundary",
-    "unified_field_semantics",
+    "matrix_field_semantics",
     "audit_explainability",
 )
 
@@ -515,7 +515,7 @@ def _checks_from_invariants(
 
     checks: Dict[str, AcceptanceCheck] = {}
     for name in (
-        "unified_field_semantics",
+        "matrix_field_semantics",
         "single_trade_exit",
         "evidence_trigger_boundary",
         "trader_trigger_parity",
@@ -531,10 +531,10 @@ def _checks_from_invariants(
         }
         if name in {"evidence_trigger_boundary", "learning_landing", "single_trade_exit"}:
             metadata["protocol_audit_boundaries"] = list(PROTOCOL_AUDIT_BOUNDARIES)
-        if name == "unified_field_semantics":
-            metadata["source_of_truth"] = "docs/unified_field_semantics.md"
-            metadata["unified_field_semantics_audit"] = dict(
-                invariant_report.metadata.get("unified_field_semantics_audit") or {}
+        if name == "matrix_field_semantics":
+            metadata["source_of_truth"] = "docs/matrix_field_semantics.md"
+            metadata["matrix_field_semantics_audit"] = dict(
+                invariant_report.metadata.get("matrix_field_semantics_audit") or {}
             )
         checks[name] = AcceptanceCheck(
             name=name,
@@ -611,12 +611,12 @@ def run_pre_backtest_acceptance(
             warnings=[f"sqlite_missing:{db_path}"],
             metadata={"strategy_profitability_checked": False},
         )
-        checks["unified_field_semantics"] = _pass_check(
-            "unified_field_semantics",
+        checks["matrix_field_semantics"] = _pass_check(
+            "matrix_field_semantics",
             metadata={
-                "source_of_truth": "docs/unified_field_semantics.md",
+                "source_of_truth": "docs/matrix_field_semantics.md",
                 "runtime_artifact_audit": "skipped_sqlite_missing",
-                "unified_field_semantics_audit": {
+                "matrix_field_semantics_audit": {
                     "ok": True,
                     "error_count": 0,
                     "errors": [],

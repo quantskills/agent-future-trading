@@ -1,561 +1,248 @@
 # AgentQuant AI 开发协作手册
 
-本文件是 AI 协助开发 AgentQuant 时必须遵守的最高工作手册。处理本项目时，无论是回答问题、改代码、改配置、改提示词、改文档、排查回测、评估策略表现，还是判断“下一步该怎么做”，都必须先按本手册校准边界、证据和验收路径。
+本文件是 AI 协助开发 AgentQuant 时必须遵守的最高工作手册。它只服务于项目开发、排错、回测验收和机制对齐，不保存普通讨论内容。
 
-核心原则：`docs/mechanism_multiagents.md` 定义当前启用智能体的固定工作流；`docs/mechanism_workflow.md` 定义 workflow 只编排不决策；`docs/mechanism_pm.md` 定义 PM 六步主链与唯一合约签发；`docs/unified_field_semantics.md` 是唯一字段语义来源；`docs/mechanism_research.md` 定义研究、记忆和学习消费边界。AI 协助开发时不能按旧口径、个人推测或局部函数名改系统。
+除非用户明确要求修改本文件，AI 不主动改动 `AGENTS.md`。发现本文件与代码、机制文档、测试结果不一致时，先说明冲突，再按用户指令处理。
 
-`AGENTS.md` 是辅助开发手册，不是普通机制文档。除非用户本人明确要求修改、对齐或更新本文件，否则不要主动改动它；发现本文件与代码或机制文档不一致时，先向用户说明不一致和建议改法，不直接修改。
+## 1. 回答与方案规则
 
-## 1. 项目目标
+- 回答必须给出唯一结论、唯一原因、唯一行动方案。
+- 禁用模糊表达：`如果`、`假如`、`例如`、`或`、`也许`、`可能`、`大概`、`倾向于`、`看起来`、`可以考虑`、`先观察`、`兜底`、`兼容旧路径`。
+- 证据不足时先查代码、数据库、artifact、日志、测试和机制文档，查清后再回答。
+- 不能用现有审计规则反推业务契约；必须先确定业务契约，再判断审计是否正确。
+- 不能给多套方案让用户选择；必须给出明确修改点、原因、位置、验证方式。
+- 不能把系统 bug 说成策略问题，也不能把策略亏损说成系统 bug。
+- 用户问“现在该怎么做”时，直接给下一步动作。
 
-AgentQuant 的目标是让多智能体系统自动生成的期货交易策略，在回测和模拟盘中尽可能实现稳定正收益，并能在真实期货业务链路中一比一复刻。
+## 2. 项目目标
 
-系统采用多智能体结构，是为了利用 LLM 的信息处理和推理能力，对同一条期货价格时序进行技术面、基本面、新闻面和研究复盘的多维分析，提高对开盘后日频价格走势的预测质量。LLM 只能用于分析师和研究员形成结构化预测证据或结构化研究成果，不能直接决定仓位、手数或最终交易合约。
+AgentQuant 的目标是让多智能体期货交易系统在回测、模拟盘和实盘链路中一比一复刻同一套交易逻辑，并在系统链路干净后继续提升净收益、稳定性、资金利用率、回撤控制和学习闭环质量。
 
-判断一次开发工作是否有价值，要看它是否直接或间接改善：
+LLM 只能用于分析师、复盘员、研究员形成结构化证据和研究结果，不能直接决定仓位、手数、资金部署、审计结论和最终交易合约。
 
-- 净收益、收益稳定性、最大回撤；
-- 胜率、盈亏比、交易成本后收益；
-- 资金利用率和实战部署意义；
-- 正期望机会识别、合理落仓、及时退出、盈利持仓保护；
-- 回测策略能否在模拟盘和真实执行链路复刻。
+判断开发工作价值的标准：
 
-机制更多、日志更详细、门控更多，不等于目标达成。硬门控只阻断非策略风险、越权、前视、字段缺失、账务错误和非法合约；软门控用于降级、减分、缩手数、条件监控或补证据，不能层层重复把交易压死。
+- 修复真实系统链路 bug。
+- 保持交易事实、审计事实、学习事实可追溯。
+- 防止越权、前视、字段漂移、artifact 污染、PM 中间态外泄。
+- 改善交易机会识别、入退场、资金部署、复盘学习和回测稳定性。
 
-## 2. 运行环境硬边界
+## 3. 运行环境
 
-- 所有 AgentQuant 程序、测试、验收、回测、评估、数据库脚本都必须在本地 conda 环境 `deepfund` 中运行。
-- 标准 Python 路径是 `C:\ProgramData\miniconda3\envs\deepfund\python.exe`。
-- 推荐从仓库根目录 `D:\research\AgentQuant` 运行命令。
-- 不要使用 `base` 环境、系统默认 Python 或未确认环境运行本项目。
-- `.env` 保存 API key，不得在回复、日志或文档中泄露密钥内容。
-- 临时排查脚本如确实需要，只能放在 `D:\research\Workshop\`，任务结束后删除；不要把一次性脚本长期留在 `src/run`、`src/tests` 或业务模块中。
-- 不要执行 `git reset --hard`、`git checkout --` 等会丢弃用户工作的命令，除非用户明确要求。
+- 项目根目录：`D:\research\AgentQuant`
+- Python 环境：`C:\ProgramData\miniconda3\envs\deepfund\python.exe`
+- 不使用 `base` 环境、系统默认 Python、未确认解释器。
+- `.env` 保存密钥，禁止在回复、日志、文档中泄露。
+- 临时排查脚本放在 `D:\research\Workshop\`，任务结束后清理。
+- 禁止执行会丢弃用户工作的命令，尤其是 `git reset --hard`、`git checkout --`。
 
-## 3. 必读机制文档
+## 4. 必读文档
 
-每次涉及系统实际运行方式的任务，动手前必须读对应文档。这里的“系统实际运行方式”指：运行脚本、阶段顺序、启用智能体、输入输出、LLM 调用、字段读写、数据库落库、工具调用、审计门控、交易执行、结算、复盘和研究学习链路。
+任何任务启动时，必须先读本文件，再读 `docs/matrix_chain_contract.md`，随后再读任务相关机制文档、代码、测试、artifact、DB、日志。
 
-“涉及系统实际运行方式的任务”包括：
+涉及系统运行、代码修改、回测排错、字段语义、artifact、审计、学习链路时，先读相关文档和代码。
 
-- 修改代码，例如智能体、工具、运行脚本、审计、测试、数据库读写；
-- 修改会影响代码行为的文档、配置或提示词，例如机制文档、字段语义表、prompt、`dev.yaml`；
-- 判断或解释系统如何运行，例如谁调用 LLM、谁消费研究信息、交易员是否能读研究库、Phase4 后学习如何运行。
-
-纯文字润色、错别字和不改变机制含义的格式调整，不属于系统实际运行方式任务。
-
-- `docs/mechanism_multiagents.md`：当前启用智能体、固定工作流、LLM 边界、工具边界、研究信息消费边界。
-- `docs/mechanism_workflow.md`：workflow 编排边界，只负责调度、传递、保存、触发和阻断，不生成策略、rank、合约、资金部署或 fallback 修复。
-- `docs/mechanism_pm.md`：PM 六步主链、生命周期动作口、全市场资金部署、Step6 合约签发与自检。
-- `docs/mechanism_agent_internal_rules.md`：各智能体内部状态流转、确定性规则引擎和 LLM 输出落地契约。
-- `docs/unified_field_semantics.md`：唯一字段语义表；新增字段必须先在这里登记。
-- `docs/mechanism_research.md`：研究员、复盘员、action-value、记忆读取和未来学习消费机制。
-- `docs/mechanism_data_model.md`：数据、模型调用、运行数据边界。
+- `docs/work_log.md`：只记录 `.py/.yaml/.yml` 行为修改。
+- `docs/matrix_chain_contract.md`：全链路生产、落盘、消费、审计、hard fail、diagnostics 契约矩阵，是理解系统问题和修改 bug 的第一锚点。
+- `docs/mechanism_multiagents.md`：多智能体固定工作流和边界。
+- `docs/mechanism_workflow.md`：workflow 编排边界。
+- `docs/mechanism_pm.md`：PM 六步链路、最终合约、自检。
+- `docs/mechanism_agent_internal_rules.md`：智能体内部状态流转。
+- `docs/mechanism_research.md`：研究、复盘、记忆和学习边界。
+- `docs/matrix_field_semantics.md`：字段语义矩阵唯一来源。
+- `docs/matrix_action_canonical.md`：action-value 动作 canonical 矩阵。
+- `docs/mechanism_data_model.md`：数据模型和落库边界。
 - `docs/mechanism_future_trade.md`：期货交易业务机制。
-- `docs/work_log.md`：已完成行为修改记录；避免重复修、反向修和语义漂移。
 
-文档之间发生冲突时，按以下顺序处理：
+冲突裁决顺序：
 
-1. 当前代码事实和测试；
-2. `mechanism_multiagents.md` 固定工作流；
-3. `mechanism_workflow.md` workflow 编排边界；
-4. `mechanism_pm.md` PM 六步与唯一合约边界；
-5. `unified_field_semantics.md` 字段语义；
-6. `mechanism_agent_internal_rules.md` 智能体内部转换规则；
-7. 其他机制文档；
-8. 历史 work log。
+1. 当前代码事实、数据库事实、artifact 事实、测试结果。
+2. `matrix_chain_contract.md`
+3. `mechanism_multiagents.md`
+4. `mechanism_workflow.md`
+5. `mechanism_pm.md`
+6. `matrix_field_semantics.md`
+7. `matrix_action_canonical.md`
+8. `mechanism_agent_internal_rules.md`
+9. 其他机制文档。
+10. `docs/work_log.md`
 
-如果文档落后于代码事实，先说明不一致，再按当前任务范围同步文档或代码。
+## 5. 固定工作流
 
-## 4. 文档边界
-
-- `docs/work_log.md`：行为代码/配置工作日志；
-- `docs/mechanism_multiagents.md`：多智能体固定工作流、边界和协作；
-- `docs/mechanism_workflow.md`：workflow 编排边界和禁止事项；
-- `docs/mechanism_pm.md`：PM 六步、资金部署、最终合约生成和自检机制；
-- `docs/mechanism_research.md`：研究、记忆、action-value 和学习闭环；
-- `docs/mechanism_data_model.md`：数据与模型调用机制；
-- `docs/mechanism_future_trade.md`：期货交易业务机制；
-- `docs/unified_field_semantics.md`：唯一字段语义表；
-- `docs/parameter.md`：长期参数调节备忘；
-- `docs/pandaia_data_introduction.md`：PandaAI 数据接入说明；
-- `docs/ppt.md`：演示稿生成提示，不代表运行规则。
-
-纯文档说明不能替代代码、测试和真实 audit 证据。文档变更必须和现有代码语义一致。
-
-## 5. 项目结构索引
-
-- `src/agents/analysis_team/`：技术面、基本面、期货新闻面分析师；
-- `src/agents/decision_team/signal_collector.py`：信号收集员；
-- `src/agents/decision_team/portfolio_manager.py`：投资组合经理，唯一交易合约签发；
-- `src/agents/decision_team/auditor.py`：审计员；
-- `src/graph/workflow.py`：Phase1 workflow 编排层，只调度、传递和保存事实，不生成 PM 交易语义；
-- `src/agents/execution_team/trader.py`：交易员；
-- `src/agents/execution_team/accountant.py`：会计师；
-- `src/agents/research_team/reviewer.py`：复盘员；
-- `src/agents/research_team/researcher.py`：研究员；
-- `src/agents/control_team/protocol_governor.py`：协议管理员；
-- `src/agents/control_team/planner.py`：封存开发组件，当前 workflow 不启用；
-- `src/tools/agent_tools/analysis/`：分析侧工具；
-- `src/tools/agent_tools/decision/`：决策侧工具；
-- `src/tools/agent_tools/execution/`：执行侧工具；
-- `src/tools/agent_tools/research/`：研究侧工具；
-- `src/tools/agent_tools/control/`：控制侧治理工具；
-- `src/tools/common/`：跨智能体公共基础能力；
-- `src/llm/prompt.py`：集中提示词和 prompt builder；
-- `src/run/backtest.py`：回测主入口；
-- `src/run/pre_backtest_test.py`：回测前测试和控制检查总入口；
-- `src/run/backtest_daily_test.py`：每日回测后测试和控制检查总入口；
-- `src/run/research/researcher_learning.py`：研究学习入口；
-- `src/tests/`：确定性测试和回归测试。
-
-## 6. 当前固定工作流
-
-当前业务主链只有一条：
+当前业务主链固定为：
 
 ```text
-数据与行情
+行情/数据
 -> technical / fundamental / commodity_news 结构化预测证据
--> signal_collector 信号收集员
--> portfolio_manager 投资组合经理唯一 final_action_contract
--> auditor 审计员
--> trader 交易员
--> accountant 会计师
--> reviewer 复盘员
--> researcher 研究员
--> 下一交易日分析师校准或投资组合经理 decision_memory_retrieval
+-> signal_collector 生成 signal_collection_contract
+-> portfolio_manager 生成唯一 final_action_contract
+-> auditor 审计合约
+-> trader 执行
+-> accountant 结算
+-> reviewer 复盘
+-> researcher 学习
+-> 下一交易日分析师校准与 PM decision_memory_retrieval
 ```
 
-当前四阶段运行框架固定为：
+运行阶段固定为：
 
-| 阶段 | 现实含义 | 运行脚本 | 智能体/主流程 | 输出 |
-|---|---|---|---|---|
-| Phase1 | 盘前策略生成 | `src/run/proposal.py` | `AgentWorkflow`：技术面分析师、基本面分析师、期货新闻面分析师、信号收集员、投资组合经理、审计员 | `final_action_contract`、`audit_verdict`、策略推荐 |
-| Phase2 | 开盘后/盘中执行 | `src/run/order.py` | 交易员 | 成交/未成交、`execution_result`、`futures_transactions` |
-| Phase3 | 收盘后结算 | `src/run/settlement.py` | 会计师 | `daily_settlement`、PnL、费用、保证金、权益和持仓事实 |
-| Phase4 | 收盘后复盘验收 | `src/run/validate_phase_flow.py` | 复盘员 | Phase4 验收、完整交易日志、事实归因、研究输入材料 |
-| Phase4 后 | 研究学习 | `src/run/research/researcher_learning.py` | 研究员 | 结构化研究信息，供未来交易日使用 |
+| 阶段 | 含义 | 入口 | 输出 |
+|---|---|---|---|
+| Phase1 | 盘前策略生成 | `src/run/proposal.py` | recommendation、`final_action_contract`、`audit_verdict` |
+| Phase2 | 开盘后执行 | `src/run/order.py` | transactions、execution result |
+| Phase3 | 收盘后结算 | `src/run/settlement.py` | settlement、PnL、持仓事实 |
+| Phase4 | 收盘后复盘验收 | `src/run/validate_phase_flow.py` | 复盘事实和研究输入 |
+| Phase4 后 | 研究学习 | `src/run/research/researcher_learning.py` | 结构化学习记录 |
 
-回测、模拟盘和实盘复刻共享同一套阶段顺序、字段契约、智能体边界和 no-lookahead 约束。区别只在 Phase2：回测中 `order.py` 单次回放完整交易日；模拟盘用 `order.py --loop` 按真实盘中时间循环检查触发。
+workflow 只编排、传递、保存和阻断；禁止生成 PM 交易语义、rank、资金部署、合约字段、审计结论。
 
-旧 `planner` 是封存开发组件，不属于当前启用智能体和固定工作流。`planner_mode=false` 是当前唯一合法运行配置；`planner_mode=true` 必须 fail-fast。
+## 6. 智能体边界
 
-`preflight` 的 LLM auth probe 是环境认证探针，不是协议管理员的交易链路 LLM 调用，也不是 Phase1-Phase4 智能体。
+### 6.1 分析师
 
-workflow 是编排层，不是决策层。它可以调度 Agent、传递状态、保存事实、触发审计和阻断异常，但不能生成或修补研究结论、机会排序、资金部署、PM 合约、审计结论，也不能把 PM 中间态保存为对外事实。
+`technical`、`fundamental`、`commodity_news` 可调用 LLM，只输出结构化预测证据。
 
-## 7. 启用智能体边界
+禁止输出：
 
-### 7.1 分析师
+- 手数、仓位比例、保证金授权。
+- 最终交易动作。
+- `final_action_contract`
+- `opportunity_rank`、资金部署结论。
 
-启用分析师只有：
+### 6.2 signal_collector
 
-- `technical` 技术面分析师；
-- `fundamental` 基本面分析师；
-- `commodity_news` 期货新闻面分析师。
+只读取分析师结构化证据，输出 `signal_collection_contract`。
 
-分析师可以调用 LLM。它们只输出结构化预测证据，核心输出是 `AnalystSignal` 和 `action_evidence_contract`。分析师可以消费本专业校准类结构化研究，用于修正证据解释、触发质量和失效边界。
+必须保留：
 
-分析师禁止输出：
+- `producer="signal_collector"`
+- `collector_decision_boundary="no_trade_authority"`
+- 来源引用、逐条证据、方向、触发状态、强弱、时效、一致性、冲突、确认需求、缺失、风险、失效边界、profile 使用痕迹、`evidence_fusion`
 
-- 手数；
-- 仓位比例；
-- 保证金授权；
-- 最终交易动作；
-- `final_action_contract`；
-- `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`。
+禁止读取研究库、输出 score/rank、仓位、手数、交易动作、`final_action_contract`。
 
-`setup_quality_ok=true` 只表示形态值得关注，不代表当前触发成立。`trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。
+### 6.3 portfolio_manager
 
-### 7.2 `signal_collector` 信号收集员
+PM 不调用 LLM。PM 是唯一策略资金经理和唯一最终交易合约签发者。
 
-信号收集员属于决策组，文件位置是 `src/agents/decision_team/signal_collector.py`。
+PM 六步固定为：
 
-职责：
+1. 读取 SCC、账户、持仓、合约、行情、配置。
+2. 判断生命周期动作口。
+3. 判断单品种方向与候选质量。
+4. 按生命周期消费有效学习。
+5. 新增风险路径执行全市场 rank 与资金部署。
+6. 生成唯一 `final_action_contract` 并执行自检。
 
-- 读取三类分析师的结构化预测证据；
-- 输出 `signal_collection_contract`；
-- 保留来源引用、逐条证据、方向、触发状态、证据强弱、冲突、缺失、风险、失效边界；
-- 不调用 LLM。
+PM 最终 artifact 必须包含：
 
-禁止：
+- `signal_snapshot.final_action_contract`
+- `signal_snapshot.pm_six_step_trace`
+- `signal_snapshot.signal_collection_contract`
 
-- 直接读取研究库；
-- 混入历史学习结论；
-- 输出 score/rank；
-- 输出仓位、手数、交易动作；
-- 输出 `final_action_contract`。
+PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 signal_collector 输出的原始 `signal_collection_contract`。
 
-### 7.3 `portfolio_manager` 投资组合经理
+`final_action_contract.learning_used.alpha_setup_action_values` 只保存可作为 PM 正式学习证据的 canonical action-value。弱先验、相似 SQL 检索、诊断材料不得进入正式 action-value 主列表，只能进入 `learning_used.memory_retrieval.rejected_or_downgraded` 诊断位置。
 
-投资组合经理不调用 LLM。它是唯一策略资金经理和唯一策略交易意图签发者。
+### 6.4 auditor
 
-固定输入：
+只审 PM 合约和硬风险边界，不改方向、不改手数、不新建合约、不直接消费研究记录。
 
-- `signal_collection_contract`；
-- 账户、持仓、合约信息、市场确认；
-- `decision_memory_retrieval` / `effective_memory_summary`；
-- `pm_lifecycle_action_port` 输出；
-- `pm_ticker_side_selection` 输出；
-- `pm_lifecycle_learning_router` 输出；
-- 新增风险路径上的 `pm_full_market_capital_deployment` 输出；
-- `pm_position_sizing` / `build_position_sizing_result` 输出；
-- 资金与风控配置。
+### 6.5 trader
 
-固定输出：
+只执行审计通过的 `final_action_contract` 和合约化触发规则。
 
-- `FuturesRecommendation`；
-- 唯一 `final_action_contract`；
-- `pm_six_step_trace`；
-- `learning_used`；
-- `opportunity_scorecard`；
-- 必要时的 `opportunity_rank`；
-- `position_sizing_result`；
-- `capital_deployment`；
-- `capital_allocation_reason`。
+禁止读取研究库、action-value、`learning_used`、`opportunity_rank` 并据此下单。
 
-投资组合经理研究消费入口只有 `decision_memory_retrieval`。投资组合经理不直接查研究表，不直接解析原始研究记录，不直接用空历史覆盖真实历史。
+### 6.6 accountant
 
-投资组合经理的确定性工具链固定为 PM 六步：
+只按成交和结算事实入账，禁止生成策略结论。
 
-1. 读取 `signal_collection_contract`、账户、持仓、合约、行情与配置；
-2. 通过 `pm_lifecycle_action_port` 判断开仓、加仓、减仓、平仓、持有、观察等生命周期动作口；
-3. 通过 `pm_ticker_side_selection` 判断单品种方向与候选质量；
-4. 通过 `pm_lifecycle_learning_router` 按生命周期动作消费有效记忆；
-5. 仅在新增风险路径调用 `pm_full_market_capital_deployment` 做全市场 rank 与资金部署；
-6. 通过 `pm_contract_builder` 生成唯一 `final_action_contract`，并调用 `pm_contract_self_check` 写入 `pm_six_step_trace.step6_contract_generation_check` 与 `pm_six_step_trace.pm_contract_self_check`。
+### 6.7 reviewer
 
-非新增风险路径必须跳过 Step5，执行 `1 -> 2 -> 3 -> 4 -> 6`；新增风险路径执行 `1 -> 2 -> 3 -> 4 -> 5 -> 6`。
+只复盘交易事实、执行事实、结算事实和合约一致性。复盘员可提供研究材料，不能直接写最终 action-value。
 
-`decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_full_market_capital_deployment`、`pm_position_sizing` 只能提供 PM 内部输入，不能签发或修补 `final_action_contract`。最终交易什么、交易多少，只能由投资组合经理根据工具输出和规则写入唯一合约。
+### 6.8 researcher
 
-PM 输出进入 workflow 前必须满足：
+只在 Phase4 验收后运行，输出结构化研究和学习记录。
 
-- `signal_snapshot.final_action_contract` 存在；
-- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`；
-- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`；
-- 不向对外 `signal_snapshot` 泄漏 `pm_internal_candidate`、`pm_capital_deployment_decision`、PM draft contract 等内部中间态。
+禁止生成当日交易指令、修改 PM 合约、修改交易员权限、使用未来数据。
 
-### 7.4 `auditor` 审计员
+### 6.9 protocol_governor
 
-审计员不调用 LLM，不直接消费研究记录。
+只做旁路治理和系统不变量审计，不参与交易消费，不评价策略收益。
 
-输入：
+PG 审 artifact 边界、字段语义、可追溯性、越权、中间态污染、契约断链。PG 不复刻 PM rank、手数、方向、资金部署判断。
 
-- 投资组合经理的 `final_action_contract`；
-- 账户；
-- 持仓；
-- 保证金；
-- 数据质量；
-- 硬风险边界。
+## 7. 唯一交易真相
 
-输出：
+策略交易的唯一真相是 PM recommendation 中的 `final_action_contract`。
 
-- `audit_verdict`；
-- hard/soft risk reasons；
-- 审计 payload。
+禁止旁路：
 
-审计员只审合约，不改方向、不改手数、不新建合约。研究记忆只能通过投资组合经理的评分、排序、手数计算和唯一合约间接影响审计对象。
+- 分析师自由文本成为交易依据。
+- signal_collector 读取研究库。
+- workflow 生成 rank、资金部署、PM 字段、PM 合约。
+- 审计员、交易员、会计师、复盘员、研究员改写 PM 交易方向和目标手数。
+- 交易员用学习记录下单。
+- LLM 自由文本成为仓位、审计、结算、研究 action-value 依据。
 
-### 7.5 `trader` 交易员
+非策略动作使用独立来源类型，不能污染 alpha 学习。
 
-交易员不调用 LLM，不直接读取研究库、action-value、`strategy_memory` 或 `adaptive_policy_state`。
+## 8. 字段语义
 
-输入：
+- `docs/matrix_field_semantics.md` 是字段语义矩阵唯一来源。
+- `docs/matrix_action_canonical.md` 是 action-value 动作 canonical 矩阵唯一来源。
+- 已有字段能表达同一语义时必须复用已有字段。
+- 新字段必须同轮同步生产端、消费端、审计、测试、机制文档。
+- 禁止新增第二套字段名、别名、旧字段兼容路径。
+- 禁止从裸 `action_name` 私自推断学习语义；必须使用统一动作语义工具。
 
-- 审计通过的 `final_action_contract`；
-- 合约化执行触发规则；
-- 盘中行情；
-- 执行配置。
-
-输出：
-
-- 成交/未成交；
-- `execution_result`；
-- `execution_learning_trace`。
-
-交易员只能按合约中的 `current_lots/target_lots/lots_delta/final_action` 和 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 执行。交易员不能按 `opportunity_score`、`opportunity_rank`、`learning_used` 或研究记录下单、放宽触发、改方向或改手数。
-
-执行触发机制的迭代路径固定为：
+action-value 标准路径：
 
 ```text
-交易员 execution_result / execution_learning_trace
--> 复盘员 Phase4 factual validation
--> 研究员 structured execution learning
--> 下一交易日投资组合经理 decision_memory_retrieval
--> 投资组合经理将 execution_profile / entry_trigger 写入 final_action_contract
--> 交易员执行合约化触发规则
+action_name -> canonical_action_family -> action_value_lane / learning_lane -> action_preference
 ```
 
-### 7.6 `accountant` 会计师
+学习偏向不是明日执行指令。具体交易动作只来自 PM 当日 `final_action_contract`。
 
-会计师不调用 LLM。它只按成交、持仓、结算价、手续费、滑点、保证金率和合约乘数入账。
+## 9. Artifact 与审计边界
 
-会计师禁止：
+- PM 对外 artifact 只能保存最终合约、最终 Step6 trace、原始 SCC、审计所需摘要。
+- PM Step1-5 中间态只能保留为安全 diagnostics/provenance 摘要，不能冒充最终决策证据。
+- `decision_learning_rows` 是 Step6 final contract 按最终生命周期重新生成的最终决策层学习 trace。
+- `trigger_profile_learning_rows` 只保存 execution/trigger/profile 学习，不进入决策层。
+- 自检审最终合约证据链是否干净，不审交易判断是否正确。
+- PG daily audit 只认 `signal_snapshot.signal_collection_contract` 作为 SCC 主证据。
+- `signal_collection_contract_ref` 可保留为摘要，不能替代完整 SCC。
 
-- 用 LLM 调账；
-- 用学习改账；
-- 生成交易动作；
-- 写最终 action-value。
+## 10. 开发流程
 
-### 7.7 `reviewer` 复盘员
+动手前必须完成：
 
-复盘员不调用 LLM，不触发研究员学习，不写最终 action-value。
+1. 先读 `AGENTS.md`，确认执行规范。
+2. 再读 `docs/matrix_chain_contract.md`，定位本次任务对应的生产端、落点、消费端、自检、pre-backtest gate、daily PG audit、测试、机制文档。
+3. 明确任务属于系统 bug、策略表现、配置、数据、学习、文档对齐中的哪一类。
+4. 阅读 `docs/work_log.md`、相关机制文档、相关代码、测试、最近回测记录和审计结果。
+5. 沿完整链路排查，不只盯单个函数。
+6. 先确定业务契约，再确定实现，再确定审计。
 
-职责：
-
-- 验证 Phase1-3 是否完整；
-- 输出 Phase4 验收、完整交易日志、事实归因、研究输入材料；
-- 复盘投资组合经理合约、交易员执行、会计师结算和学习使用痕迹；
-- 区分系统非策略问题和策略表现问题。
-
-复盘员可以给研究员提供事实材料，但未来学习由 `researcher_learning.py` 和研究工具写入。
-
-### 7.8 `researcher` 研究员
-
-研究员可受限调用 LLM。研究员只在 Phase4 验证完成后运行，入口是 `src/run/research/researcher_learning.py`。
-
-输出必须是结构化研究成果：
-
-- `alpha_setup_action_value`；
-- `alpha_setup_profile`；
-- `adaptive_policy_state`；
-- 分析师校准类研究；
-- 交易决策类 action-value；
-- 执行学习；
-- 排序偏好和研究反馈。
-
-研究员禁止：
-
-- 生成当天交易指令；
-- 修改投资组合经理手数；
-- 修改交易员权限；
-- 直接修改合约；
-- 输出只供下游消费的自由文本研究结论。
-
-### 7.9 `protocol_governor` 协议管理员
-
-协议管理员不调用 LLM，不参与交易消费，不评价收益。
-
-职责：
-
-- 契约覆盖；
-- 机制断链；
-- 系统不变量；
-- 回测前/每日非策略风险报告；
-- 字段、提示词、配置、测试和机制文档一致性检查。
-
-发现 hard error 时，应阻断回测或阻断收益评价。
-
-## 8. 唯一交易契约原则
-
-策略交易的唯一交易真相是投资组合经理最终推荐记录中的 `final_action_contract`。
-
-必须保持如下路径：
-
-- 分析师只输出结构化预测证据；
-- 信号收集员只输出统一结构化预测证据包；
-- 投资组合经理按 PM 六步消费 `decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_lifecycle_learning_router`、必要时的 `pm_full_market_capital_deployment` 与 `pm_position_sizing` 后签发唯一合约；
-- 审计员只审这张合约；
-- 交易员只执行审计通过后的这张合约和合约化触发规则；
-- 会计师只按成交和结算事实入账；
-- 复盘员只复盘事实；
-- 研究员只输出未来可用结构化学习。
-
-禁止以下旁路：
-
-- 投资组合经理直接把分析师自由文本当交易依据；
-- 信号收集员直接读研究库；
-- 投资组合经理绕过 `decision_memory_retrieval` 直接解析研究记录；
-- `decision_memory_retrieval`、`pm_ticker_side_selection`、`pm_full_market_capital_deployment`、`pm_position_sizing` 生成或修补 `final_action_contract`；
-- workflow 生成 rank、部署资金、补 PM 字段、修 PM 合约或保存 PM 中间态；
-- 审计员、交易员、会计师、复盘员、研究员改写投资组合经理的交易方向或目标手数；
-- 复盘员入口调用研究员学习或任何 LLM 研究函数；
-- 交易员使用 `opportunity_rank`、`opportunity_score`、`learning_used` 或研究记录作为下单权限；
-- 任何 LLM 自由文本成为交易权限、仓位依据、审计依据、结算依据或下游研究 action-value。
-
-策略单必须使用 `source_type=strategy`。换月、强平、风控处置等非策略动作必须走运营或风险事件路径，例如 `source_type=rollover`、`source_type=forced_risk`，独立核算，不得污染 alpha 学习。
-
-## 9. 字段、提示词和工具命名规则
-
-字段语义以 `docs/unified_field_semantics.md` 为唯一来源。
-
-- 已有字段能表达同一语义时，必须复用已有字段。
-- 确认需要新字段时，必须同一轮同步字段表、生产端、消费端、提示词、测试和契约覆盖闸门。
-- `payload`、`payload_json`、`artifact_json` 等只允许作为结构化容器；容器里的业务字段仍必须属于统一字段语义表。
-- 字段新增缺任一同步项，都视为语义漂移。
-
-提示词集中在 `src/llm/prompt.py` 管理。涉及智能体输入、输出、禁止项、字段语义、LLM 权限边界的改造，必须同步检查提示词。
-
-不调用 LLM 的智能体和工具不得新增提示词入口。旧提示词入口如仍存在，改造时必须删除。
-
-工具目录按功能边界分类，不按智能体名字分类：
-
-- `src/tools/agent_tools/analysis`：分析侧业务工具；
-- `src/tools/agent_tools/decision`：决策侧业务工具；
-- `src/tools/agent_tools/execution`：执行侧业务工具；
-- `src/tools/agent_tools/research`：研究侧业务工具；
-- `src/tools/agent_tools/control`：控制侧治理工具；
-- `src/tools/common`：跨智能体公共基础能力，例如 `contracts.py` 和 `runtime_setup.py`；
-- `src/util`：更底层的通用基础设施。
-
-`agent_tools` 下的工具必须按具体功能命名，不能按智能体名命名。禁止新增 `*_tools`、`pm_*`、`trader_*`、`reviewer_tools`、`researcher_tools` 这类泛称或角色名工具。
-
-## 10. 数据与事实边界
-
-- PandaAI：行情、分钟线、结算、合约和期货衍生数据。
-- Finoview 本地 feather：基本面数据，只能从 `data/Fundamental_data/Finoview_data/` 调用。
-- 本地新闻：只能从 `data/News_data/Future_news/` 调用。
-- `finoview_factor_catalog.yaml` 是本地 feather 字段目录。
-- `data_factor_policy_catalog.yaml` 是 PandaAI、Finoview、新闻的数据入口和质量策略目录。
-- 没有日期列、无法确认时点或超过决策日 cutoff 的数据，不能作为当日强证据。
-- `data_usage_summary` 必须说明数据新鲜度、来源和降级原因。
-
-所有学习读取必须满足 `source_trading_date < decision_date`。同日 Phase4、研究员或未来记录不得影响当日分析师、投资组合经理、审计员或交易员。
-
-## 11. 开发任务流程
-
-### 11.1 先定义任务目标
-
-动手前必须先判断任务类型：
-
-- 修非策略 bug；
-- 解决不交易；
-- 提升收益；
-- 提高资金利用率；
-- 优化学习闭环；
-- 对齐文档、提示词或配置；
-- 整理工具目录或智能体边界。
-
-不同目标不能混用同一套修法。尤其不能把所有问题都处理成“加门控、加限制、少交易”。
-
-### 11.2 先读上下文
-
-修改或判断前必须读：
-
-- `docs/work_log.md`；
-- `docs/mechanism_multiagents.md`；
-- `docs/mechanism_workflow.md`；
-- `docs/mechanism_pm.md`；
-- `docs/unified_field_semantics.md`；
-- 相关 `.py`、`.yaml/.yml`、提示词、测试和机制文档；
-- 最近回测记录和系统审计结果，如果任务与回测表现有关。
-
-读完后必须能说清楚：问题是系统 bug、策略表现问题、配置问题、数据问题、学习问题，还是文档口径问题。
-
-### 11.3 沿完整链路排查
-
-不得只盯单个函数、单个字段或单个智能体。至少沿这条链路核对：
-
-```text
-分析师证据
--> signal_collector
--> 投资组合经理 PM 六步工具链与唯一合约
--> 审计员审计
--> 交易员执行
--> 会计师结算
--> 复盘员复盘
--> 研究员学习
--> 回测前/每日验收
-```
-
-凡是只写日志、分数、原因、诊断或报告，但没有影响真实合约或明确不交易原因的修改，只能算解释增强，不能算交易链路修复。
-
-### 11.4 修改边界
+修改 bug 时必须先在 `docs/matrix_chain_contract.md` 定位对应契约行，再按生产端、落点、消费端、自检、pre-backtest gate、daily PG audit、测试、机制文档的顺序核对。
 
 修改时必须守住：
 
-- 不新增兜底逻辑掩盖错误；
-- 不用旧字段绕过唯一合约；
-- 不让控制组写交易策略；
-- 不让 workflow 生成 rank、部署资金、补 PM 字段、修 PM 合约或保存 PM 中间态；
-- 不让分析师给仓位；
-- 不让信号收集员读研究库；
-- 不让投资组合经理绕过 `decision_memory_retrieval` 读研究；
-- 不让审计员消费研究记录改交易权限；
-- 不让交易员创造策略、方向、目标手数、保证金权限或研究触发权限；
-- 不让复盘员调用 LLM、触发研究员学习或写最终 action-value；
-- 不让研究员用未来数据、弱先验或候选偏好直接放大真实仓位；
-- 不把一个品种、一个窗口或一次偶然失败写成全局硬规则；
-- 不默认通过新增门控解决收益问题。
+- 不新增兜底逻辑。
+- 不静默降级。
+- 不补默认值伪造事实。
+- 不用旧字段绕过唯一合约。
+- 不让控制组写交易策略。
+- 不让 workflow 生成 PM 语义。
+- 不把偶然失败写成全局硬规则。
+- 不用门控压死交易来伪装修复。
 
-新增限制前必须说明它是在提升机会排序、资金迁移、退出保护、风险识别，还是单纯减少交易。单纯减少交易不能被当成策略优化。
+真实失败路径要先补可复现测试，再修代码，再跑目标测试和相关链路验收。
 
-### 11.5 测试与验收
-
-如果是修真实失败路径，优先写能复刻该路径的失败测试，再修代码。测试必须覆盖真实入口和真实链路，不能只用绕过主流程的手工构造样例证明局部函数正确。
-
-修改后按影响面选择验证：
-
-- 目标测试；
-- 相关链路测试；
-- `compileall`；
-- `contract_coverage_audit`；
-- `pre_backtest_acceptance`；
-- `system_invariant_audit`；
-- `mechanism_effectiveness_audit`；
-- `git diff --check`。
-
-影响面大时运行全量 `python -m unittest`。
-
-### 11.6 交付结论
-
-完成后必须给出三个结论：
-
-- 实际交易链路是否改变，具体改变到哪一层；
-- 是否存在压死交易、资金利用率下降或新旁路风险；
-- 下一轮回测应重点观察哪些指标和非策略问题。
-
-## 12. 回测前验收
-
-回测前先跑控制组验收，而不是让回测暴露已知系统 bug。
-
-推荐命令：
-
-```powershell
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py --config src\config\dev.yaml --local-db --check-llm-auth --json
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.py --config src\config\dev.yaml --local-db --json
-```
-
-`contract_coverage_audit` 是版本级只读闸门，固定检查核心契约是否有 producer、consumer、audit、test、字段表、配置、提示词和机制文档覆盖，并要求关键智能体边界有 producer-to-consumer 保真测试。它不读收益、不写 DB、不改交易。
-
-`pre_backtest_acceptance` 固定覆盖：
-
-- environment_api；
-- config_consistency；
-- data_time_boundary；
-- agent_boundaries；
-- structured_io；
-- contract_coverage；
-- single_trade_exit；
-- pm_opportunity_routing；
-- trader_trigger_parity；
-- learning_landing；
-- capital_boundary；
-- audit_explainability。
-
-当前 `src/run/pre_backtest_test.py` 还编排 PM/workflow 合约静态闸门，尤其是 `src.tests.test_pre_backtest_pm_workflow_contracts`。新增或修改 PM、workflow、信号快照、审计边界时，必须优先保证该闸门仍能证明：workflow 不生成 PM 交易语义，PM Step6 合约检查存在且为真，PM 内部中间态不落入对外快照。
-
-`src/run/backtest_daily_test.py` 面向真实数据库和真实 artifact 做运行前检查，不承载静态代码扫描职责；不要把 pre-backtest 静态闸门迁移到 daily gate。
-
-验收通过只表示系统 readiness，不表示策略一定盈利。
-
-## 13. 回测中与回测后判断
-
-如果 `system_invariant_audit` 或 `mechanism_effectiveness_audit` 出现 hard fail，必须停止，把结果按系统 bug 或机制断链处理，不得讨论策略收益。
-
-`mechanism_effectiveness_audit` 必须按交易生命周期场景判断：
-
-- 开仓/加仓看学习是否进入 score/rank 和唯一合约；
-- 条件监控看盘中触发或未触发结果；
-- 持仓/减仓/退出看学习是否落到目标手数下降、退出/减仓动作或明确继续持有解释；
-- 不能用开仓评分规则误杀已经正确退出的合约。
-
-`mechanism_effectiveness_audit` 的 diagnostic 不停止回测；它只说明机制已连接但效果差，需要进入策略层分析。
-
-如果两类 audit 都 clean 但收益差，才进入策略层分析。
-
-## 14. 测试矩阵
+## 11. 验证命令
 
 常用命令必须使用 deepfund：
 
@@ -566,77 +253,63 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py 
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.py --config src\config\dev.yaml --local-db --json
 ```
 
-关键测试入口：
+按影响面选择：
 
-- `src/tests/test_agent_contracts.py`；
-- `src/tests/test_phase_flow_regression.py`；
-- `src/tests/test_decision_workflow_tools.py`；
-- `src/tests/test_fact_entry_boundaries.py`；
-- `src/tests/test_final_action_semantics.py`；
-- `src/tests/test_agent_output_contract_boundary.py`；
-- `src/tests/test_pre_backtest_pm_workflow_contracts.py`；
-- `src/tests/test_reviewer_transaction_log_readability.py`；
-- `src/tests/test_pm_state_transition_matrix.py`；
-- `src/tests/test_pm_watch_for_trigger_release.py`；
-- `src/tests/test_analyst_output_landing.py`；
-- `src/tests/test_evidence_fusion_semantics.py`；
-- `src/tests/test_pre_backtest_acceptance.py`；
-- `src/tests/test_protocol_governor.py`；
-- `src/tests/test_protocol_preflight_cli.py`；
-- `src/tests/test_system_invariant_audit.py`；
-- `src/tests/test_mechanism_effectiveness_audit.py`；
-- `src/tests/test_contract_coverage_audit.py`；
-- `src/tests/test_reviewer_learning.py`；
-- `src/tests/test_pandaai_api_adapter.py`；
-- `src/tests/test_futures_market_rules.py`；
-- `src/tests/test_market_confirmation.py`；
-- `src/tests/test_phase1_acceleration.py`。
+- 目标单测。
+- 相关链路单测。
+- `compileall`
+- `pre_backtest_acceptance`
+- `system_invariant_audit`
+- `mechanism_effectiveness_audit`
+- `contract_coverage_audit`
+- `git diff --check`
 
-新发现真实失败路径时，先写能复刻该路径的失败测试，再修代码，再跑目标测试、相关链路测试和必要验收。
+## 12. 回测判断
 
-## 15. 工作日志规则
+- `system_invariant_audit` hard fail 时，停止收益讨论，按系统 bug 处理。
+- `mechanism_effectiveness_audit` hard fail 时，停止收益讨论，按机制断链处理。
+- 两类 audit clean 后，收益差才进入策略层分析。
+- daily gate 是真实 DB 与真实 artifact 的运行后检查，不承载静态代码扫描职责。
+- pre-backtest gate 是回测前 readiness 检查，不代表策略一定盈利。
 
-`docs/work_log.md` 只记录完成后的 `.py`、`.yaml`、`.yml` 行为或运行配置修改。
+## 13. 工作日志
 
-位置与验收规则：
+`docs/work_log.md` 只记录完成后的 `.py/.yaml/.yml` 行为修改和运行配置修改。
 
-- `docs/work_log.md` 按日期正序排列。
-- 新日期段必须追加在已有最后一个日期段之后、`==========当前验证口径==========` 之前。
-- 不得把新日期段插到文件顶部、插到历史日期之前，或改变既有日期段顺序。
-- 更新后必须用 `rg -n "^==========[0-9]{4}年[0-9]{2}月[0-9]{2}日==========|^==========当前验证口径==========" docs\work_log.md` 或等价命令核对日期顺序。
-- 若本次按规则需要更新 `docs/work_log.md`，最终回复必须说明更新位置，例如 `docs/work_log.md:217`；纯文档、README 或 AGENTS 对齐且不改变系统行为时不更新 work_log，也不需要给出 work_log 位置。
+必须记录：
 
-必须记录的情况：
+- 业务逻辑修改。
+- 智能体输入输出修改。
+- 交易合约、审计、执行、结算、学习修改。
+- 测试逻辑修改。
+- 控制组工具修改。
+- runtime 配置修改。
 
-- 修改业务逻辑；
-- 修改智能体输入输出；
-- 修改交易合约、审计、执行、结算、学习；
-- 修改测试逻辑；
-- 修改控制组工具；
-- 修改 runtime 配置。
+不记录：
 
-不记录的情况：
+- 纯讨论。
+- 纯方案。
+- 纯回测分析。
+- 纯文档、README、AGENTS 修改。
+- 数据文件变动。
+- 文件改名、删除。
+- 只改注释且不改变行为。
+- 只运行测试和命令。
 
-- 纯讨论；
-- 纯方案；
-- 纯回测分析；
-- 纯文档或 README；
-- 数据文件变动；
-- 文件改名或删除；
-- 只改注释或 docstring 且不改变行为；
-- 只运行测试或命令。
+日志按日期正序追加，每条只写：
 
-每条只写两项：
+- 改了什么。
+- 为什么改。
 
-- 修改了什么：文件/模块/机制；
-- 为什么改：对应哪个问题。
+## 14. 交付回复
 
-## 16. 回答用户时的规则
+完成任务后必须说明：
 
-回答必须直接、基于证据、服务项目目标。
+- 修改文件。
+- 核心逻辑变化。
+- 验证命令和结果。
+- 真实交易链路是否改变。
+- 是否存在新旁路风险。
+- 下一轮回测重点观察项。
 
-不要用“可能”“观察一下”“再小修一下”代替判断。若证据不足，先查代码、配置、数据库、日志或测试。若是系统 bug，明确说是系统 bug；若系统不变量 clean 但收益差，明确进入策略层分析。
-
-不要把机制建设说成收益保证，也不要用“不保证盈利”逃避系统目标。正确说法是：系统链路必须先能一比一复刻交易逻辑；链路 clean 后，亏损才按策略信号、入退场、资金利用、学习效果和品种/setup 分布分析。
-
-用户问“现在该干什么”时，必须给出下一步唯一动作或非常短的决策，不要绕回多套方案。
+未完成任务时必须说明唯一阻塞点和下一步动作。

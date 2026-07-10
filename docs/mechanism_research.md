@@ -2,7 +2,7 @@
 
 更新时间：2026-06-25
 
-本文档定义 AgentQuant 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/unified_field_semantics.md` 作为唯一字段语义来源。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和统一字段语义表为准。
+本文档定义 AgentQuant 的复盘、研究、记忆持久化和未来学习消费机制。它必须与 `docs/mechanism_multiagents.md` 的固定工作流一致，并以 `docs/matrix_field_semantics.md` 作为唯一字段语义矩阵。若本文与多智能体运行机制冲突，以固定工作流、智能体边界和字段语义矩阵为准。
 
 研究机制只服务未来交易日的结构化学习，不产生当天交易动作，不改写当天合约、成交、结算或收益。
 
@@ -74,7 +74,7 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 
 ## 四、action-value 语义
 
-action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释，统一工具是 `src/tools/common/final_action_semantics.py`，完整映射见 `docs/action_value_canonical_action_family.md`。Researcher 写入时必须保存 canonical family 和 lane；PM、Reviewer、Researcher 后续链路和 PG 审计不得各自维护私有字符串集合来猜动作含义。
+action-value 的动作含义必须按 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` 解释，统一工具是 `src/tools/common/final_action_semantics.py`，完整动作矩阵见 `docs/matrix_action_canonical.md`。Researcher 写入时必须保存 canonical family 和 lane；PM、Reviewer、Researcher 后续链路和 PG 审计不得各自维护私有字符串集合来猜动作含义。
 
 学习偏向不是明日执行指令。`positive_candidate_open` 只能说明同 family/lane 的历史样本支持 open/add 新增风险候选，不能让交易员直接下单；具体执行动作仍只能来自 PM 当日 `final_action_contract`。
 

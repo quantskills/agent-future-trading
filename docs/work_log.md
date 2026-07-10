@@ -61,3 +61,9 @@
 （6）[PM 自检口径] `final_action_semantics.py` 收住 PM final contract 自检，`portfolio_manager.py` 保留 Step6 已生成的生命周期学习 trace，相关 PM/PG 单测同步。原因：生命周期决策污染只应审 `decision_learning_rows`；`trigger_profile_learning_rows` 中的 execution/profile 学习不能被误判为 reduce_exit 决策污染。
 
 （7）[PM Step6 final trace] `pm_contract_builder.py` 按 Step6 最终生命周期重新生成 `decision_learning_rows`，`portfolio_manager.py` 不再用 Step2 消费结果裁掉最终候选池，`final_action_semantics.py` 自检只审 Step6 final lifecycle trace，相关测试同步。原因：修复 2025-03-26 `open_rank_mixed_forbidden_learning_lanes:hold`，避免 Step2 hold trace 被误装成 open/rank 最终决策层证据。
+==========2026年07月10日==========
+
+（1）[PM action-value artifact] `portfolio_manager.py` 将 `canonical_action_value=False` 的 similar/fallback prior 从 `final_action_contract.learning_used.alpha_setup_action_values` 剔除，并写入 `learning_used.memory_retrieval.rejected_or_downgraded`。原因：PM 正式 action-value 主列表只能保存完整 canonical 学习证据，weak prior 只能作诊断检索材料。
+（2）[PM self-check] `pm_contract_self_check.py` 增加 `alpha_setup_action_values` 纯净性检查，相关 PM 单测同步。原因：最终合约主列表出现缺 family、缺 preference、缺 lane、`canonical_action_value=False` 或 `incomplete_trace_not_for_pm_scoring` 时必须 hard fail。
+（3）[PG observe action-value] `pg_system_invariants.py` 落实 `canonical_action_family=observe`、lane 为 `hold` 时空 `action_preference` 的合法语义，相关 system invariant 单测同步。原因：observe/watchlist 是观察事实和 hold 诊断线，不应被误报为缺交易动作偏向；本次未修改 PM artifact、PM self-check、SCC、action-value 写入端或交易业务逻辑。
+（4）[字段矩阵命名] `pg_system_invariants.py`、`pg_pre_backtest_acceptance.py`、`pg_contract_coverage_audit.py`、`src/config/dev.yaml` 和相关测试改用 `matrix_field_semantics` 与 `docs/matrix_field_semantics.md`。原因：字段语义文档改为矩阵命名后，控制组闸门、契约覆盖和测试不能继续引用旧文件名。

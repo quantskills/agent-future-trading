@@ -1,6 +1,6 @@
 # AgentQuant 主配置
 # 本文件只负责运行入口、catalog 索引、账户/资金参数、交易宇宙和 LLM 路由。
-# 机制说明见 docs/mechanism_*.md；字段语义见 docs/unified_field_semantics.md；
+# 机制说明见 docs/mechanism_*.md；字段语义见 docs/matrix_field_semantics.md；
 # 策略细节、学习策略、数据策略和 rank 权重由 config_catalogs 指向的 catalog 展开。
 #
 # 硬边界：

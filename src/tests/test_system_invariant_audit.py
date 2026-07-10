@@ -1428,15 +1428,15 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
         report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
         self.assertFalse(report.ok)
         self.assertTrue(
-            any(error.startswith("unified_field_artifact_forbidden_field:2025-03-03:RB:rec1:signal_snapshot") for error in report.errors),
+            any(error.startswith("matrix_field_artifact_forbidden_field:2025-03-03:RB:rec1:signal_snapshot") for error in report.errors),
             report.to_dict(),
         )
         self.assertTrue(any("action_evidence_contract.opportunity_layer" in error for error in report.errors))
-        self.assertIn("unified_field_semantics", report.metadata.get("failed_categories", []))
-        semantics = report.metadata.get("unified_field_semantics_audit", {})
+        self.assertIn("matrix_field_semantics", report.metadata.get("failed_categories", []))
+        semantics = report.metadata.get("matrix_field_semantics_audit", {})
         self.assertFalse(semantics.get("ok"), report.to_dict())
         self.assertTrue(
-            any(error.startswith("unified_field_artifact_forbidden_field:") for error in semantics.get("errors", [])),
+            any(error.startswith("matrix_field_artifact_forbidden_field:") for error in semantics.get("errors", [])),
             report.to_dict(),
         )
 
@@ -1586,7 +1586,7 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             any(error.startswith("trigger_valid_without_current_trigger_confirmed:") for error in report.errors),
             report.to_dict(),
         )
-        self.assertIn("unified_field_semantics", report.metadata.get("failed_categories", []))
+        self.assertIn("matrix_field_semantics", report.metadata.get("failed_categories", []))
         self.assertIn("evidence_trigger_boundary", report.metadata.get("failed_categories", []))
 
     def test_system_invariant_audit_accepts_conditional_monitor_contract(self):
@@ -2868,6 +2868,132 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             any(error.startswith("forced_risk_open_transaction_not_allowed") for error in report.errors),
             report.to_dict(),
         )
+
+    def _set_av1_action_value_semantics(
+        self,
+        db_path: Path,
+        *,
+        action_name: str = "observe",
+        family: str = "observe",
+        action_value_lane: str = "hold",
+        learning_lane: str = "hold",
+        action_preference: str = "",
+        reward_sum: float = 0.0,
+    ) -> None:
+        payload = {
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+            "amplification_scope_quality": "exact_real_state",
+        }
+        if family:
+            payload["canonical_action_family"] = family
+        if action_value_lane:
+            payload["action_value_lane"] = action_value_lane
+        if learning_lane:
+            payload["learning_lane"] = learning_lane
+        if action_preference:
+            payload["action_preference"] = action_preference
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE alpha_setup_action_value
+                SET action_name=?, canonical_action_family=?, reward_sum=?, reward_mean=?,
+                    action_preference=?, reward_source=?, evidence_scope=?,
+                    action_value_lane=?, learning_lane=?, payload_json=?
+                WHERE id='av1'
+                """,
+                (
+                    action_name,
+                    family,
+                    reward_sum,
+                    reward_sum,
+                    action_preference,
+                    "trade_episode",
+                    "exact_real_state",
+                    action_value_lane,
+                    learning_lane,
+                    _dumps(payload),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_system_invariant_audit_accepts_observe_empty_preference_for_any_reward_sign(self):
+        for reward_sum in (100.0, -100.0, 0.0):
+            with self.subTest(reward_sum=reward_sum):
+                db_path = self._make_db()
+                self._insert_good_open(db_path)
+                self._set_av1_action_value_semantics(db_path, reward_sum=reward_sum)
+
+                report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+                self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_accepts_observe_protective_preferences(self):
+        for preference in ("negative_hold_revalidate", "negative_revalidate", "tail_loss_protect"):
+            with self.subTest(preference=preference):
+                db_path = self._make_db()
+                self._insert_good_open(db_path)
+                self._set_av1_action_value_semantics(
+                    db_path,
+                    action_preference=preference,
+                    reward_sum=-100.0,
+                )
+
+                report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+                self.assertTrue(report.ok, report.to_dict())
+
+    def test_system_invariant_audit_rejects_observe_positive_preferences(self):
+        for preference in (
+            "positive_candidate_open",
+            "positive_candidate_exit",
+            "positive_candidate_execution",
+            "positive_candidate_hold",
+        ):
+            with self.subTest(preference=preference):
+                db_path = self._make_db()
+                self._insert_good_open(db_path)
+                self._set_av1_action_value_semantics(
+                    db_path,
+                    action_preference=preference,
+                    reward_sum=100.0,
+                )
+
+                report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+                self.assertFalse(report.ok)
+                self.assertTrue(
+                    any(error.startswith("observe_action_value_positive_preference_forbidden") for error in report.errors),
+                    report.to_dict(),
+                )
+
+    def test_system_invariant_audit_rejects_observe_missing_family_or_lane(self):
+        cases = (
+            {"family": "", "action_value_lane": "hold", "learning_lane": "hold", "error": "action_value_missing_canonical_action_family"},
+            {"family": "observe", "action_value_lane": "", "learning_lane": "", "error": "observe_action_value_invalid_lane"},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                db_path = self._make_db()
+                self._insert_good_open(db_path)
+                self._set_av1_action_value_semantics(
+                    db_path,
+                    family=case["family"],
+                    action_value_lane=case["action_value_lane"],
+                    learning_lane=case["learning_lane"],
+                    reward_sum=100.0,
+                )
+
+                report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+                self.assertFalse(report.ok)
+                self.assertTrue(
+                    any(error.startswith(case["error"]) for error in report.errors),
+                    report.to_dict(),
+                )
 
     def test_system_invariant_audit_fails_generic_positive_open_action_value(self):
         db_path = self._make_db()

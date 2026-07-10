@@ -1,6 +1,6 @@
-# AgentQuant 统一字段语义表
+# Matrix Field Semantics
 
-本文是 AgentQuant 的唯一字段语义表。系统从分析、决策、审计、执行、结算、复盘、研究、学习到评估，只允许使用本文定义的字段语义。
+本文是 AgentQuant 的字段语义矩阵。系统从分析、决策、审计、执行、结算、复盘、研究、学习到评估，只允许使用本文定义的字段语义。
 
 核心规则：
 
@@ -14,7 +14,7 @@
 - 换月、强平、回放、反事实观察不是策略交易，必须用 `source_type != strategy` 分账，不能污染策略 action-value。
 - `payload`、`payload_json`、`artifact_json`、`signal_snapshot`、`evidence_json`、`result_json`、`features_json` 等只允许作为结构化容器；容器里的业务字段必须属于本文字段，不能形成第二套语义。
 
-共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓、退出，以及 action-value 的 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference`。动作家族完整业务表见 `docs/action_value_canonical_action_family.md`；可执行口径以 `final_action_semantics.py` 为准。Protocol Governor 只能通过该工具解释学习 family/lane 匹配、`final_action + current_lots + target_lots + lots_delta` 一致性、no-change / rank / learning 无仓位变化解释、active opportunity rejection 和 open transaction blocker；PG 不得保留私有 reason code 词表、私有 action-value 动作集合或私有 final_action 推断口径。
+共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓、退出，以及 action-value 的 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference`。动作 canonical 矩阵见 `docs/matrix_action_canonical.md`；可执行口径以 `final_action_semantics.py` 为准。Protocol Governor 只能通过该工具解释学习 family/lane 匹配、`final_action + current_lots + target_lots + lots_delta` 一致性、no-change / rank / learning 无仓位变化解释、active opportunity rejection 和 open transaction blocker；PG 不得保留私有 reason code 词表、私有 action-value 动作集合和私有 final_action 推断口径。
 
 分析师差异化分析协议：`src/config/product_price_behavior_profiles.yaml` 是三类分析师的商品价格行为冷启动配置；`src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的确定性读取与格式化工具。它只服务 `technical`、`fundamental`、`commodity_news` 的证据分析，输出 `product_profile_evidence`，用于区分品种价格行为、趋势惯性、波动阈值、产业链确认、季节窗口、假突破风险和适合的 setup。它不调用 LLM，不读研究库，不签合约，不下单，不入账，不写研究；PM 只能从 `signal_collection_contract` 读取它作为证据上下文，Auditor、Trader、Accountant 不直接读取或解释该 profile。
 
@@ -374,8 +374,9 @@
 | `opportunity_scorecard` | `pm_ticker_side_selection` 输出 / PM 输入 / `final_action_contract.evidence_used` | PM 对同一品种多方向候选的结构化评分卡，包含现实证据、历史学习、市场确认、数据质量、风险扣分和单品种方向优先级；它不生成最终资金 rank，也不是交易授权。 |
 | `opportunity_score` | PM scorecard / `final_action_contract.evidence_used` / 资金部署 / 复盘评估 | PM 对候选机会的综合评分，用于资金部署排序解释；不是交易授权，不能替代 `target_lots`。 |
 | `opportunity_score_components` | PM scorecard / `final_action_contract.evidence_used` / 复盘评估 | `opportunity_score` 的分项来源，如方向支持、setup 质量、市场确认、学习调整和风险扣分。 |
-| `positive_learning` | `opportunity_score_components` | 正向 action-value 对对应生命周期决策口的加分分项；新资金 rank 只允许 open/add/scale/increase 学习直接加分，hold/reduce/exit/conditional_monitor/execution 只能进入各自生命周期决策或触发/profile 校准，不能冒充开仓学习。按 episode、作用域、样本、收益、`memory_side_role` 和时间衰减计算，不能单独授权交易。 |
-| `negative_learning` | `opportunity_score_components` | `tail_loss_protect` / `negative_revalidate` / `negative_hold_revalidate` 等负向 action-value 对对应生命周期决策口的扣分分项；新资金 rank 只消费 open/add/scale/increase 相关负向学习，hold/reduce/exit 学习用于持仓或释放资金判断，execution 学习用于 trigger/profile 校准，不是永久封杀。 |
+| `positive_learning` | `opportunity_score_components` | 正向 action-value 对对应生命周期决策口的加分分项。具体 family/lane/preference 匹配口径见 `docs/matrix_action_canonical.md`；该字段不能单独授权交易。 |
+| `negative_learning` | `opportunity_score_components` | 负向 action-value 对对应生命周期决策口的扣分分项。具体保护偏向和生命周期匹配口径见 `docs/matrix_action_canonical.md`；该字段不是永久封杀。 |
+| `observe_action_value` | action-value / PG 审计 | `canonical_action_family=observe` 且 `action_value_lane=learning_lane=hold` 的观察事实。该字段的 preference 合法集合由 `docs/matrix_action_canonical.md` 固定。 |
 | `execution_profile_learning` | `opportunity_score_components` | 同类 `execution_profile` / `trigger_reason` 后续收益对 trigger/profile 选择的影响；可正可负，但不能直接生成或抬高新资金 rank。必须经 PM 写入 `final_action_contract.execution_profile/entry_trigger` 后才影响执行，Trader 不能直接读取学习记录、改手数或方向。 |
 | `recent_tail_loss_penalty` | `opportunity_score_components` | 近期同作用域大亏或 tail-loss episode 对排序的惩罚分项，可抵消旧正向学习，防止失效 alpha 继续被抬分；不等于硬风险 block。 |
 | `entry_quality_loss_penalty` | `opportunity_score_components` | 亏损开仓 episode 反写到原始入场质量后的 PM 排序扣分分项；来源必须是 Researcher 写入的 `entry_quality_outcome`，只降低资金优先级和真实部署资格，不是硬阻断。 |
@@ -404,7 +405,7 @@
 | `capital_ratio_source` | `final_action_contract.evidence_used` / `capital_deployment` | 当前资金层级引用的资金参数来源，例如 `probe_margin_ratio_0.008`、`normal_trade_margin_ratio`、`strong_opportunity_target_margin_ratio`。该字段只解释参数来源，不改参数值。 |
 | `rank_reason` | `final_action_contract.evidence_used` / `capital_deployment` | rank=1 或该候选排名位置的确定性原因摘要。watch/probe 层固定表达按证据、触发、学习、风险质量排序后的最佳小探针候选；真实资金层表达当前证据和产品级学习支持；放大层表达多次正向 alpha、触发质量和回撤约束均达标。 |
 | `rank_input_components` | `final_action_contract.evidence_used` / `capital_deployment` | 全市场资金 rank 的确定性输入快照，至少包含 `capital_priority_tier`、`capital_priority_score`、`watch_priority_score`、`opportunity_score`、证据质量、setup/trigger 质量和主要学习分项；用于证明 rank 不是旧局部排序或空字段补齐。 |
-| `lifecycle_learning_trace` | `final_action_contract.evidence_used` / `capital_deployment` | 学习路由轨迹。最终决策层 `decision_learning_rows` 必须来自 Step6 按最终 `final_action/current_lots/target_lots` 与合约权限重新路由出的 final lifecycle trace；Step1-Step5 的 router/diagnostic/provenance 不能直接复制为最终 `decision_learning_rows`。新资金 rank 固定为 `open_add_new_risk`，只允许 open/add/scale/increase 学习直接影响排序；hold/reduce/exit/execution/conditional_monitor 必须记录为 blocked/ignored，不能冒充开仓学习。非 rank 的 hold、reduce/exit、conditional_monitor 合约也必须写入该字段，用来证明对应生命周期学习已经落到最终合约而不是只停在诊断字段。 |
+| `lifecycle_learning_trace` | `final_action_contract.evidence_used` / `capital_deployment` | 学习路由轨迹。最终决策层 `decision_learning_rows` 必须来自 Step6 按最终 `final_action/current_lots/target_lots` 与合约权限重新路由出的 final lifecycle trace；Step1-Step5 的 router/diagnostic/provenance 不能直接复制为最终 `decision_learning_rows`。生命周期匹配规则见 `docs/matrix_action_canonical.md`。 |
 | `learning_impact_delta` | `final_action_contract.evidence_used` / `capital_deployment` | 学习对本次资金 rank 或生命周期决策的净影响拆解。rank 场景记录正向 open/add 学习、负向 open/add 学习、入场质量亏损、触发质量正负反馈等分项；非 rank 场景记录是否改变持仓解释、减仓/退出倾向、条件监控或 execution profile；`execution_profile_learning_direct_to_rank` 必须为 false。 |
 | `rank_cleanup_fields` | PM 全市场资金部署工具 / `final_action_semantics.canonicalize_final_action_contract_for_persistence()` | 非 full-market rank 清理只允许删除 rank 专属字段：`opportunity_rank`、`rank_source`、`rank_scope`、`capital_rank_generated_by`、`rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components` 及 rank 语义布尔字段。`lifecycle_learning_trace`、`learning_impact_delta`、`pm_lifecycle_learning_trace`、`pm_lifecycle_learning_impact_delta` 是生命周期学习解释字段，不能因为合约不走 rank 而被清理。 |
 | `pm_lifecycle_learning_trace` | `final_action_contract.learning_used` | PM 合约构造器写入的最终动作生命周期学习 trace，覆盖 `open_add_new_risk`、`hold`、`reduce_exit`、`conditional_monitor` 和 `wait`。它用于证明 PM 把 action-value 按生命周期路由到正确决策口，不创建第二张交易合约。 |
@@ -592,13 +593,13 @@
 | `policy_type` | adaptive policy / provisional policy | 策略学习类型；不能作为交易动作。 |
 | `policy_multiplier` | adaptive policy / provisional policy | 策略学习倍率；只能影响策略参数，不能覆盖 PM 合约。 |
 | `action_name` | action-value | 历史动作名称，如 open、add、add_or_open、hold、reduce、exit、execution、conditional_monitor 等；不能直接作为学习家族判断依据，必须先经过 `canonical_action_family`。 |
-| `action_preference` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 唯一动作偏好；PM 评分优先读取 DB 顶层 canonical 字段，payload 只作历史兼容来源。真实正收益 open / add / increase 固定写 `positive_candidate_open`，不能写成 `tail_loss_protect`；保护类偏好只能表达负收益、持仓再验证、退出保护或风险诊断。 |
+| `action_preference` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 唯一动作偏好；PM 评分优先读取 DB 顶层 canonical 字段，payload 只作历史兼容来源。合法取值和 family/lane 匹配规则见 `docs/matrix_action_canonical.md`。 |
 | `reward_source` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | 奖励来源；用于区分真实 episode、真实交易、反事实或观察先验。 |
 | `evidence_scope` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | exact、partial、similar、counterfactual；PM 评分优先使用该字段判断学习作用域。 |
-| `canonical_action_family` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 / PM `learning_used` | action-value 的统一动作家族；固定为 `open_add_new_risk`、`reduce_exit`、`execution`、`hold`、`no_trade`、`observe`、`conditional_monitor`。所有生产端、消费端和 PG 审计必须按 `final_action_semantics.py` 解释，不得从裸 `action_name` 私自猜 family。 |
-| `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线，固定为 open、add、scale、increase、hold、reduce、exit、execution、conditional_monitor；必须与 `canonical_action_family` 和 `action_preference` 一致，不能跨 family 使用。 |
+| `canonical_action_family` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 / PM `learning_used` | action-value 的统一动作家族；固定枚举为 `open_add_new_risk`、`reduce_exit`、`execution`、`hold`、`no_trade`、`observe`、`conditional_monitor`。完整 family/lane/preference 矩阵见 `docs/matrix_action_canonical.md`。 |
+| `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线；取值集合由 `src/tools/common/final_action_semantics.py` 与 `docs/matrix_action_canonical.md` 固定。 |
 | `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读 `pm_learning`，分析师只读 `analyst_calibration` 安全摘要，Trader 只读 `trader_execution_learning` 执行诊断；`execution` family 的 `pm_learning` 只能进入 PM execution profile / trigger 输入，不能进入新开仓 rank、方向、手数或交易授权。 |
-| `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务 open、add、scale、increase、hold、reduce、exit、execution、conditional_monitor、calibration 或 diagnostic。 |
+| `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务的生命周期入口，完整矩阵见 `docs/matrix_action_canonical.md`。 |
 | `memory_side_role` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / PM `learning_used` | 声明该学习记录中 `side` 的角色；固定为 `target_side`、`current_position_side`、`trigger_side`、`historical_sample_side`。新开仓/加仓读取目标方向，减仓/退出/持仓读取当前持仓方向，条件监控读取触发方向；会计师不读取该字段入账。 |
 | `product_learning_performance_key` | `alpha_setup_profile.payload_json` / `alpha_setup_action_value.payload_json` / 学习样本 payload | 产品级动态学习身份键，固定记录 ticker、side、setup_type、entry_trigger、evidence_combo、deployment_outcome、entry_quality_outcome、opportunity_rank、opportunity_score 与后续收益；只供下一轮分析师校准、PM 排名和资金部署学习使用，不创建交易权限、不替代 `final_action_contract`。 |
 | `performance_scope_key` | `product_learning_performance_key` | 产品级表现聚合键，格式为 ticker、side、setup_type、trigger_key、evidence_combo、deployment_tier；用于把历史表现绑定到同类机会，不得硬编码具体品种好坏。 |
@@ -612,7 +613,8 @@
 | `historical_pm_rank` | `product_learning_calibration_view` | 历史 PM 排名事实别名，只描述过去样本在当日 PM 队列中的位置；分析师只能用它判断该类证据组合过去是否值得复核，不能输出 `opportunity_rank` 或交易权限。 |
 | `historical_pm_score` | `product_learning_calibration_view` | 历史 PM 分数事实别名，只描述过去样本的 PM 评分；分析师只能用它校准证据可靠性，不能生成 PM score、rank、手数或资金部署。 |
 | `memory_requirements` | `final_action_contract.learning_used` / `final_action_semantics` / 机制审计 | 由 `src/tools/common/final_action_semantics.py` 根据最终合约生命周期生成的 PM 必读记忆需求；包含 lanes、side roles、是否必须落入 PM 合约，不创建交易权限。 |
-| `learning_used.alpha_setup_action_values` | `final_action_contract.learning_used` | PM 最终合约实际声明消费的 action-value。只能包含与当前 `final_action_contract` 的动作生命周期、方向、`canonical_action_family`、`action_value_lane/learning_lane` 和 `memory_side_role` 匹配的 `pm_learning` 记录；持仓、减仓、退出不能落入不匹配方向的 open 学习。`execution` 学习只可作为合约化执行 profile / trigger 输入，不能直接参与新开仓 rank、方向、手数或资金部署。缺少匹配学习只记录检索为空，不直接禁止交易。 |
+| `learning_used.alpha_setup_action_values` | `final_action_contract.learning_used` | PM 最终合约实际声明消费的正式 canonical action-value 主证据列表。行级纯净性和生命周期匹配口径由 `docs/mechanism_pm.md` 与 `docs/matrix_action_canonical.md` 固定。 |
+| `learning_used.memory_retrieval.rejected_or_downgraded` | `final_action_contract.learning_used` | PM 学习检索诊断列表。被剔除的 incomplete prior 只能以 `reason=incomplete_prior_not_pm_scoring_evidence` 保留在这里；该列表不参与 score、rank、手数、资金部署和 `final_action`。 |
 | `retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM exact state 检索键，格式为 ticker、side、horizon_class、market_regime、setup_type、learning_lane；用于机器检索，不是交易授权。 |
 | `fallback_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM fallback 检索键，格式为 ticker、side、horizon_class、learning_lane；exact state 漂移时用于同品种同方向同期限学习消费。 |
 | `execution_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 执行学习检索键，格式为 ticker、execution_profile、trigger_reason、learning_lane；只能支持执行质量诊断或 PM execution profile 偏好，不产生交易权限，Trader 不直接读取。 |

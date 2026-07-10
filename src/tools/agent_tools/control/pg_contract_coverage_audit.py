@@ -115,9 +115,9 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/mechanism_multiagents.md",
-                ("signal_collection_contract", "signal_collector_no_trade_authority"),
-                "mechanism document fixes signal collector authority boundaries",
+                "docs/matrix_field_semantics.md",
+                ("signal_collection_contract", "collector_decision_boundary", "no_trade_authority"),
+                "field matrix fixes signal collector authority boundaries",
             ),
         ),
         tests=(
@@ -212,7 +212,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/unified_field_semantics.md",
+                "docs/matrix_field_semantics.md",
                 ("product_profile_evidence", "analyst_product_price_behavior_profile.py"),
                 "field semantics define product profile evidence and its analysis-only boundary",
             ),
@@ -273,7 +273,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "Reviewer emits read-only fusion attribution summary",
             ),
             _rule(
-                "docs/unified_field_semantics.md",
+                "docs/matrix_field_semantics.md",
                 ("evidence_fusion", "pm_fusion_diagnostics"),
                 "field semantics register fusion evidence and boundary",
             ),
@@ -390,7 +390,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "daily system invariants audit both PM step-6 gates after persistence",
             ),
             _rule(
-                "docs/unified_field_semantics.md",
+                "docs/matrix_field_semantics.md",
                 (
                     "pm_six_step_trace.step6_contract_generation_check",
                     "pm_six_step_trace.pm_contract_self_check",
@@ -437,9 +437,9 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/mechanism_multiagents.md",
-                ("artifact 保存边界", "PM recommendation artifact", "Researcher artifact"),
-                "mechanism document fixes per-stage artifact persistence boundaries",
+                "docs/matrix_field_semantics.md",
+                ("artifact_phase_boundary", "artifact 阶段保存边界", "系统不变量审计"),
+                "field matrix fixes per-stage artifact persistence boundaries",
             ),
         ),
         tests=(
@@ -538,9 +538,9 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/mechanism_multiagents.md",
-                ("decision_memory_retrieval", "empty_history_cannot_block_real_history"),
-                "mechanism document fixes memory retrieval boundary",
+                "docs/matrix_field_semantics.md",
+                ("effective_memory_summary", "decision_memory_retrieval", "不是交易授权"),
+                "field matrix fixes memory retrieval boundary",
             ),
         ),
         tests=(
@@ -753,9 +753,9 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/mechanism_multiagents.md",
-                ("position_sizing", "no_final_action_authority"),
-                "mechanism document fixes sizing tool no-authority boundary",
+                "docs/matrix_field_semantics.md",
+                ("position_sizing_result", "不是最终交易合约", "final_action_contract"),
+                "field matrix fixes sizing tool no-authority boundary",
             ),
         ),
         tests=(
@@ -1058,7 +1058,7 @@ def _scan_active_docs_for_old_trade_contract_terms(repo_root: Path) -> List[str]
 
 
 def _scan_field_table(repo_root: Path) -> List[str]:
-    text = _read_text(repo_root, "docs/unified_field_semantics.md")
+    text = _read_text(repo_root, "docs/matrix_field_semantics.md")
     errors: List[str] = []
     for spec in CONTRACT_SPECS:
         if spec.contract not in text:

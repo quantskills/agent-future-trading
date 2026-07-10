@@ -1,12 +1,12 @@
-# Action-Value Canonical Action Family
+# Matrix Action Canonical
 
-本文用于收住 action-value 学习语义。所有进入 Researcher 写入、PM 消费、Reviewer 复盘理解、Research 后续研究链路或 PG 审计的交易动作，必须走同一条解释链：
+本文是 action-value 动作语义矩阵。所有进入 Researcher 写入、PM 消费、Reviewer 复盘理解、Research 后续研究链路和 PG 审计的交易动作，必须走同一条解释链：
 
 ```text
 action_name -> canonical_action_family -> action_value_lane / learning_lane -> action_preference
 ```
 
-可执行来源是 `src/tools/common/final_action_semantics.py`。本文只记录业务口径，不新增第二套字段或别名。
+可执行来源是 `src/tools/common/final_action_semantics.py`。本文只记录动作矩阵口径，不新增第二套字段名、别名和字段语义。
 
 ## 核心边界
 
@@ -17,13 +17,19 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 - Accountant 不消费 action-value 语义，只按成交、持仓、结算价、手续费、滑点、保证金和合约乘数入账。
 - 换月、强平、运营风控等非策略动作必须用非策略 `source_type` 分账，不能写成策略 action-value。
 
+## PM Artifact Boundary
+
+- `final_action_contract.learning_used.alpha_setup_action_values` 只保存完整 canonical action-value 正式学习证据。
+- `similar_sql_prior` / fallback prior 缺 `canonical_action_family`、缺 `action_preference` 或 `canonical_action_value == false` 时，只能保留在 `learning_used.memory_retrieval.rejected_or_downgraded`。
+- `rejected_or_downgraded` 中的 prior 只作 provenance / diagnostics，不参与 score、rank、手数、资金部署或 `final_action`。
+
 ## Canonical Action Family Table
 
 | `action_name` | `canonical_action_family` | `action_value_lane / learning_lane` | 正向 `action_preference` | 负向 / 保护偏向 | 业务边界 |
 |---|---|---|---|---|---|
 | `wait` / `no_trade` / `flat` | `no_trade` | `hold` 或诊断线 | 无 | `negative_hold_revalidate` 只可作保护/再验证 | 不产生 open 授权，不支持 `positive_candidate_open`。 |
 | `hold` / `hold_position` / `continue_hold` | `hold` | `hold` | `positive_candidate_hold` | `negative_hold_revalidate` | 评价已有持仓是否应继续持有，不证明新开仓有效。 |
-| `observe` / `watchlist` | `observe` | `hold` 或诊断线 | 无 | `negative_hold_revalidate` 或诊断偏向 | 观察事实不能冒充 open/add 学习。 |
+| `observe` / `watchlist` | `observe` | `hold` | 空 `action_preference` | `negative_hold_revalidate` / `negative_revalidate` / `tail_loss_protect` | 空偏向是合法观察语义；禁止 `positive_candidate_open` / `positive_candidate_exit` / `positive_candidate_execution` / `positive_candidate_hold`；观察事实不能冒充 open/add 学习。 |
 | `conditional_probe` / `conditional_monitor` / `watch_trigger` | `conditional_monitor` | `conditional_monitor` | 无 | `negative_revalidate` / `tail_loss_protect` | 条件监控不是已执行开仓；只有 PM 当日合约触发后，才能形成执行事实。 |
 | `open` / `open_long` / `open_short` | `open_add_new_risk` | `open` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 标准新增风险开仓学习。 |
 | `open_probe` / `open_real` | `open_add_new_risk` | `open` | `positive_candidate_open` | `negative_revalidate` / `tail_loss_protect` | 探针或真实预算开仓都属于新增风险 family。 |
@@ -68,5 +74,7 @@ PG 审计检查统一语义一致性，不审死字符串，也不根据学习�
 - `positive_candidate_exit` 必须满足 `canonical_action_family=reduce_exit`，且 lane 属于 `reduce/exit`。
 - `positive_candidate_execution` 必须满足 `canonical_action_family=execution`，且 lane 为 `execution`。
 - `positive_candidate_hold` 必须满足 `canonical_action_family=hold`，且 lane 为 `hold`。
+- `canonical_action_family=observe` 必须满足 lane 为 `hold`；空 `action_preference` 是合法语义，不是缺字段；负向保护偏向只允许 `negative_hold_revalidate` / `negative_revalidate` / `tail_loss_protect`。
+- `observe` 禁止 `positive_candidate_open` / `positive_candidate_exit` / `positive_candidate_execution` / `positive_candidate_hold`。
 - 缺 `canonical_action_family`、缺 lane，或 family/lane/preference 不一致，必须 hard fail。
 - `signal_collection_contract` / SCC 审计属于另一条机制问题，不由本文规则处理。

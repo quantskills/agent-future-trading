@@ -197,6 +197,44 @@ def _contract_consumes_lifecycle_learning(contract: Mapping[str, Any]) -> bool:
     return False
 
 
+def _row_value(row: Mapping[str, Any], field: str) -> Any:
+    payload = _mapping(row.get("payload"))
+    value = row.get(field)
+    return value if value not in (None, "") else payload.get(field)
+
+
+def _alpha_setup_action_value_purity_errors(contract: Mapping[str, Any]) -> List[str]:
+    learning_used = _mapping(contract.get("learning_used"))
+    rows = learning_used.get("alpha_setup_action_values")
+    if rows in (None, ""):
+        return []
+    if not isinstance(rows, list):
+        return ["alpha_setup_action_values_invalid"]
+
+    errors: List[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            errors.append(f"alpha_setup_action_value_invalid:{index}")
+            continue
+        if _row_value(row, "canonical_action_value") is not True:
+            errors.append(f"alpha_setup_action_value_not_canonical:{index}")
+        for field in (
+            "canonical_action_family",
+            "action_preference",
+            "action_value_lane",
+            "learning_lane",
+        ):
+            if not _present(_row_value(row, field)):
+                errors.append(f"alpha_setup_action_value_missing_{field}:{index}")
+        evidence_scope = str(_row_value(row, "evidence_scope") or "").strip().lower()
+        canonical_source = str(_row_value(row, "canonical_action_value_source") or "").strip().lower()
+        if evidence_scope == "similar_sql_prior" and _row_value(row, "canonical_action_value") is not True:
+            errors.append(f"alpha_setup_action_value_incomplete_similar_sql_prior:{index}")
+        if canonical_source == "incomplete_trace_not_for_pm_scoring":
+            errors.append(f"alpha_setup_action_value_incomplete_trace_not_for_pm_scoring:{index}")
+    return errors
+
+
 def _pm_lifecycle_trace_errors(contract: Mapping[str, Any]) -> List[str]:
     requires_trace = (
         _contract_has_any_rank(contract)
@@ -252,6 +290,7 @@ def check_final_action_contract(
     errors: List[str] = []
     errors.extend(_base_field_errors(contract))
     errors.extend(_semantic_object_errors(contract))
+    errors.extend(_alpha_setup_action_value_purity_errors(contract))
     if lots_delta != target - current:
         errors.append("lots_delta_mismatch")
     expected = _expected_action(current, target, authority_type=authority_type)

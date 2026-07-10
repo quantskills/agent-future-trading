@@ -1531,6 +1531,7 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
     execution_fields["capital_deployment"] = deployment
     execution_fields.pop("pm_capital_deployment_decision", None)
     builder_inputs["execution_contract_fields"] = execution_fields
+    builder_inputs = _attach_incomplete_prior_diagnostics_to_builder_inputs(builder_inputs)
 
     final_action_contract = _build_final_action_contract(**builder_inputs)
     final_action_contract = _finalize_hold_exit_learning_explanation(final_action_contract)
@@ -4638,7 +4639,11 @@ def _pm_canonical_action_value_rank(row: dict) -> tuple[int, int, int, int, int,
 
 
 def _select_learning_trace_action_values(rows: list | None, limit: int = 10) -> list[dict]:
-    normalized = _normalize_alpha_setup_action_values(rows)
+    normalized = [
+        row
+        for row in _normalize_alpha_setup_action_values(rows)
+        if _is_complete_pm_scoring_action_value(row)
+    ]
     normalized.sort(key=_pm_canonical_action_value_rank)
     compacted: list[dict] = []
     for row in normalized:
@@ -4648,6 +4653,131 @@ def _select_learning_trace_action_values(rows: list | None, limit: int = 10) -> 
         if len(compacted) >= int(limit):
             break
     return compacted
+
+
+def _is_complete_pm_scoring_action_value(row: dict) -> bool:
+    normalized = _normalize_alpha_setup_action_value(row)
+    if not normalized:
+        return False
+    return (
+        normalized.get("canonical_action_value") is True
+        and bool(str(normalized.get("canonical_action_family") or "").strip())
+        and bool(str(normalized.get("action_preference") or "").strip())
+        and bool(str(normalized.get("action_value_lane") or "").strip())
+        and bool(str(normalized.get("learning_lane") or "").strip())
+        and str(normalized.get("canonical_action_value_source") or "").strip().lower()
+        != "incomplete_trace_not_for_pm_scoring"
+    )
+
+
+def _is_incomplete_pm_prior_action_value(row: dict) -> bool:
+    normalized = _normalize_alpha_setup_action_value(row)
+    if not normalized or _is_complete_pm_scoring_action_value(normalized):
+        return False
+    payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+    evidence_scope = str(normalized.get("evidence_scope") or payload.get("evidence_scope") or "").strip().lower()
+    match_level = str(normalized.get("retrieval_match_level") or payload.get("retrieval_match_level") or "").strip().lower()
+    match_reason = str(normalized.get("retrieval_match_reason") or payload.get("retrieval_match_reason") or "").strip().lower()
+    prior_role = str(payload.get("prior_role") or normalized.get("prior_role") or "").strip().lower()
+    canonical_source = str(
+        normalized.get("canonical_action_value_source")
+        or payload.get("canonical_action_value_source")
+        or ""
+    ).strip().lower()
+    return (
+        normalized.get("canonical_action_value") is False
+        and (
+            evidence_scope in {"similar_sql_prior", "counterfactual_prior"}
+            or match_level in {"similar", "weak_prior"}
+            or "fallback" in match_reason
+            or prior_role == "weak_prior_not_action_preference"
+            or canonical_source == "incomplete_trace_not_for_pm_scoring"
+        )
+    )
+
+
+def _compact_rejected_pm_prior_action_value(row: dict) -> dict:
+    compact = _compact_alpha_setup_action_value(row)
+    if not compact:
+        return {}
+    compact["reason"] = "incomplete_prior_not_pm_scoring_evidence"
+    compact["diagnostic_only"] = True
+    return compact
+
+
+def _select_rejected_pm_prior_action_values(rows: list | None, limit: int = 20) -> list[dict]:
+    rejected: list[dict] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for row in _normalize_alpha_setup_action_values(rows):
+        if not _is_incomplete_pm_prior_action_value(row):
+            continue
+        compact = _compact_rejected_pm_prior_action_value(row)
+        if not compact:
+            continue
+        key = (
+            str(compact.get("id") or ""),
+            str(compact.get("ticker") or ""),
+            str(compact.get("side") or ""),
+            str(compact.get("setup_type") or ""),
+            str(compact.get("action_name") or ""),
+            str(compact.get("reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        rejected.append(compact)
+        if len(rejected) >= int(limit):
+            break
+    return rejected
+
+
+def _merge_rejected_or_downgraded(existing: list | None, additions: list | None) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for item in list(existing or []) + list(additions or []):
+        if not isinstance(item, dict) or not item:
+            continue
+        key = (
+            str(item.get("id") or ""),
+            str(item.get("ticker") or ""),
+            str(item.get("side") or ""),
+            str(item.get("setup_type") or ""),
+            str(item.get("action_name") or ""),
+            str(item.get("reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(item))
+    return merged
+
+
+def _attach_incomplete_prior_diagnostics_to_builder_inputs(builder_inputs: dict) -> dict:
+    if not isinstance(builder_inputs, dict):
+        return builder_inputs
+    rejected_priors = _select_rejected_pm_prior_action_values(
+        builder_inputs.get("alpha_setup_action_values")
+    )
+    if not rejected_priors:
+        return builder_inputs
+    updated = dict(builder_inputs)
+    diagnostics = (
+        dict(updated.get("control_diagnostics"))
+        if isinstance(updated.get("control_diagnostics"), dict)
+        else {}
+    )
+    memory_retrieval = (
+        dict(diagnostics.get("final_action_memory_retrieval"))
+        if isinstance(diagnostics.get("final_action_memory_retrieval"), dict)
+        else {"tool": "decision_memory_retrieval"}
+    )
+    memory_retrieval["rejected_or_downgraded"] = _merge_rejected_or_downgraded(
+        memory_retrieval.get("rejected_or_downgraded"),
+        rejected_priors,
+    )
+    diagnostics["final_action_memory_retrieval"] = memory_retrieval
+    updated["control_diagnostics"] = diagnostics
+    return updated
 
 
 def _normalize_alpha_setup_action_values(rows: list | None) -> list[dict]:
