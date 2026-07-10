@@ -12,6 +12,8 @@ if str(SRC_ROOT) not in sys.path:
 from tools.agent_tools.control.pg_contract_coverage_audit import (
     ACTIVE_DOC_PATHS,
     CONTRACT_SPECS,
+    MATRIX_CHAIN_COVERAGE_SPECS,
+    MATRIX_CHAIN_DIMENSIONS,
     audit_contract_coverage,
 )
 
@@ -27,6 +29,10 @@ def _write_minimal_covered_repo(root: Path) -> None:
     for spec in CONTRACT_SPECS:
         for rule in (*spec.producers, *spec.consumers, *spec.audits, *spec.tests):
             _append_text(root, rule.path, "\n".join(rule.patterns))
+    for spec in MATRIX_CHAIN_COVERAGE_SPECS:
+        for rules in spec.dimensions.values():
+            for rule in rules:
+                _append_text(root, rule.path, "\n".join(rule.patterns))
 
     for relative_path in ACTIVE_DOC_PATHS:
         _append_text(
@@ -203,6 +209,34 @@ class ContractCoverageAuditTest(unittest.TestCase):
             report = audit_contract_coverage(repo)
 
         self.assertTrue(report.ok, report.to_dict())
+
+    def test_current_repo_matrix_chain_contract_coverage_is_clean(self):
+        report = audit_contract_coverage(PROJECT_ROOT)
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(
+            {row.contract for row in report.matrix_chain},
+            {spec.contract for spec in MATRIX_CHAIN_COVERAGE_SPECS},
+        )
+        for row in report.matrix_chain:
+            self.assertEqual(set(row.dimensions), set(MATRIX_CHAIN_DIMENSIONS), row.to_dict())
+            for dimension in MATRIX_CHAIN_DIMENSIONS:
+                self.assertTrue(row.dimensions[dimension], row.to_dict())
+
+    def test_matrix_chain_contract_coverage_requires_pre_backtest_fixture_gate(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp)
+            _write_minimal_covered_repo(repo)
+            fixture_path = repo / "src" / "tools" / "agent_tools" / "control" / "pg_pre_backtest_failure_fixtures.py"
+            fixture_path.write_text("", encoding="utf-8")
+
+            report = audit_contract_coverage(repo)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any(error.endswith("_missing_matrix_pre_backtest_fixture_gate_coverage") for error in report.errors),
+            report.to_dict(),
+        )
 
     def test_learning_used_consumers_follow_shared_semantic_entry(self):
         learning_spec = next(spec for spec in CONTRACT_SPECS if spec.contract == "learning_used")

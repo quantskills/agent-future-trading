@@ -13,6 +13,12 @@
 - `docs/mechanism_workflow.md`：workflow 编排、传递、保存、阻断。
 - `docs/mechanism_research.md`：复盘、研究、记忆、学习边界。
 
+本文已经接入可执行闸门：
+- `src/tools/agent_tools/control/pg_contract_coverage_audit.py` 按本文关键契约行检查生产端、落点、消费端、自检、pre-backtest fixture、daily PG、真实路径测试和机制文档覆盖。
+- `src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py` 按本文第 4 节固定历史失败形态，接入 `pg_pre_backtest_acceptance.py`，回测启动前执行。
+- `src/tools/agent_tools/control/pg_system_invariants.py` 按本文第 5 节输出 daily PG hard fail 边界和 diagnostics 边界。
+- `src/run/control/pre_backtest_acceptance.py` 与 `src/run/control/system_invariant_audit.py` 是本文对应的只读控制入口。
+
 ## 1. 使用规则
 
 修改生产端、自检、回测前验收、日终 PG 审计、Research 写入、PM artifact、Trader/Reviewer/Researcher artifact 时，必须先定位本文对应行，再同步修改：

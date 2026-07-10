@@ -1,6 +1,7 @@
 # PM 内部工作流机制
 
 本文固定 PM 内部工作流口径。PM 是唯一组合决策者和唯一 `final_action_contract` 签发者；工具和模块只提供结构化输入、语义判断、合约构造、自检和全市场资金 rank 支撑，不替代 PM 生成交易事实。
+PM 的生产端、artifact 落点、下游消费、自检、pre-backtest fixture 和 daily PG 审计边界统一锚定 `docs/matrix_chain_contract.md`；本文只说明 PM 六步和自检细节。
 
 PM 内部 6 步流程固定为：
 

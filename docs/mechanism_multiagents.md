@@ -3,6 +3,7 @@
 更新时间：2026-07-10
 
 本文是 AgentQuant 多智能体链路总纲，只定义启用智能体、阶段顺序、权限边界、事实入口总原则和文档分工。字段级生产/落盘/消费/审计矩阵不写在本文，避免和 `docs/matrix_chain_contract.md` 重复。
+全链路契约的可执行依据固定为 `docs/matrix_chain_contract.md`；contract coverage、pre-backtest failure fixture 和 daily PG audit 均按该矩阵执行。
 
 ## 1. 文档职责
 

@@ -1,0 +1,1 @@
+"""Control-team CLI entrypoints."""

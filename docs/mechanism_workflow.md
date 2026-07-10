@@ -1,6 +1,7 @@
 # Workflow 运行编排机制
 
 本文固定 AgentQuant 中 `workflow` 的职责边界。`workflow` 不是智能体，也不是第十二个决策者；它只负责运行顺序、上下文传递、事实保存、审计/执行触发和流程阻断。各智能体的业务判断必须由各自智能体及其确定性工具完成。
+全链路生产、落盘、消费、审计、hard fail 与 diagnostics 契约以 `docs/matrix_chain_contract.md` 为准；workflow 只按该矩阵触发只读 gate 与流程阻断，不补字段、不改语义。
 
 ## 0. 11 个智能体端到端业务流
 

@@ -82,6 +82,28 @@ PROTOCOL_AUDIT_BOUNDARIES = [
     "pg_reads_pm_step6_self_checks_not_pm_internal_trade_semantics",
     "protocol_governor_checks_artifact_boundaries_not_strategy_profitability",
 ]
+DAILY_PG_HARD_FAIL_BOUNDARIES = [
+    "artifact_missing",
+    "producer_boundary_invalid",
+    "field_semantics_inconsistent",
+    "agent_authority_overreach",
+    "pm_intermediate_state_pollution",
+    "final_action_contract_single_truth_break",
+    "trader_execution_not_from_contract",
+    "phase_chain_break",
+    "lookahead_data",
+    "formal_learning_evidence_pollution",
+]
+DAILY_PG_DIAGNOSTIC_BOUNDARIES = [
+    "pm_rank_reasonableness",
+    "lots_optimality",
+    "direction_accuracy",
+    "weak_learning_signal",
+    "legal_observe_empty_preference",
+    "legal_diagnostics",
+    "daily_loss",
+    "no_trade",
+]
 OPEN_AMPLIFICATION_EFFECTS = {
     "open_amplification",
     "real_budget_entry",
@@ -411,6 +433,15 @@ def _matrix_field_semantics_audit_summary(errors: Iterable[str]) -> Dict[str, An
             "trade_research_contract_and_action_evidence_contract_must_not_disagree",
             "diagnostics_cannot_carry_trade_action_fields",
         ],
+    }
+
+
+def _daily_pg_boundary_metadata() -> Dict[str, Any]:
+    return {
+        "protocol_audit_boundaries": list(PROTOCOL_AUDIT_BOUNDARIES),
+        "daily_pg_hard_fail_boundaries": list(DAILY_PG_HARD_FAIL_BOUNDARIES),
+        "daily_pg_diagnostic_boundaries": list(DAILY_PG_DIAGNOSTIC_BOUNDARIES),
+        "strategy_profitability_checked": False,
     }
 
 
@@ -1992,6 +2023,7 @@ def audit_system_invariants(
                 "error_categories": {},
                 "failed_categories": [],
                 "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
+                **_daily_pg_boundary_metadata(),
             },
         )
 
@@ -2011,6 +2043,7 @@ def audit_system_invariants(
                         "error_categories": {},
                         "failed_categories": [],
                         "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
+                        **_daily_pg_boundary_metadata(),
                     },
                 )
             return InvariantAuditReport(
@@ -2021,6 +2054,7 @@ def audit_system_invariants(
                     "error_categories": categorize_invariant_errors([f"config_not_found:{exp_name or config_id or 'missing'}"]),
                     "failed_categories": ["audit_explainability"],
                     "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
+                    **_daily_pg_boundary_metadata(),
                 },
             )
         metadata["config_id"] = resolved_config_id
@@ -2040,6 +2074,7 @@ def audit_system_invariants(
                     "error_categories": categories,
                     "failed_categories": sorted(categories),
                     "matrix_field_semantics_audit": _matrix_field_semantics_audit_summary([]),
+                    **_daily_pg_boundary_metadata(),
                 },
             )
         recommendations = _load_recommendations(conn, config_id=resolved_config_id, start_date=start_date, end_date=end_date)
@@ -2098,7 +2133,7 @@ def audit_system_invariants(
         "system_invariants_only; no strategy profitability judgment; "
         "does_not_create_trade_authority_or_modify_lots"
     )
-    metadata["protocol_audit_boundaries"] = list(PROTOCOL_AUDIT_BOUNDARIES)
+    metadata.update(_daily_pg_boundary_metadata())
     error_categories = categorize_invariant_errors(errors)
     metadata["error_categories"] = error_categories
     metadata["failed_categories"] = sorted(error_categories)

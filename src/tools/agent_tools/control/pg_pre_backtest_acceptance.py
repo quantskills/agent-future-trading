@@ -22,6 +22,7 @@ from tools.agent_tools.control.pg_agent_cards import build_default_agent_cards, 
 from tools.agent_tools.control.pg_contract_coverage_audit import audit_contract_coverage
 from tools.agent_tools.control.pg_db_schema_contract import audit_db_schema_contract
 from tools.agent_tools.control.pg_preflight import run_preflight_checks
+from tools.agent_tools.control.pg_pre_backtest_failure_fixtures import run_pre_backtest_failure_fixtures
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.agent_tools.control.pg_system_invariants import (
     ERROR_CATEGORY_PREFIXES,
@@ -50,6 +51,7 @@ ACCEPTANCE_CHECKS = (
     "agent_boundaries",
     "structured_io",
     "contract_coverage",
+    "historical_failure_fixtures",
     "matrix_field_semantics",
     "single_trade_exit",
     "evidence_trigger_boundary",
@@ -306,12 +308,15 @@ def _runtime_field_unification_check(repo_root: Path) -> AcceptanceCheck:
 def _contract_coverage_check(repo_root: Path) -> AcceptanceCheck:
     report = audit_contract_coverage(repo_root)
     matrix = [row.to_dict() for row in report.matrix]
+    matrix_chain = [row.to_dict() for row in report.matrix_chain]
     metadata = {
         "contract_coverage_version": report.contract_version,
         "strategy_profitability_checked": False,
         "boundary": "version_level_static_contract_coverage_only_no_trade_authority",
         "contracts_checked": [row.contract for row in report.matrix],
         "matrix": matrix,
+        "matrix_chain": matrix_chain,
+        "matrix_chain_source_of_truth": "docs/matrix_chain_contract.md",
     }
     if report.errors:
         return _fail_check(
@@ -321,6 +326,19 @@ def _contract_coverage_check(repo_root: Path) -> AcceptanceCheck:
             metadata=metadata,
         )
     return _pass_check("contract_coverage", warnings=report.warnings, metadata=metadata)
+
+
+def _historical_failure_fixture_check() -> AcceptanceCheck:
+    result = run_pre_backtest_failure_fixtures()
+    return _check_from_result(
+        "historical_failure_fixtures",
+        result,
+        metadata={
+            "source_of_truth": "docs/matrix_chain_contract.md",
+            "strategy_profitability_checked": False,
+            "boundary": "historical_system_contract_failures_only_no_backtest_execution",
+        },
+    )
 
 
 def _parse_window_date(value: str, field_name: str, errors: List[str]) -> Optional[datetime]:
@@ -594,6 +612,7 @@ def run_pre_backtest_acceptance(
         _runtime_field_unification_check(repo_root),
     )
     checks["contract_coverage"] = _contract_coverage_check(repo_root)
+    checks["historical_failure_fixtures"] = _historical_failure_fixture_check()
 
     if db_path.exists() and checks["db_schema_contract"].ok:
         checks.update(

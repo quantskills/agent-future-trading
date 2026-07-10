@@ -35,6 +35,12 @@ class ContractCoverageSpec:
     tests: Sequence[ContractEvidenceRule]
 
 
+@dataclass(frozen=True)
+class MatrixChainCoverageSpec:
+    contract: str
+    dimensions: Mapping[str, Sequence[ContractEvidenceRule]]
+
+
 @dataclass
 class ContractCoverageRow:
     contract: str
@@ -61,9 +67,29 @@ class ContractCoverageRow:
 
 
 @dataclass
+class MatrixChainCoverageRow:
+    contract: str
+    dimensions: Dict[str, List[str]] = field(default_factory=dict)
+    uncovered_risks: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.uncovered_risks
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "contract": self.contract,
+            "ok": self.ok,
+            "dimensions": {name: list(values) for name, values in self.dimensions.items()},
+            "uncovered_risks": list(self.uncovered_risks),
+        }
+
+
+@dataclass
 class ContractCoverageAuditReport:
     ok: bool
     matrix: List[ContractCoverageRow]
+    matrix_chain: List[MatrixChainCoverageRow] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     metadata: Dict[str, object] = field(default_factory=dict)
@@ -78,6 +104,7 @@ class ContractCoverageAuditReport:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "matrix": [row.to_dict() for row in self.matrix],
+            "matrix_chain": [row.to_dict() for row in self.matrix_chain],
             "metadata": dict(self.metadata),
         }
 
@@ -866,6 +893,319 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
 )
 
 
+MATRIX_CHAIN_DIMENSIONS = (
+    "producer",
+    "artifact_db_landing",
+    "consumer",
+    "self_or_role_check",
+    "pre_backtest_fixture_gate",
+    "daily_pg_audit",
+    "real_path_test",
+    "mechanism_doc",
+)
+
+
+def _matrix_spec(
+    contract: str,
+    *,
+    producer: Sequence[ContractEvidenceRule],
+    artifact_db_landing: Sequence[ContractEvidenceRule],
+    consumer: Sequence[ContractEvidenceRule],
+    self_or_role_check: Sequence[ContractEvidenceRule],
+    pre_backtest_fixture_gate: Sequence[ContractEvidenceRule],
+    daily_pg_audit: Sequence[ContractEvidenceRule],
+    real_path_test: Sequence[ContractEvidenceRule],
+    mechanism_doc: Sequence[ContractEvidenceRule],
+) -> MatrixChainCoverageSpec:
+    return MatrixChainCoverageSpec(
+        contract=contract,
+        dimensions={
+            "producer": tuple(producer),
+            "artifact_db_landing": tuple(artifact_db_landing),
+            "consumer": tuple(consumer),
+            "self_or_role_check": tuple(self_or_role_check),
+            "pre_backtest_fixture_gate": tuple(pre_backtest_fixture_gate),
+            "daily_pg_audit": tuple(daily_pg_audit),
+            "real_path_test": tuple(real_path_test),
+            "mechanism_doc": tuple(mechanism_doc),
+        },
+    )
+
+
+MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
+    _matrix_spec(
+        "signal_collection_contract",
+        producer=(
+            _rule("src/tools/common/signal_evidence_collection.py", ("def build_signal_collection_contract", "collector_decision_boundary"), "SCC builder is signal collector owned"),
+        ),
+        artifact_db_landing=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ('snapshot["signal_collection_contract"] = deepcopy(signal_collection_contract)',), "PM lands original SCC in signal_snapshot"),
+        ),
+        consumer=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ("pm_missing_signal_collection_contract_from_signal_collector", "pm_invalid_signal_collection_contract_producer"), "PM consumes only signal_collector SCC"),
+        ),
+        self_or_role_check=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ("def _require_step6_signal_collection_contract", "pm_step6_invalid_signal_collection_contract_boundary"), "PM Step6 checks SCC producer and boundary"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("scc_missing", "scc_producer_boundary_invalid"), "pre-backtest failure fixtures cover SCC missing and invalid boundary"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", ("mechanism_signal_collection_contract_missing", "mechanism_signal_collection_contract_invalid_producer"), "daily mechanism audit checks final SCC landing"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_phase_flow_regression.py", ("test_pm_step6_requires_signal_collection_contract_from_builder_inputs",), "real PM Step6 path rejects missing SCC"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`signal_collection_contract`", "`signal_snapshot.signal_collection_contract`"), "chain matrix fixes SCC producer, landing, consumers, and audit"),
+        ),
+    ),
+    _matrix_spec(
+        "final_action_contract",
+        producer=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ("def _sign_pm_candidate_recommendation", "_build_final_action_contract(**builder_inputs)"), "PM Step6 signs final contract"),
+        ),
+        artifact_db_landing=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ('snapshot["final_action_contract"] = final_action_contract',), "PM lands final contract in signal_snapshot"),
+        ),
+        consumer=(
+            _rule("src/agents/execution_team/trader.py", ("_final_action_contract_from_snapshot", "missing_final_action_contract"), "Trader consumes final contract only"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("def check_final_action_contract", "lots_delta_mismatch"), "PM self-check validates final contract"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("trader_transaction_not_from_final_contract",), "pre-backtest failure fixture covers transaction lineage"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("transaction_not_derived_from_final_action_contract", "strategy_recommendation_missing_signal_snapshot_final_action_contract"), "daily PG audits final contract truth"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_phase_flow_regression.py", ("test_final_action_contract_is_single_structured_trade_truth",), "phase path tests cover final contract construction"),
+        ),
+        mechanism_doc=(
+            _rule("docs/mechanism_pm.md", ("唯一 `final_action_contract`", "pm_contract_self_check"), "PM mechanism fixes final contract and self-check"),
+        ),
+    ),
+    _matrix_spec(
+        "pm_six_step_trace",
+        producer=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ('snapshot["pm_six_step_trace"]', '"step6_contract_generation_check": step6_contract_generation_check'), "PM lands Step6 trace"),
+        ),
+        artifact_db_landing=(
+            _rule("src/graph/workflow.py", ('trace = snapshot.get("pm_six_step_trace")', "pm_contract_self_check"), "workflow reads Step6 gates before persistence"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_six_step_self_check_missing",), "PG consumes persisted PM Step6 trace"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("pm_contract_self_check", "writes_db"), "PM self-check is deterministic and side-effect free"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("step2_step6_trace_mixed",), "pre-backtest failure fixture covers Step2/Step6 trace mixing"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_step6_generation_check_failed",), "daily PG audits PM Step6 generation check"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_step6_lifecycle_uses_final_candidate_and_keeps_old_check_historical",), "PM workflow tests cover final Step6 trace"),
+        ),
+        mechanism_doc=(
+            _rule("docs/mechanism_pm.md", ("Step2 到 Step6 的变化", "最终合约失败判断"), "PM mechanism fixes Step2 provenance and Step6 final trace boundary"),
+        ),
+    ),
+    _matrix_spec(
+        "lifecycle_learning_trace.decision_learning_rows",
+        producer=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ("Step6 final contract reroutes", "decision_learning_rows from the final contract lifecycle"), "PM Step6 regenerates final decision rows"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/decision/pm_contract_builder.py", ("pm_final_contract_lifecycle_trace", "decision_learning_rows"), "PM contract builder lands final lifecycle trace"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("lifecycle_learning_decision_contract_errors",), "PM self-check consumes final decision rows"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/common/final_action_semantics.py", ("open_rank_mixed_forbidden_learning_lanes", "reduce_exit_lifecycle_mixed_forbidden_learning_lanes"), "shared semantics checks final decision row lanes"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("step2_step6_trace_mixed", "execution_profile_pollutes_decision_rows"), "pre-backtest failure fixtures cover lifecycle trace pollution"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_contract_self_check_failed",), "daily PG reads PM self-check result"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_final_action_semantics.py", ("test_rank_lifecycle_route_requires_step6_final_trace", "open_rank_mixed_forbidden_learning_lanes"), "final-action semantic tests cover final decision rows"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`lifecycle_learning_trace.decision_learning_rows`", "Step6 final 决策层学习 rows"), "chain matrix fixes final decision rows"),
+        ),
+    ),
+    _matrix_spec(
+        "learning_used.alpha_setup_action_values",
+        producer=(
+            _rule("src/agents/decision_team/portfolio_manager.py", ("_attach_incomplete_prior_diagnostics_to_builder_inputs", "_normalize_alpha_setup_action_values"), "PM filters formal action-value rows"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/decision/pm_contract_builder.py", ('"alpha_setup_action_values": selected_action_values',), "PM contract builder lands formal action-values"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("_alpha_setup_action_value_purity_errors", "alpha_setup_action_value_missing_"), "PM self-check consumes formal action-value rows"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("alpha_setup_action_value_not_canonical", "alpha_setup_action_value_missing_"), "PM self-check rejects formal action-value pollution"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("pm_incomplete_prior_in_formal_action_values",), "pre-backtest failure fixture covers incomplete prior pollution"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("pm_action_value_missing_canonical_fields", "pm_action_value_family_preference_mismatch"), "daily PG audits formal action-value landing"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_phase_flow_regression.py", ("test_pm_artifact_excludes_incomplete_prior_from_formal_action_values",), "phase flow test covers incomplete prior filtering"),
+        ),
+        mechanism_doc=(
+            _rule("docs/mechanism_pm.md", ("alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表", "incomplete_prior_not_pm_scoring_evidence"), "PM mechanism fixes formal action-value boundary"),
+        ),
+    ),
+    _matrix_spec(
+        "alpha_setup_action_value",
+        producer=(
+            _rule("src/tools/agent_tools/research/research_memory_writers.py", ("upsert_alpha_setup_action_value", "INSERT INTO alpha_setup_action_value"), "Research writes action-value through writer"),
+        ),
+        artifact_db_landing=(
+            _rule("src/database/sqlite_setup.py", ("CREATE TABLE IF NOT EXISTS alpha_setup_action_value", "canonical_action_family", "learning_lane"), "DB schema lands canonical action-value columns"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/decision/pm_decision_memory_retrieval.py", ("get_alpha_setup_action_values", "consumer_scope"), "PM memory retrieval consumes PM-scoped action-value"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/common/final_action_semantics.py", ("validate_action_preference_family_consistency", "canonical_action_family"), "shared action semantics validates family and preference"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("observe_empty_preference", "action_family_lane_preference_mismatch"), "pre-backtest failure fixtures cover action matrix failures"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("observe_action_value_positive_preference_forbidden", "action_value_missing_action_preference"), "daily PG audits action-value semantics"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_system_invariant_audit.py", ("test_system_invariant_audit_accepts_observe_empty_preference_for_any_reward_sign", "test_system_invariant_audit_rejects_observe_positive_preferences"), "system audit tests cover observe semantics"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_action_canonical.md", ("`observe` / `watchlist`", "negative_hold_revalidate"), "action matrix fixes observe semantics"),
+        ),
+    ),
+    _matrix_spec(
+        "artifact_phase_boundary",
+        producer=(
+            _rule("src/tools/common/contracts.py", ("validate_execution_artifact_boundary", "validate_reviewer_artifact_boundary", "validate_researcher_artifact_boundary"), "shared artifact boundary helpers own role checks"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("_audit_artifact_phase_boundaries",), "PG reads persisted artifacts and payloads"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("pm_artifact_forbidden_downstream_field", "trader_artifact_forbidden_pm_explanation"), "PG consumes artifact phase boundaries"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/common/contracts.py", ("execution_artifact_forbidden_pm_fields", "reviewer_artifact_forbidden_research_or_mutation_fields"), "role boundary helpers fail fast"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("trader_artifact_forbidden_fields", "reviewer_artifact_forbidden_fields", "researcher_artifact_forbidden_fields"), "pre-backtest failure fixtures cover role artifact violations"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("accountant_artifact_forbidden_learning_field", "researcher_artifact_forbidden_trade_fact_mutation"), "daily PG audits persisted artifact boundaries"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_agent_output_contract_boundary.py", ("validate_execution_artifact_boundary", "validate_reviewer_artifact_boundary", "validate_researcher_artifact_boundary"), "agent output tests cover role boundaries"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`artifact_phase_boundary`", "阶段白名单 artifact"), "chain matrix fixes artifact phase boundary"),
+        ),
+    ),
+    _matrix_spec(
+        "execution_result",
+        producer=(
+            _rule("src/util/futures_audit.py", ("def ensure_execution_result", "def set_execution_result"), "execution result helpers write execution output"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/execution/trader_futures_execution.py", ("set_execution_result",), "execution helper lands execution result"),
+        ),
+        consumer=(
+            _rule("src/tools/agent_tools/research/research_review_helpers.py", ("_execution_result_from_snapshot",), "Reviewer consumes execution result"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/common/contracts.py", ("execution_artifact_boundary_violations",), "execution artifact boundary helper protects execution result"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("trader_artifact_forbidden_fields",), "pre-backtest fixture covers execution artifact PM leakage"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("trader_execution_learning_trace_missing_scope", "transaction_not_derived_from_final_action_contract"), "daily PG audits execution result lineage"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_phase_flow_regression.py", ("test_trader_to_researcher_execution_result_preserves_no_trade_fact_and_learning_scope",), "phase flow test covers execution result lineage"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`execution_result`", "执行结果、状态、成交数量"), "chain matrix fixes execution result boundary"),
+        ),
+    ),
+    _matrix_spec(
+        "pre_backtest_acceptance",
+        producer=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_acceptance.py", ("def run_pre_backtest_acceptance", "ACCEPTANCE_CHECKS"), "PG pre-backtest acceptance produces readiness report"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_acceptance.py", ("PreBacktestAcceptanceReport", "checks"), "acceptance report lands check details in memory/CLI output"),
+        ),
+        consumer=(
+            _rule("src/run/control/pre_backtest_acceptance.py", ("run_pre_backtest_acceptance", "report"), "control CLI consumes acceptance report"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("def run_pre_backtest_failure_fixtures",), "historical failure fixture gate self-checks readiness failures"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_acceptance.py", ("historical_failure_fixtures", "run_pre_backtest_failure_fixtures"), "acceptance directly runs historical failure fixtures"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("DAILY_PG_HARD_FAIL_BOUNDARIES", "DAILY_PG_DIAGNOSTIC_BOUNDARIES"), "daily PG exposes hard-fail and diagnostics boundaries"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_pre_backtest_acceptance.py", ("historical_failure_fixtures",), "pre-backtest acceptance tests cover fixture gate wiring"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`pre_backtest_acceptance`", "历史失败 fixture 失败"), "chain matrix fixes pre-backtest gate boundary"),
+        ),
+    ),
+    _matrix_spec(
+        "system_invariant_audit",
+        producer=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("def audit_system_invariants", "InvariantAuditReport"), "PG produces daily system invariant report"),
+        ),
+        artifact_db_landing=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("return InvariantAuditReport", "metadata"), "daily PG report lands metadata and errors"),
+        ),
+        consumer=(
+            _rule("src/run/control/system_invariant_audit.py", ("audit_system_invariants", "report"), "control CLI consumes daily invariant report"),
+        ),
+        self_or_role_check=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("categorize_invariant_errors", "ERROR_CATEGORY_PREFIXES"), "PG classifies only system invariant errors"),
+        ),
+        pre_backtest_fixture_gate=(
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("trader_transaction_not_from_final_contract", "unfinished_day_enters_learning"), "pre-backtest fixtures cover daily PG hard-fail shapes"),
+        ),
+        daily_pg_audit=(
+            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("DAILY_PG_HARD_FAIL_BOUNDARIES", "DAILY_PG_DIAGNOSTIC_BOUNDARIES"), "daily PG boundary constants separate hard fail from diagnostics"),
+        ),
+        real_path_test=(
+            _rule("src/tests/test_system_invariant_audit.py", ("test_system_invariant_audit_daily_pg_boundaries_are_contract_only",), "system invariant tests lock daily PG boundary"),
+        ),
+        mechanism_doc=(
+            _rule("docs/matrix_chain_contract.md", ("`system_invariant_audit`", "daily PG audit 只 hard fail 系统契约断裂"), "chain matrix fixes daily PG audit boundary"),
+        ),
+    ),
+)
+
+
 ACTIVE_DOC_PATHS = (
     "AGENTS.md",
     "README.md",
@@ -877,6 +1217,9 @@ ACTIVE_DOC_PATHS = (
     "docs/mechanism_future_trade.md",
     "docs/mechanism_multiagents.md",
     "docs/mechanism_research.md",
+    "docs/matrix_chain_contract.md",
+    "docs/matrix_field_semantics.md",
+    "docs/matrix_action_canonical.md",
 )
 
 
@@ -913,6 +1256,21 @@ def _row_for_spec(repo_root: Path, spec: ContractCoverageSpec) -> ContractCovera
                 evidence_list.append(_evidence(rule))
         if not evidence_list:
             row.uncovered_risks.append(f"{spec.contract}_missing_{section}_coverage")
+    return row
+
+
+def _row_for_matrix_spec(repo_root: Path, spec: MatrixChainCoverageSpec) -> MatrixChainCoverageRow:
+    row = MatrixChainCoverageRow(contract=spec.contract)
+    for dimension in MATRIX_CHAIN_DIMENSIONS:
+        rules = tuple(spec.dimensions.get(dimension) or ())
+        evidence = [
+            _evidence(rule)
+            for rule in rules
+            if _rule_matched(repo_root, rule)
+        ]
+        row.dimensions[dimension] = evidence
+        if not evidence:
+            row.uncovered_risks.append(f"{spec.contract}_missing_matrix_{dimension}_coverage")
     return row
 
 
@@ -1133,9 +1491,13 @@ def _scan_reviewer_pre_backtest_boundary(repo_root: Path) -> List[str]:
 def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditReport:
     repo_root = Path(repo_root).resolve()
     matrix = [_row_for_spec(repo_root, spec) for spec in CONTRACT_SPECS]
+    matrix_chain = [_row_for_matrix_spec(repo_root, spec) for spec in MATRIX_CHAIN_COVERAGE_SPECS]
     errors: List[str] = []
     warnings: List[str] = []
     for row in matrix:
+        for risk in row.uncovered_risks:
+            errors.append(f"contract_coverage_uncovered:{risk}")
+    for row in matrix_chain:
         for risk in row.uncovered_risks:
             errors.append(f"contract_coverage_uncovered:{risk}")
     errors.extend(_scan_field_table(repo_root))
@@ -1154,11 +1516,19 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
             "does_not_read_trade_records_or_modify_strategy"
         ),
         "contracts_checked": [spec.contract for spec in CONTRACT_SPECS],
+        "matrix_chain_contracts_checked": [spec.contract for spec in MATRIX_CHAIN_COVERAGE_SPECS],
+        "matrix_chain_source_of_truth": "docs/matrix_chain_contract.md",
         "checked_dimensions": [
             "producer_coverage",
+            "artifact_db_landing_coverage",
             "consumer_coverage",
-            "audit_coverage",
-            "test_coverage",
+            "self_or_role_check_coverage",
+            "pre_backtest_fixture_gate_coverage",
+            "daily_pg_audit_coverage",
+            "real_path_test_coverage",
+            "mechanism_doc_coverage",
+            "legacy_audit_coverage",
+            "legacy_test_coverage",
             "producer_consumer_fidelity_tests",
             "bare_contract_writes",
             "consumer_scope_boundaries",
@@ -1171,6 +1541,7 @@ def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditRepor
     return ContractCoverageAuditReport(
         ok=not errors,
         matrix=matrix,
+        matrix_chain=matrix_chain,
         errors=errors,
         warnings=warnings,
         metadata=metadata,

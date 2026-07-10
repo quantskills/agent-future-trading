@@ -286,6 +286,7 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
                 "agent_boundaries",
                 "structured_io",
                 "contract_coverage",
+                "historical_failure_fixtures",
                 "matrix_field_semantics",
                 "single_trade_exit",
                 "evidence_trigger_boundary",
@@ -408,7 +409,13 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             self.assertTrue(report.ok, report.to_dict())
             self.assertEqual(report.failed_checks, [])
             self.assertIn("environment_api", report.checks)
+            self.assertIn("historical_failure_fixtures", report.checks)
             self.assertIn("learning_landing", report.checks)
+            self.assertTrue(report.checks["historical_failure_fixtures"].ok, report.to_dict())
+            self.assertEqual(
+                report.checks["historical_failure_fixtures"].metadata["source_of_truth"],
+                "docs/matrix_chain_contract.md",
+            )
             self.assertEqual(
                 report.checks["matrix_field_semantics"].metadata["source_of_truth"],
                 "docs/matrix_field_semantics.md",

@@ -13,6 +13,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tools.agent_tools.control.pg_system_invariants import (
+    DAILY_PG_DIAGNOSTIC_BOUNDARIES,
+    DAILY_PG_HARD_FAIL_BOUNDARIES,
     _audit_pm_learning_transport_and_contract_effect,
     _contract_increases_risk as system_contract_increases_risk,
     audit_system_invariants,
@@ -615,6 +617,33 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             "recommendation_top_level_action_lots_must_match_final_contract",
             report.metadata["protocol_audit_boundaries"],
         )
+
+    def test_system_invariant_audit_daily_pg_boundaries_are_contract_only(self):
+        db_path = self._make_db()
+
+        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(
+            report.metadata["daily_pg_hard_fail_boundaries"],
+            list(DAILY_PG_HARD_FAIL_BOUNDARIES),
+        )
+        self.assertEqual(
+            report.metadata["daily_pg_diagnostic_boundaries"],
+            list(DAILY_PG_DIAGNOSTIC_BOUNDARIES),
+        )
+        self.assertFalse(report.metadata["strategy_profitability_checked"])
+        for strategy_boundary in (
+            "pm_rank_reasonableness",
+            "lots_optimality",
+            "direction_accuracy",
+            "weak_learning_signal",
+            "legal_observe_empty_preference",
+            "daily_loss",
+            "no_trade",
+        ):
+            self.assertNotIn(strategy_boundary, report.metadata["daily_pg_hard_fail_boundaries"])
+            self.assertIn(strategy_boundary, report.metadata["daily_pg_diagnostic_boundaries"])
 
     def test_system_invariant_audit_accepts_add_or_open_positive_open_family(self):
         db_path = self._make_db()
