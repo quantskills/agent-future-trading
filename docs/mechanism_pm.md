@@ -610,6 +610,10 @@ trace 是 PM 对“自己如何使用学习”的安全摘要，必须能回答�
 - 学习影响方向是加分、扣分、保护性持有、释放资金还是触发校准
 - 学习是否改变 rank、资金层级、目标手数、持仓解释或触发要求
 
+最终 `final_action_contract` 中的 `decision_learning_rows` 只能是第 6 步根据最终 `final_action`、`current_lots`、`target_lots`、执行权限和 rank 状态重新路由出的最终决策层学习证据。Step1-Step5 的中间生命周期 trace 只能作为 provenance / diagnostics 安全摘要保留，不能直接复制为最终 `decision_learning_rows`。
+
+`trigger_profile_learning_rows` 与 `decision_learning_rows` 分层不变：execution / trigger / profile 学习可以留在 `trigger_profile_learning_rows` 供审计和研究查看，但不能进入最终决策层、不能直接改变 rank、手数、方向、资金部署或最终动作。
+
 ### 6.7 自检要求
 
 `pm_contract_self_check` 必须检查：
@@ -621,6 +625,9 @@ trace 是 PM 对“自己如何使用学习”的安全摘要，必须能回答�
 - Step5 未部署新增风险必须还原为 `wait/hold`、`target_lots=current_lots`、`lots_delta=0`，且不得残留盘中触发执行权限
 - PM artifact 没有越界研究事实对象
 - `final_action` 与 `current_lots` / `target_lots` / `lots_delta` 一致
+- 生命周期学习污染只检查 Step6 final lifecycle trace 的 `decision_learning_rows`；rank 外层 trace、Step2 router 结果、deployment 旧 trace 和其他中间态 trace 不能作为最终决策层学习行
+- `trigger_profile_learning_rows` 可保留 execution/profile 学习用于审计和研究，但 `execution_profile_learning_direct_to_rank` 与 `trigger_profile_learning_direct_to_rank` 必须为 `false`
+- 当 `learning_used.alpha_setup_action_values` 非空时，最终合约必须同时保留 `decision_learning_rows` 与 `trigger_profile_learning_rows`，自检不得从完整 action-value 列表反推决策层学习行
 
 `pm_contract_self_check` 不读取 `final_action_contract.evidence_used.contract_lifecycle_self_check`，也不把 Step2 与 Step6 的生命周期差异作为最终失败依据。
 

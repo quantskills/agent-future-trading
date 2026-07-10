@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List
 
+from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_position_transition import final_action_from_lots
 from tools.common.final_action_semantics import canonical_action_value_lane
 from tools.common.order_semantics import build_lot_intent_consistency
@@ -28,6 +29,7 @@ def _compact_learning_trace_row(row: Any) -> dict:
         return {}
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     contract = {
+        "id": row.get("id") or payload.get("id"),
         "action_value_id": row.get("id") or payload.get("id"),
         "scope_key": row.get("scope_key") or payload.get("scope_key"),
         "ticker": row.get("ticker") or payload.get("ticker"),
@@ -209,6 +211,7 @@ def _pm_lifecycle_learning_trace(
     authority: dict,
     diagnostics: dict,
     selected_action_values: list,
+    final_route_action_values: list | None,
     execution_contract_payload: dict,
     control_reasons: list[str],
 ) -> dict:
@@ -219,8 +222,11 @@ def _pm_lifecycle_learning_trace(
         authority=authority,
     )
     used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values or []) if lane})
-    lifecycle_router = diagnostics.get("pm_lifecycle_learning_router")
-    lifecycle_router = lifecycle_router if isinstance(lifecycle_router, dict) else {}
+    final_route_values = final_route_action_values if isinstance(final_route_action_values, list) else selected_action_values
+    lifecycle_router = route_lifecycle_learning(
+        lifecycle_port=lifecycle_port,
+        action_values=final_route_values,
+    )
     memory_retrieval = diagnostics.get("final_action_memory_retrieval")
     memory_retrieval = memory_retrieval if isinstance(memory_retrieval, dict) else {}
     decision_learning_rows = (
@@ -257,6 +263,8 @@ def _pm_lifecycle_learning_trace(
     trace = {
         "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
         "contract_lifecycle_port": lifecycle_port,
+        "pm_lifecycle_action_port": lifecycle_router.get("pm_lifecycle_action_port"),
+        "router_source": "step6_final_contract_lifecycle",
         "rank_lifecycle": "open_add_new_risk" if lifecycle_port == "open_add_new_risk" else lifecycle_port,
         "used_lanes": used_lanes,
         "accepted_learning_lanes": accepted_by_port,
@@ -266,6 +274,7 @@ def _pm_lifecycle_learning_trace(
         "trigger_profile_indices": list(lifecycle_router.get("trigger_profile_indices") or []),
         "rejected_learning": rejected if isinstance(rejected, list) else [],
         "rejected_learning_lanes": rejected_lanes,
+        "pm_lifecycle_learning_router": lifecycle_router,
         "blocked_learning_lanes": (
             ["hold", "reduce", "exit", "execution", "conditional_monitor"]
             if lifecycle_port == "open_add_new_risk"
@@ -516,6 +525,7 @@ def build_final_action_contract(
         authority=authority,
         diagnostics=diagnostics,
         selected_action_values=selected_action_values,
+        final_route_action_values=alpha_setup_action_values,
         execution_contract_payload=execution_contract_payload,
         control_reasons=sorted(reason_codes),
     )
@@ -638,8 +648,8 @@ def build_final_action_contract(
             ),
             "learning_adjustment_summary": scorecard_side.get("learning_adjustment_summary") or {},
             "pm_lifecycle_learning_router": (
-                diagnostics.get("pm_lifecycle_learning_router")
-                if isinstance(diagnostics.get("pm_lifecycle_learning_router"), dict)
+                pm_lifecycle_trace.get("pm_lifecycle_learning_router")
+                if isinstance(pm_lifecycle_trace.get("pm_lifecycle_learning_router"), dict)
                 else {}
             ),
             "trigger_profile_learning": pm_lifecycle_trace.get("trigger_profile_learning") or [],

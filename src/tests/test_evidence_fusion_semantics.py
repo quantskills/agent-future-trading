@@ -185,6 +185,17 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
     def test_final_contract_preserves_execution_trigger_profile_learning_route(self):
         action_values = [
             {
+                "id": "hold-1",
+                "ticker": "RB",
+                "side": "long",
+                "action_name": "hold",
+                "canonical_action_family": "hold",
+                "action_value_lane": "hold",
+                "action_preference": "positive_candidate_hold",
+                "reward_mean": 0.11,
+                "sample_count": 3,
+            },
+            {
                 "id": "open-1",
                 "ticker": "RB",
                 "side": "long",
@@ -207,11 +218,11 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                 "sample_count": 4,
             },
         ]
-        router = route_lifecycle_learning(lifecycle_port="new_risk", action_values=action_values)
+        router = route_lifecycle_learning(lifecycle_port="hold", action_values=action_values)
         primary_port = classify_lifecycle_action_port({
-            "current_lots": 0,
+            "current_lots": 1,
             "target_lots": 1,
-            "final_action": "open_probe",
+            "final_action": "hold",
         })
         contract = build_final_action_contract(
             ticker="RB",
@@ -257,8 +268,13 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         self.assertNotIn("lifecycle_transition_reason", trace)
         self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["open-1"])
         self.assertEqual([row["id"] for row in trace["trigger_profile_learning"]], ["exec-1"])
+        self.assertNotIn("hold-1", {row.get("id") for row in trace["decision_learning_rows"]})
         self.assertNotIn("exec-1", {row.get("id") for row in trace["rejected_learning"]})
         self.assertFalse(trace["execution_profile_learning_direct_to_rank"])
+        self.assertEqual(
+            contract["learning_used"]["pm_lifecycle_learning_router"]["pm_lifecycle_action_port"],
+            "open_add_new_risk",
+        )
         impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(impact["open_add_rank_score_delta"], 0.031)
         self.assertFalse(impact["execution_profile_learning_direct_to_rank"])

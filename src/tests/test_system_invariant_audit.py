@@ -80,6 +80,16 @@ def _transaction_audit_payload(payload):
 
 class SystemInvariantAuditRegressionTest(unittest.TestCase):
     def _lifecycle_trace(self, port: str, lanes: list[str]) -> dict:
+        decision_rows = [
+            {"id": f"{lane}-fixture", "learning_lane": lane, "action_name": lane}
+            for lane in lanes
+            if lane != "execution"
+        ]
+        trigger_rows = [
+            {"id": "execution-fixture", "learning_lane": "execution", "action_name": "execution"}
+            for lane in lanes
+            if lane == "execution"
+        ]
         return {
             "lifecycle_learning_trace": {
                 "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
@@ -87,7 +97,11 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "rank_lifecycle": port,
                 "used_lanes": lanes,
                 "accepted_learning_lanes": lanes,
+                "decision_learning_rows": decision_rows,
+                "trigger_profile_learning_rows": trigger_rows,
                 "blocked_learning_lanes": ["open", "add", "scale", "increase"],
+                "execution_profile_learning_direct_to_rank": False,
+                "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
             },
             "learning_impact_delta": {
@@ -130,6 +144,10 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                 "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
                 "contract_lifecycle_port": "open_add_new_risk" if lots_delta else "hold",
                 "used_lanes": [],
+                "decision_learning_rows": [],
+                "trigger_profile_learning_rows": [],
+                "execution_profile_learning_direct_to_rank": False,
+                "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
             },
         )

@@ -93,7 +93,24 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "lifecycle_learning_trace": {
                 "rank_lifecycle": "open_add_new_risk",
                 "used_lanes": ["open"],
+                "decision_learning_rows": [{"id": "open-1", "learning_lane": "open", "action_name": "open"}],
+                "trigger_profile_learning_rows": [],
+                "execution_profile_learning_direct_to_rank": False,
+                "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
+                "pm_final_contract_lifecycle_trace": {
+                    "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
+                    "contract_lifecycle_port": "open_add_new_risk",
+                    "rank_lifecycle": "open_add_new_risk",
+                    "used_lanes": ["open"],
+                    "decision_learning_rows": [
+                        {"id": "open-1", "learning_lane": "open", "action_name": "open"}
+                    ],
+                    "trigger_profile_learning_rows": [],
+                    "execution_profile_learning_direct_to_rank": False,
+                    "trigger_profile_learning_direct_to_rank": False,
+                    "execution_profile_signal_direct_to_rank": False,
+                },
             },
             "learning_impact_delta": {
                 "net_rank_learning_delta": 0.04,
@@ -108,6 +125,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "contract_lifecycle_port": "open_add_new_risk",
             "rank_lifecycle": "open_add_new_risk",
             "used_lanes": ["open"],
+            "decision_learning_rows": [{"id": "open-1", "learning_lane": "open", "action_name": "open"}],
+            "trigger_profile_learning_rows": [],
+            "execution_profile_learning_direct_to_rank": False,
+            "trigger_profile_learning_direct_to_rank": False,
         }
         return self._complete_contract(
             final_action="open_probe",
@@ -141,6 +162,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         pm_trace = {
             "contract_lifecycle_port": "wait",
             "transition_reason": "no_rank_or_budget_no_new_exposure",
+            "decision_learning_rows": [],
+            "trigger_profile_learning_rows": [],
+            "execution_profile_learning_direct_to_rank": False,
+            "trigger_profile_learning_direct_to_rank": False,
         }
         contract = self._complete_contract(
             final_action="wait",
@@ -471,6 +496,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "lifecycle_learning_trace": {
                 "contract_lifecycle_port": "hold",
                 "used_lanes": ["hold"],
+                "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
+                "trigger_profile_learning_rows": [],
+                "execution_profile_learning_direct_to_rank": False,
+                "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
             },
             "learning_impact_delta": {"hold_decision": "continue_hold"},
@@ -478,6 +507,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract["learning_used"]["pm_lifecycle_learning_trace"] = {
             "contract_lifecycle_port": "hold",
             "used_lanes": ["hold"],
+            "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
+            "trigger_profile_learning_rows": [],
+            "execution_profile_learning_direct_to_rank": False,
+            "trigger_profile_learning_direct_to_rank": False,
         }
         contract["learning_used"]["pm_lifecycle_learning_impact_delta"] = {
             "hold_decision": "continue_hold",

@@ -75,6 +75,10 @@ def _rank_scorecard(ticker: str = "BU", score: float = 0.72) -> dict:
             "lifecycle_learning_trace": {
                 "rank_lifecycle": "open_add_new_risk",
                 "used_lanes": ["open"],
+                "decision_learning_rows": [{"id": "open-1", "learning_lane": "open", "action_name": "open"}],
+                "trigger_profile_learning_rows": [],
+                "execution_profile_learning_direct_to_rank": False,
+                "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
             },
             "learning_impact_delta": {

@@ -1586,7 +1586,27 @@ def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> 
     )
     for field in rank_fields:
         if field in deployment:
-            evidence_used[field] = deployment[field]
+            value = deployment[field]
+            if field == "lifecycle_learning_trace" and isinstance(value, dict):
+                existing_trace = evidence_used.get("lifecycle_learning_trace")
+                existing_trace = existing_trace if isinstance(existing_trace, dict) else {}
+                pm_final_trace = existing_trace.get("pm_final_contract_lifecycle_trace")
+                if not isinstance(pm_final_trace, dict):
+                    pm_final_trace = existing_trace
+                if isinstance(pm_final_trace, dict):
+                    value = dict(value)
+                    if isinstance(pm_final_trace.get("decision_learning_rows"), list):
+                        value["decision_learning_rows"] = list(pm_final_trace["decision_learning_rows"])
+                    if isinstance(pm_final_trace.get("trigger_profile_learning_rows"), list):
+                        value["trigger_profile_learning_rows"] = list(pm_final_trace["trigger_profile_learning_rows"])
+                    for flag in (
+                        "execution_profile_learning_direct_to_rank",
+                        "trigger_profile_learning_direct_to_rank",
+                    ):
+                        if flag in pm_final_trace:
+                            value[flag] = bool(pm_final_trace.get(flag))
+                    value["pm_final_contract_lifecycle_trace"] = dict(pm_final_trace)
+            evidence_used[field] = value
     evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
     final_action_contract["evidence_used"] = evidence_used
     _pm_step6_strip_legacy_lifecycle_self_check(final_action_contract)
@@ -4362,6 +4382,7 @@ def _compact_alpha_setup_action_value(row: dict) -> dict:
         "source": payload.get("source") or row.get("source"),
         "reward_source": row.get("reward_source") or payload.get("reward_source"),
         "consumer_scope": row.get("consumer_scope") or payload.get("consumer_scope"),
+        "canonical_action_family": row.get("canonical_action_family") or payload.get("canonical_action_family"),
         "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
         "memory_side_role": row.get("memory_side_role") or payload.get("memory_side_role"),
         "memory_requirement_reason": row.get("memory_requirement_reason") or payload.get("memory_requirement_reason"),
@@ -11879,16 +11900,17 @@ def _run_pm_six_step_decision(state: FundState):
         if isinstance(index, int)
     }
     consumed_learning_indices = decision_learning_indices | trigger_profile_indices
-    alpha_setup_action_values = [
+    step2_consumed_action_values = [
         row
         for index, row in enumerate(final_lifecycle_route_action_values)
         if index in consumed_learning_indices
     ]
+    alpha_setup_action_values = final_lifecycle_route_action_values
     lifecycle_learning_router["contract_consumed_indices"] = sorted(consumed_learning_indices)
-    lifecycle_learning_router["contract_consumed_count"] = len(alpha_setup_action_values)
+    lifecycle_learning_router["contract_consumed_count"] = len(step2_consumed_action_values)
     lifecycle_learning_router["contract_consumption_boundary"] = (
-        "decision_learning_rows plus trigger_profile_learning_rows land in PM trace; "
-        "trigger_profile_learning may tune execution/profile but cannot create open/add rank delta"
+        "Step2 lifecycle router is provenance only; Step6 final contract reroutes "
+        "decision_learning_rows from the final contract lifecycle"
     )
     lifecycle_memory_audit["primary_lifecycle_action_port"] = primary_lifecycle_action_port
     lifecycle_memory_audit["lifecycle_transition_diagnostic"] = lifecycle_transition_diagnostic

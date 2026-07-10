@@ -830,6 +830,41 @@ def contract_increases_risk_position(contract: Mapping[str, Any] | None) -> bool
     return abs(target_lots) > abs(current_lots)
 
 
+def _contract_final_lifecycle_port(contract: Mapping[str, Any] | None) -> str:
+    contract = contract if isinstance(contract, Mapping) else {}
+    action = _clean(contract.get("final_action"))
+    current_lots, target_lots, _ = _current_target_delta(contract)
+    if (
+        action in CONDITIONAL_ACTIONS
+        or (
+            _bool(contract.get("conditional_trigger_authority"))
+            and _bool(contract.get("requires_intraday_confirmation"))
+            and not _bool(contract.get("can_execute_without_intraday_trigger"))
+        )
+    ):
+        return "conditional_monitor"
+    if current_lots == 0 and target_lots != 0:
+        return "open_add_new_risk"
+    if current_lots != 0 and target_lots != 0 and (
+        (current_lots > 0 and target_lots > current_lots)
+        or (current_lots < 0 and target_lots < current_lots)
+        or (current_lots > 0 and target_lots < 0)
+        or (current_lots < 0 and target_lots > 0)
+    ):
+        return "open_add_new_risk"
+    if current_lots != 0 and target_lots == current_lots:
+        return "hold"
+    if current_lots != 0 and (
+        target_lots == 0
+        or abs(target_lots) < abs(current_lots)
+        or action in (DECREASE_ACTIONS | EXIT_ACTIONS)
+    ):
+        return "reduce_exit"
+    if action in (OPEN_ACTIONS | INCREASE_ACTIONS | {"reverse"}):
+        return "open_add_new_risk"
+    return "wait"
+
+
 def contract_requires_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
     """Return whether a PM contract must carry a full-market capital rank.
 
@@ -978,6 +1013,8 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
 def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> list[str]:
     """Return errors when full-market new-capital rank used wrong lifecycle learning."""
     contract = contract if isinstance(contract, Mapping) else {}
+    if contract_is_unselected_no_new_exposure_candidate(contract):
+        return []
     if _rank_value_from_contract(contract) in (None, ""):
         return []
     evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
@@ -989,6 +1026,8 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
     trace = deployment.get("lifecycle_learning_trace")
     if not isinstance(trace, Mapping):
         trace = evidence.get("lifecycle_learning_trace")
+    evidence_trace = evidence.get("lifecycle_learning_trace")
+    decision_trace = _pm_lifecycle_decision_trace(evidence_trace)
     impact = deployment.get("learning_impact_delta")
     if not isinstance(impact, Mapping):
         impact = evidence.get("learning_impact_delta")
@@ -999,16 +1038,67 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
     lifecycle = _clean(trace.get("rank_lifecycle"))
     if lifecycle != "open_add_new_risk":
         errors.append(f"rank_lifecycle_invalid:{lifecycle or 'missing'}")
-    forbidden_lanes = {"hold", "reduce", "exit", "execution", "conditional_monitor"}
-    used_lanes = {_clean(item) for item in trace.get("used_lanes") or [] if _clean(item)}
-    mixed = sorted(used_lanes & forbidden_lanes)
+    if not isinstance(decision_trace, Mapping):
+        errors.append("pm_final_contract_lifecycle_trace_missing")
+        return sorted(set(errors))
+    decision_lifecycle = _clean(
+        decision_trace.get("contract_lifecycle_port")
+        or decision_trace.get("rank_lifecycle")
+    )
+    if decision_lifecycle != "open_add_new_risk":
+        errors.append(
+            f"final_lifecycle_trace_port_mismatch:{decision_lifecycle or 'missing'}:open_add_new_risk"
+        )
+    decision_rows, row_errors = _lifecycle_trace_learning_rows(decision_trace)
+    errors.extend(row_errors)
+    decision_lanes = _learning_row_lanes(decision_rows)
+    mixed = sorted(decision_lanes - {"open", "add", "scale", "increase"})
     if mixed:
         errors.append(f"open_rank_mixed_forbidden_learning_lanes:{','.join(mixed)}")
+    if bool(decision_trace.get("execution_profile_learning_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    if bool(decision_trace.get("trigger_profile_learning_direct_to_rank")):
+        errors.append("trigger_profile_learning_direct_to_new_capital_rank")
     if bool(trace.get("execution_profile_signal_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
     if isinstance(impact, Mapping) and bool(impact.get("execution_profile_learning_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
+    if isinstance(impact, Mapping) and bool(impact.get("trigger_profile_learning_direct_to_rank")):
+        errors.append("trigger_profile_learning_direct_to_new_capital_rank")
     return sorted(set(errors))
+
+
+def _pm_lifecycle_decision_trace(trace: Any) -> Mapping[str, Any] | None:
+    if not isinstance(trace, Mapping):
+        return None
+    nested = trace.get("pm_final_contract_lifecycle_trace")
+    if isinstance(nested, Mapping):
+        return nested
+    if trace.get("trace_version") == "agentquant.pm_lifecycle_learning_trace.v1":
+        return trace
+    if "contract_lifecycle_port" in trace:
+        return trace
+    return None
+
+
+def _lifecycle_trace_learning_rows(trace: Mapping[str, Any]) -> tuple[list[Any], list[str]]:
+    errors: list[str] = []
+    decision_rows = trace.get("decision_learning_rows")
+    trigger_rows = trace.get("trigger_profile_learning_rows")
+    if not isinstance(decision_rows, list):
+        errors.append("decision_learning_rows_missing")
+        decision_rows = []
+    if not isinstance(trigger_rows, list):
+        errors.append("trigger_profile_learning_rows_missing")
+    return decision_rows, errors
+
+
+def _learning_row_lanes(rows: Iterable[Any]) -> set[str]:
+    return {
+        _clean(lane)
+        for lane in (_action_value_lane(row) for row in rows if isinstance(row, Mapping))
+        if _clean(lane)
+    }
 
 
 def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | None) -> list[str]:
@@ -1020,7 +1110,7 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
     actions, lots, rank, or audit severity.
     """
     contract = contract if isinstance(contract, Mapping) else {}
-    if contract_has_full_market_capital_rank(contract):
+    if contract_has_full_market_capital_rank(contract) and not contract_is_unselected_no_new_exposure_candidate(contract):
         return []
     learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
     rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
@@ -1033,34 +1123,58 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
     if not isinstance(trace, Mapping):
         errors.append("lifecycle_learning_trace_missing")
         return errors
+    trace = _pm_lifecycle_decision_trace(trace)
+    if not isinstance(trace, Mapping):
+        errors.append("pm_final_contract_lifecycle_trace_missing")
+        return errors
     if not isinstance(impact, Mapping):
         errors.append("learning_impact_delta_missing")
 
     port = _clean(trace.get("contract_lifecycle_port") or trace.get("rank_lifecycle"))
     if not port:
         errors.append("lifecycle_decision_port_missing")
-    lanes = {_action_value_lane(row) for row in rows if isinstance(row, Mapping)}
-    lanes = {_clean(lane) for lane in lanes if _clean(lane)}
+    expected_port = _contract_final_lifecycle_port(contract)
+    if port and expected_port and port != expected_port:
+        errors.append(f"lifecycle_trace_port_mismatch:{port}:{expected_port}")
+    decision_rows, row_errors = _lifecycle_trace_learning_rows(trace)
+    errors.extend(row_errors)
+    lanes = _learning_row_lanes(decision_rows)
     open_like = {"open", "add", "scale", "increase"}
-    if port == "hold" and lanes & (open_like | {"execution", "conditional_monitor"}):
+    if port == "hold" and lanes - {"hold"}:
         errors.append(
             "hold_lifecycle_mixed_forbidden_learning_lanes:"
-            + ",".join(sorted(lanes & (open_like | {"execution", "conditional_monitor"})))
+            + ",".join(sorted(lanes - {"hold"}))
         )
-    if port == "reduce_exit" and lanes & (open_like | {"execution", "conditional_monitor"}):
+    if port == "reduce_exit" and lanes - {"reduce", "exit"}:
         errors.append(
             "reduce_exit_lifecycle_mixed_forbidden_learning_lanes:"
-            + ",".join(sorted(lanes & (open_like | {"execution", "conditional_monitor"})))
+            + ",".join(sorted(lanes - {"reduce", "exit"}))
         )
-    if port == "conditional_monitor" and lanes & {"hold", "reduce", "exit"}:
+    if port == "conditional_monitor" and lanes - {"conditional_monitor"}:
         errors.append(
             "conditional_monitor_mixed_forbidden_learning_lanes:"
-            + ",".join(sorted(lanes & {"hold", "reduce", "exit"}))
+            + ",".join(sorted(lanes - {"conditional_monitor"}))
         )
+    if port == "open_add_new_risk" and lanes - open_like:
+        errors.append(
+            "open_rank_mixed_forbidden_learning_lanes:"
+            + ",".join(sorted(lanes - open_like))
+        )
+    if port in {"wait", "no_opportunity", "no_trade"} and lanes:
+        errors.append(
+            "wait_lifecycle_unexpected_decision_learning_lanes:"
+            + ",".join(sorted(lanes))
+        )
+    if bool(trace.get("execution_profile_learning_direct_to_rank")):
+        errors.append("execution_learning_direct_to_new_capital_rank")
+    if bool(trace.get("trigger_profile_learning_direct_to_rank")):
+        errors.append("trigger_profile_learning_direct_to_new_capital_rank")
     if bool(trace.get("execution_profile_signal_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
     if isinstance(impact, Mapping) and bool(impact.get("execution_profile_learning_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
+    if isinstance(impact, Mapping) and bool(impact.get("trigger_profile_learning_direct_to_rank")):
+        errors.append("trigger_profile_learning_direct_to_new_capital_rank")
     return sorted(set(errors))
 
 
