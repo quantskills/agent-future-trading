@@ -204,9 +204,9 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 学习使用摘要：来自第 4 步学习检索结果。
 
-排名与预算分配摘要：来自第 5 步新增风险排序与预算分配结果。
+排名与预算分配摘要：只在新增风险路径中来自第 5 步排序与预算分配结果；非新增风险路径不生成该摘要。
 
-仓位测算结果：来自第 5 步 position sizing 结果。
+仓位测算结果：新增风险路径来自第 5 步 position sizing；非新增风险路径由第 6 步按最终持仓生命周期确定目标手数，不进入全市场 rank 和预算分配。
 
 来源链路：来自 SCC source refs、分析师引用完整性校验和 PM 生成上下文。
 
@@ -449,9 +449,9 @@ PM 第 6 步对外返回 `FuturesRecommendation`。
 
 DB 记录、本地 artifact 和运行日志都由 workflow / 保存层基于 `FuturesRecommendation` 物理化生成，不是 PM 第二次输出。
 
-Step1 到 Step5 不输出物理交易事实。
+Step1 到 Step4，以及新增风险路径进入的 Step5，都不输出物理交易事实。
 
-Step1 到 Step5 只更新同一个 PM 内部候选状态。
+Step1 到 Step4，以及新增风险路径进入的 Step5，只更新同一个 PM 内部候选状态。
 
 排名和预算分配是内部候选状态的一部分，不是独立输出。
 
@@ -599,9 +599,9 @@ PM 把上述理解写入同一个产品候选状态。
 
 DB 记录和本地 artifact 由 workflow / 保存层基于 `FuturesRecommendation` 持久化生成，不是本步输出。
 
-Step1 到 Step5 只更新同一个 PM 内部候选状态。
+Step1 到 Step4，以及新增风险路径进入的 Step5，只更新同一个 PM 内部候选状态。
 
-Step1 到 Step5 禁止生成 `candidate_contract`、`final_contract_builder_inputs`、`FuturesRecommendation` 或任何 recommendation。
+Step1 到 Step4，以及新增风险路径进入的 Step5，禁止生成 `candidate_contract`、`final_contract_builder_inputs`、`FuturesRecommendation` 或任何 recommendation。
 
 #### 1.7 状态演化与自检边界
 
@@ -712,7 +712,7 @@ PM 按以下顺序判断方向：
 
 `preferred_direction` 是第 2 步根据 SCC 事实确定的产品证据优先方向，不是最终交易动作，也不是最终合约必须保持不变的方向字段。
 
-第 3、4、5 步结合当前持仓、生命周期、学习成果、风险和资金部署继续更新同一个候选状态。最终候选可以进入等待、持有、减仓、退出和新增风险路径，该变化属于正常状态演化。
+第 3、4 步结合当前持仓、生命周期和学习成果继续更新同一个候选状态。只有新增风险候选进入第 5 步执行风险排序和资金部署；非新增风险候选从第 4 步直接进入第 6 步。最终候选进入等待、持有、减仓、退出和新增风险路径都属于正常状态演化。
 
 第 6 步只根据最终候选状态生成 `final_action_contract`，并只对最终合约自身执行 `pm_contract_self_check`。禁止直接比较第 2 步 `preferred_direction` 与第 6 步最终动作、最终持仓方向来判定合约失败。
 
@@ -750,7 +750,7 @@ PM 比较第 1 步整理的当前持仓方向与第 2 步确定的 `preferred_di
 - 当前持仓与产品优先方向是什么关系。
 - 该产品进入新增风险、持仓管理、释放资金、等待中的哪条内部处理路径。
 
-本步不确定最终动作和目标手数。初始生命周期分流和候选交易状态都属于同一个 PM 内部候选状态，可以在第 4、5、6 步继续演化。
+本步不确定最终动作和目标手数。初始生命周期分流和候选交易状态都属于同一个 PM 内部候选状态，先进入第 4 步；第 4 步完成后，非新增风险直接进入第 6 步，新增风险进入第 5 步后再进入第 6 步。
 
 #### 3.2 使用的状态事实
 
@@ -827,7 +827,7 @@ PM 以有符号当前手数确认持仓方向：当前手数大于零为 `long`�
 
 代码梳理时把 `classify_pm_decision_state` 的基础状态判断前移到本步，把输入收窄为 `current_lots`、`position_direction_relation`、触发状态、证据质量、失效边界和当前风险空间。目标手数、学习成果、全市场 rank 和最终资金部署不得反向成为本步初始状态的必需输入。
 
-候选交易状态不是交易动作。`tradeable_candidate` 仍须经过第 4 步学习修正、第 5 步风险排序与预算分配、第 6 步签约和最终合约自检。
+候选交易状态不是交易动作。第 4 步完成学习修正后，只有形成 open、add、scale、reverse 和 conditional open 意图的新增风险候选进入第 5 步；wait、hold、reduce、exit 和 `capital_release` 等非新增风险候选直接进入第 6 步。
 
 #### 3.6 状态更新
 
@@ -846,7 +846,7 @@ PM 以有符号当前手数确认持仓方向：当前手数大于零为 `long`�
 
 `primary_lifecycle_action_port` 只是第 3 步的内部初始分流口，不是最终合约的 `contract_lifecycle_port`。
 
-第 4、5 步改变候选质量、风险路径和资金部署后，最终生命周期可以与本步初始分流不同。该变化属于正常状态演化，不构成最终合约错误。
+第 4 步可以改变候选质量和风险路径；新增风险候选还可以由第 5 步资金部署继续改变。最终生命周期可以与本步初始分流不同，该变化属于正常状态演化，不构成最终合约错误。
 
 现有 `build_lifecycle_transition_diagnostic` 只用于解释内部状态变化：
 
@@ -1037,17 +1037,28 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 - `learning_adjustment_summary`
 - 学习修正后的 `pm_decision_state` 和内部生命周期意图
 
-本步不创建新的候选对象，不输出独立学习 artifact。更新后的同一候选状态继续传入第 5 步；只有属于新增风险路径的最终候选才进入全市场 rank 和资金部署。
+本步不创建新的候选对象，不输出独立学习 artifact。第 4 步完成后按最终候选风险性质分流：
+
+- 非新增风险路径：`Step4 -> Step6`。`wait`、`hold`、`reduce`、`exit`、`capital_release` 和不增加风险敞口的 `conditional_monitor` 跳过第 5 步。
+- 新增风险路径：`Step4 -> Step5 -> Step6`。`open`、`add`、`scale`、`reverse` 和具有新开仓权限的 `conditional_open` 必须进入第 5 步执行全市场 rank、预算分配和 position sizing。
+
+两条路径继续传递同一个 PM 内部候选状态，不生成第二套候选对象和中间交易事实。
 
 #### 4.9 状态演化与自检边界
 
-第 4 步的检索结果、生命周期路由和候选质量修正都是 PM 内部中间状态，不是最终合约学习事实。
+第 4 步的完整 canonical 候选学习池、当前生命周期路由和候选质量修正都是 PM 内部中间状态，不是最终合约学习事实。`rejected_or_downgraded` 和 `rejected_learning_rows` 只解释材料为什么未被当前候选消费，不得冒充最终决策层学习证据。
 
-第 5 步风险和资金处理可以继续改变候选状态。第 6 步必须根据最终 `final_action`、`current_lots`、`target_lots` 和最终 `contract_lifecycle_port` 重新形成正式 `decision_learning_rows`，再写入唯一 `final_action_contract`。
+非新增风险候选从第 4 步直接进入第 6 步。新增风险候选由第 5 步风险排序、资金部署和 position sizing 继续更新后再进入第 6 步。
 
-第 6 步只校验最终 `learning_used.alpha_setup_action_values` 的纯净性、最终生命周期与 `decision_learning_rows` 的一致性，以及 execution/profile 学习未进入决策层。禁止比较第 4 步初始路由与第 6 步最终生命周期来判定合约失败。
+无论是否经过第 5 步，第 6 步都必须从第 4 步保留的完整 canonical 候选学习池重新开始，根据最终 `final_action`、`current_lots`、`target_lots` 和最终 `contract_lifecycle_port` 重新形成正式 `decision_learning_rows` 和独立的 `trigger_profile_learning_rows`，再写入唯一 `final_action_contract`。第 6 步不得复制第 4 步的 `decision_learning_rows`，也不得让第 4 步未消费的生命周期记录因早期路由被永久丢弃。
 
-检索为空、有效学习数量少、匹配层级较弱只进入 diagnostics，不触发最终合约 hard fail。未来数据、正式列表污染和 action-value 语义不一致才属于学习契约错误。
+第 6 步只校验最终 `learning_used.alpha_setup_action_values` 的纯净性、最终生命周期与最终 `decision_learning_rows` 的一致性，以及 execution/profile 学习只进入 `trigger_profile_learning_rows`。禁止读取第 4 步初始路由结果作为最终自检输入，禁止比较第 4 步初始路由与第 6 步最终生命周期来判定合约失败。
+
+检索为空、有效学习数量少、匹配层级较弱、完整 canonical 记录与第 4 步当前生命周期不匹配，只进入 diagnostics，不触发最终合约 hard fail。
+
+非完整 canonical、非 `pm_learning` 和 action-value 语义不一致的记录在第 4 步被识别并隔离到拒绝诊断后，不得参与候选质量和后续路由，也不因“已正确拒绝”触发最终合约 hard fail。只有这些非法记录进入候选质量、`learning_used.alpha_setup_action_values`、最终 `decision_learning_rows` 和 `trigger_profile_learning_rows` 时，才属于学习契约污染并触发 hard fail。
+
+research DB 中晚于当前交易日的记录只要未被检索返回，就不属于本次 PM 输入。future dated 记录一旦被 `retrieve_pm_memory` 返回，代表时间边界已经断裂，必须在第 4 步输入校验处 hard fail，禁止把它降级成普通 diagnostics 后继续签约。
 
 #### 4.10 禁止项
 
