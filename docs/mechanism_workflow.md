@@ -35,9 +35,11 @@ technical / fundamental / commodity_news 分析师
 
 ### 0.3 PM
 
-PM 接收 `signal_collector` 打包好的结构化信号证据，并按 `docs/agent_pm.md` 的六步机制，把结构化信号证据、持仓、配置和可用学习转成下一交易日唯一合法的 `final_action_contract`。
+PM 接收 `signal_collector` 打包好的结构化信号证据，并按 `docs/agent_pm.md` 的六步机制处理结构化证据、持仓和配置；学习成果由 PM Step4 通过 `decision_memory_retrieval` 自行读取，不由 `workflow` 编排层传入。最终状态在 Step6 转成唯一合法的 `final_action_contract`。
 
 PM 是唯一组合决策者、唯一资金 rank 与资金部署决策者、唯一 `final_action_contract` 签发者。
+
+PM Step1–5 只更新同一个 PM 内存状态，不向 `workflow` 编排层返回中间对象。PM 第 6 步原子返回唯一 `FuturesRecommendation`，其中 `signal_snapshot.final_action_contract` 是唯一交易事实。
 
 ### 0.4 审计员
 
@@ -118,7 +120,7 @@ Researcher 基于复盘材料、交易过程和交易结果形成结构化研究
 
 - 把分析师输出交给 `signal_collector`。
 - 把 `signal_collector` 签出的结构化结果交给 PM。
-- 把 PM 签出的 `final_action_contract` 交给 PG/Auditor/Trader。
+- 接收 PM 第 6 步返回的唯一 `FuturesRecommendation`，先把其中的最终合约交给 PG/Auditor，审计通过后再交给 Trader。
 
 `workflow` 只传递事实，不解释策略，不改字段语义。
 
@@ -130,7 +132,7 @@ Researcher 基于复盘材料、交易过程和交易结果形成结构化研究
 
 ### 2.4 保存事实
 
-`workflow` 负责保存各智能体已经签出的 artifact / contract / execution / settlement。
+`workflow` 编排层负责在 PM 返回后组织审计，并由保存层物理化最终 recommendation、审计结果、artifact、execution 和 settlement。
 
 `workflow` 只能保存，不能改语义，不能把候选、草稿或中间诊断伪装成最终交易事实。
 
@@ -139,12 +141,12 @@ PM strategy recommendation 保存前必须通过只读 hard gate：
 - `signal_snapshot.final_action_contract` 必须存在且为 PM Step6 已签出的最终合约。
 - `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`。
 - `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`。
-- `signal_snapshot.signal_collection_contract` 必须存在，且是 PM 从 workflow state 读取到的 signal_collector 原始 `signal_collection_contract` 快照，保留 `producer="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。
+- `signal_snapshot.signal_collection_contract` 必须存在，且是 PM 从 workflow state 读取到的 signal_collector 原始 `signal_collection_contract` 快照，保留 `source_agent="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。
 - `signal_snapshot` 不得残留 `pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision` 或 PM draft 字段。
 
 当前第一阶段没有独立 signal_collector artifact，PM final `signal_snapshot.signal_collection_contract` 保存完整原始 SCC 供 PG、Reviewer 和 Researcher 审计追溯；这不是 PM 重建证据包，也不是第二套字段语义。后续如果信号收集员独立落 artifact，可再收敛为 artifact path / id / sha256 强引用，但强引用不是本阶段目标。
 
-`workflow` 只检查这些条件，不修合同、不补字段、不把 Step2/Step3/Step4 的诊断对象保存成最终交易事实。
+`workflow` 编排层只检查这些条件，不修合同、不补字段、不读取和保存 Step1–5 内存状态，也不执行跨步骤比较式自检。
 
 ### 2.5 触发审计和执行
 

@@ -14,7 +14,7 @@ AgentQuant 是一个面向中国期货主力合约的多智能体交易策略系
 AgentQuant 以交易日为最小运行单元，每个交易日分为四个阶段：
 
 1. **Phase1 策略生成**  
-   技术面、基本面、新闻面分析师读取盘前可见数据，生成结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理通过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 三个确定性工具读取研究、评分排序和计算手数，最后签发唯一 `final_action_contract`。
+   技术面、基本面、新闻面分析师读取盘前可见数据，生成结构化预测证据；信号收集员汇总三类分析师证据，输出 `signal_collection_contract`；投资组合经理按六步机制连续更新同一个内存状态，Step4 读取并路由学习，只有新增风险路径进入 Step5 全市场 rank、预算和 sizing，最后由 Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。Step1–5 不输出 artifact 和合约草稿。
 
 2. **Phase2 交易执行**  
    交易员读取 Phase1 审计后的 `final_action_contract`，结合盘中确认、合约、持仓、手数、滑点、涨跌停、保证金和订单语义，写入真实交易流水。交易员只执行或跳过已批准计划，不创造新的交易策略，不从投资组合经理草稿或研究 action-value 推导交易。
@@ -46,7 +46,7 @@ src/agents/
 | 基本面分析师 | 读取 Finoview 本地基本面数据与 PandaAI 衍生数据，分析供需、库存、基差、仓单、产业链和数据质量 |
 | 期货新闻面分析师 | 读取本地期货新闻，分析事件方向、强度、新鲜度、相关性和可交易性 |
 | 信号收集员 | 不调用 LLM，收集三类分析师结构化预测证据，输出 `signal_collection_contract` |
-| 投资组合经理 | 不调用 LLM，通过 `decision_memory_retrieval`、`opportunity_ranking`、`position_sizing` 后签发唯一 `final_action_contract` |
+| 投资组合经理 | 不调用 LLM；Step1–5 只更新同一个内存状态，Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract` |
 | 审计员 | 做确定性交易审核，审投资组合经理的最终合约，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
 | 交易员 | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
 | 会计师 | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |

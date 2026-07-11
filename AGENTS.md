@@ -115,7 +115,7 @@ workflow 只编排、传递、保存和阻断；禁止生成 PM 交易语义、r
 
 必须保留：
 
-- `producer="signal_collector"`
+- `source_agent="signal_collector"`
 - `collector_decision_boundary="no_trade_authority"`
 - 来源引用、逐条证据、方向、触发状态、强弱、时效、一致性、冲突、确认需求、缺失、风险、失效边界、profile 使用痕迹、`evidence_fusion`
 
@@ -128,13 +128,13 @@ PM 不调用 LLM。PM 是唯一策略资金经理和唯一最终交易合约签�
 PM 六步固定为：
 
 1. 读取 SCC、账户、持仓、合约、行情、配置。
-2. 判断生命周期动作口。
-3. 判断单品种方向与候选质量。
+2. 判断单品种方向。
+3. 结合持仓确定交易状态、候选质量和内部生命周期分流。
 4. 按生命周期消费有效学习。
 5. 新增风险路径执行全市场 rank 与资金部署。
-6. 生成唯一 `final_action_contract` 并执行自检。
+6. 原子生成唯一 `FuturesRecommendation` 与 `final_action_contract`，并检查最终输出自身一致性。
 
-PM 最终 artifact 必须包含：
+PM 的直接输出只有第 6 步返回的 `FuturesRecommendation`。其 `signal_snapshot` 必须包含：
 
 - `signal_snapshot.final_action_contract`
 - `signal_snapshot.pm_six_step_trace`
@@ -208,8 +208,9 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 
 ## 9. Artifact 与审计边界
 
-- PM 对外 artifact 只能保存最终合约、最终 Step6 trace、原始 SCC、审计所需摘要。
-- PM Step1-5 中间态只能保留为安全 diagnostics/provenance 摘要，不能冒充最终决策证据。
+- PM Step1-5 只更新同一个 PM 内存状态，不生成独立 artifact、合约草稿、recommendation、DB 记录和物理日志。
+- `workflow` 编排层、Auditor 和保存层只能在 PM 返回后审计并物理化最终 `FuturesRecommendation`；不得保存 PM Step1-5 中间状态。
+- `pm_six_step_trace` 只保留 Step6 最终合约生成检查和最终合约自身检查，不保存早期状态和跨步骤比较结果。
 - `decision_learning_rows` 是 Step6 final contract 按最终生命周期重新生成的最终决策层学习 trace。
 - `trigger_profile_learning_rows` 只保存 execution/trigger/profile 学习，不进入决策层。
 - 自检审最终合约证据链是否干净，不审交易判断是否正确。

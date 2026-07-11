@@ -160,11 +160,12 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 ```text
 signal_collection_contract
--> decision_memory_retrieval.effective_memory_summary
--> PM Step3/Step4 candidate_quality / lifecycle_learning_trace
+-> PM Step2 单品种方向
+-> PM Step3 candidate_quality / 内部生命周期分流
+-> PM Step4 decision_memory_retrieval.effective_memory_summary / 生命周期学习消费
 -> PM Step5 pm_full_market_capital_deployment（仅新增风险）
--> PM Step6 position_sizing_result / contract self-check
--> portfolio_manager.final_action_contract
+-> PM Step5 position_sizing_result
+-> PM Step6 原子生成 FuturesRecommendation / final_action_contract / 最终合约自身检查
 ```
 
 多维证据融合学习进入 PM 的固定链路是：
@@ -259,6 +260,6 @@ Reviewer fusion_attribution_label
 
 ## 研究机制审计边界补充（2026-07-07）
 
-PG 可以审计研究记忆是否按未来学习边界写入、是否未污染当日交易、是否未被 Trader/Accountant 直接消费；但 PG 不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit，也不判断 PM 为什么 rank 或不 rank。PM 对研究成果的消费是否形成合法交易事实，由 `pm_six_step_trace.pm_contract_self_check` 和 `pm_six_step_trace.step6_contract_generation_check` 表达。
+PG 可以审计研究记忆是否按未来学习边界写入、是否未污染当日交易、是否未被 Trader/Accountant 直接消费；但 PG 不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit，也不判断 PM 为什么 rank 或不 rank。PM 对研究成果的消费是否形成合法交易事实，只由 Step6 最终 `final_action_contract`、`pm_six_step_trace.pm_contract_self_check` 和 `pm_six_step_trace.step6_contract_generation_check` 表达；Step4 临时路由不进入最终自检输入。
 
 `pg_mechanism_effectiveness_audit.py` 的 hard fail 只表示机制链路断开、必要 artifact 缺失、PM 自检失败、条件监控缺少执行事实等协议问题。排序收益、学习效果、资金部署质量属于诊断或研究分析，不作为 PG 替代 PM 的交易语义判定。

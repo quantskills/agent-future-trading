@@ -276,7 +276,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 ```text
 三类分析师 action_evidence_contract
 -> 去重、保留来源、对齐方向/触发/失效/冲突/缺失
--> signal_collection_contract（producer="signal_collector"，collector_decision_boundary="no_trade_authority"）
+-> signal_collection_contract（source_agent="signal_collector"，collector_decision_boundary="no_trade_authority"）
 ```
 
 如果配置只启用一个或两个分析师，信号收集员只按已启用分析师收集证据；未启用分析师不记为缺失。已启用但没有输出的分析师，必须写入 `missing_evidence=missing_analyst:*`，不能伪造补齐。
@@ -295,7 +295,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 证据强弱摘要 | `evidence_strength` | 只能来自分析师置信度和证据质量，不是 PM score/rank |
 | 商品差异化 profile 使用痕迹 | `source_contracts.product_profile_evidence`、`evidence_items.product_profile_id` | 只保真传递，不重新解释、不评分、不生成交易动作 |
 | 多维融合证据 | `source_contracts.fusion_evidence`、`evidence_items.fusion_evidence`、`evidence_fusion` | 只保真汇总证据强弱、时效、一致性、冲突、确认需求和缺失证据，不生成 PM score/rank、不生成交易动作 |
-| 生产者和权限边界 | `producer`、`collector_decision_boundary` | 固定为 `signal_collector` 和 `no_trade_authority`，供 PM 入口校验 |
+| 生产者和权限边界 | `source_agent`、`collector_decision_boundary` | 固定为 `signal_collector` 和 `no_trade_authority`，供 PM 入口校验 |
 
 ### 5.2 聚合状态规则
 
@@ -346,18 +346,18 @@ PM 内部固定为六步：
 
 ```text
 1. 读取标准输入
-2. 生成主生命周期动作口
-3. 选择单品种代表方向和候选质量
+2. 判断单品种方向
+3. 结合持仓确定交易状态、候选质量和内部生命周期分流
 4. 按生命周期消费学习
 5. 新增风险进入全市场资金 rank 与资金部署
-6. 签发唯一 final_action_contract 并自检
+6. 原子生成唯一 FuturesRecommendation 与 final_action_contract，并检查最终输出自身
 ```
 
 ### 6.1 输入读取边界
 
 | 输入 | PM 可以做 | PM 不能做 |
 |---|---|---|
-| `signal_collection_contract` | 只读取 `signal_collector` 已签出的结构化预测证据包，要求 `producer="signal_collector"` 且 `collector_decision_boundary="no_trade_authority"` | 在 PM 内重建证据包，或重新解释分析师自由文本 |
+| `signal_collection_contract` | 只读取 `signal_collector` 已签出的结构化预测证据包，要求 `source_agent="signal_collector"` 且 `collector_decision_boundary="no_trade_authority"` | 在 PM 内重建证据包，或重新解释分析师自由文本 |
 | 账户、持仓、合约、保证金 | 计算当前手数、风险、可用预算 | 伪造成交或结算 |
 | `decision_memory_retrieval` 输出 | 读取有效 action-value、profile、剔除原因、学习摘要 | 直接查研究 DB 原始记录 |
 | `pm_ticker_side_selection` 输出 | 读取单品种方向优先级、候选质量和候选层级提示 | 把单品种方向优先级写成最终全市场 rank |
@@ -374,32 +374,32 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 
 ```text
 1. 读取标准输入
-2. 生成 primary_lifecycle_action_port
-3. 生成 side_priority / ticker_side_priority / candidate_quality
+2. 生成 side_priority / ticker_side_priority
+3. 结合 current_lots 形成 candidate_quality / candidate_layer_hint / primary_lifecycle_action_port
 4. 按生命周期消费学习
 5. 新增风险全市场资金 rank 与部署
-6. 生成唯一 final_action_contract 并自检
+6. 原子生成唯一 FuturesRecommendation / final_action_contract 并检查最终输出自身
 ```
 
 | 顺序 | 阶段 | 对应工具/入口 | 必须做 | 禁止 |
 |---|---|---|---|---|
-| 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据 | 在 PM 内调用证据包 builder；直接查研究 DB；读取上游内部草稿 |
-| 2 | 主生命周期动作口 | `pm_lifecycle_action_port`、持仓变化和条件字段 | 先判定当前 candidate 属于新增风险还是非新增风险，并生成唯一 `primary_lifecycle_action_port`，只作为 PM 内部分流、学习路由和 provenance trace | 把 Step2 结果写入 `final_action_contract.evidence_used`，或把它拿来和 Step6 最终合约比较后作为最终失败依据 |
-| 3 | 单品种方向与候选质量 | `pm_ticker_side_selection`、`pm_signal_fusion`、市场确认和数据质量 | 只生成 `side_priority`、`ticker_side_priority`、`side_priority_score`、`candidate_quality`、`candidate_layer_hint` | 写 `opportunity_rank`、`capital_priority_score`、`capital_priority_tier` 或最终资金部署事实 |
-| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 open/add/hold/reduce/exit/execution/conditional_monitor lane 消费学习，并保留安全 trace | 拿开仓学习解释退出，拿 execution 学习给开仓权限，或把原始研究对象写入 artifact |
-| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理 `open/open_probe/open_real/add/scale/increase/reverse/conditional open` 等新增风险候选，生成唯一全市场 `opportunity_rank`、`rank_score`、`capital_deployment` 和 rank trace | 让非新增风险进入资金 rank；伪造空 deployment；把 Step3/4 候选字段当最终 rank trace |
-| 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、PM 推荐事实写入口 | PM 原子签出唯一 `final_action_contract`，写清动作、手数、触发、失效、资金或非 rank 理由、生命周期学习 trace 和 reason code，并通过最终合约生成合法性检查和最终合约自身边界检查 | 分散写多个交易合约；保存 `pm_internal_candidate`、`pm_capital_deployment_decision` 等中间态；让 Trader/Reviewer 补签合约；把 Step2 与 Step6 的动作差异作为最终失败依据 |
+| 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据，并写入同一个 PM 内存状态 | 在 PM 内调用证据包 builder；读取上游内部草稿；生成任何独立输出 |
+| 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 只形成 `side_priority`、`ticker_side_priority`，继续更新同一个 PM 内存状态 | 读取学习、比较持仓、生成生命周期、rank、手数和交易权限 |
+| 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
+| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 canonical family/lane 消费学习，把完整候选学习池、临时路由和拒绝原因留在同一个 PM 内存状态 | 把 Step4 临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限；把原始研究对象写入 artifact |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理 `open/open_probe/open_real/add/scale`、反转退出后的新风险腿和保留新增风险目标的条件 `open_probe`，把唯一全市场 rank、预算和 sizing 事实写回同一个 PM 内存状态 | 让非新增风险进入资金 rank；生成独立 rank/budget/sizing artifact；把 Step3/4 候选字段当最终 rank trace |
+| 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、`FuturesRecommendation` 返回入口 | 从最终 PM 内存状态原子生成唯一 `final_action_contract` 与唯一 `FuturesRecommendation`，按最终动作和手数重新形成学习事实，并检查最终输出自身 | 分散写多个交易合约；读取 Step1–5 早期状态做回溯比较；返回半成品；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
 
-1. 第 2 步生命周期口必须早于方向选择、学习消费和 rank；后续步骤只能读取它，不能重判第二套口径。
-2. 非新增风险动作走 `1 -> 2 -> 3 -> 4 -> 6`，包括 `wait/hold/reduce/exit/close/risk_exit`；它们不得伪造全市场 rank 或资金部署。
-3. 新增风险动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括 `open/open_probe/open_real/add/scale/increase/reverse/conditional open`；缺 Step5 资金部署事实时不能签出新增风险最终合约。
+1. 第 2 步只判断单品种方向；第 3 步结合持仓形成交易状态和内部生命周期分流；两步都不是最终交易事实。
+2. 非新增风险动作走 `1 -> 2 -> 3 -> 4 -> 6`，包括 `wait/hold/reduce/exit` 和不增加风险的 `conditional_monitor`；它们不得伪造全市场 rank。
+3. 新增风险动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括 `open/open_probe/open_real/add/scale` 和反转退出后的新风险腿；缺 Step5 资金部署事实时不能签出新增风险最终合约。
 4. `watch_for_trigger` 的条件触发出口必须由 PM 在唯一合约中写明 `conditional_trigger_authority`、触发条件和失效边界；Trader 未触发不得成交。
 5. 手数计算必须晚于生命周期口、候选质量、学习路由和必要的全市场资金部署；分析师证据不能直接决定手数。
-6. `pm_six_step_trace.step6_contract_generation_check` 或 `pm_six_step_trace.pm_contract_self_check` 失败时必须停止保存 PM 推荐，不能把非法合约交给审计员兜底。
+6. `pm_six_step_trace.step6_contract_generation_check` 和 `pm_six_step_trace.pm_contract_self_check` 只检查最终输出自身；任一失败时 PM 不返回半成品，不能把非法合约交给审计员修复。
 
-PM 内部可以分步生成评分草稿、排序草稿、资金部署草稿和签约候选，但这些草稿只能存在 PM 内部内存中，不得写入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。对外事实入口只有第 6 步签出的唯一 `final_action_contract`。最终合约提交必须是原子动作：凡最终 `final_action_contract` 属于新增风险并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；非新增风险合约必须写明非 rank 生命周期解释和学习 trace，不得把裸 rank、空 deployment 或 PM 中间态交给 Auditor、Trader、Reviewer、Researcher 或 Protocol Governor。
+Step1–5 只更新同一个 PM 内存状态，不生成独立评分草稿、排序草稿、资金部署 artifact、签约候选、recommendation 和合约草稿。对外事实入口只有第 6 步返回的唯一 `FuturesRecommendation`；`workflow` 编排层、Auditor 和保存层在 PM 返回后完成审计与物理化。最终合约提交必须是原子动作：凡最终 `final_action_contract` 属于新增风险并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；直接跳过 Step5 的非新增风险合约不得补造 rank，Step5 预算拒绝路径保留真实 rank 和拒绝事实。
 
 ### 6.3 配置参数对应关系
 
@@ -531,7 +531,7 @@ PM 不能：
 - 跳过审计员；
 - 让学习记忆单独创造交易权限；
 - 把无触发、无失效边界的机会写成可成交合约；
-- 把 `pm_internal_candidate`、`pm_capital_deployment_decision` 等 Step6 前中间态保存为跨智能体事实。
+- 在 Step1–5 生成 `pm_internal_candidate`、`pm_capital_deployment_decision`、recommendation、合约草稿和独立 artifact。
 
 ## 七、审计员内部机制
 
@@ -901,11 +901,11 @@ src/run/backtest_daily_test.py
 
 ## PG 审计边界补充（2026-07-07）
 
-Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_snapshot.signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
+Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM 返回后由保存层物理化的 recommendation artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_snapshot.signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
 
-PG 对 `signal_snapshot.signal_collection_contract` 只审存在性、`producer="signal_collector"`、`collector_decision_boundary="no_trade_authority"`，以及 SCC 内不得出现 PM 越权字段，例如 `final_action`、`target_lots`、`lots_delta`、`opportunity_rank`、`opportunity_score`、`rank_score`、`position_sizing_result`、`capital_deployment`、`final_action_contract` 或 `pm_six_step_trace`。`final_action_contract.signal_collection_contract_ref` 只是摘要，不是主证据，不能替代完整 SCC。
+PG 对 `signal_snapshot.signal_collection_contract` 只审存在性、`source_agent="signal_collector"`、`collector_decision_boundary="no_trade_authority"`，以及 SCC 内不得出现 PM 越权字段，例如 `final_action`、`target_lots`、`lots_delta`、`opportunity_rank`、`opportunity_score`、`rank_score`、`position_sizing_result`、`capital_deployment`、`final_action_contract` 或 `pm_six_step_trace`。`final_action_contract.signal_collection_contract_ref` 只是摘要，不是主证据，不能替代完整 SCC。
 
-PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、缺完整 SCC 或 SCC producer/boundary/越权字段非法、残留 `pm_internal_candidate` / `pm_internal_candidate_contract` / `pm_capital_deployment_decision` / PM draft 字段，或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 生成检查和 PM 合约自检负责。
+PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、缺完整 SCC、SCC source_agent/boundary/越权字段非法、残留 Step1–5 中间状态或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 最终生成检查和最终合约自身检查负责。
 
 测试体系按职责分层：`src/tests` 只构造样本并断言对应工具是否判对；`src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py` 只负责编排，不写审计规则。PG 专用审计规则只放在 `src/tools/agent_tools/control/pg_*.py`。
 

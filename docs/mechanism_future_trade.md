@@ -21,7 +21,7 @@
 
 ### 1. 四阶段业务流
 
-- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `producer="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步签发每个品种的唯一 `final_action_contract`。PM 先判断生命周期动作口：`open/open_probe/open_real/add/scale/increase/reverse/conditional open` 等新增风险候选必须进入 Step5 全市场资金 rank 与部署，`wait/hold/reduce/exit/close/risk_exit` 等非新增风险动作直接进入 Step6 签约并写清非 rank 生命周期解释。普通策略执行依据只能是唯一 `final_action_contract` 及其内部权限字段；投资组合经理内部草稿只用于本地推演和日志留痕，不能成为交易员或研究员的事实入口。`watch_for_trigger + trigger_valid=false + setup_quality_ok + 明确方向/触发条件/失效边界` 的机会，只有被 PM 签成同一张 `final_action_contract` 的条件监控 probe 后，才允许交易员盘中监控触发。
+- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `source_agent="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步转换同一个内存状态：Step2 判断单品种方向，Step3 结合持仓确定交易状态，Step4 消费学习，新增风险候选再进入 Step5 全市场 rank、预算和 sizing，非新增风险候选从 Step4 直接进入 Step6。Step1–5 不输出 artifact、合约草稿和 recommendation；Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。普通策略执行依据只能是审计通过的唯一 `final_action_contract`。
 - **Phase2 盘中执行**：交易员读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。交易员不能从投资组合经理文本、旧 probe 标记或最小一手机制自行创造策略方向，只能执行投资组合经理和审计员已授权计划。
 - **Phase3 日终结算**：会计师回放当日成交流水，使用同日官方结算价逐日盯市，更新官方组合、日结算、品种日 PnL 和交易流水结算价；结算后发现换月需要时，只能生成下一交易日执行的 rollover 运营单，不能反向影响当天盘前策略。
 - **Phase4 复盘验收**：复盘员检查 Phase1-3 完整性、账务一致性、交易流水入账、分析师信号落库完整性、投资组合经理机会评分/排名与资金分配理由、完整交易日志；研究员在 Phase4 验证后通过独立入口输出结构化研究信息，供未来交易日使用。未完成交易日会被 `incomplete_trading_day_phase` 硬拦，不能作为策略结论或学习样本。
@@ -48,7 +48,7 @@
 
 - Phase2 支持盘中执行确认：15 分钟级别判断信号，1 分钟级别选择成交候选价。
 - 开仓通常需要完整开盘区间、VWAP、突破/跌破条件和追价过滤；平仓、减仓和换约属于即时执行优先事项。
-- 条件监控 probe 不等于立即开仓。投资组合经理必须在 `final_action_contract` 中写明 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`、方向、目标手数、触发条件和失效边界；交易员盘中只检查合约里的触发是否成立，成立才按合约成交，未触发只记录原因。
+- `conditional_monitor` 只表示监控语义，不是新增 `final_action`，不增加风险时最终动作仍为 `wait/hold` 且不要求 rank。最终仍保留新增风险目标的条件 `open_probe` 必须经过 Step5，并在 `final_action_contract` 中写明 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`、方向、目标手数、触发条件和失效边界；交易员盘中只检查合约里的触发是否成立，成立才按合约成交，未触发只记录原因。
 - `opportunity_score/opportunity_rank` 不等于执行触发。它们只解释投资组合经理为什么把资金或监控资源给某个候选。交易员的执行触发仍只能来自 `final_action_contract` 的普通目标手数或条件监控字段，以及盘中真实行情。
 - 若没有启用或无法满足盘中确认，系统会使用早盘执行基准价或跳过交易，并写入原因。
 - 滑点模型为 tick 模型：买入类动作按基准价加滑点，卖出类动作按基准价减滑点。

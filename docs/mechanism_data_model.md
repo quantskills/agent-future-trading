@@ -73,18 +73,19 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 信号收集员
 
-不调用 LLM，不读取研究库。只读取三类分析师正式输出的 `action_evidence_contract`，生成 `signal_collection_contract`，并写明 `producer="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。它不输出 score/rank、手数、仓位、交易动作或 `final_action_contract`。
+不调用 LLM，不读取研究库。只读取三类分析师正式输出的 `action_evidence_contract`，生成 `signal_collection_contract`，并写明 `source_agent="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。它不输出 score/rank、手数、仓位、交易动作或 `final_action_contract`。
 
 ### 投资组合经理
 
 不调用 LLM。读取 `signal_collection_contract`、账户、持仓、资金、风控配置、市场确认和 PM 六步内部确定性工具输出：
 
-- `decision_memory_retrieval` 输出 `effective_memory_summary`；
-- `pm_ticker_side_selection` 输出 `opportunity_scorecard`、`side_priority` 和候选质量；
-- `pm_full_market_capital_deployment` 只对新增风险输出 `opportunity_rank`、`capital_deployment` 和 rank trace；
-- `pm_position_sizing` 输出 `position_sizing_result`。
+- Step2 由 `pm_ticker_side_selection` 形成 `side_priority` 和 `ticker_side_priority`；
+- Step3 结合持仓形成候选质量和内部生命周期分流；
+- Step4 由 `decision_memory_retrieval` 输出 `effective_memory_summary` 和完整 canonical 候选学习池；
+- Step5 只对新增风险调用 `pm_full_market_capital_deployment` 和 `pm_position_sizing`，把 rank、预算和 `position_sizing_result` 写回同一个 PM 内存状态；
+- Step6 原子装配最终合约和两个最终检查。
 
-投资组合经理是唯一策略交易合约签发者，只能输出一张 `final_action_contract`。缺少 `signal_collection_contract` 或 producer/boundary 不合法时，PM 应 fail-fast，不能自行重建证据包。
+投资组合经理是唯一策略交易合约签发者。Step1–5 只更新同一个 PM 内存状态；Step6 原子返回唯一 `FuturesRecommendation`，唯一 `final_action_contract` 位于 `signal_snapshot.final_action_contract`。缺少 `signal_collection_contract` 或 source_agent/boundary 不合法时，PM 应 fail-fast，不能自行重建证据包。
 
 ### 审计员
 
@@ -183,8 +184,8 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | 事实载体 | 保存的系统事实 | 标准日期字段 | 授权写入口 | 允许保存 | 禁止保存或改写 |
 |---|---|---|---|---|---|
 | 分析师报告 artifact / `action_evidence_contract` / `artifact_json` | 盘前预测证据事实 | `trading_date` | 技术面分析师、基本面分析师、期货新闻面分析师 | 方向、触发、证据强弱、缺失、冲突、失效边界、数据可见性 | 手数、仓位、最终交易动作、`final_action_contract` |
-| 信号收集 artifact / `signal_collection_contract` | 统一结构化证据事实 | `trading_date` | 信号收集员 | `producer="signal_collector"`、`collector_decision_boundary="no_trade_authority"`、来源引用、逐条证据、方向汇总、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 历史学习结论、score/rank、仓位、手数、交易动作、`final_action_contract`；PM 或其他模块重建证据包 |
-| `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实；独立 Auditor 审计事实载体 | `trading_date` | 投资组合经理写 PM 合约；独立 Auditor 写 `audit_payload` / auditor 摘要；换月/强平运营入口写运营事实 | PM 策略路径可保存完整 `final_action_contract`、`signal_snapshot.final_action_contract`、`pm_six_step_trace`；Auditor 只能保存 `audit_verdict`、hard/soft risk reasons 和只读审计 payload；运营路径只保存运营动作事实 | Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；Auditor 改方向/改手数/新建合约；运营推荐伪装成 PM 策略评分；PM 中间态 `pm_internal_candidate`、`pm_capital_deployment_decision` 进入持久化载体 |
+| 信号收集 artifact / `signal_collection_contract` | 统一结构化证据事实 | `trading_date` | 信号收集员 | `source_agent="signal_collector"`、`collector_decision_boundary="no_trade_authority"`、来源引用、逐条证据、方向汇总、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 历史学习结论、score/rank、仓位、手数、交易动作、`final_action_contract`；PM 或其他模块重建证据包 |
+| `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实；独立 Auditor 审计事实载体 | `trading_date` | PM Step6 返回唯一 `FuturesRecommendation`；独立 Auditor 写 `audit_payload` / auditor 摘要；保存层负责物理化；换月/强平运营入口写运营事实 | PM 策略路径只保存完整 `signal_snapshot.final_action_contract`、原始 SCC 和两个最终检查；Auditor 只能保存 `audit_verdict`、hard/soft risk reasons 和只读审计 payload；运营路径只保存运营动作事实 | Step1–5 内存状态进入持久化载体；Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；Auditor 改方向/改手数/新建合约；运营推荐伪装成 PM 策略评分 |
 | `futures_intraday_decision` / Phase2 `features_json` | 盘中触发和执行判断事实 | `trading_date` | 交易员执行入口 | 触发是否成立、执行摘要、盘中行情、执行原因、成交/未成交依据 | 完整 `final_action_contract` 镜像、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` |
 | `futures_transactions` / transaction `audit_payload` | 交易员执行事实 | `trading_date` | 交易员成交写入入口 | 成交/未成交、动作、手数、品种、执行审计摘要、执行结果 | 完整 PM 合约镜像、PM 学习解释、PM 排名、PM 资金部署理由、研究记录 |
 | `daily_settlement` / `ticker_daily_pnl` | 会计师结算事实 | `trading_date` | 会计师结算入口 | PnL、手续费、保证金、权益、持仓快照、分品种盈亏 | 学习字段、LLM 字段、交易授权、研究结论 |

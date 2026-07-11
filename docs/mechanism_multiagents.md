@@ -31,7 +31,7 @@
 |---|---|
 | 多智能体角色、阶段、权限边界 | `docs/mechanism_multiagents.md` |
 | workflow 编排、传递、保存、阻断 | `docs/mechanism_workflow.md` |
-| PM 六步、最终合约、自检、PM artifact | `docs/agent_pm.md` |
+| PM 六步、最终合约、自检、直接返回与返回后 artifact 边界 | `docs/agent_pm.md` |
 | 全链路生产/落盘/消费/审计契约矩阵 | `docs/matrix_chain_contract.md` |
 | 字段语义矩阵 | `docs/matrix_field_semantics.md` |
 | action-value 动作 canonical 矩阵 | `docs/matrix_action_canonical.md` |
@@ -97,7 +97,7 @@ protocol_governor
 | `fundamental` | 库存、仓单、基差、供需、产业数据、基本面校准研究 | 结构化基本面预测证据、驱动、数据质量、反向压制、失效边界 | 是 | 输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `commodity_news` | 新闻、事件、政策、舆情、新闻校准研究 | 结构化新闻预测证据、事件方向、催化质量、时效、确认条件 | 是 | 输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `signal_collector` | 三类分析师结构化预测证据 | `signal_collection_contract` | 否 | 读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
-| `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | `FuturesRecommendation`、唯一 `final_action_contract`、`pm_six_step_trace` | 否 | 调 LLM、重建 SCC、输出第二套交易计划、保存 PM 内部草稿 | Auditor、Trader |
+| `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot` | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划 | Auditor；审计通过后由 workflow 编排层交给 Trader |
 | `auditor` | PM 最终合约、账户、持仓、保证金、硬风险边界 | `audit_verdict`、审计 payload、risk reasons | 否 | 改方向、改手数、新建合约、直接消费研究记忆改交易权限 | Trader |
 | `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发 | Accountant、Reviewer |
 | `accountant` | 成交、持仓、结算价、费用、保证金率、合约乘数 | settlement、PnL、保证金、权益、持仓状态 | 否 | 用 LLM、学习、复盘改账；写交易动作 | Reviewer |
@@ -112,7 +112,7 @@ protocol_governor
 | 事实类型 | 授权入口 | 总边界 |
 |---|---|---|
 | 预测证据事实 | 三类分析师结构化输出 | 不含手数、仓位、最终交易动作 |
-| 信号收集事实 | `signal_collector` | 只保真聚合预测证据，保留 `producer=signal_collector` 与 `collector_decision_boundary=no_trade_authority` |
+| 信号收集事实 | `signal_collector` | 只保真聚合预测证据，保留 `source_agent=signal_collector` 与 `collector_decision_boundary=no_trade_authority` |
 | 策略交易事实 | `portfolio_manager` | 只由 PM 第 6 步签出唯一 `final_action_contract` |
 | 审计事实 | `auditor` | 只审 PM 合约，不改合约 |
 | 执行事实 | `trader` | 只记录执行和触发事实，不复制 PM 学习、rank、资金解释 |
@@ -153,7 +153,7 @@ protocol_governor
 
 | 阶段 | 可以保存 | 禁止保存 |
 |---|---|---|
-| PM recommendation | `final_action_contract`、`pm_six_step_trace`、完整原始 `signal_snapshot.signal_collection_contract`、正式学习证据、安全摘要 | PM 内部草稿、第二套交易计划、Trader 执行结果、收盘后事实、PM 重建 SCC |
+| PM recommendation | 第 6 步返回的唯一 `FuturesRecommendation`；其中只保存 `final_action_contract`、两个最终检查、完整原始 `signal_snapshot.signal_collection_contract` 和矩阵登记的最终摘要 | Step1–5 内存状态、合约草稿、第二套交易计划、Trader 执行结果、收盘后事实、PM 重建 SCC |
 | Auditor | 审计裁决、风险原因、只读审计摘要 | 新合约、改写后的方向、改写后的手数、研究库原始记录 |
 | Trader / Phase2 | 执行事实、触发事实、执行必要字段摘要 | 完整 PM 合约镜像、PM 学习、rank、资金解释 |
 | Transaction audit payload | 成交事实、保证金审计、执行触发摘要 | 完整 PM 合约镜像、PM 学习解释、PM 排名解释 |
@@ -177,7 +177,7 @@ protocol_governor
 
 - 缺 `final_action_contract`。
 - PM self-check failed。
-- SCC 缺失、producer 错、boundary 错。
+- SCC 缺失、source_agent 错、boundary 错。
 - Trader 成交不来自最终合约。
 - artifact 污染。
 - 字段语义不一致。

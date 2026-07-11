@@ -1,6 +1,6 @@
 # Matrix Chain Contract
 
-更新时间：2026-07-10
+更新时间：2026-07-11
 
 本文是 AgentQuant 全链路契约矩阵。它只回答一件事：每个关键系统事实由谁生产、落在哪里、谁消费、谁审计、什么条件必须 hard fail、什么条件只进入 diagnostics。
 
@@ -49,18 +49,18 @@
 | `action_evidence_contract` | `technical` / `fundamental` / `commodity_news`，Phase1 | 行情、基本面、新闻、商品 profile、分析师校准摘要、数据截止点 | 结构化预测证据、方向、trigger、invalidation、证据强弱、数据质量 | signal 表 `artifact_json`；分析师 artifact；workflow `analyst_signals` | `signal_collector`、Reviewer、Researcher | pre-backtest structured IO；daily PG evidence boundary | 含手数、仓位比例、保证金、`final_action_contract`、`opportunity_rank`、最终交易动作；缺 `data_cutoff`；自由文本覆盖结构化字段 | 证据弱、证据冲突、数据缺口、只给背景证据 |
 | `product_profile_evidence` | 三类分析师，Phase1 | `product_price_behavior_profiles.yaml`、行情与品种上下文 | profile 使用痕迹、支持证据、冲突证据、缺失确认项 | 分析师 `metadata`；`action_evidence_contract.learning_scope`；SCC source/evidence items | `signal_collector`、PM 证据上下文、Reviewer、Researcher | contract coverage；PG artifact boundary | profile 字段含交易授权、手数、rank、PM reason code、最终动作 | profile 不相关、profile 证据不足 |
 | `fusion_evidence` | 分析师质量工具，Phase1 | 分析师结构化证据、profile、数据质量 | 证据强弱、时效、一致性、冲突、确认需求 | 分析师 `metadata.action_evidence_contract`；SCC `source_contracts` | `signal_collector`、PM scorecard、Auditor、Reviewer、Researcher | contract coverage；Auditor fusion explanation audit | fusion 字段直接授权交易、替代 PM score/rank、进入 Trader 执行权限 | evidence_fusion 冲突高、确认需求多 |
-| `signal_collection_contract` | `signal_collector`，Phase1 | 三类分析师正式结构化输出 | 统一结构化预测证据包，保留 `producer=signal_collector` 与 `collector_decision_boundary=no_trade_authority` | workflow state `signal_collection_contract`；PM final `signal_snapshot.signal_collection_contract` | PM、Reviewer、Researcher、PG | pre-backtest SCC fixture；daily SCC audit；contract coverage | 缺 SCC；producer 非 `signal_collector`；boundary 非 `no_trade_authority`；SCC 含 PM 字段、手数、rank、资金部署、交易动作；缺 source refs；缺 evidence items | 分析师冲突、证据弱、缺确认项 |
-| `signal_snapshot.signal_collection_contract` | PM 签约落盘，Phase1 | workflow state 原始 SCC | 原始 SCC 快照 | `futures_recommendation.signal_snapshot`；recommendation artifact | Reviewer、Researcher、PG | daily PG SCC audit | PM 重建、补造、改写 SCC；只保存 SCC ref；完整 SCC 缺失；producer/boundary 错 | SCC 证据弱、冲突多 |
+| `signal_collection_contract` | `signal_collector`，Phase1 | 三类分析师正式结构化输出 | 统一结构化预测证据包，保留 `source_agent=signal_collector` 与 `collector_decision_boundary=no_trade_authority` | workflow state `signal_collection_contract`；PM final `signal_snapshot.signal_collection_contract` | PM、Reviewer、Researcher、PG | pre-backtest SCC fixture；daily SCC audit；contract coverage | 缺 SCC；`source_agent` 非 `signal_collector`；boundary 非 `no_trade_authority`；SCC 含 PM 字段、手数、rank、资金部署、交易动作；缺 source refs；缺 evidence items | 分析师冲突、证据弱、缺确认项 |
+| `signal_snapshot.signal_collection_contract` | PM Step6 返回、保存层物理化，Phase1 | workflow state 原始 SCC | 原始 SCC 快照 | `futures_recommendation.signal_snapshot`；recommendation artifact | Reviewer、Researcher、PG | daily PG SCC audit | PM 重建、补造、改写 SCC；只保存 SCC ref；完整 SCC 缺失；source_agent/boundary 错 | SCC 证据弱、冲突多 |
 | `final_action_contract` | PM Step6，Phase1 | SCC、持仓、账户、合约、配置、有效学习、PM 工具输出 | 唯一可执行策略合约：`final_action`、`current_lots`、`target_lots`、`lots_delta`、执行触发、风险边界、证据摘要 | `futures_recommendation.signal_snapshot.final_action_contract`；recommendation artifact | Auditor、Trader、Reviewer、Researcher、PG | PM self-check；Auditor；daily PG single trade truth | 缺 final contract；自检失败；顶层推荐 action/lots 与合约不一致；`lots_delta` 不匹配；空对象冒充事实；PM 中间态污染；第二套交易计划 | no trade、rank 低、资金预算不足、信号弱 |
-| `pm_six_step_trace` | PM Step6，Phase1 | PM 六步确定性工具输出 | Step6 final generation check、PM self-check、final lifecycle trace、安全摘要 | `signal_snapshot.pm_six_step_trace`；recommendation artifact | PG、Reviewer、Researcher | PM self-check；daily PG PM step6 audit | 缺 `step6_contract_generation_check`；缺 `pm_contract_self_check`；check failed；Step1-5 草稿冒充最终 trace | 早期路由被拒绝、学习为空、候选降级 |
+| `pm_six_step_trace` | PM Step6，Phase1 | 唯一最终 `final_action_contract` 与最终 `FuturesRecommendation` | `step6_contract_generation_check`、`pm_contract_self_check` | `signal_snapshot.pm_six_step_trace`；recommendation artifact | PG、Reviewer、Researcher | PM self-check；daily PG PM step6 audit | 缺任一最终检查；check failed；Step1-5 中间状态、早期生命周期和跨步骤比较结果进入 trace | 最终检查通过后的 no trade、学习为空、候选降级 |
 | `artifact_phase_boundary` | 各智能体对外 artifact 写入端 | 本角色授权事实、上游正式输出摘要 | 阶段白名单 artifact | signal / recommendation / audit / transaction / settlement / reviewer / research artifact | 下游智能体、PG、contract coverage | pre-backtest artifact fixture；daily PG artifact boundary | 下游 artifact 复制完整上游合约；Trader 保存 PM 学习/rank；Reviewer 写最终 action-value；Researcher 改当天交易事实；Accountant 保存学习字段 | artifact 摘要字段不足、诊断信息较少 |
-| `lifecycle_learning_trace.decision_learning_rows` | PM Step6 合约装配 | 最终 `final_action/current_lots/target_lots`、contract lifecycle、有效 action-value | Step6 final 决策层学习 rows | `final_action_contract.evidence_used.lifecycle_learning_trace.pm_final_contract_lifecycle_trace.decision_learning_rows` | PM self-check、PG、Reviewer、Researcher | PM self-check；daily PG learning boundary | 读取 Step2 router rows；open/rank 混入 hold/reduce/exit/execution/conditional_monitor；reduce_exit 混入 open/add/execution；hold 混入非 hold；conditional_monitor 混入非 conditional_monitor；trace lifecycle 与最终合约不一致 | 对应生命周期没有有效学习 |
+| `lifecycle_learning_trace.decision_learning_rows` | PM Step6 合约装配 | 最终 `final_action/current_lots/target_lots`、contract lifecycle、有效 action-value | Step6 final 决策层学习 rows | `final_action_contract.evidence_used.lifecycle_learning_trace.pm_final_contract_lifecycle_trace.decision_learning_rows` | PM self-check、PG、Reviewer、Researcher | PM self-check；daily PG learning boundary | 复制 Step4 临时 router rows；open/rank 混入 hold/reduce/exit/execution/conditional_monitor；reduce_exit 混入 open/add/execution；hold 混入非 hold；conditional_monitor 混入非 conditional_monitor；trace lifecycle 与最终合约不一致 | 对应生命周期没有有效学习 |
 | `lifecycle_learning_trace.trigger_profile_learning_rows` | PM Step6 合约装配 | execution / trigger / profile 类 action-value | 触发画像与执行质量学习 rows | `final_action_contract.evidence_used.lifecycle_learning_trace.trigger_profile_learning_rows` | PM self-check、Reviewer、Researcher | PM self-check | execution/profile 学习 direct-to-rank；改变 final_action、target_lots、lots_delta、rank、资金部署 | execution 学习为空、触发质量弱 |
 | `learning_used` | PM Step6 合约装配 | 有效 action-value、检索摘要、剔除/降级诊断、memory requirements | PM 最终合约学习证据容器 | `final_action_contract.learning_used` | PM self-check、PG、Reviewer、Researcher | PM self-check；daily PG learning boundary；contract coverage | `learning_used` 含第二套交易计划；formal 与 diagnostics 混层；缺 memory requirements；execution/profile 学习直接改 rank/手数/final_action | 没有命中有效学习、命中层级弱 |
-| `learning_used.alpha_setup_action_values` | PM Step6 合约装配 | `decision_memory_retrieval` 返回的正式 canonical action-value | PM 实际声明消费的正式 action-value 主证据列表 | `final_action_contract.learning_used.alpha_setup_action_values` | PM self-check、PG、Reviewer、Researcher | PM self-check purity；daily PG learning landing | 缺 `canonical_action_family`；缺 `action_preference`；缺 `action_value_lane`；缺 `learning_lane`；`canonical_action_value != true`；`consumer_scope != pm_learning`；future dated；incomplete prior 混入 | 列表为空、同类样本少、弱命中 |
+| `learning_used.alpha_setup_action_values` | PM Step6 合约装配 | `decision_memory_retrieval` 返回的正式 canonical action-value | PM 实际声明消费的正式 action-value 主证据列表 | `final_action_contract.learning_used.alpha_setup_action_values` | PM self-check、PG、Reviewer、Researcher | PM self-check purity；daily PG learning landing | 缺 `canonical_action_family`；缺必需的 `action_preference` 或 preference 违反 canonical family；缺 `action_value_lane`；缺 `learning_lane`；`canonical_action_value != true`；`consumer_scope != pm_learning`；future dated；incomplete prior 混入 | 列表为空、同类样本少、弱命中、canonical 允许的空 preference |
 | `learning_used.memory_retrieval.rejected_or_downgraded` | PM learning retrieval / Step6 装配 | 被 PM 候选学习集合剔除的 weak prior、incomplete prior、降级行 | 诊断检索材料，记录剔除原因 | `final_action_contract.learning_used.memory_retrieval.rejected_or_downgraded` | Reviewer、Researcher、PG 只读 | PM self-check 边界；daily artifact boundary | 参与 score/rank/手数/final_action；被当作正式 action-value 主证据 | weak prior 多、同类历史不足 |
 | `effective_memory_summary` | `pm_decision_memory_retrieval` | 研究库 action-value、profile、state、有效日期 | PM 记忆检索质量摘要、有效数量、剔除原因、匹配层级 | PM 输入对象；`final_action_contract.learning_used` 摘要 | PM、PG、Reviewer、Researcher | contract coverage；pre-backtest memory fixture | 空壳历史覆盖真实历史；future learning 进入 PM；非 `pm_learning` 进入 PM 正式学习 | 历史为空、弱匹配、样本少 |
-| `opportunity_scorecard` | PM ticker-side selection，Step3 | SCC、证据融合、当前持仓、学习摘要、风险上下文 | 单品种方向选择和候选质量 scorecard | PM 内部结果；`final_action_contract.evidence_used` 摘要 | PM Step4/Step5、Reviewer、Researcher、PG | contract coverage；PM self-check 间接校验 | scorecard 直接写最终 rank、手数、资金部署；替代 full-market rank；输出第二套交易计划 | 方向冲突、候选质量低 |
+| `opportunity_scorecard` | PM 内部方向与状态判断，Step2–3 | SCC、证据融合、当前持仓、风险上下文 | 单品种方向选择、候选质量和内部状态分项 | 同一个 PM 内存状态；Step6 仅把矩阵登记摘要写入 `final_action_contract.evidence_used` | PM Step4/Step5、Reviewer、Researcher、PG | contract coverage；PM 最终合约间接校验 | scorecard 独立输出 artifact、直接写最终 rank/手数/资金部署、替代 full-market rank、形成第二套交易计划 | 方向冲突、候选质量低 |
 | `opportunity_score_components` | PM scorecard / signal fusion | SCC、学习摘要、证据融合、风险边界 | PM 机会评分分项 | PM 内部结果；`final_action_contract.evidence_used` 摘要 | PM Step5 rank、Reviewer、Researcher、PG | PG learning components diagnostic audit | score component 被 Trader 当交易意图；学习分项直接生成手数；执行学习直接推 rank | 正向学习弱、负向学习强、冲突高 |
 | `rank_capital_layer_contract` | PM full-market capital deployment，Step5 | 新增风险候选池、资金状态、rank score、资金政策 | rank、capital layer、ratio source、资金部署解释 | `final_action_contract.capital_deployment` | PM self-check、Auditor、Reviewer、Researcher、PG | PM self-check；daily PG single trade truth | 新增风险未经过 rank；rank 字段缺失；资金层字段缺失；rank 写在非 PM artifact 里变成交易权限 | 未入选、资金层级低、资金利用不足 |
 | `position_sizing_result` | PM position sizing tool | 持仓、合约乘数、保证金率、风险参数、目标资金层 | 确定性手数计算结果 | PM 输入；`final_action_contract.evidence_used.position_sizing_result` | PM Step6、PM self-check、Auditor、Reviewer、PG | PM self-check；contract coverage | sizing 工具直接签最终交易；空对象冒充 sizing；结果与 `target_lots/lots_delta` 不一致 | sizing 被风险上限压低 |
@@ -89,11 +89,11 @@
 | 失败形态 | fixture 输入 | 必须命中的 gate | hard fail 断言 |
 |---|---|---|---|
 | SCC 缺失 | PM recommendation 只有 `signal_collection_contract_ref`，缺 `signal_snapshot.signal_collection_contract` | pre-backtest acceptance / contract coverage SCC fixture | `signal_snapshot.signal_collection_contract` 缺失 hard fail |
-| SCC producer/boundary 错 | SCC producer 非 `signal_collector`，boundary 非 `no_trade_authority` | pre-backtest SCC fixture | producer/boundary 非法 hard fail |
+| SCC source_agent/boundary 错 | SCC `source_agent` 非 `signal_collector`，boundary 非 `no_trade_authority` | pre-backtest SCC fixture | source_agent/boundary 非法 hard fail |
 | PM artifact 混入 incomplete prior | `canonical_action_value=false` 的 similar/fallback prior 塞进 `learning_used.alpha_setup_action_values` | PM self-check fixture | formal action-value 主列表污染 hard fail |
 | observe 空 `action_preference` | `canonical_action_family=observe`，lane 为 `hold`，preference 为空 | PG action matrix fixture | 合法通过；禁止误报 missing preference |
 | observe 冒充交易偏向 | observe 行带 `positive_candidate_open/exit/execution/hold` | PG action matrix fixture | family/lane/preference 不一致 hard fail |
-| Step2 / Step6 trace 混用 | Step2 是 hold，Step6 final 是 open/rank，最终 decision rows 带 hold | PM self-check fixture | final lifecycle trace 污染 hard fail |
+| Step4 临时路由 / Step6 final trace 混用 | Step4 临时路由是 hold，Step6 final 是 open/rank，最终 decision rows 带 hold | PM self-check fixture | final lifecycle trace 污染 hard fail；禁止比较早期路由与最终生命周期本身是否一致 |
 | execution/profile 污染决策层 | reduce_exit final contract 的 decision rows 带 execution | PM self-check fixture | decision rows 污染 hard fail |
 | execution/profile 合法分层 | reduce_exit final contract 的 trigger profile rows 带 execution，direct-to-rank false | PM self-check fixture | 通过；不误判为 reduce_exit 污染 |
 | action family/lane/preference 不一致 | `positive_candidate_open` 配 `reduce_exit`；缺 family；缺 lane | PG action matrix fixture | hard fail |
@@ -107,7 +107,7 @@
 
 | 审计对象 | PG 必审 | PG 禁审 |
 |---|---|---|
-| SCC | 完整 SCC 存在、producer、boundary、越权字段 | 信号强弱是否足够交易 |
+| SCC | 完整 SCC 存在、source_agent、boundary、越权字段 | 信号强弱是否足够交易 |
 | PM final contract | 存在性、自检结果、字段一致性、唯一合约、无中间态污染 | PM 方向、rank、手数、资金部署是否更优 |
 | action-value | family/lane/preference 一致性、PM formal list 纯净性、future dated、consumer_scope | 学习带来的收益预测是否正确 |
 | Trader | 成交来自审计通过合约、触发记录、source_type 分账、无 PM 学习镜像 | 是否应该追价、是否错过更好成交 |
@@ -138,7 +138,7 @@
 - PM formal action-value 主列表只保存完整 canonical 证据。
 - weak prior 只进入 diagnostics。
 - observe 空 preference 是合法观察语义。
-- Step6 final trace 是 PM 自检唯一决策层学习 trace。
+- `final_action_contract` 中由 Step6 重新形成的 final lifecycle trace 是 PM 自检唯一决策层学习 trace；`pm_six_step_trace` 只保存两个最终检查。
 - pre-backtest gate 拦截历史非策略失败形态。
 - daily PG audit 只 hard fail 系统契约断裂。
 - 策略优劣只由长期策略评估判断。
