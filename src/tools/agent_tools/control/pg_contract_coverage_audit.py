@@ -1432,11 +1432,11 @@ def _scan_field_table(repo_root: Path) -> List[str]:
 def _scan_config_prompt_alignment(repo_root: Path) -> List[str]:
     errors: List[str] = []
     checks = {
-        "src/config/learning_policy_catalog.yaml": (
-            "learning_consumer_scopes",
-            "pm_allowed_consumer_scope",
-            "trader_direct_research_consumption_allowed",
-            "授权事实入口",
+        "docs/matrix_field_semantics.md": (
+            "consumer_scope",
+            "pm_learning",
+            "Trader",
+            "final_action_contract",
         ),
         "src/config/portfolio_policy_catalog.yaml": (
             "consumer_scope=pm_learning",

@@ -107,34 +107,6 @@ def _signal_combo_tuple(signal_combo: Sequence[Any]) -> tuple[str, str, str]:
     return (values[0], values[1], values[2])
 
 
-def _infer_horizon_from_payload(payload: "PMRiskGateInput", target_side: str) -> str:
-    target_signal = _target_signal_for_side(target_side)
-    for item in payload.analyst_signals or []:
-        if not isinstance(item, dict) or _signal_text(item.get("signal")) != target_signal:
-            continue
-        horizon = str(item.get("analyst_horizon") or item.get("horizon_class") or "")
-        if horizon and horizon != "unknown":
-            return horizon
-    return "*"
-
-
-def _infer_market_regime_from_payload(payload: "PMRiskGateInput", target_side: str) -> str:
-    target_signal = _target_signal_for_side(target_side)
-    for item in payload.analyst_signals or []:
-        if not isinstance(item, dict) or _signal_text(item.get("signal")) != target_signal:
-            continue
-        regime = str(item.get("market_regime") or "")
-        if regime and regime != "unknown":
-            return regime
-    for item in payload.analyst_signals or []:
-        if not isinstance(item, dict):
-            continue
-        regime = str(item.get("market_regime") or "")
-        if regime and regime != "unknown":
-            return regime
-    return "*"
-
-
 def _state_bucket(value: Any, default: str = "unknown") -> str:
     if isinstance(value, dict):
         for key in ("market_state", "regime", "state", "trend_state"):

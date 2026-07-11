@@ -9,14 +9,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
-    action_value_matches_contract_memory_requirement,
     audit_pm_memory_consumption,
     authority_allows_entry,
     canonical_action_family,
     canonicalize_final_action_contract_for_persistence,
     canonical_action_preference_for_action_value,
     canonical_action_value_lane,
-    classify_analyst_evidence,
     classify_final_action_contract,
     classify_final_action_reason_codes,
     classify_reason_codes,
@@ -26,27 +24,22 @@ from tools.common.final_action_semantics import (
     contract_requires_conditional_intraday_result,
     derive_memory_requirements,
     derive_accounting_expectation,
-    derive_execution_requirement,
     derive_protocol_semantic_checks,
     derive_research_fact_state,
     derive_review_expectation,
-    has_active_opportunity_rejection,
     has_open_transaction_blocker,
-    has_valid_generic_no_change_explanation,
     has_valid_hold_exit_no_change_explanation,
     filter_action_values_for_contract_learning,
     full_market_rank_gate_errors,
     full_market_rank_source_payload,
     lane_matches_memory_requirement,
     lifecycle_learning_decision_contract_errors,
-    rank_capital_layer_contract_complete,
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
     requires_intraday_result,
     validate_action_preference_family_consistency,
     validate_action_value_write_consistency,
     validate_final_action_lot_transition,
-    validate_signal_collection,
 )
 
 
@@ -182,13 +175,12 @@ class FinalActionSemanticsTest(unittest.TestCase):
     def test_conditional_monitor_with_soft_limit_reaches_intraday_check(self):
         contract = self._conditional_contract()
         semantics = classify_final_action_contract(contract)
-        requirement = derive_execution_requirement(contract)
 
         self.assertEqual(semantics["lifecycle_state"], "conditional_monitor")
         self.assertEqual(semantics["execution_permission"], "monitor_intraday")
         self.assertTrue(semantics["requires_intraday_result"])
-        self.assertTrue(requirement["can_monitor_intraday"])
-        self.assertFalse(requirement["blocked"])
+        self.assertTrue(semantics["can_monitor_intraday"])
+        self.assertFalse(semantics["blocked"])
         self.assertTrue(authority_allows_entry(contract))
         self.assertTrue(requires_intraday_result(contract))
 
@@ -307,25 +299,6 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 }
                 self.assertTrue(expected.issubset(got), result)
 
-    def test_analyst_and_signal_collector_have_no_trade_authority_fields(self):
-        analyst = classify_analyst_evidence({
-            "opportunity_state": "tradeable_candidate",
-            "trigger_valid": True,
-            "current_trigger_confirmed": True,
-            "invalidation_present": True,
-            "final_action_contract": {},
-            "conditional_trigger_authority": True,
-        })
-        collector = validate_signal_collection({
-            "collector_decision_boundary": "no_trade_authority",
-            "no_trade_authority": True,
-            "target_lots": 1,
-        })
-
-        self.assertIn("final_action_contract", analyst["forbidden_trade_authority_fields"])
-        self.assertIn("conditional_trigger_authority", analyst["forbidden_trade_authority_fields"])
-        self.assertIn("target_lots", collector["forbidden_trade_authority_fields"])
-
     def test_accountant_reviewer_researcher_pg_read_same_lifecycle(self):
         contract = self._conditional_contract()
         accounting = derive_accounting_expectation(contract, {"actual_transactions": []})
@@ -381,9 +354,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "capital_deployment.capital_layer_missing",
             rank_capital_layer_contract_errors(incomplete),
         )
-        self.assertFalse(rank_capital_layer_contract_complete(incomplete))
         self.assertEqual(rank_capital_layer_contract_errors(complete), [])
-        self.assertTrue(rank_capital_layer_contract_complete(complete))
 
     def test_canonical_persistence_turns_flat_hold_into_wait(self):
         contract = {
@@ -1051,9 +1022,6 @@ class FinalActionSemanticsTest(unittest.TestCase):
         rejected_ids = {row["id"] for row in result["rejected_action_values"]}
         self.assertIn("c-long-open", rejected_ids)
         self.assertIn("c-long-execution", rejected_ids)
-        self.assertTrue(action_value_matches_contract_memory_requirement(contract, rows[2]))
-        self.assertFalse(action_value_matches_contract_memory_requirement(contract, rows[0]))
-        self.assertFalse(action_value_matches_contract_memory_requirement(contract, rows[1]))
 
     def test_positive_open_action_value_canonical_preference_is_required(self):
         row = {
@@ -1364,9 +1332,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "reason_codes": ["diagnostic_only_comment"],
         }
 
-        self.assertTrue(has_valid_generic_no_change_explanation(explained))
-        self.assertTrue(has_valid_generic_no_change_explanation(with_field))
-        self.assertFalse(has_valid_generic_no_change_explanation(unexplained))
+        self.assertTrue(classify_final_action_reason_codes(explained)["rank_no_deployment_explanation"])
+        self.assertTrue(classify_final_action_reason_codes(with_field)["capital_allocation_explanation"])
+        self.assertFalse(classify_final_action_reason_codes(unexplained)["rank_no_deployment_explanation"])
 
     def test_reason_code_classification_drives_active_rejection_and_open_blockers(self):
         classification = classify_final_action_reason_codes({
@@ -1374,18 +1342,8 @@ class FinalActionSemanticsTest(unittest.TestCase):
         })
         self.assertTrue(classification["conditional_monitor_candidate_only"])
 
-        self.assertFalse(
-            has_active_opportunity_rejection(
-                {"decision": {"reason": "pm_watch_for_trigger_probe_cap", "authority_type": "watchlist_only"}},
-                {"reason_codes": ["pm_watch_for_trigger_probe_cap"]},
-            )
-        )
-        self.assertTrue(
-            has_active_opportunity_rejection(
-                {"decision": {"reason": "market_confirmation_conflict", "authority_type": "watchlist_only"}},
-                {"reason_codes": ["market_confirmation_conflict"]},
-            )
-        )
+        rejected = classify_final_action_reason_codes({"reason_codes": ["market_confirmation_conflict"]})
+        self.assertIn("market_confirmation_conflict", rejected["active_opportunity_rejection_reasons"])
         self.assertTrue(
             has_open_transaction_blocker({
                 "final_action": "open_probe",

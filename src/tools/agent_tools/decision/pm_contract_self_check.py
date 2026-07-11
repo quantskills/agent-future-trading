@@ -328,11 +328,3 @@ def check_final_action_contract(
         "writes_artifact": False,
         "writes_payload": False,
     }
-
-
-def assert_final_action_contract(
-    contract: Dict[str, Any] | None,
-) -> None:
-    result = check_final_action_contract(contract)
-    if not result.get("ok"):
-        raise ValueError(f"pm_final_action_contract_self_check_failed:{result.get('errors')}")

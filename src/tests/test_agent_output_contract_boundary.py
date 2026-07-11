@@ -22,14 +22,12 @@ from tools.common.contracts import (
 from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
 from tools.common.final_action_semantics import (
     FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS,
-    classify_analyst_evidence,
     classify_final_action_contract,
     contract_increases_risk_position,
     derive_accounting_expectation,
     derive_research_fact_state,
     derive_review_expectation,
     validate_final_action_lot_transition,
-    validate_signal_collection,
 )
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
@@ -156,10 +154,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         }
         self.assertFalse(_nested_key_paths(artifact, FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS))
 
-        semantics = classify_analyst_evidence(artifact["action_evidence_contract"])
-        self.assertEqual(semantics["semantic_errors"], [])
-        self.assertEqual(semantics["forbidden_trade_authority_fields"], [])
-
     def test_signal_collector_output_has_source_agent_boundary_and_no_trade_authority(self):
         contract = build_signal_collection_contract(
             ticker="BU",
@@ -174,9 +168,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         self.assertTrue(contract["no_trade_authority"])
 
-        signal_semantics = validate_signal_collection(contract)
-        self.assertTrue(signal_semantics["no_trade_authority"])
-        self.assertEqual(signal_semantics["forbidden_trade_authority_fields"], [])
         pm_view = build_pm_fusion_diagnostics(contract)
         self.assertTrue(pm_view["pm_fusion_diagnostics"])
         self.assertTrue(pm_view["no_trade_authority"])

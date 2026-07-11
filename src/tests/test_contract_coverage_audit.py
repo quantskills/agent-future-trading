@@ -57,18 +57,6 @@ def _write_minimal_covered_repo(root: Path) -> None:
         )
     _append_text(
         root,
-        "src/config/learning_policy_catalog.yaml",
-        "\n".join(
-            [
-                "learning_consumer_scopes",
-                "pm_allowed_consumer_scope",
-                "trader_direct_research_consumption_allowed",
-                "授权事实入口",
-            ]
-        ),
-    )
-    _append_text(
-        root,
         "src/config/portfolio_policy_catalog.yaml",
         "consumer_scope=pm_learning\nTrader 不读研究记录\n授权事实入口",
     )
@@ -146,6 +134,9 @@ def _write_minimal_covered_repo(root: Path) -> None:
                     "opportunity_scorecard",
                     "position_sizing_result",
                     "consumer_scope",
+                    "pm_learning",
+                    "Trader",
+                    "final_action_contract",
                 "learning_lane",
                 "retrieval_key",
                 "uncovered_risks",

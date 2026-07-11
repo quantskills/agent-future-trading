@@ -15,7 +15,6 @@ from apis.contract_info_cache import FuturesContractInfoCache
 from graph.schema import (
     FuturesRecommendation,
     Portfolio,
-    RecommendationAction,
     RecommendationSourceType,
     RecommendationStatus,
 )
@@ -26,7 +25,6 @@ from tools.common.final_action_semantics import (
     RANK_CAPITAL_SOURCE_FIELDS,
     full_market_rank_source_payload,
     is_full_market_rank_source,
-    rank_capital_layer_contract_complete,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 
@@ -509,34 +507,6 @@ def contract_is_opening_risk(pm_state: Dict[str, Any]) -> bool:
     return current_lots == 0 and target_lots != 0
 
 
-def _lots_action_from_target(current_lots: int, target_lots: int) -> Tuple[RecommendationAction, int]:
-    current = int(current_lots)
-    target = int(target_lots)
-    if target == current:
-        return RecommendationAction.HOLD, 0
-    if current == 0:
-        return (
-            (RecommendationAction.OPEN_LONG, abs(target))
-            if target > 0
-            else (RecommendationAction.OPEN_SHORT, abs(target))
-        )
-    if current > 0:
-        if target >= 0:
-            return (
-                (RecommendationAction.OPEN_LONG, target - current)
-                if target > current
-                else (RecommendationAction.CLOSE_LONG, current - target)
-            )
-        return RecommendationAction.CLOSE_LONG, current
-    if target <= 0:
-        return (
-            (RecommendationAction.OPEN_SHORT, abs(target) - abs(current))
-            if abs(target) > abs(current)
-            else (RecommendationAction.CLOSE_SHORT, abs(current) - abs(target))
-        )
-    return RecommendationAction.CLOSE_SHORT, abs(current)
-
-
 def _update_pm_state_with_deployment(
     pm_state: Dict[str, Any],
     *,
@@ -849,28 +819,6 @@ def _apply_capital_efficiency_to_rank_row(
     row["rank_score"] = rank_score
     row["capital_priority_score"] = rank_score
     return rank_score
-
-
-def _capital_deployment_complete(contract: Dict[str, Any], rank: int | None) -> bool:
-    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
-    if not deployment:
-        return False
-    if rank is not None and not rank_capital_layer_contract_complete(contract):
-        return False
-    required = {
-        "selected_for_capital_deployment",
-        "capital_allocation_reason",
-        "original_target_lots",
-        "deployed_target_lots",
-        "deployed_lots_delta",
-    }
-    if rank is not None:
-        required.update({"rank_capital_role", "capital_layer", "capital_ratio_source", "rank_reason"})
-    if not required.issubset(deployment.keys()):
-        return False
-    if rank is not None and deployment.get("opportunity_rank") in (None, ""):
-        return False
-    return True
 
 
 def apply_full_market_capital_deployment(

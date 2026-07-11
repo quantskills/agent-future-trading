@@ -4,7 +4,6 @@
 
 commission:
   enabled: true
-  basis: execution_price
   rounding: 0.01
   require_explicit_rule_for_all_tickers: true
   by_underlying:

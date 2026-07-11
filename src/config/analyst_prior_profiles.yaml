@@ -16,18 +16,6 @@ dynamic_bounds:
   min_weight: 0.05
   max_weight: 0.70
 
-usage_rules:
-  static_weights_mode: prior_only
-  static_weights_can_create_trade_authority: false
-  allow_static_weights_to_open: false
-  strategic_view_only_for: [direction_context, holding_background, medium_term_bias]
-  trade_timing_only_for: [cold_start_ordering, quality_context, analyst_prior]
-  # watch_for_trigger 本身不能开仓；干净条件机会只能由 PM 写入 final_action_contract
-  # 条件监控合约后，交给 Trader 盘中检查触发。
-  strategic_view_cannot_open_position: true
-  watch_for_trigger_cannot_open_position: true
-  missing_fundamental_or_news_can_still_trade_if_market_data_setup_confirmed: true
-
 applicability_profile:
   # 分析师适用性校准：只作为上下文和信号质量调整的冷启动先验。
   # 它用于解释“哪个分析师在什么场景更有参考价值”，不是手工交易规则，

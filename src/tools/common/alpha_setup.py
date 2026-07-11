@@ -1372,34 +1372,6 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
     )
 
 
-def action_value_prompt_line(action_value: Mapping[str, Any]) -> str:
-    payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
-    preference = str(payload.get("action_preference") or "").strip()
-    signal_calibration = payload.get("signal_calibration") if isinstance(payload.get("signal_calibration"), Mapping) else {}
-    lane = str(payload.get("action_value_lane") or action_value.get("action_name") or "unknown")
-    analysis_boundary = ""
-    if signal_calibration:
-        analysis_boundary = (
-            f" Analyst-use={','.join(signal_calibration.get('allowed_effects') or [])}; "
-            "no trade authority/lots/margin/direction override."
-        )
-    return (
-        f"{action_value.get('ticker')}/{action_value.get('side')}/"
-        f"{action_value.get('horizon_class')}/{action_value.get('market_regime')}: "
-        f"setup={action_value.get('setup_type')}, action={action_value.get('action_name')}, lane={lane}, "
-        f"action_preference={preference or 'none'}, "
-        f"n={_safe_int(action_value.get('sample_count'))}, "
-        f"reward_mean={_safe_float(action_value.get('reward_mean')):.0f}, "
-        f"reward_sum={_safe_float(action_value.get('reward_sum')):.0f}, "
-        f"wr={_safe_float(action_value.get('win_rate')):.2f}, "
-        f"conf={_safe_float(action_value.get('confidence_score')):.2f}, "
-        f"max_impact={_safe_float(action_value.get('max_position_impact')):.3f}. "
-        "Use by lane only; analysts treat it as signal calibration, PM/Trader use only their own lane; "
-        "current trigger, invalidation, final_action_contract, Auditor, Trader, and the 20% margin hard cap "
-        f"still decide the trade.{analysis_boundary}"
-    )
-
-
 def analyst_signal_calibration_prompt_line(action_value: Mapping[str, Any]) -> str:
     payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
     signal_calibration = (
@@ -1533,37 +1505,6 @@ def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
         "max_position_impact": profile.get("max_position_impact"),
         "valid_until": profile.get("valid_until"),
         "product_learning_calibration_view": product_view,
-    }
-
-
-def compact_action_value_for_trace(action_value: Mapping[str, Any]) -> Dict[str, Any]:
-    payload = action_value.get("payload") if isinstance(action_value.get("payload"), Mapping) else {}
-    action_preference = payload.get("action_preference")
-    return {
-        "scope_key": action_value.get("scope_key"),
-        "ticker": action_value.get("ticker"),
-        "side": action_value.get("side"),
-        "horizon_class": action_value.get("horizon_class"),
-        "market_regime": action_value.get("market_regime"),
-        "setup_type": action_value.get("setup_type"),
-        "data_combo": _compact_text(action_value.get("data_combo"), 90),
-        "action_name": action_value.get("action_name"),
-        "sample_count": action_value.get("sample_count"),
-        "reward_sum": action_value.get("reward_sum"),
-        "reward_mean": action_value.get("reward_mean"),
-        "win_rate": action_value.get("win_rate"),
-        "confidence_score": action_value.get("confidence_score"),
-        "action_preference": action_preference,
-        "canonical_action_preference_source": payload.get("canonical_action_preference_source") or "payload.action_preference",
-        "max_position_impact": action_value.get("max_position_impact"),
-        "valid_until": action_value.get("valid_until"),
-        "research_output_contract_version": payload.get("research_output_contract_version"),
-        "action_value_lane": payload.get("action_value_lane"),
-        "prior_role": payload.get("prior_role"),
-        "usable_by": payload.get("usable_by"),
-        "allowed_effects": payload.get("allowed_effects"),
-        "forbidden_effects": payload.get("forbidden_effects"),
-        "signal_calibration": payload.get("signal_calibration"),
     }
 
 

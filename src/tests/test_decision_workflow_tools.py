@@ -30,10 +30,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     rank_metadata_for_row,
     rank_trace_for_row,
 )
-from tools.agent_tools.decision.pm_lifecycle_action_port import (
-    build_lifecycle_transition_diagnostic,
-    classify_lifecycle_action_port,
-)
+from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_ticker_side_selection import (
     SIDE_PRIORITY_MEANING,
@@ -365,50 +362,6 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertIn("`primary_lifecycle_action_port`", step3)
         self.assertIn("写回同一个产品候选状态", step2)
         self.assertIn("同一个产品候选状态", step3)
-
-    def test_lifecycle_transition_diagnostic_allows_explicit_budget_transition(self):
-        primary = classify_lifecycle_action_port({
-            "current_lots": 0,
-            "target_lots": 1,
-            "final_action": "open_probe",
-        })
-        final = classify_lifecycle_action_port({
-            "current_lots": 0,
-            "target_lots": 0,
-            "final_action": "wait",
-            "reason_codes": ["no_rank_or_budget_no_new_exposure"],
-        })
-        check = build_lifecycle_transition_diagnostic(
-            primary_lifecycle_action_port=primary,
-            contract_lifecycle_port=final,
-            reason_codes=["no_rank_or_budget_no_new_exposure"],
-        )
-        self.assertTrue(check["ok"])
-        self.assertEqual(check["diagnostic_type"], "lifecycle_transition_diagnostic")
-        self.assertFalse(check["consistent"])
-        self.assertEqual(check["transition_reason"], "no_rank_or_budget_no_new_exposure")
-        self.assertTrue(check["diagnostic_only"])
-        self.assertTrue(check["not_final_contract_gate"])
-        self.assertTrue(check["does_not_route_learning"])
-
-    def test_lifecycle_transition_diagnostic_marks_unexplained_transition(self):
-        primary = classify_lifecycle_action_port({
-            "current_lots": 0,
-            "target_lots": 1,
-            "final_action": "open_probe",
-        })
-        final = classify_lifecycle_action_port({
-            "current_lots": 0,
-            "target_lots": 0,
-            "final_action": "wait",
-        })
-        check = build_lifecycle_transition_diagnostic(
-            primary_lifecycle_action_port=primary,
-            contract_lifecycle_port=final,
-            reason_codes=[],
-        )
-        self.assertFalse(check["ok"])
-        self.assertEqual(check["transition_reason"], "unexplained_lifecycle_port_transition")
 
     def test_lifecycle_learning_router_routes_execution_to_trigger_profile(self):
         result = route_lifecycle_learning(

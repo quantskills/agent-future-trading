@@ -23,7 +23,6 @@ config_catalogs:
   rank_score_policy: rank_score_policy.yaml
   data_factor_policy: data_factor_policy_catalog.yaml
   product_price_behavior_profiles: product_price_behavior_profiles.yaml
-  evidence_fusion_policy: evidence_fusion_policy_catalog.yaml
 
 # ---------------------------------------------------------------------------
 # 1. 运行加速与数据预取：只影响性能和数据准备，不改变交易权限
@@ -43,43 +42,16 @@ runtime:
     prefetch_finoview_feather: true
     prefetch_all_finoview_feathers: false
     prefetch_news_txt: true
-  data_quality_summary:
-    enabled: true
-    output_dir: src/logs/data_quality
 
 # ---------------------------------------------------------------------------
 # 2. 控制组协议治理：PG 只做协议边界和 artifact 审计，不生成交易事实
 # ---------------------------------------------------------------------------
 
 control_governance:
-  enabled: true
   protocol_governor:
-    enabled: true
-    role: audit_sidecar_only
-    llm_enabled: false
     may_create_trade_authority: false
     may_modify_lots_or_margin: false
     may_execute_orders: false
-    may_write_settlement: false
-    final_trade_truth: final_action_contract
-  preflight:
-    enabled: true
-    deterministic_only: true
-    call_external_apis: false
-    required_python_env: deepfund
-    check_assets_writable: true
-    check_local_sqlite: true
-  cost_budget_audit:
-    enabled: true
-    role: resource_observation_only
-    can_change_strategy: false
-    can_emit_trade_action_fields: false
-    allowed_outputs: [cost_report, cost_warning, retry_suggestion, investigation_priority]
-  tool_access_policy:
-    enabled: true
-    role: agent_tool_namespace_audit
-    violation_effect: protocol_error_only
-    protocol_governor_allowed_namespaces: [control, database]
 
 # ---------------------------------------------------------------------------
 # 3. 实验账户与资金控制
@@ -99,8 +71,6 @@ max_total_margin_ratio: 0.20
 # 该段服务 PM 计划、rank 资金部署和 Step6 签约；不由 Reviewer/PG 复判收益表现。
 position_budget_policy:
   enabled: true
-  basis: margin
-  capital_base: account_equity
   # 账户/组合保证金硬边界：PM 签约、Auditor 复核、Trader 执行与 Reviewer 结算验收都必须守住。
   hard_max_total_margin_ratio: 0.20
   min_real_trade_margin_ratio: 0.008
@@ -125,14 +95,11 @@ position_budget_policy:
 # 3.4 分析师证据权重入口
 # 该段只作为 PM 证据路由/先验设置；分析师仍不能生成手数、保证金或 final_action_contract。
 analyst_weight_policy:
-  enabled: true
   mode: evidence_router
   static_weights_mode: prior_only
   static_weights_can_create_trade_authority: false
-  allow_static_weights_to_open: false
   strategic_profile: sector_strategic_view
   trade_timing_profile: daily_trade_timing
-  dynamic_overlay: database_only
   strategic_view_cannot_open_position: true
   watch_for_trigger_cannot_open_position: true
 
@@ -184,7 +151,6 @@ drawdown_control:
   first_probe_loss_cooldown_days: 2
   second_probe_loss_cooldown_days: 3
   cooldown_increment_days: 1
-  recovery_probe_margin_ratio_min: 0.008
   recovery_probe_margin_ratio_max: 0.015
   recovery_restore_step_margin_ratios: [0.02, 0.04, 0.06, 0.08]
   recovery_probe_min_confirmation_score: 0.65

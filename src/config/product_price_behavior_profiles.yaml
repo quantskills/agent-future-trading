@@ -1,4 +1,3 @@
-version: agentquant.product_price_behavior_profiles.v1
 profile_contract_version: agentquant.analyst_product_price_behavior_profile.v1
 required_tickers:
   - BU
@@ -16,33 +15,6 @@ required_tickers:
   - SR
   - TA
   - ZN
-authority_boundary:
-  profile_role: analysis_evidence_context_only
-  static_profile_mode: cold_start_analysis_frame
-  dynamic_learning_overlay: learning_context_and_analyst_learning_calibration
-  yaml_runtime_mutation: forbidden
-  forbidden_consumers:
-    - auditor
-    - trader
-    - accountant
-  forbidden_trade_fields:
-    - final_action
-    - final_action_contract
-    - target_lots
-    - current_lots
-    - lots_delta
-    - lots_delta_abs
-    - target_position_ratio
-    - target_margin_ratio
-    - margin_required
-    - authority_type
-    - audit_verdict
-    - capital_allocation_reason
-    - opportunity_rank
-    - conditional_trigger_authority
-    - requires_intraday_confirmation
-    - can_execute_without_intraday_trigger
-    - reason_codes
 profiles:
   BU:
     product_profile_version: agentquant.product_price_behavior.v1

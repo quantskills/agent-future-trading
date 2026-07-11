@@ -62,44 +62,6 @@ def resolve_decision_horizon(analyst_signals: Iterable[Any], target_lots: int) -
     return "unknown"
 
 
-def build_horizon_scope(
-    analyst_signals: Iterable[Any],
-    *,
-    decision_horizon: str,
-    execution_horizon: str = "short",
-    validation_horizon: str | None = None,
-) -> dict[str, Any]:
-    analyst_horizons: dict[str, dict[str, Any]] = {}
-    for signal in analyst_signals or []:
-        agent_name = normalize_analyst_name(getattr(signal, "agent_name", ""))
-        if not agent_name:
-            continue
-        analyst_horizons[agent_name] = {
-            "analyst_horizon": str(getattr(signal, "analyst_horizon", "") or getattr(signal, "horizon_class", "") or "unknown"),
-            "horizon_class": str(getattr(signal, "horizon_class", "") or "unknown"),
-            "expected_horizon_days": int(getattr(signal, "expected_horizon_days", 0) or 0),
-        }
-    return {
-        "analyst_horizons": analyst_horizons,
-        "decision_horizon": decision_horizon or "unknown",
-        "execution_horizon": execution_horizon or "short",
-        "validation_horizon": validation_horizon or decision_horizon or "unknown",
-    }
-
-
-def dominant_business_quality(analyst_payloads: Iterable[Mapping[str, Any]], target_signal: str) -> float:
-    scores = []
-    for payload in analyst_payloads or []:
-        if not isinstance(payload, Mapping):
-            continue
-        if str(payload.get("signal") or "") == target_signal:
-            try:
-                scores.append(float(payload.get("business_quality_score") or 0.0))
-            except Exception:
-                scores.append(0.0)
-    return max(scores, default=0.0)
-
-
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None:

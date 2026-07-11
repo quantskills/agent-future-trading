@@ -217,52 +217,6 @@ def apply_pm_contextual_calibration(
     return control, diagnostics
 
 
-def apply_auditor_contextual_calibration(
-    rows: Iterable[Mapping[str, Any]] | None,
-    *,
-    ticker: str,
-    side: str,
-    horizon_class: str,
-    market_regime: str,
-    reasons: list[str],
-    allowed_soften_reasons: set[str],
-    min_confidence: float = 0.35,
-) -> tuple[set[str], dict[str, Any]]:
-    allowed = {str(reason) for reason in (allowed_soften_reasons or set())}
-    soften: set[str] = set()
-    applied: list[dict[str, Any]] = []
-    for row in select_contextual_rule_calibrations(
-        rows,
-        rule_group="pm_risk_gate",
-        ticker=ticker,
-        side=side,
-        horizon_class=horizon_class,
-        market_regime=market_regime,
-        min_confidence=min_confidence,
-    ):
-        rules = (_row_rules(row).get("pm_risk_gate") or {})
-        if not isinstance(rules, Mapping):
-            continue
-        for reason in rules.get("soften_hard_block_reasons") or []:
-            text = str(reason or "").strip()
-            if text and (not allowed or text in allowed):
-                soften.add(text)
-        applied.append(_applied_summary(row, rules))
-    active = sorted(set(reasons or []) & soften)
-    return soften, {
-        "enabled": True,
-        "rule_group": "pm_risk_gate",
-        "softened_reasons": active,
-        "applied": applied,
-        "scope": {
-            "ticker": ticker,
-            "side": side,
-            "horizon_class": horizon_class,
-            "market_regime": market_regime,
-        },
-    }
-
-
 def _applied_summary(row: Mapping[str, Any], rules: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),

@@ -13108,7 +13108,6 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
                 "execution_commission",
                 "execution_exit_policy",
                 "execution_slippage",
-                "evidence_fusion_policy",
                 "learning_policy",
                 "portfolio_policy",
                 "product_price_behavior_profiles",
@@ -13119,11 +13118,6 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertEqual(
             cfg["_config_parameter_roles"]["product_price_behavior_profiles"],
             "cold_start_analyst_differentiation_profile_only_not_trade_authority",
-        )
-        self.assertIn("evidence_fusion_policy", cfg)
-        self.assertEqual(
-            cfg["_config_parameter_roles"]["evidence_fusion_policy"],
-            "multidimensional_prediction_evidence_fusion_only_not_trade_authority",
         )
         self.assertIn("rank_score_policy", cfg)
         self.assertEqual(
@@ -13167,7 +13161,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
             "portfolio_policy_catalog_runtime_expanded",
         )
         self.assertFalse(cfg["analyst_weight_policy"]["static_weights_can_create_trade_authority"])
-        self.assertFalse(cfg["analyst_weight_policy"]["allow_static_weights_to_open"])
+        self.assertNotIn("allow_static_weights_to_open", cfg["analyst_weight_policy"])
         self.assertEqual(
             cfg["_config_parameter_roles"]["portfolio_manager.sector_weights"],
             "cold_start_trade_timing_prior_only_not_trade_authority",
@@ -13221,9 +13215,9 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         )
 
         policy = cfg["analyst_weight_policy"]
-        self.assertEqual(policy["static_weights_mode"], "prior_only")
-        self.assertFalse(policy["static_weights_can_create_trade_authority"])
-        self.assertFalse(policy["allow_static_weights_to_open"])
+        self.assertNotIn("static_weights_mode", policy)
+        self.assertNotIn("static_weights_can_create_trade_authority", policy)
+        self.assertNotIn("allow_static_weights_to_open", policy)
         self.assertIn("analyst_prior_profiles", cfg["_config_catalogs_loaded"])
         self.assertEqual(
             cfg["_config_parameter_roles"]["portfolio_manager.sector_weights"],

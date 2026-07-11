@@ -93,16 +93,6 @@ auditor:
   # 独立审计员：位于 PM 与 Trader 之间，只审 PM 已签 final_action_contract。
   # Auditor 不调用 LLM、不读取研究库、不改方向、不改手数、不新建合约。
   enabled: true
-  mode: deterministic
-  use_llm: false
-  policy_version: deterministic_v1
-  approve_with_warning_allowed: true
-  require_valid_final_action_contract: true
-  require_invalidation_for_new_exposure: true
-  trader_requires_approved_verdict: true
-  audit:
-    write_to_signal_snapshot: true
-    log_decision_reasons: true
 
 trade_frequency_control:
   # 通用历史样本保护。这里产生的是 reason code / soft risk tag，
@@ -220,7 +210,6 @@ portfolio_manager:
       # 目的不是压死交易，而是避免最小一手把弱机会放大成真实亏损仓。
       exploration_reconfirm_enabled: true
       exploration_reconfirm_min_hold_days: 1
-      exploration_reconfirm_layers: [watch_for_trigger, unknown]
       exploration_reconfirm_min_confirmation_score: 0.55
       exploration_reconfirm_exit_confirmation_score: 0.48
       exploration_reconfirm_min_signal_strength: 0.30
@@ -289,7 +278,6 @@ portfolio_manager:
       release_multiplier: 1.20
       require_tradeable_support: true
       require_invalidation: true
-      allow_learning_mechanism_protect: true
     fast_candidate_alpha_probe:
       # 错过机会经未来 Counterfactual 证明为正后，只允许下一轮同作用域极小仓 probe。
       # 仍必须有当日确认、可交易 setup 和失效边界；不是品种白名单，也不支撑加仓硬扛。

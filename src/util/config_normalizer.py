@@ -28,7 +28,6 @@ def normalize_config(config: Mapping[str, Any] | None, config_path: str | Path |
     _apply_analyst_weight_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_data_factor_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_product_price_behavior_profiles(cfg, catalogs, base_path, loaded_catalogs)
-    _apply_evidence_fusion_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_portfolio_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_learning_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
     _apply_rank_score_policy_catalog(cfg, catalogs, base_path, loaded_catalogs)
@@ -75,16 +74,6 @@ def _apply_analyst_weight_catalog(
     # decided by action evidence in PM, not by static analyst weights.
     pm_cfg["sector_weights"] = trade_profile
     pm_cfg["strategic_view_weights"] = strategic_profile
-    usage_rules = payload.get("usage_rules")
-    if isinstance(usage_rules, Mapping):
-        policy_cfg = cfg.setdefault("analyst_weight_policy", {})
-        if isinstance(policy_cfg, dict):
-            policy_cfg["catalog_usage_rules"] = dict(usage_rules)
-            policy_cfg.setdefault("mode", "evidence_router")
-            policy_cfg.setdefault("static_weights_mode", "prior_only")
-            policy_cfg.setdefault("static_weights_can_create_trade_authority", False)
-            policy_cfg.setdefault("allow_static_weights_to_open", False)
-
     applicability_profile = payload.get("applicability_profile")
     if isinstance(applicability_profile, Mapping) and "analyst_applicability_profile" not in cfg:
         cfg["analyst_applicability_profile"] = deepcopy(dict(applicability_profile))
@@ -152,26 +141,6 @@ def _apply_product_price_behavior_profiles(
     if isinstance(roles, dict):
         roles["product_price_behavior_profiles"] = (
             "cold_start_analyst_differentiation_profile_only_not_trade_authority"
-        )
-
-
-def _apply_evidence_fusion_policy_catalog(
-    cfg: Dict[str, Any],
-    catalogs: Mapping[str, Any],
-    base_path: Path | None,
-    loaded_catalogs: Dict[str, str],
-) -> None:
-    ref = catalogs.get("evidence_fusion_policy")
-    if not ref:
-        return
-    payload = _load_catalog(ref, base_path)
-    cfg["evidence_fusion_policy"] = payload
-    loaded_catalogs["evidence_fusion_policy"] = str(_resolve_catalog_path(ref, base_path))
-    cfg.setdefault("_config_parameter_roles", {})
-    roles = cfg["_config_parameter_roles"]
-    if isinstance(roles, dict):
-        roles["evidence_fusion_policy"] = (
-            "multidimensional_prediction_evidence_fusion_only_not_trade_authority"
         )
 
 
@@ -246,8 +215,6 @@ def _apply_learning_policy_catalog(
     cfg.setdefault("_config_parameter_roles", {})
     roles = cfg["_config_parameter_roles"]
     if isinstance(roles, dict):
-        if isinstance(payload.get("learning_gatekeeping_policy"), Mapping):
-            roles["learning_policy.learning_gatekeeping_policy"] = "learning_action_preference_semantics_not_trade_authority"
         roles["strategy_memory"] = "learning_policy_catalog_runtime_expanded"
         roles["learning"] = "learning_policy_catalog_runtime_expanded"
         roles["analyst_business_quality"] = "learning_policy_catalog_runtime_expanded"

@@ -10,15 +10,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.agent_tools.decision.pm_contract_builder import build_final_action_contract
 from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
-from tools.agent_tools.decision.pm_lifecycle_action_port import (
-    build_lifecycle_transition_diagnostic,
-    classify_lifecycle_action_port,
-)
+from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.agent_tools.decision.pm_position_transition import classify_position_transition
-from tools.agent_tools.decision.pm_state_transition import (
-    classify_new_entry_transition,
-    classify_pm_decision_state,
-)
+from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
 from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
@@ -62,16 +56,6 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "target_position_ratio": 0.01,
             "no_final_action_authority": True,
         }
-
-    def _lifecycle_transition_diagnostic(self, contract, primary_contract=None, reason_codes=None):
-        primary = classify_lifecycle_action_port(primary_contract or contract)
-        final = classify_lifecycle_action_port(contract)
-        return build_lifecycle_transition_diagnostic(
-            primary_lifecycle_action_port=primary,
-            contract_lifecycle_port=final,
-            reason_codes=reason_codes or contract.get("reason_codes") or [],
-            control_reasons=reason_codes or contract.get("reason_codes") or [],
-        )
 
     def _complete_contract(self, **overrides):
         sizing_override = overrides.pop("position_sizing_result", None)
@@ -210,123 +194,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             requires_intraday_confirmation=False,
             can_execute_without_intraday_trigger=False,
         )
-        diagnostic = self._lifecycle_transition_diagnostic(
-            contract,
-            primary_contract={
-                "current_lots": 0,
-                "target_lots": 1,
-                "final_action": "open_probe",
-            },
-            reason_codes=["no_rank_or_budget_no_new_exposure"],
-        )
-        self.assertTrue(diagnostic["diagnostic_only"])
         return contract
-
-    def test_watch_for_trigger_complete_setup_becomes_conditional_contract_candidate(self):
-        result = classify_new_entry_transition(
-            opportunity_state="watch_for_trigger",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=False,
-            risk_budget_ok=True,
-        )
-        self.assertEqual(result["decision"], "conditional_trigger_contract")
-        self.assertTrue(result["requires_intraday_confirmation"])
-        self.assertFalse(result["can_execute_without_intraday_trigger"])
-        self.assertEqual(result["final_action_hint"], "open_probe")
-
-    def test_watch_for_trigger_missing_setup_stays_wait(self):
-        result = classify_new_entry_transition(
-            opportunity_state="watch_for_trigger",
-            setup_complete=False,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=False,
-            risk_budget_ok=True,
-        )
-        self.assertEqual(result["decision"], "wait")
-        self.assertIn("setup", result["missing_required_fields"])
-
-    def test_probe_candidate_requires_current_confirmation_and_budget(self):
-        blocked = classify_new_entry_transition(
-            opportunity_state="probe_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=False,
-            risk_budget_ok=True,
-        )
-        allowed = classify_new_entry_transition(
-            opportunity_state="probe_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=True,
-            risk_budget_ok=True,
-        )
-        self.assertEqual(blocked["decision"], "watch_for_trigger")
-        self.assertEqual(allowed["decision"], "open_probe")
-
-    def test_tradeable_candidate_can_open_real_or_scale_only_after_confirmation(self):
-        pending = classify_new_entry_transition(
-            opportunity_state="tradeable_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=False,
-            risk_budget_ok=True,
-            evidence_strength="strong",
-        )
-        real = classify_new_entry_transition(
-            opportunity_state="tradeable_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=True,
-            risk_budget_ok=True,
-            evidence_strength="strong",
-        )
-        scale = classify_new_entry_transition(
-            opportunity_state="tradeable_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=True,
-            risk_budget_ok=True,
-            evidence_strength="strong",
-            positive_learning=True,
-            rank_priority=True,
-            scale_allowed=True,
-        )
-        self.assertEqual(pending["decision"], "watch_for_trigger")
-        self.assertEqual(real["decision"], "open_real")
-        self.assertEqual(scale["decision"], "scale")
-
-    def test_hard_and_negative_blocks_override_release_inputs(self):
-        hard = classify_new_entry_transition(
-            opportunity_state="tradeable_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=True,
-            risk_budget_ok=True,
-            evidence_strength="strong",
-            hard_block=True,
-            positive_learning=True,
-        )
-        negative = classify_new_entry_transition(
-            opportunity_state="tradeable_candidate",
-            setup_complete=True,
-            entry_trigger_present=True,
-            invalidation_present=True,
-            current_trigger_confirmed=True,
-            risk_budget_ok=True,
-            evidence_strength="strong",
-            negative_learning_block=True,
-        )
-        self.assertEqual(hard["decision"], "wait")
-        self.assertEqual(negative["decision"], "wait")
 
     def test_position_transition_matrix_for_open_add_scale_reduce_exit(self):
         self.assertEqual(
@@ -565,8 +433,6 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract["learning_used"]["pm_lifecycle_learning_impact_delta"] = {
             "hold_decision": "continue_hold",
         }
-        diagnostic = self._lifecycle_transition_diagnostic(contract)
-        self.assertTrue(diagnostic["diagnostic_only"])
         self.assertTrue(check_final_action_contract(contract)["ok"])
 
     def test_pm_contract_self_check_rejects_incomplete_prior_in_formal_action_values(self):

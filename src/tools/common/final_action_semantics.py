@@ -18,7 +18,6 @@ OPEN_ACTIONS = {"open", "open_long", "open_short", "open_probe", "open_real"}
 INCREASE_ACTIONS = {"add", "scale", "increase"}
 DECREASE_ACTIONS = {"reduce", "trim", "decrease", "reduce_position", "scale_down", "reduce_only"}
 EXIT_ACTIONS = {"exit", "close", "close_long", "close_short", "close_position", "risk_exit", "flatten"}
-TRADE_ACTIONS = OPEN_ACTIONS | INCREASE_ACTIONS | DECREASE_ACTIONS | EXIT_ACTIONS | CONDITIONAL_ACTIONS
 HOLD_EXIT_NO_CHANGE_EXPLANATION_REASONS = {
     "holding_period_control",
     "profitable_hold_continuation",
@@ -728,46 +727,6 @@ def classify_final_action_reason_codes(contract: Mapping[str, Any] | None) -> di
     }
 
 
-def has_valid_generic_no_change_explanation(contract: Mapping[str, Any] | None) -> bool:
-    """Return whether no-change/rank/learning no-effect has a valid PM explanation."""
-    contract = contract if isinstance(contract, Mapping) else {}
-    classification = classify_final_action_reason_codes(contract)
-    if classification.get("rank_no_deployment_explanation") or classification.get("learning_no_effect_explanation"):
-        return True
-    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), Mapping) else {}
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
-    if deployment and (
-        deployment.get("capital_allocation_reason")
-        or deployment.get("allocation_explanation")
-        or deployment.get("deployment_reason")
-    ):
-        return True
-    return bool(evidence.get("capital_allocation_reason") or contract.get("capital_allocation_reason"))
-
-
-def has_active_opportunity_rejection(
-    active_audit: Mapping[str, Any] | None,
-    contract: Mapping[str, Any] | None,
-) -> bool:
-    """Return whether PM formally rejected/degraded an active opportunity."""
-    active_audit = active_audit if isinstance(active_audit, Mapping) else {}
-    contract = contract if isinstance(contract, Mapping) else {}
-    decision = active_audit.get("decision") if isinstance(active_audit.get("decision"), Mapping) else {}
-    combined_reasons = [
-        *reason_codes_from(contract),
-        *reason_codes_from(contract.get("audit_reason_codes")),
-        decision.get("reason"),
-    ]
-    reason_set = {_clean(item) for item in combined_reasons if _clean(item)}
-    reason_set -= CONDITIONAL_MONITOR_CANDIDATE_ONLY_REASONS
-    if reason_set & (ACTIVE_OPPORTUNITY_REJECTION_REASONS | HARD_BLOCK_REASONS | SOFT_LIMIT_REASONS):
-        return True
-    decision_authority = _clean(decision.get("authority_type"))
-    if decision_authority in BLOCKING_AUTHORITY_TYPES:
-        return bool(reason_set)
-    return False
-
-
 def has_open_transaction_blocker(contract: Mapping[str, Any] | None) -> bool:
     """Return whether a contract explicitly forbids a real open transaction."""
     contract = contract if isinstance(contract, Mapping) else {}
@@ -788,20 +747,6 @@ def _current_target_delta(contract: Mapping[str, Any]) -> tuple[int, int, int]:
     target_lots = _int(contract.get("target_lots"), current_lots)
     lots_delta = _int(contract.get("lots_delta"), target_lots - current_lots)
     return current_lots, target_lots, lots_delta
-
-
-def contract_has_lot_change(contract: Mapping[str, Any]) -> bool:
-    current_lots, target_lots, lots_delta = _current_target_delta(contract)
-    return target_lots != current_lots or lots_delta != 0
-
-
-def contract_has_trade_intent(contract: Mapping[str, Any]) -> bool:
-    if not isinstance(contract, Mapping):
-        return False
-    action = _clean(contract.get("final_action"))
-    if action in TRADE_ACTIONS:
-        return True
-    return contract_has_lot_change(contract)
 
 
 def contract_reduces_or_exits_position(contract: Mapping[str, Any] | None) -> bool:
@@ -1182,11 +1127,6 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
     if isinstance(impact, Mapping) and bool(impact.get("trigger_profile_learning_direct_to_rank")):
         errors.append("trigger_profile_learning_direct_to_new_capital_rank")
     return sorted(set(errors))
-
-
-def rank_capital_layer_contract_complete(contract: Mapping[str, Any] | None) -> bool:
-    """Return whether any ranked PM contract has complete capital-layer fields."""
-    return not rank_capital_layer_contract_errors(contract)
 
 
 def is_conditional_monitor_contract(contract: Mapping[str, Any]) -> bool:
@@ -1858,24 +1798,6 @@ def validate_action_value_write_consistency(row: Mapping[str, Any] | None) -> di
     }
 
 
-def action_value_matches_contract_memory_requirement(
-    contract: Mapping[str, Any] | None,
-    row: Mapping[str, Any] | None,
-) -> bool:
-    """Return whether one PM action-value row may land in this contract."""
-    row = row if isinstance(row, Mapping) else {}
-    if _row_text(row, "consumer_scope") != PM_ACTION_VALUE_CONSUMER_SCOPE:
-        return False
-    validation = validate_action_value_write_consistency(row)
-    if not validation.get("ok"):
-        return False
-    requirements = derive_memory_requirements(contract)
-    for requirement in requirements.get("must_land_in_pm_contract") or []:
-        if _row_covers_requirement(row, requirement):
-            return True
-    return False
-
-
 def filter_action_values_for_contract_learning(
     contract: Mapping[str, Any] | None,
     rows: Iterable[Mapping[str, Any]] | None,
@@ -2006,24 +1928,6 @@ def audit_pm_memory_consumption(contract: Mapping[str, Any] | None) -> dict[str,
     }
 
 
-def derive_execution_requirement(contract: Mapping[str, Any] | None) -> dict[str, Any]:
-    semantics = classify_final_action_contract(contract)
-    memory = derive_memory_requirements(contract)
-    return {
-        "contract": "final_action_semantics.execution_requirement.v1",
-        "lifecycle_state": semantics["lifecycle_state"],
-        "execution_permission": semantics["execution_permission"],
-        "requires_intraday_result": semantics["requires_intraday_result"],
-        "can_monitor_intraday": semantics["can_monitor_intraday"],
-        "can_submit_order_now": semantics["can_submit_order_now"],
-        "blocked": semantics["blocked"],
-        "blocked_reasons": semantics["hard_block_reasons"],
-        "soft_limit_reasons": semantics["soft_limit_reasons"],
-        "memory_side_role": memory["contract_side_role"],
-        "trader_reads_pm_action_value": False,
-    }
-
-
 def requires_intraday_result(contract: Mapping[str, Any] | None) -> bool:
     return bool(classify_final_action_contract(contract).get("requires_intraday_result"))
 
@@ -2064,44 +1968,6 @@ def authority_allows_entry(authority: Mapping[str, Any] | None) -> bool:
     if authority_type in BLOCKING_AUTHORITY_TYPES:
         return False
     return semantics["execution_permission"] in {"direct_execute", "monitor_intraday"}
-
-
-def classify_analyst_evidence(payload: Mapping[str, Any] | None) -> dict[str, Any]:
-    payload = payload if isinstance(payload, Mapping) else {}
-    forbidden = sorted(key for key in payload.keys() if key in FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS)
-    opportunity_state = _clean(payload.get("opportunity_state")) or "unknown"
-    trigger_valid = _bool(payload.get("trigger_valid"))
-    current_trigger_confirmed = _bool(payload.get("current_trigger_confirmed"))
-    invalidation_present = _bool(payload.get("invalidation_present"))
-    semantic_errors: list[str] = []
-    if opportunity_state in {"probe_candidate", "tradeable_candidate"} and not trigger_valid:
-        semantic_errors.append("analyst_candidate_without_current_trigger")
-    if trigger_valid and not current_trigger_confirmed:
-        semantic_errors.append("analyst_trigger_valid_without_current_confirmation")
-    if opportunity_state in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"} and not invalidation_present:
-        semantic_errors.append("analyst_trade_setup_missing_invalidation")
-    semantic_errors.extend(f"analyst_forbidden_trade_authority_field:{key}" for key in forbidden)
-    return {
-        "contract": "final_action_semantics.analyst_evidence.v1",
-        "opportunity_state": opportunity_state,
-        "trigger_valid": trigger_valid,
-        "current_trigger_confirmed": current_trigger_confirmed,
-        "invalidation_present": invalidation_present,
-        "forbidden_trade_authority_fields": forbidden,
-        "semantic_errors": sorted(set(semantic_errors)),
-    }
-
-
-def validate_signal_collection(collection: Mapping[str, Any] | None) -> dict[str, Any]:
-    collection = collection if isinstance(collection, Mapping) else {}
-    forbidden = sorted(key for key in collection.keys() if key in FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS)
-    no_trade_authority = _bool(collection.get("no_trade_authority")) or collection.get("collector_decision_boundary") == "no_trade_authority"
-    return {
-        "contract": "final_action_semantics.signal_collection.v1",
-        "no_trade_authority": no_trade_authority,
-        "forbidden_trade_authority_fields": forbidden,
-        "semantic_errors": [f"signal_collection_forbidden_trade_authority_field:{key}" for key in forbidden],
-    }
 
 
 def derive_accounting_expectation(

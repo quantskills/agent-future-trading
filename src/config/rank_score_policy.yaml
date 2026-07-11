@@ -6,14 +6,6 @@
 # adding this catalog does not change current behavior by itself.
 
 rank_score_policy:
-  contract_version: agentquant.rank_score_policy.v1
-  usage_boundary:
-    role: full_market_capital_rank_score_weights
-    creates_trade_authority: false
-    creates_position_size: false
-    may_override_margin_limits: false
-    tune_after_min_clean_backtest_days: 40
-
   rank_score:
     cold_start_evidence_quality: 0.52
     capital_layer_priority:

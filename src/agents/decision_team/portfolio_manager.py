@@ -489,7 +489,6 @@ DEFAULT_HOLDING_REBALANCE_CONTROL = {
         "release_multiplier": 1.20,
         "require_tradeable_support": True,
         "require_invalidation": True,
-        "allow_learning_mechanism_protect": True,
     },
     "fast_candidate_alpha_probe": {
         "enabled": True,

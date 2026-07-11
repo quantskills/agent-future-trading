@@ -379,25 +379,14 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         self.assertFalse(cfg.get("planner_mode"), "legacy LLM planner must stay disabled")
         governance = cfg.get("control_governance") or {}
-        self.assertTrue(governance.get("enabled"))
-
         governor = governance.get("protocol_governor") or {}
-        self.assertEqual(governor.get("role"), "audit_sidecar_only")
-        self.assertFalse(governor.get("llm_enabled"))
         self.assertFalse(governor.get("may_create_trade_authority"))
         self.assertFalse(governor.get("may_modify_lots_or_margin"))
         self.assertFalse(governor.get("may_execute_orders"))
-        self.assertFalse(governor.get("may_write_settlement"))
-        self.assertEqual(governor.get("final_trade_truth"), "final_action_contract")
-
-        cost_audit = governance.get("cost_budget_audit") or {}
-        self.assertEqual(cost_audit.get("role"), "resource_observation_only")
-        self.assertFalse(cost_audit.get("can_change_strategy"))
-        self.assertFalse(cost_audit.get("can_emit_trade_action_fields"))
-
-        tool_policy = governance.get("tool_access_policy") or {}
-        self.assertEqual(tool_policy.get("violation_effect"), "protocol_error_only")
-        self.assertEqual(tool_policy.get("protocol_governor_allowed_namespaces"), ["control", "database"])
+        self.assertEqual(
+            set(governor),
+            {"may_create_trade_authority", "may_modify_lots_or_margin", "may_execute_orders"},
+        )
 
         budget = cfg.get("position_budget_policy") or {}
         self.assertEqual(float(budget.get("probe_margin_ratio")), 0.008)
@@ -624,33 +613,12 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertNotIn("`settlement_result`", text)
         self.assertNotIn("Reviewer LLM notes", text)
 
-    def test_learning_policy_catalog_documents_action_value_usage_boundary(self):
+    def test_learning_policy_catalog_contains_runtime_parameters_only(self):
         config_path = SRC_ROOT / "config" / "learning_policy_catalog.yaml"
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        policy = cfg.get("learning_gatekeeping_policy") or {}
-
-        self.assertEqual(policy.get("research_output_contract_version"), "agentquant.research_action_value.v1")
-        self.assertEqual(policy.get("analyst_allowed_action_value_view"), "signal_calibration_only")
-        self.assertEqual(policy.get("pm_allowed_consumer_scope"), "pm_learning")
-        self.assertEqual(
-            policy.get("pm_allowed_action_value_lanes"),
-            ["open", "add", "hold", "reduce", "exit", "conditional_monitor", "execution"],
-        )
-        self.assertEqual(
-            policy.get("pm_allowed_memory_side_roles"),
-            ["target_side", "current_position_side", "trigger_side", "historical_sample_side"],
-        )
-        self.assertEqual(policy.get("analyst_allowed_consumer_scope"), "analyst_calibration")
-        self.assertFalse(policy.get("trader_direct_research_consumption_allowed"))
-        self.assertNotIn("trader_allowed_consumer_scope", policy)
-        self.assertNotIn("trader_allowed_action_value_lanes", policy)
-        self.assertEqual(
-            policy.get("pm_action_value_retrieval_order"),
-            ["exact_state", "same_ticker_side_horizon", "same_ticker_side", "weak_prior"],
-        )
-        self.assertEqual(policy.get("similar_sql_rag_role"), "weak_prior_not_trade_authority")
-        self.assertIn("exit_as_open_amplifier", policy.get("forbidden_cross_action_uses") or [])
-        self.assertIn("execution_changes_lots", policy.get("forbidden_cross_action_uses") or [])
+        self.assertNotIn("learning_gatekeeping_policy", cfg)
+        self.assertIn("strategy_memory", cfg)
+        self.assertIn("learning", cfg)
 
     def test_agent_cards_keep_business_boundaries_explicit(self):
         cards = build_default_agent_cards()

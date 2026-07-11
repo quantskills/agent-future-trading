@@ -18,7 +18,7 @@
 
 分析师差异化分析协议：`src/config/product_price_behavior_profiles.yaml` 是三类分析师的商品价格行为冷启动配置；`src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的确定性读取与格式化工具。它只服务 `technical`、`fundamental`、`commodity_news` 的证据分析，输出 `product_profile_evidence`，用于区分品种价格行为、趋势惯性、波动阈值、产业链确认、季节窗口、假突破风险和适合的 setup。它不调用 LLM，不读研究库，不签合约，不下单，不入账，不写研究；PM 只能从 `signal_collection_contract` 读取它作为证据上下文，Auditor、Trader、Accountant 不直接读取或解释该 profile。
 
-多维证据融合预测协议：`src/config/evidence_fusion_policy_catalog.yaml` 是证据融合冷启动策略目录；`src/tools/common/evidence_fusion_semantics.py` 是跨分析师、信号收集、PM 评分、Auditor 审核、Reviewer 归因和 Researcher 学习上下文的确定性解释工具。它只解释技术、基本面、新闻、商品 profile、历史学习上下文和执行反馈形成的预测证据强弱、时效、一致性、冲突、确认需求和缺失证据；不调用 LLM，不签合约，不下单，不入账，不直接写 action-value。Trader 和 Accountant 不读取该工具，也不能用融合证据改执行或结算。
+多维证据融合预测协议由 `src/tools/common/evidence_fusion_semantics.py` 的确定性函数固定实现，不设无运行时消费者的 YAML 参数。它只解释技术、基本面、新闻、商品 profile、历史学习上下文和执行反馈形成的预测证据强弱、时效、一致性、冲突、确认需求和缺失证据；不调用 LLM，不签合约，不下单，不入账，不直接写 action-value。Trader 和 Accountant 不读取该工具，也不能用融合证据改执行或结算。
 
 ## 1. 通用消息与 artifact 字段
 
@@ -108,7 +108,6 @@
 | `profile_learning_interaction` | `product_profile_evidence` | 静态 profile 与动态 `learning_context` / `analyst_learning_calibration` 的关系说明。 |
 | `profile_invalid_use_flags` | `product_profile_evidence` | 本次分析中被识别的 profile 错用风险，如把成本变化当直接交易权限。 |
 | `profile_analysis_boundary` | `product_profile_evidence` | 固定为分析证据边界，声明该 profile 不创建交易权限。 |
-| `evidence_fusion_policy` | config catalog | 多维证据融合预测协议配置；只定义证据强弱、时效、冲突、确认需求、profile 融合和复盘学习口径，不创建交易权限。 |
 | `rank_score_policy` | config catalog / `src/config/rank_score_policy.yaml` / runtime config | 唯一全市场资金 rank 的评分配置。`rank_score` 下的参数组固定与七个 `rank_score_components` 同名：`cold_start_evidence_quality`、`capital_layer_priority`、`open_add_action_value_delta`、`product_setup_trigger_history`、`trigger_execution_quality`、`capital_efficiency`、`conflict_risk_invalidation_penalty`；嵌套权重键与 Python 实际消费的输入字段同名。它不创建交易权限、不改变仓位参数、不覆盖 0.008 probe、20% 总保证金或 0.5 净敞口红线。40 个干净交易日后才允许依据 rank 分层平均收益微调。 |
 | `evidence_fusion_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/evidence_fusion_semantics.py` 生成的只读融合语义解释；不签合约、不下单、不入账、不写当天交易事实。 |
 | `fusion_evidence` | 分析师 `metadata.action_evidence_contract` / `signal_collection_contract.source_contracts` | 单个分析师的多维证据融合字段包，说明证据强弱、时效、冲突、缺失和确认需求；不是交易合约。 |
@@ -749,7 +748,68 @@
 | `reason_bucket` | 资金部署 | 资金状态原因分桶。 |
 | `deployment_plan` | 资金部署 | 资金部署计划。 |
 
-## 16. 静态验证要求
+## 16. 配置参数与 Python 消费函数
+
+登记规则：
+
+- YAML 只保留真实改变运行行为的参数；纯说明、边界宣言、版本说明放在本文或机制文档，不伪装成配置。
+- 固定参数名必须与消费函数的 `dict.get` / 字段读取名一致。动态 ticker、sector、factor、template 映射用 `*` 或 `**` 表示参数族，族内键由同一函数按运行上下文读取。
+- 每个配置参数路径必须对应至少一个真实存在的 Python 消费函数。配置路径与函数存在性由 `test_config_parameter_mapping.py` 静态验证。
+
+| 配置参数路径 | Python 消费函数 | 固定含义 |
+|---|---|---|
+| `src/config/analyst_prior_profiles.yaml::dynamic_bounds.*` | `src/util/config_normalizer.py::_apply_analyst_weight_catalog` | 分析师动态权重的最小值与最大值。 |
+| `src/config/analyst_prior_profiles.yaml::profiles.**` | `src/util/config_normalizer.py::_profile_weights` | 按战略视图/日频时机与 sector 读取 technical、fundamental、commodity_news 冷启动先验。 |
+| `src/config/analyst_prior_profiles.yaml::applicability_profile.**` | `src/agents/decision_team/portfolio_manager.py::_quality_aware_fusion_context` | 按分析师、周期、sector 和市场状态动态读取适用性乘数；只调整证据质量。 |
+| `src/config/data_factor_policy_catalog.yaml::fundamental_quality_control.**` | `src/tools/agent_tools/analysis/analyst_dynamic_weights.py::_apply_fundamental_quality_adjustment` | Finoview 覆盖、陈旧、缺失阈值及对应基本面权重乘数。 |
+| `src/config/data_factor_policy_catalog.yaml::pandaai_extra_data.**` | `src/agents/analysis_team/fundamental.py::fundamental_agent` | PandaAI 扩展因子启用、可见日期、回看窗口和分析因子集合。 |
+| `src/config/data_factor_policy_catalog.yaml::factor_data.**` | `src/tools/agent_tools/analysis/analyst_data_usage.py::prefetch_local_daily_data` | Finoview 与本地新闻的数据目录、开关和盘前可见性入口。 |
+| `src/config/dev.yaml::config_catalogs.*` | `src/util/config_normalizer.py::normalize_config` | 主配置到各业务 catalog 的唯一加载索引。 |
+| `src/config/dev.yaml::runtime.phase1.**` | `src/graph/workflow.py::_phase1_acceleration_enabled` | Phase1 并行、预取、计时及分析师写库方式。 |
+| `src/config/dev.yaml::runtime.data_cache.**` | `src/tools/agent_tools/analysis/analyst_data_usage.py::prefetch_pandaai_daily_data` | 本地数据与 PandaAI 日级缓存预取开关。 |
+| `src/config/dev.yaml::control_governance.protocol_governor.*` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_consistency_check` | PG 不得创建交易权限、修改手数/保证金或执行订单的验收开关。 |
+| `src/config/dev.yaml::exp_name`、`src/config/dev.yaml::market_type`、`src/config/dev.yaml::tickers`、`src/config/dev.yaml::planner_mode`、`src/config/dev.yaml::workflow_analysts` | `src/graph/workflow.py::__init__` | 实验身份、市场、交易宇宙和固定 workflow 编排入口。 |
+| `src/config/dev.yaml::cashflow` | `src/run/proposal.py::main` | 新建或显式重建实验账户时的初始现金。 |
+| `src/config/dev.yaml::max_total_margin_ratio` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_consistency_check` | 账户总保证金硬上限。 |
+| `src/config/dev.yaml::position_budget_policy.**` | `src/agents/decision_team/portfolio_manager.py::_position_budget_policy_config` | Step5/Step6 的 probe、正常、deployable、exceptional 资金层级及单品种约束。 |
+| `src/config/dev.yaml::analyst_weight_policy.**` | `src/agents/decision_team/portfolio_manager.py::_final_contract_authority` | 静态分析师先验的证据路由边界；不得创建交易权限。 |
+| `src/config/dev.yaml::risk_control.**` | `src/agents/decision_team/portfolio_manager.py::check_risk_level` | 账户风险等级阈值及不同风险等级的仓位缩放/单仓上限。 |
+| `src/config/dev.yaml::net_exposure_control.**` | `src/agents/decision_team/portfolio_manager.py::_resolve_net_exposure_control` | Step5 计划净敞口上限及对称缩放方式。 |
+| `src/config/dev.yaml::drawdown_control.**` | `src/agents/decision_team/portfolio_manager.py::_apply_drawdown_and_ticker_loss_control` | 回撤冷却、恢复预算阶梯和恢复确认条件。 |
+| `src/config/dev.yaml::capital_utilization_control.**` | `src/tools/agent_tools/decision/pm_capital_deployment_policy.py::_apply_capital_utilization_control` | Step5 资金利用目标、强机会部署条件、储备比例和成熟学习释放约束。 |
+| `src/config/dev.yaml::execution.limit_lock.**` | `src/tools/agent_tools/execution/trader_futures_execution.py::_build_market_rules_audit` | 涨跌停锁定检查参数。 |
+| `src/config/dev.yaml::execution.dynamic_margin.**` | `src/tools/agent_tools/execution/trader_futures_execution.py::_resolve_dynamic_margin_rate` | 动态保证金来源及静态缓存回退。 |
+| `src/config/dev.yaml::execution.contract_expiry_guard.**` | `src/tools/agent_tools/execution/trader_futures_execution.py::_build_market_rules_audit` | 交割月、临近到期和换月的新仓限制。 |
+| `src/config/dev.yaml::execution.intraday_confirmation.**` | `src/tools/agent_tools/execution/trader_intraday_execution.py::intraday_confirmation_enabled` | 盘中确认频率、开盘区间、追价、成交量与循环检查参数。 |
+| `src/config/dev.yaml::rollover.*` | `src/agents/execution_team/trader.py::_reconcile_rollover_with_strategy_target` | 换月与策略目标仓位的协调方式。 |
+| `src/config/dev.yaml::audit.*` | `src/agents/analysis_team/technical.py::technical_agent` | 技术分析运行审计细节开关。 |
+| `src/config/dev.yaml::analyst_llm.**` | `src/tools/agent_tools/analysis/analyst_quality.py::apply_signal_quality_gate` | 分析师模型路由、报告和低可交易性/陈旧基本面置信度处理。 |
+| `src/config/dev.yaml::llm.**` | `src/llm/inference.py::_normalize_llm_config` | LLM provider、model、并发、结构化输出、错误策略和密钥入口。 |
+| `src/config/execution_commission_catalog.yaml::commission.**` | `src/tools/agent_tools/execution/trade_futures_commission.py::resolve_commission_rule` | 按 underlying 和开平/平今方式读取真实手续费规则及舍入精度。 |
+| `src/config/execution_slippage_catalog.yaml::slippage.**` | `src/tools/agent_tools/execution/trader_futures_execution.py::_get_slippage_ticks` | 滑点模型、默认 ticks 和 underlying 动态映射。 |
+| `src/config/execution_exit_policy_catalog.yaml::exit_policy.**` | `src/tools/agent_tools/execution/trader_execution_exit_policy.py::resolve_exit_policy_config` | 默认、sector 和 setup/template 的止损、止盈与时间退出参数。 |
+| `src/config/finoview_factor_catalog.yaml::required_groups`、`src/config/finoview_factor_catalog.yaml::ticker_overrides.**`、`src/config/finoview_factor_catalog.yaml::context_ticker_overrides.*` | `src/tools/agent_tools/analysis/analyst_finoview_factors.py::build_local_finoview_availability_audit` | 可交易快照要求的因子组及辅助字段到交易品种的动态映射。 |
+| `src/config/finoview_factor_catalog.yaml::factor_group_overrides.**`、`src/config/finoview_factor_catalog.yaml::frequency_overrides.*`、`src/config/finoview_factor_catalog.yaml::release_lag_days.*`、`src/config/finoview_factor_catalog.yaml::freshness_threshold_days.*` | `src/tools/agent_tools/analysis/analyst_finoview_factors.py::build_factor_catalog` | 因子名到业务组、频率、发布滞后和新鲜度阈值的动态映射。 |
+| `src/config/learning_policy_catalog.yaml::opportunity_ranking_learning_policy.**` | `src/tools/agent_tools/research/research_memory_writers.py::_write_opportunity_ranking_learning_events` | rank 表现学习事件的样本门槛、有效期、输入字段和允许/禁止影响。 |
+| `src/config/learning_policy_catalog.yaml::strategy_memory.**` | `src/database/sqlite_helper.py::_strategy_memory_thresholds` | 策略记忆回看、过期、样本、胜率、净收益和 PM 风险门阈值。 |
+| `src/config/learning_policy_catalog.yaml::learning.**` | `src/tools/agent_tools/research/research_learning.py::apply_researcher_learning`、`src/tools/agent_tools/research/research_memory_writers.py::_write_adaptive_policy_state`、`src/tools/agent_tools/research/research_memory_writers.py::_write_contextual_rule_calibration_state`、`src/tools/agent_tools/research/research_memory_writers.py::_write_provisional_policy_state` | Researcher 的 profile、action-value、overlay、策略晋升、情境校准、哨兵、episode、反事实和因果研究参数；只影响未来学习。 |
+| `src/config/learning_policy_catalog.yaml::analyst_business_quality.**` | `src/agents/decision_team/portfolio_manager.py::_quality_multiplier` | 分析师业务质量的 probe/deployable 阈值与软仓位乘数。 |
+| `src/config/learning_policy_catalog.yaml::signal_quality.**` | `src/tools/agent_tools/research/research_memory_writers.py::_write_neutral_accountability_state` | Neutral 责任字段、结构化学习和反事实跟踪参数。 |
+| `src/config/learning_policy_catalog.yaml::learning_context.**` | `src/tools/agent_tools/analysis/analyst_learning_context.py::build_learning_context` | 分析师学习上下文的条数、字符数、缓存和跨品种回退预算。 |
+| `src/config/learning_policy_catalog.yaml::learning_retention.**` | `src/database/sqlite_helper.py::_cleanup_learning_retention_with_cursor` | 学习明细/聚合表保留天数、最大行数和清理表集合。 |
+| `src/config/portfolio_policy_catalog.yaml::market_confirmation.**` | `src/agents/decision_team/portfolio_manager.py::_apply_market_confirmation_control` | 新仓确认、冲突、数据缺口与受控 probe 的证据阈值。 |
+| `src/config/portfolio_policy_catalog.yaml::directional_override_control.**` | `src/agents/decision_team/portfolio_manager.py::_apply_directional_override` | 高质量空头方向覆盖的分数、置信度、强度、边际和 probe 上限。 |
+| `src/config/portfolio_policy_catalog.yaml::pm_risk_gate.**` | `src/tools/agent_tools/decision/pm_risk_gate.py::plan` | PM 内部确定性风险门、质量门、历史归因和冷启动参数。 |
+| `src/config/portfolio_policy_catalog.yaml::auditor.**` | `src/agents/decision_team/auditor.py::audit` | Auditor 是否启用；其余审计规则由最终合约语义固定实现。 |
+| `src/config/portfolio_policy_catalog.yaml::trade_frequency_control.**` | `src/tools/agent_tools/decision/pm_risk_gate.py::_evaluate_performance` | 交易频率、弱/严重表现和 churn 的软风险参数。 |
+| `src/config/portfolio_policy_catalog.yaml::ticker_performance_control.**`、`src/config/portfolio_policy_catalog.yaml::ticker_loss_control.**` | `src/agents/decision_team/portfolio_manager.py::_apply_drawdown_and_ticker_loss_control` | 品种近期表现与连续亏损的软缩放和恢复参数。 |
+| `src/config/portfolio_policy_catalog.yaml::dynamic_weights.**` | `src/tools/agent_tools/analysis/analyst_dynamic_weights.py::_apply_weight_constraints` | 分析师动态权重启用状态和上下界。 |
+| `src/config/portfolio_policy_catalog.yaml::portfolio_manager.holding_rebalance_control.**` | `src/agents/decision_team/portfolio_manager.py::_apply_holding_rebalance_control` | 持仓生命周期、观察候选、成熟 alpha、日频可交易性和周期一致性参数。 |
+| `src/config/portfolio_policy_catalog.yaml::portfolio_manager.adaptive_fusion.**`、`src/config/portfolio_policy_catalog.yaml::portfolio_manager.quality_aware_fusion.**` | `src/agents/decision_team/portfolio_manager.py::_quality_aware_fusion_context` | 证据质量融合、scorecard、学习权重、状态乘数和质量 sizing 参数。 |
+| `src/config/product_price_behavior_profiles.yaml::profile_contract_version`、`src/config/product_price_behavior_profiles.yaml::required_tickers`、`src/config/product_price_behavior_profiles.yaml::profiles.**` | `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py::load_product_price_behavior_profiles` | 商品价格行为 profile 的契约版本、覆盖品种和按 ticker 动态分析参数。 |
+| `src/config/rank_score_policy.yaml::rank_score_policy.rank_score.**` | `src/tools/agent_tools/decision/pm_full_market_capital_deployment.py::_rank_score_components_for_row` | Step5 唯一 rank 的七个分项权重、学习修正边界、资金效率和风险扣分参数；不改变交易属性。 |
+
+## 17. 静态验证要求
 
 必须保留静态测试：
 

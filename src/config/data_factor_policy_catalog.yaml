@@ -20,10 +20,8 @@ fundamental_quality_control:
 pandaai_extra_data:
   # PandaAI 扩展数据用于因子上下文、盘前确认和仓位缩放，不单独生成信号。
   enabled: true
-  mode: confirm_and_factor_context
   reference_lag_days: 1
   lookback_days: 5
-  fail_policy: soft_skip
   use_in_fundamental_analyst: true
   features:
     # 默认启用：已实测可用，且适合做盘前确认。
@@ -63,12 +61,7 @@ factor_data:
   finoview_enabled: true
   data_dir: data/Fundamental_data/Finoview_data
   catalog_path: src/config/finoview_factor_catalog.yaml
-  no_lookahead_snapshot: true
-  freshness_gate: true
-  unknown_factor_trade_weight: 0.0
-  coverage_audit_tickers: [BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN]
   news:
     enabled: true
     data_dir: data/News_data/Future_news
     pre_open_only: true
-    require_fundamental_or_pandaai_confirmation_for_large_position: true

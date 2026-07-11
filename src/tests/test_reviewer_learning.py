@@ -23,7 +23,6 @@ from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_stra
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
-from tools.common.contracts import attach_snapshot_contract, validate_artifact_header
 from database.artifact_store import load_externalized_json, load_externalized_text
 from tools.common.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
 from tools.agent_tools.analysis.analyst_dynamic_weights import calibrate_weights_by_signal_history
@@ -2566,21 +2565,6 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(summary["category_counts"]["reasonable_avoidance"], 1)
         self.assertEqual(summary["category_counts"]["evidence_gap_conservative"], 1)
         self.assertAlmostEqual(summary["accountability_complete_rate"], 1.0)
-
-    def test_snapshot_contract_adds_required_audit_header(self):
-        snapshot = attach_snapshot_contract(
-            {
-                "technical": {"signal": "Bullish"},
-                "pm_internal_draft": {"target_position_ratio": 0.05},
-            },
-            trading_date="2025-02-10",
-            ticker="BU",
-            config_id="cfg",
-            source_artifacts=["technical:BU:2025-02-10"],
-        )
-
-        self.assertIn("artifact_contract", snapshot)
-        self.assertEqual(validate_artifact_header(snapshot["artifact_contract"]), [])
 
     def test_reviewer_horizon_prefers_decision_scope_over_short_technical(self):
         snapshot = {

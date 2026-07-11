@@ -44,6 +44,7 @@ PRE_BACKTEST_TEST_MODULES = [
     "src.tests.test_system_invariant_audit",
     "src.tests.test_mechanism_effectiveness_audit",
     "src.tests.test_contract_coverage_audit",
+    "src.tests.test_config_parameter_mapping",
     "src.tests.test_pre_backtest_acceptance",
     "src.tests.test_protocol_governor",
 ]

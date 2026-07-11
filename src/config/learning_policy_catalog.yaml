@@ -5,51 +5,6 @@
 # 本文件中 strategy_memory 是历史兼容的数据库记忆入口名，不是交易权限字段；
 # 只能由 Researcher 写入未来学习，再由 PM 通过 decision_memory_retrieval 消费。
 
-learning_gatekeeping_policy:
-  # 学习结果服务 action preference，不直接下交易命令。
-  # block/cap/probe 只允许作为同作用域学习倾向、reason code 或软风险标签；
-  # PM 必须结合当日证据和确定性工具输出写入 final_action_contract；
-  # Auditor 只审合约，Trader 只执行审过的合约。
-  # 学习闭环主线：state + action + reward -> action_preference -> PM action candidate；
-  # 策略交易事实仍只能通过 PM 授权事实入口写入 final_action_contract。
-  # Researcher 写入的 action-value 必须带 consumer_scope、memory_side_role 与 usage_boundary：
-  # pm_learning 给 PM open/add/hold/reduce/exit/conditional_monitor/execution 评分和合约解释；
-  # analyst_calibration 只给分析师安全 signal_calibration；
-  # trader_execution_learning 是 Trader 输出给复盘/研究的执行学习 trace scope；
-  # Trader 不读取研究库，执行学习必须先由 PM 合约化为 execution_profile / entry_trigger。
-  # PM 评分不能使用分析师压缩 trace；PM 在确定 ticker/side/setup/horizon/regime 后，
-  # 按 exact state -> same ticker/side/horizon -> same ticker/side -> weak prior
-  # 读取 consumer_scope=pm_learning 的 canonical action-value / episode 行，
-  # 并优先使用顶层字段，payload 只作为历史兼容 fallback。
-  # PM 必须按 final_action_semantics 的交易生命周期读取记忆：
-  # open 读 target_side；add/scale 读 target_side 与 current_position_side；
-  # reduce/exit/hold 读 current_position_side；conditional_monitor 读 trigger_side。
-  # 不能只按初始 preferred_side 或目标机会方向取学习，否则退出/持仓生命周期会丢失。
-  research_output_contract_version: agentquant.research_action_value.v1
-  analyst_allowed_action_value_view: signal_calibration_only
-  learning_consumer_scopes:
-    pm_learning: portfolio_manager_only
-    analyst_calibration: analysis_team_safe_summary_only
-    trader_execution_learning: execution_trace_for_research_only
-    research_diagnostics: protocol_and_human_review_only
-  pm_allowed_consumer_scope: pm_learning
-  pm_allowed_action_value_lanes: [open, add, hold, reduce, exit, conditional_monitor, execution]
-  pm_allowed_memory_side_roles: [target_side, current_position_side, trigger_side, historical_sample_side]
-  analyst_allowed_consumer_scope: analyst_calibration
-  trader_direct_research_consumption_allowed: false
-  pm_action_value_retrieval_order:
-    - exact_state
-    - same_ticker_side_horizon
-    - same_ticker_side
-    - weak_prior
-  similar_sql_rag_role: weak_prior_not_trade_authority
-  forbidden_cross_action_uses:
-    - exit_as_open_amplifier
-    - execution_changes_direction
-    - execution_changes_lots
-    - execution_changes_target_lots
-    - execution_changes_margin_ratio
-
 opportunity_ranking_learning_policy:
   # 复盘员提供事实归因，研究员评估 PM 的 opportunity_score / opportunity_rank 是否真的把资金推向正 alpha。
   # 该学习只生成下一轮排序偏好和 policy_multiplier，不直接开仓、不改交易员手数。
@@ -97,17 +52,9 @@ strategy_memory:
   weak_block_total_pnl_below: -2500
   audit:
     # protected 必须满足样本、胜率和净收益门槛。
-    protected_min_sample_count: 5
     protected_min_win_rate: 0.60
     protected_min_net_pnl: 1000
     protected_min_confirmation_score: 0.45
-    protected_multiplier: 0.65
-    # watchlist 偏弱模板压仓。
-    watchlist_min_confirmation_score: 0.55
-    watchlist_cap_multiplier: 0.50
-    # weak_block 严格压制，但允许强确认边缘模板。
-    weak_block_min_confirmation_score: 0.60
-    weak_block_cap_multiplier: 0.35
     # 暂时保持 2，不全局放松到 1，避免弱模板同时放宽过头。
     min_qualified_supporters: 2
 
@@ -194,11 +141,6 @@ learning:
     max_rows_per_day: 6
     min_counterfactual_pnl_for_relaxation: 1200
     min_counterfactual_loss_for_tightening: 1200
-    # 盘中触发只允许同作用域成熟记忆小幅校准。
-    relaxed_opening_range_miss: 0.003
-    tightened_opening_range_miss: 0.001
-    relaxed_intraday_confirmation_score: 0.65
-    tightened_intraday_confirmation_score: 0.72
     # 新仓亏损与 horizon 失败只做短期情境校准。
     horizon_confirm_score_after_failure: 0.58
     short_timing_confidence_after_failure: 0.48
@@ -264,7 +206,6 @@ learning:
   provisional_policy_state:
     # 临时策略状态只在短窗口保护交易质量；它是软学习状态，不是永久规则。
     enabled: true
-    anomaly_loss_cap_enabled: true
     anomaly_loss_threshold: -8000
     anomaly_loss_cap_multiplier: 0.25
     consecutive_loss_probe_only_threshold: 2
@@ -358,13 +299,6 @@ analyst_business_quality:
   enabled: true
   min_score_for_probe: 0.45
   min_score_for_deployable: 0.60
-  min_score_for_protected: 0.75
-  confidence_capped_by_business_quality: true
-  require_primary_driver: true
-  require_counter_evidence: true
-  require_reward_risk_ratio: true
-  require_horizon_match: true
-  low_quality_action: observe_or_block
   probe_multiplier: 0.25
   low_quality_multiplier: 0.10
   soft_gate_never_zero: true
@@ -419,8 +353,6 @@ learning_retention:
   detail_retention_days: 90
   aggregate_retention_days: 180
   max_detail_rows_per_config: 50000
-  delete_expired_inactive: true
-  preserve_trade_facts: true
   detail_tables:
     - research_position_feedback
     - analyst_learning_digest

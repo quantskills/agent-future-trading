@@ -167,10 +167,6 @@ def enriched_policy_evidence(row: Mapping[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def has_adaptive_policy_action(rows: Iterable[Mapping[str, Any]] | None, actions: set[str]) -> bool:
-    return bool(adaptive_policy_record(rows, actions))
-
-
 def high_quality_learning_context(
     *,
     strategy_memory: Mapping[str, Any] | None,

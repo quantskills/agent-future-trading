@@ -45,7 +45,7 @@ Phase1 投资组合经理 final_action_contract
 
 `product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究，下一交易日由 `learning_context` 和 `analyst_learning_calibration` 进入 `technical`、`fundamental`、`commodity_news` 的证据判断；静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
 
-`evidence_fusion_policy_catalog.yaml` 是多维证据融合预测协议配置，不是研究库，不随回测自动改写。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval`、生命周期学习路由和必要的开仓 Step5 资金部署消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
+多维证据融合协议由 `tools/common/evidence_fusion_semantics.py` 的确定性函数固定实现，不设置无人读取的 YAML 参数。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval`、生命周期学习路由和必要的开仓 Step5 资金部署消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
 
 ## 二、Phase4 与研究学习分工
 

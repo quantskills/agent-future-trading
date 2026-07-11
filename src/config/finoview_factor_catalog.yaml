@@ -1,12 +1,3 @@
-version: 1
-description: >
-  本文件是本地 Finoview feather 字段的业务含义映射表。运行时仍会自动扫描
-  feather schema，但关键字段的 ticker、factor_group、频率和滞后天数由这里显式固定，
-  避免让 LLM 或文件名猜测交易含义。
-
-# 仅用于基本面覆盖率审计，不得作为交易白名单、黑名单或仓位偏置。
-coverage_audit_tickers: [BU, C, CF, EB, HC, I, J, M, MA, P, PB, RB, SR, TA, ZN]
-
 # 可交易基本面快照至少要尽量覆盖这些因子组。
 required_groups:
   - price_basis
