@@ -693,7 +693,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "docs/mechanism_pm.md",
+                "docs/agent_pm.md",
                 ("pm_ticker_side_selection", "side_priority"),
                 "PM mechanism document fixes ticker side selection boundary",
             ),
@@ -984,7 +984,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tests/test_phase_flow_regression.py", ("test_final_action_contract_is_single_structured_trade_truth",), "phase path tests cover final contract construction"),
         ),
         mechanism_doc=(
-            _rule("docs/mechanism_pm.md", ("唯一 `final_action_contract`", "pm_contract_self_check"), "PM mechanism fixes final contract and self-check"),
+            _rule("docs/agent_pm.md", ("唯一 `final_action_contract`", "pm_contract_self_check"), "PM mechanism fixes final contract and self-check"),
         ),
     ),
     _matrix_spec(
@@ -1011,7 +1011,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_step6_lifecycle_uses_final_candidate_and_keeps_old_check_historical",), "PM workflow tests cover final Step6 trace"),
         ),
         mechanism_doc=(
-            _rule("docs/mechanism_pm.md", ("Step2 到 Step6 的变化", "最终合约失败判断"), "PM mechanism fixes Step2 provenance and Step6 final trace boundary"),
+            _rule("docs/agent_pm.md", ("Step2 到 Step6 的变化", "最终合约失败判断"), "PM mechanism fixes Step2 provenance and Step6 final trace boundary"),
         ),
     ),
     _matrix_spec(
@@ -1065,7 +1065,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tests/test_phase_flow_regression.py", ("test_pm_artifact_excludes_incomplete_prior_from_formal_action_values",), "phase flow test covers incomplete prior filtering"),
         ),
         mechanism_doc=(
-            _rule("docs/mechanism_pm.md", ("alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表", "incomplete_prior_not_pm_scoring_evidence"), "PM mechanism fixes formal action-value boundary"),
+            _rule("docs/agent_pm.md", ("alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表", "incomplete_prior_not_pm_scoring_evidence"), "PM mechanism fixes formal action-value boundary"),
         ),
     ),
     _matrix_spec(

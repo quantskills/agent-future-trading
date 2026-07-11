@@ -613,7 +613,7 @@
 | `historical_pm_rank` | `product_learning_calibration_view` | 历史 PM 排名事实别名，只描述过去样本在当日 PM 队列中的位置；分析师只能用它判断该类证据组合过去是否值得复核，不能输出 `opportunity_rank` 或交易权限。 |
 | `historical_pm_score` | `product_learning_calibration_view` | 历史 PM 分数事实别名，只描述过去样本的 PM 评分；分析师只能用它校准证据可靠性，不能生成 PM score、rank、手数或资金部署。 |
 | `memory_requirements` | `final_action_contract.learning_used` / `final_action_semantics` / 机制审计 | 由 `src/tools/common/final_action_semantics.py` 根据最终合约生命周期生成的 PM 必读记忆需求；包含 lanes、side roles、是否必须落入 PM 合约，不创建交易权限。 |
-| `learning_used.alpha_setup_action_values` | `final_action_contract.learning_used` | PM 最终合约实际声明消费的正式 canonical action-value 主证据列表。行级纯净性和生命周期匹配口径由 `docs/mechanism_pm.md` 与 `docs/matrix_action_canonical.md` 固定。 |
+| `learning_used.alpha_setup_action_values` | `final_action_contract.learning_used` | PM 最终合约实际声明消费的正式 canonical action-value 主证据列表。行级纯净性和生命周期匹配口径由 `docs/agent_pm.md` 与 `docs/matrix_action_canonical.md` 固定。 |
 | `learning_used.memory_retrieval.rejected_or_downgraded` | `final_action_contract.learning_used` | PM 学习检索诊断列表。被剔除的 incomplete prior 只能以 `reason=incomplete_prior_not_pm_scoring_evidence` 保留在这里；该列表不参与 score、rank、手数、资金部署和 `final_action`。 |
 | `retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM exact state 检索键，格式为 ticker、side、horizon_class、market_regime、setup_type、learning_lane；用于机器检索，不是交易授权。 |
 | `fallback_retrieval_key` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | PM fallback 检索键，格式为 ticker、side、horizon_class、learning_lane；exact state 漂移时用于同品种同方向同期限学习消费。 |

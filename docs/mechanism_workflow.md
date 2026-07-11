@@ -35,7 +35,7 @@ technical / fundamental / commodity_news 分析师
 
 ### 0.3 PM
 
-PM 接收 `signal_collector` 打包好的结构化信号证据，并按 `docs/mechanism_pm.md` 的六步机制，把结构化信号证据、持仓、配置和可用学习转成下一交易日唯一合法的 `final_action_contract`。
+PM 接收 `signal_collector` 打包好的结构化信号证据，并按 `docs/agent_pm.md` 的六步机制，把结构化信号证据、持仓、配置和可用学习转成下一交易日唯一合法的 `final_action_contract`。
 
 PM 是唯一组合决策者、唯一资金 rank 与资金部署决策者、唯一 `final_action_contract` 签发者。
 

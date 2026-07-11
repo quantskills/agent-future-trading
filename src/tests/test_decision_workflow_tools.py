@@ -375,7 +375,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertNotIn("pm_capital_deployment_decision", recommendation.signal_snapshot)
 
     def test_mechanism_pm_step2_documents_lifecycle_port_primary_tool(self):
-        text = (PROJECT_ROOT / "docs" / "mechanism_pm.md").read_text(encoding="utf-8-sig")
+        text = (PROJECT_ROOT / "docs" / "agent_pm.md").read_text(encoding="utf-8-sig")
         step2_start = text.index("## 2. 判断生命周期动作口")
         step3_start = text.index("## 3. 判断单品种方向与候选质量")
         step2 = text[step2_start:step3_start]

@@ -31,7 +31,7 @@
 |---|---|
 | 多智能体角色、阶段、权限边界 | `docs/mechanism_multiagents.md` |
 | workflow 编排、传递、保存、阻断 | `docs/mechanism_workflow.md` |
-| PM 六步、最终合约、自检、PM artifact | `docs/mechanism_pm.md` |
+| PM 六步、最终合约、自检、PM artifact | `docs/agent_pm.md` |
 | 全链路生产/落盘/消费/审计契约矩阵 | `docs/matrix_chain_contract.md` |
 | 字段语义矩阵 | `docs/matrix_field_semantics.md` |
 | action-value 动作 canonical 矩阵 | `docs/matrix_action_canonical.md` |

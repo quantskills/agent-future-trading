@@ -6,7 +6,7 @@
 
 内容：`signal_collection_contract`
 
-生产者：`signal_collector_agent`
+生产者：`signal_collector`
 
 传递者：`workflow` 编排层。`workflow` 不是智能体，只负责把 signal collector 产物写入运行时 state。
 
@@ -94,7 +94,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 #### 1.2 包含内容
 
-`final_action_contract` 必须包含：
+`final_action_contract` 字段按真实层级分组如下。四个结构化容器位于顶层；新增风险路径才写入 rank 和预算明细，非新增风险路径不伪造这些字段。
 
 - `contract_version`
 - `producer`
@@ -139,6 +139,33 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 - `margin_delta`
 - `post_trade_margin_estimate`
 - `evidence_used`
+  - `lifecycle_learning_trace`
+    - `decision_learning_rows`
+    - `trigger_profile_learning_rows`
+  - `opportunity_score_components`
+  - `side_priority`
+  - `ticker_side_priority`
+  - `side_priority_score`
+- `learning_used`
+  - `alpha_setup_action_values`
+  - `memory_requirements`
+  - `memory_retrieval`
+  - `pm_lifecycle_learning_trace`
+- `capital_deployment`
+  - `opportunity_rank`
+  - `rank_source`
+  - `rank_lifecycle`
+  - `capital_layer`
+  - `budget_approved`
+  - `budget_rejection_reason`
+  - `allocated_budget`
+  - `target_margin`
+- `position_sizing_result`
+  - `sizing_method`
+  - `sizing_constraints`
+  - `max_lots_allowed`
+  - `target_lots_before_constraints`
+  - `target_lots_after_constraints`
 - `evidence_understanding`
 - `signal_collection_contract_ref`
 - `evidence_alignment_state`
@@ -146,36 +173,12 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 - `cross_analyst_conflict_count`
 - `missing_evidence_count`
 - `resolution_effect`
-- `learning_used`
-- `alpha_setup_action_values`
-- `memory_retrieval`
-- `lifecycle_learning_trace`
-- `decision_learning_rows`
-- `trigger_profile_learning_rows`
-- `opportunity_rank`
-- `rank_source`
-- `rank_lifecycle`
-- `side_priority`
-- `ticker_side_priority`
-- `side_priority_score`
-- `scorecard_score`
-- `scorecard_preferred_side`
-- `capital_deployment`
-- `capital_layer`
-- `budget_approved`
-- `budget_rejection_reason`
-- `allocated_budget`
-- `target_margin`
-- `position_sizing_result`
-- `sizing_method`
-- `sizing_constraints`
-- `max_lots_allowed`
-- `target_lots_before_constraints`
-- `target_lots_after_constraints`
 - `lineage`
 - `source_lineage_context`
 - `generated_at`
 - `pm_contract_generation_mode`
+
+`pm_six_step_trace` 位于 `FuturesRecommendation.signal_snapshot`，不属于 `final_action_contract` 内部字段。
 
 #### 1.3 来源
 
@@ -214,6 +217,10 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 ##### 2.1.1 落点
 
 PM 第 6 步返回给 `workflow` 的内存对象：`FuturesRecommendation`。
+
+`FuturesRecommendation` 包含 recommendation 基础字段和 `signal_snapshot`；唯一最终交易事实位于 `signal_snapshot.final_action_contract`。
+
+PM 的直接输出到此结束。Auditor 审计结果、DB 记录、本地 artifact 和运行日志均属于后续处理结果。
 
 ##### 2.1.2 包含内容
 
@@ -422,7 +429,17 @@ recommendation-level 摘要字段来自最终合约，不另造第二套事实�
 
 运行日志只用于排查，不是交易事实来源。
 
-### 3. 定死口径
+### 3. 后续处理边界
+
+Auditor 在 PM 返回 `FuturesRecommendation` 后审计最终合约。
+
+workflow / 保存层负责将 `FuturesRecommendation` 写入 DB，并生成本地 artifact。
+
+运行日志由 PM、Auditor、workflow 和保存层在各自运行阶段写入。
+
+上述材料属于 PM 返回后的处理结果，不属于 PM 直接输出。
+
+### 4. 定死口径
 
 PM 只有第 6 步生成最终合约。
 
@@ -476,6 +493,8 @@ PM 按 `ticker` 调 `FuturesContractInfoCache.get_contract_info` 读取合约乘
 
 PM 从 `state["analyst_signals"]` 读取 SCC 来源引用材料。
 
+运行时 state 的统一读取入口是 `src/agents/decision_team/portfolio_manager.py` 中的 `_run_pm_six_step_decision`。该入口负责取出上述输入并传入同一个 PM 内部候选状态，不生成交易合约。
+
 #### 1.2 输入校验
 
 PM 校验 SCC 的 `producer="signal_collector"`。
@@ -488,11 +507,16 @@ PM 校验 `morning_price_context.base_price` 能作为 Phase1 盘前计划参考
 
 PM 校验合约基础信息存在，且能支持手数、保证金和风险测算。
 
+现有校验代码位于 `src/agents/decision_team/portfolio_manager.py`：
+
+- `_run_pm_six_step_decision` 校验 SCC 是否存在，以及 `producer`、`collector_decision_boundary` 是否符合边界。
+- `_validate_required_analyst_signals` 只校验分析师输出是否齐全，不使用分析师信号生成交易判断。
+
 #### 1.3 PM 如何理解 SCC
 
 PM 对 SCC 的理解写入 `evidence_understanding`：
 
-- `preferred_direction`：多、空、退出、观望。
+- `direction_evidence`：SCC 中与多、空、退出、观望相关的结构化方向证据。
 - `trigger_state`：已触发、等待触发、未触发。
 - `trigger_condition`：进入交易需要满足的触发条件。
 - `evidence_strength`：证据强弱。
@@ -508,6 +532,12 @@ PM 对 SCC 的理解写入 `evidence_understanding`：
 
 PM 只解释 SCC 已经给出的结构化证据，不回读分析师原始文本，不补造 SCC 没有给出的交易证据。
 
+本步复用现有 `build_pm_fusion_diagnostics` 理解 SCC 中的证据融合信息。
+
+工具路径：`src/tools/common/evidence_fusion_semantics.py`。
+
+该工具只读取 `signal_collection_contract`，生成一致性、冲突、缺失证据和确认需求摘要，不生成方向、rank、手数或交易权限。
+
 #### 1.4 PM 如何理解账户、价格、合约和配置
 
 PM 对账户和持仓的理解写入 `position_context`：
@@ -516,7 +546,6 @@ PM 对账户和持仓的理解写入 `position_context`：
 - 当前方向。
 - 当前保证金占用。
 - 可用风险空间。
-- 当前仓位与 SCC 方向的关系。
 
 PM 对盘前价格的理解写入 `price_basis_context`：
 
@@ -534,6 +563,10 @@ PM 对合约信息的理解写入 `contract_context`：
 - 主力合约信息。
 - 合约基础校验结果。
 
+合约信息读取工具：`FuturesContractInfoCache.get_contract_info`。
+
+工具路径：`src/apis/contract_info_cache.py`。
+
 PM 对运行参数的理解写入 `config_context`：
 
 - 单品种风险上限。
@@ -550,19 +583,25 @@ PM 对分析师信号引用的理解写入 `source_lineage_context`：
 - artifact 引用是否完整。
 - 该部分只证明 SCC 来源完整，不生成交易判断。
 
-#### 1.6 本步输出
+现有来源完整性校验入口是 `src/agents/decision_team/portfolio_manager.py` 中的 `_validate_required_analyst_signals`。该入口只核对启用分析师与实际输出，不解释分析师方向、触发、风险和失效边界。
+
+#### 1.6 状态更新
 
 PM 把上述理解写入同一个产品候选状态。
 
 候选状态是 PM 内部主链对象，后续步骤继续改写同一个对象，不再另起一套交易事实。
 
-本步输出不是最终合约。
+本步状态不是最终合约。
 
 候选状态继续传入第 2 步。
 
 最终物理输出只来自第 6 步后的 `FuturesRecommendation`：原始 SCC 进入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，可执行交易事实进入 `FuturesRecommendation.signal_snapshot.final_action_contract`，候选状态演化摘要进入 `FuturesRecommendation.signal_snapshot.pm_six_step_trace`。
 
 DB 记录和本地 artifact 由 workflow / 保存层基于 `FuturesRecommendation` 持久化生成，不是本步输出。
+
+Step1 到 Step5 只更新同一个 PM 内部候选状态。
+
+Step1 到 Step5 禁止生成 `candidate_contract`、`final_contract_builder_inputs`、`FuturesRecommendation` 或任何 recommendation。
 
 #### 1.7 禁止项
 
@@ -593,6 +632,8 @@ PM 不把第 1 步候选状态暴露给 workflow、Auditor、Trader、Reviewer�
 ### 3. 结合持仓确定交易状态
 
 ### 4. 读取学习成果修正候选质量
+
+PM 在本步调用 `pm_decision_memory_retrieval.retrieve_pm_memory` 读取与当前产品、方向、生命周期和交易日期匹配的学习成果。
 
 ### 5. 新增风险排序与预算分配
 
