@@ -94,10 +94,10 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 #### 1.2 包含内容
 
-`final_action_contract` 字段按真实层级分组如下。四个结构化容器位于顶层；新增风险路径才写入 rank 和预算明细，非新增风险路径不伪造这些字段。
+`final_action_contract` 只使用 `docs/matrix_field_semantics.md` 已登记字段，并按该文档规定的层级放置。动作与学习语义只使用 `docs/matrix_action_canonical.md` 的 canonical 口径。
 
 - `contract_version`
-- `producer`
+- `source_agent`
 - `trading_date`
 - `config_id`
 - `ticker`
@@ -105,80 +105,70 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 - `contract_code`
 - `source_type`
 - `final_action`
-- `action_family`
-- `contract_lifecycle_port`
 - `current_lots`
 - `target_lots`
 - `lots_delta`
-- `position_change_direction`
-- `side`
-- `direction`
-- `direction_source`
-- `authority`
-- `execution_trigger_state`
-- `execution_trigger_condition`
-- `execution_timing_rule`
+- `target_position_ratio`
+- `authority_type`
+- `execution_profile`
+- `trigger_source`
+- `entry_trigger`
+- `invalidation`
+- `valid_until`
+- `requires_intraday_confirmation`
+- `can_execute_without_intraday_trigger`
 - `conditional_trigger_authority`
-- `trigger_valid_until`
-- `trigger_cancel_condition`
-- `invalidation_boundary`
-- `risk_boundary`
-- `stop_reference`
 - `reason_codes`
-- `do_not_trade_reason`
-- `rejection_reason`
+- `risk_controls`
+- `capital_controls`
+- `margin_ratio`
+- `max_allowed_margin_ratio`
 - `base_price`
 - `base_price_source`
 - `base_price_date`
 - `prev_close_price`
-- `price_basis_warning`
 - `contract_multiplier`
 - `margin_rate`
-- `notional_value`
-- `estimated_margin`
-- `margin_delta`
-- `post_trade_margin_estimate`
 - `evidence_used`
   - `lifecycle_learning_trace`
-    - `decision_learning_rows`
-    - `trigger_profile_learning_rows`
+  - `learning_impact_delta`
   - `opportunity_score_components`
   - `side_priority`
   - `ticker_side_priority`
-  - `side_priority_score`
+  - `pm_fusion_diagnostics`
+  - `pm_conflict_resolution`
+  - `position_sizing_result`
 - `learning_used`
   - `alpha_setup_action_values`
   - `memory_requirements`
   - `memory_retrieval`
+    - `rejected_or_downgraded`
   - `pm_lifecycle_learning_trace`
+  - `pm_lifecycle_learning_impact_delta`
+  - `learning_adjustment_summary`
 - `capital_deployment`
+  - `selected_for_capital_deployment`
+  - `capital_allocation_reason`
   - `opportunity_rank`
   - `rank_source`
-  - `rank_lifecycle`
+  - `rank_scope`
+  - `capital_rank_generated_by`
+  - `rank_capital_role`
   - `capital_layer`
-  - `budget_approved`
-  - `budget_rejection_reason`
-  - `allocated_budget`
-  - `target_margin`
-- `position_sizing_result`
-  - `sizing_method`
-  - `sizing_constraints`
-  - `max_lots_allowed`
-  - `target_lots_before_constraints`
-  - `target_lots_after_constraints`
-- `evidence_understanding`
-- `signal_collection_contract_ref`
-- `evidence_alignment_state`
-- `multi_evidence_consensus_score`
-- `cross_analyst_conflict_count`
-- `missing_evidence_count`
-- `resolution_effect`
-- `lineage`
-- `source_lineage_context`
-- `generated_at`
-- `pm_contract_generation_mode`
+  - `capital_ratio_source`
+  - `rank_reason`
+  - `rank_input_components`
+  - `rank_semantics_version`
+  - `opportunity_rank_meaning`
+  - `rank_is_capital_priority`
+  - `rank_is_not_trade_authority`
+  - `lifecycle_learning_trace`
+  - `learning_impact_delta`
+- `created_at`
 
 `pm_six_step_trace` 位于 `FuturesRecommendation.signal_snapshot`，不属于 `final_action_contract` 内部字段。
+
+`capital_deployment` 只在矩阵要求的资金 rank、新开、加仓、扩大或条件监控场景原子生成；非 rank 合约不得补造 rank 专属子字段。
 
 #### 1.3 来源
 
@@ -190,25 +180,25 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 `final_action`、`current_lots`、`target_lots`、`lots_delta`：来自第 6 步对最终候选状态的合约化结果。
 
-方向、交易状态、生命周期口：来自第 6 步读取的最终候选状态；第 2、3 步写入的内容只作为该状态的内部演化来源。
+最终动作和持仓变化：只由 `final_action`、`current_lots`、`target_lots`、`lots_delta` 表达；生命周期由共享 `final_action_semantics` 和 `pm_lifecycle_learning_trace` 解释，不新增顶层生命周期字段。
 
-执行触发条件：来自最终候选状态中保留的 SCC trigger 信息和最终交易状态，不直接复制第 3 步中间判断。
+执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。
 
-失效边界、风险边界：来自 SCC 的 invalidation、risk 信息。
+风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 
 计划参考价：来自 `morning_price_context`。
 
 合约基础信息：来自 `FuturesContractInfoCache.get_contract_info`。
 
-证据摘要：由第 6 步从最终候选状态读取第 1 步保真证据事实后生成，不把第 1 步中间状态直接当作最终合约字段。
+证据摘要：只使用 `evidence_used` 下已登记的 score、融合解释、生命周期学习解释和 `position_sizing_result`，不新增证据摘要字段。
 
 学习使用摘要：由第 6 步从第 4 步保留的完整 canonical 学习池按最终生命周期重新路由后生成，不复制第 4 步初始路由结果。
 
-排名与预算分配摘要：只在新增风险路径中来自第 5 步排序与预算分配结果；非新增风险路径不生成该摘要。
+排名与预算分配摘要：只在进入第 5 步的候选中来自排序与预算分配结果。候选即使最终因预算拒绝退回 `wait/hold`，仍保留本次 rank 和拒绝事实；直接从第 4 步进入第 6 步的候选不生成 rank 明细。
 
-仓位测算结果：新增风险路径来自第 5 步 position sizing；非新增风险路径由第 6 步按最终持仓生命周期确定目标手数，不进入全市场 rank 和预算分配。
+仓位测算结果：按矩阵固定落入 `final_action_contract.evidence_used.position_sizing_result`。新增风险路径来自第 5 步 position sizing；非新增风险路径由第 6 步按最终持仓变化确定目标手数，不进入全市场 rank。
 
-来源链路：来自 SCC source refs、分析师引用完整性校验和 PM 生成上下文。
+来源链路由 `signal_snapshot.signal_collection_contract.source_contracts` 和 `evidence_items` 保真承载，不在最终合约中自创 lineage 字段。
 
 ### 2. PM 返回对象与后续物理化
 
@@ -224,32 +214,9 @@ PM 的直接输出到此结束。Auditor 审计结果、DB 记录、本地 artif
 
 ##### 2.1.2 包含内容
 
-- `id`
-- `config_id`
-- `reference_portfolio_id`
-- `trading_date`
-- `effective_trade_date`
-- `source_type`
-- `underlying_code`
-- `from_contract`
-- `to_contract`
-- `contract_code`
-- `action`
-- `lots`
-- `base_price`
-- `base_price_source`
-- `base_price_date`
-- `open_price`
-- `prev_close_price`
-- `slippage_model`
-- `slippage_ticks`
-- `slippage_amount`
-- `execution_price`
-- `justification`
-- `signal_snapshot`
-- `warning_message`
-- `status`
-- `created_at`
+返回对象结构沿用 `src/graph/schema.py` 中的 `FuturesRecommendation`，本文件不为 recommendation wrapper 另定字段语义。
+
+其中业务字段必须来自 `matrix_field_semantics.md`；顶层动作、手数、价格、产品、日期和理由只能由唯一 `final_action_contract` 映射，不得在 wrapper 中产生第二套含义。
 
 ##### 2.1.3 来源
 
@@ -269,41 +236,9 @@ PM 返回时不填充 Auditor 审计结果和 `audit_payload`。
 
 ##### 2.2.2 包含内容
 
-- `id`
-- `config_id`
-- `reference_portfolio_id`
-- `trading_date`
-- `effective_trade_date`
-- `source_type`
-- `underlying_code`
-- `from_contract`
-- `to_contract`
-- `contract_code`
-- `action`
-- `lots`
-- `base_price`
-- `base_price_source`
-- `base_price_date`
-- `open_price`
-- `prev_close_price`
-- `slippage_model`
-- `slippage_ticks`
-- `slippage_amount`
-- `execution_price`
-- `justification`
-- `status`
-- `warning_message`
-- `signal_snapshot`
-- `signal_snapshot_artifact_path`
-- `signal_snapshot_sha256`
-- `signal_snapshot_size`
-- `signal_snapshot_summary_json`
-- `audit_payload`
-- `audit_payload_artifact_path`
-- `audit_payload_sha256`
-- `audit_payload_size`
-- `audit_payload_summary_json`
-- `created_at`
+DB 字段沿用既有 `futures_recommendation` 表结构；本文件不新增保存字段。
+
+保存层只能保存 PM 返回对象、`signal_snapshot`、独立 `audit_payload` 以及 `matrix_field_semantics.md` 已登记的 artifact 元数据。未在矩阵登记的业务字段不得借 DB 列、JSON 容器或摘要字段进入系统。
 
 ##### 2.2.3 来源
 
@@ -322,8 +257,7 @@ PM 返回时不填充 Auditor 审计结果和 `audit_payload`。
 - `signal_collection_contract`
 - `final_action_contract`
 - `pm_six_step_trace`
-- 必要的 snapshot header 和 lineage 字段
-- 由 `final_action_contract` 派生的 recommendation-level 摘要字段
+- `matrix_field_semantics.md` 已登记的必要 header、来源字段和派生摘要字段
 
 ##### 2.3.3 来源
 
@@ -331,7 +265,7 @@ PM 返回时不填充 Auditor 审计结果和 `audit_payload`。
 
 `final_action_contract` 来自第 6 步最终合约。
 
-`pm_six_step_trace` 只由第 6 步生成，包含最终合约生成检查、最终合约自身一致性检查和安全 provenance 摘要；不保存 Step1–5 原始中间状态、合约草稿和比较式自检结果。
+`pm_six_step_trace` 只由第 6 步生成，只包含矩阵登记的最终合约生成检查和最终合约自身一致性检查；不保存 Step1–5 原始中间状态、合约草稿、额外 provenance 字段和比较式自检结果。
 
 recommendation-level 摘要字段来自最终合约，不另造第二套事实。
 
@@ -348,18 +282,7 @@ Auditor 审计结果不属于 PM 返回时的 `signal_snapshot`；由 `workflow`
 - recommendation payload JSON
 - signal_snapshot JSON
 - audit_payload JSON
-- final_action_contract
-- pm_six_step_trace
-- signal_collection_contract
-- auditor
-- signal_snapshot_artifact_path
-- signal_snapshot_sha256
-- signal_snapshot_size
-- signal_snapshot_summary_json
-- audit_payload_artifact_path
-- audit_payload_sha256
-- audit_payload_size
-- audit_payload_summary_json
+- `matrix_field_semantics.md` 已登记的 artifact 元数据
 
 ##### 2.4.3 来源
 
@@ -377,23 +300,7 @@ Auditor 审计结果不属于 PM 返回时的 `signal_snapshot`；由 `workflow`
 
 ##### 2.5.2 包含内容
 
-- `trading_date`
-- `config_id`
-- `ticker`
-- `run_id`
-- `log_namespace`
-- `pm_invocation_result`
-- `final_contract_generation_result`
-- `pm_contract_self_check_result`
-- `auditor_result_summary`
-- `db_persistence_result`
-- `artifact_externalization_result`
-- `contract_generation_block_reason`
-- `persistence_block_reason`
-- `error_stack`
-- `exception_context`
-- `runtime_elapsed`
-- `runtime_notice`
+日志只记录既有 logger 元数据、最终返回状态、最终检查结果和异常上下文。本文件不定义日志业务字段，也不允许日志引入 `matrix_field_semantics.md` 之外的交易语义。
 
 ##### 2.5.3 来源
 
@@ -443,7 +350,7 @@ DB、artifact、日志都是最终合约生成之后的物理材料。
 
 `signal_snapshot.signal_collection_contract` 是 PM 使用的原始 SCC 快照。
 
-`pm_six_step_trace` 只保存第 6 步最终生成检查、最终合约自身检查和安全 provenance 摘要，不保存 Step1–5 原始中间状态，不生成交易动作。
+`pm_six_step_trace` 只保存矩阵登记的第 6 步最终生成检查和最终合约自身检查，不保存 Step1–5 原始中间状态，不新增 provenance 字段，不生成交易动作。
 
 recommendation-level 摘要字段必须来自 `final_action_contract`，不能形成第二套交易事实。
 
@@ -471,7 +378,7 @@ PM 从 `state["analyst_signals"]` 读取 SCC 来源引用材料。
 
 #### 1.2 输入校验
 
-PM 校验 SCC 的 `producer="signal_collector"`。
+PM 校验 SCC 的 `source_agent="signal_collector"`。
 
 PM 校验 SCC 的 `collector_decision_boundary="no_trade_authority"`。
 
@@ -483,26 +390,24 @@ PM 校验合约基础信息存在，且能支持手数、保证金和风险测�
 
 现有校验代码位于 `src/agents/decision_team/portfolio_manager.py`：
 
-- `_run_pm_six_step_decision` 校验 SCC 是否存在，以及 `producer`、`collector_decision_boundary` 是否符合边界。
+- `_run_pm_six_step_decision` 校验 SCC 是否存在，以及 `source_agent`、`collector_decision_boundary` 是否符合边界。
 - `_validate_required_analyst_signals` 只校验分析师输出是否齐全，不使用分析师信号生成交易判断。
 
 #### 1.3 PM 如何理解 SCC
 
-PM 对 SCC 的理解写入 `evidence_understanding`：
+PM 只读取 SCC 已登记字段，并在同一个内部状态中保真使用：
 
-- `direction_evidence`：SCC 中与多、空、退出、观望相关的结构化方向证据。
-- `trigger_state`：已触发、等待触发、未触发。
-- `trigger_condition`：进入交易需要满足的触发条件。
+- `dominant_side`：SCC 汇总方向，不是交易授权。
+- `trigger_status`：SCC 当前触发状态。
+- `entry_trigger`：当前触发事实或等待条件。
 - `evidence_strength`：证据强弱。
-- `evidence_quality`：证据质量。
-- `alignment_state`：证据一致性。
-- `conflict_summary`：主要冲突。
+- `evidence_fusion.evidence_alignment_state`：证据一致性。
+- `evidence_fusion.cross_analyst_conflicts`：结构化冲突。
 - `confirmation_requirements`：仍需确认的条件。
-- `missing_evidence`：缺失证据。
-- `risk_factors`：主要风险。
-- `invalidation_boundary`：失效边界。
-- `profile_usage`：profile 使用痕迹。
-- `evidence_fusion_summary`：融合摘要。
+- `data_quality_flags`：数据质量和缺失标记。
+- `invalidation_summary`：失效边界。
+- `evidence_items.product_profile_used`：profile 使用痕迹。
+- `evidence_fusion`：融合证据原始结构。
 
 PM 只解释 SCC 已经给出的结构化证据，不回读分析师原始文本，不补造 SCC 没有给出的交易证据。
 
@@ -514,34 +419,28 @@ PM 只解释 SCC 已经给出的结构化证据，不回读分析师原始文本
 
 #### 1.4 PM 如何理解账户、价格、合约和配置
 
-PM 对账户和持仓的理解写入 `position_context`：
+PM 从 `portfolio` 读取账户和持仓事实，不新增 position context 字段：
 
 - 当前手数。
 - 当前方向。
 - 当前保证金占用。
 - 可用风险空间。
 
-PM 对盘前价格的理解写入 `price_basis_context`：
+PM 使用矩阵登记的价格字段：
 
 - `base_price`。
 - `base_price_source`。
 - `base_price_date`。
 - `prev_close_price`。
-- `warning_message`。
 - Phase1 价格只用于计划测算，不代表真实成交价。
 
-PM 对合约信息的理解写入 `contract_context`：
-
-- 合约乘数。
-- 保证金率。
-- 主力合约信息。
-- 合约基础校验结果。
+PM 使用矩阵登记的 `contract_code`、`contract_multiplier` 和 `margin_rate`，主力合约信息只作为合约选择输入，不新增 contract context 字段。
 
 合约信息读取工具：`FuturesContractInfoCache.get_contract_info`。
 
 工具路径：`src/apis/contract_info_cache.py`。
 
-PM 对运行参数的理解写入 `config_context`：
+PM 直接读取配置中的风险和资金参数，不新增 config context 字段：
 
 - 单品种风险上限。
 - 总保证金上限。
@@ -550,7 +449,7 @@ PM 对运行参数的理解写入 `config_context`：
 
 #### 1.5 PM 如何理解分析师信号引用
 
-PM 对分析师信号引用的理解写入 `source_lineage_context`：
+PM 只通过 SCC 已登记的 `source_contracts` 和 `evidence_items` 校验来源：
 
 - 分析师输出是否齐全。
 - SCC 来源引用是否能对应分析师输出。
@@ -569,21 +468,21 @@ PM 把上述理解写入同一个产品候选状态。
 
 候选状态继续传入第 2 步。
 
-最终物理输出只来自第 6 步后的 `FuturesRecommendation`：原始 SCC 进入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，可执行交易事实进入 `FuturesRecommendation.signal_snapshot.final_action_contract`，第 6 步最终生成检查、最终合约自身检查和安全 provenance 摘要进入 `FuturesRecommendation.signal_snapshot.pm_six_step_trace`。
+最终物理输出只来自第 6 步后的 `FuturesRecommendation`：原始 SCC 进入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，可执行交易事实进入 `FuturesRecommendation.signal_snapshot.final_action_contract`，矩阵登记的第 6 步最终生成检查和最终合约自身检查进入 `FuturesRecommendation.signal_snapshot.pm_six_step_trace`。
 
 DB 记录和本地 artifact 由 `workflow` 编排层 / 保存层基于 `FuturesRecommendation` 持久化生成，不是本步输出。
 
 Step1 到 Step4，以及新增风险路径进入的 Step5，只更新同一个 PM 内部候选状态。
 
-Step1 到 Step4，以及新增风险路径进入的 Step5，禁止生成 `candidate_contract`、`final_contract_builder_inputs`、`FuturesRecommendation` 或任何 recommendation。
+Step1 到 Step4，以及新增风险路径进入的 Step5，禁止生成 `candidate_contract`、builder 输入、`FuturesRecommendation` 或任何 recommendation。
 
 #### 1.7 状态演化与自检边界
 
 第 1 步读取的原始 `signal_collection_contract` 和来源引用事实必须保持不变。后续步骤只能消费这些事实并更新 PM 内部候选状态，不得反向改写第 1 步证据。
 
-第 1 步 `evidence_understanding` 是后续决策输入，不是最终动作约束。第 2、3、4 步继续更新同一个候选状态，只有新增风险路径再由第 5 步更新该状态；最终动作可以与 SCC `dominant_side` 和第 1 步证据理解不同。
+第 1 步读取的 SCC 字段是后续决策输入，不是最终动作约束。第 2、3、4 步继续更新同一个候选状态，只有新增风险路径再由第 5 步更新该状态；最终动作可以与 SCC `dominant_side` 不同。
 
-第 6 步必须把原始 SCC 保真写入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，并只对最终 `final_action_contract` 自身执行 `pm_contract_self_check`。禁止因最终动作、最终持仓方向与 SCC `dominant_side`、第 1 步 `evidence_understanding` 不同而判定合约失败。
+第 6 步必须把原始 SCC 保真写入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，并只对最终 `final_action_contract` 自身执行 `pm_contract_self_check`。禁止因最终动作、最终持仓方向与 SCC `dominant_side` 不同而判定合约失败。
 
 #### 1.8 禁止项
 
@@ -615,19 +514,19 @@ PM 不把第 1 步候选状态暴露给 `workflow` 编排层、Auditor、Trader�
 
 #### 2.1 本步目标
 
-PM 根据第 1 步写入候选状态的 `direction_evidence`，确定当前产品的 `preferred_direction`。
+PM 根据原始 SCC 方向事实，调用唯一方向选择工具生成 `side_priority` 和 `ticker_side_priority`。
 
-`preferred_direction` 只取 `long`、`short`、`flat`：
+产品代表方向只从上述既有方向优先级结果读取，取值为 `long`、`short`、`flat`：
 
 - `long`：当前 SCC 结构化证据的优先方向为多头。
 - `short`：当前 SCC 结构化证据的优先方向为空头。
 - `flat`：当前 SCC 没有形成可区分的多空优先方向。
 
-`preferred_direction` 只表达产品方向选择，不表达开仓、加仓、持有、减仓、退出、手数和交易授权。
+产品代表方向只表达单品种方向选择，不表达开仓、加仓、持有、减仓、退出、手数和交易授权。
 
 #### 2.2 使用的状态事实
 
-本步只读取同一个产品候选状态中第 1 步已经整理的 `direction_evidence`，其中方向事实来自原始 `signal_collection_contract`：
+本步只读取原始 `signal_collection_contract` 已登记的方向事实：
 
 - `dominant_side`
 - `side_consensus`
@@ -642,7 +541,7 @@ PM 根据第 1 步写入候选状态的 `direction_evidence`，确定当前产�
 - `confirmation_requirements`
 - `missing_evidence`
 
-本步沿用第 1 步已经生成的 `evidence_fusion_summary`，不重新读取分析师输出，不重新生成 SCC 融合事实。
+本步沿用 SCC 原始 `evidence_fusion`，不重新读取分析师输出，不重新生成融合字段。
 
 #### 2.3 调用工具
 
@@ -653,7 +552,7 @@ PM 根据第 1 步写入候选状态的 `direction_evidence`，确定当前产�
 
 `pm_ticker_side_selection` 中的 `side_priority` 只用于同一产品内部的多空方向排序，不是全市场 `opportunity_rank`，不是资金优先级，也不是交易授权。
 
-代码梳理时保留该工具的确定性方向选择入口，把本步输入收窄为候选状态中的 `direction_evidence` 和原始 SCC 方向事实。现有 `build_opportunity_scorecard` 承担的候选质量计算不属于本步，学习成果也不在本步读取。
+代码梳理时保留该工具的确定性方向选择入口，把本步输入收窄为原始 SCC 方向事实。现有 `build_opportunity_scorecard` 承担的候选质量计算不属于本步，学习成果也不在本步读取。
 
 本步不新增方向判断工具，不调用 LLM。
 
@@ -664,8 +563,8 @@ PM 按以下顺序判断方向：
 1. 读取 SCC 的 `dominant_side`，确认其属于 `long`、`short`、`flat`、`mixed`。
 2. 使用 `side_consensus`、`evidence_alignment_state` 和 `multi_evidence_consensus_score` 核对主方向的一致性。
 3. 使用 `supporting_analysts`、`opposing_analysts`、`cross_analyst_conflicts` 和 `dominant_opposing_evidence` 保留主方向的支持与反对事实。
-4. 对 `long`、`short` 形成产品内部 `side_priority`，取优先侧写入 `preferred_direction`。
-5. `dominant_side` 为 `flat`、`mixed`、方向证据缺失、两侧无法区分时，写入 `preferred_direction="flat"`。
+4. 对 `long`、`short` 形成产品内部 `side_priority` 和 `ticker_side_priority`。
+5. `dominant_side` 为 `flat`、`mixed`、方向证据缺失、两侧无法区分时，方向选择结果保持 `flat`，不新增方向字段。
 
 冲突、缺失和待确认项不会被删除。它们继续保留在候选状态中，供第 3 步判断交易状态和候选质量。
 
@@ -673,40 +572,37 @@ PM 按以下顺序判断方向：
 
 本步把以下内容写回同一个产品候选状态：
 
-- `preferred_direction`
-- `direction_source="signal_collection_contract"`
 - `side_priority`
 - `ticker_side_priority`
-- 本次方向判断使用的 SCC 事实摘要
-- 未解决的方向冲突、缺失证据和确认需求
+- 原始 SCC 中未解决的 `cross_analyst_conflicts`、`missing_evidence` 和 `confirmation_requirements`
 
-本步不创建新的候选对象，不输出独立方向 artifact。更新后的同一候选状态继续传入第 3 步，由第 3 步比较当前持仓与 `preferred_direction`，再确定交易状态。
+本步不创建新的候选对象，不输出独立方向 artifact。更新后的同一候选状态继续传入第 3 步，由第 3 步比较当前持仓与 `ticker_side_priority` 的代表方向，再确定交易状态。
 
 #### 2.6 状态演化与自检边界
 
-`preferred_direction` 是第 2 步根据 SCC 事实确定的产品证据优先方向，不是最终交易动作，也不是最终合约必须保持不变的方向字段。
+`side_priority` 和 `ticker_side_priority` 是第 2 步根据 SCC 事实确定的单品种方向优先级，不是最终交易动作，也不是最终合约必须保持不变的方向字段。
 
 第 3、4 步结合当前持仓、生命周期和学习成果继续更新同一个候选状态。只有新增风险候选进入第 5 步执行风险排序和资金部署；非新增风险候选从第 4 步直接进入第 6 步。最终候选进入等待、持有、减仓、退出和新增风险路径都属于正常状态演化。
 
-第 6 步只根据最终候选状态生成 `final_action_contract`，并只对最终合约自身执行 `pm_contract_self_check`。禁止直接比较第 2 步 `preferred_direction` 与第 6 步最终动作、最终持仓方向来判定合约失败。
+第 6 步只根据最终候选状态生成 `final_action_contract`，并只对最终合约自身执行 `pm_contract_self_check`。禁止直接比较第 2 步方向优先级与第 6 步最终动作、最终持仓方向来判定合约失败。
 
 #### 2.7 禁止项
 
 PM 不从 `state["analyst_signals"]`、分析师自由文本和分析师 artifact 重新判断产品方向。
 
-PM 不改写、重建、补造 `signal_collection_contract` 和 `direction_evidence`。
+PM 不改写、重建、补造 `signal_collection_contract` 和其中的方向事实。
 
 PM 不在本步读取 research DB、学习成果和未来日期数据。
 
-PM 不在本步比较当前持仓与 `preferred_direction`，不判断生命周期和交易状态。
+PM 不在本步比较当前持仓与方向优先级，不判断生命周期和交易状态。
 
 PM 不在本步生成 `opportunity_scorecard`、候选质量、全市场 `opportunity_rank`、资金部署和手数。
 
 PM 不把 `side_priority` 当作全市场资金排名、开仓资格和执行权限。
 
-PM 不要求第 2 步 `preferred_direction` 与第 6 步最终动作、最终持仓方向保持不变，不执行 Step2 与 Step6 的比较式自检。
+PM 不要求第 2 步 `side_priority` / `ticker_side_priority` 与第 6 步最终动作、最终持仓方向保持不变，不执行 Step2 与 Step6 的比较式自检。
 
-PM 不在本步生成 `candidate_contract`、`final_contract_builder_inputs`、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
+PM 不在本步生成 `candidate_contract`、builder 输入、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
 
 PM 不在本步执行最终合约自检，不生成 DB 记录、本地 artifact 和运行日志物理事实。
 
@@ -716,7 +612,7 @@ PM 不把本步候选状态暴露给 `workflow` 编排层、Auditor、Trader、R
 
 #### 3.1 本步目标
 
-PM 比较第 1 步整理的当前持仓方向与第 2 步确定的 `preferred_direction`，写入 `position_direction_relation`，再确定当前产品的初始生命周期分流口和候选交易状态。
+PM 根据 `current_lots` 推导当前持仓方向，与第 2 步 `ticker_side_priority` 的代表方向进行内存比较，再确定 `primary_lifecycle_action_port`、`candidate_quality` 和 `candidate_layer_hint`。该比较不新增关系字段，也不改写分析师证据字段 `opportunity_state`。
 
 本步只回答三件事：
 
@@ -728,42 +624,39 @@ PM 比较第 1 步整理的当前持仓方向与第 2 步确定的 `preferred_di
 
 #### 3.2 使用的状态事实
 
-本步只读取同一个产品候选状态中的以下内容：
+本步只读取矩阵已有事实：
 
-- `position_context.current_lots`
-- `position_context.current_direction`
-- `position_context.current_margin`
-- `position_context.available_risk_space`
-- `preferred_direction`
-- `direction_source`
-- `trigger_state`
-- `trigger_condition`
+- `current_lots`
+- `ticker_side_priority`
+- `opportunity_state`
+- `trigger_status`
+- `entry_trigger`
 - `evidence_strength`
 - `evidence_quality`
 - `confirmation_requirements`
 - `missing_evidence`
-- `risk_factors`
-- `invalidation_boundary`
+- `data_quality_flags`
+- `invalidation_summary`
 
-PM 以有符号当前手数确认持仓方向：当前手数大于零为 `long`，小于零为 `short`，等于零为 `flat`。`position_context.current_direction` 必须与有符号当前手数一致。
+PM 以有符号 `current_lots` 确认持仓方向：当前手数大于零为 `long`，小于零为 `short`，等于零为 `flat`。不另存当前方向字段。
 
 本步沿用第 1、2 步已经写入候选状态的事实，不重新读取 portfolio，不重新判断产品方向。
 
 #### 3.3 持仓与方向关系
 
-`position_direction_relation` 固定按下表确定：
+持仓与产品代表方向在内存中按下表比较，不生成新字段：
 
-| 当前持仓方向 | `preferred_direction` | `position_direction_relation` | 初始处理含义 |
-|---|---|---|---|
-| `flat` | `flat` | `flat_no_direction` | 当前没有持仓，也没有方向候选 |
-| `flat` | `long`、`short` | `flat_with_direction` | 当前存在新增风险候选 |
-| `long` | `long` | `same_direction` | 当前多头持仓进入同向持仓管理 |
-| `short` | `short` | `same_direction` | 当前空头持仓进入同向持仓管理 |
-| `long` | `short` | `opposite_direction` | 当前多头持仓先进入释放资金判断 |
-| `short` | `long` | `opposite_direction` | 当前空头持仓先进入释放资金判断 |
-| `long`、`short` | `flat` | `position_without_direction` | 当前持仓进入释放资金判断 |
+| 当前持仓方向 | 产品代表方向 | 初始处理含义 |
+|---|---|---|
+| `flat` | `flat` | 当前没有持仓，也没有方向候选 |
+| `flat` | `long`、`short` | 当前存在新增风险候选 |
+| `long` | `long` | 当前多头持仓进入同向持仓管理 |
+| `short` | `short` | 当前空头持仓进入同向持仓管理 |
+| `long` | `short` | 当前多头持仓先进入 reduce/exit 判断 |
+| `short` | `long` | 当前空头持仓先进入 reduce/exit 判断 |
+| `long`、`short` | `flat` | 当前持仓进入 reduce/exit 判断 |
 
-`position_direction_relation` 只描述当前事实关系，不直接等于开仓、加仓、持有、减仓、退出和反转动作。
+该内存比较不直接等于开仓、加仓、持有、减仓、退出和反转动作。
 
 #### 3.4 判断初始生命周期分流口
 
@@ -772,53 +665,51 @@ PM 以有符号当前手数确认持仓方向：当前手数大于零为 `long`�
 - 工具：`classify_lifecycle_action_port`
 - 路径：`src/tools/agent_tools/decision/pm_lifecycle_action_port.py`
 
-初始 `primary_lifecycle_action_port` 按持仓关系确定：
+初始 `primary_lifecycle_action_port` 按持仓与方向比较结果确定：
 
-- `flat_no_direction` 进入 `wait`。
-- `flat_with_direction` 进入 `new_risk` 候选路径。
-- `same_direction` 进入 `position_hold`，后续新增同向风险仍须由第 5 步重新识别为新增风险路径。
-- `opposite_direction` 进入 `capital_release`，反向新开风险不得与原持仓释放合并成一步。
-- `position_without_direction` 进入 `capital_release` 候选路径；最终减仓、退出和继续持有仍由后续状态演化决定。
+- 空仓且没有代表方向时进入 `wait`。
+- 空仓且存在代表方向时进入 `new_risk` 候选路径。
+- 持仓与代表方向相同时进入 `position_hold`；后续若扩大同向敞口，仍须由第 5 步识别为新增风险路径。
+- 持仓与代表方向相反时进入 `capital_release` 内部分流口；退出旧方向与授权反向新风险必须分开。
+- 有持仓但无代表方向时进入 `capital_release` 内部分流口；最终 `reduce`、`exit` 或 `hold` 由后续状态演化决定。
 
-现有 `classify_lifecycle_action_port` 以 `current_lots`、`target_lots` 和动作字段组成的 contract-shaped payload 分类。代码梳理时保留该工具，把本步输入收窄为 `current_lots`、`position_direction_relation` 和候选交易状态，不创建 `candidate_contract`，不提前生成目标手数。最终合约生命周期仍由第 6 步根据最终 `current_lots`、`target_lots` 和合约权限重新分类。
+现有 `classify_lifecycle_action_port` 以 `current_lots`、`target_lots` 和动作字段组成的 contract-shaped payload 分类。代码梳理时保留该工具，把本步输入收窄为 `current_lots`、方向比较结果和 `opportunity_state`，不创建 `candidate_contract`，不提前生成目标手数。最终生命周期仍由第 6 步通过共享 `final_action_semantics` 和最终学习 trace 解释。
 
 该工具是确定性、无 LLM、无 DB 写入、无 artifact 写入、无合约签发的 PM 内部工具。
 
 #### 3.5 判断候选交易状态
 
-候选交易状态沿用现有 `pm_state_transition` 状态语义：
+候选质量与层级判断沿用现有 `pm_state_transition` 状态语义：
 
 - 工具：`classify_pm_decision_state`
 - 路径：`src/tools/agent_tools/decision/pm_state_transition.py`
 
-本步使用以下候选状态：
+PM 只读取 `opportunity_state` 的以下分析师证据语义，再形成自己的 `candidate_quality` 和 `candidate_layer_hint`：
 
-- `no_opportunity`：无持仓且 `preferred_direction="flat"`。
+- `no_opportunity`：无持仓且产品代表方向为 `flat`。
 - `watch_for_trigger`：存在方向候选，但触发、确认、失效边界、必要证据尚未完整。
 - `probe_candidate`：方向和必要结构化证据已经成立，但当前只具备小规模候选条件。
 - `tradeable_candidate`：方向、触发、证据质量、失效边界和当前风险空间支持进入后续资金决策。
 - `risk_reduction_candidate`：当前持仓与优先方向相反，当前风险事实要求进入释放资金判断。
 
-代码梳理时把 `classify_pm_decision_state` 的基础状态判断前移到本步，把输入收窄为 `current_lots`、`position_direction_relation`、触发状态、证据质量、失效边界和当前风险空间。目标手数、学习成果、全市场 rank 和最终资金部署不得反向成为本步初始状态的必需输入。
+代码梳理时把 `classify_pm_decision_state` 的基础判断前移到本步，把输入收窄为只读 `opportunity_state`、`current_lots`、方向比较结果、`trigger_status`、`evidence_quality`、`invalidation_summary` 和账户风险事实，并把 PM 结果收口到 `candidate_quality` 与 `candidate_layer_hint`。目标手数、学习成果、全市场 rank 和最终资金部署不得反向成为本步初始状态的必需输入。
 
-候选交易状态不是交易动作。第 4 步完成学习修正后，只有形成 open、add、scale、reverse 和 conditional open 意图的新增风险候选进入第 5 步；wait、hold、reduce、exit 和 `capital_release` 等非新增风险候选直接进入第 6 步。
+`opportunity_state` 不是交易动作，`candidate_quality` 和 `candidate_layer_hint` 也不是交易权限。第 4 步完成学习修正后，只有形成 open/add/scale 新增风险或反转后新风险意图的候选进入第 5 步；wait、hold、reduce、exit 和监控类候选直接进入第 6 步。
 
 #### 3.6 状态更新
 
 本步把以下内容写回同一个产品候选状态：
 
-- `current_position_direction`
-- `position_direction_relation`
 - `primary_lifecycle_action_port`
-- `pm_decision_state`
-- 持仓关系使用的事实摘要
-- 待确认条件、缺失证据、风险因素和失效边界
+- `candidate_quality`
+- `candidate_layer_hint`
+- 原始 `confirmation_requirements`、`missing_evidence`、`data_quality_flags` 和 `invalidation_summary`
 
 本步不创建新的候选对象，不输出独立持仓状态 artifact。更新后的同一候选状态继续传入第 4 步，由第 4 步读取与当前产品、方向和生命周期匹配的学习成果，修正候选质量。
 
 #### 3.7 状态演化与自检边界
 
-`primary_lifecycle_action_port` 只是第 3 步的内部初始分流口，不是最终合约的 `contract_lifecycle_port`。
+`primary_lifecycle_action_port` 只是第 3 步的内部初始分流口，不是最终合约字段，也不得作为 Step6 最终合约失败依据。
 
 第 4 步可以改变候选质量和风险路径；新增风险候选还可以由第 5 步资金部署继续改变。最终生命周期可以与本步初始分流不同，该变化属于正常状态演化，不构成最终合约错误。
 
@@ -830,7 +721,7 @@ Step1–5 不生成生命周期转换对比对象，不保留“初始生命周�
 
 PM 不在本步重新读取 `state["analyst_signals"]`、分析师自由文本和分析师 artifact 判断持仓状态。
 
-PM 不在本步重新判断和改写 `preferred_direction`。
+PM 不在本步重新生成和改写 `side_priority`、`ticker_side_priority`。
 
 PM 不在本步读取 research DB、学习成果和未来日期数据。
 
@@ -842,7 +733,7 @@ PM 不把 `primary_lifecycle_action_port` 当作最终合约生命周期、最�
 
 PM 不要求第 3 步初始状态与第 6 步最终合约保持不变，不执行 Step3 与 Step6 的比较式自检。
 
-PM 不在本步生成 `candidate_contract`、`final_contract_builder_inputs`、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
+PM 不在本步生成 `candidate_contract`、builder 输入、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
 
 PM 不在本步生成 DB 记录、本地 artifact 和运行日志物理事实。
 
@@ -865,11 +756,10 @@ PM 从同一个产品候选状态读取以下检索事实：
 - `config_id`
 - `ticker`
 - `trading_date`
-- `preferred_direction`
-- `current_position_direction`
-- `position_direction_relation`
+- `ticker_side_priority` 的代表方向
+- `current_lots`
 - `primary_lifecycle_action_port`
-- `pm_decision_state`
+- `opportunity_state`
 - `horizon_class`
 - `market_regime`
 - `setup_type`
@@ -910,16 +800,15 @@ action-value 语义完整性复用现有共享校验：
 
 真实完整历史优先于空壳历史。缺少 canonical 语义、奖励事实和动作偏好的空壳记录不得占用有效历史名额，也不得压住真实完整样本。
 
-检索结果至少保留：
+检索结果按矩阵已有学习对象保留：
 
 - `effective_memory_summary`
-- `action_values`
-- `alpha_setup_profiles`
-- `strategy_memory`
-- `adaptive_policy_state`
-- `provisional_policy_state`
-- `rejected_or_downgraded`
-- `retrieval_attempts`
+- `alpha_setup_profile` 表中的学习记录
+- `strategy_memory` 表中的学习记录
+- `adaptive_policy_state` 表中的学习记录
+- `provisional_policy_state` 表中的学习记录
+- 正式 canonical action-value 候选集合
+- `learning_used.memory_retrieval.rejected_or_downgraded` 所需的拒绝诊断材料
 
 其中 `effective_memory_summary` 只描述检索质量、有效数量、匹配层级、剔除原因和来源状态，不是交易授权。
 
@@ -931,30 +820,30 @@ action-value 语义完整性复用现有共享校验：
 - `consumer_scope="pm_learning"`。
 - `canonical_action_value=true`。
 - `canonical_action_family` 存在。
-- `action_preference` 符合该 canonical action family 的语义。
+- `action_preference` 符合该 canonical action family 的语义。矩阵明确无正向偏好的 `no_trade`、`observe`、`conditional_monitor` 可以在对应语义下保留空值；其他记录不得由 PM 自行放宽，必须已经通过矩阵口径和写入一致性校验。
 - `action_value_lane` 和 `learning_lane` 存在且一致。
 - 产品和方向符合本次检索范围；当前生命周期只用于第 4 步临时候选质量路由，不作为完整 canonical 候选学习池的准入条件。
 - 不是 empty shell、incomplete prior、weak prior 和纯诊断记录。
 
-Step4 在此只形成完整 canonical action-value 候选学习池，不直接形成最终 `alpha_setup_action_values`。
+Step4 在此只形成完整 canonical action-value 候选学习池，不直接形成最终 `learning_used.alpha_setup_action_values`。
 
 `final_action_contract.learning_used.alpha_setup_action_values` 是 PM 最终正式 canonical action-value 主证据列表。第 6 步必须按最终 `final_action`、最终持仓变化和最终生命周期重新路由 Step4 候选学习池；只有最终路由实际接收的完整 canonical 记录，才允许进入该正式列表。禁止直接复制第 4 步初始生命周期路由结果。
 
-以下材料只能进入内部 `memory_retrieval.rejected_or_downgraded`：
+以下材料只能进入最终 `learning_used.memory_retrieval.rejected_or_downgraded` 所需的内部诊断集合：
 
 - `canonical_action_value=false`，包括 similar SQL prior、fallback prior
-- 缺少 canonical family、preference、action-value lane、learning lane，包括 similar SQL prior、fallback prior
+- 缺少 canonical family、action-value lane 或 learning lane；需要动作偏好的 family 缺少 preference；包括不完整的 similar SQL prior、fallback prior
 - `consumer_scope` 不是 `pm_learning`
 - empty shell
 - incomplete prior
 - weak prior
 - action family、lane、preference 语义不一致
 
-incomplete prior 的固定诊断原因为 `incomplete_prior_not_pm_scoring_evidence`。`rejected_or_downgraded` 只保留必要 provenance 摘要和剔除原因，不参与候选质量、rank、手数、资金部署和最终动作。
+incomplete prior 的固定诊断原因为 `incomplete_prior_not_pm_scoring_evidence`。`learning_used.memory_retrieval.rejected_or_downgraded` 只保留必要 provenance 摘要和剔除原因，不参与候选质量、rank、手数、资金部署和最终动作。
 
-完整 canonical 记录在生命周期路由阶段发生 lane 不匹配时，进入 `pm_lifecycle_learning_router.rejected_learning_rows`，不混入 `memory_retrieval.rejected_or_downgraded`。前者表示完整学习与当前生命周期不匹配，后者表示检索记录本身被剔除或降级。
+完整 canonical 记录在生命周期路由阶段发生 lane 不匹配时，只进入路由器内部拒绝诊断，不混入 `learning_used.memory_retrieval.rejected_or_downgraded`。前者表示完整学习与当前生命周期不匹配，后者表示检索记录本身被剔除或降级；两者都不新增最终合约字段。
 
-`alpha_setup_profiles`、`strategy_memory`、`adaptive_policy_state` 和 `provisional_policy_state` 只作为经过现有安全过滤后的学习上下文。它们不得冒充正式 action-value，不得单独生成交易权限。
+`alpha_setup_profile`、`strategy_memory`、`adaptive_policy_state` 和 `provisional_policy_state` 表中的学习记录只作为经过现有安全过滤后的学习上下文。这些表名不是最终合约字段，其记录不得冒充正式 action-value，也不得单独生成交易权限。
 
 #### 4.6 按生命周期分流学习
 
@@ -964,13 +853,13 @@ incomplete prior 的固定诊断原因为 `incomplete_prior_not_pm_scoring_evide
 |---|---|
 | `new_risk` | `open`、`add`、`scale`、`increase` |
 | `position_hold` | `hold` |
-| `capital_release` | `reduce`、`exit`、`close`、`risk_exit` |
+| `capital_release` | `reduce`、`exit` |
 | `conditional_monitor` | `conditional_monitor` |
-| `wait` | 不接收决策层 action-value |
+| `wait` | 不接收决策层 action-value；`no_trade`、`observe` 只保留为诊断语义 |
 
-execution、trigger、profile 类学习只进入 `trigger_profile_learning_rows`，用于后续执行画像和触发质量解释。它们不得进入 `decision_learning_rows`，`trigger_profile_learning_direct_to_rank` 和 `execution_profile_learning_direct_to_rank` 必须为 `false`。
+execution、trigger、profile 类学习只进入 `trigger_profile_learning_rows`，用于后续执行画像和触发质量解释。它们不得进入 `decision_learning_rows`，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。
 
-生命周期不匹配的记录进入 `rejected_learning_rows`，不得通过修改 lane、action family 和 action preference 强行进入当前候选。
+生命周期不匹配的记录进入路由器内部拒绝诊断，不得通过修改 `learning_lane`、`canonical_action_family` 和 `action_preference` 强行进入当前候选。
 
 #### 4.7 修正候选质量
 
@@ -984,40 +873,37 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 学习修正不得覆盖当前 SCC 事实。没有当日方向、setup、触发和失效边界时，历史正向学习不能把 `no_opportunity` 单独提升为可交易候选。
 
-本步可以更新 `pm_decision_state` 和内部生命周期意图，但不生成最终动作。候选状态发生变化后，后续步骤继续读取同一个对象。
+本步可以更新 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图，但不得改写原始 `opportunity_state`，也不生成最终动作。候选状态发生变化后，后续步骤继续读取同一个对象。
 
 #### 4.8 状态更新
 
 本步把以下内容写回同一个产品候选状态：
 
 - `effective_memory_summary`
-- `memory_retrieval` 检索摘要
 - 正式 action-value 候选集合
-- `alpha_setup_profiles` 摘要
+- `alpha_setup_profile` 表中学习记录的摘要
 - 安全过滤后的策略和 policy state 摘要
-- `pm_lifecycle_learning_router`
 - 当前生命周期路由的内部摘要
-- `rejected_learning_rows`
-- `rejected_or_downgraded`
-- `candidate_quality_before_learning`
-- `candidate_quality_after_learning`
+- `learning_used.memory_retrieval.rejected_or_downgraded` 所需的拒绝诊断材料
 - `learning_adjustment_summary`
-- 学习修正后的 `pm_decision_state` 和内部生命周期意图
+- 学习修正后的 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图
 
 本步不创建新的候选对象，不输出独立学习 artifact。第 4 步完成后按最终候选风险性质分流：
 
-- 非新增风险路径：`Step4 -> Step6`。`wait`、`hold`、`reduce`、`exit`、`capital_release` 和不增加风险敞口的 `conditional_monitor` 跳过第 5 步。
-- 新增风险路径：`Step4 -> Step5 -> Step6`。`open`、`add`、`scale`、`reverse` 和具有新开仓权限的 `conditional_open` 必须进入第 5 步执行全市场 rank、预算分配和 position sizing。
+- 非新增风险路径：`Step4 -> Step6`。`wait`、`hold`、`reduce`、`exit` 和不保留新增风险敞口的 `conditional_monitor` 跳过第 5 步。
+- 新增风险路径：`Step4 -> Step5 -> Step6`。`open`、`open_probe`、`open_real`、`add`、`scale`，以及反转退出后的新风险腿必须进入第 5 步执行全市场 rank、预算分配和 position sizing。
+
+这里的 `conditional_monitor` 是 canonical family / 生命周期语义，不是 `final_action` 的新增枚举；最终动作仍由第 6 步按 `current_lots` 与 `target_lots` 形成 `wait/hold`。
 
 两条路径继续传递同一个 PM 内部候选状态，不生成第二套候选对象和中间交易事实。
 
 #### 4.9 状态演化与自检边界
 
-第 4 步的完整 canonical 候选学习池、当前生命周期路由和候选质量修正都是 PM 内部中间状态，不是最终合约学习事实。`rejected_or_downgraded` 和 `rejected_learning_rows` 只解释材料为什么未被当前候选消费，不得冒充最终决策层学习证据。
+第 4 步的完整 canonical 候选学习池、当前生命周期路由和候选质量修正都是 PM 内部中间状态，不是最终合约学习事实。检索拒绝诊断和路由拒绝诊断只解释材料为什么未被当前候选消费，不得冒充最终决策层学习证据。
 
 非新增风险候选从第 4 步直接进入第 6 步。新增风险候选由第 5 步风险排序、资金部署和 position sizing 继续更新后再进入第 6 步。
 
-无论是否经过第 5 步，第 6 步都必须从第 4 步保留的完整 canonical 候选学习池重新开始，根据最终 `final_action`、`current_lots`、`target_lots` 和最终 `contract_lifecycle_port` 重新形成正式 `decision_learning_rows` 和独立的 `trigger_profile_learning_rows`，再写入唯一 `final_action_contract`。第 6 步不得复制第 4 步的 `decision_learning_rows`，也不得让第 4 步未消费的生命周期记录因早期路由被永久丢弃。
+无论是否经过第 5 步，第 6 步都必须从第 4 步保留的完整 canonical 候选学习池重新开始，根据最终 `final_action`、`current_lots`、`target_lots` 和 `pm_lifecycle_learning_trace.contract_lifecycle_port` 重新形成正式 `decision_learning_rows` 和独立的 `trigger_profile_learning_rows`，再写入唯一 `final_action_contract`。第 6 步不得复制第 4 步的 `decision_learning_rows`，也不得让第 4 步未消费的生命周期记录因早期路由被永久丢弃。
 
 在学习边界内，第 6 步只校验最终 `learning_used.alpha_setup_action_values` 的纯净性、最终生命周期与最终 `decision_learning_rows` 的一致性，以及 execution/profile 学习只进入 `trigger_profile_learning_rows`。禁止读取第 4 步初始路由结果作为最终自检输入，禁止比较第 4 步初始路由与第 6 步最终生命周期来判定合约失败。
 
@@ -1033,9 +919,9 @@ PM 不通过 `workflow` 编排层接收学习成果，不让 `workflow` 编排�
 
 PM 不读取当前交易日和未来日期的学习记录。
 
-PM 不把 weak prior、incomplete prior、empty shell、非 `pm_learning` 记录，以及 `canonical_action_value=false` 或 canonical 字段不完整的 similar SQL prior、fallback prior 写入正式 `alpha_setup_action_values`。
+PM 不把 weak prior、incomplete prior、empty shell、非 `pm_learning` 记录，以及 `canonical_action_value=false` 或 canonical 字段不完整的 similar SQL prior、fallback prior 写入正式 `learning_used.alpha_setup_action_values`。
 
-PM 不把 `rejected_or_downgraded` 中的材料用于候选质量、rank、手数、资金部署和最终动作。
+PM 不把 `learning_used.memory_retrieval.rejected_or_downgraded` 中的材料用于候选质量、rank、手数、资金部署和最终动作。
 
 PM 不让 execution、trigger、profile 学习直接改变方向、候选质量、rank、资金部署和手数。
 
@@ -1045,7 +931,7 @@ PM 不在本步生成全市场 `opportunity_rank`、资金部署、目标手数�
 
 PM 不要求第 4 步学习路由与第 6 步最终生命周期保持不变，不执行 Step4 与 Step6 的比较式自检。
 
-PM 不在本步生成 `candidate_contract`、`final_contract_builder_inputs`、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
+PM 不在本步生成 `candidate_contract`、builder 输入、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
 
 PM 不在本步写入 research DB，不生成 DB 记录、本地 artifact 和运行日志物理事实。
 
@@ -1057,7 +943,7 @@ PM 不把本步候选状态暴露给 `workflow` 编排层、Auditor、Trader、R
 
 第 5 步只处理第 4 步确认需要增加风险敞口的产品候选，在完整的当日全市场候选集合中完成统一排名、预算安排和 position sizing。
 
-排名的业务含义是资金投入优先级。`opportunity_rank=1` 表示：在当前 SCC 证据、正式 action-value、产品历史经验和风险约束共同作用下，该候选是本轮相对最值得优先投入资金、预期风险收益最优的候选。它不表示已经校准的盈利概率，也不保证盈利。
+排名的业务含义只使用矩阵固定的资金投入优先级。`opportunity_rank=1` 表示：在当前 SCC 证据、正式 action-value、产品历史经验和风险约束共同作用下，该候选是本轮最高资金优先级；它不是交易权限，不表示已经校准的盈利概率，也不保证盈利。
 
 排名不是独立研究结论，也不是展示性指标。排名必须直接服务预算：PM 按排名顺序消耗同一个账户预算，先处理更值得投入资金的候选，再处理后续候选。没有进入预算安排的排名不完整；脱离排名单独分配资金同样不允许。
 
@@ -1070,10 +956,12 @@ PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已�
 进入队列的候选包括：
 
 - `open`
+- `open_probe`
+- `open_real`
 - `add`
 - `scale`
-- `reverse` 中释放原持仓后形成的反向新增风险部分
-- 具有新开仓权限的 `conditional_open`
+- `reverse` 先由 `exit` 退出旧方向后形成的新风险腿
+- 最终仍保留新增风险敞口和 `conditional_trigger_authority` 的条件 `open_probe`
 
 以下状态不进入排名队列：
 
@@ -1081,9 +969,8 @@ PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已�
 - `hold`
 - `reduce`
 - `exit`
-- `capital_release`
 - 不增加风险敞口的 `conditional_monitor`
-- `no_opportunity`、`blocked`、`rejected`
+- 已确认不具备新增风险资格或已被输入门拒绝的候选
 
 队列为空是合法状态，表示当日没有需要竞争新增风险预算的候选。候选集合不完整、混入其他交易日或混入非新增风险状态属于 Step5 输入契约错误，不得通过补造 rank 继续运行。
 
@@ -1094,14 +981,16 @@ PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已�
 每个新增风险候选沿用同一个 PM 内存状态中的以下事实：
 
 - `ticker`、`trading_date`、`config_id`
-- `preferred_direction`
-- `pm_decision_state`
+- `ticker_side_priority`
+- `opportunity_state`
+- `candidate_quality`
+- `candidate_layer_hint`
 - 当前新增风险意图
 - `evidence_strength`、`evidence_quality`、setup 和 trigger 质量
 - 冲突、缺失证据、风险因素和失效边界
 - 第 4 步学习修正后的候选质量
 - 第 4 步保留的完整 canonical action-value 候选学习池及当前新增风险 lane 路由摘要
-- `position_context.current_lots`
+- `current_lots`
 - 当前品种敞口和账户组合敞口
 - Phase1 参考价
 - 第 1 步读取的合约乘数和方向保证金率
@@ -1110,7 +999,7 @@ PM 从同一个账户状态读取：
 
 - `account_equity`
 - `margin_used`
-- `margin_available`
+- 可用保证金
 - 当前组合保证金比例
 - 当前组合净敞口
 - 已有各品种敞口
@@ -1190,7 +1079,7 @@ rank_score = clamp(
 
 历史经验不能单独创造候选。即使 action-value 很强，只要当日 SCC 没有方向、setup、触发、失效边界或必要证据，候选仍不得进入新增风险资金队列。
 
-`hold`、`reduce`、`exit`、execution 和 profile lane 不得进入新增风险积分。`rejected_or_downgraded`、weak prior、incomplete prior、similar SQL prior 和 fallback prior 不得影响 rank。
+只有 `matrix_action_canonical.md` 允许的 `open`、`add`、`scale`、`increase` 新增风险 lane 可以进入新增风险积分；其他 family/lane 均不得进入。`learning_used.memory_retrieval.rejected_or_downgraded` 所对应的 weak prior、incomplete prior、similar SQL prior 和 fallback prior 不得影响 rank。
 
 #### 5.7 排名顺序
 
@@ -1206,21 +1095,21 @@ PM 先按资金层级，再按 `rank_score` 对新增风险候选排序：
 
 #### 5.8 排名与预算原子绑定
 
-PM 按 `opportunity_rank` 从 1 开始顺序消费同一个账户可部署预算。处理每个候选时，必须同时计算并写回：
+PM 按 `opportunity_rank` 从 1 开始顺序消费同一个账户可部署预算。处理每个候选时，必须形成矩阵已有资金部署事实：
 
 - 排名前的账户已用保证金比例
 - 候选所需保证金比例
 - 选中后的账户保证金比例
 - 当前品种与选中后的单品种保证金比例
 - 当前组合净敞口与选中后的预计净敞口
-- `budget_approved`
-- `budget_rejection_reason`
-- `allocated_budget`
-- `target_margin`
+- `selected_for_capital_deployment`
+- `capital_allocation_reason`
+- `capital_layer`
+- `capital_ratio_source`
 
 候选只有同时满足可用保证金、单品种上限、组合保证金预算、净敞口上限、回撤和冷却限制时，才允许占用预算。批准后立即更新同一内部账户预算游标，后续候选只能使用剩余预算。
 
-排名靠前不绕过硬约束。即使 `opportunity_rank=1`，资金不足、单品种超限、组合超限、净敞口超限或风险状态禁止新增风险时，也必须 `budget_approved=false`，并把新增目标恢复为不增加风险敞口的状态。被拒绝的候选保留 rank 和唯一拒绝原因，用于说明“机会存在但本轮未获资金”，不得伪造为无机会。
+排名靠前不绕过硬约束。即使 `opportunity_rank=1`，资金不足、单品种超限、组合超限、净敞口超限或风险状态禁止新增风险时，也必须 `selected_for_capital_deployment=false`，并写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`，把 `target_lots` 还原为 `current_lots`。被拒绝的候选保留 rank 和完整 rank 解释字段，不得伪造为无机会。
 
 排名靠后的候选不得越过排名靠前且满足约束的候选抢占预算。只有靠前候选因明确硬约束被拒绝后，剩余预算才继续评估后续候选。
 
@@ -1263,17 +1152,11 @@ one_lot_margin = base_price * contract_multiplier * margin_rate
 max_lots_by_budget = floor(allocated_margin / one_lot_margin)
 ```
 
-PM 再依次施加可用保证金、单品种上限、组合保证金上限、净敞口上限、最大仓位比例、风险等级、回撤、冷却和最小真实交易预算约束，形成：
-
-- `sizing_method`
-- `sizing_constraints`
-- `max_lots_allowed`
-- `target_lots_before_constraints`
-- `target_lots_after_constraints`
+PM 再依次施加可用保证金、单品种上限、组合保证金上限、净敞口上限、最大仓位比例、风险等级、回撤、冷却和最小真实交易预算约束，形成矩阵登记的 `position_sizing_result`。该对象记录 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由，不新增 sizing 子字段。
 
 不足一手时不得为了“必须交易”而向上取整。`reverse` 必须先计算原持仓释放，再只对反向新增风险部分占用预算，不能把平旧仓和开新仓的保证金重复计算。
 
-`build_position_sizing_result` 记录最终测算事实，但不决定最终动作。第 6 步根据本步更新后的 `current_lots`、`target_lots_after_constraints`、预算结果和最终权限原子生成 `final_action`、`lots_delta` 与唯一合约。
+`build_position_sizing_result` 记录最终测算事实，但不决定最终动作。第 6 步根据该对象中的 `current_lots`、`target_lots`、`lots_delta` 和最终权限原子生成唯一合约。
 
 #### 5.11 配置微调边界
 
@@ -1291,21 +1174,27 @@ PM 再依次施加可用保证金、单品种上限、组合保证金上限、�
 - `rank_score`
 - `opportunity_rank`
 - `rank_source`
-- `rank_lifecycle="open_add_new_risk"`
+- `rank_scope`
+- `capital_rank_generated_by`
+- `rank_capital_role`
 - `capital_layer`
-- `budget_approved`
-- `budget_rejection_reason`
-- `allocated_budget`
-- `target_margin`
+- `capital_ratio_source`
+- `rank_reason`
+- `rank_input_components`
+- `rank_semantics_version`
+- `opportunity_rank_meaning`
+- `rank_is_capital_priority`
+- `rank_is_not_trade_authority`
+- `selected_for_capital_deployment`
+- `capital_allocation_reason`
 - `position_sizing_result`
-- `target_lots_after_constraints`
 - 更新后的内部账户预算游标和组合预计敞口
 
 本步不创建第二个候选对象，不输出独立 rank、预算或 sizing artifact。更新后的同一候选状态进入第 6 步。
 
 第 5 步只执行新增风险候选集合和资金测算输入的契约校验，不执行最终合约自检。预算拒绝、手数被约束为零、候选由新增风险转为不增加风险，都属于正常状态演化。
 
-第 6 步只根据最终候选状态形成 `capital_deployment`、`position_sizing_result` 和最终交易字段，并只检查最终 `final_action_contract` 自身一致性。禁止比较第 5 步约束前目标与第 6 步最终动作，禁止要求 Step4 排名预期、Step5 初始手数和 Step6 最终合约保持不变。
+第 6 步只根据最终候选状态形成 `capital_deployment`、`evidence_used.position_sizing_result`、最终 `lifecycle_learning_trace`、最终 `learning_impact_delta` 和最终交易字段，并只检查最终 `final_action_contract` 自身一致性。禁止比较第 5 步约束前目标与第 6 步最终动作，禁止要求 Step4 排名预期、Step5 初始手数和 Step6 最终合约保持不变。
 
 #### 5.13 禁止项
 
@@ -1317,13 +1206,13 @@ PM 不把 rank 当作交易授权、盈利保证和硬风险豁免。
 
 PM 不让 action-value 覆盖当日 SCC，不让 hold、reduce、exit、execution、profile 和被拒绝学习进入新增风险积分。
 
-PM 不让 `rejected_or_downgraded`、weak prior、incomplete prior、similar SQL prior 和 fallback prior 影响 rank、预算和手数。
+PM 不让 `learning_used.memory_retrieval.rejected_or_downgraded`、weak prior、incomplete prior、similar SQL prior 和 fallback prior 影响 rank、预算和手数。
 
 PM 不把 execution/profile 学习通过 `trigger_execution_quality` 或其他别名重新直连 rank。
 
 PM 不在工具和代码中写死替代 catalog 的积分权重、预算比例和手数边界，不根据单次回测临时改分。
 
-PM 不在本步生成或修改 `candidate_contract`、`final_contract_builder_inputs`、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
+PM 不在本步生成或修改 `candidate_contract`、builder 输入、`final_action_contract`、`FuturesRecommendation` 和任何 recommendation。
 
 PM 不读取和修改 `signal_snapshot`，不让 `apply_full_market_capital_deployment` 继续通过 recommendation/snapshot 落地中间交易事实。
 
@@ -1360,7 +1249,7 @@ PM 不把本步候选状态、排名队列和预算游标暴露给 `workflow` �
 Step4 -> Step6
 ```
 
-包括 `wait`、`hold`、`reduce`、`exit`、`capital_release` 和不增加风险敞口的 `conditional_monitor`。
+包括 `wait`、`hold`、`reduce`、`exit` 和不增加风险敞口的 `conditional_monitor`。
 
 新增风险候选经第 5 步进入本步：
 
@@ -1368,7 +1257,7 @@ Step4 -> Step6
 Step4 -> Step5 -> Step6
 ```
 
-包括 `open`、`add`、`scale`、`reverse` 和具有新开仓权限的 `conditional_open`。
+包括 `open`、`open_probe`、`open_real`、`add`、`scale`，以及反转退出后的新风险腿。最终仍保留新增风险敞口的条件 `open_probe` 也属于该路径。
 
 两条路径进入第 6 步的都是同一个 PM 内存候选状态，不是候选合约、recommendation 草稿、snapshot 草稿或 artifact。
 
@@ -1377,13 +1266,13 @@ Step4 -> Step5 -> Step6
 第 6 步开始前只校验最终签约所需输入是否完整、类型是否正确：
 
 - `ticker`、`trading_date`、`config_id` 和 `source_type` 存在。
-- 原始 `signal_collection_contract` 存在，且 `producer="signal_collector"`、`collector_decision_boundary="no_trade_authority"`。
+- 原始 `signal_collection_contract` 存在，且 `source_agent="signal_collector"`、`collector_decision_boundary="no_trade_authority"`。
 - 当前持仓、账户权益、可用保证金和风险空间存在。
 - 计划参考价、合约代码、合约乘数和方向保证金率有效。
 - 最终候选方向、触发、失效边界、风险原因和权限状态可解释。
 - 第 4 步完整 canonical 学习候选池仍保留，且未混入 future dated 记录。
 - 最终状态若增加风险，必须存在第 5 步唯一全市场 rank、预算结论和 position sizing 结果。
-- 最终状态若不增加风险，不要求也不补造第 5 步 rank。
+- 最终状态若不增加风险，直接从第 4 步进入第 6 步的候选不要求也不补造 rank；若候选已经在第 5 步获得 rank 后因预算拒绝还原为不增加风险，则保留该次真实 rank 和拒绝事实。
 
 缺少必要输入属于输入契约错误，立即停止本产品签约。证据弱、学习为空、rank 低、预算不足和最终不交易是合法业务结果，不属于输入契约错误。
 
@@ -1426,44 +1315,43 @@ recommendation 顶层动作和手数映射使用现有共享工具：
 
 上述工具都不调用 LLM、不写 DB、不生成 artifact、不写运行日志、不调用 Auditor，也不自行修复最终合约。
 
-代码梳理时，`build_final_action_contract` 的输入必须从旧的 `builder_inputs`、`candidate_contract`、`opportunity_scorecard` 草稿和 recommendation snapshot 收窄为一个最终 PM 内存候选状态。工具不得接收或返回第二套交易计划。
+代码梳理时，`build_final_action_contract` 的输入必须从旧的 builder 输入、`candidate_contract`、`opportunity_scorecard` 草稿和 recommendation snapshot 收窄为一个最终 PM 内存候选状态。工具不得接收或返回第二套交易计划。
 
 #### 6.5 确定最终目标手数与动作
 
-新增风险路径直接读取第 5 步约束后的 `target_lots_after_constraints`。非新增风险路径在本步根据最终持仓管理状态确定目标手数：
+新增风险路径读取第 5 步 `position_sizing_result` 中的 `target_lots`。第 6 步签约时才把该确定性测算对象写入 `evidence_used.position_sizing_result`。非新增风险路径在本步根据最终持仓管理状态确定目标手数：
 
 | 最终状态 | `target_lots` |
 |---|---|
-| `wait` | `0` |
-| `hold` | 等于 `current_lots` |
-| `reduce` | 与当前持仓同号，绝对值小于 `current_lots` |
-| `exit`、`capital_release` | `0` |
-| 未获预算的新增风险候选 | 恢复为 `current_lots` |
-| 不增加风险的 `conditional_monitor` | 等于 `current_lots` |
+| `wait` | `current_lots=0` 且 `target_lots=0` |
+| `hold` | `current_lots` 非零且 `target_lots=current_lots` |
+| `reduce` | 与当前持仓同号，且 `abs(target_lots) < abs(current_lots)` |
+| `exit` | `0` |
+| `no_rank_no_new_exposure`、`no_rank_or_budget_no_new_exposure` | 等于 `current_lots`，最终为 `wait/hold` |
+| 不增加风险的 `conditional_monitor` 生命周期语义 | 等于 `current_lots`，`final_action` 仍按空仓或持仓事实取 `wait/hold` |
 
 PM 只从最终 `current_lots`、最终 `target_lots` 和最终权限状态调用 `classify_position_transition`，一次性形成：
 
 - `final_action`
-- `action_family`
 - `lots_delta = target_lots - current_lots`
-- `position_change_direction`
-- 最终 direction / side
+- `target_position_ratio`
+- `authority_type`
 
-预算未批准时，新增风险目标必须恢复为不增加风险，清除直接执行权限和新增风险条件权限，并保留唯一 `budget_rejection_reason`。该正常降级不得被第 6 步重新恢复为开仓。
+新增风险未获得 rank 时，必须写入 `capital_allocation_reason=no_rank_no_new_exposure`；已有 rank 但未获预算时，必须写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`。两者都必须恢复 `target_lots=current_lots`、最终为 `wait/hold`，并清除新增风险触发权限。
 
-反转候选必须沿用现有 `exit_then_reenter` 两段语义。最终合约要明确当前可执行腿和后续反向开仓腿；recommendation 顶层 `action/lots` 只映射当前可执行腿，不得用一条交易指令伪装已同时完成平仓和反向开仓。反向新增风险腿必须已经通过第 5 步 rank 和预算约束。
+反转遵守 `matrix_action_canonical.md`：当前合约先以 `exit` 退出旧方向；后续反向新风险必须重新获得 `opportunity_rank`，再由 `open/open_probe/open_real` 合约授权。不得自创 reverse final action，也不得用一条 recommendation 同时表达两腿。
 
 #### 6.6 形成最终生命周期
 
-PM 根据最终动作、最终 `current_lots`、最终 `target_lots` 和最终条件权限调用 `classify_lifecycle_action_port`，形成唯一 `contract_lifecycle_port`：
+PM 根据最终动作、最终 `current_lots`、最终 `target_lots` 和最终条件权限调用 `classify_lifecycle_action_port`，形成 `pm_lifecycle_learning_trace.contract_lifecycle_port`：
 
-| 最终合约事实 | `contract_lifecycle_port` |
+| 最终合约事实 | `pm_lifecycle_learning_trace.contract_lifecycle_port` |
 |---|---|
 | 新开、加仓、扩大或反向新增风险 | `open_add_new_risk` |
-| 持仓手数不变 | `hold` |
 | 减仓或退出 | `reduce_exit` |
 | 只保留触发监控、当前不增加敞口 | `conditional_monitor` |
-| 空仓等待 | `wait` |
+| 非零持仓手数不变且不是条件监控 | `hold` |
+| 空仓等待且不是条件监控 | `wait` |
 
 最终生命周期只由最终合约事实决定。第 3 步的 `primary_lifecycle_action_port`、第 4 步临时学习路由和第 5 步约束前风险意图都不进入最终生命周期判定。
 
@@ -1471,7 +1359,7 @@ PM 根据最终动作、最终 `current_lots`、最终 `target_lots` 和最终�
 
 #### 6.7 按最终生命周期重新形成学习事实
 
-PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开始，按最终 `contract_lifecycle_port` 调用 `route_lifecycle_learning`：
+PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开始，按最终 `pm_lifecycle_learning_trace.contract_lifecycle_port` 调用 `route_lifecycle_learning`：
 
 - `open_add_new_risk` 只接收 `open`、`add`、`scale`、`increase` 决策学习。
 - `hold` 只接收 `hold` 决策学习。
@@ -1486,9 +1374,9 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 
 只有最终 `decision_learning_rows` 中实际被最终动作消费的完整 canonical 记录，才进入 `learning_used.alpha_setup_action_values`。不得先截取 Step4 列表再路由，不得复制 Step4 临时 `decision_learning_rows`，不得让未匹配最终生命周期的记录进入正式主证据列表。
 
-`trigger_profile_learning_rows` 只进入 `evidence_used.lifecycle_learning_trace`，其 `execution_profile_learning_direct_to_rank` 和 `trigger_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、rank、预算和手数。
+`trigger_profile_learning_rows` 只进入 `evidence_used.lifecycle_learning_trace`，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、rank、预算和手数。
 
-`memory_retrieval.rejected_or_downgraded` 和最终生命周期未接受的完整学习只保留必要 provenance 与拒绝原因，不进入正式决策列表。
+`learning_used.memory_retrieval.rejected_or_downgraded` 和最终生命周期未接受的完整学习只保留必要 provenance 与拒绝原因，不进入正式决策列表。
 
 #### 6.8 原子构建 final_action_contract
 
@@ -1496,34 +1384,36 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 
 装配顺序固定为：
 
-1. 产品、日期、配置、合约和 source identity。
-2. 最终动作、持仓变化、方向和生命周期。
-3. 最终权限、触发、时效、取消条件和执行规则。
-4. 失效边界、风险边界、止损参考和 `reason_codes`。
-5. 参考价、合约乘数、保证金率、名义价值和保证金测算。
-6. 最终证据摘要和 SCC 引用。
+1. 产品、日期、配置、合约和 `source_agent`。
+2. `final_action`、`current_lots`、`target_lots`、`lots_delta` 和 `target_position_ratio`。
+3. `authority_type`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until` 和盘中确认字段。
+4. `risk_controls`、`capital_controls`、`max_allowed_margin_ratio` 和 `reason_codes`。
+5. 参考价、合约乘数、保证金率和 `margin_ratio`。
+6. 最终 `evidence_used` 和原始 SCC 快照引用关系。
 7. 最终生命周期学习事实。
-8. 新增风险路径的最终 rank、预算和 position sizing；非新增风险路径的无 rank 说明及最终手数摘要。
-9. lineage、生成时间和生成模式。
+8. 新增风险路径的最终 rank、预算和 position sizing；第 5 步预算拒绝路径保留真实 rank 与拒绝事实；直接非新增风险路径只保留无 rank 说明和最终手数摘要。
+9. `created_at`。
 
-新增风险合约的 `capital_deployment` 必须与第 5 步最终状态一致。未获预算时必须同时满足：
+新增风险合约的 `capital_deployment` 必须与第 5 步最终状态一致，并只使用矩阵已有字段。资金部署结果固定为三种合法形态：
 
-- `budget_approved=false`
-- `target_lots=current_lots`
-- `lots_delta=0`
-- `final_action` 为 `wait` 或 `hold`
-- 无直接执行和新增风险条件权限
+| 资金部署形态 | 矩阵字段 | 最终交易事实 |
+|---|---|---|
+| 新增风险获准部署 | `selected_for_capital_deployment=true`；存在 `opportunity_rank`、满足 `rank_capital_layer_contract` 且具有 `capital_allocation_reason` | 才允许 `open/open_probe/open_real/add/scale`，或保留经 rank 授权的新风险条件合约 |
+| 新增风险未获得 rank | `selected_for_capital_deployment=false`；`capital_allocation_reason=no_rank_no_new_exposure`；不存在 `opportunity_rank` | 固定还原为 `target_lots=current_lots`，最终为 `wait/hold`，不得保留新增风险触发权限 |
+| 已有 rank 但未获预算 | `selected_for_capital_deployment=false`；`capital_allocation_reason=no_rank_or_budget_no_new_exposure`；保留 `opportunity_rank` 和完整 rank 解释字段 | 固定还原为 `target_lots=current_lots`，最终为 `wait/hold`，不得绕过预算继续开仓 |
 
-非新增风险合约可以保留 `deployment_required=false` 和 `new_risk_rank_required=false` 的说明，但不得伪造 `opportunity_rank`、资金层级和已批准预算。
+原生 `wait/hold/reduce/exit` 从 Step4 直接进入 Step6，不要求 `opportunity_rank`。`conditional_monitor` 只表达监控，不是开仓动作；只有最终仍保留新增风险敞口的条件 `open_probe` 合约才必须经过 rank。
 
-合约不得包含 `action_candidates`、`recommendation_intent`、`candidate_contract`、`builder_inputs`、`pm_internal_candidate`、scorecard 草稿、rank 草稿、预算草稿和任何可被解释为第二套交易计划的字段。
+`reverse` 只表示 `open_add_new_risk` 学习家族。执行必须先由 `exit` 合约退出旧方向，再由后续已获得 rank 的新风险合约授权反向开仓；不得把反转写成一个自创 final action 或一条同时完成两腿的 recommendation。
+
+合约不得包含 `candidate_contract`、矩阵列明的 PM 内部 draft、builder 输入、scorecard 草稿、rank 草稿、预算草稿和任何可被解释为第二套交易计划的字段。
 
 #### 6.9 生成 FuturesRecommendation
 
 PM 只从已经形成的 `final_action_contract` 派生 `FuturesRecommendation`：
 
 - `config_id`、日期、产品和合约身份来自最终合约。
-- `action` 和 `lots` 由 `recommendation_intent_from_lots(current_lots, target_lots)` 映射。
+- recommendation 顶层动作和手数由 `recommendation_intent_from_lots(current_lots, target_lots)` 映射。
 - `base_price`、价格来源和日期来自最终合约。
 - `justification` 只摘要最终动作、手数、核心证据和原因代码，不产生新动作。
 - `status` 反映本次 recommendation 状态，不改写最终交易事实。
@@ -1534,10 +1424,9 @@ PM 只从已经形成的 `final_action_contract` 派生 `FuturesRecommendation`�
 - 原样深拷贝的 `signal_collection_contract`
 - 唯一 `final_action_contract`
 - `pm_six_step_trace`
-- 必要 header 和 lineage
-- 从最终合约派生的 recommendation-level 摘要
+- `matrix_field_semantics.md` 已登记的必要 header、来源字段和最终合约派生摘要
 
-recommendation 顶层 `action`、`lots`、价格、产品和日期必须与 `final_action_contract` 对齐。若需要兼容两段反转，顶层动作表示当前可执行腿，完整目标和两段语义仍以最终合约为唯一事实。
+recommendation 顶层动作、手数、价格、产品和日期必须与 `final_action_contract` 对齐。反转时本次 recommendation 只表达当前 `exit` 腿；后续反向新增风险必须由另一张经过 rank 和审计的最终合约授权。
 
 #### 6.10 Step6 最终检查
 
@@ -1551,38 +1440,45 @@ recommendation 顶层 `action`、`lots`、价格、产品和日期必须与 `fin
 - recommendation 顶层字段来自最终合约。
 - snapshot 不含 PM 内部候选状态、builder inputs、合约草稿和 rank/预算草稿。
 
-`check_final_action_contract` 只检查最终合约自身：
+`check_final_action_contract` 只使用共享 `final_action_semantics` 检查最终合约自身：
 
-- 必填字段和四个结构化容器存在且类型正确。
+- 矩阵规定的必填字段和结构化对象存在、位置正确且类型正确。
 - `lots_delta = target_lots - current_lots`。
-- `final_action`、`action_family`、方向、持仓变化和最终生命周期一致。
-- 条件执行权限、trigger、有效期和取消条件内部一致。
-- 可执行 `conditional_open` 有明确 trigger；只监控的 `conditional_monitor` 可以保持 `target_lots=current_lots`，不得因手数不变被误报为合约失败。
-- 新增风险合约具有第 5 步唯一 rank、预算和 sizing；非新增风险合约没有伪造 rank。
-- `position_sizing_result.target_lots_after_constraints` 与最终 `target_lots` 一致。
+- `final_action`、`current_lots`、`target_lots` 和 `lots_delta` 一致。
+- `authority_type`、`execution_profile`、`entry_trigger`、盘中确认字段和 `reason_codes` 一致。
+- 保留新增风险敞口的条件 `open_probe` 具有明确 `entry_trigger`；`conditional_monitor` 不被解释为开仓授权。
+- 最终增加风险的合约具有第 5 步唯一 rank、预算和 sizing；Step5 拒绝结果只保留对应拒绝事实；直接跳过 Step5 的合约没有 rank。
+- `evidence_used.position_sizing_result` 的 `target_lots`、`lots_delta` 与最终合约一致。
 - `learning_used.alpha_setup_action_values` 纯净且与最终生命周期匹配。
 - decision learning 与 trigger/profile learning 分层正确。
 - 最终合约不含 PM 内部中间状态和第二套交易计划。
 
-`check_final_action_contract` 必须收窄为 `check_final_action_contract(final_action_contract)`。PM 不再把 `pm_artifact`、`signal_snapshot`、Step1–5 状态和早期生命周期传给合约自检；artifact 边界由 PM 返回后的 Auditor、保存层和 PG 检查。
+rank 自检只使用矩阵已有字段和固定原因代码：
+
+| 最终合约形态 | 必须检查 | 禁止误判 |
+|---|---|---|
+| 最终新增风险获准 | `selected_for_capital_deployment=true`，存在 `opportunity_rank`，满足 `rank_capital_layer_contract`，并具有 `capital_allocation_reason` 和 `evidence_used.position_sizing_result` | 不得允许无 rank 的 `open/open_probe/open_real/add/scale` 增加风险 |
+| `no_rank_no_new_exposure` | 不存在 `opportunity_rank`，`selected_for_capital_deployment=false`，`target_lots=current_lots`，最终为 `wait/hold`，无新增风险触发权限 | 不得因缺少 rank 判错，也不得保留原新增风险目标 |
+| `no_rank_or_budget_no_new_exposure` | 保留 `opportunity_rank` 和完整 rank 解释字段，`selected_for_capital_deployment=false`，`target_lots=current_lots`，最终为 `wait/hold`，无新增风险触发权限 | 不得把 rank 当作交易权限，不得因最终为 `wait/hold` 判定 rank 合约失败 |
+| 共享语义解释为 `conditional_monitor` 且不增加风险 | `final_action` 为 `wait/hold`、`target_lots=current_lots`，存在矩阵要求的 `capital_deployment` 和 `capital_allocation_reason`，且不存在 rank 专属字段 | 不得要求 `opportunity_rank`，不得解释为已授权开仓 |
+| 原生非新增风险 | `final_action` 为 `wait/hold/reduce/exit`，且最终持仓变化与动作一致 | 不得因缺少 rank 判错 |
+
+PM 自检不得自建资金部署状态字段、私有动作集合和私有生命周期字段。动作解释统一调用 `final_action_semantics`；学习 family/lane 统一遵守 `matrix_action_canonical.md`。
+
+`check_final_action_contract` 必须收窄为 `check_final_action_contract(final_action_contract)`。PM 不再把 artifact 对象、`signal_snapshot`、Step1–5 状态和早期生命周期传给合约自检；artifact 边界由 PM 返回后的 Auditor、保存层和 PG 检查。
 
 两个检查都只读、无副作用。检查器只能报告错误，不能补字段、改动作、改手数、改变生命周期和修复合约。
 
 #### 6.11 pm_six_step_trace
 
-最终检查通过后，PM 在 `signal_snapshot.pm_six_step_trace` 写入安全摘要：
+最终检查通过后，`signal_snapshot.pm_six_step_trace` 只保留矩阵已登记的：
 
-- `stage="step_6_final_action_contract_signed"`
-- `step_6_contract_builder`
 - `step6_contract_generation_check`
 - `pm_contract_self_check`
-- 最终 `contract_lifecycle_port`
-- 是否经过 Step5
-- 是否需要全市场 rank
-- 安全 provenance 摘要
-- `candidate_was_internal_only=true`
 
 `pm_six_step_trace` 只证明唯一最终对象如何生成并通过最终检查。它不保存 Step1–5 原始状态，不保存 candidate contract、builder inputs、旧生命周期、旧手数、旧 rank 和任何跨步骤比较结论。
+
+是否需要 rank、是否已部署和未部署原因全部由最终 `final_action_contract` 的既有字段解释，不在 `pm_six_step_trace` 自创字段。
 
 #### 6.12 成功、失败与返回边界
 
@@ -1615,7 +1511,11 @@ PM 不调用 `build_lifecycle_transition_diagnostic`，不执行任何 Step1/2/3
 
 PM 不让 `check_final_action_contract` 读取 artifact、snapshot 和 PM 中间状态，不让自检器修复最终合约。
 
-PM 不在 `final_action_contract` 中保留 `action_candidates`、`recommendation_intent`、scorecard 草稿、rank 草稿、预算草稿、第二套手数计划和内部审计对象。
+PM 不要求所有产品都有 rank，不把 Step4 直接进入 Step6 的合法合约误判为缺少资金排名。
+
+PM 不要求已排名但未获预算的候选继续保持新增风险生命周期，不把正常预算拒绝误判为 Step5/Step6 不一致。
+
+PM 不在 `final_action_contract` 中保留矩阵列明的 PM 内部 draft、scorecard 草稿、rank 草稿、预算草稿、第二套手数计划和内部审计对象。
 
 PM 不让 recommendation 顶层字段形成第二套交易事实；所有顶层摘要必须从最终合约派生。
 
