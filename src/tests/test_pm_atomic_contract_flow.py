@@ -1,0 +1,520 @@
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from agents.decision_team.portfolio_manager import (
+    finalize_pm_full_market_contracts,
+    portfolio_agent_futures,
+)
+from graph.schema import Portfolio, RecommendationSourceType, RecommendationStatus
+from graph.workflow import AgentWorkflow
+from tools.common.final_action_semantics import full_market_rank_source_payload
+
+
+def _signal_collection_contract(ticker: str) -> dict:
+    return {
+        "contract_version": "agentquant.signal_collection.v1",
+        "source_agent": "signal_collector",
+        "collector_decision_boundary": "no_trade_authority",
+        "ticker": ticker,
+        "trading_date": "2025-03-25",
+        "source_contracts": [],
+        "evidence_items": [],
+    }
+
+
+def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecard: bool) -> dict:
+    collection = _signal_collection_contract(ticker)
+    scorecard = {}
+    if with_scorecard:
+        scorecard = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "watch_for_trigger",
+                "opportunity_score": 0.8,
+                "score": 0.8,
+                "rank_score": 0.8,
+                "capital_priority_score": 0.8,
+                "watch_priority_score": 0.8,
+                "capital_priority_tier": 1,
+                "rank_score_components": {
+                    "cold_start_evidence_quality": 0.8,
+                    "open_add_action_value_delta": 0.0,
+                },
+                "rank_input_components": {
+                    "rank_score": 0.8,
+                    "capital_priority_score": 0.8,
+                    "opportunity_score": 0.8,
+                },
+                "rank_capital_role": "exploration_probe",
+                "capital_layer": "exploration",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "fixture_rank",
+                "lifecycle_learning_trace": {
+                    "rank_lifecycle": "open_add_new_risk",
+                    "used_lanes": [],
+                    "decision_learning_rows": [],
+                    "trigger_profile_learning_rows": [],
+                    "execution_profile_learning_direct_to_rank": False,
+                    "trigger_profile_learning_direct_to_rank": False,
+                    "execution_profile_signal_direct_to_rank": False,
+                },
+                "learning_impact_delta": {
+                    "net_rank_learning_delta": 0.0,
+                    "execution_profile_learning_direct_to_rank": False,
+                },
+                **full_market_rank_source_payload(),
+            },
+        }
+    ratio = 0.008 if target_lots else 0.0
+    return {
+        "ticker": ticker,
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "lots_delta": target_lots - current_lots,
+        "lots_delta_abs": abs(target_lots - current_lots),
+        "target_position_ratio": ratio,
+        "target_margin_ratio_estimate": abs(ratio),
+        "position_ratio": ratio,
+        "margin_required": abs(ratio) * 1_000_000.0,
+        "account_equity": 1_000_000.0,
+        "lots_to_trade": abs(target_lots - current_lots),
+        "lots_to_trade_reason": "fixture_state",
+        "recommendation_intent": {},
+        "final_entry_authority": {
+            "authority_type": "exploration_probe" if target_lots != current_lots else "not_applicable",
+            "authority_decision": "fixture_state",
+            "decision": "fixture_state",
+            "requires_authority": target_lots != current_lots,
+            "open_action_evidence": target_lots != current_lots,
+            "max_allowed_margin_ratio": abs(ratio),
+            "reason_codes": ["fixture_state"],
+        },
+        "control_reasons": ["fixture_state"],
+        "reason_codes": ["fixture_state"],
+        "control_diagnostics": {},
+        "opportunity_scorecard": scorecard,
+        "market_confirmation": {},
+        "alpha_setup_action_values": [],
+        "signal_collection_contract": collection,
+        "execution_contract_fields": {"signal_collection_contract": collection},
+        "recommendation_context": {
+            "config_id": "cfg",
+            "reference_portfolio_id": "p1",
+            "trading_date": "2025-03-25",
+            "effective_trade_date": "2025-03-25",
+            "source_type": RecommendationSourceType.STRATEGY,
+            "underlying_code": ticker,
+            "base_price": 3000.0,
+            "status": RecommendationStatus.PENDING,
+            "justification": "fixture",
+        },
+    }
+
+
+class PMAtomicContractFlowTests(unittest.TestCase):
+    def test_learning_retrieval_starts_only_after_step3_lifecycle_port(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
+            encoding="utf-8-sig"
+        )
+        main_chain = source[
+            source.index("def _run_pm_six_step_decision") : source.index("def portfolio_agent_futures")
+        ]
+        step2_index = main_chain.index("ticker_side_selection_result = select_ticker_side(")
+        step3_index = main_chain.index("primary_lifecycle_action_port = classify_lifecycle_action_port(")
+
+        self.assertLess(step2_index, step3_index)
+        self.assertGreater(main_chain.index("apply_config_learning_overlay("), step3_index)
+        for learning_call in ("retrieve_pm_memory(", "_retrieve_lifecycle_pm_memory("):
+            self.assertGreater(main_chain.index(learning_call), step3_index)
+        self.assertNotIn("calibrate_weights_by_signal_history(", main_chain)
+
+        side_selection_call = main_chain[step2_index:step3_index]
+        for learning_input in (
+            "effective_memory_summary=",
+            "adaptive_policy_state=",
+            "alpha_setup_profiles=",
+            "alpha_setup_action_values=",
+        ):
+            self.assertNotIn(learning_input, side_selection_call)
+
+    def test_position_sizing_is_built_only_by_step5(self):
+        pm_source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
+            encoding="utf-8-sig"
+        )
+        main_chain = pm_source[
+            pm_source.index("def _run_pm_six_step_decision") : pm_source.index("def portfolio_agent_futures")
+        ]
+        deployment_source = (
+            SRC_ROOT / "tools" / "agent_tools" / "decision" / "pm_full_market_capital_deployment.py"
+        ).read_text(encoding="utf-8-sig")
+
+        self.assertNotIn("build_position_sizing_result(", main_chain)
+        self.assertIn("build_position_sizing_result(", deployment_source)
+
+    def test_pm_runtime_chain_has_no_physical_logger_calls(self):
+        pm_source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
+            encoding="utf-8-sig"
+        )
+        decision_root = SRC_ROOT / "tools" / "agent_tools" / "decision"
+
+        self.assertNotIn("from util.logger import logger", pm_source)
+        self.assertNotIn("logger.", pm_source)
+        for tool_path in decision_root.glob("pm_*.py"):
+            with self.subTest(tool=tool_path.name):
+                self.assertNotIn("logger.", tool_path.read_text(encoding="utf-8-sig"))
+
+    def test_final_contract_self_check_accepts_only_the_final_contract(self):
+        source = (
+            SRC_ROOT / "tools" / "agent_tools" / "decision" / "pm_contract_self_check.py"
+        ).read_text(encoding="utf-8-sig")
+        signature = source[
+            source.index("def check_final_action_contract(") : source.index(
+                '    """Check final_action_contract consistency',
+                source.index("def check_final_action_contract("),
+            )
+        ]
+
+        self.assertNotIn("pm_artifact", signature)
+        self.assertNotIn("snapshot", signature)
+
+    def test_portfolio_node_returns_only_pm_memory_state_before_step6(self):
+        memory_state = {"ticker": "BU", "current_lots": 0, "target_lots": 0}
+        with patch(
+            "agents.decision_team.portfolio_manager._run_pm_six_step_decision",
+            return_value=memory_state,
+        ):
+            result = portfolio_agent_futures({})
+
+        self.assertEqual(result, {"pm_state": memory_state})
+        self.assertNotIn("recommendation", result)
+        self.assertNotIn("final_action_contract", result)
+        self.assertNotIn("signal_snapshot", result["pm_state"])
+
+    def test_workflow_collects_pm_memory_state_not_recommendation(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        memory_state = {"ticker": "BU", "current_lots": 1, "target_lots": 1}
+
+        observed = workflow._require_pm_memory_state("BU", {"pm_state": memory_state})
+
+        self.assertIs(observed, memory_state)
+        with self.assertRaisesRegex(RuntimeError, "missing pm_state"):
+            workflow._require_pm_memory_state("BU", {"recommendation": object()})
+
+    def test_pm_source_has_no_old_intermediate_physical_outputs(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
+            encoding="utf-8-sig"
+        )
+        for legacy_name in (
+            "pm_internal_candidate",
+            "pm_internal_candidate_contract",
+            "final_contract_builder_inputs",
+            "pm_capital_deployment_decision",
+        ):
+            self.assertNotIn(legacy_name, source)
+
+    def test_steps_1_5_do_not_build_unsigned_recommendation_consistency(self):
+        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
+            encoding="utf-8-sig"
+        )
+        main_chain = source[
+            source.index("def _run_pm_six_step_decision") : source.index("def portfolio_agent_futures")
+        ]
+
+        self.assertNotIn('plan_snapshot["recommendation_position_consistency"]', main_chain)
+
+    def test_non_new_risk_skips_step5_and_step6_creates_only_final_output(self):
+        state = _pm_state("BU", 1, 1, with_scorecard=False)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(id="p1", cashflow=1_000_000.0, account_equity=1_000_000.0, positions={}),
+        )
+
+        recommendation = result[0][1]
+        contract = recommendation.signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "hold")
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+        self.assertTrue(recommendation.signal_snapshot["pm_six_step_trace"]["pm_contract_self_check"]["ok"])
+
+    def test_new_risk_runs_step5_before_step6_atomic_signing(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.5},
+            },
+            portfolio=Portfolio(id="p1", cashflow=1_000_000.0, account_equity=1_000_000.0, positions={}),
+        )
+
+        recommendation = result[0][1]
+        contract = recommendation.signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "open_probe")
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(contract["evidence_used"]["position_sizing_result"]["target_lots"], 1)
+
+    def test_step5_rejection_restores_zero_new_exposure_before_step6(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=False)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(id="p1", cashflow=1_000_000.0, account_equity=1_000_000.0, positions={}),
+        )
+
+        recommendation = result[0][1]
+        contract = recommendation.signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(contract["evidence_used"]["position_sizing_result"]["target_lots"], 0)
+        self.assertEqual(contract["evidence_used"]["position_sizing_result"]["lots_delta"], 0)
+
+    def test_reverse_exits_old_side_before_any_new_risk_rank(self):
+        state = _pm_state("BU", 1, -1, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(id="p1", cashflow=1_000_000.0, account_equity=1_000_000.0, positions={}),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "exit")
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertNotIn("opportunity_rank", contract["evidence_used"])
+        self.assertIn("reverse_exit_first", contract["reason_codes"])
+
+    def test_native_wait_reduce_and_exit_skip_step5_without_rank(self):
+        cases = (
+            ("WAIT", 0, 0, "wait"),
+            ("REDUCE", 2, 1, "reduce"),
+            ("EXIT", 1, 0, "exit"),
+        )
+        for ticker, current_lots, target_lots, expected_action in cases:
+            with self.subTest(ticker=ticker):
+                state = _pm_state(ticker, current_lots, target_lots, with_scorecard=False)
+                result = finalize_pm_full_market_contracts(
+                    generated=[(ticker, state)],
+                    config={"max_total_margin_ratio": 0.2},
+                    portfolio=Portfolio(
+                        id="p1",
+                        cashflow=1_000_000.0,
+                        account_equity=1_000_000.0,
+                        positions={},
+                    ),
+                )
+                contract = result[0][1].signal_snapshot["final_action_contract"]
+                self.assertEqual(contract["final_action"], expected_action)
+                self.assertNotIn("opportunity_rank", contract["evidence_used"])
+
+    def test_add_and_scale_do_not_enter_opening_rank(self):
+        cases = (
+            ("ADD_LONG", 1, 2),
+            ("ADD_SHORT", -1, -2),
+        )
+        for ticker, current_lots, target_lots in cases:
+            with self.subTest(ticker=ticker):
+                state = _pm_state(ticker, current_lots, target_lots, with_scorecard=True)
+                result = finalize_pm_full_market_contracts(
+                    generated=[(ticker, state)],
+                    config={"max_total_margin_ratio": 0.2},
+                    portfolio=Portfolio(
+                        id="p1",
+                        cashflow=1_000_000.0,
+                        account_equity=1_000_000.0,
+                        positions={},
+                    ),
+                )
+
+                contract = result[0][1].signal_snapshot["final_action_contract"]
+                self.assertEqual(contract["final_action"], "scale")
+                self.assertEqual(contract["current_lots"], current_lots)
+                self.assertEqual(contract["target_lots"], target_lots)
+                self.assertNotIn("opportunity_rank", contract["evidence_used"])
+                self.assertEqual(
+                    contract["capital_deployment"]["capital_allocation_reason"],
+                    "non_new_risk_no_capital_rank",
+                )
+
+    def test_only_flat_to_position_open_competes_for_rank(self):
+        open_state = _pm_state("OPEN", 0, 1, with_scorecard=True)
+        add_state = _pm_state("ADD", 1, 2, with_scorecard=True)
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("ADD", add_state), ("OPEN", open_state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
+        self.assertEqual(contracts["OPEN"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertNotIn("opportunity_rank", contracts["ADD"]["evidence_used"])
+
+    def test_ranked_candidate_rejected_by_budget_keeps_rank_and_zeroes_new_risk(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.001,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.5},
+            },
+            portfolio=Portfolio(id="p1", cashflow=1_000_000.0, account_equity=1_000_000.0, positions={}),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "wait")
+        self.assertEqual(contract["target_lots"], 0)
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertTrue(
+            str(contract["capital_deployment"]["capital_allocation_reason"]).startswith(
+                "no_rank_or_budget_no_new_exposure"
+            )
+        )
+
+    def test_alpha_scale_rank_precedes_real_budget_and_consumes_budget_first(self):
+        real_state = _pm_state("ZN", 0, 1, with_scorecard=True)
+        alpha_state = _pm_state("BU", 0, 1, with_scorecard=True)
+        for state in (real_state, alpha_state):
+            state["final_entry_authority"].update(
+                {
+                    "authority_type": "real_budget_entry",
+                    "max_allowed_margin_ratio": 0.06,
+                }
+            )
+            row = state["opportunity_scorecard"]["long"]
+            row["final_state"] = "tradeable_candidate"
+            row["opportunity_score"] = 0.8
+            row["score"] = 0.8
+        alpha_state["control_diagnostics"] = {
+            "capital_utilization_target": {
+                "high_quality_memory": True,
+                "target_mode": "alpha_release_boost",
+            }
+        }
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("ZN", real_state), ("BU", alpha_state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "capital_utilization_control": {"target_margin_ratio_confirmed": 0.10},
+                "net_exposure_control": {"max_net_exposure": 0.008},
+            },
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
+        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertTrue(contracts["BU"]["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertFalse(contracts["ZN"]["capital_deployment"]["selected_for_capital_deployment"])
+
+    def test_rank_preserves_probe_and_real_budget_authority(self):
+        probe_state = _pm_state("BU", 0, 1, with_scorecard=True)
+        real_state = _pm_state("ZN", 0, 1, with_scorecard=True)
+        probe_row = probe_state["opportunity_scorecard"]["long"]
+        probe_row.update({"final_state": "tradeable_candidate", "opportunity_score": 0.99, "score": 0.99})
+        probe_state["final_entry_authority"].update(
+            {"authority_type": "exploration_probe", "max_allowed_margin_ratio": 0.015}
+        )
+        real_row = real_state["opportunity_scorecard"]["long"]
+        real_row.update({"final_state": "watch_for_trigger", "opportunity_score": 0.20, "score": 0.20})
+        real_state["final_entry_authority"].update(
+            {"authority_type": "real_budget_entry", "max_allowed_margin_ratio": 0.06}
+        )
+        real_state.update(
+            {
+                "target_position_ratio": 0.03,
+                "target_margin_ratio_estimate": 0.03,
+                "position_ratio": 0.03,
+                "margin_required": 30_000.0,
+            }
+        )
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", probe_state), ("ZN", real_state)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "capital_utilization_control": {"target_margin_ratio_confirmed": 0.10},
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
+        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["ZN"]["capital_deployment"]["capital_layer"], "real_budget_entry")
+        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contracts["BU"]["capital_deployment"]["capital_layer"], "exploration_probe")
+        self.assertEqual(probe_state["final_entry_authority"]["authority_type"], "exploration_probe")
+        self.assertEqual(probe_state["final_entry_authority"]["max_allowed_margin_ratio"], 0.015)
+
+    def test_equal_rank_inputs_use_normalized_ticker_as_stable_final_key(self):
+        zn_state = _pm_state("zn", 0, 1, with_scorecard=True)
+        bu_state = _pm_state("bu", 0, 1, with_scorecard=True)
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("zn", zn_state), ("bu", bu_state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.5},
+            },
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contracts = {ticker.upper(): rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
+        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

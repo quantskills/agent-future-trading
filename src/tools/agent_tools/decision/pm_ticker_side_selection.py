@@ -1,6 +1,6 @@
 """Deterministic PM ticker side selection helper.
 
-This tool is PM step 3 only: choose the ticker-local side and candidate
+This tool is PM step 2 only: choose the ticker-local side and candidate
 quality. It never creates the final all-market capital rank, deploys capital,
 sizes positions, or signs the final_action_contract.
 """
@@ -32,6 +32,7 @@ FINAL_CAPITAL_RANK_FIELDS = {
     "rank_score_components",
     "capital_priority_score",
     "capital_priority_tier",
+    "alpha_scale_eligible",
 }
 
 
@@ -77,8 +78,6 @@ def _candidate_eligible(row: Mapping[str, Any]) -> bool:
 
 def _candidate_layer_hint(row: Mapping[str, Any]) -> str:
     state = _candidate_state(row)
-    if bool(row.get("alpha_scale_candidate")) or bool(row.get("mature_alpha_candidate")):
-        return "alpha_scale_candidate"
     if state == "tradeable_candidate":
         return "tradeable_candidate"
     if state == "probe_candidate":
@@ -106,7 +105,7 @@ def _candidate_quality_components(row: Mapping[str, Any]) -> dict[str, float]:
     components = row.get("opportunity_score_components")
     components = components if isinstance(components, Mapping) else {}
     opportunity_score = _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
-    evidence_quality = _safe_float(row.get("evidence_quality_score"), 0.0)
+    evidence_quality = _safe_float(row.get("direction_evidence_strength"), 0.0)
     setup_quality = _safe_float(row.get("setup_quality_score"), _safe_float(row.get("max_setup_quality"), 0.0))
     trigger_quality = _safe_float(row.get("trigger_quality_score"), 0.0)
     if bool(row.get("trigger_valid")) or bool(row.get("current_trigger_confirmed")):
@@ -120,7 +119,7 @@ def _candidate_quality_components(row: Mapping[str, Any]) -> dict[str, float]:
         + _safe_float(components.get("positive_learning"), 0.0)
     )
     conflict_penalty = (
-        abs(min(0.0, _safe_float(components.get("fusion_conflict_adjustment"), 0.0)))
+        abs(min(0.0, _safe_float(components.get("fusion_score_adjustment"), 0.0)))
         + abs(min(0.0, _safe_float(components.get("negative_learning"), 0.0)))
         + 0.02 * _count_items(row.get("gating_failures") or row.get("cross_analyst_conflicts"))
     )
@@ -145,12 +144,8 @@ def select_ticker_side(
     ticker: str,
     analyst_signals: list,
     signal_collection_contract: Mapping[str, Any] | None,
-    effective_memory_summary: Mapping[str, Any] | None,
     market_confirmation: Mapping[str, Any] | None,
     data_quality_summary: Mapping[str, Any] | None,
-    adaptive_policy_state: list | None,
-    alpha_setup_profiles: list | None,
-    alpha_setup_action_values: list | None,
     decision_date: Any,
     config: Mapping[str, Any] | None,
     prebuilt_scorecard: Mapping[str, Any] | None = None,
@@ -164,9 +159,9 @@ def select_ticker_side(
             analyst_signals=analyst_signals,
             market_confirmation=market_confirmation or {},
             data_quality_summary=data_quality_summary or {},
-            adaptive_policy_state=adaptive_policy_state or [],
-            alpha_setup_profiles=alpha_setup_profiles or [],
-            alpha_setup_action_values=alpha_setup_action_values or [],
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
             signal_collection_contract=signal_collection_contract or {},
             decision_date=decision_date,
             config=config or {},
@@ -252,7 +247,6 @@ def select_ticker_side(
             "dominant_opposing_evidence": (signal_collection_contract or {}).get("dominant_opposing_evidence") or [],
             "confirmation_requirements": (signal_collection_contract or {}).get("confirmation_requirements") or [],
         },
-        "memory_summary": dict(effective_memory_summary or {}),
         "side_priority_is_not_trade_authority": True,
         "final_opportunity_rank_generated_here": False,
     }

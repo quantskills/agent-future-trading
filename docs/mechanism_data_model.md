@@ -35,10 +35,10 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | `fundamental` 基本面分析师 | 是 | 用基本面数据生成结构化基本面预测证据 | 手数、仓位、最终交易动作 |
 | `commodity_news` 期货新闻面分析师 | 是 | 用新闻和事件生成结构化新闻预测证据 | 手数、仓位、最终交易动作 |
 | `signal_collector` 信号收集员 | 否 | 确定性收集和对齐三类分析师证据 | 自由文本判断、研究结论、score/rank、手数 |
-| `portfolio_manager` 投资组合经理 | 否 | 按 PM 六步确定性读取证据、判生命周期、消费学习、对新增风险做全市场 rank/资金部署，并签唯一合约 | LLM 判断、LLM 手数、第二套交易计划、重建 `signal_collection_contract` |
+| `portfolio_manager` 投资组合经理 | 否 | 按 PM 六步确定性读取证据、判生命周期、消费学习、只对从空仓建立新仓做全市场 rank/资金部署，并签唯一合约 | LLM 判断、LLM 手数、第二套交易计划、重建 `signal_collection_contract` |
 | `decision_memory_retrieval` | 否 | 确定性读取结构化研究信息 | 自由文本记忆解释、手数、交易动作 |
 | `pm_ticker_side_selection` | 否 | PM 第 3 步单品种方向选择和候选质量判断 | 全市场 rank、最终手数、最终合约 |
-| `pm_full_market_capital_deployment` | 否 | PM 第 5 步只对新增风险候选做全市场资金 rank 和部署 | 非新增风险伪 rank、最终合约 |
+| `pm_full_market_capital_deployment` | 否 | PM 第 5 步只对 `current_lots=0` 且 `target_lots!=0` 的开仓候选做全市场资金 rank 和部署 | `add/scale/hold/reduce/exit/reverse` 当前合约伪 rank、最终合约 |
 | `pm_position_sizing` | 否 | PM 第 6 步签约前计算目标手数建议 | 改方向、签合约 |
 | `auditor` 审计员 | 否 | 审计最终合约和硬风险 | 改方向、改手数、新建合约 |
 | `trader` 交易员 | 否 | 执行审计通过的最终合约和合约化触发规则 | 读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发、改方向、改手数 |
@@ -82,7 +82,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 - Step2 由 `pm_ticker_side_selection` 形成 `side_priority` 和 `ticker_side_priority`；
 - Step3 结合持仓形成候选质量和内部生命周期分流；
 - Step4 由 `decision_memory_retrieval` 输出 `effective_memory_summary` 和完整 canonical 候选学习池；
-- Step5 只对新增风险调用 `pm_full_market_capital_deployment` 和 `pm_position_sizing`，把 rank、预算和 `position_sizing_result` 写回同一个 PM 内存状态；
+- Step5 只对从空仓建立新仓调用 `pm_full_market_capital_deployment` 和 `pm_position_sizing`，把 rank、预算和 `position_sizing_result` 写回同一个 PM 内存状态；
 - Step6 原子装配最终合约和两个最终检查。
 
 投资组合经理是唯一策略交易合约签发者。Step1–5 只更新同一个 PM 内存状态；Step6 原子返回唯一 `FuturesRecommendation`，唯一 `final_action_contract` 位于 `signal_snapshot.final_action_contract`。缺少 `signal_collection_contract` 或 source_agent/boundary 不合法时，PM 应 fail-fast，不能自行重建证据包。
@@ -173,7 +173,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 - `can_execute_without_intraday_trigger`；
 - `reason_codes`。
 
-`opportunity_rank` 和 `opportunity_score` 只用于投资组合经理资金部署解释，不是交易员执行权限。非新增风险合约不得伪造 rank 或空 `capital_deployment`；新增风险合约必须把 Step5 资金部署事实原子写入同一张 `final_action_contract`。
+`opportunity_rank` 和 `opportunity_score` 只用于投资组合经理开仓资金部署解释，不是交易员执行权限。`add/scale/hold/reduce/exit/reverse` 当前合约不得伪造 rank 或空 `capital_deployment`；只有从空仓建立新仓的合约必须把 Step5 资金部署事实原子写入同一张 `final_action_contract`。
 
 ## 七、系统事实载体契约
 

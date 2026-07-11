@@ -408,10 +408,10 @@ def _audit_recommendation_mechanisms(
         if not signal_contract:
             hard_failures.append(f"mechanism_signal_collection_contract_missing:{label}")
         else:
-            producer = _lower(signal_contract.get("producer"))
+            source_agent = _lower(signal_contract.get("source_agent"))
             boundary = _lower(signal_contract.get("collector_decision_boundary"))
-            if producer != "signal_collector":
-                hard_failures.append(f"mechanism_signal_collection_contract_invalid_producer:{label}:{producer or 'missing'}")
+            if source_agent != "signal_collector":
+                hard_failures.append(f"mechanism_signal_collection_contract_invalid_source_agent:{label}:{source_agent or 'missing'}")
             if boundary != "no_trade_authority":
                 hard_failures.append(f"mechanism_signal_collection_contract_invalid_boundary:{label}:{boundary or 'missing'}")
             forbidden_fields = _forbidden_signal_collection_pm_fields(signal_contract)

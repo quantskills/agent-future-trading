@@ -135,7 +135,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                     "signal_collection_contract",
                     "pm_missing_signal_collection_contract_from_signal_collector",
                     "collector_decision_boundary",
-                    "pm_invalid_signal_collection_contract_producer",
+                    "pm_invalid_signal_collection_contract_source_agent",
                 ),
                 "PM only consumes the signal collection contract produced by signal_collector",
             ),
@@ -319,8 +319,8 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/agents/decision_team/portfolio_manager.py",
                 (
-                    "def _sign_pm_candidate_recommendation",
-                    "_build_final_action_contract(**builder_inputs)",
+                    "def _sign_pm_memory_state",
+                    "_build_final_action_contract(**contract_inputs)",
                     'snapshot["final_action_contract"] = final_action_contract',
                 ),
                 "PM step-6 signer is the only outward final contract publication point",
@@ -647,7 +647,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
                 ("opportunity_rank", "apply_full_market_capital_deployment"),
-                "PM full-market capital deployment uses score components to rank new-risk candidates",
+                "PM full-market capital deployment uses score components to rank flat-to-position opening candidates",
             ),
             _rule(
                 "src/evaluation/analyze_strategy_attribution.py",
@@ -773,9 +773,14 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         consumers=(
             _rule(
-                "src/agents/decision_team/portfolio_manager.py",
+                "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
                 ("build_position_sizing_result", "position_sizing_result"),
-                "PM consumes sizing tool output and then signs the unique contract",
+                "PM Step5 builds sizing only after rank and budget deployment",
+            ),
+            _rule(
+                "src/tools/agent_tools/decision/pm_contract_builder.py",
+                ("position_sizing_result", "evidence_used"),
+                "PM Step6 lands the Step5 sizing fact in the unique final contract",
             ),
         ),
         audits=(
@@ -942,19 +947,19 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/agents/decision_team/portfolio_manager.py", ('snapshot["signal_collection_contract"] = deepcopy(signal_collection_contract)',), "PM lands original SCC in signal_snapshot"),
         ),
         consumer=(
-            _rule("src/agents/decision_team/portfolio_manager.py", ("pm_missing_signal_collection_contract_from_signal_collector", "pm_invalid_signal_collection_contract_producer"), "PM consumes only signal_collector SCC"),
+            _rule("src/agents/decision_team/portfolio_manager.py", ("pm_missing_signal_collection_contract_from_signal_collector", "pm_invalid_signal_collection_contract_source_agent"), "PM consumes only signal_collector SCC"),
         ),
         self_or_role_check=(
             _rule("src/agents/decision_team/portfolio_manager.py", ("def _require_step6_signal_collection_contract", "pm_step6_invalid_signal_collection_contract_boundary"), "PM Step6 checks SCC producer and boundary"),
         ),
         pre_backtest_fixture_gate=(
-            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("scc_missing", "scc_producer_boundary_invalid"), "pre-backtest failure fixtures cover SCC missing and invalid boundary"),
+            _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("scc_missing", "scc_source_agent_boundary_invalid"), "pre-backtest failure fixtures cover SCC missing and invalid boundary"),
         ),
         daily_pg_audit=(
-            _rule("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", ("mechanism_signal_collection_contract_missing", "mechanism_signal_collection_contract_invalid_producer"), "daily mechanism audit checks final SCC landing"),
+            _rule("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", ("mechanism_signal_collection_contract_missing", "mechanism_signal_collection_contract_invalid_source_agent"), "daily mechanism audit checks final SCC landing"),
         ),
         real_path_test=(
-            _rule("src/tests/test_phase_flow_regression.py", ("test_pm_step6_requires_signal_collection_contract_from_builder_inputs",), "real PM Step6 path rejects missing SCC"),
+            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_scc_source_agent_and_boundary_are_hard_inputs",), "real PM Step6 path rejects invalid SCC"),
         ),
         mechanism_doc=(
             _rule("docs/matrix_chain_contract.md", ("`signal_collection_contract`", "`signal_snapshot.signal_collection_contract`"), "chain matrix fixes SCC producer, landing, consumers, and audit"),
@@ -963,7 +968,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
     _matrix_spec(
         "final_action_contract",
         producer=(
-            _rule("src/agents/decision_team/portfolio_manager.py", ("def _sign_pm_candidate_recommendation", "_build_final_action_contract(**builder_inputs)"), "PM Step6 signs final contract"),
+            _rule("src/agents/decision_team/portfolio_manager.py", ("def _sign_pm_memory_state", "_build_final_action_contract(**contract_inputs)"), "PM Step6 signs final contract"),
         ),
         artifact_db_landing=(
             _rule("src/agents/decision_team/portfolio_manager.py", ('snapshot["final_action_contract"] = final_action_contract',), "PM lands final contract in signal_snapshot"),
@@ -981,7 +986,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("transaction_not_derived_from_final_action_contract", "strategy_recommendation_missing_signal_snapshot_final_action_contract"), "daily PG audits final contract truth"),
         ),
         real_path_test=(
-            _rule("src/tests/test_phase_flow_regression.py", ("test_final_action_contract_is_single_structured_trade_truth",), "phase path tests cover final contract construction"),
+            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_three_pm_paths_sign_exactly_one_final_contract",), "phase path tests cover final contract construction"),
         ),
         mechanism_doc=(
             _rule("docs/agent_pm.md", ("唯一 `final_action_contract`", "pm_contract_self_check"), "PM mechanism fixes final contract and self-check"),
@@ -1008,10 +1013,10 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_step6_generation_check_failed",), "daily PG audits PM Step6 generation check"),
         ),
         real_path_test=(
-            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_step6_lifecycle_uses_final_candidate_and_keeps_old_check_historical",), "PM workflow tests cover final Step6 trace"),
+            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_three_pm_paths_sign_exactly_one_final_contract",), "PM workflow tests cover final Step6 trace"),
         ),
         mechanism_doc=(
-            _rule("docs/agent_pm.md", ("Step2 到 Step6 的变化", "最终合约失败判断"), "PM mechanism fixes Step2 provenance and Step6 final trace boundary"),
+            _rule("docs/agent_pm.md", ("pm_six_step_trace", "回溯比较式自检"), "PM mechanism fixes Step1-5 evolution and Step6 final trace boundary"),
         ),
     ),
     _matrix_spec(
@@ -1044,7 +1049,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
     _matrix_spec(
         "learning_used.alpha_setup_action_values",
         producer=(
-            _rule("src/agents/decision_team/portfolio_manager.py", ("_attach_incomplete_prior_diagnostics_to_builder_inputs", "_normalize_alpha_setup_action_values"), "PM filters formal action-value rows"),
+            _rule("src/agents/decision_team/portfolio_manager.py", ("_attach_incomplete_prior_diagnostics_to_contract_state", "_normalize_alpha_setup_action_values"), "PM filters formal action-value rows"),
         ),
         artifact_db_landing=(
             _rule("src/tools/agent_tools/decision/pm_contract_builder.py", ('"alpha_setup_action_values": selected_action_values',), "PM contract builder lands formal action-values"),
@@ -1065,7 +1070,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tests/test_phase_flow_regression.py", ("test_pm_artifact_excludes_incomplete_prior_from_formal_action_values",), "phase flow test covers incomplete prior filtering"),
         ),
         mechanism_doc=(
-            _rule("docs/agent_pm.md", ("alpha_setup_action_values` 是 PM 正式 canonical action-value 主证据列表", "incomplete_prior_not_pm_scoring_evidence"), "PM mechanism fixes formal action-value boundary"),
+            _rule("docs/agent_pm.md", ("final_action_contract.learning_used.alpha_setup_action_values", "incomplete_prior_not_pm_scoring_evidence"), "PM mechanism fixes formal action-value boundary"),
         ),
     ),
     _matrix_spec(
@@ -1395,8 +1400,8 @@ def _scan_signal_collection_producer_boundary(repo_root: Path) -> List[str]:
         errors.append("signal_collection_contract_pm_imports_builder")
     if "build_signal_collection_contract(" in pm_text:
         errors.append("signal_collection_contract_pm_builds_contract")
-    if '"producer": "signal_collector"' not in signal_text:
-        errors.append("signal_collection_contract_missing_signal_collector_producer")
+    if '"source_agent": "signal_collector"' not in signal_text:
+        errors.append("signal_collection_contract_missing_signal_collector_source_agent")
     return errors
 
 

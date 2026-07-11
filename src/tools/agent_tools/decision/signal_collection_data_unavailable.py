@@ -136,7 +136,7 @@ def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_
 
 def _signal_snapshot_from_signals(analyst_signals: list[AnalystSignal], contract: dict) -> dict:
     snapshot: dict[str, Any] = {
-        "producer": "signal_collector",
+        "source_agent": "signal_collector",
         "collection_status": "data_unavailable_no_trade",
         "signal_collection_contract": contract,
     }
@@ -174,7 +174,7 @@ def build_data_unavailable_signal_package(
     contract.update({
         "collection_status": "data_unavailable_no_trade",
         "data_unavailable_reason": reason_text,
-        "producer": "signal_collector",
+        "source_agent": "signal_collector",
         "workflow_is_not_signal_producer": True,
     })
     return {

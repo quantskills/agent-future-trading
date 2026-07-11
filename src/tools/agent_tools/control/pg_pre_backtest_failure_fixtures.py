@@ -25,7 +25,7 @@ from tools.common.final_action_semantics import validate_action_preference_famil
 
 MATRIX_FAILURE_FIXTURE_IDS = (
     "scc_missing",
-    "scc_producer_boundary_invalid",
+    "scc_source_agent_boundary_invalid",
     "pm_incomplete_prior_in_formal_action_values",
     "observe_empty_preference",
     "observe_positive_candidate_forbidden",
@@ -53,8 +53,8 @@ def _scc_errors(contract: Any) -> List[str]:
     errors: List[str] = []
     if not payload:
         return ["signal_collection_contract_missing"]
-    if str(payload.get("producer") or "") != "signal_collector":
-        errors.append("signal_collection_contract_invalid_producer")
+    if str(payload.get("source_agent") or "") != "signal_collector":
+        errors.append("signal_collection_contract_invalid_source_agent")
     if str(payload.get("collector_decision_boundary") or "") != "no_trade_authority":
         errors.append("signal_collection_contract_invalid_boundary")
     for field in (
@@ -127,6 +127,12 @@ def _base_contract(
             },
         },
         "evidence_used": {
+            "position_sizing_result": {
+                "sizing_method": "pre_backtest_failure_fixture",
+                "current_lots": current_lots,
+                "target_lots": target_lots,
+                "lots_delta": lots_delta,
+            },
             "lifecycle_learning_trace": {
                 **trace,
                 "pm_final_contract_lifecycle_trace": dict(trace),
@@ -145,14 +151,7 @@ def _base_contract(
         },
         "capital_deployment": {
             "selected_for_capital_deployment": False,
-            "new_risk_rank_required": False,
             "capital_allocation_reason": "non_new_risk_no_capital_rank",
-        },
-        "position_sizing_result": {
-            "sizing_method": "pre_backtest_failure_fixture",
-            "current_lots": current_lots,
-            "target_lots": target_lots,
-            "lots_delta": lots_delta,
         },
     }
 
@@ -223,17 +222,17 @@ def _fixture_scc_missing(errors: List[str]) -> None:
     _expect_prefix(errors, "scc_missing", _scc_errors({}), "signal_collection_contract_missing")
 
 
-def _fixture_scc_producer_boundary_invalid(errors: List[str]) -> None:
+def _fixture_scc_source_agent_boundary_invalid(errors: List[str]) -> None:
     actual = _scc_errors(
         {
-            "producer": "portfolio_manager",
+            "source_agent": "portfolio_manager",
             "collector_decision_boundary": "trade_authority",
             "source_contracts": [{"id": "signal-1"}],
             "evidence_items": [{"id": "evidence-1"}],
         }
     )
-    _expect_prefix(errors, "scc_producer_boundary_invalid", actual, "signal_collection_contract_invalid_producer")
-    _expect_prefix(errors, "scc_producer_boundary_invalid", actual, "signal_collection_contract_invalid_boundary")
+    _expect_prefix(errors, "scc_source_agent_boundary_invalid", actual, "signal_collection_contract_invalid_source_agent")
+    _expect_prefix(errors, "scc_source_agent_boundary_invalid", actual, "signal_collection_contract_invalid_boundary")
 
 
 def _fixture_pm_incomplete_prior(errors: List[str]) -> None:
@@ -426,7 +425,7 @@ def _fixture_unfinished_day_enters_learning(errors: List[str]) -> None:
 
 FIXTURE_RUNNERS: Dict[str, Callable[[List[str]], None]] = {
     "scc_missing": _fixture_scc_missing,
-    "scc_producer_boundary_invalid": _fixture_scc_producer_boundary_invalid,
+    "scc_source_agent_boundary_invalid": _fixture_scc_source_agent_boundary_invalid,
     "pm_incomplete_prior_in_formal_action_values": _fixture_pm_incomplete_prior,
     "observe_empty_preference": _fixture_observe_empty_preference,
     "observe_positive_candidate_forbidden": _fixture_observe_positive_candidate_forbidden,

@@ -864,12 +864,8 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
             analyst_signals=[long_signal, short_signal],
             signal_collection_contract={"dominant_side": "long"},
-            effective_memory_summary={"status": "available"},
             market_confirmation={"confirmation_score": 0.72},
             data_quality_summary={},
-            adaptive_policy_state=[],
-            alpha_setup_profiles=[],
-            alpha_setup_action_values=[],
             decision_date="2025-03-05",
             config={"weak_confirmation_threshold": 0.45},
             prebuilt_scorecard=card,
@@ -1180,6 +1176,5 @@ class NewsDataBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 
 

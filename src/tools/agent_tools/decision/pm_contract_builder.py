@@ -89,15 +89,11 @@ def _non_rank_capital_deployment_summary(
     reasons = sorted({str(reason) for reason in (control_reasons or []) if str(reason)} | {"non_new_risk_no_capital_rank"})
     return {
         "selected_for_capital_deployment": False,
-        "deployment_required": False,
-        "new_risk_rank_required": False,
         "capital_allocation_reason": "non_new_risk_no_capital_rank",
         "original_target_lots": target,
         "deployed_target_lots": target,
         "deployed_lots_delta": target - current,
         "reason_codes": reasons,
-        "not_second_contract": True,
-        "pm_remains_single_fund_manager": True,
     }
 
 
@@ -662,7 +658,6 @@ def build_final_action_contract(
         "entry_trigger": execution_contract_payload.get("entry_trigger") or "",
         "invalidation": execution_contract_payload.get("invalidation") or "",
         **({"capital_deployment": capital_deployment} if isinstance(capital_deployment, dict) else {}),
-        "position_sizing_result": position_sizing_result,
         "execution_requirement": (
             "intraday_trigger_required"
             if final_action in {"open_probe", "open_real", "scale"}
@@ -679,6 +674,7 @@ def build_final_action_contract(
         "candidate_sources_do_not_bypass_contract": True,
     }
     evidence_used = contract["evidence_used"]
+    evidence_used["position_sizing_result"] = position_sizing_result
     top_level_side_priority = scorecard.get("side_priority") if isinstance(scorecard.get("side_priority"), dict) else {}
     top_level_ticker_side_priority = (
         scorecard.get("ticker_side_priority") if isinstance(scorecard.get("ticker_side_priority"), dict) else {}

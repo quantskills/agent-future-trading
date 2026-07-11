@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping
 
-from tools.common.contracts import pm_artifact_boundary_violations
 from tools.common.final_action_semantics import (
     contract_has_full_market_capital_rank,
     contract_increases_risk_position,
@@ -32,14 +31,12 @@ FINAL_ACTION_CONTRACT_REQUIRED_FIELDS = (
     "learning_used",
     "evidence_used",
     "capital_deployment",
-    "position_sizing_result",
 )
 
 FINAL_ACTION_CONTRACT_DICT_FIELDS = (
     "learning_used",
     "evidence_used",
     "capital_deployment",
-    "position_sizing_result",
 )
 
 FINAL_ACTION_CONTRACT_LIST_FIELDS = ("reason_codes",)
@@ -140,16 +137,25 @@ def _semantic_object_errors(contract: Mapping[str, Any]) -> List[str]:
         elif not _contract_has_any_rank(contract) and not contract_requires_full_market_capital_rank(contract):
             if deployment.get("selected_for_capital_deployment") is not False:
                 errors.append("non_rank_capital_deployment_selected_flag_invalid")
-            if deployment.get("new_risk_rank_required") is not False:
-                errors.append("non_rank_capital_deployment_rank_required_flag_invalid")
             reason = deployment.get("capital_allocation_reason")
             if not _present(reason):
                 errors.append("non_rank_capital_deployment_reason_missing")
             elif str(reason) != "non_new_risk_no_capital_rank":
                 errors.append("non_rank_capital_deployment_reason_invalid")
-    sizing = contract.get("position_sizing_result")
-    if isinstance(sizing, Mapping) and not sizing:
+    evidence = _mapping(contract.get("evidence_used"))
+    sizing = evidence.get("position_sizing_result")
+    if not isinstance(sizing, Mapping) or not sizing:
         errors.append("position_sizing_result_missing")
+    else:
+        current = _as_int(contract.get("current_lots"))
+        target = _as_int(contract.get("target_lots"))
+        delta = _as_int(contract.get("lots_delta"))
+        if _as_int(sizing.get("current_lots")) != current:
+            errors.append("position_sizing_result_current_lots_mismatch")
+        if _as_int(sizing.get("target_lots")) != target:
+            errors.append("position_sizing_result_target_lots_mismatch")
+        if _as_int(sizing.get("lots_delta")) != delta:
+            errors.append("position_sizing_result_lots_delta_mismatch")
     return errors
 
 
@@ -262,22 +268,8 @@ def _pm_lifecycle_trace_errors(contract: Mapping[str, Any]) -> List[str]:
     return errors
 
 
-def _artifact_boundary_errors(pm_artifact: Dict[str, Any] | None) -> List[str]:
-    if pm_artifact is None:
-        return []
-    if not isinstance(pm_artifact, dict):
-        return ["invalid_pm_artifact"]
-    return [
-        f"pm_artifact_boundary_violation:{violation}"
-        for violation in pm_artifact_boundary_violations(pm_artifact)
-    ]
-
-
 def check_final_action_contract(
     contract: Dict[str, Any] | None,
-    *,
-    pm_artifact: Dict[str, Any] | None = None,
-    snapshot: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Check final_action_contract consistency without mutating it."""
     if not isinstance(contract, dict):
@@ -323,8 +315,6 @@ def check_final_action_contract(
     errors.extend(rank_lifecycle_learning_route_errors(contract))
     errors.extend(lifecycle_learning_decision_contract_errors(contract))
     errors.extend(_pm_lifecycle_trace_errors(contract))
-    errors.extend(_artifact_boundary_errors(pm_artifact))
-    errors.extend(_artifact_boundary_errors(snapshot))
     return {
         "tool": "pm_contract_self_check",
         "ok": not errors,
@@ -342,10 +332,7 @@ def check_final_action_contract(
 
 def assert_final_action_contract(
     contract: Dict[str, Any] | None,
-    *,
-    pm_artifact: Dict[str, Any] | None = None,
-    snapshot: Dict[str, Any] | None = None,
 ) -> None:
-    result = check_final_action_contract(contract, pm_artifact=pm_artifact, snapshot=snapshot)
+    result = check_final_action_contract(contract)
     if not result.get("ok"):
         raise ValueError(f"pm_final_action_contract_self_check_failed:{result.get('errors')}")

@@ -81,7 +81,7 @@ def _write_minimal_covered_repo(root: Path) -> None:
     _append_text(
         root,
         "src/tools/common/signal_evidence_collection.py",
-        '"producer": "signal_collector"',
+        '"source_agent": "signal_collector"',
     )
     _append_text(
         root,

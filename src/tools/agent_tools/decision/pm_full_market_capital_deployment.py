@@ -2,7 +2,7 @@
 
 This module is the only producer of final all-market ``opportunity_rank``.
 It does not write database rows and it is not a workflow fallback. The caller
-passes the complete PM candidate set for a trading day; the tool ranks new-risk
+passes the complete PM candidate set for a trading day; the tool ranks opening
 candidates, consumes portfolio budgets in rank order, and writes PM deployment
 decisions for step 6 signing. It must not sign or repair final_action_contract.
 """
@@ -28,6 +28,7 @@ from tools.common.final_action_semantics import (
     is_full_market_rank_source,
     rank_capital_layer_contract_complete,
 )
+from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 
 RANK_CAPITAL_ROLE_EXPLORATION = "best_exploration_probe_candidate"
 RANK_CAPITAL_ROLE_REAL_BUDGET = "best_real_budget_candidate"
@@ -48,6 +49,8 @@ def _clean_key(value: Any) -> str:
 def rank_metadata_for_row(row: Dict[str, Any]) -> dict[str, str]:
     """Return final full-market rank metadata for a scorecard row."""
     layer = _capital_layer_for_ranked_row(row)
+    if not layer:
+        return {}
     return {
         "rank_capital_role": _rank_capital_role_for_layer(layer),
         "capital_layer": layer,
@@ -95,29 +98,47 @@ def _candidate_state(row: Dict[str, Any]) -> str:
     return _clean_key(row.get("final_state") or row.get("opportunity_state"))
 
 
-def _is_alpha_scale_candidate(row: Dict[str, Any]) -> bool:
-    return any(
-        bool(row.get(field))
-        for field in (
-            "alpha_scale_candidate",
-            "mature_alpha_candidate",
-            "repeated_positive_alpha",
-            "strong_opportunity_alpha_scale_candidate",
-        )
+def _final_entry_authority(pm_state: Dict[str, Any]) -> Dict[str, Any]:
+    authority = pm_state.get("final_entry_authority")
+    return authority if isinstance(authority, dict) else {}
+
+
+def _alpha_scale_eligible_from_pm_state(pm_state: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    authority_type = _clean_key(_final_entry_authority(pm_state).get("authority_type"))
+    diagnostics = pm_state.get("control_diagnostics") if isinstance(pm_state.get("control_diagnostics"), dict) else {}
+    target = (
+        diagnostics.get("capital_utilization_target")
+        if isinstance(diagnostics.get("capital_utilization_target"), dict)
+        else {}
+    )
+    return bool(
+        authority_type == "real_budget_entry"
+        and _candidate_state(row) == "tradeable_candidate"
+        and target.get("high_quality_memory") is True
+        and _clean_key(target.get("target_mode")) in {"alpha_release_boost", "alpha_release_max_boost"}
     )
 
 
 def _capital_layer_for_ranked_row(row: Dict[str, Any]) -> str:
-    if _is_alpha_scale_candidate(row):
-        return CAPITAL_LAYER_ALPHA_SCALE
-    state = _candidate_state(row)
-    if state == "tradeable_candidate":
-        return CAPITAL_LAYER_REAL_BUDGET
-    if state in {"probe_candidate", "watch_for_trigger"}:
+    layer = _clean_key(row.get("capital_layer"))
+    return layer if layer in {
+        CAPITAL_LAYER_ALPHA_SCALE,
+        CAPITAL_LAYER_REAL_BUDGET,
+        CAPITAL_LAYER_EXPLORATION,
+    } else ""
+
+
+def _capital_layer_from_pm_state(pm_state: Dict[str, Any], row: Dict[str, Any]) -> str:
+    authority_type = _clean_key(_final_entry_authority(pm_state).get("authority_type"))
+    if authority_type == "exploration_probe":
         return CAPITAL_LAYER_EXPLORATION
-    if _safe_float(row.get("score"), 0.0) > 0.0 or _safe_float(row.get("opportunity_score"), 0.0) > 0.0:
-        return CAPITAL_LAYER_EXPLORATION
-    return "not_capital_rank_candidate"
+    if authority_type == "real_budget_entry":
+        return (
+            CAPITAL_LAYER_ALPHA_SCALE
+            if _alpha_scale_eligible_from_pm_state(pm_state, row)
+            else CAPITAL_LAYER_REAL_BUDGET
+        )
+    return ""
 
 
 def _rank_capital_role_for_layer(layer: str) -> str:
@@ -128,7 +149,7 @@ def _rank_capital_role_for_layer(layer: str) -> str:
         return RANK_CAPITAL_ROLE_REAL_BUDGET
     if value == CAPITAL_LAYER_EXPLORATION:
         return RANK_CAPITAL_ROLE_EXPLORATION
-    return "not_capital_rank_candidate"
+    return ""
 
 
 def _capital_ratio_source_for_layer(layer: str) -> str:
@@ -139,7 +160,7 @@ def _capital_ratio_source_for_layer(layer: str) -> str:
         return CAPITAL_RATIO_SOURCE_REAL_BUDGET
     if value == CAPITAL_LAYER_EXPLORATION:
         return CAPITAL_RATIO_SOURCE_EXPLORATION
-    return "not_applicable"
+    return ""
 
 
 def _rank_reason_for_layer(row: Dict[str, Any], layer: str) -> str:
@@ -150,15 +171,12 @@ def _rank_reason_for_layer(row: Dict[str, Any], layer: str) -> str:
         return "tradeable_candidate_supported_by_current_evidence_and_product_learning"
     if value == CAPITAL_LAYER_EXPLORATION:
         return "best_watch_for_trigger_by_evidence_trigger_learning_and_risk"
-    return f"not_capital_rank_candidate:{_candidate_state(row) or 'unknown'}"
+    return ""
 
 
 def _rank_score_policy(config: Dict[str, Any] | None) -> Dict[str, Any]:
     cfg = config if isinstance(config, dict) else {}
-    policy = cfg.get("rank_score_policy") if isinstance(cfg.get("rank_score_policy"), dict) else {}
-    if policy and policy.get("enabled") is False:
-        return {}
-    return policy
+    return cfg.get("rank_score_policy") if isinstance(cfg.get("rank_score_policy"), dict) else {}
 
 
 def _policy_section(policy: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -182,8 +200,8 @@ def _capital_priority_tier_for_state(state: Any) -> int:
 def _rank_learning_delta(action_value_learning: Dict[str, Any], *, policy: Dict[str, Any]) -> float:
     rank_section = _policy_section(policy, "rank_score")
     action_section = _policy_section(rank_section, "open_add_action_value_delta")
-    positive = _safe_float(action_value_learning.get("positive_signal"), 0.0)
-    negative = _safe_float(action_value_learning.get("negative_signal"), 0.0)
+    positive = _safe_float(action_value_learning.get("positive_learning_signal"), 0.0)
+    negative = _safe_float(action_value_learning.get("negative_learning_signal"), 0.0)
     tail_loss = _safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0)
     entry_loss = _safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0)
     trigger_positive = _safe_float(action_value_learning.get("trigger_quality_positive_signal"), 0.0)
@@ -193,12 +211,12 @@ def _rank_learning_delta(action_value_learning: Dict[str, Any], *, policy: Dict[
         -max_abs_delta,
         min(
             max_abs_delta,
-            _policy_float(action_section, "positive_signal_weight", 0.18) * positive
-            + _policy_float(action_section, "trigger_quality_positive_signal_weight", 0.08) * trigger_positive
-            + _policy_float(action_section, "negative_signal_weight", -0.18) * negative
-            + _policy_float(action_section, "recent_tail_loss_signal_weight", -0.14) * tail_loss
-            + _policy_float(action_section, "entry_quality_loss_signal_weight", -0.16) * entry_loss
-            + _policy_float(action_section, "net_trigger_quality_loss_signal_weight", -0.10) * trigger_loss,
+            _policy_float(action_section, "positive_learning_signal", 0.18) * positive
+            + _policy_float(action_section, "trigger_quality_positive_signal", 0.08) * trigger_positive
+            + _policy_float(action_section, "negative_learning_signal", -0.18) * negative
+            + _policy_float(action_section, "recent_tail_loss_signal", -0.14) * tail_loss
+            + _policy_float(action_section, "entry_quality_loss_signal", -0.16) * entry_loss
+            + _policy_float(action_section, "net_trigger_quality_loss_signal", -0.10) * trigger_loss,
         ),
     )
 
@@ -209,7 +227,7 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     score_components = row.get("opportunity_score_components") if isinstance(row.get("opportunity_score_components"), dict) else {}
     action_value_learning = row.get("action_value_learning_summary") if isinstance(row.get("action_value_learning_summary"), dict) else {}
     state = _candidate_state(row)
-    tier_bonus_cfg = _policy_section(rank_section, "capital_layer_priority_bonus")
+    tier_bonus_cfg = _policy_section(rank_section, "capital_layer_priority")
     tier_bonus = {
         "tradeable_candidate": 0.18,
         "probe_candidate": 0.10,
@@ -218,34 +236,42 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     }
     if tier_bonus_cfg:
         tier_bonus = {key: _safe_float(tier_bonus_cfg.get(key), value) for key, value in tier_bonus.items()}
+    rank_score_inputs = (
+        row.get("rank_score_input_components")
+        if isinstance(row.get("rank_score_input_components"), dict)
+        else {}
+    )
+    cold_start_quality = (
+        _safe_float(rank_score_inputs.get("cold_start_evidence_quality"), 0.0)
+        if "cold_start_evidence_quality" in rank_score_inputs
+        else _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
+    )
     cold_start_evidence = (
-        _policy_float(rank_section, "cold_start_evidence_weight", 0.52)
-        * _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
+        _policy_float(rank_section, "cold_start_evidence_quality", 0.52)
+        * cold_start_quality
     )
     trigger_section = _policy_section(rank_section, "trigger_execution_quality")
     trigger_execution_quality = (
-        _policy_float(trigger_section, "execution_profile_learning_weight", 1.0)
-        * _safe_float(score_components.get("execution_profile_learning"), 0.0)
-        + _policy_float(trigger_section, "trigger_quality_positive_bonus_weight", 1.0)
+        _policy_float(trigger_section, "trigger_quality_positive_bonus", 1.0)
         * _safe_float(score_components.get("trigger_quality_positive_bonus"), 0.0)
-        + _policy_float(trigger_section, "trigger_quality_loss_penalty_weight", 1.0)
+        + _policy_float(trigger_section, "trigger_quality_loss_penalty", 1.0)
         * _safe_float(score_components.get("trigger_quality_loss_penalty"), 0.0)
     )
     history_section = _policy_section(rank_section, "product_setup_trigger_history")
     product_setup_trigger_history = (
-        _policy_float(history_section, "alpha_profile_adjustment_weight", 1.0)
+        _policy_float(history_section, "alpha_profile_adjustment", 1.0)
         * _safe_float(score_components.get("alpha_profile_adjustment"), 0.0)
     )
     conflict_section = _policy_section(rank_section, "conflict_risk_invalidation_penalty")
     gating_failures = row.get("gating_failures") if isinstance(row.get("gating_failures"), list) else []
     conflict_and_risk_penalty = (
-        _policy_float(conflict_section, "fusion_conflict_adjustment_weight", 1.0)
-        * abs(min(0.0, _safe_float(score_components.get("fusion_conflict_adjustment"), 0.0)))
-        + _policy_float(conflict_section, "market_conflict_penalty_weight", 1.0)
+        _policy_float(conflict_section, "fusion_score_adjustment", 1.0)
+        * abs(min(0.0, _safe_float(score_components.get("fusion_score_adjustment"), 0.0)))
+        + _policy_float(conflict_section, "market_conflict_penalty", 1.0)
         * abs(min(0.0, _safe_float(score_components.get("market_conflict_penalty"), 0.0)))
-        + _policy_float(conflict_section, "critical_data_gap_penalty_weight", 1.0)
+        + _policy_float(conflict_section, "critical_data_gap_penalty", 1.0)
         * abs(min(0.0, _safe_float(score_components.get("critical_data_gap_penalty"), 0.0)))
-        + _policy_float(conflict_section, "fundamental_gap_penalty_weight", 1.0)
+        + _policy_float(conflict_section, "fundamental_gap_penalty", 1.0)
         * abs(min(0.0, _safe_float(score_components.get("fundamental_gap_penalty"), 0.0)))
         + min(
             _policy_float(conflict_section, "gating_failure_penalty_cap", 0.16),
@@ -277,6 +303,7 @@ def _ensure_final_rank_score_fields(row: Dict[str, Any], *, config: Dict[str, An
 def _rank_input_components_for_row(row: Dict[str, Any]) -> dict[str, Any]:
     components = row.get("opportunity_score_components") if isinstance(row.get("opportunity_score_components"), dict) else {}
     rank_score_components = row.get("rank_score_components") if isinstance(row.get("rank_score_components"), dict) else {}
+    rank_score_inputs = row.get("rank_score_input_components") if isinstance(row.get("rank_score_input_components"), dict) else {}
     return {
         "final_state": str(row.get("final_state") or row.get("opportunity_state") or ""),
         "capital_priority_tier": _safe_int(row.get("capital_priority_tier"), 0),
@@ -288,15 +315,14 @@ def _rank_input_components_for_row(row: Dict[str, Any]) -> dict[str, Any]:
         "capital_priority_score": round(_safe_float(row.get("capital_priority_score"), 0.0), 6),
         "watch_priority_score": round(_safe_float(row.get("watch_priority_score"), 0.0), 6),
         "opportunity_score": round(_safe_float(row.get("opportunity_score", row.get("score")), 0.0), 6),
-        "evidence_quality_score": round(_safe_float(row.get("evidence_quality_score"), 0.0), 6),
+        "cold_start_evidence_quality": round(_safe_float(rank_score_inputs.get("cold_start_evidence_quality"), 0.0), 6),
         "setup_quality_score": round(_safe_float(row.get("setup_quality_score", row.get("max_setup_quality")), 0.0), 6),
         "trigger_quality_score": round(_safe_float(row.get("trigger_quality_score"), 0.0), 6),
-        "positive_learning_component": round(_safe_float(components.get("positive_learning"), 0.0), 6),
-        "negative_learning_component": round(_safe_float(components.get("negative_learning"), 0.0), 6),
-        "entry_quality_loss_component": round(_safe_float(components.get("entry_quality_loss_penalty"), 0.0), 6),
-        "trigger_quality_positive_component": round(_safe_float(components.get("trigger_quality_positive_bonus"), 0.0), 6),
-        "trigger_quality_loss_component": round(_safe_float(components.get("trigger_quality_loss_penalty"), 0.0), 6),
-        "execution_profile_learning_component": round(_safe_float(components.get("execution_profile_learning"), 0.0), 6),
+        "positive_learning": round(_safe_float(components.get("positive_learning"), 0.0), 6),
+        "negative_learning": round(_safe_float(components.get("negative_learning"), 0.0), 6),
+        "entry_quality_loss_penalty": round(_safe_float(components.get("entry_quality_loss_penalty"), 0.0), 6),
+        "trigger_quality_positive_bonus": round(_safe_float(components.get("trigger_quality_positive_bonus"), 0.0), 6),
+        "trigger_quality_loss_penalty": round(_safe_float(components.get("trigger_quality_loss_penalty"), 0.0), 6),
     }
 
 
@@ -388,14 +414,8 @@ def _rank_trace_from_snapshot(snapshot: Dict[str, Any], side: str = "") -> Dict[
     return {}
 
 
-def _snapshot_pm_candidate_contract(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    candidate = snapshot.get("pm_internal_candidate") if isinstance(snapshot.get("pm_internal_candidate"), dict) else {}
-    contract = candidate.get("candidate_contract") if isinstance(candidate.get("candidate_contract"), dict) else {}
-    return contract if isinstance(contract, dict) else {}
-
-
-def _snapshot_trade_contract(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    return _snapshot_pm_candidate_contract(snapshot)
+def _pm_state_trade_facts(pm_state: Dict[str, Any]) -> Dict[str, Any]:
+    return pm_state if isinstance(pm_state, dict) else {}
 
 
 def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) -> None:
@@ -442,6 +462,7 @@ def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
             "opportunity_rank_meaning",
             "rank_is_capital_priority",
             "rank_is_not_trade_authority",
+            "alpha_scale_eligible",
         }
     )
 
@@ -466,34 +487,26 @@ def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
     clear_mapping(alignment)
 
 
-def _contract_target_lots(snapshot: Dict[str, Any]) -> int:
-    contract = _snapshot_trade_contract(snapshot)
+def _contract_target_lots(pm_state: Dict[str, Any]) -> int:
+    contract = _pm_state_trade_facts(pm_state)
     try:
         return int(contract.get("target_lots") or 0)
     except (TypeError, ValueError):
         return 0
 
 
-def _contract_current_lots(snapshot: Dict[str, Any]) -> int:
-    contract = _snapshot_trade_contract(snapshot)
+def _contract_current_lots(pm_state: Dict[str, Any]) -> int:
+    contract = _pm_state_trade_facts(pm_state)
     try:
         return int(contract.get("current_lots") or 0)
     except (TypeError, ValueError):
         return 0
 
 
-def contract_is_new_or_increasing_risk(snapshot: Dict[str, Any]) -> bool:
-    current_lots = _contract_current_lots(snapshot)
-    target_lots = _contract_target_lots(snapshot)
-    if target_lots == 0 or target_lots == current_lots:
-        return False
-    if current_lots == 0:
-        return True
-    if (current_lots > 0 and target_lots > current_lots) or (current_lots < 0 and target_lots < current_lots):
-        return True
-    if (current_lots > 0 and target_lots < 0) or (current_lots < 0 and target_lots > 0):
-        return True
-    return False
+def contract_is_opening_risk(pm_state: Dict[str, Any]) -> bool:
+    current_lots = _contract_current_lots(pm_state)
+    target_lots = _contract_target_lots(pm_state)
+    return current_lots == 0 and target_lots != 0
 
 
 def _lots_action_from_target(current_lots: int, target_lots: int) -> Tuple[RecommendationAction, int]:
@@ -524,8 +537,8 @@ def _lots_action_from_target(current_lots: int, target_lots: int) -> Tuple[Recom
     return RecommendationAction.CLOSE_SHORT, abs(current)
 
 
-def _land_pm_deployment_decision_in_snapshot(
-    snapshot: Dict[str, Any],
+def _update_pm_state_with_deployment(
+    pm_state: Dict[str, Any],
     *,
     target_lots: int,
     reason: str,
@@ -534,57 +547,38 @@ def _land_pm_deployment_decision_in_snapshot(
     side: str = "",
     deployment_extra: Dict[str, Any] | None = None,
 ) -> None:
-    candidate_contract = _snapshot_pm_candidate_contract(snapshot)
-    if not candidate_contract:
+    if not isinstance(pm_state, dict) or not pm_state:
         return
-    current_lots = _contract_current_lots(snapshot)
-    source_contract = candidate_contract
-    original_target = int(source_contract.get("target_lots") or 0)
-    original_final_action = str(source_contract.get("final_action") or "").strip()
+    current_lots = _contract_current_lots(pm_state)
+    original_target = int(pm_state.get("target_lots") or 0)
     target_lots = int(target_lots)
     lots_delta = target_lots - current_lots
-    deployment_reason_codes = set(str(item) for item in (source_contract.get("reason_codes") or []) if item)
+    deployment_reason_codes = set(str(item) for item in (pm_state.get("reason_codes") or []) if item)
     deployment_reason_codes.add("pm_full_market_capital_deployment")
     if not selected and original_target != target_lots:
         deployment_reason_codes.add("capital_queue_not_selected")
-        deployment_reason_codes.add("no_rank_or_budget_no_new_exposure")
-    candidate = snapshot.get("pm_internal_candidate") if isinstance(snapshot.get("pm_internal_candidate"), dict) else {}
-    if isinstance(candidate_contract, dict):
-        candidate_contract["target_lots"] = target_lots
-        candidate_contract["lots_delta"] = lots_delta
-        candidate_contract["lots_delta_abs"] = abs(lots_delta)
-        if selected and target_lots == original_target and original_final_action:
-            candidate_contract["final_action"] = original_final_action
-        elif target_lots == current_lots:
-            candidate_contract["final_action"] = "hold" if current_lots else "wait"
-        elif current_lots == 0:
-            candidate_contract["final_action"] = "open_probe"
-        elif target_lots == 0:
-            candidate_contract["final_action"] = "exit"
-        elif (current_lots > 0 and target_lots > 0) or (current_lots < 0 and target_lots < 0):
-            candidate_contract["final_action"] = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
-        else:
-            candidate_contract["final_action"] = "exit"
-        candidate_contract["reason_codes"] = sorted(deployment_reason_codes)
-        if isinstance(candidate, dict):
-            candidate["candidate_contract"] = candidate_contract
-            inputs = candidate.get("final_contract_builder_inputs")
-            if isinstance(inputs, dict):
-                inputs["target_lots"] = target_lots
-                inputs["lots_to_trade"] = abs(lots_delta)
-                inputs["control_reasons"] = sorted(deployment_reason_codes)
-                candidate["final_contract_builder_inputs"] = inputs
-            snapshot["pm_internal_candidate"] = candidate
-    rank_metadata = _rank_metadata_from_snapshot(snapshot, side) if rank is not None else {}
-    rank_trace = _rank_trace_from_snapshot(snapshot, side) if rank is not None else {}
+        deployment_reason_codes.add(
+            "no_rank_no_new_exposure" if rank is None else "no_rank_or_budget_no_new_exposure"
+        )
+    pm_state["target_lots"] = target_lots
+    pm_state["lots_delta"] = lots_delta
+    pm_state["lots_delta_abs"] = abs(lots_delta)
+    pm_state["lots_to_trade"] = abs(lots_delta)
+    pm_state["reason_codes"] = sorted(deployment_reason_codes)
+    pm_state["control_reasons"] = sorted(deployment_reason_codes)
+    execution_fields = (
+        pm_state.get("execution_contract_fields")
+        if isinstance(pm_state.get("execution_contract_fields"), dict)
+        else {}
+    )
+    rank_metadata = _rank_metadata_from_snapshot(pm_state, side) if rank is not None else {}
+    rank_trace = _rank_trace_from_snapshot(pm_state, side) if rank is not None else {}
     deployment = {
         "selected_for_capital_deployment": bool(selected),
         "capital_allocation_reason": reason,
         "original_target_lots": int(original_target),
         "deployed_target_lots": int(target_lots),
         "deployed_lots_delta": int(lots_delta),
-        "not_second_contract": True,
-        "pm_remains_single_fund_manager": True,
         "reason_codes": sorted(deployment_reason_codes),
     }
     if rank is not None:
@@ -601,26 +595,50 @@ def _land_pm_deployment_decision_in_snapshot(
         )
     if isinstance(deployment_extra, dict):
         deployment.update(deployment_extra)
-    snapshot["pm_capital_deployment_decision"] = deployment
-    rebalance = snapshot.get("rebalance_summary") if isinstance(snapshot.get("rebalance_summary"), dict) else {}
-    if rebalance:
-        rebalance["target_lots"] = int(target_lots)
-        rebalance["lots_delta"] = int(lots_delta)
-        rebalance["capital_allocation_reason"] = reason
-        rebalance["capital_deployment"] = deployment
-    active = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-    opportunity = active.get("opportunity") if isinstance(active.get("opportunity"), dict) else {}
-    if isinstance(opportunity, dict):
-        opportunity["capital_allocation_reason"] = reason
-        opportunity["selected_for_capital_deployment"] = bool(selected)
-        if rank is not None:
-            opportunity["opportunity_rank"] = rank
-            opportunity.update(rank_metadata)
-            opportunity.update(rank_trace)
-            opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
-            opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
-            opportunity["rank_is_capital_priority"] = True
-            opportunity["rank_is_not_trade_authority"] = True
+    pm_state["capital_deployment"] = deployment
+    account_equity = _safe_float(pm_state.get("account_equity"), 0.0)
+    current_ticker_exposure = _safe_float(pm_state.get("current_ticker_exposure"), 0.0)
+    if selected:
+        target_position_ratio = _safe_float(pm_state.get("position_ratio"), 0.0)
+        target_value = _safe_float(pm_state.get("target_value"), 0.0)
+        margin_required = _safe_float(pm_state.get("margin_required"), 0.0)
+        projected_net_exposure = _safe_float(pm_state.get("projected_net_exposure"), 0.0)
+    else:
+        target_position_ratio = current_ticker_exposure
+        target_value = current_ticker_exposure * account_equity
+        margin_required = (
+            abs(current_ticker_exposure)
+            * account_equity
+            * _safe_float(pm_state.get("margin_rate"), 0.0)
+        )
+        projected_net_exposure = _safe_float(pm_state.get("current_net_exposure"), 0.0)
+        pm_state["position_ratio"] = target_position_ratio
+        pm_state["target_value"] = target_value
+        pm_state["margin_required"] = margin_required
+        pm_state["projected_net_exposure"] = projected_net_exposure
+    execution_fields["position_sizing_result"] = build_position_sizing_result(
+        ticker=str(pm_state.get("ticker") or ""),
+        current_lots=current_lots,
+        target_lots=target_lots,
+        target_position_ratio=target_position_ratio,
+        target_value=target_value,
+        margin_required=margin_required,
+        account_equity=account_equity,
+        margin_rate=_safe_float(pm_state.get("margin_rate"), 0.0),
+        current_net_exposure=_safe_float(pm_state.get("current_net_exposure"), 0.0),
+        projected_net_exposure=projected_net_exposure,
+        current_ticker_exposure=current_ticker_exposure,
+        max_position_ratio=_safe_float(pm_state.get("max_position_ratio"), 0.0),
+        max_net_exposure=_safe_float(pm_state.get("max_net_exposure"), 0.0),
+        risk_level=str(pm_state.get("risk_level") or "unknown"),
+        lots_to_trade_reason=reason,
+        control_reasons=sorted(deployment_reason_codes),
+        capital_allocation_reason={
+            "selected_for_capital_deployment": bool(selected),
+            "capital_allocation_reason": reason,
+        },
+    )
+    pm_state["execution_contract_fields"] = execution_fields
 
 
 def _daily_capital_deployment_config(config: Dict[str, Any]) -> Dict[str, float]:
@@ -628,9 +646,10 @@ def _daily_capital_deployment_config(config: Dict[str, Any]) -> Dict[str, float]
     capital = config.get("capital_utilization_control", {}) or {}
     net_control = config.get("net_exposure_control", {}) or {}
     rank_policy = config.get("rank_score_policy") if isinstance(config.get("rank_score_policy"), dict) else {}
+    rank_score_policy = rank_policy.get("rank_score") if isinstance(rank_policy.get("rank_score"), dict) else {}
     efficiency_policy = (
-        rank_policy.get("capital_efficiency")
-        if isinstance(rank_policy.get("capital_efficiency"), dict)
+        rank_score_policy.get("capital_efficiency")
+        if isinstance(rank_score_policy.get("capital_efficiency"), dict)
         else {}
     )
     hard_max = _safe_positive_ratio(config.get("max_total_margin_ratio"), 0.20)
@@ -692,15 +711,15 @@ def _portfolio_ticker_exposure(portfolio: Portfolio, ticker: str) -> float:
     return (1.0 if shares > 0 else -1.0) * value / equity
 
 
-def _contract_target_position_ratio(snapshot: Dict[str, Any]) -> float:
-    contract = _snapshot_trade_contract(snapshot)
+def _contract_target_position_ratio(pm_state: Dict[str, Any]) -> float:
+    contract = _pm_state_trade_facts(pm_state)
     try:
         value = float(contract.get("target_position_ratio") or 0.0)
     except (TypeError, ValueError):
         value = 0.0
     if value:
         return value
-    target_lots = _contract_target_lots(snapshot)
+    target_lots = _contract_target_lots(pm_state)
     if target_lots == 0:
         return 0.0
     try:
@@ -714,23 +733,23 @@ def _contract_target_position_ratio(snapshot: Dict[str, Any]) -> float:
     return 0.0
 
 
-def _recommended_margin_ratio(recommendation: FuturesRecommendation, portfolio: Portfolio) -> float:
-    snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
-    contract = _snapshot_trade_contract(snapshot)
+def _recommended_margin_ratio(pm_state: Dict[str, Any], portfolio: Portfolio) -> float:
+    contract = _pm_state_trade_facts(pm_state)
     try:
         estimate = float(contract.get("target_margin_ratio_estimate") or 0.0)
     except (TypeError, ValueError):
         estimate = 0.0
     if estimate > 0:
         return estimate
-    base_price = float(getattr(recommendation, "base_price", None) or 0.0)
-    target_lots = abs(_contract_target_lots(snapshot))
+    context = pm_state.get("recommendation_context") if isinstance(pm_state.get("recommendation_context"), dict) else {}
+    base_price = float(context.get("base_price") or 0.0)
+    target_lots = abs(_contract_target_lots(pm_state))
     if base_price <= 0 or target_lots <= 0:
         return 0.0
-    info = FuturesContractInfoCache.get_contract_info(recommendation.underlying_code)
+    info = FuturesContractInfoCache.get_contract_info(str(pm_state.get("ticker") or ""))
     if not info:
         return 0.0
-    side_rate = info.get("margin_rate_long") if _contract_target_lots(snapshot) > 0 else info.get("margin_rate_short")
+    side_rate = info.get("margin_rate_long") if _contract_target_lots(pm_state) > 0 else info.get("margin_rate_short")
     margin = base_price * target_lots * float(info.get("contract_multiplier") or 1.0) * float(side_rate or 0.0)
     equity = float(getattr(portfolio, "account_equity", 0.0) or getattr(portfolio, "cashflow", 0.0) or 1.0)
     return margin / max(equity, 1.0)
@@ -743,21 +762,20 @@ def _float_field(mapping: Dict[str, Any], field: str, default: float = 0.0) -> f
         return default
 
 
-def _capital_rank_eligible(snapshot: Dict[str, Any], row: Dict[str, Any]) -> bool:
+def _capital_rank_eligible(pm_state: Dict[str, Any], row: Dict[str, Any]) -> bool:
     state = str(row.get("final_state") or row.get("opportunity_state") or "").strip().lower()
     if state in {"no_opportunity", "wait", "flat_wait", "blocked", "rejected"}:
         return False
-    contract = _snapshot_trade_contract(snapshot)
-    final_action = str(contract.get("final_action") or "").strip().lower()
-    if final_action in {"reduce", "exit", "close", "close_long", "close_short", "risk_exit"}:
+    if not _capital_layer_from_pm_state(pm_state, row):
         return False
-    current_lots = _contract_current_lots(snapshot)
-    target_lots = _contract_target_lots(snapshot)
+    contract = _pm_state_trade_facts(pm_state)
+    current_lots = _contract_current_lots(pm_state)
+    target_lots = _contract_target_lots(pm_state)
     if target_lots == 0 and current_lots == 0 and not (
         bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation"))
     ):
         return False
-    if not contract_is_new_or_increasing_risk(snapshot) and not (
+    if not contract_is_opening_risk(pm_state) and not (
         bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation"))
     ):
         return False
@@ -778,6 +796,14 @@ def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[int, float, float, fl
     if rank_score <= 0:
         rank_score = priority
     return tier, rank_score, watch_priority, score
+
+
+def _capital_layer_sort_priority(row: Dict[str, Any]) -> int:
+    return {
+        CAPITAL_LAYER_ALPHA_SCALE: 3,
+        CAPITAL_LAYER_REAL_BUDGET: 2,
+        CAPITAL_LAYER_EXPLORATION: 1,
+    }.get(_capital_layer_for_ranked_row(row), 0)
 
 
 def _capital_efficiency_rank_bonus(
@@ -849,47 +875,31 @@ def _capital_deployment_complete(contract: Dict[str, Any], rank: int | None) -> 
 
 def apply_full_market_capital_deployment(
     *,
-    generated: List[Tuple[str, FuturesRecommendation]],
+    generated: List[Tuple[str, Dict[str, Any]]],
     config: Dict[str, Any],
     portfolio: Portfolio,
 ) -> Dict[str, Any]:
-    """Apply PM full-market rank and capital deployment to PM candidates."""
+    """Apply Step5 rank and capital deployment directly to PM memory states."""
     deployment_cfg = _daily_capital_deployment_config(config)
-    candidates: List[Tuple[int, float, float, float, str, FuturesRecommendation, str, float, float, float]] = []
-    updated_recommendations: list[FuturesRecommendation] = []
-    updated_object_ids: set[int] = set()
-
-    def mark_updated(recommendation: FuturesRecommendation) -> None:
-        marker = id(recommendation)
-        if marker not in updated_object_ids:
-            updated_object_ids.add(marker)
-            updated_recommendations.append(recommendation)
-
-    for _, recommendation in generated:
-        if recommendation.status != RecommendationStatus.SKIPPED:
+    candidates: List[Tuple[int, int, float, float, float, str, Dict[str, Any], str, float, float, float]] = []
+    for ticker, pm_state in generated:
+        context = pm_state.get("recommendation_context") if isinstance(pm_state.get("recommendation_context"), dict) else {}
+        status = context.get("status")
+        status_value = getattr(status, "value", status)
+        if status_value == RecommendationStatus.SKIPPED.value:
             continue
-        source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
+        source_type = context.get("source_type")
+        source_type = getattr(source_type, "value", source_type)
         if source_type != RecommendationSourceType.STRATEGY.value:
             continue
-        snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
-        _clear_non_full_market_rank_fields(snapshot)
-
-    for ticker, recommendation in generated:
-        if recommendation.status == RecommendationStatus.SKIPPED:
+        _clear_non_full_market_rank_fields(pm_state)
+        if not contract_is_opening_risk(pm_state):
             continue
-        source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
-        if source_type != RecommendationSourceType.STRATEGY.value:
-            continue
-        snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
-        _clear_non_full_market_rank_fields(snapshot)
-        if not contract_is_new_or_increasing_risk(snapshot):
-            recommendation.signal_snapshot = snapshot
-            continue
-        side, row = _scorecard_preferred_row(snapshot)
+        side, row = _scorecard_preferred_row(pm_state)
         if side not in {"long", "short"} or not row:
-            _land_pm_deployment_decision_in_snapshot(
-                snapshot,
-                target_lots=_contract_current_lots(snapshot),
+            _update_pm_state_with_deployment(
+                pm_state,
+                target_lots=_contract_current_lots(pm_state),
                 reason="no_rank_no_new_exposure:missing_pm_side_scorecard",
                 selected=False,
                 rank=None,
@@ -898,14 +908,14 @@ def apply_full_market_capital_deployment(
                     "new_risk_candidate_restored_to_no_new_exposure": True,
                 },
             )
-            recommendation.signal_snapshot = snapshot
-            mark_updated(recommendation)
             continue
+        row["alpha_scale_eligible"] = _alpha_scale_eligible_from_pm_state(pm_state, row)
+        row["capital_layer"] = _capital_layer_from_pm_state(pm_state, row)
         _ensure_final_rank_score_fields(row, config=config)
-        if not _capital_rank_eligible(snapshot, row):
-            _land_pm_deployment_decision_in_snapshot(
-                snapshot,
-                target_lots=_contract_current_lots(snapshot),
+        if not _capital_rank_eligible(pm_state, row):
+            _update_pm_state_with_deployment(
+                pm_state,
+                target_lots=_contract_current_lots(pm_state),
                 reason="no_rank_no_new_exposure:not_full_market_rank_eligible",
                 selected=False,
                 rank=None,
@@ -915,8 +925,6 @@ def apply_full_market_capital_deployment(
                     "new_risk_candidate_restored_to_no_new_exposure": True,
                 },
             )
-            recommendation.signal_snapshot = snapshot
-            mark_updated(recommendation)
             continue
         try:
             score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
@@ -927,8 +935,7 @@ def apply_full_market_capital_deployment(
         except (TypeError, ValueError):
             priority_score = score
         rank_score = _float_field(row, "rank_score", priority_score)
-        recommendation.signal_snapshot = snapshot
-        margin_ratio = _recommended_margin_ratio(recommendation, portfolio)
+        margin_ratio = _recommended_margin_ratio(pm_state, portfolio)
         rank_score = _apply_capital_efficiency_to_rank_row(
             row,
             margin_ratio=margin_ratio,
@@ -938,19 +945,20 @@ def apply_full_market_capital_deployment(
             capital_efficiency_rank_max_bonus=float(deployment_cfg["capital_efficiency_rank_max_bonus"]),
         )
         priority_score = rank_score
-        target_position_ratio = _contract_target_position_ratio(snapshot)
+        target_position_ratio = _contract_target_position_ratio(pm_state)
         current_ticker_exposure = _portfolio_ticker_exposure(portfolio, str(ticker).upper())
         tier, sorted_rank_score, _, _ = _capital_rank_sort_tuple(row)
         if sorted_rank_score > 0:
             rank_score = sorted_rank_score
         candidates.append(
             (
+                _capital_layer_sort_priority(row),
                 tier,
                 rank_score,
                 priority_score,
                 score,
                 str(ticker).upper(),
-                recommendation,
+                pm_state,
                 side,
                 margin_ratio,
                 target_position_ratio,
@@ -958,7 +966,16 @@ def apply_full_market_capital_deployment(
             )
         )
 
-    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            -item[2],
+            -item[3],
+            -item[4],
+            item[5],
+        )
+    )
     used_margin_ratio = _portfolio_margin_ratio(portfolio)
     running_net_exposure = _portfolio_current_net_exposure(portfolio)
     target_margin_ratio = deployment_cfg["target_margin_ratio"]
@@ -968,13 +985,12 @@ def apply_full_market_capital_deployment(
     max_net_exposure = deployment_cfg["max_net_exposure"]
     budget_ceiling = min(target_margin_ratio, hard_max_margin_ratio)
 
-    for rank, (_, rank_score, priority_score, score, _, recommendation, side, margin_ratio, target_position_ratio, current_ticker_exposure) in enumerate(candidates, start=1):
-        snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
-        _set_daily_opportunity_rank(snapshot, side, rank)
-        current_lots = _contract_current_lots(snapshot)
-        target_lots = _contract_target_lots(snapshot)
-        if not contract_is_new_or_increasing_risk(snapshot):
-            raise RuntimeError("pm_step5_rank_queue_contains_non_new_risk_candidate")
+    for rank, (_, _, rank_score, priority_score, score, _, pm_state, side, margin_ratio, target_position_ratio, current_ticker_exposure) in enumerate(candidates, start=1):
+        _set_daily_opportunity_rank(pm_state, side, rank)
+        current_lots = _contract_current_lots(pm_state)
+        target_lots = _contract_target_lots(pm_state)
+        if not contract_is_opening_risk(pm_state):
+            raise RuntimeError("pm_step5_rank_queue_contains_non_opening_state")
         candidate_margin = max(float(margin_ratio or 0.0), min_probe_ratio)
         single_ok = candidate_margin <= max_single_ratio + 1e-12
         total_ok = used_margin_ratio + candidate_margin <= budget_ceiling + 1e-12
@@ -1006,8 +1022,8 @@ def apply_full_market_capital_deployment(
                 f"target_margin_used={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
                 f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
             )
-            _land_pm_deployment_decision_in_snapshot(
-                snapshot,
+            _update_pm_state_with_deployment(
+                pm_state,
                 target_lots=target_lots,
                 reason=reason,
                 selected=True,
@@ -1031,8 +1047,8 @@ def apply_full_market_capital_deployment(
                 f"capital_target_filled={used_margin_ratio:.4f}/{budget_ceiling:.4f};"
                 f"net_exposure={running_net_exposure:.4f}/{max_net_exposure:.4f}"
             )
-            _land_pm_deployment_decision_in_snapshot(
-                snapshot,
+            _update_pm_state_with_deployment(
+                pm_state,
                 target_lots=current_lots,
                 reason=reason,
                 selected=False,
@@ -1040,12 +1056,9 @@ def apply_full_market_capital_deployment(
                 side=side,
                 deployment_extra=budget_detail,
             )
-        recommendation.signal_snapshot = snapshot
-        mark_updated(recommendation)
 
     return {
         "tool": "pm_full_market_capital_deployment",
-        "updated_recommendations": updated_recommendations,
         "candidate_count": len(candidates),
         "final_margin_ratio": round(used_margin_ratio, 6),
         "final_net_exposure": round(running_net_exposure, 6),

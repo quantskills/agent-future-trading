@@ -9,6 +9,11 @@ from tools.common.evidence_fusion_semantics import build_pm_fusion_diagnostics
 from tools.common.final_action_semantics import (
     ACTION_FAMILY_EXECUTION,
     ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    POSITIVE_EXECUTION_ACTION_PREFERENCES,
+    POSITIVE_EXIT_ACTION_PREFERENCES,
+    POSITIVE_HOLD_ACTION_PREFERENCES,
+    POSITIVE_OPEN_ACTION_PREFERENCES,
+    PROTECTIVE_ACTION_PREFERENCES,
     validate_action_preference_family_consistency,
 )
 
@@ -328,6 +333,13 @@ def _setup_quality(signal: Any) -> float:
         return 0.0
 
 
+def _trigger_quality(signal: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(getattr(signal, "trigger_quality_score", 0.0) or 0.0)))
+    except Exception:
+        return 0.0
+
+
 def _setup_quality_notes(signal: Any) -> list[str]:
     value = getattr(signal, "setup_quality_notes", [])
     if value is None:
@@ -459,17 +471,12 @@ def _learning_recency_weight(
     return max(floor, 0.5 ** (days / half_life))
 
 
-_POSITIVE_ACTION_PREFERENCES = {
-    "positive_candidate_open",
-    "positive_candidate_hold",
-    "positive_candidate_exit",
-    "positive_candidate_execution",
-}
-_NEGATIVE_ACTION_PREFERENCES = {
-    "negative_revalidate",
-    "negative_hold_revalidate",
-    "tail_loss_protect",
-}
+_POSITIVE_ACTION_PREFERENCES = (
+    POSITIVE_OPEN_ACTION_PREFERENCES
+    | POSITIVE_HOLD_ACTION_PREFERENCES
+    | POSITIVE_EXIT_ACTION_PREFERENCES
+    | POSITIVE_EXECUTION_ACTION_PREFERENCES
+)
 
 
 def _action_value_learning_summary(
@@ -500,8 +507,8 @@ def _action_value_learning_summary(
     reward_unit = max(1.0, _safe_float(config.get("learning_reward_unit"), 4000.0))
     full_sample_count = max(1, _safe_int(config.get("learning_full_weight_sample_count"), 3))
     tail_loss_threshold = _safe_float(config.get("tail_loss_reward_threshold"), -1000.0)
-    positive_signal = 0.0
-    negative_signal = 0.0
+    positive_learning_signal = 0.0
+    negative_learning_signal = 0.0
     execution_signal = 0.0
     recent_tail_loss_signal = 0.0
     entry_quality_loss_signal = 0.0
@@ -612,7 +619,7 @@ def _action_value_learning_summary(
             or reward_mean <= tail_loss_threshold
         )
         is_positive = action_preference in _POSITIVE_ACTION_PREFERENCES
-        is_negative = action_preference in _NEGATIVE_ACTION_PREFERENCES or action_preference.startswith("negative")
+        is_negative = action_preference in PROTECTIVE_ACTION_PREFERENCES
         if lane_is_execution_profile:
             ignored_lanes.add("execution")
             if action_preference == "positive_candidate_execution":
@@ -643,7 +650,7 @@ def _action_value_learning_summary(
         }
         if is_positive:
             positive_count += 1
-            positive_signal += strength
+            positive_learning_signal += strength
             if not strongest_positive or strength > _safe_float(strongest_positive.get("weight"), 0.0):
                 strongest_positive = summary_ref
         if is_negative:
@@ -651,7 +658,7 @@ def _action_value_learning_summary(
             negative_strength = strength * (1.30 if is_tail_loss else 1.0)
             if action_preference == "negative_hold_revalidate":
                 negative_strength *= 0.75
-            negative_signal += negative_strength
+            negative_learning_signal += negative_strength
             if is_tail_loss:
                 recent_tail_loss_signal += strength * 1.35
             if not strongest_negative or negative_strength > _safe_float(strongest_negative.get("weight"), 0.0):
@@ -670,8 +677,8 @@ def _action_value_learning_summary(
             if bool(entry_quality_outcome.get("tail_loss_episode")):
                 trigger_quality_loss_signal += strength * max(0.55, entry_penalty_weight)
                 recent_tail_loss_signal += strength * 0.35
-    positive_signal = _bounded(positive_signal)
-    negative_signal = _bounded(negative_signal)
+    positive_learning_signal = _bounded(positive_learning_signal)
+    negative_learning_signal = _bounded(negative_learning_signal)
     execution_signal = _bounded(execution_signal, -1.0, 1.0)
     recent_tail_loss_signal = _bounded(recent_tail_loss_signal)
     entry_quality_loss_signal = _bounded(entry_quality_loss_signal)
@@ -681,8 +688,8 @@ def _action_value_learning_summary(
         max(0.0, trigger_quality_loss_signal - trigger_quality_positive_signal * 0.50)
     )
     return {
-        "positive_signal": positive_signal,
-        "negative_signal": negative_signal,
+        "positive_learning_signal": positive_learning_signal,
+        "negative_learning_signal": negative_learning_signal,
         "execution_profile_signal": execution_signal,
         "recent_tail_loss_signal": recent_tail_loss_signal,
         "entry_quality_loss_signal": entry_quality_loss_signal,
@@ -762,7 +769,7 @@ def _candidate_quality_components(
         + _safe_float(components.get("positive_learning"), 0.0)
     )
     conflict_penalty = (
-        abs(min(0.0, _safe_float(components.get("fusion_conflict_adjustment"), 0.0)))
+        abs(min(0.0, _safe_float(components.get("fusion_score_adjustment"), 0.0)))
         + abs(min(0.0, _safe_float(components.get("negative_learning"), 0.0)))
         + 0.02 * _count_items(list(gating_failures or []))
     )
@@ -797,8 +804,8 @@ def _learning_adjustment_summary(
         "negative_action_value_count": int(action_value_learning.get("negative_count", 0) or 0),
         "exact_real_action_value_count": int(action_value_learning.get("exact_real_count", 0) or 0),
         "episode_action_value_count": int(action_value_learning.get("episode_count", 0) or 0),
-        "positive_learning_signal": round(_safe_float(action_value_learning.get("positive_signal"), 0.0), 4),
-        "negative_learning_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
+        "positive_learning_signal": round(_safe_float(action_value_learning.get("positive_learning_signal"), 0.0), 4),
+        "negative_learning_signal": round(_safe_float(action_value_learning.get("negative_learning_signal"), 0.0), 4),
         "execution_profile_learning_signal": round(
             _safe_float(action_value_learning.get("execution_profile_signal"), 0.0),
             4,
@@ -831,9 +838,9 @@ def _learning_adjustment_summary(
         "capped_or_rejected_profile_count": len(capped_profiles),
         "effect": (
             "boosted"
-            if net_adjustment > 0 or _safe_float(action_value_learning.get("positive_signal"), 0.0) > _safe_float(action_value_learning.get("negative_signal"), 0.0)
+            if net_adjustment > 0 or _safe_float(action_value_learning.get("positive_learning_signal"), 0.0) > _safe_float(action_value_learning.get("negative_learning_signal"), 0.0)
             else "penalized"
-            if net_adjustment < 0 or _safe_float(action_value_learning.get("negative_signal"), 0.0) > 0
+            if net_adjustment < 0 or _safe_float(action_value_learning.get("negative_learning_signal"), 0.0) > 0
             else "neutral"
         ),
         "not_trade_authority": True,
@@ -929,6 +936,7 @@ def build_opportunity_scorecard(
         setup_count = 0
         quality_scores: list[float] = []
         setup_quality_scores: list[float] = []
+        trigger_quality_scores: list[float] = []
         setup_quality_notes: list[str] = []
         confidence_scores: list[float] = []
         analyst_names: list[str] = []
@@ -957,6 +965,7 @@ def build_opportunity_scorecard(
                 entry_triggers.append(trigger_text)
             quality_scores.append(_safe_float(getattr(signal, "business_quality_score", 0.0), 0.0))
             setup_quality_scores.append(_setup_quality(signal))
+            trigger_quality_scores.append(_trigger_quality(signal))
             setup_quality_notes.extend(_setup_quality_notes(signal))
             confidence_scores.append(_safe_float(getattr(signal, "confidence", 0.0), 0.0))
             analyst_name = normalize_analyst_name(getattr(signal, "agent_name", ""))
@@ -972,6 +981,7 @@ def build_opportunity_scorecard(
         max_quality = max(quality_scores, default=0.0)
         avg_setup_quality = sum(setup_quality_scores) / len(setup_quality_scores) if setup_quality_scores else 0.0
         max_setup_quality = max(setup_quality_scores, default=0.0)
+        max_trigger_quality = max(trigger_quality_scores, default=0.0)
         avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
         action_value_learning = _action_value_learning_summary(
             alpha_setup_action_values,
@@ -982,11 +992,11 @@ def build_opportunity_scorecard(
         policy_positive_signal = min(1.0, float(policy_counts.get("positive", 0) or 0)) * 0.55
         policy_negative_signal = min(1.0, float(policy_counts.get("negative", 0) or 0)) * 0.75
         positive_learning_signal = max(
-            _safe_float(action_value_learning.get("positive_signal"), 0.0),
+            _safe_float(action_value_learning.get("positive_learning_signal"), 0.0),
             policy_positive_signal,
         )
         negative_learning_signal = max(
-            _safe_float(action_value_learning.get("negative_signal"), 0.0),
+            _safe_float(action_value_learning.get("negative_learning_signal"), 0.0),
             policy_negative_signal,
         )
         execution_profile_signal = _safe_float(action_value_learning.get("execution_profile_signal"), 0.0)
@@ -998,7 +1008,6 @@ def build_opportunity_scorecard(
         action_value_signal_present = bool(
             int(action_value_learning.get("positive_count", 0) or 0)
             or int(action_value_learning.get("negative_count", 0) or 0)
-            or abs(execution_profile_signal) > 1e-9
             or recent_tail_loss_signal > 1e-9
             or entry_quality_loss_signal > 1e-9
             or trigger_quality_loss_signal > 1e-9
@@ -1025,9 +1034,13 @@ def build_opportunity_scorecard(
             "trigger_quality_positive_bonus": _score_weight(cfg, "trigger_quality_positive_bonus", 0.08) * trigger_quality_positive_signal,
             "trigger_quality_loss_penalty": -abs(_score_weight(cfg, "trigger_quality_loss_penalty", 0.10)) * net_trigger_quality_loss_signal,
             "fusion_consensus": _score_weight(cfg, "fusion_consensus", 0.08) * fusion_consensus,
-            "fusion_conflict_adjustment": fusion_adjustment,
+            "fusion_score_adjustment": fusion_adjustment,
         }
-        score = sum(score_components.values())
+        score = sum(
+            value
+            for component, value in score_components.items()
+            if component != "execution_profile_learning"
+        )
         side_profiles = alpha_profiles_by_side.get(side, [])
         deployable_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "deployable"]
         protected_profiles = [p for p in side_profiles if str(p.get("lifecycle_state") or "").lower() == "protected"]
@@ -1069,7 +1082,11 @@ def build_opportunity_scorecard(
         score_components["fundamental_gap_penalty"] = -abs(
             _score_weight(cfg, "fundamental_gap_penalty", 0.06)
         ) if fundamental_setup_gap else 0.0
-        score = sum(score_components.values())
+        score = sum(
+            value
+            for component, value in score_components.items()
+            if component != "execution_profile_learning"
+        )
         score = max(0.0, min(1.0, score))
 
         gating_failures: list[str] = []
@@ -1160,6 +1177,23 @@ def build_opportunity_scorecard(
             final_state = "no_opportunity"
 
         opportunity_score = round(score, 4)
+        cold_start_evidence_quality = round(
+            _bounded(
+                sum(
+                    _safe_float(score_components.get(component), 0.0)
+                    for component in (
+                        "directional_support",
+                        "tradeable_state",
+                        "business_quality",
+                        "setup_quality",
+                        "confidence",
+                        "market_confirmation",
+                        "fusion_consensus",
+                    )
+                )
+            ),
+            4,
+        )
         candidate_quality_components = _candidate_quality_components(
             opportunity_score=opportunity_score,
             score_components=score_components,
@@ -1176,6 +1210,8 @@ def build_opportunity_scorecard(
             "candidate_quality": candidate_quality,
             "candidate_quality_components": candidate_quality_components,
             "direction_evidence_strength": candidate_quality,
+            "setup_quality_score": round(max_setup_quality, 4),
+            "trigger_quality_score": round(max_trigger_quality, 4),
             "direction_evidence_components": {
                 "opportunity_score": opportunity_score,
                 "candidate_quality": candidate_quality,
@@ -1198,30 +1234,8 @@ def build_opportunity_scorecard(
             },
             "direction_evidence_boundary": "fusion_preserves_signal_collector_evidence_no_pm_side_selection",
             "candidate_layer_hint": _candidate_layer_hint(final_state),
-            "rank_candidate_input_components": {
-                "cold_start_evidence_quality": round(opportunity_score, 4),
-                "product_setup_trigger_history": round(_safe_float(score_components.get("alpha_profile_adjustment"), 0.0), 4),
-                "trigger_execution_quality": round(
-                    _safe_float(score_components.get("execution_profile_learning"), 0.0)
-                    + _safe_float(score_components.get("trigger_quality_positive_bonus"), 0.0)
-                    + _safe_float(score_components.get("trigger_quality_loss_penalty"), 0.0),
-                    4,
-                ),
-                "open_add_action_value_signals": {
-                    "positive_signal": round(_safe_float(action_value_learning.get("positive_signal"), 0.0), 4),
-                    "negative_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
-                    "recent_tail_loss_signal": round(_safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0), 4),
-                    "entry_quality_loss_signal": round(_safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0), 4),
-                    "net_trigger_quality_loss_signal": round(_safe_float(action_value_learning.get("net_trigger_quality_loss_signal"), 0.0), 4),
-                },
-                "conflict_risk_invalidation_inputs": {
-                    "gating_failure_count": len([item for item in gating_failures if str(item or "").strip()]),
-                    "fusion_conflict_adjustment": round(_safe_float(score_components.get("fusion_conflict_adjustment"), 0.0), 4),
-                    "market_conflict_penalty": round(_safe_float(score_components.get("market_conflict_penalty"), 0.0), 4),
-                    "critical_data_gap_penalty": round(_safe_float(score_components.get("critical_data_gap_penalty"), 0.0), 4),
-                    "fundamental_gap_penalty": round(_safe_float(score_components.get("fundamental_gap_penalty"), 0.0), 4),
-                },
-                "final_rank_score_generated_by": "pm_full_market_capital_deployment",
+            "rank_score_input_components": {
+                "cold_start_evidence_quality": cold_start_evidence_quality,
             },
             "opportunity_score_components": {
                 key: round(float(value or 0.0), 4)
@@ -1259,8 +1273,8 @@ def build_opportunity_scorecard(
             "learning_positive_count": policy_counts.get("positive", 0),
             "learning_negative_count": policy_counts.get("negative", 0),
             "action_value_learning_summary": {
-                "positive_signal": round(_safe_float(action_value_learning.get("positive_signal"), 0.0), 4),
-                "negative_signal": round(_safe_float(action_value_learning.get("negative_signal"), 0.0), 4),
+                "positive_learning_signal": round(_safe_float(action_value_learning.get("positive_learning_signal"), 0.0), 4),
+                "negative_learning_signal": round(_safe_float(action_value_learning.get("negative_learning_signal"), 0.0), 4),
                 "execution_profile_signal": round(_safe_float(action_value_learning.get("execution_profile_signal"), 0.0), 4),
                 "recent_tail_loss_signal": round(_safe_float(action_value_learning.get("recent_tail_loss_signal"), 0.0), 4),
                 "entry_quality_loss_signal": round(_safe_float(action_value_learning.get("entry_quality_loss_signal"), 0.0), 4),

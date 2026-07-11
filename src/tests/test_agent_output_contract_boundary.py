@@ -10,7 +10,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.execution_team import trader as trader_agent
-from agents.decision_team.portfolio_manager import _pm_step6_strip_legacy_lifecycle_self_check
 from llm.prompt import build_researcher_causal_review_prompt
 from tools.agent_tools.research import research_review_helpers
 from tools.common.contracts import (
@@ -127,35 +126,23 @@ def _final_action_contract():
         "reason_codes": ["non_new_risk_no_capital_rank"],
         "capital_deployment": {
             "selected_for_capital_deployment": False,
-            "new_risk_rank_required": False,
             "capital_allocation_reason": "non_new_risk_no_capital_rank",
         },
-        "position_sizing_result": {
-            "current_lots": 0,
-            "target_lots": 0,
-            "lots_delta": 0,
-            "position_sizing_status": "no_new_risk",
-        },
         "evidence_used": {
+            "position_sizing_result": {
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "position_sizing_status": "no_new_risk",
+            },
             "signal_collection_contract_ref": {
-                "producer": "signal_collector",
+                "source_agent": "signal_collector",
                 "collector_decision_boundary": "no_trade_authority",
                 "ticker": "BU",
                 "trading_date": "2025-03-25",
             },
         },
-        "learning_used": {
-            "memory_retrieval": {
-                "memory_count": 1,
-                "lifecycle_transition_diagnostic": {"ok": False},
-                "lifecycle_transition_reason": "old_internal_diagnostic",
-                "primary_lifecycle_action_port": {"pm_lifecycle_action_port": "new_risk"},
-            },
-            "final_action_memory_retrieval": {
-                "memory_count": 1,
-                "lifecycle_transition_diagnostic": {"ok": False},
-            },
-        },
+        "learning_used": {"memory_retrieval": {"memory_count": 1}},
     }
 
 
@@ -173,7 +160,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         self.assertEqual(semantics["semantic_errors"], [])
         self.assertEqual(semantics["forbidden_trade_authority_fields"], [])
 
-    def test_signal_collector_output_has_producer_boundary_and_no_trade_authority(self):
+    def test_signal_collector_output_has_source_agent_boundary_and_no_trade_authority(self):
         contract = build_signal_collection_contract(
             ticker="BU",
             trading_date="2025-03-25",
@@ -183,7 +170,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
                 _analyst_signal("commodity_news"),
             ],
         )
-        self.assertEqual(contract["producer"], "signal_collector")
+        self.assertEqual(contract["source_agent"], "signal_collector")
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         self.assertTrue(contract["no_trade_authority"])
 
@@ -194,9 +181,8 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         self.assertTrue(pm_view["pm_fusion_diagnostics"])
         self.assertTrue(pm_view["no_trade_authority"])
 
-    def test_pm_final_contract_projection_removes_internal_lifecycle_diagnostics(self):
+    def test_pm_final_contract_contains_no_internal_lifecycle_diagnostics(self):
         contract = _final_action_contract()
-        _pm_step6_strip_legacy_lifecycle_self_check(contract)
 
         self.assertFalse(_nested_key_paths(contract["evidence_used"], LEGACY_PM_LIFECYCLE_FIELDS))
         self.assertFalse(_nested_key_paths(contract["learning_used"], LEGACY_PM_LIFECYCLE_FIELDS))
@@ -206,7 +192,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
 
     def test_trader_output_keeps_execution_artifact_without_full_pm_contract(self):
         contract = deepcopy(_final_action_contract())
-        _pm_step6_strip_legacy_lifecycle_self_check(contract)
         execution_fields = final_contract_execution_fields(contract)
         payload = {
             "phase2_execution": {
@@ -229,7 +214,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
 
     def test_accountant_output_is_settlement_only_and_uses_trade_semantics_readonly(self):
         contract = deepcopy(_final_action_contract())
-        _pm_step6_strip_legacy_lifecycle_self_check(contract)
         expectation = derive_accounting_expectation(contract, {"actual_transactions": []})
         self.assertEqual(expectation["settlement_basis"], "actual_execution_facts_only")
 
@@ -249,7 +233,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
 
     def test_reviewer_output_is_review_only_and_uses_trade_semantics_readonly(self):
         contract = deepcopy(_final_action_contract())
-        _pm_step6_strip_legacy_lifecycle_self_check(contract)
         expectation = derive_review_expectation(contract, {"actual_transactions": []})
         self.assertEqual(expectation["settlement_basis"], "actual_execution_facts_only")
 
@@ -303,7 +286,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         signal_collector_source = _source("agents/decision_team/signal_collector.py")
         self.assertIn("build_signal_collection_contract", signal_collector_source)
         signal_contract_source = _source("tools/common/signal_evidence_collection.py")
-        self.assertIn('"producer": "signal_collector"', signal_contract_source)
+        self.assertIn('"source_agent": "signal_collector"', signal_contract_source)
         self.assertIn('"collector_decision_boundary": "no_trade_authority"', signal_contract_source)
 
         pm_source = _source("agents/decision_team/portfolio_manager.py")
@@ -391,7 +374,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
 
     def test_reviewer_and_researcher_fact_views_are_common_semantic_views(self):
         contract = deepcopy(_final_action_contract())
-        _pm_step6_strip_legacy_lifecycle_self_check(contract)
         review_view = research_review_helpers._final_action_semantic_view(
             contract,
             {"actual_transactions": []},

@@ -208,22 +208,36 @@ class AgentWorkflow:
                 f"extra={extra[:12]}, duplicate={duplicate_pairs[:12]}"
             )
 
-    def _persist_pm_full_market_contracts(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
-        """Finalize PM contracts and persist each recommendation exactly once."""
+    def _persist_pm_full_market_contracts(self, generated: List[Tuple[str, Dict[str, Any]]]) -> List[Tuple[str, FuturesRecommendation]]:
+        """Ask PM Step6 to create recommendations, then persist each exactly once."""
         from agents.decision_team.portfolio_manager import finalize_pm_full_market_contracts
 
-        finalize_pm_full_market_contracts(
-            generated=generated,
-            config=self.config,
-            portfolio=self.init_portfolio,
-        )
-        for ticker, recommendation in generated:
+        try:
+            signed = list(
+                finalize_pm_full_market_contracts(
+                    generated=generated,
+                    config=self.config,
+                    portfolio=self.init_portfolio,
+                )
+            )
+        except Exception as exc:
+            logger.error(f"PM Step6 finalization failed after PM call ended: {exc}")
+            raise
+        if len(signed) != len(generated):
+            raise RuntimeError("PM Step6 did not return one recommendation for every PM state")
+        for ticker, recommendation in signed:
             self._assert_pm_signed_recommendation_for_persistence(ticker, recommendation)
-        for _, recommendation in generated:
+            logger.info(
+                f"{ticker} PM returned signed recommendation: "
+                f"action={getattr(recommendation.action, 'value', recommendation.action)}, "
+                f"lots={recommendation.lots}, step6_checks=ok"
+            )
+        for _, recommendation in signed:
             recommendation_id = self.db.save_futures_recommendation(recommendation)
             if not recommendation_id:
                 raise RuntimeError(f"Failed to save futures recommendation for {recommendation.underlying_code}")
             recommendation.id = recommendation_id
+        return signed
 
     def _assert_pm_signed_recommendation_for_persistence(
         self,
@@ -237,12 +251,6 @@ class AgentWorkflow:
         final_contract = snapshot.get("final_action_contract")
         if not isinstance(final_contract, dict) or not final_contract:
             raise RuntimeError(f"{ticker} PM recommendation missing signed final_action_contract")
-        if "pm_internal_candidate" in snapshot:
-            raise RuntimeError(f"{ticker} PM internal candidate remained after step6 signing")
-        if "pm_internal_candidate_contract" in snapshot:
-            raise RuntimeError(f"{ticker} PM internal candidate contract remained after step6 signing")
-        if "pm_capital_deployment_decision" in snapshot:
-            raise RuntimeError(f"{ticker} PM capital deployment decision remained after step6 signing")
         trace = snapshot.get("pm_six_step_trace")
         check = trace.get("pm_contract_self_check") if isinstance(trace, dict) else None
         if not isinstance(check, dict) or check.get("ok") is not True:
@@ -378,19 +386,16 @@ class AgentWorkflow:
             
         logger.info(f"Active analysts for {ticker}: {self.current_analysts}")
 
-    def _require_pm_candidate_recommendation(self, ticker: str, final_state: Dict[str, Any]) -> FuturesRecommendation:
-        """Collect PM's per-ticker candidate before full-market step 5/6 finalization."""
-        recommendation = final_state.get("recommendation")
-        if not recommendation:
-            raise RuntimeError(f"{ticker} phase1 PM did not return a FuturesRecommendation candidate")
-        if isinstance(recommendation, FuturesRecommendation):
-            candidate = recommendation
-        else:
-            candidate = FuturesRecommendation.model_validate(recommendation)
-        snapshot = candidate.signal_snapshot
-        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("pm_internal_candidate"), dict):
-            raise RuntimeError(f"{ticker} phase1 PM recommendation missing pm_internal_candidate")
-        return candidate
+    def _require_pm_memory_state(self, ticker: str, final_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect the one PM memory state before full-market Step5/Step6."""
+        pm_state = final_state.get("pm_state")
+        if not isinstance(pm_state, dict) or not pm_state:
+            raise RuntimeError(f"{ticker} phase1 PM result missing pm_state")
+        if "final_action_contract" in pm_state or "recommendation" in pm_state:
+            raise RuntimeError(f"{ticker} PM state created a Step6 output before Step6")
+        if "signal_snapshot" in pm_state:
+            raise RuntimeError(f"{ticker} PM state created a signal_snapshot before Step6")
+        return pm_state
 
     def _build_futures_phase1_state(self, ticker: str, portfolio: Portfolio, morning_price_context):
         return FundState(
@@ -741,7 +746,7 @@ class AgentWorkflow:
         self._prefetch_pandaai_daily_data(timings)
         morning_contexts = self._prefetch_pre_open_reference_prices(timings)
         prefetched_analysis = self._prefetch_phase1_analysis(portfolio, morning_contexts, timings)
-        generated_recommendations: List[Tuple[str, FuturesRecommendation]] = []
+        generated_pm_states: List[Tuple[str, Dict[str, Any]]] = []
 
         for ticker in self.tickers:
             ticker_started_at = perf_counter()
@@ -771,9 +776,10 @@ class AgentWorkflow:
                     self._save_prefetched_analyst_outputs,
                     final_state,
                 )
-                recommendation = self._require_pm_candidate_recommendation(ticker=ticker, final_state=final_state)
-                generated_recommendations.append((ticker, recommendation))
-                logger.warning(f"{ticker} phase1 skipped: {recommendation.warning_message}")
+                pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
+                generated_pm_states.append((ticker, pm_state))
+                warning_message = (pm_state.get("recommendation_context") or {}).get("warning_message")
+                logger.warning(f"{ticker} phase1 skipped: {warning_message}")
                 logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
                 if self.planner_mode:
                     self.current_analysts = None
@@ -811,8 +817,8 @@ class AgentWorkflow:
                 logger.error(f"Error running futures phase1 workflow: {e}")
                 raise RuntimeError(f"Failed to generate futures phase1 recommendation for {ticker}")
 
-            recommendation = self._require_pm_candidate_recommendation(ticker=ticker, final_state=final_state)
-            generated_recommendations.append((ticker, recommendation))
+            pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
+            generated_pm_states.append((ticker, pm_state))
 
             logger.log_portfolio(f"{ticker} phase1 recommendation collected", portfolio)
 
@@ -823,7 +829,7 @@ class AgentWorkflow:
             timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
 
         self._validate_phase1_signal_persistence(portfolio, self.tickers)
-        self._persist_pm_full_market_contracts(generated_recommendations)
+        generated_recommendations = self._persist_pm_full_market_contracts(generated_pm_states)
         self._audit_phase1_strategy_recommendations(generated_recommendations)
         portfolio = phase1_planning_portfolio
         for _, recommendation in generated_recommendations:

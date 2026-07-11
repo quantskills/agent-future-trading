@@ -85,16 +85,16 @@ def classify_lifecycle_action_port(contract: Mapping[str, Any] | None) -> dict[s
         requires_full_market_rank = False
     elif (current_lots > 0 and target_lots < 0) or (current_lots < 0 and target_lots > 0):
         port = NEW_RISK_PORT
-        requires_full_market_rank = True
+        requires_full_market_rank = False
     elif abs(target_lots) > abs(current_lots):
         port = NEW_RISK_PORT
-        requires_full_market_rank = True
+        requires_full_market_rank = False
     elif abs(target_lots) < abs(current_lots):
         port = CAPITAL_RELEASE_PORT
         requires_full_market_rank = False
     elif action in {"open", "open_probe", "open_real", "add", "scale", "increase", "reverse", "conditional_open"}:
         port = NEW_RISK_PORT
-        requires_full_market_rank = True
+        requires_full_market_rank = False
     elif action in {"reduce", "exit", "close", "risk_exit"}:
         port = CAPITAL_RELEASE_PORT
         requires_full_market_rank = False

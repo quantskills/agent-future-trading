@@ -868,12 +868,13 @@ def _contract_final_lifecycle_port(contract: Mapping[str, Any] | None) -> str:
 def contract_requires_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
     """Return whether a PM contract must carry a full-market capital rank.
 
-    Only contracts that add new risk exposure require the rank gate: open,
-    add/scale/increase, side reversal, or conditional open with non-zero target
-    risk. Hold/wait/reduce/exit/close do not participate in capital-priority
-    ranking.
+    Only a flat-to-position opening requires the rank gate. Existing-position
+    add/scale, hold, reduce, exit, and the exit leg of a reversal do not
+    participate in opening-opportunity ranking.
     """
-    return contract_increases_risk_position(contract)
+    contract = contract if isinstance(contract, Mapping) else {}
+    current_lots, target_lots, _ = _current_target_delta(contract)
+    return current_lots == 0 and target_lots != 0
 
 
 def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
@@ -913,7 +914,7 @@ def contract_is_unselected_no_new_exposure_candidate(contract: Mapping[str, Any]
 
 
 def full_market_rank_gate_errors(contract: Mapping[str, Any] | None) -> list[str]:
-    """Return hard-gate errors for unranked new risk exposure."""
+    """Return hard-gate errors for an unranked flat-to-position opening."""
     if not contract_requires_full_market_capital_rank(contract):
         return []
     if contract_has_full_market_capital_rank(contract):
@@ -982,6 +983,11 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
         return []
 
     errors: list[str] = []
+    if (
+        not contract_requires_full_market_capital_rank(contract)
+        and not contract_is_unselected_no_new_exposure_candidate(contract)
+    ):
+        errors.append("non_opening_contract_has_full_market_rank")
     if contract_has_rank:
         errors.append("top_level.opportunity_rank_forbidden")
     if not deployment:

@@ -23,7 +23,7 @@
 
 ## 唯一全市场 rank 分数制度
 
-唯一 `opportunity_rank` 只用于新增风险敞口资金排序。`rank=1` 永远表示当天全市场最值得占用资金的产品机会。
+唯一 `opportunity_rank` 只用于从空仓建立新仓的资金排序。`rank=1` 永远表示当天全市场最值得占用开仓资金的产品机会。
 
 基础公式：
 
@@ -53,6 +53,7 @@ rank_score =
 
 资金部署规则：
 
+- 只有 `current_lots=0` 且 `target_lots!=0` 的开仓候选进入 1-N 排名；`add/scale/hold/reduce/exit/reverse` 当前合约没有 rank。
 - 按 `rank_score` 从高到低排出 1-N。
 - `rank=1` 只表示最值得占用资金，不自动升仓。
 - `watch_for_trigger / exploration_probe` 仍使用原 0.008 小探针资金层。
@@ -101,7 +102,7 @@ rank_score =
 - 不能因为某个品种短期亏损写死品种黑名单。
 - 不能把 `watch_for_trigger` 直接排除出 rank；全是 watch 时仍要排出最值得小仓试探的 1-N。
 - 不能让 execution 学习直接冒充 open/add 学习进入资金 rank。
-- 不能让 hold/reduce/exit 抢新资金 rank。
+- 不能让 add/scale/hold/reduce/exit/reverse 当前合约抢开仓资金 rank。
 - 不能在样本不足时把单日亏损写成硬规则。
 
 ## 每次调参前必须回答

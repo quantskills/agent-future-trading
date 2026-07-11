@@ -154,7 +154,7 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
             "signal_collection_contract": signal_contract
             if signal_contract is not None
             else {
-                "producer": "signal_collector",
+                "source_agent": "signal_collector",
                 "collector_decision_boundary": "no_trade_authority",
             },
             "pm_six_step_trace": {
@@ -270,7 +270,7 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
 
         self.assertFalse(report.ok)
         joined = "\n".join(report.hard_failures)
-        self.assertIn("mechanism_signal_collection_contract_invalid_producer", joined)
+        self.assertIn("mechanism_signal_collection_contract_invalid_source_agent", joined)
         self.assertIn("mechanism_signal_collection_contract_invalid_boundary", joined)
 
     def test_rejects_pm_fields_inside_signal_collection_contract(self):
@@ -278,7 +278,7 @@ class MechanismEffectivenessAuditBoundaryTest(unittest.TestCase):
         snapshot = self._snapshot(
             self._contract(),
             signal_contract={
-                "producer": "signal_collector",
+                "source_agent": "signal_collector",
                 "collector_decision_boundary": "no_trade_authority",
                 "evidence_strength_score": 0.62,
                 "multi_evidence_consensus_score": 0.55,

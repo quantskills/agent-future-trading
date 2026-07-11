@@ -7,18 +7,16 @@
 
 rank_score_policy:
   contract_version: agentquant.rank_score_policy.v1
-  enabled: true
   usage_boundary:
     role: full_market_capital_rank_score_weights
     creates_trade_authority: false
     creates_position_size: false
     may_override_margin_limits: false
     tune_after_min_clean_backtest_days: 40
-    tuning_window: "2025-03-25..2025-05-31"
 
   rank_score:
-    cold_start_evidence_weight: 0.52
-    capital_layer_priority_bonus:
+    cold_start_evidence_quality: 0.52
+    capital_layer_priority:
       tradeable_candidate: 0.18
       probe_candidate: 0.10
       watch_for_trigger: 0.02
@@ -26,29 +24,28 @@ rank_score_policy:
 
     open_add_action_value_delta:
       max_abs_delta: 0.35
-      positive_signal_weight: 0.18
-      trigger_quality_positive_signal_weight: 0.08
-      negative_signal_weight: -0.18
-      recent_tail_loss_signal_weight: -0.14
-      entry_quality_loss_signal_weight: -0.16
-      net_trigger_quality_loss_signal_weight: -0.10
+      positive_learning_signal: 0.18
+      trigger_quality_positive_signal: 0.08
+      negative_learning_signal: -0.18
+      recent_tail_loss_signal: -0.14
+      entry_quality_loss_signal: -0.16
+      net_trigger_quality_loss_signal: -0.10
 
     trigger_execution_quality:
-      execution_profile_learning_weight: 1.00
-      trigger_quality_positive_bonus_weight: 1.00
-      trigger_quality_loss_penalty_weight: 1.00
+      trigger_quality_positive_bonus: 1.00
+      trigger_quality_loss_penalty: 1.00
 
     product_setup_trigger_history:
-      alpha_profile_adjustment_weight: 1.00
+      alpha_profile_adjustment: 1.00
+
+    capital_efficiency:
+      enabled: true
+      max_bonus: 0.02
 
     conflict_risk_invalidation_penalty:
-      fusion_conflict_adjustment_weight: 1.00
-      market_conflict_penalty_weight: 1.00
-      critical_data_gap_penalty_weight: 1.00
-      fundamental_gap_penalty_weight: 1.00
+      fusion_score_adjustment: 1.00
+      market_conflict_penalty: 1.00
+      critical_data_gap_penalty: 1.00
+      fundamental_gap_penalty: 1.00
       gating_failure_penalty_per_item: 0.025
       gating_failure_penalty_cap: 0.16
-
-  capital_efficiency:
-    enabled: true
-    max_bonus: 0.02

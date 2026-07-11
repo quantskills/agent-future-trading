@@ -143,41 +143,30 @@ class Phase1AccelerationTest(unittest.TestCase):
         def fake_pm(state):
             pm_order.append(state["ticker"])
             ticker = state["ticker"]
-            recommendation = FuturesRecommendation(
-                config_id="cfg",
-                reference_portfolio_id="p1",
-                trading_date="2025-01-02",
-                effective_trade_date="2025-01-02",
-                underlying_code=ticker,
-                contract_code=f"{ticker}01",
-                action=RecommendationAction.HOLD,
-                lots=0,
-                base_price=100.0,
-                justification="test PM candidate",
-                signal_snapshot={
-                    "pm_internal_candidate": {
-                        "schema": "agentquant.pm_internal_candidate.v1",
-                        "candidate_contract": {
-                            "ticker": ticker,
-                            "contract_code": f"{ticker}01",
-                            "final_action": "wait",
-                            "current_lots": 0,
-                            "target_lots": 0,
-                            "lots_delta": 0,
-                            "reason_codes": ["test_pm_candidate"],
-                        },
-                        "final_contract_builder_inputs": {"ticker": ticker},
-                    }
-                },
-            )
             return {
-                "decision": SimpleNamespace(action=FuturesAction.HOLD, lots=0, contract_code=f"{ticker}01"),
-                "recommendation": recommendation,
+                "pm_state": {
+                    "ticker": ticker,
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "recommendation_context": {"underlying_code": ticker},
+                }
             }
 
         def fake_finalize_pm_contracts(*, generated, config, portfolio):
-            for ticker, recommendation in generated:
-                recommendation.signal_snapshot = {
+            signed = []
+            for ticker, _ in generated:
+                recommendation = FuturesRecommendation(
+                    config_id="cfg",
+                    reference_portfolio_id="p1",
+                    trading_date="2025-01-02",
+                    effective_trade_date="2025-01-02",
+                    underlying_code=ticker,
+                    contract_code=f"{ticker}01",
+                    action=RecommendationAction.HOLD,
+                    lots=0,
+                    base_price=100.0,
+                    justification="test PM final",
+                    signal_snapshot={
                     "final_action_contract": {
                         "ticker": ticker,
                         "contract_code": f"{ticker}01",
@@ -188,9 +177,13 @@ class Phase1AccelerationTest(unittest.TestCase):
                         "reason_codes": ["test_pm_final_contract"],
                     },
                     "pm_six_step_trace": {
+                        "step6_contract_generation_check": {"ok": True},
                         "pm_contract_self_check": {"ok": True, "tool": "pm_contract_self_check"}
                     },
-                }
+                    },
+                )
+                signed.append((ticker, recommendation))
+            return signed
 
         with patch("graph.workflow.get_db", return_value=fake_db), patch(
             "graph.workflow.Router", _FakeRouter

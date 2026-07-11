@@ -23,6 +23,21 @@ from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
 class PMStateTransitionMatrixTest(unittest.TestCase):
+    def test_lifecycle_port_requires_rank_only_for_flat_to_open(self):
+        opening = classify_lifecycle_action_port(
+            {"current_lots": 0, "target_lots": 1, "final_action": "open_probe"}
+        )
+        adding = classify_lifecycle_action_port(
+            {"current_lots": 1, "target_lots": 2, "final_action": "scale"}
+        )
+        reversing = classify_lifecycle_action_port(
+            {"current_lots": 1, "target_lots": -1, "final_action": "reverse"}
+        )
+
+        self.assertTrue(opening["requires_full_market_rank"])
+        self.assertFalse(adding["requires_full_market_rank"])
+        self.assertFalse(reversing["requires_full_market_rank"])
+
     def _non_rank_deployment(self):
         return {
             "selected_for_capital_deployment": False,
@@ -59,6 +74,8 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         )
 
     def _complete_contract(self, **overrides):
+        sizing_override = overrides.pop("position_sizing_result", None)
+        evidence_override = overrides.pop("evidence_used", None)
         contract = {
             "ticker": "BU",
             "final_action": "hold",
@@ -70,11 +87,16 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "entry_trigger": "",
             "invalidation": "",
             "learning_used": {},
-            "evidence_used": {},
+            "evidence_used": dict(evidence_override or {}),
             "capital_deployment": self._non_rank_deployment(),
-            "position_sizing_result": self._position_sizing(),
         }
         contract.update(overrides)
+        sizing = dict(self._position_sizing() if sizing_override is None else sizing_override)
+        if sizing:
+            sizing["current_lots"] = contract["current_lots"]
+            sizing["target_lots"] = contract["target_lots"]
+            sizing["lots_delta"] = contract["lots_delta"]
+        contract["evidence_used"]["position_sizing_result"] = sizing
         return contract
 
     def _rank_trace(self):
@@ -393,12 +415,12 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
 
     def test_pm_contract_self_check_requires_mechanism_6_7_base_fields(self):
         contract = self._complete_contract()
-        contract.pop("position_sizing_result")
+        contract["evidence_used"].pop("position_sizing_result")
 
         result = check_final_action_contract(contract)
 
         self.assertFalse(result["ok"])
-        self.assertIn("missing_final_action_contract_position_sizing_result", result["errors"])
+        self.assertIn("position_sizing_result_missing", result["errors"])
 
     def test_pm_contract_self_check_rejects_new_risk_without_full_market_rank(self):
         contract = self._complete_contract(
@@ -477,6 +499,25 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         pm_errors = check_final_action_contract(missing_pm_trace)["errors"]
         self.assertIn("pm_lifecycle_learning_trace_missing", pm_errors)
 
+    def test_pm_contract_self_check_rejects_rank_on_add_or_scale(self):
+        contract = self._ranked_new_risk_contract()
+        contract.update(
+            {
+                "final_action": "scale",
+                "current_lots": 1,
+                "target_lots": 2,
+                "lots_delta": 1,
+            }
+        )
+        contract["evidence_used"]["position_sizing_result"].update(
+            {"current_lots": 1, "target_lots": 2, "lots_delta": 1}
+        )
+
+        result = check_final_action_contract(contract)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("non_opening_contract_has_full_market_rank", result["errors"])
+
     def test_pm_contract_self_check_requires_non_rank_learning_trace_when_learning_consumed(self):
         contract = self._complete_contract(
             learning_used={
@@ -501,6 +542,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         self.assertIn("pm_lifecycle_learning_trace_missing", missing["errors"])
 
         contract["evidence_used"] = {
+            "position_sizing_result": self._position_sizing(),
             "lifecycle_learning_trace": {
                 "contract_lifecycle_port": "hold",
                 "used_lanes": ["hold"],
@@ -577,23 +619,6 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         self.assertIn("alpha_setup_action_value_missing_action_preference:0", result["errors"])
         self.assertIn("alpha_setup_action_value_incomplete_similar_sql_prior:0", result["errors"])
         self.assertIn("alpha_setup_action_value_incomplete_trace_not_for_pm_scoring:0", result["errors"])
-
-    def test_pm_contract_self_check_rejects_raw_research_objects_in_pm_artifact(self):
-        contract = self._complete_contract()
-
-        result = check_final_action_contract(
-            contract,
-            pm_artifact={
-                "final_action_contract": contract,
-                "adaptive_policy_scope": {"policies": [{"policy_action": "raw"}]},
-            },
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertTrue(
-            any(error.startswith("pm_artifact_boundary_violation:") for error in result["errors"])
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,7 @@ class PreBacktestFailureFixturesTest(unittest.TestCase):
             set(MATRIX_FAILURE_FIXTURE_IDS),
             {
                 "scc_missing",
-                "scc_producer_boundary_invalid",
+                "scc_source_agent_boundary_invalid",
                 "pm_incomplete_prior_in_formal_action_values",
                 "observe_empty_preference",
                 "observe_positive_candidate_forbidden",

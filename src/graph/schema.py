@@ -508,4 +508,5 @@ class FundState(TypedDict):
     signal_collection_contract: Dict[str, Any]
     signal_collection_contracts: Annotated[List[Dict[str, Any]], operator.add]
     decision: FuturesDecision
+    pm_state: Dict[str, Any]
     recommendation: Optional[FuturesRecommendation]

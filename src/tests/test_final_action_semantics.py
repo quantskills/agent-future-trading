@@ -341,6 +341,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
     def test_rank_capital_layer_contract_requires_complete_rank_metadata(self):
         incomplete = {
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
             "evidence_used": {"opportunity_rank": 1},
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
@@ -349,6 +352,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             },
         }
         complete = {
+            "current_lots": 0,
+            "target_lots": 1,
+            "lots_delta": 1,
             "evidence_used": {
                 "opportunity_rank": 1,
                 "rank_capital_role": "best_exploration_probe_candidate",
@@ -1294,7 +1300,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertFalse(bad["ok"])
         self.assertIn("final_action_contract_action_mismatch", bad["errors"])
 
-    def test_full_market_rank_gate_required_only_for_new_risk(self):
+    def test_full_market_rank_gate_required_only_for_opening_position(self):
         unranked_open = {
             "current_lots": 0,
             "target_lots": -1,
@@ -1306,6 +1312,12 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": -1,
             "lots_delta": -3,
             "final_action": "exit",
+        }
+        unranked_add = {
+            "current_lots": 1,
+            "target_lots": 2,
+            "lots_delta": 1,
+            "final_action": "scale",
         }
         reduce_contract = {
             "current_lots": 2,
@@ -1323,10 +1335,8 @@ class FinalActionSemanticsTest(unittest.TestCase):
             full_market_rank_gate_errors(unranked_open),
             ["new_risk_exposure_missing_full_market_rank"],
         )
-        self.assertEqual(
-            full_market_rank_gate_errors(unranked_reverse),
-            ["new_risk_exposure_missing_full_market_rank"],
-        )
+        self.assertEqual(full_market_rank_gate_errors(unranked_reverse), [])
+        self.assertEqual(full_market_rank_gate_errors(unranked_add), [])
         self.assertEqual(full_market_rank_gate_errors(reduce_contract), [])
         self.assertTrue(contract_has_full_market_capital_rank(ranked_open))
         self.assertEqual(full_market_rank_gate_errors(ranked_open), [])

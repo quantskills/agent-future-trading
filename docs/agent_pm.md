@@ -196,7 +196,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 排名与预算分配摘要：只在进入第 5 步的候选中来自排序与预算分配结果。候选即使最终因预算拒绝退回 `wait/hold`，仍保留本次 rank 和拒绝事实；直接从第 4 步进入第 6 步的候选不生成 rank 明细。
 
-仓位测算结果：按矩阵固定落入 `final_action_contract.evidence_used.position_sizing_result`。新增风险路径来自第 5 步 position sizing；非新增风险路径由第 6 步按最终持仓变化确定目标手数，不进入全市场 rank。
+仓位测算结果：按矩阵固定落入 `final_action_contract.evidence_used.position_sizing_result`。开仓路径来自第 5 步 position sizing；非开仓路径由第 6 步按最终持仓变化确定目标手数，不进入全市场 rank。
 
 来源链路由 `signal_snapshot.signal_collection_contract.source_contracts` 和 `evidence_items` 保真承载，不在最终合约中自创 lineage 字段。
 
@@ -330,9 +330,9 @@ PM 第 6 步对外返回 `FuturesRecommendation`。
 
 DB 记录、本地 artifact 和运行日志都由 `workflow` 编排层 / 保存层基于 `FuturesRecommendation` 物理化生成，不是 PM 第二次输出。
 
-Step1 到 Step4，以及新增风险路径进入的 Step5，都不输出物理交易事实。
+Step1 到 Step4，以及开仓路径进入的 Step5，都不输出物理交易事实。
 
-Step1 到 Step4，以及新增风险路径进入的 Step5，只更新同一个 PM 内部候选状态。
+Step1 到 Step4，以及开仓路径进入的 Step5，只更新同一个 PM 内部候选状态。
 
 排名和预算分配是内部候选状态的一部分，不是独立输出。
 
@@ -472,15 +472,15 @@ PM 把上述理解写入同一个产品候选状态。
 
 DB 记录和本地 artifact 由 `workflow` 编排层 / 保存层基于 `FuturesRecommendation` 持久化生成，不是本步输出。
 
-Step1 到 Step4，以及新增风险路径进入的 Step5，只更新同一个 PM 内部候选状态。
+Step1 到 Step4，以及开仓路径进入的 Step5，只更新同一个 PM 内部候选状态。
 
-Step1 到 Step4，以及新增风险路径进入的 Step5，禁止生成 `candidate_contract`、builder 输入、`FuturesRecommendation` 或任何 recommendation。
+Step1 到 Step4，以及开仓路径进入的 Step5，禁止生成 `candidate_contract`、builder 输入、`FuturesRecommendation` 或任何 recommendation。
 
 #### 1.7 状态演化与自检边界
 
 第 1 步读取的原始 `signal_collection_contract` 和来源引用事实必须保持不变。后续步骤只能消费这些事实并更新 PM 内部候选状态，不得反向改写第 1 步证据。
 
-第 1 步读取的 SCC 字段是后续决策输入，不是最终动作约束。第 2、3、4 步继续更新同一个候选状态，只有新增风险路径再由第 5 步更新该状态；最终动作可以与 SCC `dominant_side` 不同。
+第 1 步读取的 SCC 字段是后续决策输入，不是最终动作约束。第 2、3、4 步继续更新同一个候选状态，只有开仓路径再由第 5 步更新该状态；最终动作可以与 SCC `dominant_side` 不同。
 
 第 6 步必须把原始 SCC 保真写入 `FuturesRecommendation.signal_snapshot.signal_collection_contract`，并只对最终 `final_action_contract` 自身执行 `pm_contract_self_check`。禁止因最终动作、最终持仓方向与 SCC `dominant_side` 不同而判定合约失败。
 
@@ -582,7 +582,7 @@ PM 按以下顺序判断方向：
 
 `side_priority` 和 `ticker_side_priority` 是第 2 步根据 SCC 事实确定的单品种方向优先级，不是最终交易动作，也不是最终合约必须保持不变的方向字段。
 
-第 3、4 步结合当前持仓、生命周期和学习成果继续更新同一个候选状态。只有新增风险候选进入第 5 步执行风险排序和资金部署；非新增风险候选从第 4 步直接进入第 6 步。最终候选进入等待、持有、减仓、退出和新增风险路径都属于正常状态演化。
+第 3、4 步结合当前持仓、生命周期和学习成果继续更新同一个候选状态。只有从空仓建立新仓的候选进入第 5 步执行开仓排序和资金部署；其他候选从第 4 步直接进入第 6 步。最终候选进入等待、持有、加仓、减仓、退出和开仓路径都属于正常状态演化。
 
 第 6 步只根据最终候选状态生成 `final_action_contract`，并只对最终合约自身执行 `pm_contract_self_check`。禁止直接比较第 2 步方向优先级与第 6 步最终动作、最终持仓方向来判定合约失败。
 
@@ -620,7 +620,7 @@ PM 根据 `current_lots` 推导当前持仓方向，与第 2 步 `ticker_side_pr
 - 当前持仓与产品优先方向是什么关系。
 - 该产品进入新增风险、持仓管理、释放资金、等待中的哪条内部处理路径。
 
-本步不确定最终动作和目标手数。初始生命周期分流和候选交易状态都属于同一个 PM 内部候选状态，先进入第 4 步；第 4 步完成后，非新增风险直接进入第 6 步，新增风险进入第 5 步后再进入第 6 步。
+本步不确定最终动作和目标手数。初始生命周期分流和候选交易状态都属于同一个 PM 内部候选状态，先进入第 4 步；第 4 步完成后，非开仓行为直接进入第 6 步，只有从空仓建立新仓的候选进入第 5 步后再进入第 6 步。
 
 #### 3.2 使用的状态事实
 
@@ -649,7 +649,7 @@ PM 以有符号 `current_lots` 确认持仓方向：当前手数大于零为 `lo
 | 当前持仓方向 | 产品代表方向 | 初始处理含义 |
 |---|---|---|
 | `flat` | `flat` | 当前没有持仓，也没有方向候选 |
-| `flat` | `long`、`short` | 当前存在新增风险候选 |
+| `flat` | `long`、`short` | 当前存在开仓候选 |
 | `long` | `long` | 当前多头持仓进入同向持仓管理 |
 | `short` | `short` | 当前空头持仓进入同向持仓管理 |
 | `long` | `short` | 当前多头持仓先进入 reduce/exit 判断 |
@@ -669,7 +669,7 @@ PM 以有符号 `current_lots` 确认持仓方向：当前手数大于零为 `lo
 
 - 空仓且没有代表方向时进入 `wait`。
 - 空仓且存在代表方向时进入 `new_risk` 候选路径。
-- 持仓与代表方向相同时进入 `position_hold`；后续若扩大同向敞口，仍须由第 5 步识别为新增风险路径。
+- 持仓与代表方向相同时进入 `position_hold`；后续扩大同向敞口属于 `add/scale` 持仓管理，不进入开仓 rank。
 - 持仓与代表方向相反时进入 `capital_release` 内部分流口；退出旧方向与授权反向新风险必须分开。
 - 有持仓但无代表方向时进入 `capital_release` 内部分流口；最终 `reduce`、`exit` 或 `hold` 由后续状态演化决定。
 
@@ -711,7 +711,7 @@ PM 只读取 `opportunity_state` 的以下分析师证据语义，再形成自�
 
 `primary_lifecycle_action_port` 只是第 3 步的内部初始分流口，不是最终合约字段，也不得作为 Step6 最终合约失败依据。
 
-第 4 步可以改变候选质量和风险路径；新增风险候选还可以由第 5 步资金部署继续改变。最终生命周期可以与本步初始分流不同，该变化属于正常状态演化，不构成最终合约错误。
+第 4 步可以改变候选质量和风险路径；从空仓建立新仓的候选还可以由第 5 步资金部署继续改变。最终生命周期可以与本步初始分流不同，该变化属于正常状态演化，不构成最终合约错误。
 
 Step1–5 不生成生命周期转换对比对象，不保留“初始生命周期应当等于最终生命周期”的回溯诊断。生命周期变化只体现为同一个候选状态被继续更新。
 
@@ -888,10 +888,10 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 - `learning_adjustment_summary`
 - 学习修正后的 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图
 
-本步不创建新的候选对象，不输出独立学习 artifact。第 4 步完成后按最终候选风险性质分流：
+本步不创建新的候选对象，不输出独立学习 artifact。第 4 步完成后按是否从空仓建立新仓分流：
 
-- 非新增风险路径：`Step4 -> Step6`。`wait`、`hold`、`reduce`、`exit` 和不保留新增风险敞口的 `conditional_monitor` 跳过第 5 步。
-- 新增风险路径：`Step4 -> Step5 -> Step6`。`open`、`open_probe`、`open_real`、`add`、`scale`，以及反转退出后的新风险腿必须进入第 5 步执行全市场 rank、预算分配和 position sizing。
+- 非开仓路径：`Step4 -> Step6`。`wait`、`hold`、`add`、`scale`、`reduce`、`exit`、当前反转的退出腿和不保留开仓权限的 `conditional_monitor` 跳过第 5 步，不生成 rank。
+- 开仓路径：`Step4 -> Step5 -> Step6`。只有 `current_lots=0` 且 `target_lots!=0` 的 `open`、`open_probe`、`open_real` 和保留非零目标仓位的条件开仓进入第 5 步执行全市场 rank、预算分配和 position sizing。
 
 这里的 `conditional_monitor` 是 canonical family / 生命周期语义，不是 `final_action` 的新增枚举；最终动作仍由第 6 步按 `current_lots` 与 `target_lots` 形成 `wait/hold`。
 
@@ -901,7 +901,7 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 第 4 步的完整 canonical 候选学习池、当前生命周期路由和候选质量修正都是 PM 内部中间状态，不是最终合约学习事实。检索拒绝诊断和路由拒绝诊断只解释材料为什么未被当前候选消费，不得冒充最终决策层学习证据。
 
-非新增风险候选从第 4 步直接进入第 6 步。新增风险候选由第 5 步风险排序、资金部署和 position sizing 继续更新后再进入第 6 步。
+非开仓候选从第 4 步直接进入第 6 步。只有从空仓建立新仓的候选由第 5 步排名、资金部署和 position sizing 继续更新后再进入第 6 步。
 
 无论是否经过第 5 步，第 6 步都必须从第 4 步保留的完整 canonical 候选学习池重新开始，根据最终 `final_action`、`current_lots`、`target_lots` 和 `pm_lifecycle_learning_trace.contract_lifecycle_port` 重新形成正式 `decision_learning_rows` 和独立的 `trigger_profile_learning_rows`，再写入唯一 `final_action_contract`。第 6 步不得复制第 4 步的 `decision_learning_rows`，也不得让第 4 步未消费的生命周期记录因早期路由被永久丢弃。
 
@@ -937,11 +937,11 @@ PM 不在本步写入 research DB，不生成 DB 记录、本地 artifact 和运
 
 PM 不把本步候选状态暴露给 `workflow` 编排层、Auditor、Trader、Reviewer、Researcher 和 PG 作为外部交易事实。
 
-### 5. 新增风险排序与预算分配
+### 5. 开仓排序与预算分配
 
 #### 5.1 本步目标
 
-第 5 步只处理第 4 步确认需要增加风险敞口的产品候选，在完整的当日全市场候选集合中完成统一排名、预算安排和 position sizing。
+第 5 步只处理第 4 步确认从空仓建立新仓的产品候选，在完整的当日全市场开仓候选集合中完成统一排名、预算安排和 position sizing。已有仓位的 `add/scale` 不属于开仓排名对象。
 
 排名的业务含义只使用矩阵固定的资金投入优先级。`opportunity_rank=1` 表示：在当前 SCC 证据、正式 action-value、产品历史经验和风险约束共同作用下，该候选是本轮最高资金优先级；它不是交易权限，不表示已经校准的盈利概率，也不保证盈利。
 
@@ -951,45 +951,46 @@ PM 不把本步候选状态暴露给 `workflow` 编排层、Auditor、Trader、R
 
 #### 5.2 进入本步的候选集合
 
-PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已经完成第 4 步的全部产品候选状态，并只把新增风险候选放入统一队列。
+PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已经完成第 4 步的全部产品候选状态，并只把 `current_lots=0` 且 `target_lots!=0` 的开仓候选放入统一队列。
 
 进入队列的候选包括：
 
 - `open`
 - `open_probe`
 - `open_real`
-- `add`
-- `scale`
-- `reverse` 先由 `exit` 退出旧方向后形成的新风险腿
-- 最终仍保留新增风险敞口和 `conditional_trigger_authority` 的条件 `open_probe`
+- 旧方向已经由前一张 `exit` 合约退出后，后续从空仓形成的反向 `open/open_probe/open_real`
+- 最终保留非零目标仓位和 `conditional_trigger_authority` 的条件 `open_probe`
 
 以下状态不进入排名队列：
 
 - `wait`
 - `hold`
+- `add`
+- `scale`
 - `reduce`
 - `exit`
+- 当前反转的 `exit` 腿
 - 不增加风险敞口的 `conditional_monitor`
-- 已确认不具备新增风险资格或已被输入门拒绝的候选
+- 已确认不具备开仓资格或已被输入门拒绝的候选
 
-队列为空是合法状态，表示当日没有需要竞争新增风险预算的候选。候选集合不完整、混入其他交易日或混入非新增风险状态属于 Step5 输入契约错误，不得通过补造 rank 继续运行。
+队列为空是合法状态，表示当日没有需要竞争开仓预算的候选。候选集合不完整、混入其他交易日或混入非开仓状态属于 Step5 输入契约错误，不得通过补造 rank 继续运行。
 
 `workflow` 编排层只负责组织 PM 获得完整的当日输入集合，不计算 rank、不筛选资金候选、不分配预算，也不生成 Step5 结果。
 
 #### 5.3 使用的内部状态
 
-每个新增风险候选沿用同一个 PM 内存状态中的以下事实：
+每个开仓候选沿用同一个 PM 内存状态中的以下事实：
 
 - `ticker`、`trading_date`、`config_id`
 - `ticker_side_priority`
 - `opportunity_state`
 - `candidate_quality`
 - `candidate_layer_hint`
-- 当前新增风险意图
+- 当前开仓意图
 - `evidence_strength`、`evidence_quality`、setup 和 trigger 质量
 - 冲突、缺失证据、风险因素和失效边界
 - 第 4 步学习修正后的候选质量
-- 第 4 步保留的完整 canonical action-value 候选学习池及当前新增风险 lane 路由摘要
+- 第 4 步保留的完整 canonical action-value 候选学习池及当前开仓 lane 路由摘要
 - `current_lots`
 - 当前品种敞口和账户组合敞口
 - Phase1 参考价
@@ -1047,13 +1048,13 @@ rank_score = clamp(
 
 | 积分项 | 当前参数 | 含义 |
 |---|---:|---|
-| 当日证据质量 | `0.52 * opportunity_score` | 保证当前结构化证据是排名主体 |
+| 当日证据质量 | `cold_start_evidence_quality * 0.52` | `cold_start_evidence_quality` 只汇总当日方向、状态、业务/setup、置信度、市场确认和融合共识，保证当前结构化证据是排名主体 |
 | `tradeable_candidate` | `+0.18` | 完整可交易候选层级积分 |
 | `probe_candidate` | `+0.10` | 探索候选层级积分 |
 | `watch_for_trigger` | `+0.02` | 等待触发候选层级积分 |
-| 正向 action-value | `+0.18 * positive_signal` | 已验证正向 open/add/scale 经验 |
+| 正向 action-value | `+0.18 * positive_learning_signal` | 已验证正向 open/add/scale 经验 |
 | trigger 正向质量 | `+0.08 * trigger_quality_positive_signal` | 与新增风险相关的正向触发经验 |
-| 负向 action-value | `-0.18 * negative_signal` | 已验证负向新增风险经验 |
+| 负向 action-value | `-0.18 * negative_learning_signal` | 已验证负向新增风险经验 |
 | 近期尾部损失 | `-0.14 * recent_tail_loss_signal` | 抑制重复尾部风险 |
 | 入场质量损失 | `-0.16 * entry_quality_loss_signal` | 抑制低质量入场 |
 | trigger 净损失 | `-0.10 * net_trigger_quality_loss_signal` | 抑制失效触发模式 |
@@ -1064,7 +1065,9 @@ rank_score = clamp(
 
 `product_setup_trigger_history`、当前 trigger 质量、市场冲突、关键数据缺口、基本面缺口和失效风险继续按 catalog 中对应权重计入。所有积分必须保留组成项，不能只保存一个无法解释的总分。
 
-现有 catalog 中的 `execution_profile_learning_weight` 属于遗留入口。按第 4 步已经确定的学习边界，execution/profile 学习只能进入执行画像，不得直接增加或扣减 `rank_score`；代码优化时该直连项必须停止参与排名，不能借 trigger 质量名义重新进入决策层。
+`rank_score_policy.rank_score` 下七个参数组与 `rank_score_components` 固定同名；每个组内的权重键与 Python 消费的输入字段同名。调参时禁止新增 `_weight`、`_bonus` 别名或只改 YAML 不改消费端。
+
+`execution_profile_learning_weight` 不属于排名配置，catalog 不得保留该入口。按第 4 步已经确定的学习边界，execution/profile 学习只能进入执行画像，不得直接或通过 `opportunity_score` 间接增加或扣减 `rank_score`，不能借 trigger 质量名义重新进入决策层。
 
 #### 5.6 action-value 与已验证经验如何影响排名
 
@@ -1081,9 +1084,13 @@ rank_score = clamp(
 
 只有 `matrix_action_canonical.md` 允许的 `open`、`add`、`scale`、`increase` 新增风险 lane 可以进入新增风险积分；其他 family/lane 均不得进入。`learning_used.memory_retrieval.rejected_or_downgraded` 所对应的 weak prior、incomplete prior、similar SQL prior 和 fallback prior 不得影响 rank。
 
+这里的 `add/scale/increase` 只表示历史 action-value 可以帮助评估新的开仓候选，不表示当日 `add/scale` 交易行为获得 `opportunity_rank`。当日是否排名只由 `current_lots=0` 且 `target_lots!=0` 决定。
+
 #### 5.7 排名顺序
 
-PM 先按资金层级，再按 `rank_score` 对新增风险候选排序：
+交易属性必须在进入 rank 前由既有 `final_entry_authority.authority_type` 确定。`exploration_probe` 固定映射到 `capital_layer=exploration_probe`，`real_budget_entry` 固定映射到 `capital_layer=real_budget_entry`；只有既有资金利用控制已经确认高质量学习和 alpha release 时，`real_budget_entry` 才映射到 `alpha_scale_entry`。rank 不生成、修改或升级 `final_entry_authority`。
+
+PM 先按资金层级，再按 `rank_score` 对开仓候选排序：
 
 1. `alpha_scale_entry`：当前证据成立，且有重复正向真实经验支持的已验证候选。
 2. `real_budget_entry`：当前证据完整的 `tradeable_candidate`。
@@ -1092,6 +1099,8 @@ PM 先按资金层级，再按 `rank_score` 对新增风险候选排序：
 同层候选依次比较 `rank_score`、当日证据分、学习后候选质量和资金效率。所有比较项完全相同时，使用标准化 `ticker` 作为固定最终排序键，保证长期回测在相同输入下得到相同 rank。
 
 每个进入队列的候选只能获得一个连续、唯一的全市场 `opportunity_rank`。产品内部 `side_priority`、`ticker_side_priority` 不能替代全市场 rank。
+
+无论 `rank_score` 或 `opportunity_rank` 多高，`exploration_probe` 始终是小仓试探，不得因排名升为 `real_budget_entry` 或 `alpha_scale_entry`；其 `0.008` 起点和 `0.015` 上限继续由既有 `position_budget_policy` 与最终权限链控制，rank 工具不重复生成第二套 probe 上限。正常交易和已确认放大资金层天然排在小仓试探之前。
 
 #### 5.8 排名与预算原子绑定
 
@@ -1109,7 +1118,9 @@ PM 按 `opportunity_rank` 从 1 开始顺序消费同一个账户可部署预算
 
 候选只有同时满足可用保证金、单品种上限、组合保证金预算、净敞口上限、回撤和冷却限制时，才允许占用预算。批准后立即更新同一内部账户预算游标，后续候选只能使用剩余预算。
 
-排名靠前不绕过硬约束。即使 `opportunity_rank=1`，资金不足、单品种超限、组合超限、净敞口超限或风险状态禁止新增风险时，也必须 `selected_for_capital_deployment=false`，并写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`，把 `target_lots` 还原为 `current_lots`。被拒绝的候选保留 rank 和完整 rank 解释字段，不得伪造为无机会。
+排名靠前不绕过硬约束。即使 `opportunity_rank=1`，资金不足、单品种超限、组合超限、净敞口超限或风险状态禁止开仓时，也必须 `selected_for_capital_deployment=false`，并写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`，把 `target_lots` 还原为 `current_lots`。被拒绝的候选保留 rank 和完整 rank 解释字段，不得伪造为无机会。
+
+rank 只能决定既定交易属性候选的资金竞争顺序，并可因预算不足拒绝部署；不得改变 `authority_type`、`max_allowed_margin_ratio`、probe/real 属性、方向和原始风险权限。
 
 排名靠后的候选不得越过排名靠前且满足约束的候选抢占预算。只有靠前候选因明确硬约束被拒绝后，剩余预算才继续评估后续候选。
 
@@ -1192,15 +1203,15 @@ PM 再依次施加可用保证金、单品种上限、组合保证金上限、�
 
 本步不创建第二个候选对象，不输出独立 rank、预算或 sizing artifact。更新后的同一候选状态进入第 6 步。
 
-第 5 步只执行新增风险候选集合和资金测算输入的契约校验，不执行最终合约自检。预算拒绝、手数被约束为零、候选由新增风险转为不增加风险，都属于正常状态演化。
+第 5 步只执行开仓候选集合和资金测算输入的契约校验，不执行最终合约自检。预算拒绝、手数被约束为零、开仓候选还原为不建立新仓，都属于正常状态演化。
 
 第 6 步只根据最终候选状态形成 `capital_deployment`、`evidence_used.position_sizing_result`、最终 `lifecycle_learning_trace`、最终 `learning_impact_delta` 和最终交易字段，并只检查最终 `final_action_contract` 自身一致性。禁止比较第 5 步约束前目标与第 6 步最终动作，禁止要求 Step4 排名预期、Step5 初始手数和 Step6 最终合约保持不变。
 
 #### 5.13 禁止项
 
-PM 不让非新增风险候选进入全市场 rank 和预算队列。
+PM 不让 `add/scale/hold/reduce/exit/reverse` 当前合约和其他非开仓候选进入全市场 rank 队列。
 
-PM 不生成脱离预算安排的展示性 rank，不绕过 rank 顺序分配新增风险资金。
+PM 不生成脱离预算安排的展示性 rank，不绕过 rank 顺序分配开仓资金。
 
 PM 不把 rank 当作交易授权、盈利保证和硬风险豁免。
 
@@ -1226,7 +1237,7 @@ PM 不把本步候选状态、排名队列和预算游标暴露给 `workflow` �
 
 #### 6.1 本步目标
 
-第 6 步把 Step1–4 延续下来的最终 PM 内存候选状态，以及新增风险路径经 Step5 更新后的排名、预算和手数结果，一次性转换为唯一 `final_action_contract` 和唯一 `FuturesRecommendation`。
+第 6 步把 Step1–4 延续下来的最终 PM 内存候选状态，以及开仓路径经 Step5 更新后的排名、预算和手数结果，一次性转换为唯一 `final_action_contract` 和唯一 `FuturesRecommendation`。
 
 本步是 PM 唯一签约点。Step1–5 的状态只有在第 6 步完成最终装配并通过最终合约自身一致性检查后，才成为对外交易事实。
 
@@ -1243,21 +1254,21 @@ PM 不把本步候选状态、排名队列和预算游标暴露给 `workflow` �
 
 #### 6.2 两条进入路径
 
-非新增风险候选从第 4 步直接进入本步：
+非开仓候选从第 4 步直接进入本步：
 
 ```text
 Step4 -> Step6
 ```
 
-包括 `wait`、`hold`、`reduce`、`exit` 和不增加风险敞口的 `conditional_monitor`。
+包括 `wait`、`hold`、`add`、`scale`、`reduce`、`exit`、当前反转的退出腿和不增加风险敞口的 `conditional_monitor`。这些动作不生成 `opportunity_rank`。
 
-新增风险候选经第 5 步进入本步：
+开仓候选经第 5 步进入本步：
 
 ```text
 Step4 -> Step5 -> Step6
 ```
 
-包括 `open`、`open_probe`、`open_real`、`add`、`scale`，以及反转退出后的新风险腿。最终仍保留新增风险敞口的条件 `open_probe` 也属于该路径。
+只包括 `current_lots=0` 且 `target_lots!=0` 的 `open`、`open_probe`、`open_real`，以及保留非零目标仓位的条件 `open_probe`。反转必须先由当前 `exit` 合约退出；后续从空仓建立反向新仓时才作为新的开仓候选进入第 5 步。
 
 两条路径进入第 6 步的都是同一个 PM 内存候选状态，不是候选合约、recommendation 草稿、snapshot 草稿或 artifact。
 
@@ -1271,8 +1282,8 @@ Step4 -> Step5 -> Step6
 - 计划参考价、合约代码、合约乘数和方向保证金率有效。
 - 最终候选方向、触发、失效边界、风险原因和权限状态可解释。
 - 第 4 步完整 canonical 学习候选池仍保留，且未混入 future dated 记录。
-- 最终状态若增加风险，必须存在第 5 步唯一全市场 rank、预算结论和 position sizing 结果。
-- 最终状态若不增加风险，直接从第 4 步进入第 6 步的候选不要求也不补造 rank；若候选已经在第 5 步获得 rank 后因预算拒绝还原为不增加风险，则保留该次真实 rank 和拒绝事实。
+- 最终状态若满足 `current_lots=0` 且 `target_lots!=0`，必须存在第 5 步唯一全市场 rank、预算结论和 position sizing 结果。
+- 最终状态不是从空仓建立新仓时不要求也不补造 rank；`add/scale` 即使扩大已有仓位也不得生成 rank。开仓候选已经在第 5 步获得 rank 后因预算拒绝还原为空仓时，保留该次真实 rank 和拒绝事实。
 
 缺少必要输入属于输入契约错误，立即停止本产品签约。证据弱、学习为空、rank 低、预算不足和最终不交易是合法业务结果，不属于输入契约错误。
 
@@ -1319,7 +1330,7 @@ recommendation 顶层动作和手数映射使用现有共享工具：
 
 #### 6.5 确定最终目标手数与动作
 
-新增风险路径读取第 5 步 `position_sizing_result` 中的 `target_lots`。第 6 步签约时才把该确定性测算对象写入 `evidence_used.position_sizing_result`。非新增风险路径在本步根据最终持仓管理状态确定目标手数：
+开仓路径读取第 5 步 `position_sizing_result` 中的 `target_lots`。第 6 步签约时才把该确定性测算对象写入 `evidence_used.position_sizing_result`。非开仓路径在本步根据最终持仓管理状态确定目标手数：
 
 | 最终状态 | `target_lots` |
 |---|---|
@@ -1337,7 +1348,7 @@ PM 只从最终 `current_lots`、最终 `target_lots` 和最终权限状态调�
 - `target_position_ratio`
 - `authority_type`
 
-新增风险未获得 rank 时，必须写入 `capital_allocation_reason=no_rank_no_new_exposure`；已有 rank 但未获预算时，必须写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`。两者都必须恢复 `target_lots=current_lots`、最终为 `wait/hold`，并清除新增风险触发权限。
+开仓候选未获得 rank 时，必须写入 `capital_allocation_reason=no_rank_no_new_exposure`；已有 rank 但未获预算时，必须写入 `capital_allocation_reason=no_rank_or_budget_no_new_exposure`。两者都必须恢复 `target_lots=current_lots=0`、最终为 `wait`，并清除开仓触发权限。
 
 反转遵守 `matrix_action_canonical.md`：当前合约先以 `exit` 退出旧方向；后续反向新风险必须重新获得 `opportunity_rank`，再由 `open/open_probe/open_real` 合约授权。不得自创 reverse final action，也不得用一条 recommendation 同时表达两腿。
 
@@ -1391,18 +1402,18 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 5. 参考价、合约乘数、保证金率和 `margin_ratio`。
 6. 最终 `evidence_used` 和原始 SCC 快照引用关系。
 7. 最终生命周期学习事实。
-8. 新增风险路径的最终 rank、预算和 position sizing；第 5 步预算拒绝路径保留真实 rank 与拒绝事实；直接非新增风险路径只保留无 rank 说明和最终手数摘要。
+8. 开仓路径的最终 rank、预算和 position sizing；第 5 步预算拒绝路径保留真实 rank 与拒绝事实；直接非开仓路径只保留无 rank 说明和最终手数摘要。
 9. `created_at`。
 
-新增风险合约的 `capital_deployment` 必须与第 5 步最终状态一致，并只使用矩阵已有字段。资金部署结果固定为三种合法形态：
+开仓合约的 `capital_deployment` 必须与第 5 步最终状态一致，并只使用矩阵已有字段。资金部署结果固定为三种合法形态：
 
 | 资金部署形态 | 矩阵字段 | 最终交易事实 |
 |---|---|---|
-| 新增风险获准部署 | `selected_for_capital_deployment=true`；存在 `opportunity_rank`、满足 `rank_capital_layer_contract` 且具有 `capital_allocation_reason` | 才允许 `open/open_probe/open_real/add/scale`，或保留经 rank 授权的新风险条件合约 |
-| 新增风险未获得 rank | `selected_for_capital_deployment=false`；`capital_allocation_reason=no_rank_no_new_exposure`；不存在 `opportunity_rank` | 固定还原为 `target_lots=current_lots`，最终为 `wait/hold`，不得保留新增风险触发权限 |
+| 开仓获准部署 | `selected_for_capital_deployment=true`；存在 `opportunity_rank`、满足 `rank_capital_layer_contract` 且具有 `capital_allocation_reason` | 才允许从空仓形成 `open/open_probe/open_real`，或保留经 rank 授权的条件开仓合约 |
+| 开仓未获得 rank | `selected_for_capital_deployment=false`；`capital_allocation_reason=no_rank_no_new_exposure`；不存在 `opportunity_rank` | 固定还原为 `target_lots=current_lots=0`，最终为 `wait`，不得保留开仓触发权限 |
 | 已有 rank 但未获预算 | `selected_for_capital_deployment=false`；`capital_allocation_reason=no_rank_or_budget_no_new_exposure`；保留 `opportunity_rank` 和完整 rank 解释字段 | 固定还原为 `target_lots=current_lots`，最终为 `wait/hold`，不得绕过预算继续开仓 |
 
-原生 `wait/hold/reduce/exit` 从 Step4 直接进入 Step6，不要求 `opportunity_rank`。`conditional_monitor` 只表达监控，不是开仓动作；只有最终仍保留新增风险敞口的条件 `open_probe` 合约才必须经过 rank。
+`wait/hold/add/scale/reduce/exit` 从 Step4 直接进入 Step6，不要求 `opportunity_rank`。`conditional_monitor` 只表达监控，不是开仓动作；只有从空仓保留非零目标仓位的条件 `open_probe` 合约才必须经过 rank。
 
 `reverse` 只表示 `open_add_new_risk` 学习家族。执行必须先由 `exit` 合约退出旧方向，再由后续已获得 rank 的新风险合约授权反向开仓；不得把反转写成一个自创 final action 或一条同时完成两腿的 recommendation。
 
@@ -1447,7 +1458,7 @@ recommendation 顶层动作、手数、价格、产品和日期必须与 `final_
 - `final_action`、`current_lots`、`target_lots` 和 `lots_delta` 一致。
 - `authority_type`、`execution_profile`、`entry_trigger`、盘中确认字段和 `reason_codes` 一致。
 - 保留新增风险敞口的条件 `open_probe` 具有明确 `entry_trigger`；`conditional_monitor` 不被解释为开仓授权。
-- 最终增加风险的合约具有第 5 步唯一 rank、预算和 sizing；Step5 拒绝结果只保留对应拒绝事实；直接跳过 Step5 的合约没有 rank。
+- 最终从空仓建立新仓的合约具有第 5 步唯一 rank、预算和 sizing；Step5 拒绝结果只保留对应拒绝事实；`add/scale` 和其他直接跳过 Step5 的合约没有 rank。
 - `evidence_used.position_sizing_result` 的 `target_lots`、`lots_delta` 与最终合约一致。
 - `learning_used.alpha_setup_action_values` 纯净且与最终生命周期匹配。
 - decision learning 与 trigger/profile learning 分层正确。
@@ -1457,11 +1468,11 @@ rank 自检只使用矩阵已有字段和固定原因代码：
 
 | 最终合约形态 | 必须检查 | 禁止误判 |
 |---|---|---|
-| 最终新增风险获准 | `selected_for_capital_deployment=true`，存在 `opportunity_rank`，满足 `rank_capital_layer_contract`，并具有 `capital_allocation_reason` 和 `evidence_used.position_sizing_result` | 不得允许无 rank 的 `open/open_probe/open_real/add/scale` 增加风险 |
-| `no_rank_no_new_exposure` | 不存在 `opportunity_rank`，`selected_for_capital_deployment=false`，`target_lots=current_lots`，最终为 `wait/hold`，无新增风险触发权限 | 不得因缺少 rank 判错，也不得保留原新增风险目标 |
-| `no_rank_or_budget_no_new_exposure` | 保留 `opportunity_rank` 和完整 rank 解释字段，`selected_for_capital_deployment=false`，`target_lots=current_lots`，最终为 `wait/hold`，无新增风险触发权限 | 不得把 rank 当作交易权限，不得因最终为 `wait/hold` 判定 rank 合约失败 |
+| 最终开仓获准 | `current_lots=0`、`target_lots!=0`、`selected_for_capital_deployment=true`，存在 `opportunity_rank`，满足 `rank_capital_layer_contract`，并具有 `capital_allocation_reason` 和 `evidence_used.position_sizing_result` | 不得允许无 rank 的 `open/open_probe/open_real` 建立新仓 |
+| `no_rank_no_new_exposure` | 不存在 `opportunity_rank`，`selected_for_capital_deployment=false`，`target_lots=current_lots=0`，最终为 `wait`，无开仓触发权限 | 不得因缺少 rank 判错，也不得保留原开仓目标 |
+| `no_rank_or_budget_no_new_exposure` | 保留 `opportunity_rank` 和完整 rank 解释字段，`selected_for_capital_deployment=false`，`target_lots=current_lots=0`，最终为 `wait`，无开仓触发权限 | 不得把 rank 当作交易权限，不得因最终为 `wait` 判定 rank 合约失败 |
 | 共享语义解释为 `conditional_monitor` 且不增加风险 | `final_action` 为 `wait/hold`、`target_lots=current_lots`，存在矩阵要求的 `capital_deployment` 和 `capital_allocation_reason`，且不存在 rank 专属字段 | 不得要求 `opportunity_rank`，不得解释为已授权开仓 |
-| 原生非新增风险 | `final_action` 为 `wait/hold/reduce/exit`，且最终持仓变化与动作一致 | 不得因缺少 rank 判错 |
+| 非开仓行为 | `final_action` 为 `wait/hold/scale/reduce/exit`，且最终持仓变化与动作一致 | 不得因 `add/scale` 扩大已有仓位或其他非开仓行为缺少 rank 判错 |
 
 PM 自检不得自建资金部署状态字段、私有动作集合和私有生命周期字段。动作解释统一调用 `final_action_semantics`；学习 family/lane 统一遵守 `matrix_action_canonical.md`。
 
@@ -1511,7 +1522,7 @@ PM 不调用 `build_lifecycle_transition_diagnostic`，不执行任何 Step1/2/3
 
 PM 不让 `check_final_action_contract` 读取 artifact、snapshot 和 PM 中间状态，不让自检器修复最终合约。
 
-PM 不要求所有产品都有 rank，不把 Step4 直接进入 Step6 的合法合约误判为缺少资金排名。
+PM 不要求所有产品都有 rank，不把 `add/scale/hold/reduce/exit` 等 Step4 直接进入 Step6 的合法合约误判为缺少开仓排名。
 
 PM 不要求已排名但未获预算的候选继续保持新增风险生命周期，不把正常预算拒绝误判为 Step5/Step6 不一致。
 
