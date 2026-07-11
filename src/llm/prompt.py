@@ -390,7 +390,6 @@ Provide:
 """ + ANALYST_OUTPUT_FORMAT
 
 # Backward-compatible name for older imports.
-FUTURES_COMPANY_NEWS_PROMPT = FUTURES_COMMODITY_NEWS_PROMPT
 
 
 def _fmt_optional_percent(value: Any) -> str:

@@ -43,10 +43,7 @@ class ConfigParser:
         cfg = normalize_config(cfg, self.config_path)
         cfg['trading_date'] = datetime.strptime(self.trading_date, '%Y-%m-%d')
         cfg['planner_mode'] = cfg.get('planner_mode', False)
-        cfg['workflow_analysts'] = [
-            'commodity_news' if analyst == 'company_news' else analyst
-            for analyst in cfg.get('workflow_analysts', [])
-        ]
+        cfg['workflow_analysts'] = list(cfg.get('workflow_analysts', []))
 
         return cfg
 

@@ -109,7 +109,7 @@ def build_scope_key(
 
 def _analyst_entry_trigger(evidence: Mapping[str, Any]) -> str:
     analyst_payloads = _mapping_or_empty(evidence.get("analyst_payloads"))
-    for analyst in ("technical", "fundamental", "commodity_news", "company_news"):
+    for analyst in ("technical", "fundamental", "commodity_news"):
         payload = _mapping_or_empty(analyst_payloads.get(analyst))
         trigger = _first_text(payload.get("entry_trigger"), default="")
         if trigger:
@@ -356,7 +356,7 @@ def infer_setup_type(
             str(contract.get("event_type") or ""),
             " ".join(str(item) for item in (contract.get("factor_focus") or []) if item),
         ])
-    for analyst_name in ("technical", "fundamental", "commodity_news", "company_news"):
+    for analyst_name in ("technical", "fundamental", "commodity_news"):
         payload = snapshot.get(analyst_name)
         if not isinstance(payload, Mapping):
             continue

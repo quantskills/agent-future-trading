@@ -245,7 +245,7 @@ def _analyst_metric_names(analyst: str) -> Dict[str, str]:
             "negative": "factor_reliability_negative",
             "quality": "support_conflict_adjustment",
         }
-    if analyst_key in {"commodity_news", "company_news"}:
+    if analyst_key == "commodity_news":
         return {
             "positive": "event_reliability_positive",
             "negative": "event_reliability_negative",
@@ -490,7 +490,7 @@ def calibrate_signal_with_learning_context(
         )
         signal.factor_calibration_summary = factor_summary
         metadata["factor_calibration_summary"] = factor_summary
-    elif analyst_key in {"commodity_news", "company_news"}:
+    elif analyst_key == "commodity_news":
         event_summary = _event_calibration_summary(
             signal,
             positive_rows=positive_rows,

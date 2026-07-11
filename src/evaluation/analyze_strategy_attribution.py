@@ -104,8 +104,6 @@ def _signal_value(snapshot: Dict[str, Any], analyst: str) -> str:
 
 def _signal_combo(snapshot: Dict[str, Any]) -> str:
     commodity_news = _signal_value(snapshot, "commodity_news")
-    if commodity_news == "Neutral":
-        commodity_news = _signal_value(snapshot, "company_news")
     return "|".join(
         [
             _signal_value(snapshot, "technical"),

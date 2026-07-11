@@ -21,8 +21,7 @@ from tools.common.final_action_semantics import (
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
 def normalize_analyst_name(value: Any) -> str:
-    text = str(value or "")
-    return "commodity_news" if text == "company_news" else text
+    return str(value or "")
 
 
 def signal_to_text(value: Any) -> str:

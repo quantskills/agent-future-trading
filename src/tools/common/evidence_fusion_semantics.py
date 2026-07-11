@@ -175,7 +175,7 @@ def build_analyst_fusion_evidence(
         - min(0.24, 0.04 * len(conflicts))
         - min(0.18, 0.035 * len(missing))
     )
-    analyst_name = "commodity_news" if str(analyst) == "company_news" else str(analyst or "")
+    analyst_name = str(analyst or "")
 
     technical_false_breakout_risk = "not_applicable"
     fundamental_opposition_strength = "not_applicable"

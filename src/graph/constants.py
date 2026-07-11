@@ -5,7 +5,6 @@ class AgentKey:
     TECHNICAL = "technical"
     FUNDAMENTAL = "fundamental"
     COMMODITY_NEWS = "commodity_news"
-    COMPANY_NEWS = COMMODITY_NEWS  # backward-compatible alias for older configs/scripts
     # workflow keys
     SIGNAL_COLLECTOR = "signal_collector"
     PORTFOLIO = "portfolio manager"

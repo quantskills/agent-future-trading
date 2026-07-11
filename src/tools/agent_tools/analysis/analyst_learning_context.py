@@ -29,7 +29,6 @@ DEFAULT_HORIZON_BY_ANALYST = {
     "technical": "short",
     "fundamental": "medium",
     "commodity_news": "event_short",
-    "company_news": "event_short",
 }
 
 SECTOR_BY_TICKER = {
@@ -120,7 +119,7 @@ def _learning_context_cache_key(
     cache_cfg = context_cfg.get("cache", {}) or {}
     if not bool(cache_cfg.get("enabled", True)):
         return None
-    analyst_key = "commodity_news" if str(analyst) == "company_news" else str(analyst)
+    analyst_key = str(analyst)
     horizon = str(horizon_class or DEFAULT_HORIZON_BY_ANALYST.get(analyst_key, "*"))
     sector = _context_sector(context, ticker)
     market_regime = _context_market_regime(context)
@@ -481,7 +480,7 @@ def build_learning_context(
         if cached is not None:
             return copy.deepcopy(cached)
 
-    analyst_key = "commodity_news" if str(analyst) == "company_news" else str(analyst)
+    analyst_key = str(analyst)
     horizon = str(horizon_class or DEFAULT_HORIZON_BY_ANALYST.get(analyst_key, "*"))
     sector = _context_sector(context, ticker)
     market_regime = _context_market_regime(context)

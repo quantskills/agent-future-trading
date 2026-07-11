@@ -137,8 +137,7 @@ def _dedupe(values: Sequence[str]) -> List[str]:
 
 
 def _normalize_agent_name(agent_name: Any) -> str:
-    text = str(agent_name or "")
-    return "commodity_news" if text == "company_news" else text
+    return str(agent_name or "")
 
 
 def _signal_text(value: Any) -> str:

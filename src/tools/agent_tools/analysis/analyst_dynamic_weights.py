@@ -407,7 +407,7 @@ def calibrate_weights_by_signal_history(
         analyst_aliases = {
             "fundamental": {"fundamental"},
             "technical": {"technical"},
-            "commodity_news": {"commodity_news", "company_news"},
+            "commodity_news": {"commodity_news"},
         }
         for analyst, aliases in analyst_aliases.items():
             analyst_signals = [
@@ -443,7 +443,7 @@ def calibrate_weights_by_signal_history(
             performance_rows = []
 
         for row in performance_rows:
-            analyst = "commodity_news" if row.get("analyst") == "company_news" else row.get("analyst")
+            analyst = row.get("analyst")
             if analyst not in adjusted:
                 continue
             sample_count = int(row.get("sample_count") or 0)

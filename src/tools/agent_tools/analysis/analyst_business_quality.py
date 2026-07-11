@@ -273,7 +273,7 @@ def apply_business_quality_enrichment(
     analyst: str,
 ) -> AnalystSignal:
     """Fill deterministic business fields after the LLM and quality gate."""
-    analyst_key = "commodity_news" if analyst == "company_news" else str(analyst)
+    analyst_key = str(analyst)
     metadata = getattr(signal, "metadata", {}) or {}
     llm_cfg = (full_config or {}).get("llm", {}) or {}
     analyst_llm_cfg = (full_config or {}).get("analyst_llm", {}) or {}

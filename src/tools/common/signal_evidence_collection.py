@@ -17,8 +17,7 @@ ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
 
 def _agent_name(signal: Any) -> str:
-    name = str(getattr(signal, "agent_name", "") or "").strip()
-    return "commodity_news" if name == "company_news" else name
+    return str(getattr(signal, "agent_name", "") or "").strip()
 
 
 def _metadata(signal: Any) -> dict:
@@ -113,10 +112,7 @@ def build_signal_collection_contract(
     The result is evidence only.  It never contains lots, rank, action, or
     position authority.
     """
-    enabled = [
-        "commodity_news" if str(name) == "company_news" else str(name)
-        for name in (enabled_analysts or ANALYST_ORDER)
-    ]
+    enabled = [str(name) for name in (enabled_analysts or ANALYST_ORDER)]
     evidence_items: list[dict] = []
     source_contracts: list[dict] = []
     missing_evidence: list[str] = []

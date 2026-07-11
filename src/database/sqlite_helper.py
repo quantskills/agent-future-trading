@@ -3933,9 +3933,7 @@ class SQLiteDB(BaseDB):
         return (
             signal_value("technical"),
             signal_value("fundamental"),
-            signal_value("commodity_news")
-            if signal_value("commodity_news") != "Neutral"
-            else signal_value("company_news"),
+            signal_value("commodity_news"),
         )
 
     def _pm_risk_gate_from_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:

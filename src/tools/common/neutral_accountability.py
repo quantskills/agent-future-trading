@@ -64,8 +64,6 @@ def analyst_payloads_from_snapshot(snapshot: Mapping[str, Any]) -> Dict[str, Dic
         value = snapshot.get(analyst)
         if isinstance(value, Mapping):
             payloads[analyst] = dict(value)
-    if "commodity_news" not in payloads and isinstance(snapshot.get("company_news"), Mapping):
-        payloads["commodity_news"] = dict(snapshot["company_news"])
     return payloads
 
 

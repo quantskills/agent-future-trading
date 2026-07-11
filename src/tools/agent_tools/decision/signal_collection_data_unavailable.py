@@ -15,10 +15,7 @@ from tools.common.signal_evidence_collection import build_signal_collection_cont
 
 
 def _normalize_analyst_name(name: Any) -> str:
-    text = str(name or "").strip()
-    if text in {"company_news", "commodity_news"}:
-        return "commodity_news"
-    return text
+    return str(name or "").strip()
 
 
 def _enabled_analysts(enabled_analysts: Iterable[Any] | None) -> list[str]:

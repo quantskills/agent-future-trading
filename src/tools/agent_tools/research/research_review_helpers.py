@@ -891,8 +891,6 @@ def _first_analyst_field(snapshot: Dict[str, Any], field_name: str, default: Any
 
 def _analyst_field(snapshot: Dict[str, Any], analyst: str, field_name: str, default: Any = None) -> Any:
     keys = [analyst]
-    if analyst == "commodity_news":
-        keys.append("company_news")
     for key in keys:
         item = snapshot.get(key)
         if not isinstance(item, dict):
@@ -1257,8 +1255,6 @@ def _analyst_payloads(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         item = snapshot.get(analyst)
         if isinstance(item, dict):
             payloads[analyst] = item
-    if "commodity_news" not in payloads and isinstance(snapshot.get("company_news"), dict):
-        payloads["commodity_news"] = snapshot["company_news"]
     return payloads
 
 

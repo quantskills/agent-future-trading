@@ -1436,7 +1436,6 @@ def apply_trade_research_contract(
         "technical": "entry_timing",
         "fundamental": "direction_context",
         "commodity_news": "event_catalyst",
-        "company_news": "event_catalyst",
     }.get(str(analyst), "risk_context")
     signal.direction_context = (
         "long" if signal_value(signal.signal) == Signal.BULLISH.value

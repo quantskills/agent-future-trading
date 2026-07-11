@@ -2973,7 +2973,7 @@ def extract_underlying_code(ticker: str) -> str:
 
 
 def _normalize_agent_name(agent_name: str) -> str:
-    return "commodity_news" if agent_name == "company_news" else str(agent_name or "")
+    return str(agent_name or "")
 
 
 def _normalize_weights(weights: dict) -> dict:
@@ -5840,10 +5840,7 @@ def _analyst_signal_combo(analyst_signals: list) -> tuple[str, str, str]:
 
 
 def _normalize_required_analyst_name(name: str) -> str:
-    text = str(name or "").strip()
-    if text in {AgentKey.COMPANY_NEWS, "company_news"}:
-        return AgentKey.COMMODITY_NEWS
-    return text
+    return str(name or "").strip()
 
 
 def _validate_required_analyst_signals(ticker: str, enabled_analysts: list, analyst_signals: list) -> None:
@@ -9818,8 +9815,7 @@ def _run_pm_six_step_decision(state: FundState):
     signals_by_agent = {}
     for signal in analyst_signals:
         if hasattr(signal, 'agent_name') and signal.agent_name:
-            agent_name = "commodity_news" if signal.agent_name == "company_news" else signal.agent_name
-            signals_by_agent[agent_name] = signal
+            signals_by_agent[signal.agent_name] = signal
 
     weights = {}
     fusion_context = {}
@@ -9850,8 +9846,7 @@ def _run_pm_six_step_decision(state: FundState):
 
     for signal in analyst_signals:
         if hasattr(signal, 'agent_name') and signal.agent_name:
-            agent_name = "commodity_news" if signal.agent_name == "company_news" else signal.agent_name
-            signals_by_agent[agent_name] = signal
+            signals_by_agent[signal.agent_name] = signal
         else:
             pass
 
@@ -11984,8 +11979,7 @@ def calculate_long_short_signals(
     signals_by_agent = {}
     for signal in analyst_signals:
         if hasattr(signal, 'agent_name'):
-            agent_name = "commodity_news" if signal.agent_name == "company_news" else signal.agent_name
-            signals_by_agent[agent_name] = signal
+            signals_by_agent[signal.agent_name] = signal
 
     # Start from the strongest basis-driven directional bias when available.
     fundamental = signals_by_agent.get('fundamental')

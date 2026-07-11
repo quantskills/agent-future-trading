@@ -587,11 +587,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 signals,
             )
 
-    def test_company_news_alias_counts_as_commodity_news(self):
+    def test_commodity_news_counts_as_required_analyst(self):
         signals = [
             AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.7),
             AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.2),
-            AnalystSignal(agent_name="company_news", signal=Signal.NEUTRAL, confidence=0.2),
+            AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.2),
         ]
 
         _validate_required_analyst_signals(

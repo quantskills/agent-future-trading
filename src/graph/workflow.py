@@ -308,10 +308,7 @@ class AgentWorkflow:
 
     @staticmethod
     def _normalize_analyst_name(name: str) -> str:
-        text = str(name or "").strip()
-        if text in {AgentKey.COMPANY_NEWS, "company_news"}:
-            return AgentKey.COMMODITY_NEWS
-        return text
+        return str(name or "").strip()
 
     @classmethod
     def _validate_phase1_analyst_outputs(
