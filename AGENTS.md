@@ -45,7 +45,7 @@ LLM 只能用于分析师、复盘员、研究员形成结构化证据和研究�
 - `docs/work_log.md`：只记录 `.py/.yaml/.yml` 行为修改。
 - `docs/matrix_chain_contract.md`：全链路生产、落盘、消费、审计、hard fail、diagnostics 契约矩阵，是理解系统问题和修改 bug 的第一锚点。
 - `docs/mechanism_multiagents.md`：多智能体固定工作流和边界。
-- `docs/mechanism_workflow.md`：workflow 编排边界。
+- `docs/workflow.md`：workflow 编排边界。
 - `docs/agent_pm.md`：PM 六步链路、最终合约、自检。
 - `docs/mechanism_agent_internal_rules.md`：智能体内部状态流转。
 - `docs/mechanism_research.md`：研究、复盘、记忆和学习边界。
@@ -59,7 +59,7 @@ LLM 只能用于分析师、复盘员、研究员形成结构化证据和研究�
 1. 当前代码事实、数据库事实、artifact 事实、测试结果。
 2. `matrix_chain_contract.md`
 3. `mechanism_multiagents.md`
-4. `mechanism_workflow.md`
+4. `workflow.md`
 5. `agent_pm.md`
 6. `matrix_field_semantics.md`
 7. `matrix_action_canonical.md`

@@ -10,7 +10,7 @@
 - `docs/matrix_field_semantics.md`：字段名、字段含义、字段权限。
 - `docs/matrix_action_canonical.md`：action-value 动作 canonical 矩阵。
 - `docs/agent_pm.md`：PM 六步、最终合约、自检细节。
-- `docs/mechanism_workflow.md`：workflow 编排、传递、保存、阻断。
+- `docs/workflow.md`：workflow 编排、传递、保存、阻断。
 - `docs/mechanism_research.md`：复盘、研究、记忆、学习边界。
 
 本文已经接入可执行闸门：

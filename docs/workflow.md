@@ -1,5 +1,7 @@
 # AgentQuant 工作流
 
+本文用于固定现有系统中各智能体的编排顺序、内存传递、物理化落点和三类核心载体的完整结构，使后续逐个梳理智能体时能够先确认上游传入事实、下游必需事实和字段责任，避免中途补字段、重复解释信息或建立旁路载体。本文不把 workflow 编排层视为智能体，不替代 `matrix_field_semantics.md` 的字段语义，也不替代各智能体机制文档。
+
 ## 一、工作流程
 
 ```text
@@ -251,6 +253,48 @@ AnalystSignal.metadata.action_evidence_contract
 → data_usage_summary
 ```
 
+`learning_scope` 按生产分析师使用以下真实结构：
+
+```text
+AnalystSignal.metadata.action_evidence_contract.learning_scope（technical）
+→ setup_family
+→ sector_setup_alignment
+→ sector_preferred_setups
+→ sector_caution_setups
+→ primary_confirmation
+→ execution_focus
+→ market_regime
+→ product_profile_id
+→ product_profile_version
+→ product_profile_used
+→ product_profile_fields_used
+→ product_profile_learning_interaction
+→ product_profile_analysis_boundary
+
+AnalystSignal.metadata.action_evidence_contract.learning_scope（fundamental）
+→ factor_tree
+→ primary_driver_groups
+→ short_trigger_groups
+→ conflict_groups
+→ product_profile_id
+→ product_profile_version
+→ product_profile_used
+→ product_profile_fields_used
+→ product_profile_learning_interaction
+→ product_profile_analysis_boundary
+
+AnalystSignal.metadata.action_evidence_contract.learning_scope（commodity_news）
+→ event_regime
+→ event_type_counts
+→ catalyst_classification
+→ product_profile_id
+→ product_profile_version
+→ product_profile_used
+→ product_profile_fields_used
+→ product_profile_learning_interaction
+→ product_profile_analysis_boundary
+```
+
 ##### 1.2.2 分析师生成：学习校准字段
 
 ```text
@@ -343,10 +387,75 @@ AnalystSignal.metadata.action_evidence_contract.data_usage_summary
 → analyst
 → sources
 
-technical.sources.pandaai_market
-fundamental.sources.finoview_fundamental
-fundamental.sources.pandaai_extra
-commodity_news.sources.finoview_news_txt
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.pandaai_market（technical）
+→ source
+→ dataset
+→ available
+→ used_in_signal
+→ pre_open_only
+→ info_cutoff
+→ latest_data_date
+→ row_count
+→ fields_used
+→ indicators_used
+
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.finoview_fundamental（fundamental）
+→ source
+→ dataset
+→ available
+→ used_in_signal
+→ pre_open_only
+→ info_cutoff
+→ configured_indicator_count
+→ loaded_indicator_count
+→ missing_like_count
+→ stale_indicator_count
+→ near_stale_indicator_count
+→ coverage_ratio
+→ stale_ratio
+→ factor_groups
+→ freshness_score
+→ no_lookahead_status
+→ local_availability_audit
+→ coverage_status
+→ supports_trade_setup
+→ runtime_data_boundary
+
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.pandaai_extra（fundamental）
+→ source
+→ dataset
+→ available
+→ used_in_signal
+→ pre_open_only
+→ info_cutoff
+→ reference_date
+→ lookback_days
+→ feature_count
+→ record_counts
+→ feature_status
+→ data_missing
+→ errors
+→ direction_hint
+→ tradeability
+
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.finoview_news_txt（commodity_news）
+→ source
+→ dataset
+→ available
+→ used_in_signal
+→ pre_open_only
+→ info_cutoff
+→ news_cutoff
+→ file_path
+→ encoding
+→ raw_block_count
+→ parsed_news_count
+→ selected_news_count
+→ latest_news_date
+→ freshness_score
+→ relevance_score
+→ event_type_counts
+→ direction_counts
 ```
 
 每个来源记录必须保留来源名、数据集、可用状态、是否用于信号、盘前边界、信息截止时间及本来源实际生成的数据覆盖、时效、缺失和质量字段。分析师不得遗漏 `learning_scope`、`product_profile_evidence`、`fusion_evidence` 或 `data_usage_summary`，也不得把LLM自由文本当作正式字段补偿路径。
@@ -453,6 +562,16 @@ state["signal_collection_contract"].evidence_fusion
 → missing_evidence
 → multi_evidence_consensus_score
 → fusion_boundary
+
+state["signal_collection_contract"].evidence_fusion.evidence_strength_by_analyst
+→ technical
+→ fundamental
+→ commodity_news
+
+state["signal_collection_contract"].evidence_fusion.evidence_freshness_by_analyst
+→ technical
+→ fundamental
+→ commodity_news
 
 state["signal_collection_contract"].evidence_fusion.cross_analyst_conflicts[]
 → analyst
@@ -602,6 +721,8 @@ FuturesRecommendation.signal_snapshot.execution_translation
 
 该结构必须保留翻译订单、改写原因、参考动作与手数、执行价格基础、生命周期、方向过滤、执行合约、盘中执行、Phase2订单计划、最终合约来源、Auditor结论、执行阻断、最终执行依据和市场规则阻断。该结构只解释执行翻译，不得成为第二套交易权限或第二张合约。
 
+Trader必须从已审计 `final_action_contract` 及其中保留的SCC引用读取执行所需字段。禁止继续依赖旧的 `signal_snapshot.technical/fundamental/commodity_news` 路径补造 `signal_lifecycle`；无法从正式合约取得的生命周期字段不得以空对象冒充完整执行事实。
+
 ##### 3.2.8 Trader追加：execution_result完整结构
 
 Trader执行链必须把最终执行结果写入：
@@ -611,6 +732,8 @@ FuturesRecommendation.signal_snapshot.execution_result
 ```
 
 该结构必须保留结果、状态、成交数量、实际成交、实际动作、实际手数、不交易原因及分类、执行学习轨迹、警告和一致性诊断。成交与未成交都必须形成明确结果，禁止只更新顶层状态而遗漏执行事实。
+
+Trader写入执行审计时必须保留Auditor已生成的完整审计事实，并在同一 `audit_payload` 中增加执行审计字段。禁止用仅含 `independent_auditor` 摘要的执行payload覆盖并丢失原始Auditor payload。
 
 ##### 3.2.9 换约链生成与Trader执行：rollover_policy完整结构
 
@@ -673,33 +796,11 @@ Reviewer和Researcher读取的是保存后的完整 `FuturesRecommendation`，�
 
 Reviewer和Researcher不得向 `FuturesRecommendation` 追加复盘、归因、研究或学习字段，不得修改历史SCC、`final_action_contract`、审计结论和执行结果。Reviewer负责复盘和事实归因；Researcher基于完整物理事实链生成未来学习记录。
 
-##### 3.2.13 第二层字段完整目录
+##### 3.2.13 按生产者划分：对象字段完整目录
+
+本节是3.2.2至3.2.10各生产者职责的字段目录，不是独立载体，也不允许形成第二套同名结构。
 
 ```text
-signal_collection_contract（策略路径）
-→ contract_version
-→ source_agent
-→ ticker
-→ trading_date
-→ source_contracts
-→ evidence_items
-→ dominant_side
-→ side_consensus
-→ trigger_status
-→ supporting_analysts
-→ opposing_analysts
-→ neutral_analysts
-→ evidence_strength
-→ evidence_conflict_level
-→ confirmation_requirements
-→ missing_evidence
-→ data_quality_flags
-→ setup_types
-→ horizon_scope
-→ invalidation_summary
-→ evidence_fusion
-→ collector_decision_boundary
-
 final_action_contract（策略路径）
 → contract_version
 → ticker
@@ -869,59 +970,12 @@ audit_payload（强制风控生成时）
 → strategy_learning_boundary
 ```
 
-##### 3.2.14 第三层字段完整目录
+##### 3.2.14 按生产者划分：嵌套字段完整目录
+
+以下嵌套字段继续归属于3.2.2至3.2.10中标明的生产者。对象列表统一使用 `[]` 表示单条记录结构；不得把列表记录字段误写为父对象顶层字段。
 
 ```text
-source_contracts（signal_collection_contract）
-→ analyst
-→ action_evidence_contract
-→ product_profile_evidence
-→ fusion_evidence
-→ signal_record_id
-
-evidence_items（signal_collection_contract）
-→ analyst
-→ side
-→ confidence
-→ signal
-→ opportunity_state
-→ trigger_valid
-→ current_trigger_confirmed
-→ trigger_status
-→ entry_trigger
-→ setup_type
-→ setup_quality_ok
-→ horizon_class
-→ market_regime
-→ evidence_quality
-→ current_evidence_conflict
-→ missing_evidence
-→ fusion_evidence
-→ evidence_strength
-→ evidence_freshness
-→ confirmation_requirements
-→ product_profile_id
-→ product_profile_used
-→ product_profile_analysis_boundary
-
-invalidation_summary（signal_collection_contract）
-→ analyst
-→ condition
-→ level
-
-evidence_fusion（signal_collection_contract）
-→ contract_version
-→ evidence_strength_by_analyst
-→ evidence_freshness_by_analyst
-→ evidence_alignment_state
-→ direction_alignment
-→ cross_analyst_conflicts
-→ dominant_opposing_evidence
-→ confirmation_requirements
-→ missing_evidence
-→ multi_evidence_consensus_score
-→ fusion_boundary
-
+【PM Step6：final_action_contract嵌套结构】
 recommendation_intent（final_action_contract）
 → mode
 → action
@@ -937,7 +991,7 @@ recommendation_intent（final_action_contract）
 → follow_up_action
 → follow_up_lots
 
-action_candidates（final_action_contract）
+action_candidates[]（final_action_contract）
 → action
 → source
 → status
@@ -995,6 +1049,233 @@ evidence_used（final_action_contract）
 → rank_is_capital_priority
 → rank_is_not_trade_authority
 
+opportunity_score_components（evidence_used）
+→ directional_support
+→ tradeable_state
+→ business_quality
+→ setup_quality
+→ confidence
+→ market_confirmation
+→ positive_learning
+→ negative_learning
+→ execution_profile_learning
+→ recent_tail_loss_penalty
+→ entry_quality_loss_penalty
+→ trigger_quality_positive_bonus
+→ trigger_quality_loss_penalty
+→ fusion_consensus
+→ fusion_score_adjustment
+
+analyst_direction_evidence（evidence_used）
+→ side
+→ source
+→ boundary
+→ supporting_signal_count
+→ supporting_analysts
+→ candidate_quality
+→ candidate_layer_hint
+→ opportunity_score
+
+direction_evidence_components（evidence_used）
+→ opportunity_score
+→ candidate_quality
+→ supporting_signal_count
+→ supporting_analysts
+→ setup_quality
+→ trigger_valid
+→ invalidation_present
+→ conflict_count
+
+pm_fusion_diagnostics（evidence_used）
+→ contract_version
+→ pm_fusion_diagnostics
+→ evidence_alignment_state
+→ multi_evidence_consensus_score
+→ cross_analyst_conflict_count
+→ dominant_opposing_evidence_count
+→ missing_evidence_count
+→ confirmation_requirement_count
+→ fusion_score_adjustment
+→ requires_pm_conflict_resolution
+→ requires_pm_confirmation_explanation
+→ no_trade_authority
+
+pm_conflict_resolution（evidence_used）
+→ handled
+→ resolution_effect
+→ confirmation_requirements_addressed
+→ no_trade_authority
+
+rank_capital_priority_release_detail（evidence_used）
+→ decision
+→ rank_is_capital_priority
+→ opportunity_rank
+→ capital_priority_score
+→ capital_priority_tier
+→ min_capital_priority_score
+→ min_capital_priority_tier
+→ scorecard_state
+→ open_action_evidence
+→ strong_current_evidence
+→ has_invalidation_or_stop
+→ technical_opposes_side
+→ boundary
+
+position_sizing_result（evidence_used）
+→ tool
+→ ticker
+→ current_lots
+→ target_lots
+→ lots_delta
+→ lots_delta_abs
+→ target_position_ratio
+→ target_value
+→ margin_required
+→ account_equity
+→ target_margin_ratio_estimate
+→ margin_rate
+→ current_net_exposure
+→ projected_net_exposure
+→ current_ticker_exposure
+→ max_position_ratio
+→ max_net_exposure
+→ risk_level
+→ lots_to_trade_reason
+→ control_reasons
+→ capital_allocation_reason
+→ no_final_action_authority
+→ no_direction_override_authority
+→ no_llm
+
+lifecycle_learning_trace（evidence_used）
+→ trace_version
+→ contract_lifecycle_port
+→ pm_lifecycle_action_port
+→ router_source
+→ rank_lifecycle
+→ allowed_learning_lanes
+→ accepted_learning_lanes
+→ blocked_learning_lanes
+→ trigger_profile_learning_lanes
+→ used_lanes
+→ ignored_lanes
+→ positive_count
+→ negative_count
+→ exact_real_count
+→ episode_count
+→ decision_learning_rows
+→ trigger_profile_learning
+→ trigger_profile_learning_rows
+→ trigger_profile_indices
+→ rejected_learning
+→ rejected_learning_lanes
+→ pm_lifecycle_learning_router
+→ execution_profile_learning_direct_to_rank
+→ trigger_profile_learning_direct_to_rank
+→ execution_profile_signal_direct_to_rank
+→ memory_requirement_status
+→ memory_requirements
+→ hold_learning_decision
+→ reduce_exit_learning_decision
+→ open_add_learning_decision
+→ conditional_monitor_learning_decision
+→ execution_profile_learning_decision
+→ final_contract_effect_fields
+→ strongest_positive
+→ strongest_negative
+→ pm_final_contract_lifecycle_trace
+
+decision_learning_rows[]（lifecycle_learning_trace）
+→ source_index
+→ id
+→ ticker
+→ side
+→ canonical_action_family
+→ lane
+→ action_preference
+→ reward_mean
+→ sample_count
+
+trigger_profile_learning_rows[]（lifecycle_learning_trace）
+→ source_index
+→ id
+→ ticker
+→ side
+→ canonical_action_family
+→ lane
+→ action_preference
+→ reward_mean
+→ sample_count
+→ route
+→ not_rank_learning
+
+rejected_learning[]（lifecycle_learning_trace）
+→ source_index
+→ id
+→ ticker
+→ side
+→ canonical_action_family
+→ lane
+→ action_preference
+→ reward_mean
+→ sample_count
+→ reason
+→ errors
+
+learning_impact_delta（evidence_used）
+→ trace_version
+→ current_lots
+→ target_lots
+→ lots_delta
+→ pre_learning_position_ratio
+→ final_target_position_ratio
+→ position_ratio_delta
+→ open_add_rank_score_delta
+→ alpha_setup_multiplier
+→ alpha_setup_expectancy_lane
+→ hold_decision
+→ hold_changes_position
+→ reduce_exit_decision
+→ reduce_exit_changes_position
+→ conditional_monitor_decision
+→ execution_profile_changed
+→ positive_learning
+→ negative_learning
+→ entry_quality_loss_penalty
+→ trigger_quality_positive_bonus
+→ trigger_quality_loss_penalty
+→ net_rank_learning_delta
+→ rank_score
+→ rank_score_open_add_learning_delta
+→ execution_profile_learning_direct_to_rank
+→ execution_profile_learning_observed
+
+rank_input_components（evidence_used）
+→ final_state
+→ capital_priority_tier
+→ rank_score
+→ rank_score_components
+→ capital_priority_score
+→ watch_priority_score
+→ opportunity_score
+→ cold_start_evidence_quality
+→ setup_quality_score
+→ trigger_quality_score
+→ positive_learning
+→ negative_learning
+→ entry_quality_loss_penalty
+→ trigger_quality_positive_bonus
+→ trigger_quality_loss_penalty
+
+rank_score_components（rank_input_components）
+→ cold_start_evidence_quality
+→ capital_layer_priority
+→ open_add_action_value_delta
+→ product_setup_trigger_history
+→ trigger_execution_quality
+→ capital_efficiency
+→ conflict_risk_invalidation_penalty
+
 learning_used（final_action_contract）
 → alpha_setup_action_values
 → memory_requirements
@@ -1012,6 +1293,552 @@ learning_used（final_action_contract）
 → learning_to_position_summary
 → pm_landing_consistency_audit
 
+alpha_setup_action_values[]（learning_used）
+→ id
+→ action_value_id
+→ scope_key
+→ ticker
+→ side
+→ setup_type
+→ action_name
+→ canonical_action_family
+→ learning_lane
+→ action_value_lane
+→ action_preference
+→ memory_side_role
+→ reward_mean
+→ reward_sum
+→ win_rate
+→ sample_count
+→ last_sample_date
+→ retrieval_match_level
+
+memory_requirements（learning_used）
+→ contract
+→ action_lifecycle
+→ action
+→ current_position_side
+→ target_side
+→ contract_side_role
+→ required_memory_lanes
+→ required_memory_side_roles
+→ required_pm_memory
+→ must_land_in_pm_contract
+→ audit_only_memory
+
+required_pm_memory[]（memory_requirements）
+→ lane
+→ learning_lane
+→ action_value_lane
+→ side
+→ memory_side_role
+→ must_land_in_pm_contract
+→ reason
+
+memory_retrieval（learning_used）
+→ tool
+→ boundary
+→ memory_requirements
+→ status
+→ reason
+→ requirement_details
+→ alpha_setup_action_value_count_after_lifecycle
+→ rejected_action_values
+→ rejected_or_downgraded
+→ primary_lifecycle_action_port
+→ pm_lifecycle_learning_router
+
+alpha_setup_ev_fusion（learning_used）
+→ enabled
+→ decision
+→ target_side
+→ intended_action
+→ selected_profile
+→ selected_action_value
+→ profile_count
+→ action_value_count
+→ matched_action_value_count
+→ ignored_action_value_count
+→ scorecard_state
+→ side_priority
+→ ticker_side_priority
+→ side_priority_score
+→ candidate_quality
+→ candidate_layer_hint
+→ side_priority_semantics_version
+→ side_priority_is_not_capital_rank
+→ scorecard_gating_failures
+→ current_confirmation_score
+→ has_tradeable_support
+→ has_monitorable_setup
+→ setup_quality_ok
+→ has_invalidation_or_stop
+→ expectancy_lane
+→ positive_action_value
+→ positive_action_value_candidate
+→ candidate_positive_action_preference
+→ negative_action_value
+→ positive_profile
+→ positive_profile_raw
+→ negative_profile
+→ open_action_value_missing
+→ qualified_positive_expectancy
+→ repeat_loss_without_new_evidence
+→ tail_loss_blocks_real_amplification
+→ strong_realtime_evidence
+→ strong_market_confirmation
+→ technical_supports_side
+→ technical_direction_supports_side
+→ technical_entry_timing_supports_side
+→ technical_opposes_side
+→ fundamental_supports_side
+→ news_supports_side
+→ independent_support_count
+→ profile_stats
+→ action_value_stats
+→ multiplier
+→ max_profile_impact
+→ gate_failures
+→ pre_control_ratio
+→ final_ratio
+→ not_product_blacklist
+→ same_scope_required
+→ candidate_prior_only
+→ money_objective
+
+profile_stats（alpha_setup_ev_fusion）
+→ sample_count
+→ win_rate
+→ profit_factor
+→ net_pnl
+
+selected_profile（alpha_setup_ev_fusion）
+→ scope_key
+→ ticker
+→ side
+→ horizon_class
+→ market_regime
+→ setup_type
+→ data_combo
+→ lifecycle_state
+→ profile_state_hint
+→ profile_state_hint_boundary
+→ sample_count
+→ trade_count
+→ win_rate
+→ profit_factor
+→ net_pnl
+→ confidence_score
+→ max_position_impact
+→ valid_until
+→ product_learning_calibration_view
+
+product_learning_calibration_view（selected_profile）
+→ contract_version
+→ source_contract_version
+→ performance_scope_key
+→ ticker
+→ side
+→ horizon_class
+→ market_regime
+→ setup_type
+→ action_name
+→ trigger_key
+→ evidence_combo
+→ opportunity_state
+→ deployment_tier
+→ historical_pm_rank
+→ historical_pm_score
+→ historical_selected_for_capital_deployment
+→ historical_net_pnl
+→ outcome_label
+→ reward_source
+→ not_trade_authority
+→ future_only
+→ analyst_usage_boundary
+
+selected_action_value（alpha_setup_ev_fusion / positive_open_seed / execution_action_value_preference）
+→ id
+→ scope_key
+→ ticker
+→ side
+→ horizon_class
+→ market_regime
+→ setup_type
+→ action_name
+→ sample_count
+→ reward_sum
+→ reward_mean
+→ win_rate
+→ confidence_score
+→ action_preference
+→ canonical_action_preference_source
+→ max_position_impact
+→ last_sample_date
+→ valid_until
+→ source
+→ reward_source
+→ consumer_scope
+→ canonical_action_family
+→ learning_lane
+→ memory_side_role
+→ memory_requirement_reason
+→ retrieval_key
+→ fallback_retrieval_key
+→ execution_retrieval_key
+→ retrieval_match_level
+→ retrieval_match_reason
+→ strict_no_lookahead
+→ evidence_scope
+→ amplification_scope_quality
+→ action_value_lane
+→ exact_state_real_trade_sample_count
+→ partial_state_real_trade_sample_count
+→ similar_real_trade_sample_count
+→ exact_ticker_sample_count
+→ exact_ticker_real_trade_sample_count
+→ real_trade_reward_count
+→ counterfactual_prior_only
+→ counterfactual_reward_count
+→ loss_reward_count
+→ tail_loss_count
+→ worst_reward
+→ canonical_action_value
+→ canonical_action_value_source
+
+action_value_stats（alpha_setup_ev_fusion）
+→ action_name
+→ sample_count
+→ reward_mean
+→ reward_sum
+→ win_rate
+→ confidence_score
+→ action_preference
+→ canonical_action_preference_source
+→ exact_ticker_support
+→ scope_quality
+→ real_amplification_support
+→ loss_reward_count
+→ tail_loss_count
+→ worst_reward
+
+capital_utilization_learning（learning_used）
+→ protected_memory
+→ recovering_memory
+→ learned_demote_record
+→ adaptive_protect
+→ adaptive_protect_record
+→ learned_underperformance_block
+→ protected_evidence_rejected
+→ conflicting_weak_memory
+
+capital_utilization_target（learning_used）
+→ target_mode
+→ high_quality_memory
+→ current_margin_ratio
+→ target_margin_ratio_min
+→ target_margin_ratio_max
+→ target_margin_ratio_confirmed
+→ base_max_position_ratio
+→ effective_max_position_ratio
+→ effective_single_margin_ratio_cap
+→ dynamic_opportunity_margin_ratio_budget
+→ dynamic_opportunity_margin_ratio_cap
+→ dynamic_allocation_tier
+→ dynamic_budget_diagnostics
+→ alpha_release_tier
+→ alpha_release
+→ stop_protected
+→ structured_invalidation
+→ base_position_anchor_lifted
+→ single_position_cap_lifted
+→ opportunity_margin_cap_limited
+→ underutilization_breach
+→ capital_allocation_tier
+→ margin_ratio_gap_to_min
+
+requirement_details[]（memory_retrieval）
+→ side
+→ lane
+→ memory_side_role
+→ row_count
+→ error
+→ effective_memory_summary
+→ retrieval_attempts
+→ rejected_or_downgraded
+
+rejected_action_values[]（memory_retrieval）
+→ id
+→ scope_key
+→ ticker
+→ side
+→ setup_type
+→ action_name
+→ learning_lane
+→ memory_side_role
+→ reason
+
+positive_open_seed（learning_used）
+→ enabled
+→ decision
+→ target_side
+→ seed_position_ratio
+→ selected_action_value
+→ current_evidence
+→ not_product_rule
+→ does_not_bypass_final_contract_authority
+
+current_evidence（positive_open_seed）
+→ scorecard_state
+→ strong_realtime_evidence
+→ strong_market_confirmation
+→ technical_entry_timing_supports_side
+→ technical_opposes_side
+→ has_tradeable_support
+→ has_invalidation_or_stop
+→ current_confirmation_score
+→ independent_support_count
+
+learning_adjustment_summary（learning_used）
+→ positive_policy_count
+→ negative_policy_count
+→ positive_action_value_count
+→ negative_action_value_count
+→ exact_real_action_value_count
+→ episode_action_value_count
+→ positive_learning_signal
+→ negative_learning_signal
+→ execution_profile_learning_signal
+→ recent_tail_loss_signal
+→ entry_quality_loss_signal
+→ trigger_quality_positive_signal
+→ trigger_quality_loss_signal
+→ net_trigger_quality_loss_signal
+→ strongest_positive_action_value
+→ strongest_negative_action_value
+→ alpha_setup_score_adjustment
+→ best_profile_state
+→ best_profile_scope_key
+→ capped_or_rejected_profile_count
+→ effect
+→ not_trade_authority
+
+pm_lifecycle_learning_router（learning_used）
+→ tool
+→ pm_lifecycle_action_port
+→ accepted_lanes
+→ decision_learning_rows
+→ accepted_learning
+→ accepted_indices
+→ decision_learning_indices
+→ rejected_learning_rows
+→ rejected_learning
+→ rejected_indices
+→ trigger_profile_learning_rows
+→ trigger_profile_learning
+→ trigger_profile_indices
+→ execution_profile_learning
+→ execution_profile_indices
+→ not_rank_learning
+→ trigger_profile_learning_direct_to_rank
+→ execution_profile_learning_direct_to_rank
+→ writes_db
+→ writes_contract
+→ no_llm
+
+pm_lifecycle_learning_trace（learning_used）
+→ trace_version
+→ contract_lifecycle_port
+→ pm_lifecycle_action_port
+→ router_source
+→ rank_lifecycle
+→ used_lanes
+→ accepted_learning_lanes
+→ decision_learning_rows
+→ trigger_profile_learning
+→ trigger_profile_learning_rows
+→ trigger_profile_indices
+→ rejected_learning
+→ rejected_learning_lanes
+→ pm_lifecycle_learning_router
+→ blocked_learning_lanes
+→ execution_profile_learning_direct_to_rank
+→ trigger_profile_learning_direct_to_rank
+→ memory_requirement_status
+→ memory_requirements
+→ hold_learning_decision
+→ reduce_exit_learning_decision
+→ open_add_learning_decision
+→ conditional_monitor_learning_decision
+→ execution_profile_learning_decision
+→ execution_profile_signal_direct_to_rank
+→ final_contract_effect_fields
+
+pm_lifecycle_learning_impact_delta（learning_used）
+→ trace_version
+→ current_lots
+→ target_lots
+→ lots_delta
+→ pre_learning_position_ratio
+→ final_target_position_ratio
+→ position_ratio_delta
+→ open_add_rank_score_delta
+→ alpha_setup_multiplier
+→ alpha_setup_expectancy_lane
+→ hold_decision
+→ hold_changes_position
+→ reduce_exit_decision
+→ reduce_exit_changes_position
+→ conditional_monitor_decision
+→ execution_profile_changed
+→ execution_profile_learning_direct_to_rank
+
+learning_to_position_summary（learning_used）
+→ trace_version
+→ learning_context
+→ learning_source_summary
+→ position_effect
+→ opportunity_to_position
+→ current_day_validation
+→ holding_lifecycle
+→ artifact_boundary
+
+learning_context（learning_to_position_summary）
+→ enabled
+→ selected_digest_count
+→ candidate_hypothesis_count
+→ validated_hypothesis_count
+→ candidate_hypothesis_authority
+
+learning_source_summary（learning_to_position_summary）
+→ adaptive_policy_summary
+→ alpha_setup_profile_summary
+→ action_value_summary
+→ strategy_memory_summary
+
+adaptive_policy_summary（learning_source_summary）
+→ policy_count
+→ policy_type_counts
+→ scope
+→ status
+
+alpha_setup_profile_summary（learning_source_summary）
+→ profile_count
+→ lifecycle_counts
+→ status
+
+action_value_summary（learning_source_summary）
+→ action_value_count
+→ canonical_action_value_count
+→ incomplete_trace_action_value_count
+→ action_preference_counts
+→ status
+
+strategy_memory_summary（learning_source_summary）
+→ status
+→ raw_object_omitted
+
+position_effect（learning_to_position_summary）
+→ current_lots
+→ target_lots
+→ lots_delta
+→ pre_control_position_ratio
+→ final_target_position_ratio
+→ action
+→ action_lots
+→ reason
+→ control_reasons
+
+opportunity_to_position（learning_to_position_summary）
+→ target_side
+→ scorecard_preferred_side
+→ mature_alpha_policy_count
+→ fast_candidate_alpha_count
+→ high_quality_opportunity_present
+→ high_quality_opportunity_executed_or_targeted
+→ if_not_targeted_requires_accountability
+
+current_day_validation（learning_to_position_summary）
+→ market_confirmation_score
+→ has_structured_invalidation
+→ has_explicit_stop_protection
+→ requires_today_signal_market_state_and_invalidation
+
+holding_lifecycle（learning_to_position_summary）
+→ decision
+→ lifecycle_classification
+→ holding_days
+→ current_side
+→ target_side
+→ loss_revalidation_due
+→ loss_revalidation_failed
+→ market_confirmation_score
+
+artifact_boundary（learning_to_position_summary）
+→ summary_only
+→ research_fact_objects_omitted
+
+pm_landing_consistency_audit（learning_used）
+→ version
+→ ticker
+→ decision
+→ opportunity_scorecard_alignment
+→ analyst_setup_alignment
+→ learning_alignment
+→ pm_risk_gate_alignment
+→ trader_pre_execution_feasibility
+→ consistency_flags
+→ consistent_enough_for_phase1
+→ not_product_rule
+→ no_future_data
+
+decision（pm_landing_consistency_audit）
+→ current_lots
+→ target_lots
+→ lots_delta
+→ current_position_ratio
+→ final_position_ratio
+→ recommendation_action
+→ action_type
+→ lots_to_trade
+→ lots_to_trade_reason
+→ control_reasons
+
+opportunity_scorecard_alignment（pm_landing_consistency_audit）
+→ preferred_side
+→ target_side
+→ side_final_state
+→ side_score
+→ opportunity_score
+→ opportunity_score_components
+→ side_priority
+→ ticker_side_priority
+→ capital_allocation_reason
+→ learning_adjustment_summary
+→ gating_failures
+→ entry_setup_count
+→ invalidation_count
+
+learning_alignment（pm_landing_consistency_audit）
+→ learning_enabled
+→ selected_digest_ids
+→ candidate_hypothesis_count
+→ validated_hypothesis_count
+→ policy_count
+→ policy_types
+→ alpha_setup_profile_count
+→ alpha_setup_lifecycle_counts
+→ alpha_setup_action_value_count
+→ alpha_setup_action_preference_counts
+→ money_decision_trace_required
+
+trader_pre_execution_feasibility（pm_landing_consistency_audit）
+→ margin_required
+→ margin_available
+→ margin_feasible
+→ market_confirmation_score
+→ actual_trader_result_pending_phase2
+
 execution_action_value_preference（final_action_contract）
 → enabled
 → source
@@ -1028,6 +1855,18 @@ analyst_execution_roles（final_action_contract）
 → technical
 → fundamental
 → commodity_news
+
+analyst_execution_roles.technical（final_action_contract）
+→ action_evidence_contract
+→ learning_scope
+
+analyst_execution_roles.fundamental（final_action_contract）
+→ action_evidence_contract
+→ learning_scope
+
+analyst_execution_roles.commodity_news（final_action_contract）
+→ action_evidence_contract
+→ learning_scope
 
 capital_deployment（final_action_contract）
 → selected_for_capital_deployment
@@ -1106,6 +1945,7 @@ pm_contract_self_check（pm_six_step_trace）
 → writes_artifact
 → writes_payload
 
+【Trader：phase2_execution嵌套结构】
 execution_contract（phase2_execution）
 → execution_profile
 → trigger_source
@@ -1141,6 +1981,48 @@ intraday_selection（phase2_execution）
 → missed_opportunity_flag
 → learning_writeback_contract
 
+price_chase_check（intraday_selection）
+→ checked
+→ passed
+→ reason
+→ gap_ratio
+→ threshold
+
+features（intraday_selection）
+→ error
+→ underlying_code
+→ contract_code
+→ action
+→ execution_mode
+→ execution_profile
+→ execution_contract
+→ signal_close
+→ vwap
+→ opening_range
+→ signal_bars
+→ eligible_signal_bars
+→ execution_bars
+→ min_execution_volume
+→ latest_execution_bar
+→ finalize_untriggered
+→ trigger_rule
+→ chase_check
+
+opening_range（features）
+→ high
+→ low
+→ minutes
+→ start
+→ complete_at
+→ complete
+→ bars
+
+chase_check（features）
+→ passed
+→ reason
+→ gap_ratio
+→ threshold
+
 setup_execution_learning（phase2_execution）
 → consumer_scope
 → learning_lane
@@ -1157,6 +2039,57 @@ setup_execution_learning（phase2_execution）
 → no_trade_reason
 → intraday_selection
 → reason_family
+
+final_contract_execution_fields（setup_execution_learning）
+→ contract_version
+→ contract_type
+→ ticker
+→ underlying_code
+→ contract_code
+→ final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+→ entry_trigger
+→ invalidation
+→ invalidation_condition
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+→ execution_profile
+→ execution_requirement
+→ trigger_source
+→ authority_type
+→ authority_decision
+→ reason_codes
+→ single_source_of_trade_truth
+→ candidate_sources_do_not_bypass_contract
+
+analyst_action_evidence_contracts（setup_execution_learning）
+→ technical
+→ fundamental
+→ commodity_news
+
+analyst_learning_scopes（setup_execution_learning）
+→ technical
+→ fundamental
+→ commodity_news
+
+execution_contract_summary（setup_execution_learning）
+→ profile
+→ trigger_source
+→ entry_trigger
+→ invalidation
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+→ authority_type
+
+learning_boundary（setup_execution_learning）
+→ consumer_scope
+→ trader_executes_only
+→ execution_feedback_future_only
+→ not_strategy_creation
+→ learning_source
+→ no_full_final_action_contract_mirror
 
 pm_plan_validation（phase2_execution）
 → passed
@@ -1177,6 +2110,46 @@ pm_plan_validation（phase2_execution）
 → contract_authority_audit
 → authority_consistency
 → business_boundary
+
+contract_authority_audit（pm_plan_validation）
+→ authority_type
+→ authority_decision
+→ max_allowed_margin_ratio
+→ reason_codes
+→ open_action_evidence
+→ strong_current_evidence
+→ watch_for_trigger_block
+→ conditional_trigger_authority
+→ requires_intraday_confirmation
+
+authority_consistency（pm_plan_validation）
+→ passed
+→ reason
+→ selected_authority
+→ sources
+→ business_boundary
+
+selected_authority（authority_consistency）
+→ authority_type
+→ authority_decision
+→ requires_authority
+→ open_action_evidence
+→ strong_current_evidence
+→ watch_for_trigger_block
+→ conditional_trigger_authority
+→ negative_profile
+→ tradeable_state
+→ weak_conflict_probe
+→ max_allowed_margin_ratio
+→ reason_codes
+
+sources[]（authority_consistency）
+→ source
+→ authority_type
+→ authority_decision
+→ open_action_evidence
+→ strong_current_evidence
+→ max_allowed_margin_ratio
 
 contract_execution_observation（phase2_execution）
 → signal_invalidation_observed
@@ -1214,7 +2187,8 @@ execution_simulation（phase2_execution）
 → prev_close_price
 → warning_message
 
-translated_orders（execution_translation）
+【Trader：execution_translation嵌套结构】
+translated_orders[]（execution_translation）
 → stage
 → action
 → lots
@@ -1232,6 +2206,7 @@ signal_lifecycle（execution_translation）
 → atr_stop_distance
 → setup_type
 → business_quality_score
+→ target_price
 
 signal_lifecycle_direction_filter（execution_translation）
 → target_side
@@ -1268,6 +2243,13 @@ intraday_execution（execution_translation）
 → execution_failure_reason
 → missed_opportunity_flag
 → learning_writeback_contract
+
+price_chase_check（intraday_execution）
+→ checked
+→ passed
+→ reason
+→ gap_ratio
+→ threshold
 
 phase2_order_plan（execution_translation）
 → current_lots
@@ -1319,11 +2301,49 @@ final_execution_basis（execution_translation）
 → execution_learning_fields
 → signal_lifecycle
 
+execution_learning_fields（final_execution_basis）
+→ trigger_checked
+→ trigger_passed
+→ price_chase_check
+→ execution_failure_reason
+→ missed_opportunity_flag
+
 market_rule_block（execution_translation）
 → limit_lock
 → contract_expiry_guard
 
-actual_transactions（execution_result）
+limit_lock（market_rule_block）
+→ status
+→ limit_up
+→ limit_down
+→ trade_date
+→ ticker
+→ enabled
+→ action
+→ execution_price
+→ tolerance_ticks
+→ minimum_tick
+→ blocked
+→ reason
+→ side
+→ limit_price
+
+contract_expiry_guard（market_rule_block）
+→ enabled
+→ action
+→ contract_code
+→ trading_date
+→ source_type
+→ blocked
+→ reason
+→ status
+→ last_trade_date
+→ days_to_last_trade
+→ delivery_month
+→ days_to_delivery_month
+
+【Trader：execution_result嵌套结构】
+actual_transactions[]（execution_result）
 → action
 → lots
 → contract_code
@@ -1360,6 +2380,7 @@ consistency_diagnostics（execution_result）
 → actual_lots
 → no_trade_reason
 
+【Auditor：策略审计audit_payload嵌套结构】
 source（audit_payload策略审计后）
 → pm_recommendation_id
 → final_action_contract_hash_source
@@ -1412,6 +2433,7 @@ pm_fusion_explanation_audit（audit_payload策略审计后）
 → pm_conflict_resolution
 → auditor_boundary
 
+【Trader：执行后audit_payload嵌套结构】
 trade_contract_audit（audit_payload执行后）
 → audit_boundary
 → single_source_of_trade_truth
