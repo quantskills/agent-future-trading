@@ -507,11 +507,11 @@ state["signal_collection_contract"].source_contracts[]
 → analyst
 → signal_record_id
 → action_evidence_contract
-→ product_profile_evidence
-→ fusion_evidence
 ```
 
-每个启用分析师对应一条来源记录。`action_evidence_contract` 必须是该分析师第1.2节正式契约的完整保真副本；来源层 `product_profile_evidence` 和 `fusion_evidence` 必须分别与该契约内同名对象一致，不得形成第二套证据。
+每个启用分析师对应一条来源记录。`action_evidence_contract` 必须是该分析师第1.2节正式契约的完整保真副本。`product_profile_evidence` 和分析师单体 `fusion_evidence` 只保存在该AEC内，禁止在 `source_contracts[]` 同级复制第二份。
+
+`signal_record_id` 的唯一合法生产者是workflow 编排层的分析师signal保存入口。正常路径和数据不可用路径都必须先形成signal SQL来源记录，Signal Collector才允许将其ID写入SCC；Signal Collector不得自创ID或以空ID冒充已完成物理追溯。
 
 ##### 2.2.3 Signal Collector生成：evidence_items完整结构
 
@@ -533,7 +533,6 @@ state["signal_collection_contract"].evidence_items[]
 → evidence_quality
 → current_evidence_conflict
 → missing_evidence
-→ fusion_evidence
 → evidence_strength
 → evidence_freshness
 → confirmation_requirements
@@ -586,7 +585,7 @@ state["signal_collection_contract"].evidence_fusion.dominant_opposing_evidence[]
 → conflicts
 ```
 
-Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
+Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。`data_quality_flags` 必须由Signal Collector从AEC内真实 `data_usage_summary.sources.*` 的可用性、时效、缺失和可交易支持事实汇总，不得读取不存在的顶层补偿字段。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
 
 ### 3. `FuturesRecommendation`
 
@@ -674,9 +673,23 @@ FuturesRecommendation.signal_snapshot
 
 ##### 3.2.3 PM Step6生成：final_action_contract完整结构
 
-PM Step6必须生成唯一 `FuturesRecommendation.signal_snapshot.final_action_contract`。该合约必须完整承载最终动作、当前手数、目标手数、手数变化、交易权限、证据、学习、风险标记、执行要求、资金部署、position sizing、SCC引用和最终一致性事实。
+PM Step6必须生成唯一 `FuturesRecommendation.signal_snapshot.final_action_contract`。该合约必须完整承载最终动作、当前手数、目标手数、手数变化、交易权限、证据、学习、原因与风险边界、执行要求、资金部署、position sizing、SCC引用和最终一致性事实。
 
-本节对应下方字段目录中的 `final_action_contract（策略路径）`，以及其 `recommendation_intent`、`action_candidates`、`evidence_used`、`learning_used`、`execution_action_value_preference`、`analyst_execution_roles`、`capital_deployment`、`consistency` 和 `signal_collection_contract_ref` 全部嵌套字段。任何一项均不得因后续梳理Auditor、Trader、Reviewer或Researcher而被遗漏、改名或移出唯一合约。
+本节对应下方字段目录中的 `final_action_contract（策略路径）`。完整AEC的唯一追溯落点是 `signal_snapshot.signal_collection_contract.source_contracts[].action_evidence_contract`；禁止在 `final_action_contract` 复制第二份AEC。候选动作、推荐意图和PM Step1–5中间状态不是必传事实，不得进入唯一合约。rank及资金部署详细的唯一落点是 `capital_deployment`；`evidence_used` 只保留非重复的PM证据使用摘要与 `position_sizing_result`。
+
+以下七项是已审计确认的上游必传最终事实，字段名复用现有统一语义，不新建别名：
+
+| 唯一落点 | 合法生产者 | 固定选择规则 | 合法消费者 |
+|---|---|---|---|
+| `final_action_contract.contract_code` | PM Step6 | 从PM已读取的合约信息与当前持仓事实中选定，与最终动作绑定 | Auditor、Trader、Reviewer、Researcher |
+| `final_action_contract.setup_type` | 分析师生产原始事实；PM Step6生产最终事实 | PM只从SCC中选择与最终方向、动作及学习作用域一致的setup，不得取第一个分析师或反方向值 | Trader、Reviewer、Researcher |
+| `final_action_contract.horizon_class` | 分析师生产原始事实；PM Step6生产最终事实 | PM只从SCC中选择与最终方向、动作及Step4学习作用域一致的期限类别 | Trader、Reviewer、Researcher |
+| `final_action_contract.expected_horizon_days` | 分析师生产原始事实；PM Step6生产最终事实 | 只从与最终方向和 `horizon_class` 一致的真实AEC期限中选择，缺失时保持缺失 | Trader、Reviewer、Researcher |
+| `final_action_contract.market_regime` | 分析师生产原始事实；PM Step6生产最终事实 | PM只从SCC中选择与最终方向和Step4学习检索作用域一致的市场状态 | Trader、Reviewer、Researcher、下一交易日PM学习 |
+| `final_action_contract.invalidation_level` | 分析师生产原始事实；PM Step6生产最终事实 | 只在AEC存在真实数值且来源方向与最终方向一致时写入；禁止默认值和反方向填充 | Auditor、Trader、Reviewer、Researcher |
+| `final_action_contract.atr_stop_distance` | technical生产原始事实；PM Step6生产最终事实 | 只在technical AEC真实生产且与最终方向及setup一致时写入；禁止默认值 | Trader、Reviewer、Researcher |
+
+`target_return` 当前没有合法上游生产者，不是AEC、SCC或PM合约的必传字段。`target_price` 只能在存在合法输入时由Trader作为运行时派生事实，不得倒灌进上游载体。
 
 ##### 3.2.4 PM Step6生成：pm_six_step_trace完整结构
 
@@ -719,9 +732,9 @@ Trader执行链必须把合约到订单的翻译事实写入：
 FuturesRecommendation.signal_snapshot.execution_translation
 ```
 
-该结构必须保留翻译订单、改写原因、参考动作与手数、执行价格基础、生命周期、方向过滤、执行合约、盘中执行、Phase2订单计划、最终合约来源、Auditor结论、执行阻断、最终执行依据和市场规则阻断。该结构只解释执行翻译，不得成为第二套交易权限或第二张合约。
+该结构必须保留翻译订单、改写原因、参考动作与手数、执行价格基础、PM最终生命周期摘要、执行合约、盘中执行、Phase2订单计划、最终合约来源、Auditor结论、执行阻断、最终执行依据和市场规则阻断。该结构只解释执行翻译，不得从原始AEC再做方向过滤，不得成为第二套交易权限或第二张合约。
 
-Trader必须从已审计 `final_action_contract` 及其中保留的SCC引用读取执行所需字段。禁止继续依赖旧的 `signal_snapshot.technical/fundamental/commodity_news` 路径补造 `signal_lifecycle`；无法从正式合约取得的生命周期字段不得以空对象冒充完整执行事实。
+Trader必须从已审计 `final_action_contract` 读取最终setup、期限、市场状态、触发、数值失效和ATR止损事实；SCC只供追溯，不得成为Trader重新选择方向或执行边界的第二证据入口。禁止继续依赖旧的 `signal_snapshot.technical/fundamental/commodity_news` 路径补造 `signal_lifecycle`；无法从正式合约取得的生命周期字段不得以空对象冒充完整执行事实。`target_price` 仅在Trader存在合法运行时输入时才允许派生；当前无合法 `target_return` 生产者时不得伪造。
 
 ##### 3.2.8 Trader追加：execution_result完整结构
 
@@ -792,7 +805,7 @@ FuturesRecommendation.status
 
 ##### 3.2.12 Reviewer与Researcher只读：完整FuturesRecommendation读取边界
 
-Reviewer和Researcher读取的是保存后的完整 `FuturesRecommendation`，包括PM初始SCC与唯一合约、Auditor审计事实、Trader执行事实、换约或强制风控事实以及顶层最终状态。
+Reviewer和Researcher读取的是保存后的完整 `FuturesRecommendation`，包括PM初始SCC与唯一合约、Auditor审计事实、Trader执行事实、换约或强制风控事实以及顶层最终状态。二者追溯分析师AEC的唯一路径是 `FuturesRecommendation.signal_snapshot.signal_collection_contract.source_contracts[].action_evidence_contract`；禁止读取旧 `signal_snapshot.technical/fundamental/commodity_news` 或 `final_action_contract` 内的AEC副本。
 
 Reviewer和Researcher不得向 `FuturesRecommendation` 追加复盘、归因、研究或学习字段，不得修改历史SCC、`final_action_contract`、审计结论和执行结果。Reviewer负责复盘和事实归因；Researcher基于完整物理事实链生成未来学习记录。
 
@@ -804,6 +817,7 @@ Reviewer和Researcher不得向 `FuturesRecommendation` 追加复盘、归因、�
 final_action_contract（策略路径）
 → contract_version
 → ticker
+→ contract_code
 → final_action
 → current_lots
 → target_lots
@@ -811,6 +825,10 @@ final_action_contract（策略路径）
 → lots_delta_abs
 → target_position_ratio
 → target_margin_ratio_estimate
+→ setup_type
+→ horizon_class
+→ expected_horizon_days
+→ market_regime
 → authority_type
 → authority_decision
 → requires_authority
@@ -823,20 +841,18 @@ final_action_contract（策略路径）
 → weak_conflict_probe
 → max_allowed_margin_ratio
 → reason_codes
-→ recommendation_intent
-→ action_candidates
 → evidence_used
 → learning_used
-→ risk_flags
 → execution_profile
 → trigger_source
 → entry_trigger
 → invalidation
+→ invalidation_level
+→ atr_stop_distance
 → valid_until
 → requires_intraday_confirmation
 → can_execute_without_intraday_trigger
 → execution_action_value_preference
-→ analyst_execution_roles
 → capital_deployment
 → execution_requirement
 → consistency
@@ -894,7 +910,6 @@ execution_translation（执行后）
 → prev_close_price
 → warning_message
 → signal_lifecycle
-→ signal_lifecycle_direction_filter
 → execution_contract
 → intraday_execution
 → phase2_order_plan
@@ -976,35 +991,6 @@ audit_payload（强制风控生成时）
 
 ```text
 【PM Step6：final_action_contract嵌套结构】
-recommendation_intent（final_action_contract）
-→ mode
-→ action
-→ lots
-→ action_type
-→ current_lots
-→ target_lots
-→ lots_delta
-→ position_matched
-→ requires_two_step_reversal
-→ first_leg_action
-→ first_leg_lots
-→ follow_up_action
-→ follow_up_lots
-
-action_candidates[]（final_action_contract）
-→ action
-→ source
-→ status
-→ side
-→ ratio
-→ scorecard_state
-→ requires_intraday_confirmation
-→ reward_mean
-→ decision
-→ pnl_ratio
-→ confirmation_score
-→ classification
-
 evidence_used（final_action_contract）
 → scorecard_preferred_side
 → scorecard_state
@@ -1017,9 +1003,6 @@ evidence_used（final_action_contract）
 → direction_evidence_strength
 → direction_evidence_components
 → direction_evidence_boundary
-→ rank_capital_priority_real_budget_release
-→ rank_capital_priority_release_detail
-→ capital_allocation_reason
 → pm_fusion_diagnostics
 → pm_conflict_resolution
 → market_confirmation_score
@@ -1035,19 +1018,6 @@ evidence_used（final_action_contract）
 → side_priority_is_not_capital_rank
 → side_priority_is_not_trade_authority
 → pm_lifecycle_learning_router
-→ opportunity_rank
-→ rank_source
-→ rank_scope
-→ capital_rank_generated_by
-→ rank_capital_role
-→ capital_layer
-→ capital_ratio_source
-→ rank_reason
-→ rank_input_components
-→ rank_semantics_version
-→ opportunity_rank_meaning
-→ rank_is_capital_priority
-→ rank_is_not_trade_authority
 
 opportunity_score_components（evidence_used）
 → directional_support
@@ -1105,21 +1075,6 @@ pm_conflict_resolution（evidence_used）
 → resolution_effect
 → confirmation_requirements_addressed
 → no_trade_authority
-
-rank_capital_priority_release_detail（evidence_used）
-→ decision
-→ rank_is_capital_priority
-→ opportunity_rank
-→ capital_priority_score
-→ capital_priority_tier
-→ min_capital_priority_score
-→ min_capital_priority_tier
-→ scorecard_state
-→ open_action_evidence
-→ strong_current_evidence
-→ has_invalidation_or_stop
-→ technical_opposes_side
-→ boundary
 
 position_sizing_result（evidence_used）
 → tool
@@ -1851,23 +1806,6 @@ execution_action_value_preference（final_action_contract）
 → does_not_create_trade_authority
 → keeps_pm_authority_boundary
 
-analyst_execution_roles（final_action_contract）
-→ technical
-→ fundamental
-→ commodity_news
-
-analyst_execution_roles.technical（final_action_contract）
-→ action_evidence_contract
-→ learning_scope
-
-analyst_execution_roles.fundamental（final_action_contract）
-→ action_evidence_contract
-→ learning_scope
-
-analyst_execution_roles.commodity_news（final_action_contract）
-→ action_evidence_contract
-→ learning_scope
-
 capital_deployment（final_action_contract）
 → selected_for_capital_deployment
 → capital_allocation_reason
@@ -1884,8 +1822,6 @@ capital_deployment（final_action_contract）
 → rank_scope
 → capital_rank_generated_by
 → rank_input_components
-→ lifecycle_learning_trace
-→ learning_impact_delta
 → rank_semantics_version
 → opportunity_rank_meaning
 → rank_is_capital_priority
@@ -1947,10 +1883,17 @@ pm_contract_self_check（pm_six_step_trace）
 
 【Trader：phase2_execution嵌套结构】
 execution_contract（phase2_execution）
+→ contract_code
+→ setup_type
+→ horizon_class
+→ expected_horizon_days
+→ market_regime
 → execution_profile
 → trigger_source
 → entry_trigger
 → invalidation
+→ invalidation_level
+→ atr_stop_distance
 → valid_until
 → requires_intraday_confirmation
 → can_execute_without_intraday_trigger
@@ -1958,7 +1901,6 @@ execution_contract（phase2_execution）
 → max_allowed_margin_ratio
 → reason_codes
 → execution_action_value_preference
-→ analyst_execution_roles
 
 translated_decision（phase2_execution）
 → action
@@ -2198,28 +2140,25 @@ translated_orders[]（execution_translation）
 signal_lifecycle（execution_translation）
 → horizon_class
 → expected_horizon_days
-→ price_percentile
 → entry_trigger
-→ action_name
 → invalidation_level
-→ target_return
 → atr_stop_distance
 → setup_type
-→ business_quality_score
+→ market_regime
 → target_price
 
-signal_lifecycle_direction_filter（execution_translation）
-→ target_side
-→ selected
-→ ignored_opposing
-→ original_invalidation_level
-→ effective_invalidation_level
-
 execution_contract（execution_translation）
+→ contract_code
+→ setup_type
+→ horizon_class
+→ expected_horizon_days
+→ market_regime
 → execution_profile
 → trigger_source
 → entry_trigger
 → invalidation
+→ invalidation_level
+→ atr_stop_distance
 → valid_until
 → requires_intraday_confirmation
 → can_execute_without_intraday_trigger
@@ -2227,7 +2166,6 @@ execution_contract（execution_translation）
 → max_allowed_margin_ratio
 → reason_codes
 → execution_action_value_preference
-→ analyst_execution_roles
 
 intraday_execution（execution_translation）
 → decision

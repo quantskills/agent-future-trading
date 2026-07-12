@@ -223,7 +223,7 @@
 | `business_quality_score` | 分析师证据 | 业务质量评分。 |
 | `tradeability_reason` | 分析师证据 | 为什么可交易或不可交易。 |
 | `reward_risk_ratio` | 分析师证据 | 预期收益风险比。 |
-| `target_return` | 信号上下文 | 目标收益。 |
+| `target_return` | 未采用的旧读取字段 | 当前分析师、AEC、SCC和PM均无合法生产者，不得作为上游必传事实或由Trader伪造。 |
 | `factor_focus` | 分析师证据 | 主要因子关注点。 |
 | `current_evidence_conflict` | 分析师证据 | 当前冲突证据。 |
 | `missing_evidence` | 分析师证据 | 缺失证据。 |
@@ -258,7 +258,7 @@
 |---|---|---|
 | `signal_collection_contract` | `signal_collector` 输出 / PM 输入 | 信号收集员给投资组合经理的盘前统一结构化预测证据包；不是交易合约，不能包含手数、仓位比例或最终交易动作。 |
 | `source_contracts` | `signal_collection_contract` | 被收集的上游分析师 `action_evidence_contract` 引用列表。 |
-| `signal_record_id` | `signal_collection_contract.source_contracts` | 分析师 `signal` 表记录 ID，仅用于 Reviewer、Researcher 和 PG 来源追溯，不创建交易权限。 |
+| `signal_record_id` | `signal_collection_contract.source_contracts` | 分析师 `signal` 表记录 ID，唯一合法生产者是workflow 编排层的分析师signal保存入口；正常与数据不可用路径均必须先物理化来源记录。仅用于 Reviewer、Researcher 和 PG 追溯，不创建交易权限。 |
 | `evidence_items` | `signal_collection_contract` | 逐条结构化证据明细，必须保留来源分析师、来源字段和证据含义，不能只写汇总文字。 |
 | `product_profile_id` | `signal_collection_contract.evidence_items` | collector 保真传递的分析师商品 profile 来源 ID；不是交易权限。 |
 | `product_profile_used` | `signal_collection_contract.evidence_items` | collector 保真传递的 profile 使用状态；collector 不解释、不评分。 |
@@ -279,7 +279,7 @@
 | `dominant_opposing_evidence` | `signal_collection_contract.evidence_fusion` | 针对主方向的反向证据摘要；PM 必须解释，Auditor 只审 PM 是否解释。 |
 | `multi_evidence_consensus_score` | `signal_collection_contract.evidence_fusion` / PM scorecard | 多维证据一致性评分；只作为 PM `opportunity_score_components` 分项，不能替代最终合约。 |
 | `evidence_conflict_level` | `signal_collection_contract` | 盘前预测证据冲突程度汇总，来源于 `current_evidence_conflict`、反向证据和分析师分歧。 |
-| `data_quality_flags` | `signal_collection_contract` | 数据新鲜度、缺失、前视风险和质量问题标记。 |
+| `data_quality_flags` | `signal_collection_contract` | Signal Collector从各AEC的 `data_usage_summary.sources.*` 真实可用性、时效、缺失、前视风险和可交易支持事实生成的唯一顶层摘要；不得从不存在的AEC顶层补偿字段读取。 |
 | `setup_types` | `signal_collection_contract` | 从上游分析师证据收集到的 `setup_type` 列表。 |
 | `horizon_scope` | `signal_collection_contract` | 汇总后的证据期限范围，来源于 `horizon_class`、`analyst_horizon` 等字段。 |
 | `invalidation_summary` | `signal_collection_contract` | 从上游证据汇总出的失效边界和失效条件。 |
@@ -342,11 +342,18 @@
 | `target_lots` | `final_action_contract` | 动作后目标手数。 |
 | `lots_delta` | `final_action_contract` | `target_lots - current_lots`。 |
 | `target_position_ratio` | `final_action_contract` | 目标仓位比例。 |
+| `contract_code` | `final_action_contract.contract_code` | PM Step6从已读取的合约信息与当前持仓事实中选定的具体期货合约，将唯一动作与实际执行合约绑定；Auditor、Trader、Reviewer和Researcher只读消费。 |
+| `setup_type` | `final_action_contract.setup_type` | 分析师在AEC生产原始setup；PM Step6只从SCC中选择与最终方向、动作及Step4学习作用域一致的最终setup。Trader、Reviewer和Researcher只读消费，不得重选。 |
+| `horizon_class` | `final_action_contract.horizon_class` | 分析师在AEC生产原始期限类别；PM Step6只从SCC中选择与最终方向、动作及Step4学习作用域一致的最终值。Trader、Reviewer和Researcher只读消费。 |
+| `expected_horizon_days` | `final_action_contract.expected_horizon_days` | 分析师在AEC生产原始天数；PM Step6只从与最终方向和 `horizon_class` 一致的真实AEC中选择，缺失时保持缺失。Trader、Reviewer和Researcher只读消费。 |
+| `market_regime` | `final_action_contract.market_regime` | 分析师在AEC生产原始市场状态；PM Step6只从SCC中选择与最终方向和Step4学习检索作用域一致的最终值。Trader、Reviewer、Researcher和下一交易日PM学习只读消费。 |
+| `invalidation_level` | `final_action_contract.invalidation_level` | 分析师在AEC生产数值失效价位；PM Step6只在真实数值存在且来源方向与最终方向一致时写入，禁止默认值和反方向填充。Auditor、Trader、Reviewer和Researcher只读消费。 |
+| `atr_stop_distance` | `final_action_contract.atr_stop_distance` | technical在AEC生产ATR止损距离；PM Step6只在真实生产且与最终方向及setup一致时写入，禁止默认值。Trader、Reviewer和Researcher只读消费。 |
 | `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
 | `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / PM 学习审计 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
-| `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 抽取的触发/执行配置摘要，不是第二张交易合约。只能包含 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes`、`execution_action_value_preference`、`analyst_execution_roles` 等执行规则字段；不得包含 `target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
+| `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `contract_code`、`setup_type`、`horizon_class`、`expected_horizon_days`、`market_regime`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`atr_stop_distance`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含完整AEC、`analyst_execution_roles`、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
 | `final_contract_execution_fields` | Trader Phase2 执行学习上下文 / 执行摘要 | 从已审计 `final_action_contract` 抽取的执行必要字段摘要，可用于记录执行来源和复盘追溯；不是第二张交易合约，不能携带 PM 学习、排名、资金部署解释。 |
 | `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。已审计通过且仍保留新增风险敞口的条件合约必须先由 Trader 写触发/未触发事实，只有触发后才运行最终下单安全闸。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
@@ -796,7 +803,7 @@
 | 字段路径 | 生产与消费位置 | 固定含义 |
 |---|---|---|
 | `source_contracts[].analyst` / `source_contracts[].signal_record_id` / `source_contracts[].action_evidence_contract` | Signal Collector 来源记录 | 来源分析师、signal SQL 记录 ID 和完整 AEC 保真副本。 |
-| `source_contracts[].product_profile_evidence` / `source_contracts[].fusion_evidence` | Signal Collector 来源记录 | 与来源 AEC 内同名对象一致的 profile 和融合证据引用，不形成第二套解释。 |
+| `source_contracts[].product_profile_evidence` / `source_contracts[].fusion_evidence` | 已确认重复的旧SCC路径 | 与 `source_contracts[].action_evidence_contract` 内同名对象重复，不再是必传结构；待代码同步时删除，不得成为第二证据入口。 |
 | `evidence_items[].analyst` / `evidence_items[].side` / `evidence_items[].confidence` / `evidence_items[].signal` / `evidence_items[].opportunity_state` | SCC 逐条证据 | 单条证据来源、方向、置信度、分析信号和机会状态。 |
 | `evidence_items[].trigger_status` / `evidence_items[].entry_trigger` / `evidence_items[].setup_quality_ok` | SCC 逐条证据 | 单条证据的触发汇总、入场条件和 setup 质量状态。 |
 | `evidence_items[].product_profile_id` / `evidence_items[].product_profile_used` / `evidence_items[].product_profile_analysis_boundary` | SCC 逐条证据 | 来源商品 profile 身份、使用状态和分析边界。 |
@@ -818,12 +825,14 @@
 | `final_action_contract.target_margin_ratio_estimate` | PM 唯一合约 | PM 按最终目标手数估算的目标保证金占权益比例。 |
 | `final_action_contract.authority_decision` / `requires_authority` / `open_action_evidence` / `strong_current_evidence` / `watch_for_trigger_block` / `negative_profile` / `tradeable_state` / `weak_conflict_probe` | PM 唯一合约 | 最终开仓权限判定、当日证据、触发阻断、负面画像和候选质量事实。 |
 | `final_action_contract.max_allowed_margin_ratio` | PM 唯一合约 | PM 权限链允许该合约使用的最大保证金比例；不得高于硬风控。 |
-| `final_action_contract.action_candidates` | PM 唯一合约 | Step6 保存的候选动作解释列表；仅解释最终选择，不绕过唯一合约。 |
-| `action_candidates[].action` / `source` / `status` / `side` / `ratio` / `scorecard_state` | PM 候选动作记录 | 候选动作、来源、应用状态、方向、比例和 scorecard 状态。 |
-| `action_candidates[].requires_intraday_confirmation` / `reward_mean` / `decision` / `pnl_ratio` / `confirmation_score` / `classification` | PM 候选动作记录 | 候选的盘中确认、学习收益、持仓决策、盈亏、确认分和生命周期分类。 |
-| `final_action_contract.recommendation_intent` | PM 唯一合约 | 由最终 `current_lots/target_lots` 唯一推导的推荐动作意图。 |
-| `recommendation_intent.mode` / `action` / `lots` / `action_type` / `current_lots` / `target_lots` / `lots_delta` | PM 推荐意图 | 动作模式、规范动作、交易手数、动作类型及手数变化。 |
-| `recommendation_intent.position_matched` / `requires_two_step_reversal` / `first_leg_action` / `first_leg_lots` / `follow_up_action` / `follow_up_lots` | PM 推荐意图 | 仓位已匹配或反转所需的退出腿和后续开仓腿。 |
+| `final_action_contract.contract_code` | PM Step6生产；Auditor / Trader / Reviewer / Researcher只读 | 从PM已读取的合约信息与当前持仓事实中选定，将唯一动作与具体期货合约绑定。 |
+| `final_action_contract.setup_type` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 与最终方向、动作及Step4学习作用域一致的最终setup；不得取第一个分析师或反方向值。 |
+| `final_action_contract.horizon_class` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 与最终方向、动作及Step4学习作用域一致的最终期限类别。 |
+| `final_action_contract.expected_horizon_days` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 仅从与最终方向和 `horizon_class` 一致的真实AEC中选择；缺失时保持缺失。 |
+| `final_action_contract.market_regime` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher / 下一交易日PM只读 | 与最终方向和Step4学习检索作用域一致的最终市场状态。 |
+| `final_action_contract.invalidation_level` | 分析师AEC生产原始值；PM Step6选择；Auditor / Trader / Reviewer / Researcher只读 | 仅在真实数值存在且来源方向与最终方向一致时写入；禁止默认值和反方向填充。 |
+| `final_action_contract.atr_stop_distance` | technical AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 仅在真实生产且与最终方向及setup一致时写入；禁止默认值。 |
+| `final_action_contract.action_candidates` / `final_action_contract.recommendation_intent` | 已确认重复的PM旧路径 | 分别泄露未签约候选和重复最终动作/手数，不再是必传结构；待代码同步时删除。 |
 | `final_action_contract.evidence_used` | PM 唯一合约 | PM Step6 写入的最终证据、方向、rank、资金部署和 sizing 解释容器。 |
 | `evidence_used.scorecard_preferred_side` / `scorecard_state` / `scorecard_score` | PM 最终证据 | PM scorecard 的首选方向、最终机会状态和分数。 |
 | `evidence_used.direction_evidence_strength` / `direction_evidence_boundary` | PM 最终证据 | 方向证据质量和“只读 SCC、不重建方向证据”的边界。 |
@@ -840,17 +849,12 @@
 | `evidence_used.pm_fusion_diagnostics.cross_analyst_conflict_count` / `dominant_opposing_evidence_count` / `missing_evidence_count` / `confirmation_requirement_count` | PM 融合解释 | 跨分析师冲突、主方向反证、缺失和确认要求计数。 |
 | `evidence_used.pm_fusion_diagnostics.fusion_score_adjustment` / `requires_pm_conflict_resolution` / `requires_pm_confirmation_explanation` / `no_trade_authority` | PM 融合解释 | 融合调整、PM 必须解释的冲突/确认事项及非交易权限声明。 |
 | `evidence_used.pm_conflict_resolution.handled` / `resolution_effect` / `confirmation_requirements_addressed` / `no_trade_authority` | PM 冲突处理解释 | PM 是否处理冲突、处理效果、确认要求是否覆盖及非授权边界。 |
-| `evidence_used.rank_capital_priority_release_detail.decision` / `rank_is_capital_priority` / `opportunity_rank` / `capital_priority_score` / `capital_priority_tier` | PM 真实资金释放解释 | rank 是否支持真实资金释放及其 rank、资金优先分和层级。 |
-| `evidence_used.rank_capital_priority_release_detail.min_capital_priority_score` / `min_capital_priority_tier` / `scorecard_state` | PM 真实资金释放解释 | 真实资金释放要求的最低优先分、最低层级和机会状态。 |
-| `evidence_used.rank_capital_priority_release_detail.open_action_evidence` / `strong_current_evidence` / `has_invalidation_or_stop` / `technical_opposes_side` / `boundary` | PM 真实资金释放解释 | 当前开仓证据、强证据、失效保护、技术反对和权限边界。 |
+| `evidence_used.rank_capital_priority_release_detail` / `evidence_used.opportunity_rank` / `evidence_used.rank_source` / `evidence_used.rank_input_components` | 已确认重复的PM旧路径 | rank、rank来源、输入和资金释放详细的唯一落点是 `final_action_contract.capital_deployment`；`evidence_used` 只保留非重复的证据使用摘要与 `position_sizing_result`。待代码同步时删除这些重复路径。 |
 | `evidence_used.position_sizing_result.tool` / `ticker` / `current_lots` / `target_lots` / `lots_delta` / `lots_delta_abs` | PM sizing 事实 | sizing 工具、品种和最终手数变化。 |
 | `evidence_used.position_sizing_result.target_position_ratio` / `target_value` / `margin_required` / `account_equity` / `target_margin_ratio_estimate` / `margin_rate` | PM sizing 事实 | 目标仓位、名义价值、保证金、权益和保证金率计算事实。 |
 | `evidence_used.position_sizing_result.current_net_exposure` / `projected_net_exposure` / `current_ticker_exposure` / `max_position_ratio` / `max_net_exposure` / `risk_level` | PM sizing 事实 | sizing 前后净敞口、品种敞口、上限和风险等级。 |
 | `evidence_used.position_sizing_result.lots_to_trade_reason` / `control_reasons` / `capital_allocation_reason` | PM sizing 事实 | 最终手数、控制和资金分配原因。 |
 | `evidence_used.position_sizing_result.no_final_action_authority` / `no_direction_override_authority` / `no_llm` | PM sizing 事实 | sizing 不签动作、不改方向且不调用 LLM 的固定边界。 |
-| `evidence_used.rank_input_components.final_state` / `capital_priority_tier` / `rank_score` / `capital_priority_score` / `watch_priority_score` / `opportunity_score` | PM rank 输入 | 最终候选状态及 rank/资金优先/观察/机会分。 |
-| `evidence_used.rank_input_components.cold_start_evidence_quality` / `setup_quality_score` / `trigger_quality_score` | PM rank 输入 | 冷启动证据、setup 和触发质量。 |
-| `evidence_used.rank_input_components.positive_learning` / `negative_learning` / `entry_quality_loss_penalty` / `trigger_quality_positive_bonus` / `trigger_quality_loss_penalty` | PM rank 输入 | 允许进入新增风险 rank 的 open/add 学习分项。 |
 | `rank_input_components.rank_score_components.cold_start_evidence_quality` / `capital_layer_priority` / `open_add_action_value_delta` / `product_setup_trigger_history` / `trigger_execution_quality` / `capital_efficiency` / `conflict_risk_invalidation_penalty` | PM rank 分项 | 唯一 rank 的七项确定性评分；配置名与 Python 消费字段一一对应。 |
 | `evidence_used.lifecycle_learning_trace` | PM 最终证据 | Step6 按最终生命周期形成的学习路由与 rank 学习解释。 |
 | `lifecycle_learning_trace.trace_version` / `contract_lifecycle_port` / `pm_lifecycle_action_port` / `router_source` / `rank_lifecycle` | PM 生命周期学习 trace | trace 版本、最终生命周期口、路由入口、来源和 rank 生命周期。 |
@@ -923,7 +927,7 @@
 | `final_action_contract.signal_collection_contract_ref.ticker` / `trading_date` / `source_contract_count` / `collector_decision_boundary` | PM SCC 引用摘要 | 原始 SCC 的产品、日期、来源数量和无交易权限边界；不能替代完整 SCC。 |
 | `pm_six_step_trace.step6_contract_generation_check.tool` / `ok` / `errors` / `expected_final_action` / `actual_final_action` / `current_lots` / `target_lots` / `lots_delta` / `writes_db` / `writes_contract` / `no_llm` | PM Step6 生成检查 | 最终合约生成合法性及不写 DB、不生成第二张合约、不调用 LLM 的事实。 |
 | `pm_six_step_trace.pm_contract_self_check.tool` / `ok` / `errors` / `expected_final_action` / `actual_final_action` / `current_lots` / `target_lots` / `lots_delta` / `writes_db` / `writes_artifact` / `writes_payload` | PM 最终合约自检 | 唯一最终合约自身一致性及 PM 不写 DB、artifact、payload 的事实。 |
-| `final_action_contract.risk_flags` | PM 唯一合约 | PM 最终控制原因的风险标记列表；只解释合约，不替代 Auditor。 |
+| `final_action_contract.risk_flags` | 已确认重复的PM旧路径 | 当前与 `final_action_contract.reason_codes` 同源复制，没有独立生产语义，不再是必传结构；待代码同步时删除。 |
 | `final_action_contract.consistency` / `signal_collection_contract_ref` | PM 唯一合约 | 动作手数一致性对象和 SCC 摘要引用对象。 |
 | `learning_used.memory_retrieval` / `positive_open_seed` / `capital_utilization_learning` / `pm_lifecycle_learning_router` | PM 最终学习 | Step4 检索、正向开仓候选、资金利用学习和生命周期路由对象。 |
 | `pm_lifecycle_learning_router.accepted_lanes` / `accepted_learning` / `accepted_indices` / `decision_learning_indices` | PM 生命周期路由 | 被当前生命周期允许的 lane、记录和原列表索引。 |
@@ -987,7 +991,8 @@
 | `phase2_execution.execution_contract` | Trader 执行摘要 | 从已审 `final_action_contract` 白名单提取的执行规则，不是第二张合约。 |
 | `execution_contract.execution_profile` / `trigger_source` / `entry_trigger` / `invalidation` / `valid_until` | Trader 执行摘要 | PM 既定执行 profile、触发来源、入场、失效和有效期。 |
 | `execution_contract.requires_intraday_confirmation` / `can_execute_without_intraday_trigger` / `authority_type` / `max_allowed_margin_ratio` / `reason_codes` | Trader 执行摘要 | 盘中确认、直接执行、权限、保证金和原因边界。 |
-| `execution_contract.execution_action_value_preference` / `analyst_execution_roles` | Trader 执行摘要 | PM 已落地的 execution profile 偏好和分析师执行角色；Trader 不读取研究库。 |
+| `execution_contract.execution_action_value_preference` | Trader 执行摘要 | PM 已落地的 execution profile 偏好；Trader 不读取研究库或完整AEC。 |
+| `final_action_contract.analyst_execution_roles.*.action_evidence_contract` | 已确认重复的PM旧路径 | 完整AEC的唯一追溯路径是 `signal_snapshot.signal_collection_contract.source_contracts[].action_evidence_contract`；该FAC副本不再是必传结构，待代码同步时删除。 |
 | `phase2_execution.translated_decision.action` / `lots` / `contract_code` / `price` | Trader 翻译决策 | 合约翻译后的订单动作、手数、具体合约和价格。 |
 | `phase2_execution.intraday_selection.decision` / `reason` / `base_price` / `base_datetime` / `base_price_source` / `signal_datetime` | Trader 盘中选择 | 盘中执行/等待/跳过结论、原因和价格时间基准。 |
 | `intraday_selection.trigger_checked` / `trigger_passed` / `execution_failure_reason` / `missed_opportunity_flag` / `learning_writeback_contract` | Trader 盘中选择 | 触发检查、执行失败、错过机会及未来学习写回契约。 |
@@ -1015,8 +1020,9 @@
 | `phase2_execution.execution_simulation.base_price` / `base_price_source` / `base_price_date` / `open_price` / `prev_close_price` / `warning_message` | Trader 执行模拟 | 回测、模拟盘和实盘共用的价格基准与警告。 |
 | `execution_translation.translated_orders` / `rewrite_reasons` / `reference_action` / `reference_lots` | Trader 翻译事实 | 翻译订单、确定性改写原因和参考动作/手数。 |
 | `translated_orders[].stage` / `action` / `lots` / `contract_code` / `price` | Trader 翻译订单 | 单条订单阶段、动作、手数、合约和价格。 |
-| `execution_translation.signal_lifecycle.horizon_class` / `expected_horizon_days` / `price_percentile` / `entry_trigger` / `action_name` / `invalidation_level` / `target_return` / `atr_stop_distance` / `setup_type` / `business_quality_score` / `target_price` | Trader 信号生命周期 | 从正式合约/SCC取得的期限、触发、失效、止损和目标价格执行事实。 |
-| `execution_translation.signal_lifecycle_direction_filter.target_side` / `selected` / `ignored_opposing` / `original_invalidation_level` / `effective_invalidation_level` | Trader 方向过滤 | 只保留最终目标方向对应生命周期并记录忽略的反向信息。 |
+| `execution_translation.signal_lifecycle.horizon_class` / `expected_horizon_days` / `entry_trigger` / `invalidation_level` / `atr_stop_distance` / `setup_type` / `market_regime` | Trader 信号生命周期 | 仅从已审计 `final_action_contract` 白名单抽取的PM最终期限、触发、失效、止损、setup和市场状态；不得从SCC重新选择或读旧顶层analyst snapshot。 |
+| `execution_translation.signal_lifecycle.target_price` | Trader运行时派生 | 仅在Trader存在合法输入时才允许派生；不是AEC、SCC或PM必传事实。当前无合法 `target_return` 生产者时不得伪造。 |
+| `execution_translation.signal_lifecycle_direction_filter.*` | 已确认越权的Trader旧路径 | PM Step6已将最终方向对应的生命周期事实收口到唯一 `final_action_contract`；Trader不得从原始AEC重新选择方向、失效价或setup。该路径不再是必传结构，待代码同步时删除。 |
 | `execution_translation.phase2_order_plan.current_lots` / `target_lots` / `action` / `lots` / `contract_code` / `price` | Trader Phase2 订单计划 | 最终合约翻译出的当前/目标手数和订单。 |
 | `phase2_order_plan.account_equity` / `current_price` / `risk_level` / `cashflow_ratio` / `current_margin_ratio` / `max_total_margin_ratio` / `max_single_margin_ratio` / `remaining_margin` | Trader 下单安全事实 | 下单时账户权益、价格、风险等级和保证金边界。 |
 | `phase2_order_plan.signal_lifecycle` / `execution_contract` / `consistency_diagnostics` | Trader Phase2 订单计划 | 生命周期、执行规则和动作/手数一致性诊断。 |
@@ -1045,7 +1051,7 @@
 | `audit_payload.independent_auditor.producer` / `audit_status` / `audit_verdict` / `audit_reason_codes` / `audited_at` | Trader 执行审计 | 保留的独立 Auditor 摘要；不得替代或改写原审计事实。 |
 | `phase2_execution.translated_decision` / `intraday_selection` / `setup_execution_learning` / `pm_plan_validation` / `contract_execution_observation` / `entry_authority_gate` / `exit_policy` / `entry_timing` / `execution_simulation` | Trader Phase2 对象 | 翻译、盘中选择、执行学习、计划校验、合约观察、权限、退出、时机和模拟对象。 |
 | `execution_contract_summary` / `learning_boundary` | `phase2_execution.setup_execution_learning` | 执行规则摘要和 Trader 学习权限边界对象。 |
-| `execution_translation.final_action_contract_source` / `signal_lifecycle_direction_filter` / `phase2_order_plan` / `final_execution_basis` / `market_rule_block` | Trader 翻译对象 | 唯一合约来源、方向过滤、订单计划、最终价格依据和市场规则对象。 |
+| `execution_translation.final_action_contract_source` / `phase2_order_plan` / `final_execution_basis` / `market_rule_block` | Trader 翻译对象 | 唯一合约来源、订单计划、最终价格依据和市场规则对象；不包含从原始AEC重新选择方向的对象。 |
 | `final_execution_basis.execution_learning_fields` | Trader 最终执行基准 | 从盘中选择提取的执行学习字段对象。 |
 | `audit_payload.trade_contract_audit` | Trader 执行审计 | 交易执行对唯一 PM 合约的只读摘要。 |
 
