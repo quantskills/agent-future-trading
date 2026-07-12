@@ -221,7 +221,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertFalse(result.trigger_valid)
         self.assertFalse(action_contract["trigger_valid"])
         self.assertFalse(research_contract["trigger_valid"])
-        self.assertFalse(research_contract["action_evidence_contract"]["trigger_valid"])
+        self.assertNotIn("action_evidence_contract", research_contract)
         self.assertEqual(action_contract["opportunity_state"], "watch_for_trigger")
         self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
 
@@ -478,7 +478,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(contract["analyst"], "technical")
         self.assertEqual(contract["learning_scope"]["setup_family"], "trend_breakout")
         self.assertEqual(contract["learning_scope"]["sector_setup_alignment"], "preferred")
-        self.assertIn("primary_confirmation", contract["open"])
+        self.assertIn("primary_confirmation", contract["learning_scope"])
 
     def test_technical_context_derives_range_reversal_setup_fields(self):
         signal = AnalystSignal(
@@ -546,7 +546,8 @@ class AgentContractFixtureTest(unittest.TestCase):
         roles = context["fundamental_driver_roles"]
         self.assertIn("inventory", roles["primary_driver_groups"])
         self.assertIn("demand", roles["primary_driver_groups"])
-        self.assertFalse(context["action_evidence_contract"]["open"]["can_create_trade_authority_alone"])
+        self.assertNotIn("action_evidence_contract", context)
+        self.assertEqual(context["learning_scope"]["primary_driver_groups"], roles["primary_driver_groups"])
 
     def test_news_context_classifies_sector_tradable_catalyst(self):
         news_item = type(
@@ -563,7 +564,8 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(context["sector"], "agricultural")
         self.assertTrue(context["catalyst_classification"]["tradable_catalyst"])
         self.assertGreaterEqual(context["catalyst_classification"]["sector_tradable_event_count"], 1)
-        self.assertTrue(context["action_evidence_contract"]["open"]["price_reaction_required"])
+        self.assertTrue(context["price_reaction_required"])
+        self.assertNotIn("action_evidence_contract", context)
 
     def test_adx_signal_uses_di_for_direction_not_strength_alone(self):
         up = pd.DataFrame(
@@ -663,7 +665,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertFalse(result.trigger_valid)
         self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
         self.assertFalse(result.metadata["trade_research_contract"]["trigger_valid"])
-        self.assertFalse(result.metadata["trade_research_contract"]["action_evidence_contract"]["trigger_valid"])
+        self.assertNotIn("action_evidence_contract", result.metadata["trade_research_contract"])
 
     def test_pm_invalidation_ignores_generic_would_change_view_text(self):
         weak = AnalystSignal(
@@ -1176,5 +1178,4 @@ class NewsDataBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

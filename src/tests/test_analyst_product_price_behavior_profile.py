@@ -111,7 +111,11 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
         updated = apply_profile_usage_to_signal(signal, usage)
         metadata = updated.metadata
         self.assertEqual(metadata["product_profile_evidence"]["product_profile_id"], "agentquant.product_price_behavior.v1:TA")
-        scope = metadata["action_evidence_contract"]["learning_scope"]
+        self.assertEqual(
+            metadata["action_evidence_contract"]["learning_scope"],
+            {"setup_family": "fundamental_timing_setup"},
+        )
+        scope = metadata["learning_scope"]
         self.assertTrue(scope["product_profile_used"])
         self.assertEqual(scope["product_profile_analysis_boundary"], "analysis_evidence_only_no_trade_authority")
         self.assertIn("product_profile:TA", updated.factor_focus)
@@ -126,7 +130,10 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
             metadata={
                 "product_profile_evidence": usage,
                 "action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "commodity_news",
                     "side": "flat",
+                    "confidence": 0.42,
                     "opportunity_state": "watch_for_trigger",
                     "trigger_valid": False,
                     "current_trigger_confirmed": False,
@@ -145,7 +152,7 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
             enabled_analysts=["technical", "fundamental", "commodity_news"],
         )
 
-        self.assertTrue(contract["no_trade_authority"])
+        self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         self.assertEqual(contract["source_contracts"][0]["product_profile_evidence"]["product_profile_id"], usage["product_profile_id"])
         self.assertEqual(contract["evidence_items"][0]["product_profile_id"], usage["product_profile_id"])
         for forbidden in ("final_action_contract", "target_lots", "lots_delta", "authority_type", "reason_codes"):
@@ -197,6 +204,7 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
             "agents/analysis_team/fundamental.py",
             "agents/analysis_team/commodity_news.py",
             "tools/agent_tools/analysis/analyst_product_price_behavior_profile.py",
+            "tools/agent_tools/analysis/analyst_output_finalization.py",
         }
         actual = set()
         for path in (SRC_ROOT / "agents").rglob("*.py"):

@@ -27,11 +27,15 @@ class AnalystOutputLandingTest(unittest.TestCase):
             "trigger_valid": False,
             "metadata": {
                 "action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "technical",
+                    "signal": "Bullish",
+                    "side": "long",
                     "opportunity_state": "watch_for_trigger",
                     "entry_trigger": "break above morning range",
                     "trigger_valid": False,
                     "invalidation_present": True,
-                    "execution": {"trigger_valid": False},
+                    "factor_focus": [],
                 }
             },
         }
@@ -93,9 +97,14 @@ class AnalystOutputLandingTest(unittest.TestCase):
         signal = self._signal(
             metadata={
                 "action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "technical",
+                    "signal": "Bullish",
+                    "side": "long",
                     "opportunity_state": "watch_for_trigger",
                     "trigger_valid": False,
                     "invalidation_present": True,
+                    "factor_focus": [],
                 },
                 "reviewer_learning_context": {
                     "memory_trace": {
@@ -127,7 +136,7 @@ class AnalystOutputLandingTest(unittest.TestCase):
             "pm_learning",
             "alpha_setup_action_values",
         )
-        required_tokens = ("build_learning_context", "calibrate_signal_with_learning_context")
+        required_tokens = ("build_learning_context", "finalize_analyst_signal")
         for filename in ("technical.py", "fundamental.py", "commodity_news.py"):
             with self.subTest(filename=filename):
                 text = (agent_root / filename).read_text(encoding="utf-8")
@@ -135,6 +144,10 @@ class AnalystOutputLandingTest(unittest.TestCase):
                     self.assertNotIn(token, text)
                 for token in required_tokens:
                     self.assertIn(token, text)
+        finalizer_source = (
+            SRC_ROOT / "tools" / "agent_tools" / "analysis" / "analyst_output_finalization.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("calibrate_signal_with_learning_context", finalizer_source)
 
 
 if __name__ == "__main__":

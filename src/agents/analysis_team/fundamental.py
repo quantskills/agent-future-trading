@@ -10,20 +10,20 @@ from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_quality import (
-    apply_signal_quality_gate,
-    apply_trade_research_contract,
     format_fundamental_summary_for_prompt,
     llm_path_label,
     parse_fundamental_factors,
     summarize_pandaai_extra_factors,
     write_analyst_report,
 )
-from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
-from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_fundamental_data_usage
+from tools.agent_tools.analysis.analyst_output_finalization import (
+    finalize_analyst_signal,
+    persist_analyst_signal,
+    resolve_analyst_llm_config,
+)
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
-    apply_profile_usage_to_signal,
     build_profile_usage_contract,
     format_profile_for_fundamental,
     get_product_price_behavior_profile,
@@ -387,7 +387,7 @@ def fundamental_agent(state: FundState):
     agent_name = AgentKey.FUNDAMENTAL
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = state["llm_config"]
+    llm_config = resolve_analyst_llm_config(state)
     portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     pre_open_only = bool(state.get("pre_open_only", False))
@@ -427,7 +427,26 @@ def fundamental_agent(state: FundState):
                 pre_open_only=pre_open_only,
                 info_cutoff=info_cutoff,
             )
-            signal = apply_profile_usage_to_signal(signal, product_profile_usage)
+            signal = finalize_analyst_signal(
+                signal,
+                quality_context={
+                    "sector": str(product_profile.get("sector") or ""),
+                    "tradeability": "low",
+                    "risk_flags": ["fundamental_data_unavailable"],
+                    "data_quality": {
+                        "coverage_ratio": 0.0,
+                        "factor_freshness_score": 0.0,
+                        "no_lookahead_status": "ok",
+                    },
+                },
+                full_config=full_config,
+                analyst="fundamental",
+                ticker=ticker,
+                trading_date=trading_date,
+                learning_context={},
+                product_profile=product_profile,
+                product_profile_usage=product_profile_usage,
+            )
             prompt = (
                 f"{ticker} fundamental data unavailable before {trading_date}; "
                 "deterministic no_trade artifact produced.\n"
@@ -436,7 +455,7 @@ def fundamental_agent(state: FundState):
             report_sections = {
                 "Data Usage Summary": signal.metadata.get("data_usage_summary"),
                 "Data Quality": (fundamentals_metadata or {}),
-                "Product Price Behavior Profile": product_profile_usage,
+                "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
                 "Reason": "local_finoview_fundamental_data_unavailable",
             }
             if save_outputs:
@@ -450,7 +469,14 @@ def fundamental_agent(state: FundState):
                 )
                 if report_path:
                     signal.metadata["decision_report_path"] = report_path
-                db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+                persist_analyst_signal(
+                    db,
+                    portfolio_id=portfolio_id,
+                    analyst=agent_name,
+                    ticker=ticker,
+                    prompt=prompt,
+                    signal=signal,
+                )
             logger.log_signal(agent_name, ticker, signal)
             return {
                 "analyst_signals": [signal],
@@ -585,7 +611,6 @@ def fundamental_agent(state: FundState):
             },
             "product_profile_evidence": {
                 "product_profile_id": product_profile_usage.get("product_profile_id"),
-                "profile_role": product_profile_usage.get("profile_role"),
                 "profile_learning_interaction": product_profile_usage.get("profile_learning_interaction"),
             },
             "short_trigger_required_for_trade": True,
@@ -593,22 +618,17 @@ def fundamental_agent(state: FundState):
             "position_authority_boundary": "medium_thesis_requires_pm_auditor_trader_confirmation",
         },
     }
-    signal = calibrate_signal_with_learning_context(
+    signal = finalize_analyst_signal(
         signal,
+        quality_context=fundamental_context,
+        full_config=full_config,
         analyst="fundamental",
         ticker=ticker,
-        learning_context=learning_context,
-    )
-    signal = apply_signal_quality_gate(signal, fundamental_context, full_config, "fundamental")
-    signal = apply_business_quality_enrichment(signal, fundamental_context, full_config, "fundamental")
-    signal = apply_trade_research_contract(
-        signal,
-        fundamental_context,
-        analyst="fundamental",
         trading_date=trading_date,
-        ticker=ticker,
+        learning_context=learning_context,
+        product_profile=product_profile,
+        product_profile_usage=product_profile_usage,
     )
-    signal = apply_profile_usage_to_signal(signal, product_profile_usage)
     signal.justification += "\n" + _build_fundamental_audit_note(
         trading_date=trading_date,
         pre_open_only=pre_open_only,
@@ -628,7 +648,7 @@ def fundamental_agent(state: FundState):
         "tradeability": fundamental_context.get("tradeability"),
         "sector": fundamental_context.get("sector"),
         "Sector Guidance": fundamental_context.get("sector_guidance"),
-        "Product Price Behavior Profile": product_profile_usage,
+        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
         "Factor Groups": fundamental_context.get("factor_groups"),
         "Factor Group Counts": fundamental_context.get("factor_group_counts"),
         "Data Quality": fundamental_context.get("data_quality"),
@@ -651,7 +671,14 @@ def fundamental_agent(state: FundState):
 
     logger.log_signal(agent_name, ticker, signal)
     if save_outputs:
-        db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+        persist_analyst_signal(
+            db,
+            portfolio_id=portfolio_id,
+            analyst=agent_name,
+            ticker=ticker,
+            prompt=prompt,
+            signal=signal,
+        )
 
     return {
         "analyst_signals": [signal],

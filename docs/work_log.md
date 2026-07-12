@@ -33,3 +33,14 @@
 （17）[配置参数一一映射] 全量审计 `src/config/*.yaml` 后，删除无生产消费函数的 `evidence_fusion_policy_catalog.yaml`，并清理 analyst prior、数据因子、主配置、手续费、Finoview、学习、portfolio、商品 profile 与 rank catalog 中失效的说明型或历史残留参数；`config_normalizer.py` 同步删除无行为的 catalog 展开和 role 注入，PM 默认表删除同名失效键。新增 `test_config_parameter_mapping.py` 并接入回测前静态测试，要求每个保留 YAML 参数都登记到 `matrix_field_semantics.md`、对应真实 Python 消费函数，固定叶字段必须在生产代码逐名读取，动态 ticker/sector/factor/template 参数必须归入已登记参数族。原因：保证配置调参真实改变对应代码行为，防止经过多轮修改后出现无映射参数、装饰性配置和字段语义漂移。
 （18）[PM 冗余工具清理] `decision` 与 `common` 工具删除生产零引用的旧 PM snapshot artifact、生命周期回溯诊断、旧开仓动作提示、旧 Auditor 学习校准、未使用的自检异常包装、学习 prompt/trace 和相关私有辅助函数；同步删除只验证旧机制的测试，并新增零引用旧函数禁止回归测试。原因：新 PM 只保留单一内存状态到 Step6 唯一合约的真实调用链，防止废弃接口重新引入中间物理输出、跨步骤比较式自检和第二套动作语义。
 （19）[新闻分析师身份统一] 全链路只接受 `commodity_news`，删除旧新闻分析师别名常量、prompt 别名、配置静默转换、旧 snapshot/DB 读取回退及学习、PM、复盘兼容分支；新增全仓身份唯一性测试。原因：防止同一智能体出现第二名称，保证分析师输出、SCC、PM、学习和归因只使用唯一字段语义。
+
+==========2026年7月12日==========
+
+（1）[SCC 唯一正式接口] `signal_evidence_collection.py`、`signal_collector.py` 与 `schema.py` 将信号收集员收口为只读取分析师正式 `action_evidence_contract`、只返回一份 `signal_collection_contract`；删除复数 SCC、collector snapshot、旧字段回退和未登记 SCC 字段，并以共享校验入口检查版本、来源、ticker、交易日、字段层级、证据明细、重复来源及越权交易字段。原因：消除第二套证据解释和内部状态泄露，使 SCC 成为 PM 唯一正式证据入口。
+（2）[SCC 与 PM 语义同源] `analyst_quality.py` 将分析师质量门形成的最终结构化证据同步写入正式 action contract；`portfolio_manager.py` 仅以原始 `analyst_signals` 核对身份、数量和 SCC 来源，方向、评分、候选质量、触发与交易判断统一从 SCC 重建的内部证据视图读取；`pm_ticker_side_selection.py` 与 `evidence_fusion_semantics.py` 只按矩阵规定的 `evidence_fusion` 嵌套层级消费融合字段。原因：保证 Signal Collector 与 PM 对同一证据的字段和值理解一致，原始信号变化不能绕过 SCC 改变 PM 交易语义。
+（3）[SCC 汇总与追溯回归] `signal_evidence_collection.py` 修正多空完全同票同置信度时固定输出 `mixed`，并将 `trigger_status` 限定为只汇总主方向证据；数据不可用工具继续生成合法、安全、可追溯的正式 SCC。新增并同步 SCC、分析师、PM、workflow 与 Phase-flow 测试，覆盖共享校验、来源记录 ID、Reviewer/Researcher 快照追溯、反方向触发隔离、数据不可用、重复与缺失来源以及 collector 无 PM 越权字段。原因：保证长期回测中的证据汇总确定性、来源完整性和无交易权限边界。
+（4）[分析师统一最终收口] 新增 `analyst_output_finalization.py`，技术面、基本面和期货新闻面分析师的正常与无数据路径统一按“学习校对→质量处理→商品 profile 评估→唯一 action evidence→最终校验”顺序落地；质量上下文和 trade research 不再保存第二份 `action_evidence_contract`。原因：防止中间合约、双重证据解释和校验后再改信号。
+（5）[分析师主 LLM 配置] 三类分析师只透传主配置 `llm` 给统一推理入口，删除 `analyst_llm.mode/cloud_model` 私有模型覆盖和新闻硬编码商品上下文；提示词只要求 `AnalystSignal` 专业结构化分析，不再要求 LLM 生成最终嵌套合约、仓位、资金或旧动作字段。原因：允许只修改主配置切换 provider/model，同时保持 CodexOpenAI、reasoning effort 和 `.env` 密钥读取链不变。
+（6）[非每日数据与商品差异化] 基本面、新闻面完全无可用数据时也经过统一收口生成合法 `Neutral/flat/no_opportunity` 正式证据；商品 profile 在真实信号形成后确定性写入支持、冲突、缺失、相关度和确认要求，再同步进唯一 action contract。新闻分析师改为只读取统一商品 profile。原因：不把“当日无新增数据”等同于分析失败，也不伪造方向和催化。
+（7）[分析师学习与技术参数校准] 技术面分析师保留产品、周期和市场状态相关的有界技术参数校准；三类分析师共同保留提示词完善和 LLM 后信号校对。技术参数校准只能调整技术分析内部参数，不生成交易权限。原因：保留技术指标随产品、市场状态和过去有效经验自适应的能力，同时禁止学习绕过当前证据、Signal Collector 和 PM。
+（8）[分析师来源与契约治理] 串行保存与 workflow 并行集中保存均接收 DB 返回的 `signal_record_id` 并写回信号来源元数据；能力卡和 contract coverage 改为只把唯一 `action_evidence_contract` 视为分析师正式输出，并增加分析师、SCC、Phase-flow、Reviewer/Researcher、主配置切换和并行来源 ID 回归测试。原因：保证 Signal Collector、Reviewer、Researcher 和 PG 的完整追溯链。

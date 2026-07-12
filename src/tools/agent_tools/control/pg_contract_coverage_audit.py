@@ -161,12 +161,12 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/tools/agent_tools/analysis/analyst_quality.py",
                 ("def _build_action_evidence_contract", "apply_trade_research_contract"),
-                "analysis quality builds canonical analyst action evidence",
+                "analysis quality builds the unique canonical analyst action evidence",
             ),
             _rule(
-                "src/tools/common/contracts.py",
-                ("build_trade_research_contract", "action_evidence_contract"),
-                "trade research contract carries the same action evidence",
+                "src/tools/agent_tools/analysis/analyst_output_finalization.py",
+                ("finalize_analyst_signal", "analyst_output_landing_violations"),
+                "shared finalization creates and validates one canonical analyst action evidence contract",
             ),
         ),
         consumers=(

@@ -93,9 +93,9 @@ protocol_governor
 
 | 角色 | 输入 | 输出 | LLM | 禁止行为 | 下游 |
 |---|---|---|---|---|---|
-| `technical` | 行情、技术指标、技术校准研究、数据截止时间 | 结构化技术预测证据、方向、trigger、invalidation、证据强弱 | 是 | 输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
-| `fundamental` | 库存、仓单、基差、供需、产业数据、基本面校准研究 | 结构化基本面预测证据、驱动、数据质量、反向压制、失效边界 | 是 | 输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
-| `commodity_news` | 新闻、事件、政策、舆情、新闻校准研究 | 结构化新闻预测证据、事件方向、催化质量、时效、确认条件 | 是 | 输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
+| `technical` | 行情、技术指标、仅限历史交易日的技术校准研究、商品差异化 profile、数据截止时间、主 `llm` 配置 | 唯一正式 `action_evidence_contract`，保真承载技术方向、trigger、invalidation、`product_profile_evidence` 和 `fusion_evidence` | 是 | 私有模型路由；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
+| `fundamental` | 截止当前交易日可见的库存、仓单、基差、供需、产业数据，基本面校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新增数据时使用最近有效数据并标注时效，确无数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造缺失数据；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
+| `commodity_news` | 截止当前交易日可见的新闻、事件、政策、舆情，新闻校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新事件时如实表达无当前催化，确无可用数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造新闻催化；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `signal_collector` | 三类分析师结构化预测证据 | `signal_collection_contract` | 否 | 读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
 | `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot` | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划 | Auditor；审计通过后由 workflow 编排层交给 Trader |
 | `auditor` | PM 最终合约、账户、持仓、保证金、硬风险边界 | `audit_verdict`、审计 payload、risk reasons | 否 | 改方向、改手数、新建合约、直接消费研究记忆改交易权限 | Trader |
@@ -120,6 +120,8 @@ protocol_governor
 | 复盘事实 | `reviewer` | 只写验收、日志、事实归因、研究输入材料 |
 | 研究学习事实 | `researcher_learning.py` 与研究写入工具 | 只影响未来交易日 |
 | 控制治理事实 | 控制组只读审计入口 | 只读检查，不写业务表，不生成交易权限 |
+
+三类分析师共同用本专业历史校准结论完成两项学习任务：LLM 调用前完善提示词，LLM 返回后用同一批合格记录确定性校对信号。技术面分析师额外保留产品、短周期和当前 market_regime 相关的有界指标参数校准，并在校准后重算最终指标与 technical_context。参数校准只属于技术分析算法，不能单独创造方向、机会状态或交易权限。三类分析师只服从主配置 `llm`，并在学习校准、质量/时效和商品 profile 评估完成后，由共享收口工具生成及校验唯一 `action_evidence_contract`。
 
 字段级 `producer -> artifact/DB -> consumer -> audit -> hard fail` 矩阵不放在本文。本文只固定入口归属，细表由 `docs/matrix_chain_contract.md` 承载。
 

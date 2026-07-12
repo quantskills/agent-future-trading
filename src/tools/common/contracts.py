@@ -580,7 +580,6 @@ def build_trade_research_contract(
     atr_stop_distance: Any = None,
     sample_state: str = "current_day_evidence",
     maturity: str = "candidate",
-    action_evidence_contract: Optional[Dict[str, Any]] = None,
     product_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
@@ -600,7 +599,6 @@ def build_trade_research_contract(
         "atr_stop_distance": atr_stop_distance,
         "sample_state": str(sample_state or "current_day_evidence"),
         "maturity": str(maturity or "candidate"),
-        "action_evidence_contract": action_evidence_contract or {},
         "product_context": product_context or {},
     }
 

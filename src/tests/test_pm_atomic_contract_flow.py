@@ -18,14 +18,26 @@ from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
 def _signal_collection_contract(ticker: str) -> dict:
+    action_contract = {
+        "contract_version": "agentquant.action_evidence.v1",
+        "analyst": "technical",
+        "side": "long",
+        "confidence": 0.8,
+    }
     return {
         "contract_version": "agentquant.signal_collection.v1",
         "source_agent": "signal_collector",
         "collector_decision_boundary": "no_trade_authority",
         "ticker": ticker,
         "trading_date": "2025-03-25",
-        "source_contracts": [],
-        "evidence_items": [],
+        "source_contracts": [
+            {
+                "analyst": "technical",
+                "action_evidence_contract": action_contract,
+            }
+        ],
+        "evidence_items": [{"analyst": "technical", "side": "long"}],
+        "evidence_fusion": {},
     }
 
 

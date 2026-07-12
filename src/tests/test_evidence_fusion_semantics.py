@@ -75,8 +75,8 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         )
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         self.assertIn("evidence_fusion", contract)
-        self.assertIn("cross_analyst_conflicts", contract)
-        self.assertIn("evidence_strength_by_analyst", contract)
+        self.assertIn("cross_analyst_conflicts", contract["evidence_fusion"])
+        self.assertIn("evidence_strength_by_analyst", contract["evidence_fusion"])
         forbidden = {"opportunity_score", "opportunity_rank", "target_lots", "lots_delta", "final_action_contract"}
         self.assertFalse(forbidden.intersection(contract))
 

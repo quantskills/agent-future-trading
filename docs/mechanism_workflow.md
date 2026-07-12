@@ -23,9 +23,9 @@ technical / fundamental / commodity_news 分析师
 
 ### 0.1 分析师
 
-三类分析师分别对同一品种的价格序列及其相关数据做多维分析，判断下一交易日价格走势。
+三类分析师分别对同一品种的价格序列及其相关数据做多维分析，判断下一交易日价格走势。`workflow` 编排层只传递主配置 `llm`、盘前可见数据、商品 profile 所需身份和研究检索所需上下文；不为分析师选择私有模型，也不解释学习结论。
 
-分析师只输出结构化信号证据，包括方向、证据强弱、setup、trigger、invalidation、冲突、确认要求和可追溯依据。分析师不能输出手数、仓位、资金部署、rank、交易权限或 `final_action_contract`。
+分析师在历史学习提示词、LLM 专业分析、同批学习确定性校对、数据质量/时效和商品 profile 评估完成后，只输出最终校验通过的唯一 `action_evidence_contract`，其中保真承载方向、证据强弱、setup、trigger、invalidation、冲突、确认要求、`product_profile_evidence`、`fusion_evidence` 和可追溯依据。`workflow` 编排层不生成、补写或二次解释该合约。分析师不能输出手数、仓位、资金部署、rank、交易权限或 `final_action_contract`。
 
 ### 0.2 信号收集员
 

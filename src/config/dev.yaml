@@ -290,8 +290,6 @@ workflow_analysts:
 # 8.4 分析师 LLM 输出后处理边界
 # 分析师可用 LLM 形成结构化证据，但不能输出手数、保证金或 final_action_contract。
 analyst_llm:
-  mode: cloud_only
-  cloud_model: null
   write_decision_reports: true
   force_neutral_low_tradeability: false
   cap_medium_tradeability_confidence: 0.75

@@ -166,14 +166,25 @@ class _FakeRouter:
 
 
 def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
+    action_contract = {
+        "contract_version": "agentquant.action_evidence.v1",
+        "analyst": "technical",
+        "side": "long",
+        "confidence": 0.8,
+    }
     return {
         "contract_version": "agentquant.signal_collection.v1",
         "source_agent": "signal_collector",
         "collector_decision_boundary": "no_trade_authority",
         "ticker": ticker,
         "trading_date": "2025-03-25",
-        "source_contracts": [],
-        "evidence_items": [],
+        "source_contracts": [
+            {
+                "analyst": "technical",
+                "action_evidence_contract": action_contract,
+            }
+        ],
+        "evidence_items": [{"analyst": "technical", "side": "long"}],
         "evidence_fusion": {},
     }
 
@@ -616,9 +627,11 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual({signal.agent_name for signal in signals}, {"technical", "fundamental", "commodity_news"})
         self.assertTrue(all(signal.opportunity_state == "no_opportunity" for signal in signals))
         self.assertTrue(all(signal.tradeability_reason == "pre_open_reference_price_unavailable" for signal in signals))
-        self.assertEqual(output["signal_collection_contract"]["collection_status"], "data_unavailable_no_trade")
-        self.assertEqual(output["signal_snapshot"]["source_agent"], "signal_collector")
-        self.assertEqual(output["signal_snapshot"]["technical"]["metadata"]["no_trade_category"], "data")
+        contract = output["signal_collection_contract"]
+        self.assertIn("pre_open_reference_price_unavailable", contract["data_quality_flags"])
+        self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
+        self.assertNotIn("signal_snapshot", output)
+        self.assertEqual(signals[0].metadata["no_trade_category"], "data")
 
     def test_virtual_phase1_portfolio_uses_final_contract_not_internal_draft(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
@@ -3821,9 +3834,39 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             margin_ratio=0.0,
         )
         signals = [
-            AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.5),
-            AnalystSignal(agent_name="fundamental", signal=Signal.BEARISH, confidence=0.6),
-            AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.4),
+            AnalystSignal(
+                agent_name="technical",
+                signal=Signal.NEUTRAL,
+                confidence=0.5,
+                metadata={"action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "technical",
+                    "side": "flat",
+                    "confidence": 0.5,
+                }},
+            ),
+            AnalystSignal(
+                agent_name="fundamental",
+                signal=Signal.BEARISH,
+                confidence=0.6,
+                metadata={"action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "fundamental",
+                    "side": "short",
+                    "confidence": 0.6,
+                }},
+            ),
+            AnalystSignal(
+                agent_name="commodity_news",
+                signal=Signal.NEUTRAL,
+                confidence=0.4,
+                metadata={"action_evidence_contract": {
+                    "contract_version": "agentquant.action_evidence.v1",
+                    "analyst": "commodity_news",
+                    "side": "flat",
+                    "confidence": 0.4,
+                }},
+            ),
         ]
         state = {
             "portfolio": portfolio,

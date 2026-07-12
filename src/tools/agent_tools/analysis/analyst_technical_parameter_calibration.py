@@ -72,8 +72,15 @@ def apply_technical_parameter_calibration(
 
     params = deepcopy(dict(adaptive_params or {}))
     applied: list[dict[str, Any]] = []
-    for row in select_contextual_rule_calibrations(
-        rows,
+    ticker_value = str(ticker or "").upper()
+    product_rows = [
+        row
+        for row in rows or []
+        if isinstance(row, Mapping)
+        and str(row.get("ticker") or "").upper() == ticker_value
+    ]
+    selected_rows = select_contextual_rule_calibrations(
+        product_rows,
         rule_group="technical_parameters",
         ticker=ticker,
         side=side,
@@ -81,7 +88,14 @@ def apply_technical_parameter_calibration(
         market_regime=market_regime,
         min_confidence=min_confidence,
         min_sample_count=2,
-    ):
+    )
+    best_scope_score = max(
+        (int(row.get("_rule_scope_score") or 0) for row in selected_rows),
+        default=None,
+    )
+    for row in selected_rows:
+        if best_scope_score is not None and int(row.get("_rule_scope_score") or 0) != best_scope_score:
+            continue
         payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
         rules_by_group = payload.get("rule_adjustments") if isinstance(payload, Mapping) else {}
         rules = rules_by_group.get("technical_parameters") if isinstance(rules_by_group, Mapping) else {}

@@ -19,24 +19,22 @@ from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from typing import Optional, Dict, Any
 from tools.agent_tools.analysis.analyst_quality import (
-    apply_signal_quality_gate,
-    apply_trade_research_contract,
     build_technical_context,
     format_technical_summary_for_prompt,
     llm_path_label,
     signal_value,
     write_analyst_report,
 )
-from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
-from tools.agent_tools.analysis.analyst_learning_calibration import (
-    calibrate_signal_with_learning_context,
-    retrieve_analyst_policy_calibration,
-)
+from tools.agent_tools.analysis.analyst_learning_calibration import retrieve_analyst_policy_calibration
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_technical_data_usage
 from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
+from tools.agent_tools.analysis.analyst_output_finalization import (
+    finalize_analyst_signal,
+    persist_analyst_signal,
+    resolve_analyst_llm_config,
+)
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
-    apply_profile_usage_to_signal,
     build_profile_usage_contract,
     format_profile_for_technical,
     get_product_price_behavior_profile,
@@ -154,12 +152,34 @@ def _validate_pre_open_price_window(ticker: str, trading_date, prices_df, pre_op
     return latest_day.strftime("%Y-%m-%d")
 
 
+def _build_technical_signal_results(
+    prices_df: pd.DataFrame,
+    adaptive_params: Dict[str, Any],
+    gap_analysis: str,
+) -> Dict[str, Any]:
+    """Compute one complete technical-indicator view from one parameter set."""
+    return {
+        "trend": get_trend_signal(prices_df, adaptive_params["trend"]),
+        "open_interest": get_open_interest_signal(prices_df, thresholds["open_interest"]),
+        "settlement_price": get_settlement_price_signal(prices_df, thresholds["settlement_price"]),
+        "gap_analysis": gap_analysis,
+        "macd": get_macd_signal(prices_df, adaptive_params["macd"]),
+        "adx": get_adx_signal(prices_df, adaptive_params["adx"]),
+        "futures_volatility": get_futures_volatility(prices_df, thresholds["futures_volatility"]),
+        "turnover_value": get_turnover_value_analysis(prices_df, thresholds["turnover_value"]),
+        "price_levels": get_support_resistance(prices_df, thresholds["support_resistance"]),
+        "mean_reversion": get_mean_reversion_signal(prices_df, adaptive_params["mean_reversion"]),
+        "rsi": get_rsi_signal(prices_df, adaptive_params["rsi"]),
+        "stochastic": get_stochastic_signal(prices_df, adaptive_params["stochastic"]),
+    }
+
+
 def technical_agent(state: FundState):
     """Technical analysis specialist that excels at short to medium-term price movement predictions."""
     agent_name = AgentKey.TECHNICAL
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = state["llm_config"]
+    llm_config = resolve_analyst_llm_config(state)
     portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     phase = state.get("phase")
@@ -236,65 +256,6 @@ def technical_agent(state: FundState):
         f"volume_ratio={features['volume_ratio']:.2f}"
     )
 
-    adaptive_params = calculate_adaptive_params(features, thresholds)
-    technical_calibration_diag = {
-        "enabled": False,
-        "applied": [],
-        "reason": "not_available",
-    }
-    config_id = resolve_config_id(db, full_config, state.get("config_id"))
-    if bool(((full_config.get("learning") or {}).get("contextual_rule_calibration") or {}).get("enabled", True)):
-        try:
-            technical_probe_context = build_technical_context(
-                ticker,
-                {
-                    "trend": get_trend_signal(prices_df, adaptive_params["trend"]),
-                    "macd": get_macd_signal(prices_df, adaptive_params["macd"]),
-                    "adx": get_adx_signal(prices_df, adaptive_params["adx"]),
-                    "mean_reversion": get_mean_reversion_signal(prices_df, adaptive_params["mean_reversion"]),
-                    "rsi": get_rsi_signal(prices_df, adaptive_params["rsi"]),
-                    "stochastic": get_stochastic_signal(prices_df, adaptive_params["stochastic"]),
-                },
-                features,
-            )
-            policy_rows, policy_safety = retrieve_analyst_policy_calibration(
-                db,
-                config_id=config_id,
-                ticker=ticker,
-                side="*",
-                horizon_class="short",
-                market_regime=technical_probe_context.get("market_regime") or "*",
-                trading_date=trading_date,
-            )
-            adaptive_params, technical_calibration_diag = apply_technical_parameter_calibration(
-                adaptive_params,
-                policy_rows,
-                ticker=ticker,
-                side="*",
-                horizon_class="short",
-                market_regime=technical_probe_context.get("market_regime") or "*",
-                min_confidence=float(
-                    ((full_config.get("learning") or {}).get("contextual_rule_calibration") or {}).get(
-                        "technical_min_confidence",
-                        ((full_config.get("learning") or {}).get("contextual_rule_calibration") or {}).get("min_confidence", 0.35),
-                    )
-                ),
-            )
-            technical_calibration_diag["policy_safety"] = policy_safety
-        except Exception as exc:
-            technical_calibration_diag = {
-                "enabled": True,
-                "applied": [],
-                "error": str(exc),
-            }
-            logger.warning(f"{ticker}: technical parameter calibration skipped: {exc}")
-    logger.info(
-        f"{ticker}: Adaptive params | EMA short={adaptive_params['trend']['short']} / "
-        f"EMA long={adaptive_params['trend']['long']} | "
-        f"RSI thresholds={adaptive_params['rsi']['bullish']}/{adaptive_params['rsi']['bearish']} | "
-        f"technical_calibration_applied={len(technical_calibration_diag.get('applied') or [])}"
-    )
-
     phase_value = str(getattr(phase, "value", phase)) if phase else ""
     if pre_open_only:
         logger.info(
@@ -313,27 +274,73 @@ def technical_agent(state: FundState):
     else:
         gap_analysis = get_gap_analysis(prices_df, thresholds["gap_analysis"])
 
-    # Analyze futures-specific technical indicators.
-    # Combine primary, confirmation, and filter indicators into one payload.
-    signal_results = {
-        # Primary futures indicators.
-        "trend": get_trend_signal(prices_df, adaptive_params["trend"]),
-        "open_interest": get_open_interest_signal(prices_df, thresholds["open_interest"]),
-        "settlement_price": get_settlement_price_signal(prices_df, thresholds["settlement_price"]),
-        "gap_analysis": gap_analysis,
-
-        "macd": get_macd_signal(prices_df, adaptive_params["macd"]),
-        "adx": get_adx_signal(prices_df, adaptive_params["adx"]),
-        "futures_volatility": get_futures_volatility(prices_df, thresholds["futures_volatility"]),
-        "turnover_value": get_turnover_value_analysis(prices_df, thresholds["turnover_value"]),
-        "price_levels": get_support_resistance(prices_df, thresholds["support_resistance"]),
-
-        "mean_reversion": get_mean_reversion_signal(prices_df, adaptive_params["mean_reversion"]),
-        "rsi": get_rsi_signal(prices_df, adaptive_params["rsi"]),
-        "stochastic": get_stochastic_signal(prices_df, adaptive_params["stochastic"]),
+    initial_adaptive_params = calculate_adaptive_params(features, thresholds)
+    initial_signal_results = _build_technical_signal_results(
+        prices_df,
+        initial_adaptive_params,
+        gap_analysis,
+    )
+    initial_technical_context = build_technical_context(ticker, initial_signal_results, features)
+    config_id = resolve_config_id(db, full_config, state.get("config_id"))
+    contextual_cfg = ((full_config.get("learning") or {}).get("contextual_rule_calibration") or {})
+    adaptive_params = initial_adaptive_params
+    technical_calibration_diag = {
+        "enabled": bool(contextual_cfg.get("enabled", True)),
+        "rule_group": "technical_parameters",
+        "applied": [],
+        "scope": {
+            "ticker": ticker,
+            "side": "*",
+            "horizon_class": "short",
+            "market_regime": initial_technical_context.get("market_regime") or "*",
+        },
     }
+    if technical_calibration_diag["enabled"]:
+        try:
+            policy_rows, policy_safety = retrieve_analyst_policy_calibration(
+                db,
+                config_id=config_id,
+                ticker=ticker,
+                side="*",
+                horizon_class="short",
+                market_regime=initial_technical_context.get("market_regime") or "*",
+                trading_date=trading_date,
+            )
+            adaptive_params, technical_calibration_diag = apply_technical_parameter_calibration(
+                initial_adaptive_params,
+                policy_rows,
+                ticker=ticker,
+                side="*",
+                horizon_class="short",
+                market_regime=initial_technical_context.get("market_regime") or "*",
+                min_confidence=float(
+                    contextual_cfg.get(
+                        "technical_min_confidence",
+                        contextual_cfg.get("min_confidence", 0.35),
+                    )
+                    or 0.35
+                ),
+            )
+            technical_calibration_diag["policy_safety"] = policy_safety
+        except Exception as exc:
+            adaptive_params = initial_adaptive_params
+            technical_calibration_diag = {
+                **technical_calibration_diag,
+                "applied": [],
+                "error": str(exc),
+            }
+            logger.warning(f"{ticker}: technical parameter calibration skipped: {exc}")
 
+    signal_results = _build_technical_signal_results(prices_df, adaptive_params, gap_analysis)
     technical_context = build_technical_context(ticker, signal_results, features)
+    logger.info(
+        f"{ticker}: Adaptive params | EMA short={adaptive_params['trend']['short']} / "
+        f"EMA long={adaptive_params['trend']['long']} | "
+        f"RSI thresholds={adaptive_params['rsi']['bullish']}/{adaptive_params['rsi']['bearish']} | "
+        f"initial_regime={initial_technical_context.get('market_regime')} | "
+        f"final_regime={technical_context.get('market_regime')} | "
+        f"technical_calibration_applied={len(technical_calibration_diag.get('applied') or [])}"
+    )
     product_profile = get_product_price_behavior_profile(ticker, full_config)
     product_profile_usage = build_profile_usage_contract(ticker, "technical", product_profile)
     technical_context["product_profile_evidence"] = product_profile_usage
@@ -372,7 +379,7 @@ def technical_agent(state: FundState):
         "When research memories are present, use them only as rebuttable priors. "
         "State whether today's market regime and technical evidence confirm or contradict them. "
         "If the signal is Neutral, specify the concrete technical condition that would convert it "
-        "to probe/open and the condition that keeps it on watchlist. Candidate memories cannot "
+        "to probe_candidate or tradeable_candidate and the condition that keeps it on watch_for_trigger. Candidate memories cannot "
         "authorize sizing, add-ons, or holding a losing position.\n"
     )
 
@@ -437,29 +444,23 @@ def technical_agent(state: FundState):
             },
             "product_profile_evidence": {
                 "product_profile_id": product_profile_usage.get("product_profile_id"),
-                "profile_role": product_profile_usage.get("profile_role"),
                 "profile_learning_interaction": product_profile_usage.get("profile_learning_interaction"),
             },
             "neutral_to_opportunity_required": True,
             "position_authority_boundary": "signal_requires_pm_auditor_trader_confirmation",
         },
     }
-    signal = calibrate_signal_with_learning_context(
+    signal = finalize_analyst_signal(
         signal,
+        quality_context=technical_context,
+        full_config=full_config,
         analyst="technical",
         ticker=ticker,
-        learning_context=learning_context,
-    )
-    signal = apply_signal_quality_gate(signal, technical_context, full_config, "technical")
-    signal = apply_business_quality_enrichment(signal, technical_context, full_config, "technical")
-    signal = apply_trade_research_contract(
-        signal,
-        technical_context,
-        analyst="technical",
         trading_date=trading_date,
-        ticker=ticker,
+        learning_context=learning_context,
+        product_profile=product_profile,
+        product_profile_usage=product_profile_usage,
     )
-    signal = apply_profile_usage_to_signal(signal, product_profile_usage)
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
         f"latest_price_data_date={latest_price_data_date}; "
@@ -480,7 +481,7 @@ def technical_agent(state: FundState):
         },
         "Data Usage Summary": data_usage_summary,
         "Technical Parameter Calibration": technical_calibration_diag,
-        "Product Price Behavior Profile": product_profile_usage,
+        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
         "Structured Technical Context": technical_context,
     }
     if save_outputs:
@@ -498,7 +499,14 @@ def technical_agent(state: FundState):
     # save signal
     logger.log_signal(agent_name, ticker, signal)
     if save_outputs:
-        db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+        persist_analyst_signal(
+            db,
+            portfolio_id=portfolio_id,
+            analyst=agent_name,
+            ticker=ticker,
+            prompt=prompt,
+            signal=signal,
+        )
 
     return {
         "analyst_signals": [signal],

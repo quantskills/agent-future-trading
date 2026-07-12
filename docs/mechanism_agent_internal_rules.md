@@ -153,14 +153,14 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | LLM 智能体 | 输出契约 | 必须覆盖的结构化字段 | 自由文本允许范围 | 禁止 |
 |---|---|---|---|---|
-| 技术面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`entry_trigger`、`trigger_valid/current_trigger_confirmed`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`conflict_analysis`、`product_profile_id`、`profile_fields_used`、`evidence_strength`、`evidence_freshness`、`technical_false_breakout_risk` | 解释价格形态、触发依据、失效位、品种趋势惯性、波动纪律、假突破风险和不确定性 | 输出手数、仓位、PM rank、资金理由、`final_action_contract` |
-| 基本面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`fundamental_driver`、`driver_direction`、`driver_freshness`、`setup_quality_ok`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`confirmation_requirements`、`evidence_strength`、`evidence_freshness`、`fundamental_opposition_strength` | 解释供需、库存、利润、基差、季节性、商品驱动优先级、驱动持续性和反向压制强度 | 输出手数、仓位、交易动作、资金部署 |
-| 期货新闻面分析师 | `action_evidence_contract`、`product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`event_type`、`event_direction`、`impact_window`、`catalyst_quality`、`event_priced_in`、`entry_trigger`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`news_catalyst_priority`、`news_impact_window`、`one_off_event_risk` | 解释新闻事件、政策冲击、影响窗口、是否已兑现、该品种事件催化价值和一次性冲击风险 | 把新闻方向直接写成交易动作或手数 |
+| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`entry_trigger`、`trigger_valid/current_trigger_confirmed`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`current_evidence_conflict`、`product_profile_id`、`profile_fields_used`、`evidence_strength`、`evidence_freshness`、`technical_false_breakout_risk` | 解释价格形态、触发依据、失效位、品种趋势惯性、波动纪律、假突破风险和不确定性 | 输出手数、仓位、PM rank、资金理由、`final_action_contract` |
+| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`setup_type`、`primary_business_driver`、`direction_anchor`、`data_freshness`、`setup_quality_ok`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`confirmation_requirements`、`evidence_strength`、`evidence_freshness`、`fundamental_opposition_strength` | 解释供需、库存、利润、基差、季节性、商品驱动优先级、驱动持续性和反向压制强度 | 输出手数、仓位、交易动作、资金部署 |
+| 期货新闻面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | `signal`、`opportunity_state`、`event_type`、`direction_anchor`、`impact_window_days`、`evidence_quality`、`entry_trigger`、`invalidation_present/invalidation_condition`、`confidence`、`data_usage_summary`、`product_profile_id`、`news_impact_window`、`one_off_event_risk`、`evidence_decay_risk` | 解释新闻事件、政策冲击、影响窗口、是否已兑现、该品种事件催化价值和一次性冲击风险 | 把新闻方向直接写成交易动作或手数 |
 | 研究员 | 结构化研究成果 | `research_domain`、`sample_scope`、`source_trading_date/trading_date`、`setup_type/profile`、`action_value` 或 `policy_state`、`confidence`、`validity_window`、`evidence_scope`、`excluded_reason` | 解释因果、冲突、反事实、不确定性和未来适用条件 | 修改当天合约、成交、结算、PnL；直接给 Trader 执行规则 |
 
 落地硬规则：
 
-1. 分析师 LLM 输出必须能生成 `action_evidence_contract`；缺少方向、机会状态、触发、失效边界或数据说明时，必须降级，不能靠自由文本补权。
+1. 分析师 LLM 只生成结构化专业分析结果；学习校准、质量门、时效性和商品差异化 profile 评估完成后，由共享确定性收口工具生成唯一 `action_evidence_contract`。缺少方向、机会状态、触发、失效边界或数据说明时必须降级，不能靠自由文本补权。
 2. 研究员 LLM 输出必须能生成结构化研究成果；自由文本结论不能被分析师、PM、审计员或交易员直接消费。
 3. 提示词可以鼓励充分推理，但必须要求模型把结论写入结构化字段。
 4. 解析器不能从自由文本中猜手数、动作、rank、资金理由或交易权限。
@@ -182,37 +182,46 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 ```text
 盘前可见数据
--> product_price_behavior_profile 冷启动分析框架
--> LLM 专业推理
--> action_evidence_contract
--> fusion_evidence
+-> 技术面分析师以当前可见价格计算市场特征、初始自适应参数和初始 market_regime
+-> 技术面分析师读取过去有效的同产品/周期/market_regime contextual rule calibration，有界校准参数并重算最终指标与 technical_context
+-> 仅限历史交易日的本专业学习上下文进入提示词
+-> product_price_behavior_profile 冷启动分析框架进入提示词
+-> 主配置指定的 LLM 生成结构化专业分析
+-> 同一批合格学习记录执行确定性信号校准
+-> 数据质量、时效性和商品差异化 profile 评估
+-> 确定性生成唯一 action_evidence_contract（内含 product_profile_evidence、fusion_evidence）
+-> 最终落地校验
 ```
 
-商品差异化分析协议固定为：三类分析师通过 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 读取 `src/config/product_price_behavior_profiles.yaml`；profile 与 `learning_context`、`analyst_learning_calibration` 同时进入提示词。静态 profile 只提供冷启动品种分析框架，动态学习只通过 `learning_context` 和分析师校准摘要影响当日证据，不在回测中改写 YAML。
+商品差异化分析协议固定为：三类分析师通过 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 读取 `src/config/product_price_behavior_profiles.yaml`。静态 profile 提供冷启动品种分析框架并进入提示词，LLM 返回后再由确定性工具核对 profile 的支持、冲突、缺失和确认要求。三类分析师共同使用动态学习完善 LLM 提示词并在 LLM 返回后校对信号；技术面分析师额外使用经过验证的 contextual rule calibration，对当前产品、短周期和初始 market_regime 对应的技术指标参数执行有界校准。该校准只改变技术分析内部参数，不直接生成方向、机会状态或交易权限。学习记录必须早于当前交易日，不在回测中改写 YAML，也不能单独创造交易机会。
+
+三类分析师的 LLM provider、model、base URL、reasoning effort 和 API key 环境变量只服从主配置 `llm`。分析师不得维护私有模型路由、硬编码模型名或第二套 API 配置；切换主配置后，三类分析师必须共同切换。
+
+基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，使用交易日可见的最近有效记录并显式标注时效；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
 
 分析师可以调用 LLM 做多维信息理解、冲突分析、反事实推理、不确定性判断和价格走势预测解释；但正式输出只能是结构化预测证据，不能是手数、仓位、保证金、排名或最终交易动作。
 
 | LLM 推理内容 | 必须落地字段 | 不能落地为 |
 |---|---|---|
-| 方向判断 | `signal`、`trend_direction`、`direction_reason` | 手数、仓位 |
-| 机会形态 | `setup_type`、`setup_quality_ok`、`setup_quality_reason` | 最终交易动作 |
+| 方向判断 | `signal`、`trend_direction`、`justification` | 手数、仓位 |
+| 机会形态 | `setup_type`、`setup_quality_ok`、`setup_quality_notes` | 最终交易动作 |
 | 当前触发是否成立 | `trigger_valid`、`current_trigger_confirmed` | 自由文本触发权限 |
 | 等待触发 | `opportunity_state=watch_for_trigger`、`entry_trigger` | 直接成交 |
 | 失效边界 | `invalidation_present`、`invalidation_condition` | 无边界开仓 |
-| 证据冲突 | `conflict_analysis`、`conflicting_evidence` | 强行给方向 |
+| 证据冲突 | `current_evidence_conflict`、`conflicting_factors` | 强行给方向 |
 | 证据强弱和时效 | `fusion_evidence.evidence_strength`、`fusion_evidence.evidence_freshness`、`fusion_evidence.evidence_decay_risk` | PM score、rank、手数 |
 | 跨专业确认需求 | `fusion_evidence.confirmation_requirements` | Trader 触发权限 |
 | 本专业特殊风险 | `technical_false_breakout_risk` / `fundamental_opposition_strength` / `news_impact_window` / `one_off_event_risk` | 审计阻断或交易动作 |
-| 数据缺口 | `data_usage_summary`、`missing_data`、`data_quality` | 伪造证据 |
-| 不确定性 | `uncertainty`、`confidence` | 交易授权 |
+| 数据缺口 | `data_usage_summary`、`missing_evidence` | 伪造证据 |
+| 不确定性 | `confidence`、`current_evidence_conflict` | 交易授权 |
 
 ### 4.2 三类分析师差异
 
 | 分析师 | 内部推理重点 | 输出侧重点 |
 |---|---|---|
-| 技术面分析师 | 价格形态、趋势、位置、波动、支撑阻力、入场触发、失效位 | `entry_trigger`、`trigger_valid`、`invalidation_condition`、`technical_timing` |
-| 基本面分析师 | 供需、库存、利润、基差、产量、进口、季节性、驱动持续性 | `fundamental_driver`、`driver_direction`、`driver_freshness`、`setup_quality_ok` |
-| 期货新闻面分析师 | 新闻事件、政策冲击、突发催化、影响方向、影响窗口、是否已兑现 | `event_type`、`event_direction`、`impact_window`、`catalyst_quality` |
+| 技术面分析师 | 价格形态、趋势、位置、波动、支撑阻力、入场触发、失效位 | `entry_trigger`、`trigger_valid`、`invalidation_condition`、`timing` |
+| 基本面分析师 | 供需、库存、利润、基差、产量、进口、季节性、驱动持续性 | `primary_business_driver`、`direction_anchor`、`data_freshness`、`setup_quality_ok` |
+| 期货新闻面分析师 | 新闻事件、政策冲击、突发催化、影响方向、影响窗口、是否已兑现 | `event_type`、`direction_anchor`、`impact_window_days`、`evidence_quality` |
 
 三类分析师都不能输出 `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`、手数、仓位或 `final_action_contract`。
 
@@ -221,7 +230,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 分析结果 | 必须落地为 | 不能落地为 |
 |---|---|---|
 | 无方向或数据不足 | `opportunity_state=no_opportunity`、`data_usage_summary` | 手数、仓位、交易动作 |
-| 有信息但无明确方向 | `signal=Neutral`、`opportunity_state=no_opportunity`、`uncertainty` | 伪造 Bullish/Bearish |
+| 有信息但无明确方向 | `signal=Neutral`、`opportunity_state=no_opportunity`、`confidence` 和冲突说明 | 伪造 Bullish/Bearish |
 | 有长期方向但无开盘后触发条件 | `opportunity_state=watch_for_trigger` 或 `no_opportunity`，并写明缺少短期触发 | `probe_candidate`、`tradeable_candidate` |
 | 有方向但 setup 不完整 | `opportunity_state=no_opportunity` 或弱观察说明，写明缺失项 | `watch_for_trigger` 交易候选 |
 | 有方向和 setup，但无明确 `entry_trigger` | `opportunity_state=no_opportunity` 或弱观察说明，写明缺少入场触发 | `watch_for_trigger`、`probe_candidate` |
@@ -230,13 +239,13 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | setup 完整、失效边界完整、当前触发成立但证据偏弱、单一或仍需试探 | `probe_candidate`，并写明 `trigger_valid=true/current_trigger_confirmed=true`、证据弱点 | 直接给 PM 手数 |
 | setup 完整、失效边界完整、当前触发成立且多维证据强 | `tradeable_candidate`，并写明 `trigger_valid=true/current_trigger_confirmed=true`、`confidence`、`evidence_quality`、主要支持证据 | 直接给 PM 手数、直接限定为小额试探 |
 | 当前触发成立但无失效边界 | 降级为 `watch_for_trigger` 或 `no_opportunity`，写明失效边界缺失 | `probe_candidate`、`tradeable_candidate` |
-| 方向冲突 | `conflict_analysis`、`opportunity_state=watch_for_trigger/no_opportunity` | 强行输出单边交易动作 |
-| 多维证据冲突但仍有可监控触发 | `opportunity_state=watch_for_trigger`、`conflict_analysis`、`entry_trigger`、`invalidation_condition` | `tradeable_candidate` |
-| 数据过旧或缺口明显 | `data_usage_summary`、`uncertainty`、降级后的 `opportunity_state` | 伪造强证据 |
-| 本专业研究校准反驳当前 setup | `calibration_conflict`、`uncertainty`、降级后的 `opportunity_state` | 忽略校准直接给强候选 |
-| 新闻事件已兑现或影响窗口已过 | `event_priced_in=true` 或影响窗口失效说明，降级后的 `opportunity_state` | 继续作为强催化 |
-| 新闻事件方向明确但缺少价格/基本面确认 | `watch_for_trigger`、`entry_trigger`、`impact_window`、`uncertainty` | `tradeable_candidate` |
-| 技术触发成立但基本面/新闻强反向 | `conflict_analysis`、`watch_for_trigger` 或 `probe_candidate`，按冲突强度降级 | 无冲突强开 |
+| 方向冲突 | `current_evidence_conflict`、`opportunity_state=watch_for_trigger/no_opportunity` | 强行输出单边交易动作 |
+| 多维证据冲突但仍有可监控触发 | `opportunity_state=watch_for_trigger`、`current_evidence_conflict`、`entry_trigger`、`invalidation_condition` | `tradeable_candidate` |
+| 数据过旧或缺口明显 | `data_usage_summary`、`missing_evidence`、降级后的 `opportunity_state` | 伪造强证据 |
+| 本专业研究校准反驳当前 setup | `current_evidence_conflict`、`conflicting_factors`、降级后的 `opportunity_state` | 忽略校准直接给强候选 |
+| 新闻事件已兑现或影响窗口已过 | `evidence_decay_risk`、`news_impact_window` 和降级后的 `opportunity_state` | 继续作为强催化 |
+| 新闻事件方向明确但缺少价格/基本面确认 | `watch_for_trigger`、`entry_trigger`、`impact_window_days`、`confirmation_requirements` | `tradeable_candidate` |
+| 技术触发成立但基本面/新闻强反向 | `current_evidence_conflict`、`watch_for_trigger` 或 `probe_candidate`，按冲突强度降级 | 无冲突强开 |
 | 基本面驱动成立但技术入场位置不好 | `watch_for_trigger`、`entry_trigger`、`invalidation_condition` | 当前直接开仓 |
 | 仅有单一弱证据 | `no_opportunity` 或弱观察，写明证据弱点 | 强候选 |
 | 数据可信、setup 完整、触发成立、失效边界完整、无重大冲突 | `tradeable_candidate`；若证据强度不足则为 `probe_candidate` | 手数、仓位、最终交易动作 |

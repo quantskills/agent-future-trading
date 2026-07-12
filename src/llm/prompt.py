@@ -61,10 +61,7 @@ Output format:
 - holding_period_hint: expected holding style/window
 - factor_focus: list of factor/setup/catalyst groups that define learning scope
 - current_evidence_conflict: list of current evidence against this view
-- metadata.action_evidence_contract: structured lifecycle evidence contract for PM and later Researcher review; it is not a Trader instruction
-- metadata.action_evidence_contract.fusion_evidence: structured multi-evidence fusion fields for prediction quality only. Include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, missing_evidence, current_evidence_conflict, and analyst-specific fields: technical_false_breakout_risk for technical, fundamental_opposition_strength for fundamental, news_impact_window and one_off_event_risk for commodity_news.
-- metadata.learning_scope: setup/factor/catalyst scope for future lane-scoped action-value learning
-- metadata.product_profile_evidence: product-specific analysis frame usage; include product_profile_id, product_profile_version, product_profile_used, profile_fields_used, profile_supported_evidence, profile_conflicting_evidence, profile_missing_evidence, profile_assumption_status, profile_relevance_score, profile_learning_interaction, profile_invalid_use_flags, and profile_analysis_boundary
+- Do not generate action_evidence_contract, fusion_evidence, product_profile_evidence, or learning_scope. Shared deterministic analyst code creates and validates those objects after learning calibration, quality processing, and product-profile evaluation.
 - Product price behavior profile is a cold-start analysis frame only. It may change evidence emphasis, confirmation discipline, setup classification, and false-breakout caution. It must not create trade authority, lots, margin, reason_codes, final_action, or final_action_contract.
 - Evidence fusion is a prediction-evidence protocol only. It lets signal_collector preserve evidence strength, freshness, alignment, conflicts, confirmation needs, missing evidence, and product-profile evidence for PM scoring. It must not create opportunity_score, opportunity_rank, lots, margin, reason_codes, authority_type, final_action, or final_action_contract.
 - Analysts do not output opportunity_score, opportunity_rank, capital_allocation_reason, lots, margin, final_action_contract, final_action, authority_type, reason_codes, conditional_trigger_authority, requires_intraday_confirmation, can_execute_without_intraday_trigger, or final trade commands. They provide sortable evidence only; PM computes ranking and capital deployment.
@@ -333,32 +330,11 @@ Use role and frequency when weighing evidence:
 - If basis conflicts with inventory/supply/demand/profit evidence, keep confidence conservative.
 - If the evidence is broad and aligned across inventory, supply, demand, and profit, confidence may be high even when basis is mild.
 
-=== WATCH OPTION ===
+=== OPPORTUNITY-STATE DISCIPLINE ===
 
-**WATCH means no position: wait for stronger signals**
-
-**Use WATCH (position_ratio = 0) when:**
-
-1. **Weak Combined Signal**
-   - Combined score between -1.0 and +1.0
-   - Rationale: Signals too weak to justify taking position
-
-2. **Multiple Neutral Analysts**
-   - Two or more analysts have NEUTRAL signal (confidence < 0.4)
-   - Rationale: Insufficient strong signals to support trading
-
-3. **Conflicting Signals**
-   - One BULLISH, one BEARISH, one NEUTRAL (all three different)
-   - Rationale: No clear consensus, high uncertainty
-
-4. **Low Overall Confidence**
-   - Comprehensive confidence < 0.4 after weighting
-   - Rationale: Signal reliability too low, risk of false signals
-
-**WATCH vs NEUTRAL:**
-- **WATCH**: Active decision to wait for better signals
-- **NEUTRAL**: No clear directional bias, or conflicting signals
-- **BOTH result in position_ratio = 0**, but justification differs
+- Use no_opportunity when current fundamental evidence cannot support a directional setup.
+- Use watch_for_trigger when a directional fundamental thesis exists but current short-timing confirmation is still missing.
+- Use probe_candidate or tradeable_candidate only when current evidence, trigger, and invalidation fields satisfy the stated evidence requirements. These are evidence states, not position authority.
 
 === STRUCTURED SIGNAL CONTRACT ===
 
@@ -498,9 +474,7 @@ Output format:
 - current_evidence_conflict: list of technical evidence that conflicts with the signal
 - justification: explain the market regime, the bullish evidence, the bearish evidence, conflicts, and why the setup is or is not tradable
 - metadata: include tradeability, market_regime, indicator_votes, risk_flags, and llm_path
-- metadata.action_evidence_contract.open must state whether technical timing is current and what confirmation/invalidation PM should read
-- metadata.action_evidence_contract.fusion_evidence must state evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, and technical_false_breakout_risk. It is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank
-- metadata.learning_scope must include setup_family, market_regime, sector_alignment, and main indicator family
+- Do not generate action_evidence_contract or nested contract objects. Deterministic code will build the formal evidence contract from these final fields.
 
 Provide a concise, well-reasoned futures technical view.
 """
@@ -538,9 +512,7 @@ def build_futures_fundamental_prompt(
         "- factor_focus: factor groups most relevant for this ticker now\n"
         "- current_evidence_conflict: current evidence contradicting the direction\n"
         "- evidence_role: direction_context unless a current short trigger is explicitly present\n"
-        "- metadata.action_evidence_contract.open: fundamental evidence cannot create trade authority alone; state required technical/market confirmation\n"
-        "- metadata.action_evidence_contract.fusion_evidence: include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, and fundamental_opposition_strength; it is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank\n"
-        "- metadata.learning_scope: include primary/supporting/risk factor groups for future action-value learning\n"
+        "- Do not generate action_evidence_contract or nested contract objects; deterministic code builds them after signal calibration\n"
         "- learning_impact_summary: explain historical support, historical contradiction, today's confirmed evidence, missing confirmation, and opportunity_state_reason\n"
         "- factor_calibration_summary: list effective_factors, stale_or_conflicting_factors, factors_requiring_price_confirmation, and factor_calibration_reason\n"
         "- Do not include lots, margin, final_action, target_lots, execution instructions, or trade authority in these summaries\n"
@@ -551,8 +523,8 @@ def build_futures_fundamental_prompt(
         "When research memories are present, use them only as rebuttable priors. "
         "State whether today's available fundamentals, market state, and short-term trigger evidence "
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
-        "invalidation boundary, keep it as Neutral/watchlist and specify the condition that would "
-        "convert it to probe/open. If the short trigger and invalidation boundary are present, mark it "
+        "invalidation boundary, keep it as no_opportunity/watch_for_trigger and specify the condition that would "
+        "convert it to probe_candidate or tradeable_candidate. If the short trigger and invalidation boundary are present, mark it "
         "as tradeable_candidate instead of hiding it behind Neutral. Candidate memories cannot authorize sizing, add-ons, or holding "
         "a losing position.\n"
     )
@@ -589,9 +561,7 @@ def build_futures_commodity_news_prompt(
         "entry_trigger, exit_hint, holding_period_hint, factor_focus, and current_evidence_conflict. "
         "News can identify an event opportunity, but it must say what current confirmation is needed "
         "before PM can treat it as tradeable.\n"
-        "metadata.action_evidence_contract.open must state event_window_days, current_confirmation, and whether price reaction is required. "
-        "metadata.action_evidence_contract.fusion_evidence must include evidence_strength, evidence_freshness, evidence_decay_risk, confirmation_requirements, current_evidence_conflict, missing_evidence, news_impact_window, and one_off_event_risk; it is prediction evidence only and cannot contain final_action, lots, margin, authority_type, reason_codes, opportunity_score, or opportunity_rank. "
-        "metadata.learning_scope must include catalyst_classification and event_regime.\n"
+        "Do not generate action_evidence_contract or nested contract objects; deterministic code builds them after signal calibration.\n"
         "Fill learning_impact_summary with historical support/contradiction, today's confirmed event evidence, missing confirmation, and opportunity_state_reason. "
         "Fill event_calibration_summary with effective_catalysts, background_noise, impact_window_assessment, price_volume_confirmation_required, and event_calibration_reason. "
         "Do not include lots, margin, final_action, target_lots, execution instructions, or trade authority in these summaries.\n"
@@ -602,7 +572,7 @@ def build_futures_commodity_news_prompt(
         "When research memories are present, use them only as rebuttable priors. "
         "Classify today's news as catalyst, noise, or no-trade value, and state whether it confirms "
         "or contradicts similar past cases. If Neutral, specify the concrete event/price/volume "
-        "condition that would convert it to probe/open. If a catalyst has current price/volume confirmation "
+        "condition that would convert it to probe_candidate or tradeable_candidate. If a catalyst has current price/volume confirmation "
         "and an invalidation boundary, mark it as probe_candidate or tradeable_candidate. Candidate memories cannot authorize sizing, "
         "add-ons, or holding a losing position.\n"
     )

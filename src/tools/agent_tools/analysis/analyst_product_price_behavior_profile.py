@@ -164,7 +164,6 @@ def validate_product_price_behavior_profile(ticker: str, profile: Mapping[str, A
         "product_profile_version": str(profile.get("product_profile_version")),
         "ticker": ticker_key,
         "sector": str(profile.get("sector") or ""),
-        "profile_valid": True,
         "profile_analysis_boundary": "analysis_evidence_only_no_trade_authority",
     }
 
@@ -249,7 +248,6 @@ def build_profile_usage_contract(ticker: str, analyst: str, profile: Mapping[str
         **validation,
         "analyst": analyst_key,
         "product_profile_used": True,
-        "profile_role": "cold_start_analysis_frame",
         "profile_fields_used": profile_fields_used,
         "profile_supported_evidence": [],
         "profile_conflicting_evidence": [],
@@ -259,22 +257,121 @@ def build_profile_usage_contract(ticker: str, analyst: str, profile: Mapping[str
         "profile_learning_interaction": "static_profile_plus_dynamic_learning_context",
         "profile_invalid_use_flags": [],
         "confirmation_requirements": _as_list(profile.get("confirmation_requirements")),
-        "preferred_setups": _as_list(profile.get("preferred_setups")),
-        "caution_setups": _as_list(profile.get("caution_setups")),
-        "fundamental_driver_priority": _as_list(profile.get("fundamental_driver_priority")),
-        "news_catalyst_priority": _as_list(profile.get("news_catalyst_priority")),
-        "seasonal_event_window": _as_list(profile.get("seasonal_event_window")),
-        "invalid_profile_use": _as_list(profile.get("invalid_profile_use")),
     }
 
 
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace("_", " ").split())
+
+
+def _evidence_texts(signal: Any, quality_context: Mapping[str, Any]) -> list[str]:
+    values: list[Any] = [
+        getattr(signal, "setup_type", ""),
+        getattr(signal, "primary_business_driver", ""),
+        getattr(signal, "secondary_confirmation", ""),
+        getattr(signal, "entry_trigger", ""),
+        getattr(signal, "event_type", ""),
+        getattr(signal, "market_regime", ""),
+        getattr(signal, "technical_false_breakout_risk", ""),
+        getattr(signal, "fundamental_opposition_strength", ""),
+        getattr(signal, "news_impact_window", ""),
+        quality_context.get("setup_type"),
+        quality_context.get("market_regime"),
+        quality_context.get("event_regime"),
+    ]
+    values.extend(getattr(signal, "factor_focus", []) or [])
+    values.extend(getattr(signal, "confirmation_requirements", []) or [])
+    values.extend(quality_context.get("directional_group_names") or [])
+    values.extend((quality_context.get("factor_groups") or {}).keys())
+    values.extend((quality_context.get("event_type_counts") or {}).keys())
+    return [text for value in values if (text := _normalized_text(value))]
+
+
+def _requirement_is_evidenced(requirement: str, evidence_texts: list[str]) -> bool:
+    normalized = _normalized_text(requirement)
+    if not normalized:
+        return False
+    tokens = [token for token in normalized.split() if len(token) >= 3]
+    return any(
+        normalized in evidence
+        or evidence in normalized
+        or (tokens and sum(token in evidence for token in tokens) >= min(2, len(tokens)))
+        for evidence in evidence_texts
+    )
+
+
+def evaluate_profile_usage_contract(
+    signal: Any,
+    quality_context: Mapping[str, Any],
+    usage_contract: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate the static product frame against this run's structured evidence."""
+    usage = dict(usage_contract)
+    evidence_texts = _evidence_texts(signal, quality_context)
+    setup = _normalized_text(getattr(signal, "setup_type", "") or quality_context.get("setup_type"))
+    preferred = [_normalized_text(item) for item in _as_list(profile.get("preferred_setups"))]
+    cautions = [_normalized_text(item) for item in _as_list(profile.get("caution_setups"))]
+    requirements = _as_list(profile.get("confirmation_requirements"))
+
+    supported: list[str] = []
+    conflicting: list[str] = []
+    if setup and any(item and (item in setup or setup in item) for item in preferred):
+        supported.append(f"preferred_setup:{getattr(signal, 'setup_type', '') or quality_context.get('setup_type')}")
+    if setup and any(item and (item in setup or setup in item) for item in cautions):
+        conflicting.append(f"caution_setup:{getattr(signal, 'setup_type', '') or quality_context.get('setup_type')}")
+
+    analyst = str(usage.get("analyst") or "")
+    priority_field = (
+        "fundamental_driver_priority"
+        if analyst == "fundamental"
+        else "news_catalyst_priority"
+        if analyst == "commodity_news"
+        else ""
+    )
+    if priority_field:
+        for item in _as_list(profile.get(priority_field)):
+            if _requirement_is_evidenced(item, evidence_texts):
+                supported.append(f"{priority_field}:{item}")
+
+    evidenced_requirements = [item for item in requirements if _requirement_is_evidenced(item, evidence_texts)]
+    supported.extend(f"confirmation_requirement:{item}" for item in evidenced_requirements)
+    missing = [item for item in requirements if item not in evidenced_requirements]
+    data_usage = (getattr(signal, "metadata", {}) or {}).get("data_usage_summary") or {}
+    data_available = data_usage.get("data_available") if isinstance(data_usage, Mapping) else None
+    if data_available is False:
+        assumption_status = "profile_not_testable_data_unavailable"
+        relevance = 0.0
+    elif conflicting:
+        assumption_status = "current_evidence_conflicts_with_profile"
+        relevance = 0.5
+    elif supported:
+        assumption_status = "current_evidence_supports_profile"
+        relevance = 1.0
+    else:
+        assumption_status = "profile_relevant_confirmation_pending"
+        relevance = 0.5
+
+    usage.update(
+        {
+            "profile_supported_evidence": sorted(set(supported)),
+            "profile_conflicting_evidence": sorted(set(conflicting)),
+            "profile_missing_evidence": missing,
+            "profile_assumption_status": assumption_status,
+            "profile_relevance_score": relevance,
+            "profile_invalid_use_flags": [],
+            "confirmation_requirements": requirements,
+        }
+    )
+    return usage
+
+
 def apply_profile_usage_to_signal(signal: Any, usage_contract: Mapping[str, Any]) -> Any:
-    """Attach profile usage evidence to an AnalystSignal-like object."""
+    """Attach evaluated profile evidence before the formal action contract is built."""
     usage = dict(usage_contract)
     metadata = dict(getattr(signal, "metadata", {}) or {})
     metadata["product_profile_evidence"] = usage
-    action_contract = dict(metadata.get("action_evidence_contract") or {})
-    learning_scope = dict(action_contract.get("learning_scope") or metadata.get("learning_scope") or {})
+    learning_scope = dict(metadata.get("learning_scope") or {})
     learning_scope.update(
         {
             "product_profile_id": usage.get("product_profile_id"),
@@ -285,14 +382,10 @@ def apply_profile_usage_to_signal(signal: Any, usage_contract: Mapping[str, Any]
             "product_profile_analysis_boundary": usage.get("profile_analysis_boundary"),
         }
     )
-    action_contract["learning_scope"] = learning_scope
-    action_contract["product_profile_evidence"] = usage
-    metadata["action_evidence_contract"] = action_contract
     metadata["learning_scope"] = learning_scope
     strategy_trace = dict(metadata.get("analysis_strategy_trace") or {})
     strategy_trace["product_profile_evidence"] = {
         "product_profile_id": usage.get("product_profile_id"),
-        "profile_role": usage.get("profile_role"),
         "profile_learning_interaction": usage.get("profile_learning_interaction"),
         "profile_analysis_boundary": usage.get("profile_analysis_boundary"),
     }
@@ -303,4 +396,9 @@ def apply_profile_usage_to_signal(signal: Any, usage_contract: Mapping[str, Any]
     if profile_focus not in focus:
         focus.append(profile_focus)
     signal.factor_focus = focus
+    confirmations = list(getattr(signal, "confirmation_requirements", []) or [])
+    for requirement in usage.get("confirmation_requirements") or []:
+        if requirement not in confirmations:
+            confirmations.append(requirement)
+    signal.confirmation_requirements = confirmations
     return signal

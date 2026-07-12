@@ -79,8 +79,10 @@ class FakeMemoryDB:
 
 def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overrides) -> AnalystSignal:
     contract = {
+        "contract_version": "agentquant.action_evidence.v1",
+        "analyst": agent_name,
         "signal": signal.value,
-        "side": "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "neutral",
+        "side": "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat",
         "confidence": confidence,
         "opportunity_state": "tradeable_candidate",
         "trigger_valid": True,
@@ -140,7 +142,6 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             analyst_signals=[_signal("technical", Signal.BULLISH, 0.7)],
             enabled_analysts=["technical", "fundamental", "commodity_news"],
         )
-        self.assertTrue(contract["no_trade_authority"])
         self.assertEqual(contract["source_agent"], "signal_collector")
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
         for forbidden in ("final_action", "target_lots", "lots_delta", "margin_required", "authority_type"):

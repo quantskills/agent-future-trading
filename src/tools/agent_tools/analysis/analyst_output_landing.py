@@ -20,11 +20,19 @@ ALLOWED_STRUCTURAL_KEYS = {
     "event_calibration_summary",
     "data_usage_summary",
     "setup_quality",
-    "state_permissions",
     "learning_scope",
-    "execution",
     "product_profile_evidence",
     "fusion_evidence",
+}
+
+_LEGACY_ACTION_CONTRACT_KEYS = {
+    "open",
+    "hold",
+    "exit",
+    "execution",
+    "state_permissions",
+    "money_objective",
+    "has_invalidation",
 }
 
 
@@ -57,9 +65,25 @@ def analyst_output_landing_violations(signal: Any) -> List[str]:
             violations.append(f"analyst_output_forbidden_trade_authority_field:{hit}")
     metadata = getattr(signal, "metadata", None)
     contract = metadata.get("action_evidence_contract") if isinstance(metadata, dict) else None
-    if isinstance(contract, dict):
+    if not isinstance(contract, dict):
+        violations.append("analyst_output_action_evidence_contract_missing")
+    else:
         for hit in _walk_forbidden(contract, path="action_evidence_contract"):
             violations.append(f"analyst_output_forbidden_trade_authority_field:{hit}")
+        if contract.get("contract_version") != "agentquant.action_evidence.v1":
+            violations.append("analyst_output_action_evidence_contract_version_invalid")
+        agent_name = str(getattr(signal, "agent_name", "") or "")
+        if str(contract.get("analyst") or "") != agent_name:
+            violations.append("analyst_output_action_evidence_contract_analyst_mismatch")
+        signal_value = getattr(getattr(signal, "signal", None), "value", getattr(signal, "signal", ""))
+        if str(contract.get("signal") or "") != str(signal_value or ""):
+            violations.append("analyst_output_action_evidence_contract_signal_mismatch")
+        expected_side = "long" if str(signal_value) == "Bullish" else "short" if str(signal_value) == "Bearish" else "flat"
+        if str(contract.get("side") or "") != expected_side:
+            violations.append("analyst_output_action_evidence_contract_side_mismatch")
+        legacy_keys = sorted(_LEGACY_ACTION_CONTRACT_KEYS.intersection(contract))
+        for key in legacy_keys:
+            violations.append(f"analyst_output_legacy_action_contract_field:{key}")
         state = str(contract.get("opportunity_state") or getattr(signal, "opportunity_state", "") or "").strip().lower()
         trigger_valid = bool(contract.get("trigger_valid"))
         invalidation_present = bool(contract.get("invalidation_present"))
@@ -67,6 +91,17 @@ def analyst_output_landing_violations(signal: Any) -> List[str]:
             violations.append("analyst_output_candidate_without_current_trigger")
         if state in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"} and not invalidation_present:
             violations.append("analyst_output_trade_setup_missing_invalidation")
+        if list(contract.get("factor_focus") or []) != list(getattr(signal, "factor_focus", []) or []):
+            violations.append("analyst_output_action_evidence_contract_factor_focus_mismatch")
+        profile = metadata.get("product_profile_evidence") if isinstance(metadata, dict) else None
+        if isinstance(profile, dict) and contract.get("product_profile_evidence") != profile:
+            violations.append("analyst_output_action_evidence_contract_product_profile_mismatch")
+        fusion = metadata.get("fusion_evidence") if isinstance(metadata, dict) else None
+        if isinstance(fusion, dict) and contract.get("fusion_evidence") != fusion:
+            violations.append("analyst_output_action_evidence_contract_fusion_evidence_mismatch")
+    trade_research_contract = metadata.get("trade_research_contract") if isinstance(metadata, dict) else None
+    if isinstance(trade_research_contract, dict) and "action_evidence_contract" in trade_research_contract:
+        violations.append("analyst_output_duplicate_action_evidence_contract")
     top_level_lots = getattr(signal, "lots", None)
     if top_level_lots not in (None, 0, ""):
         violations.append("analyst_output_top_level_lots_not_allowed")

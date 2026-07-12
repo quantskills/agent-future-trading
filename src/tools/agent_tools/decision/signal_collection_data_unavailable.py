@@ -26,6 +26,8 @@ def _enabled_analysts(enabled_analysts: Iterable[Any] | None) -> list[str]:
 
 def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_message: str | None) -> AnalystSignal:
     action_evidence_contract = {
+        "contract_version": "agentquant.action_evidence.v1",
+        "analyst": analyst,
         "side": "flat",
         "signal": "Neutral",
         "confidence": 0.0,
@@ -131,18 +133,6 @@ def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_
     )
 
 
-def _signal_snapshot_from_signals(analyst_signals: list[AnalystSignal], contract: dict) -> dict:
-    snapshot: dict[str, Any] = {
-        "source_agent": "signal_collector",
-        "collection_status": "data_unavailable_no_trade",
-        "signal_collection_contract": contract,
-    }
-    for signal in analyst_signals:
-        payload = signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
-        snapshot[str(signal.agent_name)] = payload
-    return snapshot
-
-
 def build_data_unavailable_signal_package(
     *,
     ticker: str,
@@ -168,16 +158,7 @@ def build_data_unavailable_signal_package(
         analyst_signals=analyst_signals,
         enabled_analysts=analysts,
     )
-    contract.update({
-        "collection_status": "data_unavailable_no_trade",
-        "data_unavailable_reason": reason_text,
-        "source_agent": "signal_collector",
-        "workflow_is_not_signal_producer": True,
-    })
     return {
         "analyst_signals": analyst_signals,
-        "analyst_outputs": [],
         "signal_collection_contract": contract,
-        "signal_collection_contracts": [contract],
-        "signal_snapshot": _signal_snapshot_from_signals(analyst_signals, contract),
     }

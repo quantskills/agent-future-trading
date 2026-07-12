@@ -43,7 +43,7 @@ Phase1 投资组合经理 final_action_contract
 
 `template_prior` 是冷启动研究种子，只能通过 `src/run/research/load_template_prior.py` 显式加载。它不属于 Phase1 盘前策略生成，不由 `proposal.py` 自动写入研究记忆，也不能使用当天或未来交易结果。
 
-`product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究，下一交易日由 `learning_context` 和 `analyst_learning_calibration` 进入 `technical`、`fundamental`、`commodity_news` 的证据判断；静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
+`product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究；下一交易日同一批合格的 `learning_context` 和 `analyst_learning_calibration` 先进入 `technical`、`fundamental`、`commodity_news` 的提示词，再在 LLM 返回后确定性校对信号。静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
 
 多维证据融合协议由 `tools/common/evidence_fusion_semantics.py` 的确定性函数固定实现，不设置无人读取的 YAML 参数。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval`、生命周期学习路由和必要的开仓 Step5 资金部署消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
 
@@ -118,6 +118,15 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 ## 五、分析师如何使用研究成果
 
 技术面分析师、基本面分析师、期货新闻面分析师只消费本专业校准类结构化研究。它们必须把历史经验与盘前或决策时点前可见数据比较，说明当前证据确认、削弱还是反驳历史经验。
+
+三类分析师共同使用学习成果完成两件事：
+
+1. LLM 调用前，把仅限历史交易日且作用域匹配的校准摘要加入提示词，帮助模型识别该产品、setup 和本专业常见的有效证据、反例与数据缺口。
+2. LLM 返回后，用同一批合格记录执行确定性信号校对，将确认、削弱或反驳结果落入已登记的证据、冲突、缺失和质量字段。
+
+技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
+
+学习记录不得替代当日数据，不得单独创造方向、setup、触发、失效边界或交易权限；检索为空属于合法冷启动。最终唯一 `action_evidence_contract` 必须在学习校对、数据质量/时效和商品 profile 评估完成后由共享确定性工具生成。
 
 分析师不能用 action-value 输出手数、保证金、最终开仓、加仓、减仓或平仓命令，也不能输出 `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`。分析师只提供结构化预测证据，排序、资金部署和目标手数由投资组合经理及其确定性工具完成。
 

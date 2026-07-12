@@ -8,20 +8,19 @@ from util.db_helper import get_db
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_quality import (
-    apply_signal_quality_gate,
-    apply_trade_research_contract,
     format_news_summary_for_prompt,
-    get_analyst_llm_config,
     llm_path_label,
     summarize_news_events,
     write_analyst_report,
 )
-from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
-from tools.agent_tools.analysis.analyst_learning_calibration import calibrate_signal_with_learning_context
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_news_data_usage
+from tools.agent_tools.analysis.analyst_output_finalization import (
+    finalize_analyst_signal,
+    persist_analyst_signal,
+    resolve_analyst_llm_config,
+)
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
-    apply_profile_usage_to_signal,
     build_profile_usage_contract,
     format_profile_for_commodity_news,
     get_product_price_behavior_profile,
@@ -103,31 +102,12 @@ def _build_no_news_signal(
     )
 
 
-FUTURES_INSTRUMENT_CONTEXT = {
-    "BU": "BU refers to Shanghai bitumen futures in the China futures market. Keep the analysis anchored to refinery output, asphalt demand, road construction, crude-oil cost, inventories, and regional spot-market conditions.",
-    "C": "C refers to Dalian corn futures in the China futures market. Keep the analysis anchored to corn supply, planting and harvest progress, imports, feed demand, starch and alcohol processing demand, inventories, and substitution grains.",
-    "CF": "CF refers to Zhengzhou cotton futures in the China futures market. Keep the analysis anchored to cotton, cotton yarn, textile demand, planting area, import quotas, and agricultural supply-demand factors.",
-    "EB": "EB refers to Dalian styrene futures in the China futures market. Keep the analysis anchored to styrene, benzene, ethylene, downstream ABS/EPS/PS demand, petrochemical operating rates, and chemical supply-demand factors.",
-    "HC": "HC refers to Shanghai hot-rolled coil futures in the China futures market. Keep the analysis anchored to flat steel demand, manufacturing, exports, steel-mill output, hot metal, iron ore, coke, inventories, and steel margins.",
-    "I": "I refers to Dalian iron ore futures in the China futures market. Keep the analysis anchored to imported iron ore supply, port arrivals, shipments from Australia and Brazil, steel-mill demand, hot metal output, port inventories, and steel margins.",
-    "J": "J refers to Dalian coke futures in the China futures market. Keep the analysis anchored to coke supply, coking-plant margins, steel-mill demand, blast furnace activity, port and plant inventories, and steel-chain demand.",
-    "M": "M refers to Dalian soybean meal futures in the China futures market. Keep the analysis anchored to soybean meal, soybeans, crushing margins, feed demand, imports, and agricultural supply-demand factors.",
-    "MA": "MA refers to Zhengzhou methanol futures in the China futures market. Keep the analysis anchored to methanol supply, coal and natural-gas costs, port inventories, MTO demand, downstream formaldehyde/MTBE/acetic-acid demand, imports, and operating rates.",
-    "P": "P refers to Dalian palm oil futures in the China futures market. Keep the analysis anchored to palm oil imports, Malaysian and Indonesian production and exports, domestic inventories, edible-oil demand, soybean oil substitution, and biodiesel policy.",
-    "PB": "PB refers to Shanghai lead futures in the China futures market. Keep the analysis anchored to primary and secondary lead supply, smelter margins, battery demand, social and exchange inventories, imports and exports, and LME lead context.",
-    "RB": "RB refers to Shanghai Futures Exchange rebar futures in the China futures market. Do not interpret RB as RBOB gasoline or any overseas energy contract. Keep the analysis anchored to rebar, steel mills, iron ore, coking coal, coke, construction demand, infrastructure, and property-related demand.",
-    "SR": "SR refers to Zhengzhou white sugar futures in the China futures market. Keep the analysis anchored to domestic cane and beet sugar output, Guangxi production and sales, sugar imports, Brazil export flows, inventories, consumption, and policy factors.",
-    "TA": "TA refers to Zhengzhou PTA futures in the China futures market. Keep the analysis anchored to PTA, polyester demand, PX cost, operating rates, downstream textile demand, and chemical-industry supply-demand factors.",
-    "ZN": "ZN refers to Shanghai zinc futures in the China futures market. Keep the analysis anchored to zinc mine supply, treatment charges, smelting margins, refined zinc demand, galvanizing and alloy demand, inventories, imports, and LME zinc context.",
-}
-
-
 def commodity_news_agent(state: FundState):
     """Commodity news specialist analyzing China futures news to provide a signal."""
     agent_name = AgentKey.COMMODITY_NEWS
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = state["llm_config"]
+    llm_config = resolve_analyst_llm_config(state)
     portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     pre_open_only = state.get("pre_open_only", True)
@@ -171,7 +151,22 @@ def commodity_news_agent(state: FundState):
             pre_open_only=pre_open_only,
             info_cutoff=info_cutoff,
         )
-        signal = apply_profile_usage_to_signal(signal, product_profile_usage)
+        signal = finalize_analyst_signal(
+            signal,
+            quality_context={
+                "sector": str(product_profile.get("sector") or ""),
+                "tradeability": "low",
+                "risk_flags": ["news_data_unavailable"],
+                "event_regime": "no_event",
+            },
+            full_config=full_config,
+            analyst="commodity_news",
+            ticker=ticker,
+            trading_date=trading_date,
+            learning_context={},
+            product_profile=product_profile,
+            product_profile_usage=product_profile_usage,
+        )
         prompt = (
             f"{ticker} local futures news unavailable before {trading_date}; "
             "deterministic no_trade artifact produced.\n"
@@ -179,7 +174,7 @@ def commodity_news_agent(state: FundState):
         )
         report_sections = {
             "Data Usage Summary": signal.metadata.get("data_usage_summary"),
-            "Product Price Behavior Profile": product_profile_usage,
+            "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
             "Reason": "local_futures_news_unavailable",
         }
         if save_outputs:
@@ -193,7 +188,14 @@ def commodity_news_agent(state: FundState):
             )
             if report_path:
                 signal.metadata["decision_report_path"] = report_path
-            db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+            persist_analyst_signal(
+                db,
+                portfolio_id=portfolio_id,
+                analyst=agent_name,
+                ticker=ticker,
+                prompt=prompt,
+                signal=signal,
+            )
         logger.log_signal(agent_name, ticker, signal)
         return {
             "analyst_signals": [signal],
@@ -213,11 +215,7 @@ def commodity_news_agent(state: FundState):
     news_context = summarize_news_events(commodity_news, ticker, trading_date=trading_date)
     news_context["product_profile_evidence"] = product_profile_usage
     llm_path = llm_path_label(full_config, "commodity_news")
-    analyst_llm_config = get_analyst_llm_config(full_config, "commodity_news")
-    instrument_context = FUTURES_INSTRUMENT_CONTEXT.get(
-        ticker,
-        f"{ticker} is a China futures contract. Keep the analysis anchored to this domestic commodity and its relevant industrial chain.",
-    )
+    instrument_context = str(product_profile.get("product_context") or "")
     learning_context = build_learning_context(
         db=db,
         full_config=full_config,
@@ -265,7 +263,6 @@ def commodity_news_agent(state: FundState):
         "news_context": news_context,
         "product_profile_evidence": product_profile_usage,
         "data_usage_summary": data_usage_summary,
-        "cloud_model": analyst_llm_config.get("cloud_model"),
         "reviewer_learning_context": {
             "selected_ids": learning_context.get("selected_ids", []),
             "horizon_class": learning_context.get("horizon_class", "event_short"),
@@ -283,29 +280,23 @@ def commodity_news_agent(state: FundState):
             },
             "product_profile_evidence": {
                 "product_profile_id": product_profile_usage.get("product_profile_id"),
-                "profile_role": product_profile_usage.get("profile_role"),
                 "profile_learning_interaction": product_profile_usage.get("profile_learning_interaction"),
             },
             "neutral_to_opportunity_required": True,
             "position_authority_boundary": "news_signal_requires_pm_auditor_trader_confirmation",
         },
     }
-    signal = calibrate_signal_with_learning_context(
+    signal = finalize_analyst_signal(
         signal,
+        quality_context=news_context,
+        full_config=full_config,
         analyst="commodity_news",
         ticker=ticker,
-        learning_context=learning_context,
-    )
-    signal = apply_signal_quality_gate(signal, news_context, full_config, "commodity_news")
-    signal = apply_business_quality_enrichment(signal, news_context, full_config, "commodity_news")
-    signal = apply_trade_research_contract(
-        signal,
-        news_context,
-        analyst="commodity_news",
         trading_date=trading_date,
-        ticker=ticker,
+        learning_context=learning_context,
+        product_profile=product_profile,
+        product_profile_usage=product_profile_usage,
     )
-    signal = apply_profile_usage_to_signal(signal, product_profile_usage)
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
     signal.justification += (
         f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
@@ -327,7 +318,7 @@ def commodity_news_agent(state: FundState):
         "Relevance Score": news_context.get("relevance_score"),
         "Data Usage Summary": data_usage_summary,
         "Risk Flags": news_context.get("risk_flags"),
-        "Product Price Behavior Profile": product_profile_usage,
+        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
     }
     if save_outputs:
         report_path = write_analyst_report(
@@ -343,7 +334,14 @@ def commodity_news_agent(state: FundState):
 
     logger.log_signal(agent_name, ticker, signal)
     if save_outputs:
-        db.save_signal(portfolio_id, agent_name, ticker, prompt, signal)
+        persist_analyst_signal(
+            db,
+            portfolio_id=portfolio_id,
+            analyst=agent_name,
+            ticker=ticker,
+            prompt=prompt,
+            signal=signal,
+        )
 
     return {
         "analyst_signals": [signal],

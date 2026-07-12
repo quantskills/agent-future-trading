@@ -226,8 +226,8 @@ def get_analyst_llm_config(full_config: Dict[str, Any], analyst: str) -> Dict[st
     llm_cfg = full_config.get("llm", {}) or {}
     del analyst
     return {
-        "mode": "cloud_only",
-        "cloud_model": cfg.get("cloud_model") or llm_cfg.get("model"),
+        "provider": llm_cfg.get("provider"),
+        "model": llm_cfg.get("model"),
         "write_decision_reports": bool(cfg.get("write_decision_reports", True)),
         "force_neutral_low_tradeability": bool(cfg.get("force_neutral_low_tradeability", True)),
         "cap_medium_tradeability_confidence": float(cfg.get("cap_medium_tradeability_confidence", 0.65)),
@@ -249,11 +249,11 @@ def llm_path_label(full_config: Dict[str, Any], analyst: str) -> str:
     }.get(provider_key)
     provider_cfg = llm_cfg.get(provider_cfg_key, {}) if provider_cfg_key else {}
     reasoning_cfg = provider_cfg.get("reasoning", {}) or {}
-    parts = [str(base.get("mode") or "cloud_only")]
+    parts = []
     if llm_cfg.get("provider"):
         parts.append(f"provider={llm_cfg.get('provider')}")
-    if base.get("cloud_model"):
-        parts.append(f"model={base.get('cloud_model')}")
+    if base.get("model"):
+        parts.append(f"model={base.get('model')}")
     effort = provider_cfg.get("reasoning_effort") or reasoning_cfg.get("effort")
     if effort:
         parts.append(f"reasoning_effort={effort}")
@@ -702,15 +702,11 @@ def _current_entry_trigger_confirmed(
 
 
 def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: str = "") -> Dict[str, Any]:
-    contract = quality_context.get("action_evidence_contract")
-    contract = contract if isinstance(contract, dict) else {}
-    learning_scope = contract.get("learning_scope")
+    learning_scope = quality_context.get("learning_scope")
     learning_scope = learning_scope if isinstance(learning_scope, dict) else {}
     return {
         "setup_family": (
             learning_scope.get("setup_family")
-            or contract.get("setup_type")
-            or contract.get("setup_family")
             or quality_context.get("setup_type")
             or opportunity_type
             or "unknown"
@@ -718,16 +714,52 @@ def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: st
         "sector_setup_alignment": learning_scope.get("sector_setup_alignment") or quality_context.get("sector_setup_alignment"),
         "market_regime": learning_scope.get("market_regime") or quality_context.get("market_regime"),
         "required_confirmation": (
-            contract.get("entry_trigger")
-            or quality_context.get("required_confirmation")
+            quality_context.get("required_confirmation")
             or "current technical confirmation"
         ),
         "invalidation_template": (
-            contract.get("invalidation_condition")
-            or quality_context.get("invalidation_condition")
+            quality_context.get("invalidation_condition")
             or "T-day confirmation fails, price closes back inside the failed trigger area, or opposite momentum/volume confirmation appears"
         ),
     }
+
+
+_ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS = {
+    "contract_version",
+    "agent_name",
+    "justification",
+    "determinism_mode",
+    "llm_provider",
+    "llm_model",
+    "source_artifacts",
+    "validation_errors",
+    "decision_horizon",
+    "execution_horizon",
+    "validation_horizon",
+    "research_contract_version",
+    "message_contract_version",
+    "similar_past_cases",
+    "metadata",
+}
+
+
+def _sync_signal_fields_to_action_evidence_contract(
+    contract: Dict[str, Any],
+    signal: AnalystSignal,
+    metadata: Dict[str, Any],
+) -> None:
+    """Land final registered analyst evidence in the formal action contract."""
+    contract["signal"] = signal_value(signal.signal)
+    for field in AnalystSignal.model_fields:
+        if field in _ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS or field == "signal":
+            continue
+        contract[field] = getattr(signal, field)
+    data_usage_summary = metadata.get("data_usage_summary")
+    if isinstance(data_usage_summary, dict):
+        contract["data_usage_summary"] = dict(data_usage_summary)
+    invalidation_condition = str(metadata.get("invalidation_condition") or "").strip()
+    if invalidation_condition:
+        contract["invalidation_condition"] = invalidation_condition
 
 
 def _build_action_evidence_contract(
@@ -741,8 +773,7 @@ def _build_action_evidence_contract(
     exit_hint: str,
     has_invalidation: bool,
 ) -> Dict[str, Any]:
-    base = quality_context.get("action_evidence_contract")
-    contract: Dict[str, Any] = dict(base) if isinstance(base, dict) else {}
+    contract: Dict[str, Any] = {}
     sector = str(quality_context.get("sector") or "")
     side = _signal_side(signal)
     contract.update(
@@ -758,12 +789,13 @@ def _build_action_evidence_contract(
             "trigger_valid": bool(getattr(signal, "trigger_valid", False)),
             "entry_trigger": entry_trigger,
             "exit_hint": exit_hint,
-            "has_invalidation": bool(has_invalidation),
             "invalidation_present": bool(has_invalidation),
-            "money_objective": "improve_signal_quality_then_route_to_pm_trader_research",
         }
     )
-    learning_scope = dict(contract.get("learning_scope") or {})
+    metadata = getattr(signal, "metadata", {}) or {}
+    _sync_signal_fields_to_action_evidence_contract(contract, signal, metadata)
+    learning_scope = dict(quality_context.get("learning_scope") or {})
+    learning_scope.update(dict(metadata.get("learning_scope") or {}))
     if analyst == "technical":
         setup = _technical_setup_scope(quality_context, opportunity_type)
         learning_scope.update(
@@ -791,15 +823,9 @@ def _build_action_evidence_contract(
             }
         )
     contract["learning_scope"] = learning_scope
-    execution = dict(contract.get("execution") or {})
-    execution.update(
-        {
-            "trigger_checked_by_trader": True,
-            "trigger_source": analyst,
-            "invalidation_required": True,
-        }
-    )
-    contract["execution"] = execution
+    profile_evidence = metadata.get("product_profile_evidence")
+    if isinstance(profile_evidence, dict):
+        contract["product_profile_evidence"] = dict(profile_evidence)
     return contract
 
 
@@ -1150,6 +1176,11 @@ def _resolve_opportunity_candidate_state(
     """Convert analyst output into a unified opportunity_state candidate."""
     risk_flags = _clean_list(quality_context.get("risk_flags"), max_items=12)
     state_notes: List[str] = []
+    metadata = getattr(signal, "metadata", {}) or {}
+    data_usage = metadata.get("data_usage_summary") if isinstance(metadata.get("data_usage_summary"), dict) else {}
+    if str(opportunity_type or "") == "no_trade" and data_usage.get("data_available") is False:
+        state_notes.append("current_professional_data_unavailable_no_opportunity")
+        return "no_opportunity", state_notes
     signal_text = signal_value(signal.signal)
     if signal_text == Signal.NEUTRAL.value:
         if (
@@ -1397,33 +1428,6 @@ def apply_trade_research_contract(
     if pending_conditional_trigger and opportunity_state in {"probe_candidate", "tradeable_candidate"}:
         opportunity_state = "watch_for_trigger"
     action_evidence_contract["opportunity_state"] = opportunity_state
-    action_evidence_contract["state_permissions"] = {
-        "no_opportunity": {
-            "pm_use": "ignore_for_new_entry",
-            "can_seed_probe": False,
-            "can_seed_real_entry": False,
-        },
-        "watch_for_trigger": {
-            "pm_use": "watchlist_only_until_current_trigger",
-            "can_seed_probe": False,
-            "can_seed_real_entry": False,
-        },
-        "probe_candidate": {
-            "pm_use": "probe_candidate_requires_pm_auditor_authority",
-            "can_seed_probe": True,
-            "can_seed_real_entry": False,
-        },
-        "tradeable_candidate": {
-            "pm_use": "tradeable_candidate_requires_pm_auditor_authority",
-            "can_seed_probe": True,
-            "can_seed_real_entry": True,
-        },
-        "risk_reduction_candidate": {
-            "pm_use": "holding_protection_candidate_only",
-            "can_seed_probe": False,
-            "can_seed_real_entry": False,
-        },
-    }.get(opportunity_state, {})
     signal.opportunity_type = opportunity_type
     signal.opportunity_state = opportunity_state
     signal.setup_quality_score = _safe_float(setup_quality.get("score"), 0.0)
@@ -1490,10 +1494,6 @@ def apply_trade_research_contract(
         or signal.setup_quality_score >= 0.42
     )
     action_evidence_contract["setup_type"] = str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown")
-    execution_contract = dict(action_evidence_contract.get("execution") or {})
-    execution_contract["trigger_valid"] = bool(signal.trigger_valid)
-    execution_contract["current_trigger_confirmed"] = bool(current_trigger_confirmed)
-    action_evidence_contract["execution"] = execution_contract
     fusion_evidence = build_analyst_fusion_evidence(
         signal,
         {**dict(quality_context or {}), "action_evidence_contract": action_evidence_contract},
@@ -1550,7 +1550,6 @@ def apply_trade_research_contract(
         atr_stop_distance=getattr(signal, "atr_stop_distance", None),
         sample_state="current_day_evidence",
         maturity="candidate" if opportunity_state != "tradeable_candidate" else "validated",
-        action_evidence_contract=action_evidence_contract,
         product_context=product_context,
     )
     research_errors = validate_trade_research_contract(research_contract)
@@ -1574,6 +1573,12 @@ def apply_trade_research_contract(
         signal,
         opportunity_state=opportunity_state,
     )
+    _sync_signal_fields_to_action_evidence_contract(
+        action_evidence_contract,
+        signal,
+        metadata,
+    )
+    action_evidence_contract["setup_type"] = str(opportunity_type or "unknown")
     validation_errors = list(getattr(signal, "validation_errors", []) or [])
     for error in research_errors + message_errors:
         if error not in validation_errors:
@@ -1771,40 +1776,16 @@ def build_technical_context(
         "tradeability": tradeability,
         "setup_type": setup_family,
         "setup_quality_ok": setup_quality_ok,
-        "action_evidence_contract": {
-            "analyst": "technical",
-            "setup_type": setup_family,
-            "setup_quality_ok": setup_quality_ok,
-            "opportunity_state": opportunity_state,
-            "trigger_valid": False,
-            "invalidation_present": setup_family not in {"no_trade"},
-            "entry_trigger": required_confirmation,
-            "invalidation_condition": invalidation_template,
-            "learning_scope": {
-                "setup_family": setup_family,
-                "sector_setup_alignment": sector_setup_alignment,
-                "sector_preferred_setups": sorted(preferred_setups),
-                "sector_caution_setups": sorted(caution_setups),
-                "primary_confirmation": sector_policy.get("primary_confirmation") or [],
-                "execution_focus": sector_policy.get("execution_focus"),
-                "market_regime": regime,
-            },
-            "open": {
-                "setup_family": setup_family,
-                "requires_current_trigger": setup_family not in {"no_trade", "direction_watchlist"},
-                "sector_setup_alignment": sector_setup_alignment,
-                "primary_confirmation": sector_policy.get("primary_confirmation") or [],
-            },
-            "hold": {
-                "evidence": ["trend_direction", "market_regime", "invalidation_boundary"],
-            },
-            "exit": {
-                "evidence": ["trigger_failure", "opposite_technical_vote", "invalidation_boundary"],
-            },
-            "execution": {
-                "trigger_source": "technical",
-                "execution_focus": sector_policy.get("execution_focus"),
-            },
+        "required_confirmation": required_confirmation,
+        "invalidation_condition": invalidation_template,
+        "learning_scope": {
+            "setup_family": setup_family,
+            "sector_setup_alignment": sector_setup_alignment,
+            "sector_preferred_setups": sorted(preferred_setups),
+            "sector_caution_setups": sorted(caution_setups),
+            "primary_confirmation": sector_policy.get("primary_confirmation") or [],
+            "execution_focus": sector_policy.get("execution_focus"),
+            "market_regime": regime,
         },
         "range_or_choppy_state": regime in {"choppy", "range", "weak_trend"},
         "indicator_votes": votes,
@@ -1984,30 +1965,10 @@ def parse_fundamental_factors(fundamentals: str, metadata: Optional[Dict[str, An
         },
         "basis": quality.get("basis"),
         "tradeability": tradeability,
-        "action_evidence_contract": {
-            "analyst": "fundamental",
-            "open": {
-                "role": "context_or_short_trigger",
-                "can_create_trade_authority_alone": False,
-                "primary_driver_groups": primary_driver_groups,
-                "short_trigger_groups": short_trigger_groups,
-                "requires_technical_or_market_confirmation": True,
-            },
-            "hold": {
-                "role": "medium_background",
-                "primary_driver_groups": primary_driver_groups,
-                "supporting_driver_groups": supporting_driver_groups,
-            },
-            "exit": {
-                "role": "thesis_invalidation",
-                "conflict_groups": sorted(set(conflict_groups)),
-                "risk_driver_groups": risk_driver_groups,
-            },
-            "learning_scope": {
-                "factor_tree": get_sector(ticker),
-                "primary_driver_groups": primary_driver_groups,
-                "short_trigger_groups": short_trigger_groups,
-            },
+        "learning_scope": {
+            "factor_tree": get_sector(ticker),
+            "primary_driver_groups": primary_driver_groups,
+            "short_trigger_groups": short_trigger_groups,
         },
         "risk_flags": risk_flags,
     }
@@ -2296,29 +2257,10 @@ def summarize_news_events(news_items: Iterable[Any], ticker: str, trading_date: 
         "price_reaction_required": True,
         "price_reaction_confirmed": False,
         "tradeability": tradeability,
-        "action_evidence_contract": {
-            "analyst": "commodity_news",
-            "open": {
-                "role": "event_catalyst",
-                "tradable_catalyst": bool(tradable_event),
-                "price_reaction_required": True,
-                "event_window_days": event_window_days,
-                "sector_tradable_event_count": sector_tradable_event_count,
-            },
-            "hold": {
-                "role": "event_background_or_risk",
-                "risk_event": bool(catalyst_classification["risk_event"]),
-            },
-            "exit": {
-                "role": "risk_or_catalyst_failure",
-                "conflict_event": bool(mixed),
-                "stale_or_noise": bool(catalyst_classification["stale_or_noise"]),
-            },
-            "learning_scope": {
-                "event_regime": event_regime,
-                "event_type_counts": dict(type_counts),
-                "catalyst_classification": catalyst_classification,
-            },
+        "learning_scope": {
+            "event_regime": event_regime,
+            "event_type_counts": dict(type_counts),
+            "catalyst_classification": catalyst_classification,
         },
         "risk_flags": risk_flags,
     }
@@ -2434,7 +2376,7 @@ def write_analyst_report(
         f"Ticker: {ticker}",
         f"Trading Date: {trading_date_value}",
         f"LLM Path: {sections.get('llm_path', 'cloud_only')}",
-        f"Model: {cfg.get('cloud_model')}",
+        f"Model: {cfg.get('model')}",
         f"Signal: {signal_value(signal.signal)}",
         f"Confidence: {float(signal.confidence or 0.0):.2f}",
         f"Tradeability: {sections.get('tradeability', signal.metadata.get('tradeability', 'unknown'))}",

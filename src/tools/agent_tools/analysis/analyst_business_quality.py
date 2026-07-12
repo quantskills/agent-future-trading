@@ -276,15 +276,8 @@ def apply_business_quality_enrichment(
     analyst_key = str(analyst)
     metadata = getattr(signal, "metadata", {}) or {}
     llm_cfg = (full_config or {}).get("llm", {}) or {}
-    analyst_llm_cfg = (full_config or {}).get("analyst_llm", {}) or {}
-    signal.llm_provider = (
-        signal.llm_provider
-        if str(signal.llm_provider or "").strip() and signal.llm_provider != "unknown"
-        else str(llm_cfg.get("provider") or "")
-    )
-    signal.llm_model = signal.llm_model if str(signal.llm_model or "").strip() and signal.llm_model != "unknown" else str(
-        analyst_llm_cfg.get("cloud_model") or llm_cfg.get("model") or ""
-    )
+    signal.llm_provider = str(llm_cfg.get("provider") or "")
+    signal.llm_model = str(llm_cfg.get("model") or "")
     signal.analyst_horizon = signal.analyst_horizon if signal.analyst_horizon != "unknown" else signal.horizon_class
     signal.execution_horizon = signal.execution_horizon if signal.execution_horizon != "unknown" else (
         "short" if analyst_key == "technical" else "event_short" if analyst_key == "commodity_news" else "short"

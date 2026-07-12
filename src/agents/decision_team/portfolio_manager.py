@@ -85,6 +85,10 @@ from tools.agent_tools.decision.pm_signal_fusion import (
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
 from tools.common.alpha_setup import compact_profile_for_trace
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    validate_signal_collection_contract,
+)
 
 
 def finalize_pm_full_market_contracts(*, generated, config, portfolio):
@@ -1138,10 +1142,15 @@ def _require_step6_signal_collection_contract(signal_collection_contract: object
     contract = signal_collection_contract if isinstance(signal_collection_contract, dict) else {}
     if not contract:
         raise ValueError("pm_step6_missing_signal_collection_contract_from_signal_collector")
-    if str(contract.get("collector_decision_boundary") or "").strip().lower() != "no_trade_authority":
-        raise ValueError("pm_step6_invalid_signal_collection_contract_boundary")
-    if str(contract.get("source_agent") or "").strip().lower() != "signal_collector":
-        raise ValueError("pm_step6_invalid_signal_collection_contract_source_agent")
+    try:
+        validate_signal_collection_contract(contract)
+    except ValueError as exc:
+        error = str(exc)
+        if "invalid_decision_boundary" in error:
+            raise ValueError("pm_step6_invalid_signal_collection_contract_boundary") from exc
+        if "invalid_source_agent" in error:
+            raise ValueError("pm_step6_invalid_signal_collection_contract_source_agent") from exc
+        raise ValueError(f"pm_step6_invalid_signal_collection_contract:{error}") from exc
     return contract
 
 
@@ -9452,7 +9461,7 @@ def _run_pm_six_step_decision(state: FundState):
     portfolio = state["portfolio"]
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    analyst_signals = state["analyst_signals"]
+    source_analyst_signals = state["analyst_signals"]
     num_tickers = state["num_tickers"]
     enabled_analysts = state.get("enabled_analysts", [])
     config_id = state.get("config_id", "")
@@ -9463,14 +9472,26 @@ def _run_pm_six_step_decision(state: FundState):
         raise RuntimeError(
             "portfolio_agent_futures only supports phase1 pre-open recommendation flow."
         )
-    _validate_required_analyst_signals(ticker, enabled_analysts, analyst_signals)
+    _validate_required_analyst_signals(ticker, enabled_analysts, source_analyst_signals)
     signal_collection_contract = state.get("signal_collection_contract")
     if not isinstance(signal_collection_contract, dict) or not signal_collection_contract:
         raise RuntimeError("pm_missing_signal_collection_contract_from_signal_collector")
-    if str(signal_collection_contract.get("collector_decision_boundary") or "").strip().lower() != "no_trade_authority":
-        raise RuntimeError("pm_invalid_signal_collection_contract_boundary")
-    if str(signal_collection_contract.get("source_agent") or "").strip().lower() != "signal_collector":
-        raise RuntimeError("pm_invalid_signal_collection_contract_source_agent")
+    try:
+        validate_signal_collection_contract(
+            signal_collection_contract,
+            ticker=ticker,
+            trading_date=trading_date,
+            enabled_analysts=enabled_analysts,
+            analyst_signals=source_analyst_signals,
+        )
+    except ValueError as exc:
+        error = str(exc)
+        if "invalid_decision_boundary" in error:
+            raise RuntimeError("pm_invalid_signal_collection_contract_boundary") from exc
+        if "invalid_source_agent" in error:
+            raise RuntimeError("pm_invalid_signal_collection_contract_source_agent") from exc
+        raise RuntimeError(f"pm_invalid_signal_collection_contract:{error}") from exc
+    analyst_signals = build_pm_evidence_signals_from_scc(signal_collection_contract)
 
     cfg = state.get("config", {})
     db = get_db()

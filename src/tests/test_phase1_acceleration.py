@@ -123,6 +123,18 @@ class Phase1AccelerationTest(unittest.TestCase):
                     signal=Signal.NEUTRAL,
                     confidence=0.5,
                     justification=f"{analyst} neutral",
+                    metadata={
+                        "action_evidence_contract": {
+                            "contract_version": "agentquant.action_evidence.v1",
+                            "analyst": analyst,
+                            "signal": "Neutral",
+                            "side": "flat",
+                            "confidence": 0.5,
+                            "opportunity_state": "no_opportunity",
+                            "trigger_valid": False,
+                            "current_trigger_confirmed": False,
+                        }
+                    },
                 )
                 return {
                     "analyst_signals": [signal],
@@ -205,6 +217,13 @@ class Phase1AccelerationTest(unittest.TestCase):
         self.assertEqual(len(fake_db.saved_signals), 4)
         self.assertTrue(all("prompt for" in row[3] for row in fake_db.saved_signals))
         self.assertTrue(all(getattr(row[4], "metadata", {}).get("decision_report_path") for row in fake_db.saved_signals))
+        self.assertTrue(
+            all(
+                getattr(row[4], "metadata", {}).get("signal_record_id")
+                == f"sig-{row[2]}-{row[1]}"
+                for row in fake_db.saved_signals
+            )
+        )
         self.assertTrue(
             all(rec.status != RecommendationStatus.SKIPPED for rec in fake_db.saved_recommendations)
         )

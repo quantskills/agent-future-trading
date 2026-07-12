@@ -6,7 +6,10 @@ from graph.schema import FundState
 from tools.agent_tools.decision.signal_collection_data_unavailable import (
     build_data_unavailable_signal_package,
 )
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import (
+    build_signal_collection_contract,
+    validate_signal_collection_contract,
+)
 
 
 def signal_collector_agent(state: FundState):
@@ -32,6 +35,11 @@ def signal_collector_agent(state: FundState):
         enabled_analysts=state.get("enabled_analysts", []),
     )
     return {
-        "signal_collection_contract": contract,
-        "signal_collection_contracts": [contract],
+        "signal_collection_contract": validate_signal_collection_contract(
+            contract,
+            ticker=state["ticker"],
+            trading_date=state["trading_date"],
+            enabled_analysts=state.get("enabled_analysts", []),
+            analyst_signals=state.get("analyst_signals", []),
+        )
     }

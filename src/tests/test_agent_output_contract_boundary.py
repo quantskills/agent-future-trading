@@ -64,6 +64,8 @@ def _nested_key_paths(value, forbidden, prefix=""):
 
 def _analyst_action_contract():
     return {
+        "contract_version": "agentquant.action_evidence.v1",
+        "analyst": "technical",
         "signal": "bullish_breakout_watch",
         "side": "long",
         "confidence": 0.68,
@@ -96,6 +98,7 @@ def _analyst_action_contract():
 
 def _analyst_signal(agent_name="technical"):
     contract = _analyst_action_contract()
+    contract["analyst"] = agent_name
     return SimpleNamespace(
         agent_name=agent_name,
         signal=contract["signal"],
@@ -166,7 +169,6 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         )
         self.assertEqual(contract["source_agent"], "signal_collector")
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
-        self.assertTrue(contract["no_trade_authority"])
 
         pm_view = build_pm_fusion_diagnostics(contract)
         self.assertTrue(pm_view["pm_fusion_diagnostics"])
@@ -268,11 +270,16 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         for path in analyst_files:
             source = _source(path)
             self.assertIn("build_learning_context", source, path)
-            self.assertIn("calibrate_signal_with_learning_context", source, path)
+            self.assertIn("finalize_analyst_signal", source, path)
             self.assertNotIn("final_action_contract", source, path)
+
+        finalizer_source = _source("tools/agent_tools/analysis/analyst_output_finalization.py")
+        self.assertIn("calibrate_signal_with_learning_context", finalizer_source)
 
         technical_source = _source("agents/analysis_team/technical.py")
         self.assertIn("retrieve_analyst_policy_calibration", technical_source)
+        self.assertIn("apply_technical_parameter_calibration", technical_source)
+        self.assertIn("finalize_analyst_signal", technical_source)
 
         signal_collector_source = _source("agents/decision_team/signal_collector.py")
         self.assertIn("build_signal_collection_contract", signal_collector_source)

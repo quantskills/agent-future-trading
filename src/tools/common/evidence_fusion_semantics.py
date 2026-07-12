@@ -311,10 +311,10 @@ def build_pm_fusion_diagnostics(signal_collection_contract: Mapping[str, Any] | 
     """Build a PM-facing fusion diagnostic from signal_collection_contract."""
     contract = signal_collection_contract if isinstance(signal_collection_contract, Mapping) else {}
     fusion = contract.get("evidence_fusion") if isinstance(contract.get("evidence_fusion"), Mapping) else {}
-    conflicts = fusion.get("cross_analyst_conflicts") or contract.get("cross_analyst_conflicts") or []
-    opposing = fusion.get("dominant_opposing_evidence") or contract.get("dominant_opposing_evidence") or []
-    requirements = fusion.get("confirmation_requirements") or contract.get("confirmation_requirements") or []
-    missing = fusion.get("missing_evidence") or contract.get("missing_evidence") or []
+    conflicts = fusion.get("cross_analyst_conflicts") or []
+    opposing = fusion.get("dominant_opposing_evidence") or []
+    requirements = fusion.get("confirmation_requirements") or []
+    missing = fusion.get("missing_evidence") or []
     consensus = _safe_float(fusion.get("multi_evidence_consensus_score"), 0.0)
     conflict_count = len(_as_list(conflicts)) + len(_as_list(opposing))
     missing_count = len(_as_list(missing))

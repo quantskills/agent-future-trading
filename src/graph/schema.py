@@ -506,7 +506,6 @@ class FundState(TypedDict):
     router: Any
     analyst_signals: Annotated[List[AnalystSignal], operator.add]
     signal_collection_contract: Dict[str, Any]
-    signal_collection_contracts: Annotated[List[Dict[str, Any]], operator.add]
     decision: FuturesDecision
     pm_state: Dict[str, Any]
     recommendation: Optional[FuturesRecommendation]
