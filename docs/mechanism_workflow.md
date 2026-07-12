@@ -1,186 +1,1444 @@
-# Workflow 运行编排机制
+# AgentQuant 工作流
 
-本文固定 AgentQuant 中 `workflow` 的职责边界。`workflow` 不是智能体，也不是第十二个决策者；它只负责运行顺序、上下文传递、事实保存、审计/执行触发和流程阻断。各智能体的业务判断必须由各自智能体及其确定性工具完成。
-全链路生产、落盘、消费、审计、hard fail 与 diagnostics 契约以 `docs/matrix_chain_contract.md` 为准；workflow 只按该矩阵触发只读 gate 与流程阻断，不补字段、不改语义。
-
-## 0. 11 个智能体端到端业务流
-
-AgentQuant 的固定业务链如下：
+## 一、工作流程
 
 ```text
-technical / fundamental / commodity_news 分析师
--> signal_collector
--> portfolio_manager
--> auditor
--> trader
--> accountant
--> reviewer
--> researcher
--> 下一交易日 technical / fundamental / commodity_news 分析师与 portfolio_manager 消费结构化学习
+【物理输入】
+PandaAI行情 / Finoview基本面文件 / 新闻txt
+        ↓
+【内存：三个分析师】
+workflow 编排层以交易日期和主配置启动 technical、fundamental、commodity_news
+三个分析师分别从研究学习SQL读取仅限当前交易日前的本专业学习成果，
+用于完善LLM提示词和校对当日信号，
+再各生成一份内含 metadata.action_evidence_contract 正式证据的 AnalystSignal，
+并将三份 AnalystSignal 返回 workflow 编排层
+        ↓
+【物理输出①】
+workflow 编排层将三个分析师返回的 AnalystSignal
+写入 state["analyst_signals"]，继续在内存中向下传递；
+同时物理化为：
+→ 三条 signal SQL记录，artifact_json保存完整 AnalystSignal
+→ 三份分析师报告
+        ↓
+【内存：Signal Collector】
+workflow 编排层将 state["analyst_signals"] 中的三份 AnalystSignal 传入
+Signal Collector提取各自 metadata.action_evidence_contract
+生成唯一 SCC并写回 state["signal_collection_contract"]
+        ↓
+【内存：PM】
+workflow 编排层将包含 state["analyst_signals"] 和 state["signal_collection_contract"] 的运行状态传入 PM
+PM接收时，只使用 state["analyst_signals"] 核对启用分析师的身份、数量，
+以及SCC来源引用是否完整、匹配
+随后调用 build_pm_evidence_signals_from_scc，
+只从SCC形成PM证据读取对象
+PM Step1–3基于SCC、账户、持仓和合约信息更新同一个 pm_state
+PM Step4调用 pm_decision_memory_retrieval.retrieve_pm_memory，
+从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果，
+并继续更新同一个 pm_state
+PM Step5仅对新增风险候选完成排名、预算分配和手数计算，
+并继续更新同一个 pm_state；非新增风险候选跳过Step5
+PM Step6基于最终 pm_state生成 FuturesRecommendation，
+其 signal_snapshot 内含：
+→ signal_collection_contract
+→ final_action_contract
+→ pm_six_step_trace
+并将 FuturesRecommendation 返回 workflow 编排层
+        ↓
+【物理输出②】
+workflow 编排层接收 PM 返回的 FuturesRecommendation，
+并将其物理化为：
+→ 一条 futures_recommendation SQL记录
+→ signal_snapshot写入该记录；超出内联限制时生成对应 recommendation artifact
+        ↓
+【内存：Auditor】
+workflow 编排层将已保存的 FuturesRecommendation、账户状态和配置传入 Auditor
+Auditor读取 FuturesRecommendation.signal_snapshot["final_action_contract"]，
+生成 audit_verdict和audit_payload，
+不修改 final_action_contract，并将审计结果返回 workflow 编排层
+        ↓
+【物理输出③】
+workflow 编排层接收 Auditor 返回的审计结果，
+并更新同一条 futures_recommendation SQL记录：
+→ signal_snapshot["auditor"]写入审计摘要
+→ audit_payload写入完整审计结果；超出内联限制时生成对应 recommendation artifact
+        ↓
+【内存：Trader】
+workflow 编排层读取审计后的 FuturesRecommendation，
+并将其与当前账户、持仓和主配置传入 Trader
+Trader读取 FuturesRecommendation.signal_snapshot["final_action_contract"]，
+通过行情路由读取盘中行情，
+判断触发、未触发或成交，并形成执行结果
+        ↓
+【物理输出④】
+workflow 编排层调度 Trader 执行链，
+Trader执行链将执行事实物理化为：
+→ intraday decision写入 futures_intraday_decision SQL记录
+→ execution_result写入同一条 futures_recommendation记录的signal_snapshot
+→ 成交结果写入 futures_transaction SQL记录
+→ 更新同一条 futures_recommendation记录的状态和执行价格
+        ↓
+【内存：Accountant】
+workflow 编排层在 Phase2 完成后，以交易日期和主配置启动 Accountant
+Accountant从 SQL 读取最近已结算 portfolio及当日未入账的 futures_transaction，
+通过行情路由读取结算行情，并读取合约信息，
+在内存中计算账户、保证金、持仓和PnL，形成结算结果
+        ↓
+【物理输出⑤】
+workflow 编排层调度 Accountant 结算链，
+Accountant结算链将结算事实物理化为：
+→ 结算后账户和持仓写入 portfolio及position SQL记录
+→ 日结算结果写入 daily_settlement SQL记录
+→ 分产品盈亏写入 ticker_daily_pnl SQL记录
+→ 回填当日 futures_transaction的结算价并标记为已入账
+        ↓
+【内存：Reviewer】
+workflow 编排层在 Phase3 完成后，以交易日期和主配置启动 Reviewer
+Reviewer从 SQL 读取 Phase1–3阶段状态、分析师signal、审计及执行后的 futures_recommendation、
+futures_transaction、daily_settlement及最新portfolio和position，
+在内存中复盘决策、审计、执行和结算事实，分析交易结果并进行事实归因，
+形成Phase4复盘结果和研究输入材料
+        ↓
+【物理输出⑥】
+workflow 编排层调度 Reviewer 复盘链，
+Reviewer复盘链将复盘结果物理化为：
+→ Phase4状态写入 trading_day_phase SQL记录
+→ 复盘摘要写入 daily summary JSON和CSV
+→ 每日交易报告写入 transaction report
+Researcher后续读取已完成的Phase4状态及完整SQL事实链，不单独生成“研究输入材料”
+        ↓
+【内存：Researcher】
+workflow 编排层在 Phase4 完成后，以交易日期和主配置启动 Researcher
+Researcher从 SQL 读取已完成的Phase4状态、审计及执行后的 futures_recommendation、
+当日 futures_transaction和daily_settlement，
+在内存中形成已结算交易episode、未交易机会、结构化研究和未来学习结果
+        ↓
+【物理输出⑦】
+workflow 编排层调度 Researcher 学习链，
+Researcher学习链将研究与未来学习结果物理化为：
+→ 交易episode、未交易机会、action-value、profile及policy/state写入相应研究学习SQL表
+→ 历史学习快照写入Researcher MD和JSON artifact
+→ researcher_learning_completed事件写入 learning_event_log SQL记录
+        ↓
+【下一交易日学习回流】
+workflow 编排层以新的交易日期和主配置启动分析师及PM链路
+三个分析师分别从研究学习SQL读取当前交易日前的本专业学习成果，
+用于完善LLM提示词和校对当日信号
+PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
+读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果
+学习成果只影响新的交易日，不回写历史交易事实
 ```
 
-`protocol_governor` 是旁路协议管理员，负责检查非策略问题、系统不变量、字段语义、机制断链和 hard fail，不参与交易策略生成，不改交易合约，不评价收益。
-
-### 0.1 分析师
-
-三类分析师分别对同一品种的价格序列及其相关数据做多维分析，判断下一交易日价格走势。`workflow` 编排层只传递主配置 `llm`、盘前可见数据、商品 profile 所需身份和研究检索所需上下文；不为分析师选择私有模型，也不解释学习结论。
-
-分析师在历史学习提示词、LLM 专业分析、同批学习确定性校对、数据质量/时效和商品 profile 评估完成后，只输出最终校验通过的唯一 `action_evidence_contract`，其中保真承载方向、证据强弱、setup、trigger、invalidation、冲突、确认要求、`product_profile_evidence`、`fusion_evidence` 和可追溯依据。`workflow` 编排层不生成、补写或二次解释该合约。分析师不能输出手数、仓位、资金部署、rank、交易权限或 `final_action_contract`。
-
-### 0.2 信号收集员
-
-`signal_collector` 收集并整理所有分析师传出的结构化信号证据，保真打包为 PM 可消费的结构化信号包。
-
-`signal_collector` 不做策略决策，不读取研究库，不生成 rank，不生成资金部署，不生成手数，不生成 `final_action_contract`。
-
-### 0.3 PM
-
-PM 接收 `signal_collector` 打包好的结构化信号证据，并按 `docs/agent_pm.md` 的六步机制处理结构化证据、持仓和配置；学习成果由 PM Step4 通过 `decision_memory_retrieval` 自行读取，不由 `workflow` 编排层传入。最终状态在 Step6 转成唯一合法的 `final_action_contract`。
-
-PM 是唯一组合决策者、唯一资金 rank 与资金部署决策者、唯一 `final_action_contract` 签发者。
-
-PM Step1–5 只更新同一个 PM 内存状态，不向 `workflow` 编排层返回中间对象。PM 第 6 步原子返回唯一 `FuturesRecommendation`，其中 `signal_snapshot.final_action_contract` 是唯一交易事实。
-
-### 0.4 审计员
-
-Auditor 只审计 PM 签出的唯一合法合约，检查账户、持仓、保证金、合约完整性、数据质量和硬风险边界。
-
-Auditor 不能改策略、不能改方向、不能改手数、不能新建合约。
-
-### 0.5 交易员
-
-审计通过后，下一交易日由 Trader 执行这张唯一合约。
-
-Trader 只能按合约里的 `current_lots/target_lots/lots_delta/final_action`、`execution_profile`、`entry_trigger`、`requires_intraday_confirmation` 和盘中行情事实执行；需要盘中确认的合约，Trader 通过盘中盯盘判断触发或未触发，并记录执行事实。
-
-Trader 不读取学习，不改 rank，不改策略，不改方向，不改目标手数。
-
-### 0.6 会计师
-
-合约执行后，Accountant 根据成交、持仓、结算价、手续费、滑点、保证金率和合约乘数核算该交易日账户、保证金、持仓和浮盈亏。
-
-Accountant 只结算，不读学习，不改交易。
-
-### 0.7 复盘员
-
-Reviewer 对该交易日 Phase1-3 的完整链路进行复盘，确认是否存在系统运行问题、数据问题、字段问题、越权问题、执行问题或结算问题。
-
-Reviewer 只复盘和归因，不写最终 action-value，不改当日交易事实。
-
-### 0.8 研究员
-
-Researcher 基于复盘材料、交易过程和交易结果形成结构化研究成果，包括产品/setup/trigger/action-value、执行质量、条件监控质量、持仓/退出效果等学习记录。
-
-这些结构化研究成果供下一交易日分析师和 PM 通过规定入口消费，用于分析与决策策略迭代；Researcher 不改当日交易事实，不生成当日交易合约，不改 Trader 或 Accountant。
-
-### 0.9 协议管理员
-
-`protocol_governor` 作为旁路控制智能体，检查系统是否存在非策略问题，包括字段缺失、边界越权、机制断链、hard fail 条件、artifact 越界、合约不完整和测试/文档/字段语义不一致。
-
-`protocol_governor` 不参与交易策略判断，不修 PM 合约，不改手数，不评价收益。
-
-## 1. workflow 职责总纲
-
-`workflow` 负责“系统怎么跑、能不能继续跑”，不负责“交易什么、投多少”。
-
-`workflow` 应该统筹：
-
-- 阶段顺序：分析师 -> `signal_collector` -> PM -> PG/Auditor -> Trader -> Accountant -> Reviewer/Researcher。
-- 上下文齐全：结构化信号、持仓、配置、学习输入、全市场候选上下文是否齐备。
-- 输入输出传递：把上游签出的结果交给下游。
-- 事实保存：保存各智能体已经签出的 artifact / contract / execution / settlement / learning。
-- 流程阻断：PG/Auditor hard fail、缺合约、非法 artifact 时停止。
-- 回测/模拟盘节奏：按交易日推进、触发阶段、失败停机。
-
-`workflow` 不应该做：
-
-- 判断多空方向。
-- 判断哪个产品最值得交易。
-- 生成 `opportunity_rank`。
-- 部署资金。
-- 改 PM 合约。
-- 改 `target_lots` / `final_action` / `capital_deployment`。
-- 补字段。
-- 解释策略。
-- fallback 修复。
-
-## 2. workflow 应该负责什么
-
-### 2.1 调度顺序
-
-`workflow` 负责让系统按固定阶段运行：
-
-分析师 -> 信号收集员 -> PM -> PG/Auditor -> Trader -> Accountant -> Reviewer/Researcher。
-
-这里的“调度”只表示安排谁在什么阶段运行，不表示 `workflow` 代替任何智能体完成其业务工作。
-
-### 2.2 传递输入输出
-
-`workflow` 负责把上游已经签出的输出传给下游：
-
-- 把分析师输出交给 `signal_collector`。
-- 把 `signal_collector` 签出的结构化结果交给 PM。
-- 接收 PM 第 6 步返回的唯一 `FuturesRecommendation`，先把其中的最终合约交给 PG/Auditor，审计通过后再交给 Trader。
-
-`workflow` 只传递事实，不解释策略，不改字段语义。
-
-### 2.3 等待必要上下文齐全
-
-例如 PM 做全市场 rank 前，`workflow` 只能确保 PM 所需的全市场候选上下文已经齐备。
-
-但“怎么 rank、怎么部署资金”是 PM 的决策逻辑，不是 `workflow` 的逻辑。PM 必须通过自己的确定性工具完成全市场 rank 和资金部署。
-
-### 2.4 保存事实
-
-`workflow` 编排层负责在 PM 返回后组织审计，并由保存层物理化最终 recommendation、审计结果、artifact、execution 和 settlement。
-
-`workflow` 只能保存，不能改语义，不能把候选、草稿或中间诊断伪装成最终交易事实。
-
-PM strategy recommendation 保存前必须通过只读 hard gate：
-
-- `signal_snapshot.final_action_contract` 必须存在且为 PM Step6 已签出的最终合约。
-- `signal_snapshot.pm_six_step_trace.pm_contract_self_check.ok == true`。
-- `signal_snapshot.pm_six_step_trace.step6_contract_generation_check.ok == true`。
-- `signal_snapshot.signal_collection_contract` 必须存在，且是 PM 从 workflow state 读取到的 signal_collector 原始 `signal_collection_contract` 快照，保留 `source_agent="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。
-- `signal_snapshot` 不得残留 `pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision` 或 PM draft 字段。
-
-当前第一阶段没有独立 signal_collector artifact，PM final `signal_snapshot.signal_collection_contract` 保存完整原始 SCC 供 PG、Reviewer 和 Researcher 审计追溯；这不是 PM 重建证据包，也不是第二套字段语义。后续如果信号收集员独立落 artifact，可再收敛为 artifact path / id / sha256 强引用，但强引用不是本阶段目标。
-
-`workflow` 编排层只检查这些条件，不修合同、不补字段、不读取和保存 Step1–5 内存状态，也不执行跨步骤比较式自检。
-
-### 2.5 触发审计和执行
-
-PM 签出合约后，`workflow` 触发 PG/Auditor 检查；审计通过后，触发 Trader 执行；执行后，触发 Accountant 结算；最后触发 Reviewer/Researcher 复盘学习。
-
-这些触发动作不等于 `workflow` 参与策略判断。
-
-### 2.6 阻断流程
-
-如果 PG/Auditor hard fail，`workflow` 可以停止后续执行。
-
-但 `workflow` 不能自己修 PM 合约、改手数、补 rank、改资金层级或补学习 trace。
-
-### 2.7 回测/模拟盘运行节奏
-
-自动回测或模拟盘中，`workflow` 负责按交易日推进、触发各阶段、记录阶段结果，并在 hard fail 或必要上下文缺失时停机。
-
-这只是运行节奏控制，不是策略判断；`workflow` 不能因为回测结果、资金占用或策略表现而自行改变 PM 合约、rank 或仓位。
-
-## 3. workflow 不应该负责什么
-
-`workflow` 明确不负责：
-
-- 不收集信号，这是 `signal_collector` 的职责。
-- 不判断交易方向，这是 PM 的职责。
-- 不判断哪个产品最值得投钱，这是 PM 的 rank 机制。
-- 不生成 `opportunity_rank`。
-- 不部署资金，这是 PM 的资金部署机制。
-- 不改 `final_action_contract`。
-- 不改 `target_lots` / `final_action` / `capital_deployment`。
-- 不补 rank 字段、资金字段或学习 trace。
-- 不补学习 trace。
-- 不解释策略。
-- 不让旧字段“看起来合法”。
-- 不保留 atomic fallback 或任何 fallback 修复非法合约的路径。
-
-一句话：`workflow` 是运行编排层，只保证阶段顺序、上下文传递、事实保存、审计执行触发和 hard fail 阻断；所有策略判断、rank、资金部署和最终合约签发都必须留在 PM 及其确定性工具边界内。
+## 二、信息传递表
+
+本表只登记各智能体实际接收和传出的信息，不重新规定智能体输入输出契约，也不改变 workflow 编排层的传递和物理化职责。
+
+| 智能体 | 传入信息 | 传出信息 |
+|---|---|---|
+| 分析师（`technical`、`fundamental`、`commodity_news`） | 交易日期、主配置；PandaAI行情、Finoview基本面文件、新闻txt中的本专业数据；当前交易日前的本专业研究学习SQL成果 | 三份 `AnalystSignal`；每份正式证据位于 `metadata.action_evidence_contract` |
+| 信号收集员 | `state["analyst_signals"]` 中的三份 `AnalystSignal`，实际提取各自 `metadata.action_evidence_contract` | 唯一 `signal_collection_contract`，写回 `state["signal_collection_contract"]` |
+| PM | state["analyst_signals"]，仅用于核对启用分析师的身份、数量及SCC来源引用；state["signal_collection_contract"]，作为PM唯一正式证据；账户、持仓、合约信息和主配置；Step4从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果 | FuturesRecommendation；其 signal_snapshot 内含 signal_collection_contract、final_action_contract、pm_six_step_trace |
+| 审计员 | 已保存的 `FuturesRecommendation`、账户状态和配置；从 `FuturesRecommendation.signal_snapshot["final_action_contract"]` 读取唯一合约 | `audit_verdict`、`audit_payload`；不修改 `final_action_contract` |
+| 交易员 | 审计后的 `FuturesRecommendation`、当前账户、持仓和主配置；从 `signal_snapshot["final_action_contract"]` 读取执行合约；通过行情路由读取盘中行情 | `intraday decision`、`execution_result`、`futures_transaction`；更新后的 recommendation状态和执行价格 |
+| 会计师 | 交易日期、主配置；最近已结算 `portfolio`；当日未入账 `futures_transaction`；结算行情和合约信息 | 结算后的 `portfolio`、`position`、`daily_settlement`、`ticker_daily_pnl`；已回填结算价并标记入账的 `futures_transaction` |
+| 复盘员 | Phase1–3阶段状态、分析师signal、审计及执行后的 `futures_recommendation`、`futures_transaction`、`daily_settlement`、最新 `portfolio` 和 `position` | Phase4复盘结果、复盘摘要、每日交易报告和事实归因；不产生第二次合约审计结论 |
+| 研究员 | 已完成的Phase4状态、审计及执行后的 `futures_recommendation`、当日 `futures_transaction`、`daily_settlement`、交易日期和主配置 | 交易episode、未交易机会、action-value、profile、policy/state、历史学习快照和 `researcher_learning_completed` 事件，供下一交易日分析师及PM读取 |
+
+## 三、信息传递核心载体
+
+本章固定三个核心载体的生产、承载、传递、修改、完整字段目录和权限边界，并统一服从 `matrix_field_semantics.md`。
+
+### 1. `action_evidence_contract`
+
+#### 1.1 固定边界
+
+- `action_evidence_contract` 由 `technical`、`fundamental`、`commodity_news` 分别生成，是分析师本专业的正式结构化证据。
+- `action_evidence_contract` 位于 `AnalystSignal.metadata["action_evidence_contract"]`，不是与 `AnalystSignal` 并列传递的独立对象。
+- workflow 编排层传递和保存完整 `AnalystSignal`；Signal Collector只从中提取 `action_evidence_contract` 的正式证据语义。
+- Signal Collector必须保真消费该契约，不得改写分析师原始证据。Reviewer和Researcher通过已保存的 `FuturesRecommendation.signal_snapshot["signal_collection_contract"]` 追溯分析师证据及其来源。
+- `action_evidence_contract` 只承载分析师预测证据，不具有交易决策权限，禁止包含最终交易动作、手数、rank、资金部署和 `final_action_contract`。
+
+#### 1.2 内容
+
+##### 1.2.1 分析师生成：action_evidence_contract顶层字段
+
+三个分析师都必须生成同一结构的正式证据契约；专业差异只能落入本专业字段内容和学习范围，禁止改变契约字段名、层级和权限边界。
+
+```text
+AnalystSignal.metadata.action_evidence_contract
+→ contract_version
+→ analyst
+→ sector
+→ side
+→ signal
+→ confidence
+→ data_cutoff
+→ no_lookahead_status
+→ horizon_class
+→ analyst_horizon
+→ expected_horizon_days
+→ market_regime
+→ trend_stage
+→ setup_type
+→ setup_quality_ok
+→ setup_quality_score
+→ price_percentile
+→ invalidation_level
+→ invalidation_condition
+→ invalidation_present
+→ atr_stop_distance
+→ add_allowed
+→ direction_anchor
+→ supply_demand_state
+→ basis_state
+→ inventory_state
+→ warehouse_receipt_state
+→ position_flow_state
+→ data_freshness
+→ event_type
+→ impact_window_days
+→ requires_fundamental_confirmation
+→ evidence_quality
+→ evidence_strength
+→ evidence_freshness
+→ evidence_decay_risk
+→ confirmation_requirements
+→ technical_false_breakout_risk
+→ fundamental_opposition_strength
+→ news_impact_window
+→ one_off_event_risk
+→ business_quality_score
+→ primary_business_driver
+→ secondary_confirmation
+→ counter_evidence
+→ reward_risk_ratio
+→ factor_alignment_score
+→ data_coverage_score
+→ tradeability_reason
+→ opportunity_type
+→ opportunity_state
+→ learning_impact_summary
+→ factor_calibration_summary
+→ event_calibration_summary
+→ entry_quality
+→ setup_quality_notes
+→ entry_trigger
+→ exit_hint
+→ holding_period_hint
+→ evidence_role
+→ direction_context
+→ trend_direction
+→ entry_timing_signal
+→ price_location
+→ trigger_valid
+→ current_trigger_confirmed
+→ factor_focus
+→ current_evidence_conflict
+→ neutral_reason
+→ missing_evidence
+→ conflicting_factors
+→ would_change_view_if
+→ opportunity_cost_risk
+→ recommended_observation_window
+→ neutral_opportunity_bucket
+→ neutral_trigger_condition
+→ counterfactual_side
+→ neutral_watchlist_priority
+→ accountability_tag
+→ do_not_trade_reason
+→ learning_scope
+→ product_profile_evidence
+→ fusion_evidence
+→ data_usage_summary
+```
+
+##### 1.2.2 分析师生成：学习校准字段
+
+```text
+AnalystSignal.metadata.action_evidence_contract.learning_impact_summary
+→ contract_version
+→ analyst
+→ historical_support
+→ historical_contradiction
+→ product_learning_scopes
+→ current_evidence_confirmed
+→ current_evidence_missing
+→ opportunity_state
+→ opportunity_state_reason
+→ positive_strength
+→ negative_strength
+→ broad_positive_strength
+→ broad_negative_strength
+→ net_evidence_adjustment
+→ authority_boundary
+
+AnalystSignal.metadata.action_evidence_contract.factor_calibration_summary
+→ contract_version
+→ effective_factors
+→ stale_or_conflicting_factors
+→ factors_requiring_price_confirmation
+→ supporting_learning_scopes
+→ contradicting_learning_scopes
+→ factor_calibration_reason
+→ authority_boundary
+
+AnalystSignal.metadata.action_evidence_contract.event_calibration_summary
+→ contract_version
+→ effective_catalysts
+→ background_noise
+→ impact_window_assessment
+→ price_volume_confirmation_required
+→ supporting_learning_scopes
+→ contradicting_learning_scopes
+→ event_calibration_reason
+→ authority_boundary
+```
+
+##### 1.2.3 分析师生成：产品差异化与证据融合字段
+
+```text
+AnalystSignal.metadata.action_evidence_contract.product_profile_evidence
+→ contract_version
+→ product_profile_id
+→ product_profile_version
+→ ticker
+→ sector
+→ profile_analysis_boundary
+→ analyst
+→ product_profile_used
+→ profile_fields_used
+→ profile_supported_evidence
+→ profile_conflicting_evidence
+→ profile_missing_evidence
+→ profile_assumption_status
+→ profile_relevance_score
+→ profile_learning_interaction
+→ profile_invalid_use_flags
+→ confirmation_requirements
+
+AnalystSignal.metadata.action_evidence_contract.fusion_evidence
+→ contract_version
+→ ticker
+→ analyst
+→ evidence_strength
+→ evidence_strength_score
+→ evidence_freshness
+→ evidence_freshness_score
+→ evidence_decay_risk
+→ confirmation_requirements
+→ missing_evidence
+→ current_evidence_conflict
+→ technical_false_breakout_risk
+→ fundamental_opposition_strength
+→ news_impact_window
+→ one_off_event_risk
+→ fusion_boundary
+```
+
+##### 1.2.4 分析师生成：数据使用追溯字段
+
+```text
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary
+→ ticker
+→ trading_date
+→ analyst
+→ sources
+
+technical.sources.pandaai_market
+fundamental.sources.finoview_fundamental
+fundamental.sources.pandaai_extra
+commodity_news.sources.finoview_news_txt
+```
+
+每个来源记录必须保留来源名、数据集、可用状态、是否用于信号、盘前边界、信息截止时间及本来源实际生成的数据覆盖、时效、缺失和质量字段。分析师不得遗漏 `learning_scope`、`product_profile_evidence`、`fusion_evidence` 或 `data_usage_summary`，也不得把LLM自由文本当作正式字段补偿路径。
+
+### 2. `signal_collection_contract`
+
+#### 2.1 固定边界
+
+- `signal_collection_contract` 由 Signal Collector根据三份正式 `action_evidence_contract` 唯一生成，是分析师证据进入PM的唯一统一证据载体。
+- `signal_collection_contract` 生成后写入 `state["signal_collection_contract"]`，在进入PM前不独立落库、不独立生成artifact。
+- PM只能通过 `signal_collection_contract` 理解方向、证据强弱、冲突、触发和失效边界；原始 `analyst_signals` 只用于来源核对和研究追溯，不得形成第二套交易语义。
+- PM不得重建、补造或改写 `signal_collection_contract`；Step6必须将原始SCC保真写入 `FuturesRecommendation.signal_snapshot["signal_collection_contract"]`。
+- `signal_collection_contract` 只承载统一证据，不具有交易决策权限，禁止包含最终交易动作、手数、rank、资金部署和 `final_action_contract`。
+
+#### 2.2 内容
+
+##### 2.2.1 Signal Collector生成：signal_collection_contract顶层字段
+
+```text
+state["signal_collection_contract"]
+→ contract_version
+→ source_agent
+→ ticker
+→ trading_date
+→ source_contracts
+→ evidence_items
+→ dominant_side
+→ side_consensus
+→ trigger_status
+→ supporting_analysts
+→ opposing_analysts
+→ neutral_analysts
+→ evidence_strength
+→ evidence_conflict_level
+→ confirmation_requirements
+→ missing_evidence
+→ data_quality_flags
+→ setup_types
+→ horizon_scope
+→ invalidation_summary
+→ evidence_fusion
+→ collector_decision_boundary
+```
+
+##### 2.2.2 Signal Collector保真收录：source_contracts完整结构
+
+```text
+state["signal_collection_contract"].source_contracts[]
+→ analyst
+→ signal_record_id
+→ action_evidence_contract
+→ product_profile_evidence
+→ fusion_evidence
+```
+
+每个启用分析师对应一条来源记录。`action_evidence_contract` 必须是该分析师第1.2节正式契约的完整保真副本；来源层 `product_profile_evidence` 和 `fusion_evidence` 必须分别与该契约内同名对象一致，不得形成第二套证据。
+
+##### 2.2.3 Signal Collector生成：evidence_items完整结构
+
+```text
+state["signal_collection_contract"].evidence_items[]
+→ analyst
+→ side
+→ confidence
+→ signal
+→ opportunity_state
+→ trigger_valid
+→ current_trigger_confirmed
+→ trigger_status
+→ entry_trigger
+→ setup_type
+→ setup_quality_ok
+→ horizon_class
+→ market_regime
+→ evidence_quality
+→ current_evidence_conflict
+→ missing_evidence
+→ fusion_evidence
+→ evidence_strength
+→ evidence_freshness
+→ confirmation_requirements
+→ product_profile_id
+→ product_profile_used
+→ product_profile_analysis_boundary
+```
+
+##### 2.2.4 Signal Collector生成：失效与融合结构
+
+```text
+state["signal_collection_contract"].invalidation_summary[]
+→ analyst
+→ condition
+→ level
+
+state["signal_collection_contract"].evidence_fusion
+→ contract_version
+→ evidence_strength_by_analyst
+→ evidence_freshness_by_analyst
+→ evidence_alignment_state
+→ direction_alignment
+→ cross_analyst_conflicts
+→ dominant_opposing_evidence
+→ confirmation_requirements
+→ missing_evidence
+→ multi_evidence_consensus_score
+→ fusion_boundary
+
+state["signal_collection_contract"].evidence_fusion.cross_analyst_conflicts[]
+→ analyst
+→ side
+→ conflicts
+
+state["signal_collection_contract"].evidence_fusion.dominant_opposing_evidence[]
+→ analyst
+→ side
+→ strength
+→ freshness
+→ conflicts
+```
+
+Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
+
+### 3. `FuturesRecommendation`
+
+#### 3.1 固定边界
+
+- `FuturesRecommendation` 只由PM Step6基于最终 `pm_state` 原子生成，是PM向下游返回的唯一正式对象。
+- PM生成时，其 `signal_snapshot` 内含原始 `signal_collection_contract`、唯一 `final_action_contract` 和 `pm_six_step_trace`；PM Step1–5不得提前生成该对象或其草稿。
+- workflow 编排层负责保存同一份 `FuturesRecommendation`。Auditor只增加审计事实，Trader只增加执行事实和更新执行状态，二者均不得修改 `final_action_contract` 和原始SCC。
+- Accountant不接收 `FuturesRecommendation`；Reviewer和Researcher只读取已保存的 `FuturesRecommendation` 及其他物理事实，不向其中追加复盘和研究结果。
+- `FuturesRecommendation.signal_snapshot["final_action_contract"]` 是唯一合法交易合约。禁止任何智能体或workflow 编排层生成第二张合约、改写PM交易语义或用旁路字段替代该合约。
+
+#### 3.2 内容
+
+##### 3.2.1 顶层字段
+
+```text
+FuturesRecommendation
+→ id
+→ config_id
+→ reference_portfolio_id
+→ trading_date
+→ effective_trade_date
+→ source_type
+→ underlying_code
+→ from_contract
+→ to_contract
+→ contract_code
+→ action
+→ lots
+→ base_price
+→ base_price_source
+→ base_price_date
+→ open_price
+→ prev_close_price
+→ slippage_model
+→ slippage_ticks
+→ slippage_amount
+→ execution_price
+→ justification
+→ signal_snapshot
+   → signal_collection_contract（策略路径）
+   → final_action_contract（策略路径）
+   → pm_six_step_trace（策略路径）
+   → auditor（策略审计后）
+   → phase2_execution（策略执行后）
+   → execution_translation（执行后）
+   → execution_result（执行后）
+   → rollover_policy（换约路径）
+   → source_type（强制风控路径）
+   → operation_reason（强制风控路径）
+   → risk_status（强制风控路径）
+   → margin_ratio（强制风控路径）
+   → current_margin_ratio（强制风控路径）
+   → trigger_margin_ratio（强制风控路径）
+   → post_reduce_target_margin_ratio（强制风控路径）
+   → account_equity（强制风控路径）
+   → total_margin（强制风控路径）
+   → total_unrealized_pnl（强制风控路径）
+   → underlying_code（强制风控路径）
+   → contract_code（强制风控路径）
+   → risk_price（强制风控路径）
+   → risk_price_source（强制风控路径）
+   → risk_price_datetime（强制风控路径）
+   → forced_risk_boundary（强制风控路径）
+→ audit_payload
+→ warning_message
+→ status
+→ created_at
+```
+
+本目录必须保留完整 `FuturesRecommendation` 顶层字段、`signal_snapshot` 全部业务路径和 `audit_payload`。后续梳理任何智能体时，必须先在本目录定位其读取、生成或追加的字段，禁止遗漏既有路径或另建旁路载体。
+
+##### 3.2.2 PM Step6组装：signal_snapshot初始结构
+
+PM Step6必须一次性组装以下初始结构：
+
+```text
+FuturesRecommendation.signal_snapshot
+→ FuturesRecommendation.signal_snapshot.signal_collection_contract
+→ FuturesRecommendation.signal_snapshot.final_action_contract
+→ FuturesRecommendation.signal_snapshot.pm_six_step_trace
+```
+
+`signal_collection_contract` 必须是 Signal Collector原始SCC的保真写入；`final_action_contract` 和 `pm_six_step_trace` 由PM Step6生成。三者共同构成PM返回时不可遗漏的初始 `signal_snapshot`。PM不得在Step1–5生成其中任何物理草稿，也不得提前写入Auditor、Trader、换约或强制风控字段。
+
+##### 3.2.3 PM Step6生成：final_action_contract完整结构
+
+PM Step6必须生成唯一 `FuturesRecommendation.signal_snapshot.final_action_contract`。该合约必须完整承载最终动作、当前手数、目标手数、手数变化、交易权限、证据、学习、风险标记、执行要求、资金部署、position sizing、SCC引用和最终一致性事实。
+
+本节对应下方字段目录中的 `final_action_contract（策略路径）`，以及其 `recommendation_intent`、`action_candidates`、`evidence_used`、`learning_used`、`execution_action_value_preference`、`analyst_execution_roles`、`capital_deployment`、`consistency` 和 `signal_collection_contract_ref` 全部嵌套字段。任何一项均不得因后续梳理Auditor、Trader、Reviewer或Researcher而被遗漏、改名或移出唯一合约。
+
+##### 3.2.4 PM Step6生成：pm_six_step_trace完整结构
+
+PM Step6必须生成：
+
+```text
+FuturesRecommendation.signal_snapshot.pm_six_step_trace
+→ FuturesRecommendation.signal_snapshot.pm_six_step_trace.step6_contract_generation_check
+→ FuturesRecommendation.signal_snapshot.pm_six_step_trace.pm_contract_self_check
+```
+
+两项检查必须保留各自的工具名、检查结果、错误、最终动作与手数一致性以及禁止物理写入事实。该trace只记录Step6生成检查和最终合约自身检查，不得加入Step1–5中间状态或跨步骤回溯比较。
+
+##### 3.2.5 Auditor追加：审计摘要与audit_payload
+
+Auditor只允许追加：
+
+```text
+FuturesRecommendation.signal_snapshot.auditor
+FuturesRecommendation.audit_payload
+```
+
+`signal_snapshot.auditor` 必须保留审计生产者、状态、结论、原因、时间和独立审计边界；`audit_payload` 必须保留完整策略审计事实。Auditor不得修改PM已生成的SCC、`final_action_contract`、`pm_six_step_trace`、方向、rank、预算和手数，也不得生成第二张合约。
+
+##### 3.2.6 Trader追加：phase2_execution完整结构
+
+Trader执行链必须把Phase2运行状态写入：
+
+```text
+FuturesRecommendation.signal_snapshot.phase2_execution
+```
+
+该结构必须保留执行模式、状态、产品、recommendation引用、参考动作与手数、检查时间、截止时间、循环状态、执行合约、翻译后决策、盘中选择、执行学习、PM计划校验、合约执行观察、入场权限门、退出策略、入场时机、执行模拟和两步反转事实。Trader不得用该结构改写 `final_action_contract`。
+
+##### 3.2.7 Trader追加：execution_translation完整结构
+
+Trader执行链必须把合约到订单的翻译事实写入：
+
+```text
+FuturesRecommendation.signal_snapshot.execution_translation
+```
+
+该结构必须保留翻译订单、改写原因、参考动作与手数、执行价格基础、生命周期、方向过滤、执行合约、盘中执行、Phase2订单计划、最终合约来源、Auditor结论、执行阻断、最终执行依据和市场规则阻断。该结构只解释执行翻译，不得成为第二套交易权限或第二张合约。
+
+##### 3.2.8 Trader追加：execution_result完整结构
+
+Trader执行链必须把最终执行结果写入：
+
+```text
+FuturesRecommendation.signal_snapshot.execution_result
+```
+
+该结构必须保留结果、状态、成交数量、实际成交、实际动作、实际手数、不交易原因及分类、执行学习轨迹、警告和一致性诊断。成交与未成交都必须形成明确结果，禁止只更新顶层状态而遗漏执行事实。
+
+##### 3.2.9 换约链生成与Trader执行：rollover_policy完整结构
+
+换约路径必须保留：
+
+```text
+FuturesRecommendation.signal_snapshot.rollover_policy
+→ mode
+→ reason
+→ execution_type
+→ strategy_target_lots
+→ close_lots
+→ open_lots
+→ from_contract
+→ to_contract
+```
+
+换约策略目标、旧约平仓和新约开仓必须在同一换约事实中可追溯。Trader只执行既定换约路径，不得借换约重写PM策略方向和目标仓位。
+
+##### 3.2.10 强制风控链生成：强制风控Recommendation完整结构
+
+强制风控路径必须在 `FuturesRecommendation.signal_snapshot` 保留：
+
+```text
+source_type
+operation_reason
+risk_status
+margin_ratio
+current_margin_ratio
+trigger_margin_ratio
+post_reduce_target_margin_ratio
+account_equity
+total_margin
+total_unrealized_pnl
+underlying_code
+contract_code
+risk_price
+risk_price_source
+risk_price_datetime
+forced_risk_boundary
+```
+
+同时必须在 `FuturesRecommendation.audit_payload` 保留强制风控来源、触发原因、风险状态、保证金边界、账户事实、强制风控范围和策略学习隔离边界。强制风控Recommendation不得伪装成PM策略合约，也不得污染alpha学习。
+
+##### 3.2.11 Trader执行后更新：FuturesRecommendation顶层执行字段
+
+Trader执行后只按真实执行结果更新同一份Recommendation的以下顶层字段：
+
+```text
+FuturesRecommendation.execution_price
+FuturesRecommendation.warning_message
+FuturesRecommendation.status
+```
+
+未触发、被阻断、跳过和已成交必须使用对应真实状态；只有真实成交才能写入成交执行价。顶层更新必须与 `signal_snapshot.execution_result` 和实际transaction一致，不得改写PM原始动作、目标手数和唯一合约。
+
+##### 3.2.12 Reviewer与Researcher只读：完整FuturesRecommendation读取边界
+
+Reviewer和Researcher读取的是保存后的完整 `FuturesRecommendation`，包括PM初始SCC与唯一合约、Auditor审计事实、Trader执行事实、换约或强制风控事实以及顶层最终状态。
+
+Reviewer和Researcher不得向 `FuturesRecommendation` 追加复盘、归因、研究或学习字段，不得修改历史SCC、`final_action_contract`、审计结论和执行结果。Reviewer负责复盘和事实归因；Researcher基于完整物理事实链生成未来学习记录。
+
+##### 3.2.13 第二层字段完整目录
+
+```text
+signal_collection_contract（策略路径）
+→ contract_version
+→ source_agent
+→ ticker
+→ trading_date
+→ source_contracts
+→ evidence_items
+→ dominant_side
+→ side_consensus
+→ trigger_status
+→ supporting_analysts
+→ opposing_analysts
+→ neutral_analysts
+→ evidence_strength
+→ evidence_conflict_level
+→ confirmation_requirements
+→ missing_evidence
+→ data_quality_flags
+→ setup_types
+→ horizon_scope
+→ invalidation_summary
+→ evidence_fusion
+→ collector_decision_boundary
+
+final_action_contract（策略路径）
+→ contract_version
+→ ticker
+→ final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+→ lots_delta_abs
+→ target_position_ratio
+→ target_margin_ratio_estimate
+→ authority_type
+→ authority_decision
+→ requires_authority
+→ open_action_evidence
+→ strong_current_evidence
+→ watch_for_trigger_block
+→ conditional_trigger_authority
+→ negative_profile
+→ tradeable_state
+→ weak_conflict_probe
+→ max_allowed_margin_ratio
+→ reason_codes
+→ recommendation_intent
+→ action_candidates
+→ evidence_used
+→ learning_used
+→ risk_flags
+→ execution_profile
+→ trigger_source
+→ entry_trigger
+→ invalidation
+→ valid_until
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+→ execution_action_value_preference
+→ analyst_execution_roles
+→ capital_deployment
+→ execution_requirement
+→ consistency
+→ single_source_of_trade_truth
+→ candidate_sources_do_not_bypass_contract
+→ signal_collection_contract_ref
+
+pm_six_step_trace（策略路径）
+→ step6_contract_generation_check
+→ pm_contract_self_check
+
+auditor（策略审计后）
+→ producer
+→ audit_status
+→ audit_verdict
+→ audit_reason_codes
+→ audited_at
+→ independent_auditor_agent
+→ pm_risk_gate_is_not_auditor
+
+phase2_execution（策略执行后）
+→ mode
+→ status
+→ ticker
+→ recommendation_id
+→ reference_action
+→ reference_lots
+→ last_checked_at
+→ cutoff_datetime
+→ finalize_untriggered
+→ loop_iteration
+→ reason
+→ execution_contract
+→ current_lots_before
+→ translated_decision
+→ intraday_selection
+→ setup_execution_learning
+→ pm_plan_validation
+→ contract_execution_observation
+→ entry_authority_gate
+→ exit_policy
+→ entry_timing
+→ execution_simulation
+→ two_step_reversal
+
+execution_translation（执行后）
+→ translated_orders
+→ rewrite_reasons
+→ reference_action
+→ reference_lots
+→ base_price
+→ base_price_source
+→ base_price_date
+→ open_price
+→ prev_close_price
+→ warning_message
+→ signal_lifecycle
+→ signal_lifecycle_direction_filter
+→ execution_contract
+→ intraday_execution
+→ phase2_order_plan
+→ final_action_contract_source
+→ auditor_verdict
+→ execution_block
+→ final_execution_basis
+→ market_rule_block
+
+execution_result（执行后）
+→ outcome
+→ status
+→ transaction_count
+→ actual_transactions
+→ actual_action
+→ actual_lots
+→ no_trade_reason
+→ no_trade_reason_category
+→ execution_learning_trace
+→ warning_message
+→ consistency_diagnostics
+
+rollover_policy（换约路径）
+→ mode
+→ reason
+→ execution_type
+→ strategy_target_lots
+→ close_lots
+→ open_lots
+→ from_contract
+→ to_contract
+
+audit_payload（策略审计后）
+→ contract_version
+→ producer
+→ agent_name
+→ recommendation_id
+→ ticker
+→ trading_date
+→ config_id
+→ audit_status
+→ audit_verdict
+→ audit_reason_codes
+→ hard_risk_reasons
+→ soft_risk_reasons
+→ audited_by
+→ audited_at
+→ source
+→ boundary
+→ contract_summary
+→ semantic_state
+→ pm_memory_consumption_audit
+→ pm_fusion_explanation_audit
+
+audit_payload（执行后）
+→ trade_contract_audit
+→ independent_auditor
+→ execution_translation
+→ execution_result
+→ phase2_execution
+
+audit_payload（强制风控生成时）
+→ source_type
+→ operation_reason
+→ risk_status
+→ margin_ratio
+→ trigger_margin_ratio
+→ post_reduce_target_margin_ratio
+→ account_equity
+→ total_margin
+→ total_unrealized_pnl
+→ forced_risk_scope
+→ strategy_learning_boundary
+```
+
+##### 3.2.14 第三层字段完整目录
+
+```text
+source_contracts（signal_collection_contract）
+→ analyst
+→ action_evidence_contract
+→ product_profile_evidence
+→ fusion_evidence
+→ signal_record_id
+
+evidence_items（signal_collection_contract）
+→ analyst
+→ side
+→ confidence
+→ signal
+→ opportunity_state
+→ trigger_valid
+→ current_trigger_confirmed
+→ trigger_status
+→ entry_trigger
+→ setup_type
+→ setup_quality_ok
+→ horizon_class
+→ market_regime
+→ evidence_quality
+→ current_evidence_conflict
+→ missing_evidence
+→ fusion_evidence
+→ evidence_strength
+→ evidence_freshness
+→ confirmation_requirements
+→ product_profile_id
+→ product_profile_used
+→ product_profile_analysis_boundary
+
+invalidation_summary（signal_collection_contract）
+→ analyst
+→ condition
+→ level
+
+evidence_fusion（signal_collection_contract）
+→ contract_version
+→ evidence_strength_by_analyst
+→ evidence_freshness_by_analyst
+→ evidence_alignment_state
+→ direction_alignment
+→ cross_analyst_conflicts
+→ dominant_opposing_evidence
+→ confirmation_requirements
+→ missing_evidence
+→ multi_evidence_consensus_score
+→ fusion_boundary
+
+recommendation_intent（final_action_contract）
+→ mode
+→ action
+→ lots
+→ action_type
+→ current_lots
+→ target_lots
+→ lots_delta
+→ position_matched
+→ requires_two_step_reversal
+→ first_leg_action
+→ first_leg_lots
+→ follow_up_action
+→ follow_up_lots
+
+action_candidates（final_action_contract）
+→ action
+→ source
+→ status
+→ side
+→ ratio
+→ scorecard_state
+→ requires_intraday_confirmation
+→ reward_mean
+→ decision
+→ pnl_ratio
+→ confirmation_score
+→ classification
+
+evidence_used（final_action_contract）
+→ scorecard_preferred_side
+→ scorecard_state
+→ scorecard_score
+→ opportunity_score
+→ lifecycle_learning_trace
+→ learning_impact_delta
+→ opportunity_score_components
+→ analyst_direction_evidence
+→ direction_evidence_strength
+→ direction_evidence_components
+→ direction_evidence_boundary
+→ rank_capital_priority_real_budget_release
+→ rank_capital_priority_release_detail
+→ capital_allocation_reason
+→ pm_fusion_diagnostics
+→ pm_conflict_resolution
+→ market_confirmation_score
+→ market_confirmation_conflicts
+→ position_sizing_result
+→ side_priority
+→ ticker_side_priority
+→ side_priority_score
+→ candidate_quality
+→ candidate_layer_hint
+→ side_priority_semantics_version
+→ side_priority_meaning
+→ side_priority_is_not_capital_rank
+→ side_priority_is_not_trade_authority
+→ pm_lifecycle_learning_router
+→ opportunity_rank
+→ rank_source
+→ rank_scope
+→ capital_rank_generated_by
+→ rank_capital_role
+→ capital_layer
+→ capital_ratio_source
+→ rank_reason
+→ rank_input_components
+→ rank_semantics_version
+→ opportunity_rank_meaning
+→ rank_is_capital_priority
+→ rank_is_not_trade_authority
+
+learning_used（final_action_contract）
+→ alpha_setup_action_values
+→ memory_requirements
+→ memory_retrieval
+→ positive_open_seed
+→ alpha_setup_ev_fusion
+→ capital_utilization_learning
+→ capital_utilization_target
+→ memory_state
+→ learning_adjustment_summary
+→ pm_lifecycle_learning_router
+→ trigger_profile_learning
+→ pm_lifecycle_learning_trace
+→ pm_lifecycle_learning_impact_delta
+→ learning_to_position_summary
+→ pm_landing_consistency_audit
+
+execution_action_value_preference（final_action_contract）
+→ enabled
+→ source
+→ execution_profile
+→ trigger_source
+→ base_execution_profile
+→ reason_codes
+→ selected_action_value
+→ same_scope_required
+→ does_not_create_trade_authority
+→ keeps_pm_authority_boundary
+
+analyst_execution_roles（final_action_contract）
+→ technical
+→ fundamental
+→ commodity_news
+
+capital_deployment（final_action_contract）
+→ selected_for_capital_deployment
+→ capital_allocation_reason
+→ original_target_lots
+→ deployed_target_lots
+→ deployed_lots_delta
+→ reason_codes
+→ opportunity_rank
+→ rank_capital_role
+→ capital_layer
+→ capital_ratio_source
+→ rank_reason
+→ rank_source
+→ rank_scope
+→ capital_rank_generated_by
+→ rank_input_components
+→ lifecycle_learning_trace
+→ learning_impact_delta
+→ rank_semantics_version
+→ opportunity_rank_meaning
+→ rank_is_capital_priority
+→ rank_is_not_trade_authority
+→ rank_budget_sequence
+→ rank_score
+→ candidate_margin_ratio
+→ queue_margin_ratio_before
+→ queue_margin_ratio_after_if_selected
+→ target_margin_ratio_budget
+→ max_single_ticker_margin_ratio
+→ current_net_exposure_before
+→ current_ticker_exposure
+→ target_position_ratio
+→ projected_net_exposure_if_selected
+→ max_net_exposure
+→ single_ticker_budget_ok
+→ total_margin_budget_ok
+→ net_exposure_budget_ok
+
+consistency（final_action_contract）
+→ status
+→ mode
+→ issues
+→ actual
+→ expected
+
+signal_collection_contract_ref（final_action_contract）
+→ ticker
+→ trading_date
+→ source_contract_count
+→ collector_decision_boundary
+
+step6_contract_generation_check（pm_six_step_trace）
+→ tool
+→ ok
+→ errors
+→ expected_final_action
+→ actual_final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+→ writes_db
+→ writes_contract
+→ no_llm
+
+pm_contract_self_check（pm_six_step_trace）
+→ tool
+→ ok
+→ errors
+→ expected_final_action
+→ actual_final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+→ writes_db
+→ writes_artifact
+→ writes_payload
+
+execution_contract（phase2_execution）
+→ execution_profile
+→ trigger_source
+→ entry_trigger
+→ invalidation
+→ valid_until
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+→ authority_type
+→ max_allowed_margin_ratio
+→ reason_codes
+→ execution_action_value_preference
+→ analyst_execution_roles
+
+translated_decision（phase2_execution）
+→ action
+→ lots
+→ contract_code
+→ price
+
+intraday_selection（phase2_execution）
+→ decision
+→ reason
+→ base_price
+→ base_datetime
+→ base_price_source
+→ signal_datetime
+→ features
+→ trigger_checked
+→ trigger_passed
+→ price_chase_check
+→ execution_failure_reason
+→ missed_opportunity_flag
+→ learning_writeback_contract
+
+setup_execution_learning（phase2_execution）
+→ consumer_scope
+→ learning_lane
+→ setup_type
+→ opportunity_state
+→ preferred_side
+→ execution_contract
+→ final_contract_execution_fields
+→ analyst_action_evidence_contracts
+→ analyst_learning_scopes
+→ execution_contract_summary
+→ learning_boundary
+→ phase2_status
+→ no_trade_reason
+→ intraday_selection
+→ reason_family
+
+pm_plan_validation（phase2_execution）
+→ passed
+→ reason
+→ validation_errors
+→ required_for
+→ source_type
+→ contract_type
+→ current_lots
+→ target_lots
+→ target_lots_after_validation
+→ original_target_lots
+→ contract_current_lots
+→ actual_current_lots
+→ contract_lots_delta
+→ expected_lots_delta
+→ final_contract_execution_fields
+→ contract_authority_audit
+→ authority_consistency
+→ business_boundary
+
+contract_execution_observation（phase2_execution）
+→ signal_invalidation_observed
+→ exit_policy_required
+→ exit_policy_reason
+→ business_boundary
+
+entry_authority_gate（phase2_execution）
+→ status
+→ reason
+→ current_lots
+→ target_lots
+→ business_boundary
+
+exit_policy（phase2_execution）
+→ enabled
+→ exit_required
+→ target_lots
+→ reason
+→ policy
+→ same_direction_supported
+→ days_held
+→ is_probe
+
+entry_timing（phase2_execution）
+→ entry_action_family
+→ opening_range
+→ target_lots_source
+
+execution_simulation（phase2_execution）
+→ base_price
+→ base_price_source
+→ base_price_date
+→ open_price
+→ prev_close_price
+→ warning_message
+
+translated_orders（execution_translation）
+→ stage
+→ action
+→ lots
+→ contract_code
+→ price
+
+signal_lifecycle（execution_translation）
+→ horizon_class
+→ expected_horizon_days
+→ price_percentile
+→ entry_trigger
+→ action_name
+→ invalidation_level
+→ target_return
+→ atr_stop_distance
+→ setup_type
+→ business_quality_score
+
+signal_lifecycle_direction_filter（execution_translation）
+→ target_side
+→ selected
+→ ignored_opposing
+→ original_invalidation_level
+→ effective_invalidation_level
+
+execution_contract（execution_translation）
+→ execution_profile
+→ trigger_source
+→ entry_trigger
+→ invalidation
+→ valid_until
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+→ authority_type
+→ max_allowed_margin_ratio
+→ reason_codes
+→ execution_action_value_preference
+→ analyst_execution_roles
+
+intraday_execution（execution_translation）
+→ decision
+→ reason
+→ base_price
+→ base_datetime
+→ base_price_source
+→ signal_datetime
+→ features
+→ trigger_checked
+→ trigger_passed
+→ price_chase_check
+→ execution_failure_reason
+→ missed_opportunity_flag
+→ learning_writeback_contract
+
+phase2_order_plan（execution_translation）
+→ current_lots
+→ target_lots
+→ action
+→ lots
+→ contract_code
+→ price
+→ account_equity
+→ current_price
+→ risk_level
+→ cashflow_ratio
+→ current_margin_ratio
+→ max_total_margin_ratio
+→ max_single_margin_ratio
+→ remaining_margin
+→ signal_lifecycle
+→ execution_contract
+→ consistency_diagnostics
+
+final_action_contract_source（execution_translation）
+→ source
+→ contract_type
+→ final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+
+auditor_verdict（execution_translation）
+→ producer
+→ audit_status
+→ audit_verdict
+→ audit_reason_codes
+→ audited_by
+→ audited_at
+
+final_execution_basis（execution_translation）
+→ base_price
+→ base_price_source
+→ base_price_date
+→ open_price
+→ prev_close_price
+→ execution_price
+→ execution_price_basis
+→ slippage_model
+→ slippage_ticks
+→ slippage_amount
+→ intraday_execution
+→ execution_learning_fields
+→ signal_lifecycle
+
+market_rule_block（execution_translation）
+→ limit_lock
+→ contract_expiry_guard
+
+actual_transactions（execution_result）
+→ action
+→ lots
+→ contract_code
+→ execution_price
+→ execution_phase
+
+no_trade_reason_category（execution_result）
+→ reason
+→ category
+→ category_label
+→ category_description
+→ source
+
+execution_learning_trace（execution_result）
+→ consumer_scope
+→ learning_lane
+→ execution_retrieval_key
+→ outcome
+→ status
+→ no_trade_reason
+→ no_trade_reason_category
+→ actual_transaction_count
+→ turn_into_memory
+→ not_direction_evidence
+→ execution_learning_type
+→ timing_strategy_question
+
+consistency_diagnostics（execution_result）
+→ status
+→ issues
+→ phase2_plan_action
+→ phase2_plan_lots
+→ actual_action
+→ actual_lots
+→ no_trade_reason
+
+source（audit_payload策略审计后）
+→ pm_recommendation_id
+→ final_action_contract_hash_source
+
+boundary（audit_payload策略审计后）
+→ auditor_does_not_modify_final_action_contract
+→ auditor_does_not_create_trade_authority
+→ trader_requires_approved_audit_verdict
+→ research_memory_not_consumed
+→ auditor_reads_research_db
+→ auditor_checks_pm_memory_consumption_from_contract_only
+
+contract_summary（audit_payload策略审计后）
+→ final_action
+→ current_lots
+→ target_lots
+→ lots_delta
+→ requires_intraday_confirmation
+→ can_execute_without_intraday_trigger
+
+semantic_state（audit_payload策略审计后）
+→ contract
+→ lifecycle_state
+→ requires_intraday_result
+→ hard_block_reasons
+→ soft_limit_reasons
+→ semantic_errors
+
+pm_memory_consumption_audit（audit_payload策略审计后）
+→ contract
+→ ok
+→ errors
+→ warnings
+→ expected_memory_requirements
+→ declared_memory_requirements
+→ expected_requirement_keys
+→ declared_requirement_keys
+→ uncovered_required_pm_memory
+→ alpha_setup_action_value_count
+→ auditor_reads_research_db
+→ trader_reads_pm_action_value
+→ accountant_reads_memory
+
+pm_fusion_explanation_audit（audit_payload策略审计后）
+→ contract_version
+→ ok
+→ errors
+→ warnings
+→ pm_fusion_diagnostics
+→ pm_conflict_resolution
+→ auditor_boundary
+
+trade_contract_audit（audit_payload执行后）
+→ audit_boundary
+→ single_source_of_trade_truth
+→ candidate_sources_do_not_bypass_contract
+→ contract_version
+→ final_action
+→ authority_type
+→ authority_decision
+→ open_action_evidence
+→ strong_current_evidence
+→ current_lots
+→ target_lots
+→ lots_delta
+→ target_margin_ratio_estimate
+→ max_allowed_margin_ratio
+→ reason_codes
+→ execution_profile
+→ execution_requirement
+→ pm_plan_validation_passed
+→ pm_plan_validation_reason
+→ authority_consistency_reason
+→ business_boundary
+
+independent_auditor（audit_payload执行后）
+→ producer
+→ audit_status
+→ audit_verdict
+→ audit_reason_codes
+→ audited_at
+```

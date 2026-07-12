@@ -21,7 +21,6 @@ from util.db_helper import get_db
 from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_dynamic_weights import DynamicWeightCalculator
 from tools.agent_tools.analysis.analyst_learning_context import apply_config_learning_overlay
-from tools.agent_tools.analysis.analyst_market_confirmation import MarketConfirmationEngine
 from tools.agent_tools.analysis.analyst_business_quality import summarize_business_quality
 from tools.agent_tools.analysis.analyst_data_usage import build_pm_data_quality_summary
 from tools.common.order_semantics import (
@@ -32,6 +31,7 @@ from tools.common.final_action_semantics import (
     authority_allows_entry as _semantic_authority_allows_entry,
     contract_consumes_hold_exit_pm_learning,
     contract_reduces_or_exits_position,
+    contract_requires_full_market_capital_rank,
     derive_memory_requirements,
     filter_action_values_for_contract_learning,
     has_valid_hold_exit_no_change_explanation,
@@ -81,6 +81,7 @@ from tools.agent_tools.decision.pm_position_transition import (
 from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
 from tools.agent_tools.decision.pm_signal_fusion import (
     analyst_signal_combo as _fusion_analyst_signal_combo,
+    build_scc_market_confirmation,
     build_opportunity_scorecard,
     resolve_decision_horizon as _fusion_resolve_decision_horizon,
 )
@@ -3139,30 +3140,12 @@ def _canonical_contract_text(signal, key: str, default: str = "") -> str:
 def _pm_has_invalidation_contract(signal, metadata: dict | None = None) -> bool:
     metadata = metadata if isinstance(metadata, dict) else _signal_metadata(signal)
     action_contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), dict) else {}
-    if action_contract:
-        if "invalidation_present" in action_contract:
-            return bool(action_contract.get("invalidation_present"))
-        if "has_invalidation" in action_contract:
-            return bool(action_contract.get("has_invalidation"))
-        return bool(str(action_contract.get("invalidation_condition") or "").strip())
-    contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
-    status = metadata.get("trade_setup_contract_status") if isinstance(metadata.get("trade_setup_contract_status"), dict) else {}
-    presence = status.get("presence") if isinstance(status.get("presence"), dict) else {}
-    return bool(
-        getattr(signal, "invalidation_present", False)
-        or getattr(signal, "invalidation_level", None) is not None
-        or getattr(signal, "atr_stop_distance", None) is not None
-        or presence.get("invalidation_present")
-        or str(metadata.get("invalidation_condition") or "").strip()
-        or str(contract.get("exit_hint") or "").strip()
-        or str(getattr(signal, "would_change_view_if", "") or "").strip()
-    )
+    return bool(action_contract.get("invalidation_present"))
 
 
 def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     metadata = _signal_metadata(signal)
     context = _nested_context(metadata, agent_name)
-    contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
     action_contract = _canonical_action_evidence_contract(signal)
     learning_scope = (
         action_contract.get("learning_scope")
@@ -3171,16 +3154,12 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     )
     entry_trigger = (
         action_contract.get("entry_trigger")
-        or contract.get("entry_trigger")
         or learning_scope.get("required_confirmation")
         or getattr(signal, "entry_trigger", "")
         or ""
     )
     invalidation_condition = (
         action_contract.get("invalidation_condition")
-        or metadata.get("invalidation_condition")
-        or contract.get("invalidation_condition")
-        or contract.get("exit_hint")
         or getattr(signal, "exit_hint", "")
         or getattr(signal, "would_change_view_if", "")
         or ""
@@ -3191,10 +3170,9 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
         "long" if signal_text.upper() == "BULLISH" else "short" if signal_text.upper() == "BEARISH" else "neutral"
     )
     horizon_class = (
-        getattr(signal, "horizon_class", "")
-        or getattr(signal, "holding_period_hint", "")
-        or contract.get("holding_period_hint")
+        action_contract.get("horizon_class")
         or getattr(signal, "horizon_class", "")
+        or getattr(signal, "holding_period_hint", "")
         or "unknown"
     )
     if agent_name == "technical":
@@ -3263,12 +3241,9 @@ def _signal_risk_flags(signal, agent_name: str) -> list:
 
 def _signal_opportunity_state(signal) -> str:
     metadata = _signal_metadata(signal)
-    contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
     action_contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), dict) else {}
     state = (
         action_contract.get("opportunity_state")
-        or contract.get("opportunity_state")
-        or metadata.get("opportunity_state")
         or getattr(signal, "opportunity_state", None)
         or ""
     )
@@ -3805,15 +3780,6 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
         if action_contract:
             payload["action_evidence_contract"] = action_contract
             payload["learning_scope"] = action_contract.get("learning_scope") or {}
-            payload["execution_contract"] = action_contract.get("execution") or {}
-        research_contract = (
-            metadata.get("trade_research_contract")
-            if isinstance(metadata.get("trade_research_contract"), dict)
-            else {}
-        )
-        if research_contract:
-            payload["trade_research_contract"] = research_contract
-            payload["product_context"] = research_contract.get("product_context") or {}
         existing = payloads.get(agent_name)
         if existing is None or (payload["side"] == target_side and existing.get("side") != target_side):
             payloads[agent_name] = payload
@@ -5587,18 +5553,10 @@ def _build_active_opportunity_audit(
         metadata = getattr(signal, "metadata", {}) or {}
         if isinstance(metadata, dict):
             action_contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), dict) else {}
-            research_contract = metadata.get("trade_research_contract") if isinstance(metadata.get("trade_research_contract"), dict) else {}
             if action_contract:
                 candidate["action_evidence_contract"] = action_contract
                 candidate["learning_scope"] = action_contract.get("learning_scope") or candidate["learning_scope"]
                 candidate["setup_quality_ok"] = bool(action_contract.get("setup_quality_ok"))
-            if research_contract:
-                candidate["trade_research_contract"] = {
-                    "opportunity_type": research_contract.get("opportunity_type"),
-                    "opportunity_state": research_contract.get("opportunity_state"),
-                    "product_context": research_contract.get("product_context") or {},
-                    "action_evidence_contract": research_contract.get("action_evidence_contract") or {},
-                }
         clean_conditional_monitor = bool(
             state == "watch_for_trigger"
             and candidate["setup_quality_ok"]
@@ -6325,7 +6283,7 @@ def _apply_market_confirmation_control(
                     position_ratio = 0.0
                     reasons.append("market_confirmation_quality_gate")
                     notes.append(
-                        f"blocked weak {target_side} signal by PandaAI quality gate: {', '.join(gate_failures)}"
+                        f"blocked weak {target_side} signal by SCC evidence quality gate: {', '.join(gate_failures)}"
                     )
                     return position_ratio, reasons, notes
 
@@ -6336,10 +6294,10 @@ def _apply_market_confirmation_control(
                 reasons.append("market_confirmation_quality_gate")
                 notes.append(
                     f"scaled {target_side} ratio {original_ratio:.2%}->{position_ratio:.2%} "
-                    f"by PandaAI quality gate: {', '.join(gate_failures)}"
+                    f"by SCC evidence quality gate: {', '.join(gate_failures)}"
                 )
         else:
-            notes.append("PandaAI quality gate skipped: no usable pre-open confirmation features")
+            notes.append("SCC evidence quality gate skipped: no usable confirmation evidence")
 
     if conflicts:
         original_ratio = position_ratio
@@ -6360,7 +6318,7 @@ def _apply_market_confirmation_control(
             position_ratio = 0.0
             reasons.append("market_confirmation_conflict")
             notes.append(
-                f"blocked weak {target_side} signal due to PandaAI confirmation conflicts={conflicts}"
+                f"blocked weak {target_side} signal due to SCC evidence conflicts={conflicts}"
             )
         else:
             position_ratio = _scale_signed_ratio(
@@ -6377,10 +6335,10 @@ def _apply_market_confirmation_control(
             else:
                 notes.append(
                     f"scaled {target_side} ratio {original_ratio:.2%}->{position_ratio:.2%} "
-                    f"due to PandaAI conflicts={conflicts}"
+                    f"due to SCC evidence conflicts={conflicts}"
                 )
     elif confirmations:
-        notes.append(f"PandaAI confirmation supports {target_side}: {confirmations}")
+        notes.append(f"SCC evidence supports {target_side}: {confirmations}")
 
     return position_ratio, reasons, notes
 
@@ -6394,7 +6352,7 @@ def _apply_market_data_gap_control(
     market_confirmation: dict,
     full_config: dict,
 ) -> tuple[float, list[str], list[str], dict]:
-    """Degrade new risk when PandaAI evidence is incomplete, without stopping the day."""
+    """Degrade new risk when formal SCC evidence is incomplete, without stopping the day."""
     reasons: list[str] = []
     notes: list[str] = []
     diagnostics: dict = {}
@@ -6440,7 +6398,7 @@ def _apply_market_data_gap_control(
         decision = "block_no_usable_features"
         reasons.append("market_confirmation_data_gap")
         notes.append(
-            f"{ticker} {target_side} blocked: PandaAI evidence gap leaves "
+            f"{ticker} {target_side} blocked: SCC evidence gap leaves "
             f"{len(features)} usable features; missing={actionable_missing}, errors={parameter_errors or provider_errors}"
         )
     elif gap_count > max_missing or parameter_errors or provider_errors:
@@ -6452,7 +6410,7 @@ def _apply_market_data_gap_control(
             decision = "scale_data_gap"
         reasons.append("market_confirmation_data_gap")
         notes.append(
-            f"{ticker} {target_side} degraded by PandaAI data gap: "
+            f"{ticker} {target_side} degraded by SCC evidence gap: "
             f"{original_ratio:.2%}->{position_ratio:.2%}, "
             f"missing={actionable_missing}, parameter_errors={parameter_errors}, provider_errors={provider_errors}"
         )
@@ -10093,27 +10051,10 @@ def _run_pm_six_step_decision(state: FundState):
             target_side_for_confirmation = "long"
         elif short_strength_for_confirmation > long_strength_for_confirmation + 0.03:
             target_side_for_confirmation = "short"
-    market_confirmation = {}
-    if (full_config.get("pandaai_extra_data", {}) or {}).get("enabled", False):
-        try:
-            market_confirmation = MarketConfirmationEngine(full_config, router=router).evaluate(
-                underlying_code=ticker,
-                trading_date=trading_date,
-                target_direction=target_side_for_confirmation,
-                signal_strength=signal_strength,
-                contract_code=contract_code,
-            )
-        except Exception as exc:
-            pass
-            market_confirmation = {
-                "enabled": True,
-                "target_direction": target_side_for_confirmation,
-                "confirmation_score": 0.0,
-                "features": [],
-                "confirmations": [],
-                "conflicts": [],
-                "data_missing": [str(exc)],
-            }
+    market_confirmation = build_scc_market_confirmation(
+        signal_collection_contract,
+        target_direction=target_side_for_confirmation,
+    )
 
     signal_combo = _analyst_signal_combo(analyst_signals)
     early_adaptive_policy_state = []
@@ -11442,7 +11383,9 @@ def _run_pm_six_step_decision(state: FundState):
         return pm_state
 
     final_entry_authority = {}
-    if current_lots == 0 and target_lots != 0:
+    if contract_requires_full_market_capital_rank(
+        {"current_lots": current_lots, "target_lots": target_lots}
+    ):
         has_final_entry_authority, final_entry_authority = _final_contract_authority(
             control_reasons=control_reasons,
             control_diagnostics=control_diagnostics,
@@ -11458,21 +11401,23 @@ def _run_pm_six_step_decision(state: FundState):
         ):
             control_reasons.append("final_contract_authority_not_met")
             control_notes.append(
-                f"{ticker} new entry kept as watchlist: final trading authority not met; "
+                f"{ticker} incremental risk kept at current exposure: final trading authority not met; "
                 f"weak_markers={final_entry_authority.get('weak_markers')}, "
                 f"hard_blocks={final_entry_authority.get('hard_blocks')}, "
                 f"negative_profile={final_entry_authority.get('negative_profile')}, "
                 f"qualified_positive={final_entry_authority.get('qualified_positive')}, "
                 f"strong_current={final_entry_authority.get('strong_current_evidence')}"
             )
-            position_risk.optimal_position_ratio = 0.0
-            target_value = 0.0
-            target_lots = 0
-            margin_required = 0.0
-            new_net_exposure = current_net_exposure - current_ticker_exposure
+            position_risk.optimal_position_ratio = current_ticker_exposure
+            target_value = account_equity * current_ticker_exposure
+            target_lots = current_lots
+            margin_required = float(getattr(current_position, "margin_used", 0.0) or 0.0)
+            new_net_exposure = current_net_exposure
             control_block_reason = "final_contract_authority_not_met"
 
-    if current_lots == 0 and target_lots != 0:
+    if contract_requires_full_market_capital_rank(
+        {"current_lots": current_lots, "target_lots": target_lots}
+    ):
         semantic_block_reason = _pm_new_entry_semantic_block_reason(position_risk.justification)
         if semantic_block_reason:
             final_entry_authority = _semantic_watchlist_authority(
@@ -11490,14 +11435,14 @@ def _run_pm_six_step_decision(state: FundState):
             }
             control_reasons.append(semantic_block_reason)
             control_notes.append(
-                f"{ticker} new entry kept as watchlist: PM text conclusion conflicts with open lots "
+                f"{ticker} incremental risk kept at current exposure: PM text conclusion conflicts with added lots "
                 f"({semantic_block_reason})."
             )
-            position_risk.optimal_position_ratio = 0.0
-            target_value = 0.0
-            target_lots = 0
-            margin_required = 0.0
-            new_net_exposure = current_net_exposure - current_ticker_exposure
+            position_risk.optimal_position_ratio = current_ticker_exposure
+            target_value = account_equity * current_ticker_exposure
+            target_lots = current_lots
+            margin_required = float(getattr(current_position, "margin_used", 0.0) or 0.0)
+            new_net_exposure = current_net_exposure
             control_block_reason = semantic_block_reason
 
     if current_lots == 0 and target_lots != 0:

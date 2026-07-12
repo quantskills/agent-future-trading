@@ -813,13 +813,18 @@ def _contract_final_lifecycle_port(contract: Mapping[str, Any] | None) -> str:
 def contract_requires_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
     """Return whether a PM contract must carry a full-market capital rank.
 
-    Only a flat-to-position opening requires the rank gate. Existing-position
-    add/scale, hold, reduce, exit, and the exit leg of a reversal do not
-    participate in opening-opportunity ranking.
+    Every same-side increase in absolute exposure competes for incremental
+    capital. Hold, reduce, exit, and the exit leg of a reversal do not.
     """
     contract = contract if isinstance(contract, Mapping) else {}
     current_lots, target_lots, _ = _current_target_delta(contract)
-    return current_lots == 0 and target_lots != 0
+    if current_lots == 0:
+        return target_lots != 0
+    if target_lots == 0:
+        return False
+    if (current_lots > 0) != (target_lots > 0):
+        return False
+    return abs(target_lots) > abs(current_lots)
 
 
 def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
@@ -858,8 +863,30 @@ def contract_is_unselected_no_new_exposure_candidate(contract: Mapping[str, Any]
     return bool(reason or "no_rank_no_new_exposure" in reason_set)
 
 
+def _ranked_budget_rejection_preserves_rank(contract: Mapping[str, Any] | None) -> bool:
+    """Return whether Step5 genuinely ranked then rejected incremental risk."""
+    contract = contract if isinstance(contract, Mapping) else {}
+    if not contract_is_unselected_no_new_exposure_candidate(contract):
+        return False
+    deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), Mapping)
+        else {}
+    )
+    reason = _clean(
+        deployment.get("capital_allocation_reason")
+        or deployment.get("no_trade_reason")
+        or contract.get("capital_allocation_reason")
+    )
+    reason_set = set(reason_codes_from(contract))
+    return bool(
+        reason.startswith("no_rank_or_budget_no_new_exposure")
+        or "no_rank_or_budget_no_new_exposure" in reason_set
+    )
+
+
 def full_market_rank_gate_errors(contract: Mapping[str, Any] | None) -> list[str]:
-    """Return hard-gate errors for an unranked flat-to-position opening."""
+    """Return hard-gate errors for an unranked incremental-risk contract."""
     if not contract_requires_full_market_capital_rank(contract):
         return []
     if contract_has_full_market_capital_rank(contract):
@@ -930,9 +957,9 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
     errors: list[str] = []
     if (
         not contract_requires_full_market_capital_rank(contract)
-        and not contract_is_unselected_no_new_exposure_candidate(contract)
+        and not _ranked_budget_rejection_preserves_rank(contract)
     ):
-        errors.append("non_opening_contract_has_full_market_rank")
+        errors.append("non_increasing_risk_contract_has_full_market_rank")
     if contract_has_rank:
         errors.append("top_level.opportunity_rank_forbidden")
     if not deployment:

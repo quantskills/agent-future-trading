@@ -15,12 +15,17 @@ from agents.decision_team import portfolio_manager
 from agents.decision_team.portfolio_manager import finalize_pm_full_market_contracts
 from graph.schema import Portfolio
 from tests.test_pm_atomic_contract_flow import _pm_state
+from tools.agent_tools.decision import pm_signal_fusion
+from tools.agent_tools.decision.pm_invalidation_policy import (
+    _has_structured_invalidation_condition,
+)
 from tools.agent_tools.decision.signal_collection_data_unavailable import (
     build_data_unavailable_signal_package,
 )
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_signal_collection_contract,
+    validate_action_evidence_contract,
     validate_signal_collection_contract,
 )
 
@@ -43,7 +48,13 @@ def _formal_signal(
         "side": side,
         "confidence": confidence,
         "opportunity_type": "trend_continuation" if side != "flat" else "no_trade",
-        "opportunity_state": "tradeable_candidate" if side != "flat" else "no_opportunity",
+        "opportunity_state": (
+            "tradeable_candidate"
+            if side != "flat" and trigger_valid
+            else "watch_for_trigger"
+            if side != "flat"
+            else "no_opportunity"
+        ),
         "setup_type": "trend_continuation" if side != "flat" else "no_trade",
         "setup_quality_ok": side != "flat",
         "trigger_valid": trigger_valid,
@@ -206,6 +217,56 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unregistered_source_contract_field"):
             validate_signal_collection_contract(polluted_source)
 
+    def test_shared_action_contract_validator_rejects_semantic_drift(self):
+        signal = _formal_signal("technical", side="long")
+        action_contract = deepcopy(signal.metadata["action_evidence_contract"])
+        self.assertIs(
+            validate_action_evidence_contract(action_contract, analyst="technical"),
+            action_contract,
+        )
+
+        wrong_side = {**action_contract, "side": "short"}
+        with self.assertRaisesRegex(ValueError, "signal_side_mismatch"):
+            validate_action_evidence_contract(wrong_side, analyst="technical")
+
+        wrong_confidence = {**action_contract, "confidence": 1.2}
+        with self.assertRaisesRegex(ValueError, "confidence_out_of_range"):
+            validate_action_evidence_contract(wrong_confidence, analyst="technical")
+
+        wrong_state = {**action_contract, "opportunity_state": "ready_to_buy"}
+        with self.assertRaisesRegex(ValueError, "invalid_opportunity_state"):
+            validate_action_evidence_contract(wrong_state, analyst="technical")
+
+        unknown_field = {**action_contract, "private_direction_score": 0.9}
+        with self.assertRaisesRegex(ValueError, "unregistered_field"):
+            validate_action_evidence_contract(unknown_field, analyst="technical")
+
+    def test_scc_validator_rejects_summary_that_disagrees_with_source_contracts(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long", trigger_valid=True, trigger_confirmed=True),
+                _formal_signal("fundamental", side="long"),
+                _formal_signal("commodity_news", side="flat"),
+            ],
+        )
+
+        item_drift = deepcopy(contract)
+        item_drift["evidence_items"][0]["side"] = "short"
+        with self.assertRaisesRegex(ValueError, "evidence_item_semantic_mismatch"):
+            validate_signal_collection_contract(item_drift)
+
+        direction_drift = deepcopy(contract)
+        direction_drift["dominant_side"] = "short"
+        with self.assertRaisesRegex(ValueError, "dominant_side_mismatch"):
+            validate_signal_collection_contract(direction_drift)
+
+        trigger_drift = deepcopy(contract)
+        trigger_drift["trigger_status"] = "watch_for_trigger"
+        with self.assertRaisesRegex(ValueError, "trigger_status_mismatch"):
+            validate_signal_collection_contract(trigger_drift)
+
     def test_pm_evidence_view_is_built_only_from_scc(self):
         contract = build_signal_collection_contract(
             ticker="BU",
@@ -312,6 +373,49 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         collector_source = inspect.getsource(signal_collector_agent)
         self.assertIn("validate_signal_collection_contract", collector_source)
         self.assertIn("validate_signal_collection_contract", source)
+
+    def test_pm_evidence_helpers_do_not_fall_back_to_old_research_contracts(self):
+        old_only = SimpleNamespace(
+            metadata={
+                "trade_research_contract": {"opportunity_state": "tradeable_candidate"}
+            },
+            invalidation_level=100.0,
+            atr_stop_distance=5.0,
+        )
+        self.assertEqual(
+            pm_signal_fusion._contract_value(old_only, "opportunity_state", "missing"),
+            "missing",
+        )
+        self.assertFalse(_has_structured_invalidation_condition([old_only]))
+        self.assertNotIn(
+            "trade_research_contract",
+            inspect.getsource(portfolio_manager._derive_signal_contract_fields),
+        )
+
+    def test_pm_market_confirmation_is_derived_only_from_scc(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long"),
+                _formal_signal("fundamental", side="long"),
+                _formal_signal("commodity_news", side="flat"),
+            ],
+        )
+        confirmation = pm_signal_fusion.build_scc_market_confirmation(
+            contract,
+            target_direction="long",
+        )
+        self.assertTrue(confirmation["enabled"])
+        self.assertEqual(confirmation["confirmations"], ["fundamental", "technical"])
+        self.assertEqual(
+            confirmation["confirmation_score"],
+            contract["evidence_fusion"]["multi_evidence_consensus_score"],
+        )
+        pm_source = inspect.getsource(portfolio_manager._run_pm_six_step_decision)
+        self.assertIn("build_scc_market_confirmation", pm_source)
+        self.assertNotIn("MarketConfirmationEngine", pm_source)
+        self.assertNotIn("pandaai_extra_data", pm_source)
 
 
 if __name__ == "__main__":

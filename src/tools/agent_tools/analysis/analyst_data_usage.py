@@ -373,25 +373,8 @@ def build_pm_data_quality_summary(
         payload = signal.model_dump() if hasattr(signal, "model_dump") else dict(signal)
         analyst = str(payload.get("agent_name") or f"signal_{idx}")
         analysts[analyst] = extract_signal_data_usage(payload)
-    confirmation = market_confirmation or {}
-    pandaai_extra_available = bool(confirmation.get("enabled")) and bool(confirmation.get("features"))
-    pm_sources = {
-        "pandaai_market_confirmation": {
-            "source": "PandaAI",
-            "dataset": "futures_derivative_market_confirmation",
-            "available": pandaai_extra_available,
-            "used_in_signal": bool(confirmation.get("enabled")),
-            "reference_date": confirmation.get("reference_date"),
-            "feature_count": len(confirmation.get("features") or []),
-            "feature_status": confirmation.get("feature_status") or {},
-            "data_missing": confirmation.get("data_missing") or [],
-            "data_unavailable": confirmation.get("data_unavailable") or [],
-            "fallback_covered_missing": confirmation.get("fallback_covered_missing") or [],
-            "errors": confirmation.get("errors") or [],
-            "confirmation_score": confirmation.get("confirmation_score"),
-            "direction": confirmation.get("direction"),
-        }
-    }
+    _ = market_confirmation
+    pm_sources = {}
     unavailable_sources: List[str] = []
     stale_sources: List[str] = []
     used_sources: List[str] = []

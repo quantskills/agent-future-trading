@@ -31,6 +31,7 @@ class AnalystOutputLandingTest(unittest.TestCase):
                     "analyst": "technical",
                     "signal": "Bullish",
                     "side": "long",
+                    "confidence": 0.7,
                     "opportunity_state": "watch_for_trigger",
                     "entry_trigger": "break above morning range",
                     "trigger_valid": False,
@@ -45,6 +46,15 @@ class AnalystOutputLandingTest(unittest.TestCase):
     def test_watch_for_trigger_structured_output_is_allowed(self):
         signal = self._signal()
         self.assertEqual(analyst_output_landing_violations(signal), [])
+
+    def test_shared_action_contract_semantics_are_enforced_at_analyst_output(self):
+        signal = self._signal()
+        signal.metadata["action_evidence_contract"]["confidence"] = 1.2
+        violations = analyst_output_landing_violations(signal)
+        self.assertIn(
+            "analyst_output_action_evidence_contract_confidence_out_of_range",
+            violations,
+        )
 
     def test_analyst_output_cannot_land_pm_trade_authority_fields(self):
         signal = self._signal(
@@ -101,6 +111,7 @@ class AnalystOutputLandingTest(unittest.TestCase):
                     "analyst": "technical",
                     "signal": "Bullish",
                     "side": "long",
+                    "confidence": 0.7,
                     "opportunity_state": "watch_for_trigger",
                     "trigger_valid": False,
                     "invalidation_present": True,

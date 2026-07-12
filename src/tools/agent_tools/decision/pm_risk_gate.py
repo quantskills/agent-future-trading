@@ -1217,7 +1217,7 @@ class PMRiskGate:
                         block = True
                         multiplier = 0.0
                         notes.append(
-                            f"blocked weak {target_side} signal by PandaAI quality gate: {', '.join(gate_failures)}"
+                            f"blocked weak {target_side} signal by SCC evidence quality gate: {', '.join(gate_failures)}"
                         )
                     else:
                         quality_multiplier = max(
@@ -1226,11 +1226,11 @@ class PMRiskGate:
                         )
                         multiplier = min(multiplier, quality_multiplier)
                         notes.append(
-                            f"scaled {target_side} by PandaAI quality gate multiplier={quality_multiplier:.2f}: "
+                            f"scaled {target_side} by SCC evidence quality gate multiplier={quality_multiplier:.2f}: "
                             f"{', '.join(gate_failures)}"
                         )
             else:
-                notes.append("PandaAI quality gate skipped: no usable pre-open confirmation features")
+                notes.append("SCC evidence quality gate skipped: no usable confirmation evidence")
 
         if conflicts:
             weak_signal_strength = _safe_float(self.market_config.get("weak_signal_strength"), 0.25)
@@ -1258,7 +1258,7 @@ class PMRiskGate:
             ):
                 block = True
                 multiplier = 0.0
-                notes.append(f"blocked weak {target_side} signal due to PandaAI conflicts={conflicts}")
+                notes.append(f"blocked weak {target_side} signal due to SCC evidence conflicts={conflicts}")
             else:
                 conflict_multiplier = max(
                     0.0,
@@ -1274,11 +1274,11 @@ class PMRiskGate:
                     )
                 else:
                     notes.append(
-                        f"scaled {target_side} by PandaAI conflict multiplier={conflict_multiplier:.2f}: "
+                        f"scaled {target_side} by SCC evidence conflict multiplier={conflict_multiplier:.2f}: "
                         f"conflicts={conflicts}"
                     )
         elif confirmations:
-            notes.append(f"PandaAI confirmation supports {target_side}: {confirmations}")
+            notes.append(f"SCC evidence supports {target_side}: {confirmations}")
 
         return {
             "block": block,

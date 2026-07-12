@@ -223,24 +223,6 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "learning_impact_delta": {"learning_impact_delta": 0.0},
             },
         }
-        snapshot = {
-            "opportunity_scorecard": scorecard,
-            "pm_internal_candidate": {
-                "candidate_contract": {
-                    "ticker": "RB",
-                    "current_lots": 0,
-                    "target_lots": 1,
-                    "target_position_ratio": 0.008,
-                    "final_action": "open_probe",
-                    "reason_codes": [],
-                },
-                "final_contract_builder_inputs": {
-                    "current_lots": 0,
-                    "target_lots": 1,
-                    "control_reasons": [],
-                },
-            },
-        }
         pm_state = _pm_state("RB", 0, 1, with_scorecard=True)
         pm_state["opportunity_scorecard"] = scorecard
         portfolio = SimpleNamespace(account_equity=1_000_000.0, cashflow=1_000_000.0, margin_used=0.0, positions={})
@@ -264,34 +246,17 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertTrue(pm_state["capital_deployment"]["selected_for_capital_deployment"])
 
     def test_full_market_deployment_skips_non_new_risk_candidate_without_step5_fact(self):
-        snapshot = {
-            "opportunity_scorecard": {
-                "preferred_side": "long",
-                "long": {
-                    "side": "long",
-                    "final_state": "tradeable_candidate",
-                    "opportunity_score": 0.92,
-                    "score": 0.92,
-                },
-            },
-            "pm_internal_candidate": {
-                "candidate_contract": {
-                    "ticker": "RB",
-                    "current_lots": 1,
-                    "target_lots": 1,
-                    "lots_delta": 0,
-                    "final_action": "hold",
-                    "reason_codes": ["test_hold_candidate"],
-                },
-                "final_contract_builder_inputs": {
-                    "current_lots": 1,
-                    "target_lots": 1,
-                    "control_reasons": ["test_hold_candidate"],
-                },
+        scorecard = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "tradeable_candidate",
+                "opportunity_score": 0.92,
+                "score": 0.92,
             },
         }
         pm_state = _pm_state("RB", 1, 1, with_scorecard=False)
-        pm_state["opportunity_scorecard"] = snapshot["opportunity_scorecard"]
+        pm_state["opportunity_scorecard"] = scorecard
         portfolio = SimpleNamespace(account_equity=1_000_000.0, cashflow=1_000_000.0, margin_used=0.0, positions={})
 
         result = apply_full_market_capital_deployment(
@@ -324,10 +289,6 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             "final_action": "open_probe",
             "reason_codes": ["already_signed"],
             "evidence_used": {"existing": True},
-        }
-        snapshot = {
-            "opportunity_scorecard": scorecard,
-            "final_action_contract": dict(final_contract),
         }
         pm_state = _pm_state("RB", 1, 1, with_scorecard=False)
         pm_state["final_action_contract"] = dict(final_contract)

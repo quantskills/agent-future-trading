@@ -1268,7 +1268,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertFalse(bad["ok"])
         self.assertIn("final_action_contract_action_mismatch", bad["errors"])
 
-    def test_full_market_rank_gate_required_only_for_opening_position(self):
+    def test_full_market_rank_gate_required_for_all_incremental_risk(self):
         unranked_open = {
             "current_lots": 0,
             "target_lots": -1,
@@ -1298,16 +1298,44 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "evidence_used": {"opportunity_rank": 1, **full_market_rank_source_payload()},
             "capital_deployment": {"opportunity_rank": 1, **full_market_rank_source_payload()},
         }
+        ranked_add = {
+            **unranked_add,
+            "evidence_used": {"opportunity_rank": 2, **full_market_rank_source_payload()},
+            "capital_deployment": {"opportunity_rank": 2, **full_market_rank_source_payload()},
+        }
 
         self.assertEqual(
             full_market_rank_gate_errors(unranked_open),
             ["new_risk_exposure_missing_full_market_rank"],
         )
         self.assertEqual(full_market_rank_gate_errors(unranked_reverse), [])
-        self.assertEqual(full_market_rank_gate_errors(unranked_add), [])
+        self.assertEqual(
+            full_market_rank_gate_errors(unranked_add),
+            ["new_risk_exposure_missing_full_market_rank"],
+        )
         self.assertEqual(full_market_rank_gate_errors(reduce_contract), [])
         self.assertTrue(contract_has_full_market_capital_rank(ranked_open))
         self.assertEqual(full_market_rank_gate_errors(ranked_open), [])
+        self.assertTrue(contract_has_full_market_capital_rank(ranked_add))
+        self.assertEqual(full_market_rank_gate_errors(ranked_add), [])
+
+        ranked_native_hold = {
+            "current_lots": 1,
+            "target_lots": 1,
+            "lots_delta": 0,
+            "final_action": "hold",
+            "evidence_used": {"opportunity_rank": 1, **full_market_rank_source_payload()},
+            "capital_deployment": {
+                "opportunity_rank": 1,
+                "selected_for_capital_deployment": False,
+                "capital_allocation_reason": "non_new_risk_no_capital_rank",
+                **full_market_rank_source_payload(),
+            },
+        }
+        self.assertIn(
+            "non_increasing_risk_contract_has_full_market_rank",
+            rank_capital_layer_contract_errors(ranked_native_hold),
+        )
 
     def test_generic_no_change_explanation_requires_registered_reason_or_explicit_field(self):
         explained = {

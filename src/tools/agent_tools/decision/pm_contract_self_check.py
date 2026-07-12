@@ -142,6 +142,11 @@ def _semantic_object_errors(contract: Mapping[str, Any]) -> List[str]:
                 errors.append("non_rank_capital_deployment_reason_missing")
             elif str(reason) != "non_new_risk_no_capital_rank":
                 errors.append("non_rank_capital_deployment_reason_invalid")
+        if contract_requires_full_market_capital_rank(contract):
+            if deployment.get("selected_for_capital_deployment") is not True:
+                errors.append("approved_new_risk_not_selected_for_capital_deployment")
+            if not _present(deployment.get("capital_allocation_reason")):
+                errors.append("approved_new_risk_capital_allocation_reason_missing")
     evidence = _mapping(contract.get("evidence_used"))
     sizing = evidence.get("position_sizing_result")
     if not isinstance(sizing, Mapping) or not sizing:

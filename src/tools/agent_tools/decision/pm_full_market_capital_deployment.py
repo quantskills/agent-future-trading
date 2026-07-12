@@ -2,8 +2,8 @@
 
 This module is the only producer of final all-market ``opportunity_rank``.
 It does not write database rows and it is not a workflow fallback. The caller
-passes the complete PM candidate set for a trading day; the tool ranks opening
-candidates, consumes portfolio budgets in rank order, and writes PM deployment
+passes the complete PM candidate set for a trading day; the tool ranks all
+incremental-risk candidates, consumes portfolio budgets in rank order, and writes PM deployment
 decisions for step 6 signing. It must not sign or repair final_action_contract.
 """
 
@@ -23,6 +23,7 @@ from tools.common.final_action_semantics import (
     CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION,
     RANK_CAPITAL_LAYER_FIELDS,
     RANK_CAPITAL_SOURCE_FIELDS,
+    contract_requires_full_market_capital_rank,
     full_market_rank_source_payload,
     is_full_market_rank_source,
 )
@@ -501,10 +502,8 @@ def _contract_current_lots(pm_state: Dict[str, Any]) -> int:
         return 0
 
 
-def contract_is_opening_risk(pm_state: Dict[str, Any]) -> bool:
-    current_lots = _contract_current_lots(pm_state)
-    target_lots = _contract_target_lots(pm_state)
-    return current_lots == 0 and target_lots != 0
+def contract_requests_incremental_risk_capital(pm_state: Dict[str, Any]) -> bool:
+    return contract_requires_full_market_capital_rank(_pm_state_trade_facts(pm_state))
 
 
 def _update_pm_state_with_deployment(
@@ -681,6 +680,22 @@ def _portfolio_ticker_exposure(portfolio: Portfolio, ticker: str) -> float:
     return (1.0 if shares > 0 else -1.0) * value / equity
 
 
+def _portfolio_ticker_margin_ratio(portfolio: Portfolio, ticker: str) -> float:
+    equity = float(getattr(portfolio, "account_equity", 0.0) or getattr(portfolio, "cashflow", 0.0) or 0.0)
+    if equity <= 0:
+        return 0.0
+    positions = getattr(portfolio, "positions", {}) or {}
+    position = positions.get(str(ticker).upper()) or positions.get(str(ticker))
+    if position is None:
+        return 0.0
+    margin_used = _safe_float(getattr(position, "margin_used", 0.0), 0.0)
+    if margin_used <= 0:
+        value = abs(_safe_float(getattr(position, "value", 0.0), 0.0))
+        margin_rate = _safe_float(getattr(position, "margin_rate", 0.0), 0.0)
+        margin_used = value * margin_rate
+    return max(0.0, margin_used / equity)
+
+
 def _contract_target_position_ratio(pm_state: Dict[str, Any]) -> float:
     contract = _pm_state_trade_facts(pm_state)
     try:
@@ -738,16 +753,7 @@ def _capital_rank_eligible(pm_state: Dict[str, Any], row: Dict[str, Any]) -> boo
         return False
     if not _capital_layer_from_pm_state(pm_state, row):
         return False
-    contract = _pm_state_trade_facts(pm_state)
-    current_lots = _contract_current_lots(pm_state)
-    target_lots = _contract_target_lots(pm_state)
-    if target_lots == 0 and current_lots == 0 and not (
-        bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation"))
-    ):
-        return False
-    if not contract_is_opening_risk(pm_state) and not (
-        bool(contract.get("conditional_trigger_authority")) or bool(contract.get("requires_intraday_confirmation"))
-    ):
+    if not contract_requests_incremental_risk_capital(pm_state):
         return False
     if state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger"}:
         return True
@@ -829,7 +835,9 @@ def apply_full_market_capital_deployment(
 ) -> Dict[str, Any]:
     """Apply Step5 rank and capital deployment directly to PM memory states."""
     deployment_cfg = _daily_capital_deployment_config(config)
-    candidates: List[Tuple[int, int, float, float, float, str, Dict[str, Any], str, float, float, float]] = []
+    candidates: List[
+        Tuple[int, int, float, float, float, str, Dict[str, Any], str, float, float, float, float]
+    ] = []
     for ticker, pm_state in generated:
         context = pm_state.get("recommendation_context") if isinstance(pm_state.get("recommendation_context"), dict) else {}
         status = context.get("status")
@@ -841,7 +849,7 @@ def apply_full_market_capital_deployment(
         if source_type != RecommendationSourceType.STRATEGY.value:
             continue
         _clear_non_full_market_rank_fields(pm_state)
-        if not contract_is_opening_risk(pm_state):
+        if not contract_requests_incremental_risk_capital(pm_state):
             continue
         side, row = _scorecard_preferred_row(pm_state)
         if side not in {"long", "short"} or not row:
@@ -883,10 +891,15 @@ def apply_full_market_capital_deployment(
         except (TypeError, ValueError):
             priority_score = score
         rank_score = _float_field(row, "rank_score", priority_score)
-        margin_ratio = _recommended_margin_ratio(pm_state, portfolio)
+        target_ticker_margin_ratio = _recommended_margin_ratio(pm_state, portfolio)
+        current_ticker_margin_ratio = _portfolio_ticker_margin_ratio(portfolio, str(ticker).upper())
+        incremental_margin_ratio = max(
+            0.0,
+            target_ticker_margin_ratio - current_ticker_margin_ratio,
+        )
         rank_score = _apply_capital_efficiency_to_rank_row(
             row,
-            margin_ratio=margin_ratio,
+            margin_ratio=incremental_margin_ratio,
             min_probe_ratio=deployment_cfg["min_probe_margin_ratio"],
             max_single_ratio=deployment_cfg["max_single_ticker_margin_ratio"],
             capital_efficiency_rank_enabled=bool(deployment_cfg["capital_efficiency_rank_enabled"]),
@@ -908,7 +921,8 @@ def apply_full_market_capital_deployment(
                 str(ticker).upper(),
                 pm_state,
                 side,
-                margin_ratio,
+                target_ticker_margin_ratio,
+                incremental_margin_ratio,
                 target_position_ratio,
                 current_ticker_exposure,
             )
@@ -927,21 +941,34 @@ def apply_full_market_capital_deployment(
     used_margin_ratio = _portfolio_margin_ratio(portfolio)
     running_net_exposure = _portfolio_current_net_exposure(portfolio)
     target_margin_ratio = deployment_cfg["target_margin_ratio"]
-    min_probe_ratio = deployment_cfg["min_probe_margin_ratio"]
     max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
     hard_max_margin_ratio = deployment_cfg["hard_max_total_margin_ratio"]
     max_net_exposure = deployment_cfg["max_net_exposure"]
     budget_ceiling = min(target_margin_ratio, hard_max_margin_ratio)
 
-    for rank, (_, _, rank_score, priority_score, score, _, pm_state, side, margin_ratio, target_position_ratio, current_ticker_exposure) in enumerate(candidates, start=1):
+    for rank, (
+        _,
+        _,
+        rank_score,
+        priority_score,
+        score,
+        _,
+        pm_state,
+        side,
+        target_ticker_margin_ratio,
+        incremental_margin_ratio,
+        target_position_ratio,
+        current_ticker_exposure,
+    ) in enumerate(candidates, start=1):
         _set_daily_opportunity_rank(pm_state, side, rank)
         current_lots = _contract_current_lots(pm_state)
         target_lots = _contract_target_lots(pm_state)
-        if not contract_is_opening_risk(pm_state):
-            raise RuntimeError("pm_step5_rank_queue_contains_non_opening_state")
-        candidate_margin = max(float(margin_ratio or 0.0), min_probe_ratio)
+        if not contract_requests_incremental_risk_capital(pm_state):
+            raise RuntimeError("pm_step5_rank_queue_contains_non_increasing_risk_state")
+        candidate_margin = max(0.0, float(target_ticker_margin_ratio or 0.0))
+        incremental_margin = max(0.0, float(incremental_margin_ratio or 0.0))
         single_ok = candidate_margin <= max_single_ratio + 1e-12
-        total_ok = used_margin_ratio + candidate_margin <= budget_ceiling + 1e-12
+        total_ok = used_margin_ratio + incremental_margin <= budget_ceiling + 1e-12
         projected_net_exposure = running_net_exposure - float(current_ticker_exposure or 0.0) + float(target_position_ratio or 0.0)
         net_ok = abs(projected_net_exposure) <= max_net_exposure + 1e-12
         budget_detail = {
@@ -949,7 +976,7 @@ def apply_full_market_capital_deployment(
             "rank_score": round(float(rank_score or 0.0), 6),
             "candidate_margin_ratio": round(candidate_margin, 6),
             "queue_margin_ratio_before": round(used_margin_ratio, 6),
-            "queue_margin_ratio_after_if_selected": round(used_margin_ratio + candidate_margin, 6),
+            "queue_margin_ratio_after_if_selected": round(used_margin_ratio + incremental_margin, 6),
             "target_margin_ratio_budget": round(budget_ceiling, 6),
             "max_single_ticker_margin_ratio": round(max_single_ratio, 6),
             "current_net_exposure_before": round(running_net_exposure, 6),
@@ -962,7 +989,7 @@ def apply_full_market_capital_deployment(
             "net_exposure_budget_ok": bool(net_ok),
         }
         if single_ok and total_ok and net_ok:
-            used_margin_ratio += candidate_margin
+            used_margin_ratio += incremental_margin
             running_net_exposure = projected_net_exposure
             reason = (
                 "selected_by_full_market_pm_capital_queue:"

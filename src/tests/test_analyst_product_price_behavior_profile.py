@@ -132,6 +132,7 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
                 "action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "commodity_news",
+                    "signal": "Neutral",
                     "side": "flat",
                     "confidence": 0.42,
                     "opportunity_state": "watch_for_trigger",

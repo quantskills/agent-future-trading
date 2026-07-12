@@ -15,6 +15,7 @@ from tools.common.contracts import (
     validate_trade_research_contract,
 )
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
+from tools.common.signal_evidence_collection import ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS
 from tools.agent_tools.analysis.analyst_market_confirmation import score_pandaai_extra_records
 from tools.agent_tools.analysis.analyst_output_landing import apply_analyst_output_landing_check
 from util.logger import logger
@@ -724,25 +725,6 @@ def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: st
     }
 
 
-_ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS = {
-    "contract_version",
-    "agent_name",
-    "justification",
-    "determinism_mode",
-    "llm_provider",
-    "llm_model",
-    "source_artifacts",
-    "validation_errors",
-    "decision_horizon",
-    "execution_horizon",
-    "validation_horizon",
-    "research_contract_version",
-    "message_contract_version",
-    "similar_past_cases",
-    "metadata",
-}
-
-
 def _sync_signal_fields_to_action_evidence_contract(
     contract: Dict[str, Any],
     signal: AnalystSignal,
@@ -751,7 +733,7 @@ def _sync_signal_fields_to_action_evidence_contract(
     """Land final registered analyst evidence in the formal action contract."""
     contract["signal"] = signal_value(signal.signal)
     for field in AnalystSignal.model_fields:
-        if field in _ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS or field == "signal":
+        if field in ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS or field == "signal":
             continue
         contract[field] = getattr(signal, field)
     data_usage_summary = metadata.get("data_usage_summary")

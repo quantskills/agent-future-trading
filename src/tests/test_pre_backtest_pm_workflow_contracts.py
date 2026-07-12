@@ -138,6 +138,42 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
 
         self.assertEqual(saved, [])
 
+    def test_workflow_blocks_failed_step6_self_check_before_save(self):
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        saved = []
+
+        class _DB:
+            def save_futures_recommendation(self, recommendation):
+                saved.append(recommendation)
+                return "saved"
+
+        workflow.db = _DB()
+        workflow.config = {}
+        workflow.init_portfolio = _portfolio()
+        invalid = FuturesRecommendation(
+            underlying_code="BU",
+            signal_snapshot={
+                "final_action_contract": {"ticker": "BU"},
+                "pm_six_step_trace": {
+                    "step6_contract_generation_check": {"ok": True},
+                    "pm_contract_self_check": {
+                        "ok": False,
+                        "errors": ["capital_deployment_missing"],
+                    },
+                },
+            },
+        )
+        with patch(
+            "agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts",
+            return_value=[("BU", invalid)],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "self-check not ok"):
+                workflow._persist_pm_full_market_contracts(
+                    [("BU", _pm_state("BU", 1, 1, with_scorecard=False))]
+                )
+
+        self.assertEqual(saved, [])
+
     def test_scc_source_agent_and_boundary_are_hard_inputs(self):
         valid = _signal_collection_contract("BU")
         self.assertIs(_require_step6_signal_collection_contract(valid), valid)

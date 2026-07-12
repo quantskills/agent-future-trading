@@ -66,7 +66,7 @@ def _analyst_action_contract():
     return {
         "contract_version": "agentquant.action_evidence.v1",
         "analyst": "technical",
-        "signal": "bullish_breakout_watch",
+        "signal": "Bullish",
         "side": "long",
         "confidence": 0.68,
         "opportunity_state": "watch_for_trigger",

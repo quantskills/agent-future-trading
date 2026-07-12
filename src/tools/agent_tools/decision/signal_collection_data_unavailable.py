@@ -37,6 +37,7 @@ def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_
         "setup_quality_ok": False,
         "trigger_valid": False,
         "current_trigger_confirmed": False,
+        "invalidation_present": False,
         "entry_trigger": "none",
         "exit_hint": "none",
         "horizon_class": "flat",

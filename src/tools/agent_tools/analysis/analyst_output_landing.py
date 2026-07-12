@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, List
 
 from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
+from tools.common.signal_evidence_collection import validate_action_evidence_contract
 
 
 ALLOWED_STRUCTURAL_KEYS = {
@@ -68,6 +69,11 @@ def analyst_output_landing_violations(signal: Any) -> List[str]:
     if not isinstance(contract, dict):
         violations.append("analyst_output_action_evidence_contract_missing")
     else:
+        try:
+            validate_action_evidence_contract(contract, analyst=str(getattr(signal, "agent_name", "") or ""))
+        except ValueError as exc:
+            code = str(exc).removeprefix("action_evidence_contract_")
+            violations.append(f"analyst_output_action_evidence_contract_{code}")
         for hit in _walk_forbidden(contract, path="action_evidence_contract"):
             violations.append(f"analyst_output_forbidden_trade_authority_field:{hit}")
         if contract.get("contract_version") != "agentquant.action_evidence.v1":

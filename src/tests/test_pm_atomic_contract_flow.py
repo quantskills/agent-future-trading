@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -12,33 +13,45 @@ from agents.decision_team.portfolio_manager import (
     finalize_pm_full_market_contracts,
     portfolio_agent_futures,
 )
-from graph.schema import Portfolio, RecommendationSourceType, RecommendationStatus
+from graph.schema import Portfolio, Position, RecommendationSourceType, RecommendationStatus
 from graph.workflow import AgentWorkflow
 from tools.common.final_action_semantics import full_market_rank_source_payload
+from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
 def _signal_collection_contract(ticker: str) -> dict:
     action_contract = {
         "contract_version": "agentquant.action_evidence.v1",
         "analyst": "technical",
+        "signal": "Bullish",
         "side": "long",
         "confidence": 0.8,
+        "opportunity_type": "trend_continuation",
+        "opportunity_state": "watch_for_trigger",
+        "setup_type": "trend_continuation",
+        "setup_quality_ok": True,
+        "trigger_valid": False,
+        "current_trigger_confirmed": False,
+        "entry_trigger": "breakout",
+        "invalidation_present": True,
+        "invalidation_condition": "close_below_trigger",
+        "horizon_class": "short",
+        "market_regime": "trend",
+        "evidence_quality": "high",
+        "current_evidence_conflict": [],
+        "missing_evidence": [],
+        "no_lookahead_status": "ok",
     }
-    return {
-        "contract_version": "agentquant.signal_collection.v1",
-        "source_agent": "signal_collector",
-        "collector_decision_boundary": "no_trade_authority",
-        "ticker": ticker,
-        "trading_date": "2025-03-25",
-        "source_contracts": [
-            {
-                "analyst": "technical",
-                "action_evidence_contract": action_contract,
-            }
-        ],
-        "evidence_items": [{"analyst": "technical", "side": "long"}],
-        "evidence_fusion": {},
-    }
+    signal = SimpleNamespace(
+        agent_name="technical",
+        metadata={"action_evidence_contract": action_contract},
+    )
+    return build_signal_collection_contract(
+        ticker=ticker,
+        trading_date="2025-03-25",
+        analyst_signals=[signal],
+        enabled_analysts=["technical"],
+    )
 
 
 def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecard: bool) -> dict:
@@ -332,7 +345,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 self.assertEqual(contract["final_action"], expected_action)
                 self.assertNotIn("opportunity_rank", contract["evidence_used"])
 
-    def test_add_and_scale_do_not_enter_opening_rank(self):
+    def test_add_and_scale_enter_incremental_risk_rank(self):
         cases = (
             ("ADD_LONG", 1, 2),
             ("ADD_SHORT", -1, -2),
@@ -355,15 +368,20 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 self.assertEqual(contract["final_action"], "scale")
                 self.assertEqual(contract["current_lots"], current_lots)
                 self.assertEqual(contract["target_lots"], target_lots)
-                self.assertNotIn("opportunity_rank", contract["evidence_used"])
-                self.assertEqual(
-                    contract["capital_deployment"]["capital_allocation_reason"],
-                    "non_new_risk_no_capital_rank",
-                )
+                self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+                self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
 
-    def test_only_flat_to_position_open_competes_for_rank(self):
+    def test_open_and_add_compete_in_same_full_market_rank(self):
         open_state = _pm_state("OPEN", 0, 1, with_scorecard=True)
         add_state = _pm_state("ADD", 1, 2, with_scorecard=True)
+        add_state["opportunity_scorecard"]["long"].update(
+            {
+                "rank_score": 0.9,
+                "capital_priority_score": 0.9,
+                "opportunity_score": 0.9,
+                "score": 0.9,
+            }
+        )
 
         result = finalize_pm_full_market_contracts(
             generated=[("ADD", add_state), ("OPEN", open_state)],
@@ -377,8 +395,89 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
 
         contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
-        self.assertEqual(contracts["OPEN"]["evidence_used"]["opportunity_rank"], 1)
-        self.assertNotIn("opportunity_rank", contracts["ADD"]["evidence_used"])
+        self.assertEqual(contracts["ADD"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["OPEN"]["evidence_used"]["opportunity_rank"], 2)
+
+    def test_ranked_add_rejection_restores_existing_position_to_hold(self):
+        state = _pm_state("BU", 2, 3, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.001,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.5},
+            },
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=900_000.0,
+                account_equity=1_000_000.0,
+                margin_used=100_000.0,
+                positions={
+                    "BU": Position(
+                        shares=2,
+                        value=100_000.0,
+                        margin_used=20_000.0,
+                        margin_rate=0.1,
+                    )
+                },
+            ),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["final_action"], "hold")
+        self.assertEqual(contract["current_lots"], 2)
+        self.assertEqual(contract["target_lots"], 2)
+        self.assertEqual(contract["lots_delta"], 0)
+        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
+
+    def test_add_budget_consumes_only_incremental_margin(self):
+        state = _pm_state("BU", 1, 2, with_scorecard=True)
+        state.update(
+            {
+                "target_margin_ratio_estimate": 0.06,
+                "position_ratio": 0.12,
+                "target_position_ratio": 0.12,
+                "margin_required": 60_000.0,
+            }
+        )
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={
+                "max_total_margin_ratio": 0.2,
+                "capital_utilization_control": {"target_margin_ratio_confirmed": 0.2},
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.5},
+            },
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=810_000.0,
+                account_equity=1_000_000.0,
+                margin_used=190_000.0,
+                positions={
+                    "BU": Position(
+                        shares=1,
+                        value=100_000.0,
+                        margin_used=50_000.0,
+                        margin_rate=0.5,
+                    )
+                },
+            ),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        deployment = contract["capital_deployment"]
+        self.assertEqual(contract["final_action"], "scale")
+        self.assertTrue(deployment["selected_for_capital_deployment"])
+        self.assertAlmostEqual(deployment["candidate_margin_ratio"], 0.06)
+        self.assertAlmostEqual(deployment["queue_margin_ratio_before"], 0.19)
+        self.assertAlmostEqual(deployment["queue_margin_ratio_after_if_selected"], 0.20)
 
     def test_ranked_candidate_rejected_by_budget_keeps_rank_and_zeroes_new_risk(self):
         state = _pm_state("BU", 0, 1, with_scorecard=True)

@@ -179,8 +179,10 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             def to_dict(self):
                 return {"ok": self.ok, "errors": [], "warnings": []}
 
-        def fake_init_database():
-            calls.append("init_database")
+        def fake_create_pre_backtest_db(db_path, *, exp_name):
+            calls.append("create_pre_backtest_fake_db")
+            self.assertTrue(exp_name)
+            return db_path
 
         def fake_unittest(_modules):
             calls.append("unittest")
@@ -194,9 +196,10 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
             calls.append("acceptance")
             return _Report()
 
-        with patch.object(sys, "argv", argv), patch(
-            "database.sqlite_setup.init_database",
-            side_effect=fake_init_database,
+        with patch.object(sys, "argv", argv), patch.object(
+            pre_gate,
+            "_create_pre_backtest_fake_db",
+            side_effect=fake_create_pre_backtest_db,
         ), patch.object(pre_gate, "_run_unittest_modules", side_effect=fake_unittest), patch.object(
             pre_gate,
             "_run_protocol_preflight",
@@ -207,7 +210,7 @@ class ProtocolPreflightCliRegressionTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(
             calls,
-            ["init_database", "unittest", "unittest", "protocol", "acceptance"],
+            ["create_pre_backtest_fake_db", "unittest", "unittest", "protocol", "acceptance"],
         )
 
     def test_backtest_pre_backtest_command_uses_integrated_gate(self):

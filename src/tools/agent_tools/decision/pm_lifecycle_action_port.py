@@ -69,7 +69,7 @@ def classify_lifecycle_action_port(contract: Mapping[str, Any] | None) -> dict[s
         requires_full_market_rank = False
     elif abs(target_lots) > abs(current_lots):
         port = NEW_RISK_PORT
-        requires_full_market_rank = False
+        requires_full_market_rank = True
     elif abs(target_lots) < abs(current_lots):
         port = CAPITAL_RELEASE_PORT
         requires_full_market_rank = False

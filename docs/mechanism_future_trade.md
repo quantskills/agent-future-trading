@@ -15,13 +15,13 @@
 7. **业务机制必须可审计**：每笔推荐、盘中触发、成交流水、结算记录、品种日 PnL、完整交易日志和 Phase4 验收结果都要能回查，便于确认是否记错账、算错账或发生未来函数。
 8. **最终交易真相只认结构化出口**：新开仓、条件 probe、放大、减仓、持有和退出必须落到投资组合经理签发的唯一 `final_action_contract` 及其内部权限字段、交易员执行结果和会计结算结果。普通策略单先由投资组合经理生成唯一 `final_action_contract`，经审计员审核后再交给交易员执行。投资组合经理不调用 LLM；自然语言、内部草稿和日志不是成交、审计、评估或学习的兜底事实来源。仅有 `direction_context`、`opportunity_state=no_opportunity` 或普通观察状态的机会，不能被最小手数、旧 probe seed 或软门控释放绕成真实开仓。
 9. **策略单与运营风控单分账**：`source_type=strategy` 只走投资组合经理、审计员、交易员的策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，由执行/结算链独立处理、独立核算，不写入策略 alpha 学习，也不能塞进策略 `final_action_contract`。
-10. **机会排序只服务开仓资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对 `current_lots=0` 且 `target_lots!=0` 的开仓候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，用于决定资金为什么优先给某些开仓机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。`add/scale/hold/reduce/exit/reverse` 当前合约只写对应生命周期解释和学习 trace，不伪造 rank。这些字段不是第二套交易权限，交易员也不能按排名自行改方向或手数。
+10. **机会排序只服务新增风险资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对实际增加风险的候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，包括新开仓与同方向扩大绝对手数的 `add/scale`，用于决定资金为什么优先给某些新增风险机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控只写对应生命周期解释和学习 trace，不伪造 rank。这些字段不是第二套交易权限，交易员也不能按排名自行改方向或手数。
 
 ## 二、已经代码落地的实际业务运行机制
 
 ### 1. 四阶段业务流
 
-- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `source_agent="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步转换同一个内存状态：Step2 判断单品种方向，Step3 结合持仓确定交易状态，Step4 消费学习，只有从空仓建立新仓的候选进入 Step5 全市场 rank、预算和 sizing，其他候选从 Step4 直接进入 Step6。Step1–5 不输出 artifact、合约草稿和 recommendation；Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。普通策略执行依据只能是审计通过的唯一 `final_action_contract`。
+- **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `source_agent="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步转换同一个内存状态：Step2 判断单品种方向，Step3 结合持仓确定交易状态，Step4 消费学习，实际增加风险的新开仓和同方向 `add/scale` 进入 Step5 全市场 rank、预算和 sizing，不增加风险的候选从 Step4 直接进入 Step6。Step1–5 不输出 artifact、合约草稿和 recommendation；Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。普通策略执行依据只能是审计通过的唯一 `final_action_contract`。
 - **Phase2 盘中执行**：交易员读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。交易员不能从投资组合经理文本、旧 probe 标记或最小一手机制自行创造策略方向，只能执行投资组合经理和审计员已授权计划。
 - **Phase3 日终结算**：会计师回放当日成交流水，使用同日官方结算价逐日盯市，更新官方组合、日结算、品种日 PnL 和交易流水结算价；结算后发现换月需要时，只能生成下一交易日执行的 rollover 运营单，不能反向影响当天盘前策略。
 - **Phase4 复盘验收**：复盘员检查 Phase1-3 完整性、账务一致性、交易流水入账、分析师信号落库完整性、投资组合经理机会评分/排名与资金分配理由、完整交易日志；研究员在 Phase4 验证后通过独立入口输出结构化研究信息，供未来交易日使用。未完成交易日会被 `incomplete_trading_day_phase` 硬拦，不能作为策略结论或学习样本。

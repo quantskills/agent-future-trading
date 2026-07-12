@@ -69,12 +69,13 @@ from agents.decision_team.portfolio_manager import (
     _attach_incomplete_prior_diagnostics_to_contract_state,
     _normalize_alpha_setup_action_value,
     _select_learning_trace_action_values,
-    finalize_pm_full_market_contracts as _finalize_pm_full_market_contracts,
+    finalize_pm_full_market_contracts,
     _sign_pm_memory_state,
     _to_recommendation_action,
     portfolio_agent_futures,
 )
 from agents.decision_team.signal_collector import signal_collector_agent
+from tools.common.signal_evidence_collection import build_signal_collection_contract
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
     _execution_contract_from_snapshot,
@@ -169,27 +170,38 @@ def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
     action_contract = {
         "contract_version": "agentquant.action_evidence.v1",
         "analyst": "technical",
+        "signal": "Bullish",
         "side": "long",
         "confidence": 0.8,
+        "opportunity_type": "trend_continuation",
+        "opportunity_state": "watch_for_trigger",
+        "setup_type": "trend_continuation",
+        "setup_quality_ok": True,
+        "trigger_valid": False,
+        "current_trigger_confirmed": False,
+        "entry_trigger": "breakout",
+        "invalidation_present": True,
+        "invalidation_condition": "close_below_trigger",
+        "horizon_class": "short",
+        "market_regime": "trend",
+        "evidence_quality": "high",
+        "current_evidence_conflict": [],
+        "missing_evidence": [],
+        "no_lookahead_status": "ok",
     }
-    return {
-        "contract_version": "agentquant.signal_collection.v1",
-        "source_agent": "signal_collector",
-        "collector_decision_boundary": "no_trade_authority",
-        "ticker": ticker,
-        "trading_date": "2025-03-25",
-        "source_contracts": [
-            {
-                "analyst": "technical",
-                "action_evidence_contract": action_contract,
-            }
-        ],
-        "evidence_items": [{"analyst": "technical", "side": "long"}],
-        "evidence_fusion": {},
-    }
+    signal = SimpleNamespace(
+        agent_name="technical",
+        metadata={"action_evidence_contract": action_contract},
+    )
+    return build_signal_collection_contract(
+        ticker=ticker,
+        trading_date="2025-03-25",
+        analyst_signals=[signal],
+        enabled_analysts=["technical"],
+    )
 
 
-def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecard: dict | None = None, execution_fields: dict | None = None) -> dict:
+def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | None = None, execution_fields: dict | None = None) -> dict:
     contract = dict(contract or {})
     current_lots = int(contract.get("current_lots") or 0)
     target_lots = int(contract.get("target_lots") or 0)
@@ -222,83 +234,60 @@ def _pm_internal_candidate_fixture(contract: dict, *, ticker: str = "", scorecar
     )
     execution_fields.setdefault("pm_six_step_stage", "steps_1_4_candidate_generated")
     primary_lifecycle_action_port = classify_lifecycle_action_port(contract)
+    collection = execution_fields["signal_collection_contract"]
     return {
-        "schema": "agentquant.pm_internal_candidate.v1",
-        "stage": "steps_1_4_complete_pending_full_market_deployment",
-        "candidate_status": "normal",
-        "candidate_contract": contract,
-        "final_contract_builder_inputs": {
-            "ticker": ticker or contract.get("ticker") or "",
-            "current_lots": current_lots,
-            "target_lots": target_lots,
-            "position_ratio": position_ratio,
-            "margin_required": abs(position_ratio) * account_equity,
-            "account_equity": account_equity,
-            "lots_to_trade": abs(target_lots - current_lots),
-            "lots_to_trade_reason": ",".join(str(item) for item in (contract.get("reason_codes") or []) if item) or "test_pm_internal_candidate",
-            "recommendation_intent": recommendation_intent_from_lots(current_lots, target_lots),
-            "final_entry_authority": {
-                "authority_type": authority_type or "not_applicable",
-                "decision": contract.get("authority_decision") or contract.get("decision") or "test_candidate",
-                "authority_decision": contract.get("authority_decision") or contract.get("decision") or "test_candidate",
-                "reason_codes": list(contract.get("reason_codes") or []),
-                "requires_authority": bool(target_lots != current_lots and target_lots != 0),
-                "open_action_evidence": bool(contract.get("open_action_evidence")),
-                "strong_current_evidence": bool(contract.get("strong_current_evidence")),
-                "tradeable_state": bool(contract.get("tradeable_state") or authority_type == "real_budget_entry"),
-                "max_allowed_margin_ratio": float(
-                    contract.get("max_allowed_margin_ratio")
-                    if contract.get("max_allowed_margin_ratio") is not None
-                    else abs(position_ratio)
-                ),
-            },
-            "control_reasons": list(contract.get("reason_codes") or []),
-            "control_diagnostics": {"primary_lifecycle_action_port": primary_lifecycle_action_port},
-            "opportunity_scorecard": dict(scorecard or {}),
-            "market_confirmation": {},
-            "alpha_setup_action_values": [],
-            "execution_contract_fields": execution_fields,
+        **contract,
+        "ticker": ticker or contract.get("ticker") or "",
+        "current_lots": current_lots,
+        "target_lots": target_lots,
+        "position_ratio": position_ratio,
+        "margin_required": abs(position_ratio) * account_equity,
+        "account_equity": account_equity,
+        "lots_to_trade": abs(target_lots - current_lots),
+        "lots_to_trade_reason": ",".join(str(item) for item in (contract.get("reason_codes") or []) if item) or "test_pm_state",
+        "recommendation_intent": recommendation_intent_from_lots(current_lots, target_lots),
+        "final_entry_authority": {
+            "authority_type": authority_type or "not_applicable",
+            "decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
+            "authority_decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
+            "reason_codes": list(contract.get("reason_codes") or []),
+            "requires_authority": bool(target_lots != current_lots and target_lots != 0),
+            "open_action_evidence": bool(contract.get("open_action_evidence")),
+            "strong_current_evidence": bool(contract.get("strong_current_evidence")),
+            "tradeable_state": bool(contract.get("tradeable_state") or authority_type == "real_budget_entry"),
+            "max_allowed_margin_ratio": float(
+                contract.get("max_allowed_margin_ratio")
+                if contract.get("max_allowed_margin_ratio") is not None
+                else abs(position_ratio)
+            ),
         },
-        "final_action_contract_signed": False,
+        "control_reasons": list(contract.get("reason_codes") or []),
+        "control_diagnostics": {"primary_lifecycle_action_port": primary_lifecycle_action_port},
+        "opportunity_scorecard": dict(scorecard or {}),
+        "market_confirmation": {},
+        "alpha_setup_action_values": [],
+        "signal_collection_contract": collection,
+        "execution_contract_fields": execution_fields,
     }
 
 
-def _migrate_test_snapshot_final_contract_to_pm_candidate(snapshot: dict, *, ticker: str) -> None:
-    contract = snapshot.pop("final_action_contract")
-    snapshot["pm_internal_candidate"] = _pm_internal_candidate_fixture(
-        contract,
-        ticker=ticker,
-        scorecard=snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {},
-        execution_fields=dict(snapshot),
-    )
-
-
-def _legacy_pm_state_from_recommendation(recommendation: FuturesRecommendation) -> dict:
+def _pm_state_from_recommendation_fixture(recommendation: FuturesRecommendation) -> dict:
     snapshot = dict(recommendation.signal_snapshot or {})
-    legacy = snapshot.get("pm_internal_candidate") if isinstance(snapshot.get("pm_internal_candidate"), dict) else {}
-    contract = legacy.get("candidate_contract") if isinstance(legacy.get("candidate_contract"), dict) else {}
-    inputs = legacy.get("final_contract_builder_inputs") if isinstance(legacy.get("final_contract_builder_inputs"), dict) else {}
-    state = {**dict(contract), **dict(inputs)}
-    state.setdefault("ticker", recommendation.underlying_code)
-    state.setdefault("current_lots", int(contract.get("current_lots") or 0))
-    state.setdefault("target_lots", int(contract.get("target_lots") or 0))
-    state.setdefault("control_reasons", list(contract.get("reason_codes") or []))
-    state.setdefault("reason_codes", list(contract.get("reason_codes") or []))
-    state.setdefault("signal_snapshot", snapshot)
-    state.setdefault("signal_collection_contract", snapshot.get("signal_collection_contract"))
-    context = recommendation.model_dump(exclude={"id", "action", "lots", "signal_snapshot"})
-    state["recommendation_context"] = context
+    contract = snapshot.pop("final_action_contract")
+    state = _pm_state_fixture(
+        contract,
+        ticker=recommendation.underlying_code,
+        scorecard=snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {},
+        execution_fields=snapshot,
+    )
+    state["recommendation_context"] = recommendation.model_dump(
+        exclude={"id", "action", "lots", "signal_snapshot"}
+    )
     return state
 
 
-def _build_phase1_recommendation(**kwargs):
-    legacy = kwargs.pop("pm_internal_candidate", None)
-    decision = kwargs.get("decision")
-    state_update = {}
-    if isinstance(legacy, dict):
-        contract = legacy.get("candidate_contract") if isinstance(legacy.get("candidate_contract"), dict) else {}
-        inputs = legacy.get("final_contract_builder_inputs") if isinstance(legacy.get("final_contract_builder_inputs"), dict) else {}
-        state_update = {**dict(contract), **dict(inputs)}
+def _build_signed_pm_recommendation(**kwargs):
+    state_update = dict(kwargs.pop("pm_state_update", None) or {})
     if not state_update:
         current_lots = 0
         target_lots = 0
@@ -359,49 +348,12 @@ def _build_phase1_recommendation(**kwargs):
     return _sign_pm_memory_state(state)
 
 
-def _sign_pm_candidate_recommendation(recommendation: FuturesRecommendation) -> bool:
-    signed = _sign_pm_memory_state(_legacy_pm_state_from_recommendation(recommendation))
-    for field, value in signed.model_dump().items():
-        setattr(recommendation, field, value)
-    return True
-
-
-def finalize_pm_full_market_contracts(*, generated, config, portfolio):
+def _persist_pm_state_fixtures(workflow, generated) -> dict:
     states = [
-        (ticker, _legacy_pm_state_from_recommendation(value) if isinstance(value, FuturesRecommendation) else value)
-        for ticker, value in generated
+        (ticker, _pm_state_from_recommendation_fixture(recommendation))
+        for ticker, recommendation in generated
     ]
-    result = _finalize_pm_full_market_contracts(generated=states, config=config, portfolio=portfolio)
-    originals = {ticker: value for ticker, value in generated if isinstance(value, FuturesRecommendation)}
-    copied = []
-    for ticker, signed in result:
-        destination = originals.get(ticker)
-        if destination is not None:
-            for field, value in signed.model_dump().items():
-                setattr(destination, field, value)
-            copied.append((ticker, destination))
-        else:
-            copied.append((ticker, signed))
-    return copied
-
-
-def _persist_legacy_pm_recommendations(workflow, generated):
-    states = [
-        (ticker, _legacy_pm_state_from_recommendation(value))
-        for ticker, value in generated
-    ]
-    signed = workflow._persist_pm_full_market_contracts(states)
-    originals = {ticker: value for ticker, value in generated}
-    for ticker, recommendation in signed:
-        original = originals[ticker]
-        for field, value in recommendation.model_dump().items():
-            setattr(original, field, value)
-    return signed
-
-
-_attach_incomplete_prior_diagnostics_to_builder_inputs = (
-    _attach_incomplete_prior_diagnostics_to_contract_state
-)
+    return dict(workflow._persist_pm_full_market_contracts(states))
 
 
 class TradingCalendarRegressionTest(unittest.TestCase):
@@ -832,9 +784,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_low.signal_snapshot, ticker="A")
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_high.signal_snapshot, ticker="B")
-        _persist_legacy_pm_recommendations(workflow, [("A", rec_low), ("B", rec_high)])
+        signed = _persist_pm_state_fixtures(workflow, [("A", rec_low), ("B", rec_high)])
+        rec_low = signed["A"]
+        rec_high = signed["B"]
 
         self.assertNotIn("opportunity_scorecard", rec_high.signal_snapshot)
         self.assertNotIn("opportunity_scorecard", rec_low.signal_snapshot)
@@ -888,69 +840,29 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertNotIn("active_opportunity_audit", rec_low.signal_snapshot)
         self.assertEqual(len(updates), 2)
 
-    def test_workflow_collects_pm_state_before_step6(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        state = {"ticker": "BU", "current_lots": 0, "target_lots": 0}
-
-        observed = workflow._require_pm_memory_state("BU", {"pm_state": state})
-
-        self.assertIs(observed, state)
-        with self.assertRaisesRegex(RuntimeError, "missing pm_state"):
-            workflow._require_pm_memory_state("BU", {"recommendation": FuturesRecommendation()})
-
     def test_pm_step6_signer_requires_single_pm_state_inputs(self):
         with self.assertRaisesRegex(ValueError, "pm_step6_missing_pm_state"):
             _sign_pm_memory_state({})
         with self.assertRaisesRegex(ValueError, "pm_step6_missing_signal_collection_contract"):
             _sign_pm_memory_state({"ticker": "BU", "current_lots": 0, "target_lots": 0})
 
-    def test_pm_step6_requires_signal_collection_contract_from_builder_inputs(self):
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            signal_snapshot={
-                "pm_internal_candidate": {
-                    "candidate_contract": {
-                        "ticker": "BU",
-                        "current_lots": 0,
-                        "target_lots": 0,
-                        "lots_delta": 0,
-                        "final_action": "wait",
-                    },
-                    "final_contract_builder_inputs": {
-                        "ticker": "BU",
-                        "current_lots": 0,
-                        "target_lots": 0,
-                        "execution_contract_fields": {},
-                    },
-                }
-            },
-        )
-
-        with self.assertRaisesRegex(ValueError, "pm_step6_missing_signal_collection_contract_from_signal_collector"):
-            _sign_pm_candidate_recommendation(recommendation)
-
     def test_pm_step6_new_risk_requires_step5_deployment_decision(self):
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            base_price=3000.0,
-            signal_snapshot={
-                "pm_internal_candidate": _pm_internal_candidate_fixture(
-                    {
-                        "ticker": "BU",
-                        "current_lots": 0,
-                        "target_lots": 1,
-                        "lots_delta": 1,
-                        "final_action": "open_probe",
-                        "authority_type": "exploration_probe",
-                        "reason_codes": ["test_open_candidate"],
-                    },
-                    ticker="BU",
-                )
+        state = _pm_state_fixture(
+            {
+                "ticker": "BU",
+                "current_lots": 0,
+                "target_lots": 1,
+                "lots_delta": 1,
+                "final_action": "open_probe",
+                "authority_type": "exploration_probe",
+                "reason_codes": ["test_open_candidate"],
             },
+            ticker="BU",
         )
+        state["recommendation_context"] = {"underlying_code": "BU", "base_price": 3000.0}
 
         with self.assertRaisesRegex(ValueError, "pm_step6_missing_capital_deployment"):
-            _sign_pm_candidate_recommendation(recommendation)
+            _sign_pm_memory_state(state)
 
     def test_pm_step6_uses_post_gate_candidate_not_stale_primary_lifecycle_rank_trace(self):
         stale_primary_lifecycle_trace = {
@@ -960,43 +872,38 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             "target_lots": 1,
             "lots_delta": 1,
         }
-        recommendation = FuturesRecommendation(
-            underlying_code="ZN",
-            base_price=24200.0,
-            signal_snapshot={
-                "pm_internal_candidate": _pm_internal_candidate_fixture(
-                    {
-                        "ticker": "ZN",
-                        "current_lots": 0,
-                        "target_lots": 0,
-                        "lots_delta": 0,
-                        "final_action": "wait",
-                        "reason_codes": ["risk_gate_flat_target_no_new_exposure"],
-                    },
-                    ticker="ZN",
-                    execution_fields={
-                        "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
-                        "lifecycle_transition_diagnostic": {
-                            "tool": "pm_lifecycle_action_port",
-                            "diagnostic_type": "lifecycle_transition_diagnostic",
-                            "primary_lifecycle_action_port": "new_risk",
-                            "expected_contract_lifecycle_port": "open_add_new_risk",
-                            "actual_contract_lifecycle_port": "wait",
-                            "consistent": False,
-                            "ok": False,
-                            "transition_reason": "unexplained_lifecycle_port_transition",
-                        },
-                        "risk_gate_note": "RiskGate received flat target; no new exposure required",
-                    },
-                )
+        state = _pm_state_fixture(
+            {
+                "ticker": "ZN",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "final_action": "wait",
+                "reason_codes": ["risk_gate_flat_target_no_new_exposure"],
+            },
+            ticker="ZN",
+            execution_fields={
+                "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
+                "lifecycle_transition_diagnostic": {
+                    "tool": "pm_lifecycle_action_port",
+                    "diagnostic_type": "lifecycle_transition_diagnostic",
+                    "primary_lifecycle_action_port": "new_risk",
+                    "expected_contract_lifecycle_port": "open_add_new_risk",
+                    "actual_contract_lifecycle_port": "wait",
+                    "consistent": False,
+                    "ok": False,
+                    "transition_reason": "unexplained_lifecycle_port_transition",
+                },
+                "risk_gate_note": "RiskGate received flat target; no new exposure required",
             },
         )
+        state["recommendation_context"] = {"underlying_code": "ZN", "base_price": 24200.0}
 
-        finalize_pm_full_market_contracts(
-            generated=[("ZN", recommendation)],
+        recommendation = finalize_pm_full_market_contracts(
+            generated=[("ZN", state)],
             config={"max_total_margin_ratio": 0.20},
             portfolio=Portfolio(id="p1", cashflow=5_000_000.0, positions={}, account_equity=5_000_000.0),
-        )
+        )[0][1]
 
         snapshot = recommendation.signal_snapshot
         contract = snapshot["final_action_contract"]
@@ -1033,42 +940,37 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             "target_lots": 1,
             "lots_delta": 1,
         }
-        recommendation = FuturesRecommendation(
-            underlying_code="ZN",
-            base_price=24200.0,
-            signal_snapshot={
-                "pm_internal_candidate": _pm_internal_candidate_fixture(
-                    {
-                        "ticker": "ZN",
-                        "current_lots": 0,
-                        "target_lots": 0,
-                        "lots_delta": 0,
-                        "final_action": "wait",
-                        "reason_codes": [],
-                    },
-                    ticker="ZN",
-                    execution_fields={
-                        "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
-                        "lifecycle_transition_diagnostic": {
-                            "tool": "pm_lifecycle_action_port",
-                            "diagnostic_type": "lifecycle_transition_diagnostic",
-                            "primary_lifecycle_action_port": "new_risk",
-                            "expected_contract_lifecycle_port": "open_add_new_risk",
-                            "actual_contract_lifecycle_port": "wait",
-                            "consistent": False,
-                            "ok": False,
-                            "transition_reason": "unexplained_lifecycle_port_transition",
-                        },
-                    },
-                )
+        state = _pm_state_fixture(
+            {
+                "ticker": "ZN",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "final_action": "wait",
+                "reason_codes": [],
+            },
+            ticker="ZN",
+            execution_fields={
+                "primary_lifecycle_action_port": stale_primary_lifecycle_trace,
+                "lifecycle_transition_diagnostic": {
+                    "tool": "pm_lifecycle_action_port",
+                    "diagnostic_type": "lifecycle_transition_diagnostic",
+                    "primary_lifecycle_action_port": "new_risk",
+                    "expected_contract_lifecycle_port": "open_add_new_risk",
+                    "actual_contract_lifecycle_port": "wait",
+                    "consistent": False,
+                    "ok": False,
+                    "transition_reason": "unexplained_lifecycle_port_transition",
+                },
             },
         )
+        state["recommendation_context"] = {"underlying_code": "ZN", "base_price": 24200.0}
 
-        finalize_pm_full_market_contracts(
-            generated=[("ZN", recommendation)],
+        recommendation = finalize_pm_full_market_contracts(
+            generated=[("ZN", state)],
             config={"max_total_margin_ratio": 0.20},
             portfolio=Portfolio(id="p1", cashflow=5_000_000.0, positions={}, account_equity=5_000_000.0),
-        )
+        )[0][1]
 
         snapshot = recommendation.signal_snapshot
         contract = snapshot["final_action_contract"]
@@ -1094,25 +996,18 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             )
 
     def test_pm_finalizer_hard_fails_if_signer_returns_false(self):
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            base_price=3000.0,
-            signal_snapshot={
-                "pm_internal_candidate": _pm_internal_candidate_fixture(
-                    {
-                        "ticker": "BU",
-                        "current_lots": 0,
-                        "target_lots": 0,
-                        "lots_delta": 0,
-                        "final_action": "wait",
-                        "reason_codes": ["test_wait_candidate"],
-                    },
-                    ticker="BU",
-                )
+        state = _pm_state_fixture(
+            {
+                "ticker": "BU",
+                "current_lots": 0,
+                "target_lots": 0,
+                "lots_delta": 0,
+                "final_action": "wait",
+                "reason_codes": ["test_wait_candidate"],
             },
+            ticker="BU",
         )
-
-        state = _legacy_pm_state_from_recommendation(recommendation)
+        state["recommendation_context"] = {"underlying_code": "BU", "base_price": 3000.0}
         with patch("agents.decision_team.portfolio_manager._sign_pm_memory_state", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "pm_step6_signer_did_not_create_recommendation:BU"):
                 finalize_pm_full_market_contracts(
@@ -1120,168 +1015,6 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                     config={"max_total_margin_ratio": 0.20},
                     portfolio=Portfolio(id="p1", cashflow=1_000_000.0, positions={}, account_equity=1_000_000.0),
                 )
-
-    def test_pm_signer_writes_non_rank_explanation_without_step5_deployment(self):
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            base_price=3000.0,
-            signal_snapshot={
-                "pm_internal_candidate": _pm_internal_candidate_fixture(
-                    {
-                        "ticker": "BU",
-                        "current_lots": 1,
-                        "target_lots": 1,
-                        "lots_delta": 0,
-                        "final_action": "hold",
-                        "reason_codes": ["test_hold_candidate"],
-                    },
-                    ticker="BU",
-                ),
-                "pm_internal_candidate_contract": {"not_final_action_contract": True},
-            },
-        )
-
-        self.assertTrue(_sign_pm_candidate_recommendation(recommendation))
-
-        snapshot = recommendation.signal_snapshot
-        self.assertIn("final_action_contract", snapshot)
-        self.assertEqual(snapshot["signal_collection_contract"]["source_agent"], "signal_collector")
-        self.assertEqual(
-            snapshot["signal_collection_contract"]["collector_decision_boundary"],
-            "no_trade_authority",
-        )
-        self.assertIn("evidence_items", snapshot["signal_collection_contract"])
-        self.assertIn("capital_deployment", snapshot["final_action_contract"])
-        self.assertEqual(
-            snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],
-            "non_new_risk_no_capital_rank",
-        )
-        self.assertFalse(snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
-        self.assertEqual(
-            set(snapshot["pm_six_step_trace"]),
-            {"step6_contract_generation_check", "pm_contract_self_check"},
-        )
-        self.assertNotIn("pm_internal_candidate", snapshot)
-        self.assertNotIn("pm_internal_candidate_contract", snapshot)
-        self.assertNotIn("pm_capital_deployment_decision", snapshot)
-
-    def test_workflow_persistence_requires_signed_contract_before_any_save(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        saved = []
-
-        class _DB:
-            def save_futures_recommendation(self, recommendation):
-                saved.append(recommendation)
-                return "saved"
-
-        workflow.db = _DB()
-        workflow.config = {}
-        workflow.init_portfolio = Portfolio(id="p1", cashflow=1_000_000.0, positions={})
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            signal_snapshot={"pm_internal_candidate": {"candidate_contract": {}}},
-        )
-
-        with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
-            with self.assertRaisesRegex(RuntimeError, "PM Step6 did not return"):
-                _persist_legacy_pm_recommendations(workflow, [("BU", recommendation)])
-
-        self.assertEqual(saved, [])
-
-    def test_workflow_persistence_rejects_residual_pm_deployment_state(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        saved = []
-
-        class _DB:
-            def save_futures_recommendation(self, recommendation):
-                saved.append(recommendation)
-                return "saved"
-
-        workflow.db = _DB()
-        workflow.config = {}
-        workflow.init_portfolio = Portfolio(id="p1", cashflow=1_000_000.0, positions={})
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            signal_snapshot={
-                "final_action_contract": {
-                    "final_action": "wait",
-                    "current_lots": 0,
-                    "target_lots": 0,
-                    "lots_delta": 0,
-                },
-                "pm_capital_deployment_decision": {"selected_for_capital_deployment": True},
-            },
-        )
-
-        with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
-            with self.assertRaisesRegex(RuntimeError, "PM Step6 did not return"):
-                _persist_legacy_pm_recommendations(workflow, [("BU", recommendation)])
-
-        self.assertEqual(saved, [])
-
-    def test_workflow_persistence_rejects_residual_pm_internal_candidate(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        saved = []
-
-        class _DB:
-            def save_futures_recommendation(self, recommendation):
-                saved.append(recommendation)
-                return "saved"
-
-        workflow.db = _DB()
-        workflow.config = {}
-        workflow.init_portfolio = Portfolio(id="p1", cashflow=1_000_000.0, positions={})
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            signal_snapshot={
-                "final_action_contract": {
-                    "final_action": "wait",
-                    "current_lots": 0,
-                    "target_lots": 0,
-                    "lots_delta": 0,
-                },
-                "pm_internal_candidate": {"candidate_contract": {}},
-            },
-        )
-
-        with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
-            with self.assertRaisesRegex(RuntimeError, "PM Step6 did not return"):
-                _persist_legacy_pm_recommendations(workflow, [("BU", recommendation)])
-
-        self.assertEqual(saved, [])
-
-    def test_workflow_persistence_requires_pm_step6_self_check_ok_before_any_save(self):
-        workflow = AgentWorkflow.__new__(AgentWorkflow)
-        saved = []
-
-        class _DB:
-            def save_futures_recommendation(self, recommendation):
-                saved.append(recommendation)
-                return "saved"
-
-        workflow.db = _DB()
-        workflow.config = {}
-        workflow.init_portfolio = Portfolio(id="p1", cashflow=1_000_000.0, positions={})
-        recommendation = FuturesRecommendation(
-            underlying_code="BU",
-            signal_snapshot={
-                "final_action_contract": {
-                    "final_action": "wait",
-                    "current_lots": 0,
-                    "target_lots": 0,
-                    "lots_delta": 0,
-                },
-                "pm_six_step_trace": {
-                    "pm_contract_self_check": {"ok": False, "errors": ["capital_deployment_missing"]},
-                },
-            },
-        )
-
-        with patch("agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts", return_value={}):
-            with self.assertRaisesRegex(RuntimeError, "PM Step6 did not return"):
-                _persist_legacy_pm_recommendations(workflow, [("BU", recommendation)])
-
-        self.assertEqual(saved, [])
 
     def test_watch_rank_one_keeps_probe_capital_layer_and_probe_ratio_source(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
@@ -1375,9 +1108,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_best_watch.signal_snapshot, ticker="P")
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_other_watch.signal_snapshot, ticker="M")
-        _persist_legacy_pm_recommendations(workflow, [("P", rec_best_watch), ("M", rec_other_watch)])
+        signed = _persist_pm_state_fixtures(workflow, [("P", rec_best_watch), ("M", rec_other_watch)])
+        rec_best_watch = signed["P"]
+        rec_other_watch = signed["M"]
 
         contract = rec_best_watch.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
@@ -1470,9 +1203,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         rec_rank_1 = _watch_rec("rank-1", "P", 0.82)
         rec_rank_2 = _watch_rec("rank-2", "M", 0.74)
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_rank_1.signal_snapshot, ticker="P")
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_rank_2.signal_snapshot, ticker="M")
-        _persist_legacy_pm_recommendations(workflow, [("P", rec_rank_1), ("M", rec_rank_2)])
+        signed = _persist_pm_state_fixtures(workflow, [("P", rec_rank_1), ("M", rec_rank_2)])
+        rec_rank_1 = signed["P"]
+        rec_rank_2 = signed["M"]
 
         contract_1 = rec_rank_1.signal_snapshot["final_action_contract"]
         contract_2 = rec_rank_2.signal_snapshot["final_action_contract"]
@@ -1585,9 +1318,8 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 )
             )
 
-        for ticker, recommendation in recommendations:
-            _migrate_test_snapshot_final_contract_to_pm_candidate(recommendation.signal_snapshot, ticker=ticker)
-        _persist_legacy_pm_recommendations(workflow, recommendations)
+        signed = _persist_pm_state_fixtures(workflow, recommendations)
+        recommendations = [(ticker, signed[ticker]) for ticker, _ in recommendations]
 
         observed = []
         for ticker, recommendation in recommendations:
@@ -1656,8 +1388,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(recommendation.signal_snapshot, ticker="J")
-        _persist_legacy_pm_recommendations(workflow, [("J", recommendation)])
+        recommendation = _persist_pm_state_fixtures(workflow, [("J", recommendation)])["J"]
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(contract["final_action"], "wait")
@@ -1827,9 +1558,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_positive.signal_snapshot, ticker="EB")
-        _migrate_test_snapshot_final_contract_to_pm_candidate(rec_negative.signal_snapshot, ticker="TA")
-        _persist_legacy_pm_recommendations(workflow, [("EB", rec_positive), ("TA", rec_negative)])
+        signed = _persist_pm_state_fixtures(workflow, [("EB", rec_positive), ("TA", rec_negative)])
+        rec_positive = signed["EB"]
+        rec_negative = signed["TA"]
 
         positive_contract = rec_positive.signal_snapshot["final_action_contract"]
         negative_contract = rec_negative.signal_snapshot["final_action_contract"]
@@ -1934,8 +1665,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        _migrate_test_snapshot_final_contract_to_pm_candidate(recommendation.signal_snapshot, ticker="HC")
-        _persist_legacy_pm_recommendations(workflow, [("HC", recommendation)])
+        recommendation = _persist_pm_state_fixtures(workflow, [("HC", recommendation)])["HC"]
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
@@ -2922,7 +2652,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         }
 
         formal = _select_learning_trace_action_values([weak_prior, canonical], limit=10)
-        updated_inputs = _attach_incomplete_prior_diagnostics_to_builder_inputs({
+        updated_state = _attach_incomplete_prior_diagnostics_to_contract_state({
             "alpha_setup_action_values": [weak_prior, canonical],
             "control_diagnostics": {
                 "final_action_memory_retrieval": {
@@ -2931,7 +2661,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                 }
             },
         })
-        rejected = updated_inputs["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
+        rejected = updated_state["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
 
         self.assertEqual([row["id"] for row in formal], ["av-j-open-real"])
         self.assertEqual(formal[0]["canonical_action_family"], "open_add_new_risk")
@@ -2971,11 +2701,11 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             })
 
         formal = _select_learning_trace_action_values(rows, limit=10)
-        updated_inputs = _attach_incomplete_prior_diagnostics_to_builder_inputs({
+        updated_state = _attach_incomplete_prior_diagnostics_to_contract_state({
             "alpha_setup_action_values": rows,
             "control_diagnostics": {"final_action_memory_retrieval": {"tool": "decision_memory_retrieval"}},
         })
-        rejected = updated_inputs["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
+        rejected = updated_state["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
 
         self.assertEqual(formal, [])
         self.assertEqual({row["ticker"] for row in rejected}, {"I", "J", "RB", "SR"})
@@ -3607,7 +3337,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.6),
         ]
 
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="BU",
@@ -3728,7 +3458,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             execution_contract_fields={},
         )
 
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="BU",
@@ -3742,7 +3472,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 "validation_horizon": "short",
                 "release_block_diagnostics": diagnostics,
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture(final_contract, ticker="BU"),
+            pm_state_update=_pm_state_fixture(final_contract, ticker="BU"),
         )
 
         snapshot = recommendation.signal_snapshot
@@ -3782,7 +3512,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             "single_source_of_trade_truth": True,
         }
 
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="BU",
@@ -3812,7 +3542,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 "recommendation_position_consistency": {"status": "stale"},
                 "strategy_controls": {"diagnostics": {}},
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture(explicit_contract, ticker="BU"),
+            pm_state_update=_pm_state_fixture(explicit_contract, ticker="BU"),
         )
 
         snapshot = recommendation.signal_snapshot
@@ -3841,8 +3571,13 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 metadata={"action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "technical",
+                    "signal": "Neutral",
                     "side": "flat",
                     "confidence": 0.5,
+                    "opportunity_state": "no_opportunity",
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": False,
                 }},
             ),
             AnalystSignal(
@@ -3852,8 +3587,13 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 metadata={"action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "fundamental",
+                    "signal": "Bearish",
                     "side": "short",
                     "confidence": 0.6,
+                    "opportunity_state": "watch_for_trigger",
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": True,
                 }},
             ),
             AnalystSignal(
@@ -3863,8 +3603,13 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 metadata={"action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "commodity_news",
+                    "signal": "Neutral",
                     "side": "flat",
                     "confidence": 0.4,
+                    "opportunity_state": "no_opportunity",
+                    "trigger_valid": False,
+                    "current_trigger_confirmed": False,
+                    "invalidation_present": False,
                 }},
             ),
         ]
@@ -5560,6 +5305,7 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.80,
                     counter_evidence="basis weakens and price closes below breakout shelf",
+                    metadata={"action_evidence_contract": {"invalidation_present": True}},
                 )
             ],
         )
@@ -10483,7 +10229,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             trading_date="2025-03-03",
             ticker="ZZ",
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="ZZ",
@@ -10506,7 +10252,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     }
                 }
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "ZZ",
@@ -10570,7 +10316,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             counterfactual_side="short",
             neutral_watchlist_priority="medium",
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="RB",
@@ -10594,7 +10340,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reasons": ["test_probe"],
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "RB",
@@ -10710,7 +10456,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             trigger_valid=True,
             invalidation_present=True,
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="BU",
@@ -10731,7 +10477,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "diagnostics": {}
                 }
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "BU",
@@ -10785,7 +10531,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             entry_trigger="requires technical confirmation",
             invalidation_level=5800.0,
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="SR",
@@ -10809,7 +10555,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "reasons": ["alpha_setup_open_action_value_missing"],
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "SR",
@@ -10863,7 +10609,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             evidence_role="entry_timing",
             entry_quality="strong",
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="BU",
@@ -10884,7 +10630,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "diagnostics": {}
                 }
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "BU",
@@ -10936,7 +10682,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             neutral_watchlist_priority="medium",
             metadata={"learning_scope": {"setup_family": "range_breakout"}},
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="ZZ",
@@ -10963,7 +10709,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "long": {"final_state": "watch_for_trigger", "score": 0.44},
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "ZZ",
@@ -11004,7 +10750,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             contract_code="rb2505",
             justification="watchlist",
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="RB",
@@ -11032,7 +10778,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "short": {"final_state": "tradeable_candidate", "score": 0.64},
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "RB",
@@ -11091,7 +10837,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             justification="conditional monitor",
         )
 
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="HC",
@@ -11126,7 +10872,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     },
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "contract_type": "strategy",
                 "ticker": "HC",
@@ -11176,7 +10922,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             evidence_role="entry_timing",
             entry_quality="strong",
         )
-        recommendation = _build_phase1_recommendation(
+        recommendation = _build_signed_pm_recommendation(
             config_id="cfg",
             portfolio=portfolio,
             ticker="RB",
@@ -11206,7 +10952,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "long": {"final_state": "tradeable_candidate", "score": 0.70},
                 },
             },
-            pm_internal_candidate=_pm_internal_candidate_fixture({
+            pm_state_update=_pm_state_fixture({
                 "contract_version": "agentquant.final_action.v1",
                 "ticker": "RB",
                 "final_action": "open_real",
@@ -11364,7 +11110,13 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             current_ratio=0.10,
             current_position=position,
             analyst_signals=[
-                AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.75, invalidation_level=100.0),
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    confidence=0.75,
+                    invalidation_level=100.0,
+                    metadata={"action_evidence_contract": {"invalidation_present": True}},
+                ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
                 AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
             ],

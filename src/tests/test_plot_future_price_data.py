@@ -1,5 +1,8 @@
+import gc
 import sqlite3
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 import yaml
@@ -82,41 +85,51 @@ def _create_plot_db(tmp_path, exp_name="plot-price-test"):
     return db_path
 
 
-def test_ticker_pnl_fallback_filters_zero_settle_and_uses_transaction_settle(tmp_path):
-    config_path = _write_config(tmp_path)
-    db_path = _create_plot_db(tmp_path)
+class PlotFuturePriceDataTests(unittest.TestCase):
+    def test_ticker_pnl_fallback_filters_zero_settle_and_uses_transaction_settle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            config_path = _write_config(temp_path)
+            db_path = _create_plot_db(temp_path)
 
-    plotter = SingleFutureCurvePlotter(str(config_path), "BU", db_path=str(db_path))
-    assert plotter.load_config()
-    assert plotter.get_config_id() == "cfg"
+            plotter = SingleFutureCurvePlotter(str(config_path), "BU", db_path=str(db_path))
+            self.assertTrue(plotter.load_config())
+            self.assertEqual(plotter.get_config_id(), "cfg")
 
-    price_data = plotter._load_price_data_from_ticker_pnl()
+            price_data = plotter._load_price_data_from_ticker_pnl()
 
-    assert price_data is not None
-    assert [day.strftime("%Y-%m-%d") for day in price_data["trading_date"]] == [
-        "2025-01-09",
-        "2025-01-21",
-    ]
-    assert price_data["price"].tolist() == [3623.0, 3745.0]
-    assert (price_data["price"] > 0).all()
+            self.assertIsNotNone(price_data)
+            self.assertEqual(
+                [day.strftime("%Y-%m-%d") for day in price_data["trading_date"]],
+                ["2025-01-09", "2025-01-21"],
+            )
+            self.assertEqual(price_data["price"].tolist(), [3623.0, 3745.0])
+            self.assertTrue((price_data["price"] > 0).all())
+            del price_data
+            del plotter
+            gc.collect()
+
+    def test_router_price_frame_drops_non_positive_prices(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = _write_config(Path(temp_dir))
+            plotter = SingleFutureCurvePlotter(str(config_path), "BU")
+
+            price_data = plotter._build_price_frame(
+                [
+                    {"trading_date": "2025-01-09", "price": 3623.0, "source": "test"},
+                    {"trading_date": "2025-01-10", "price": 0.0, "source": "test"},
+                    {"trading_date": "2025-01-13", "price": None, "source": "test"},
+                    {"trading_date": "2025-01-14", "price": 3738.0, "source": "test"},
+                ]
+            )
+
+            self.assertIsNotNone(price_data)
+            self.assertEqual(
+                [day.strftime("%Y-%m-%d") for day in price_data["trading_date"]],
+                ["2025-01-09", "2025-01-14"],
+            )
+            self.assertEqual(price_data["price"].tolist(), [3623.0, 3738.0])
 
 
-def test_router_price_frame_drops_non_positive_prices(tmp_path):
-    config_path = _write_config(tmp_path)
-    plotter = SingleFutureCurvePlotter(str(config_path), "BU")
-
-    price_data = plotter._build_price_frame(
-        [
-            {"trading_date": "2025-01-09", "price": 3623.0, "source": "test"},
-            {"trading_date": "2025-01-10", "price": 0.0, "source": "test"},
-            {"trading_date": "2025-01-13", "price": None, "source": "test"},
-            {"trading_date": "2025-01-14", "price": 3738.0, "source": "test"},
-        ]
-    )
-
-    assert price_data is not None
-    assert [day.strftime("%Y-%m-%d") for day in price_data["trading_date"]] == [
-        "2025-01-09",
-        "2025-01-14",
-    ]
-    assert price_data["price"].tolist() == [3623.0, 3738.0]
+if __name__ == "__main__":
+    unittest.main()

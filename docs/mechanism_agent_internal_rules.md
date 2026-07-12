@@ -358,7 +358,7 @@ PM 内部固定为六步：
 2. 判断单品种方向
 3. 结合持仓确定交易状态、候选质量和内部生命周期分流
 4. 按生命周期消费学习
-5. 只有从空仓建立新仓时进入全市场资金 rank 与资金部署
+5. 只有实际增加风险时进入全市场资金 rank 与资金部署，包括从空仓建立新仓和同方向扩大绝对手数的 `add/scale`
 6. 原子生成唯一 FuturesRecommendation 与 final_action_contract，并检查最终输出自身
 ```
 
@@ -370,7 +370,7 @@ PM 内部固定为六步：
 | 账户、持仓、合约、保证金 | 计算当前手数、风险、可用预算 | 伪造成交或结算 |
 | `decision_memory_retrieval` 输出 | 读取有效 action-value、profile、剔除原因、学习摘要 | 直接查研究 DB 原始记录 |
 | `pm_ticker_side_selection` 输出 | 读取单品种方向优先级、候选质量和候选层级提示 | 把单品种方向优先级写成最终全市场 rank |
-| `pm_full_market_capital_deployment` 输出 | 只在 `current_lots=0` 且 `target_lots!=0` 的开仓路径读取全市场资金 rank、部署结论和 rank trace | 让 rank 替代 `target_lots`，或给 `add/scale/hold/reduce/exit/reverse` 当前合约伪造 rank |
+| `pm_full_market_capital_deployment` 输出 | 只在实际增加风险的路径读取全市场资金 rank、部署结论和 rank trace，包括新开仓和同方向扩大绝对手数的 `add/scale` | 让 rank 替代 `target_lots`，给 `wait/hold/reduce/exit`、当前反转退出腿或不增加风险的条件监控伪造 rank，或让实际增加风险的 `add/scale` 绕过 rank |
 | `pm_position_sizing` 输出 | 计算目标手数建议并交给 PM 第 6 步签约 | 让 sizing 工具签最终合约 |
 
 PM 必须通过 `src/tools/common/evidence_fusion_semantics.py` 把 `signal_collection_contract.evidence_fusion` 转成 `pm_fusion_diagnostics`。PM 只能把该诊断写入 `opportunity_scorecard` 分项和 `final_action_contract.evidence_used.pm_fusion_diagnostics`，并在 `pm_conflict_resolution` 解释主要冲突、反向证据和必要确认。PM 不能因为融合工具存在而调用 LLM、绕过 `decision_memory_retrieval`、跳过资金/风险计算或让融合分项直接生成 `target_lots`。
@@ -396,19 +396,19 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 只形成 `side_priority`、`ticker_side_priority`，继续更新同一个 PM 内存状态 | 读取学习、比较持仓、生成生命周期、rank、手数和交易权限 |
 | 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
 | 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 canonical family/lane 消费学习，把完整候选学习池、临时路由和拒绝原因留在同一个 PM 内存状态 | 把 Step4 临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限；把原始研究对象写入 artifact |
-| 5 | 开仓全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理 `current_lots=0` 且 `target_lots!=0` 的 `open/open_probe/open_real` 和条件开仓，把唯一全市场 rank、预算和 sizing 事实写回同一个 PM 内存状态 | 让 `add/scale/hold/reduce/exit/reverse` 当前合约进入开仓 rank；生成独立 rank/budget/sizing artifact；把 Step3/4 候选字段当最终 rank trace |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓，把唯一全市场 rank、预算和 sizing 事实写回同一个 PM 内存状态 | 让非新增风险合约进入 rank，或让实际增加风险的 `add/scale` 绕过 rank；生成独立 rank/budget/sizing artifact；把 Step3/4 候选字段当最终 rank trace |
 | 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、`FuturesRecommendation` 返回入口 | 从最终 PM 内存状态原子生成唯一 `final_action_contract` 与唯一 `FuturesRecommendation`，按最终动作和手数重新形成学习事实，并检查最终输出自身 | 分散写多个交易合约；读取 Step1–5 早期状态做回溯比较；返回半成品；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
 
 1. 第 2 步只判断单品种方向；第 3 步结合持仓形成交易状态和内部生命周期分流；两步都不是最终交易事实。
-2. 非开仓动作走 `1 -> 2 -> 3 -> 4 -> 6`，包括 `wait/hold/add/scale/reduce/exit`、当前反转退出腿和不增加风险的 `conditional_monitor`；它们不得伪造全市场 rank。
-3. 只有 `current_lots=0` 且 `target_lots!=0` 的开仓动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括 `open/open_probe/open_real` 和条件开仓；缺 Step5 资金部署事实时不能签出开仓最终合约。
+2. 非新增风险动作走 `1 -> 2 -> 3 -> 4 -> 6`，包括 `wait/hold/reduce/exit`、当前反转退出腿和不增加风险的 `conditional_monitor`；它们不得伪造全市场 rank。
+3. 实际增加风险的动作走 `1 -> 2 -> 3 -> 4 -> 5 -> 6`，包括从空仓建立非零仓位的 `open/open_probe/open_real`、同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale` 和增加目标仓位的条件开仓；缺 Step5 资金部署事实时不能签出新增风险最终合约。
 4. `watch_for_trigger` 的条件触发出口必须由 PM 在唯一合约中写明 `conditional_trigger_authority`、触发条件和失效边界；Trader 未触发不得成交。
 5. 手数计算必须晚于生命周期口、候选质量、学习路由和必要的全市场资金部署；分析师证据不能直接决定手数。
 6. `pm_six_step_trace.step6_contract_generation_check` 和 `pm_six_step_trace.pm_contract_self_check` 只检查最终输出自身；任一失败时 PM 不返回半成品，不能把非法合约交给审计员修复。
 
-Step1–5 只更新同一个 PM 内存状态，不生成独立评分草稿、排序草稿、资金部署 artifact、签约候选、recommendation 和合约草稿。对外事实入口只有第 6 步返回的唯一 `FuturesRecommendation`；`workflow` 编排层、Auditor 和保存层在 PM 返回后完成审计与物理化。最终合约提交必须是原子动作：凡最终 `final_action_contract` 从空仓建立新仓并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；直接跳过 Step5 的非开仓合约不得补造 rank，Step5 预算拒绝路径保留真实 rank 和拒绝事实。
+Step1–5 只更新同一个 PM 内存状态，不生成独立评分草稿、排序草稿、资金部署 artifact、签约候选、recommendation 和合约草稿。对外事实入口只有第 6 步返回的唯一 `FuturesRecommendation`；`workflow` 编排层、Auditor 和保存层在 PM 返回后完成审计与物理化。最终合约提交必须是原子动作：凡最终 `final_action_contract` 实际增加风险并出现 `opportunity_rank`，必须同时写入完整 `capital_deployment`、`capital_allocation_reason`、部署前后目标手数、部署手数变化、rank trace 和资金部署 reason code；直接跳过 Step5 的非新增风险合约不得补造 rank，Step5 预算拒绝路径保留真实 rank 和拒绝事实，并恢复 `target_lots=current_lots`。
 
 ### 6.3 配置参数对应关系
 
@@ -926,4 +926,4 @@ Researcher 写 `alpha_setup_action_value` 时必须保存 `canonical_action_fami
 
 `positive_candidate_open` 只允许落在 `canonical_action_family=open_add_new_risk` 且 lane 属于 `open/add/scale/increase` 的记录；`positive_candidate_exit` 只允许落在 `canonical_action_family=reduce_exit` 且 lane 属于 `reduce/exit` 的记录；`positive_candidate_execution` 只允许落在 `canonical_action_family=execution` 且 lane 为 `execution` 的记录。缺 `canonical_action_family`，或 family/lane/preference 不一致，属于系统字段语义 hard error。
 
-学习偏向不是明日执行指令。PM 可以把 open/add 学习用于同生命周期评分或降级，并把安全的历史 open/add 经验作为开仓 rank 输入；`add/scale` 当前交易行为本身不生成 rank。reduce/exit 学习用于释放风险判断，execution 学习用于未来 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，但任何 action-value 都不能直接生成 `final_action`、方向、手数或资金部署。Trader 仍只执行审计通过后的 `final_action_contract`；Accountant 不消费 action-value。
+学习偏向不是明日执行指令。PM 可以把 open/add 学习用于同生命周期评分或降级，并把安全的历史 open/add 经验作为对应新增风险 rank 输入；当天实际增加风险的 `add/scale` 与新开仓一起参与 rank。reduce/exit 学习用于释放风险判断，execution 学习用于未来 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，但任何 action-value 都不能直接生成 `final_action`、方向、手数或资金部署。Trader 仍只执行审计通过后的 `final_action_contract`；Accountant 不消费 action-value。

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
 from graph.constants import Signal
+from graph.schema import AnalystSignal
 from tools.common.evidence_fusion_semantics import build_signal_collection_fusion_summary
 from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
 
@@ -19,6 +20,49 @@ from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORIT
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 SCC_CONTRACT_VERSION = "agentquant.signal_collection.v1"
 ACTION_EVIDENCE_CONTRACT_VERSION = "agentquant.action_evidence.v1"
+ACTION_EVIDENCE_SIGNALS = {"Bullish": "long", "Bearish": "short", "Neutral": "flat"}
+ACTION_EVIDENCE_OPPORTUNITY_STATES = {
+    "no_opportunity",
+    "watch_for_trigger",
+    "probe_candidate",
+    "tradeable_candidate",
+    "risk_reduction_candidate",
+}
+ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS = {
+    "contract_version",
+    "agent_name",
+    "justification",
+    "determinism_mode",
+    "llm_provider",
+    "llm_model",
+    "source_artifacts",
+    "validation_errors",
+    "decision_horizon",
+    "execution_horizon",
+    "validation_horizon",
+    "research_contract_version",
+    "message_contract_version",
+    "similar_past_cases",
+    "metadata",
+}
+ACTION_EVIDENCE_EXTRA_FIELDS = {
+    "contract_version",
+    "analyst",
+    "sector",
+    "side",
+    "setup_quality_ok",
+    "current_trigger_confirmed",
+    "invalidation_condition",
+    "learning_scope",
+    "product_profile_evidence",
+    "fusion_evidence",
+    "data_usage_summary",
+}
+ACTION_EVIDENCE_ALLOWED_FIELDS = (
+    set(AnalystSignal.model_fields)
+    - ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS
+    | ACTION_EVIDENCE_EXTRA_FIELDS
+)
 
 SCC_ALLOWED_TOP_LEVEL_FIELDS = {
     "contract_version",
@@ -164,6 +208,65 @@ def _confidence(contract: Mapping[str, Any]) -> float:
     return max(0.0, min(1.0, parsed))
 
 
+def validate_action_evidence_contract(
+    contract: Any,
+    *,
+    analyst: str | None = None,
+) -> dict:
+    """Validate the one analyst evidence contract shared by all three boundaries."""
+    if not isinstance(contract, dict) or not contract:
+        raise ValueError("action_evidence_contract_missing")
+    forbidden = _nested_forbidden_paths(contract)
+    if forbidden:
+        raise ValueError(
+            "action_evidence_contract_forbidden_trade_field:" + ",".join(forbidden)
+        )
+    if contract.get("contract_version") != ACTION_EVIDENCE_CONTRACT_VERSION:
+        raise ValueError("action_evidence_contract_invalid_version")
+    extras = sorted(set(contract) - ACTION_EVIDENCE_ALLOWED_FIELDS)
+    if extras:
+        raise ValueError("action_evidence_contract_unregistered_field:" + ",".join(extras))
+    contract_analyst = _text(contract.get("analyst"))
+    if contract_analyst not in ANALYST_ORDER:
+        raise ValueError("action_evidence_contract_invalid_analyst")
+    if analyst is not None and contract_analyst != _text(analyst):
+        raise ValueError("action_evidence_contract_analyst_mismatch")
+
+    signal = _text(contract.get("signal"))
+    side = _text(contract.get("side")).lower()
+    expected_side = ACTION_EVIDENCE_SIGNALS.get(signal)
+    if expected_side is None:
+        raise ValueError("action_evidence_contract_invalid_signal")
+    if side != expected_side:
+        raise ValueError("action_evidence_contract_signal_side_mismatch")
+
+    try:
+        confidence = float(contract.get("confidence"))
+    except (TypeError, ValueError):
+        raise ValueError("action_evidence_contract_invalid_confidence") from None
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError("action_evidence_contract_confidence_out_of_range")
+
+    opportunity_state = _text(contract.get("opportunity_state")).lower()
+    if opportunity_state not in ACTION_EVIDENCE_OPPORTUNITY_STATES:
+        raise ValueError("action_evidence_contract_invalid_opportunity_state")
+    for field in ("trigger_valid", "current_trigger_confirmed", "invalidation_present"):
+        if field in contract and not isinstance(contract.get(field), bool):
+            raise ValueError(f"action_evidence_contract_invalid_boolean:{field}")
+    if opportunity_state in {"probe_candidate", "tradeable_candidate"}:
+        if contract.get("trigger_valid") is not True:
+            raise ValueError("action_evidence_contract_candidate_without_current_trigger")
+        if contract.get("invalidation_present") is not True:
+            raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
+    if opportunity_state == "watch_for_trigger" and contract.get("invalidation_present") is not True:
+        raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
+    for field in ("product_profile_evidence", "fusion_evidence", "data_usage_summary"):
+        value = contract.get(field)
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(f"action_evidence_contract_invalid_mapping:{field}")
+    return contract
+
+
 def _evidence_quality_score(value: Any) -> float:
     text = _text(value, "unknown").lower()
     if text in {"high", "strong", "good"}:
@@ -207,6 +310,136 @@ def _source_analyst_names(contract: Mapping[str, Any]) -> list[str]:
         for row in contract.get("source_contracts") or []
         if isinstance(row, Mapping)
     ]
+
+
+def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
+    analyst = _text(source.get("analyst"))
+    contract = dict(source.get("action_evidence_contract") or {})
+    side = _side_from_contract(contract)
+    trigger_valid = _bool(contract.get("trigger_valid"))
+    trigger_confirmed = _bool(contract.get("current_trigger_confirmed"))
+    trigger_status = (
+        "confirmed"
+        if trigger_valid and trigger_confirmed
+        else "valid_unconfirmed"
+        if trigger_valid
+        else "watch_for_trigger"
+    )
+    product_profile_evidence = contract.get("product_profile_evidence")
+    product_profile_evidence = (
+        dict(product_profile_evidence)
+        if isinstance(product_profile_evidence, Mapping)
+        else {}
+    )
+    fusion_evidence = contract.get("fusion_evidence")
+    fusion_evidence = dict(fusion_evidence) if isinstance(fusion_evidence, Mapping) else {}
+    return {
+        "analyst": analyst,
+        "side": side,
+        "confidence": _confidence(contract),
+        "signal": _text(contract.get("signal")),
+        "opportunity_state": _text(contract.get("opportunity_state"), "unknown"),
+        "trigger_valid": trigger_valid,
+        "current_trigger_confirmed": trigger_confirmed,
+        "trigger_status": trigger_status,
+        "entry_trigger": _text(contract.get("entry_trigger")),
+        "setup_type": _text(contract.get("setup_type"), "unknown"),
+        "setup_quality_ok": _bool(contract.get("setup_quality_ok")),
+        "horizon_class": _text(contract.get("horizon_class"), "unknown"),
+        "market_regime": _text(contract.get("market_regime"), "unknown"),
+        "evidence_quality": _text(contract.get("evidence_quality"), "unknown"),
+        "current_evidence_conflict": _list(contract.get("current_evidence_conflict")),
+        "missing_evidence": _list(contract.get("missing_evidence")),
+        "fusion_evidence": fusion_evidence,
+        "evidence_strength": _text(
+            fusion_evidence.get("evidence_strength") or contract.get("evidence_strength")
+        ),
+        "evidence_freshness": _text(fusion_evidence.get("evidence_freshness")),
+        "confirmation_requirements": _list(
+            fusion_evidence.get("confirmation_requirements")
+            or contract.get("confirmation_requirements")
+        ),
+        "product_profile_id": _text(product_profile_evidence.get("product_profile_id")),
+        "product_profile_used": _bool(product_profile_evidence.get("product_profile_used")),
+        "product_profile_analysis_boundary": _text(
+            product_profile_evidence.get("profile_analysis_boundary")
+        ),
+    }
+
+
+def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
+    side_counts: Counter[str] = Counter()
+    side_confidence: Counter[str] = Counter()
+    trigger_states_by_side: dict[str, Counter[str]] = {
+        "long": Counter(),
+        "short": Counter(),
+        "flat": Counter(),
+    }
+    for item in evidence_items:
+        side = _text(item.get("side"), "flat").lower()
+        side_counts[side] += 1
+        side_confidence[side] += float(item.get("confidence") or 0.0)
+        trigger_states_by_side[side][_text(item.get("trigger_status"), "watch_for_trigger")] += 1
+    long_key = (side_counts.get("long", 0), side_confidence.get("long", 0.0))
+    short_key = (side_counts.get("short", 0), side_confidence.get("short", 0.0))
+    if long_key == short_key and long_key[0] > 0:
+        dominant_side = "mixed"
+    elif long_key > short_key:
+        dominant_side = "long"
+    elif short_key > long_key:
+        dominant_side = "short"
+    else:
+        dominant_side = "flat"
+    supporting = [
+        _text(item.get("analyst"))
+        for item in evidence_items
+        if item.get("side") == dominant_side and dominant_side != "flat"
+    ]
+    opposing_side = "short" if dominant_side == "long" else "long" if dominant_side == "short" else ""
+    opposing = [
+        _text(item.get("analyst"))
+        for item in evidence_items
+        if item.get("side") == opposing_side
+    ]
+    neutral = [
+        _text(item.get("analyst"))
+        for item in evidence_items
+        if item.get("side") == "flat"
+    ]
+    consensus = (
+        "conflicted"
+        if dominant_side == "mixed" or opposing
+        else "no_direction"
+        if dominant_side == "flat"
+        else "multi_analyst_support"
+        if len(set(supporting)) >= 2
+        else "single_analyst_support"
+    )
+    strength_scores = [
+        float(item.get("confidence") or 0.0)
+        * _evidence_quality_score(item.get("evidence_quality"))
+        for item in evidence_items
+        if item.get("side") == dominant_side and dominant_side != "flat"
+    ]
+    strength = _quality_label(sum(strength_scores) / len(strength_scores)) if strength_scores else "unknown"
+    dominant_trigger_states = trigger_states_by_side.get(dominant_side, Counter())
+    trigger_status = (
+        "confirmed"
+        if dominant_trigger_states.get("confirmed")
+        else "valid_unconfirmed"
+        if dominant_trigger_states.get("valid_unconfirmed")
+        else "watch_for_trigger"
+    )
+    return {
+        "dominant_side": dominant_side,
+        "side_consensus": consensus,
+        "trigger_status": trigger_status,
+        "supporting_analysts": sorted(set(supporting)),
+        "opposing_analysts": sorted(set(opposing)),
+        "neutral_analysts": sorted(set(neutral)),
+        "evidence_strength": strength,
+        "evidence_conflict_level": "high" if len(opposing) >= 2 else "medium" if opposing else "low",
+    }
 
 
 def validate_signal_collection_contract(
@@ -288,15 +521,66 @@ def validate_signal_collection_contract(
         raise ValueError(
             f"signal_collection_unregistered_evidence_fusion_field:{','.join(fusion_extras)}"
         )
+    expected_items: list[dict] = []
     for source in source_contracts:
         source_name = _text(source.get("analyst")) if isinstance(source, Mapping) else ""
         action_contract = source.get("action_evidence_contract") if isinstance(source, Mapping) else None
-        if not isinstance(action_contract, dict) or not action_contract:
-            raise ValueError("signal_collection_missing_action_evidence_contract")
-        if action_contract.get("contract_version") != ACTION_EVIDENCE_CONTRACT_VERSION:
-            raise ValueError("signal_collection_invalid_action_evidence_contract_version")
-        if _text(action_contract.get("analyst")) != source_name:
-            raise ValueError(f"signal_collection_action_contract_analyst_mismatch:{source_name}")
+        try:
+            validate_action_evidence_contract(action_contract, analyst=source_name)
+        except ValueError as exc:
+            raise ValueError(f"signal_collection_invalid_action_evidence_contract:{source_name}:{exc}") from exc
+        action_profile = action_contract.get("product_profile_evidence")
+        action_profile = dict(action_profile) if isinstance(action_profile, Mapping) else {}
+        source_profile = source.get("product_profile_evidence")
+        source_profile = dict(source_profile) if isinstance(source_profile, Mapping) else {}
+        if source_profile != action_profile:
+            raise ValueError(f"signal_collection_source_profile_mismatch:{source_name}")
+        action_fusion = action_contract.get("fusion_evidence")
+        action_fusion = dict(action_fusion) if isinstance(action_fusion, Mapping) else {}
+        source_fusion = source.get("fusion_evidence")
+        source_fusion = dict(source_fusion) if isinstance(source_fusion, Mapping) else {}
+        if source_fusion != action_fusion:
+            raise ValueError(f"signal_collection_source_fusion_mismatch:{source_name}")
+        expected_items.append(_evidence_item_from_source(source))
+    for expected_item, actual_item in zip(expected_items, evidence_items):
+        analyst = expected_item["analyst"]
+        for field, expected_value in expected_item.items():
+            if actual_item.get(field) != expected_value:
+                raise ValueError(
+                    f"signal_collection_evidence_item_semantic_mismatch:{analyst}:{field}"
+                )
+    expected_direction = _direction_summary(expected_items)
+    for field, expected_value in expected_direction.items():
+        if contract.get(field) != expected_value:
+            raise ValueError(f"signal_collection_{field}_mismatch")
+    expected_fusion = build_signal_collection_fusion_summary(
+        expected_items,
+        dominant_side=expected_direction["dominant_side"],
+    )
+    if fusion != expected_fusion:
+        raise ValueError("signal_collection_evidence_fusion_semantic_mismatch")
+    if list(contract.get("confirmation_requirements") or []) != list(
+        expected_fusion.get("confirmation_requirements") or []
+    ):
+        raise ValueError("signal_collection_confirmation_requirements_mismatch")
+    expected_setup_types = sorted(
+        {
+            _text(item.get("setup_type"))
+            for item in expected_items
+            if _text(item.get("setup_type")) not in {"", "unknown"}
+        }
+    )
+    if list(contract.get("setup_types") or []) != expected_setup_types:
+        raise ValueError("signal_collection_setup_types_mismatch")
+    expected_horizon_scope = sorted(
+        {
+            _text(item.get("horizon_class"))
+            for item in expected_items
+            if _text(item.get("horizon_class")) not in {"", "unknown"}
+        }
+    )
+    if list(contract.get("horizon_scope") or []) != expected_horizon_scope:
+        raise ValueError("signal_collection_horizon_scope_mismatch")
     if analyst_signals is not None:
         raw_by_agent: dict[str, Any] = {}
         for signal in analyst_signals or []:

@@ -672,11 +672,13 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             would_change_view_if="wait_for_trigger",
+            metadata={"action_evidence_contract": {"invalidation_present": False}},
         )
         strong = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
             would_change_view_if="long technical idea invalid if price closes below trigger area",
+            metadata={"action_evidence_contract": {"invalidation_present": True}},
         )
 
         self.assertFalse(_has_structured_invalidation_condition([weak]))
@@ -1178,4 +1180,3 @@ class NewsDataBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

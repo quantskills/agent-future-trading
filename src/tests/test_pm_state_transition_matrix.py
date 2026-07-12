@@ -17,7 +17,7 @@ from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
 class PMStateTransitionMatrixTest(unittest.TestCase):
-    def test_lifecycle_port_requires_rank_only_for_flat_to_open(self):
+    def test_lifecycle_port_requires_rank_for_open_and_same_side_increase(self):
         opening = classify_lifecycle_action_port(
             {"current_lots": 0, "target_lots": 1, "final_action": "open_probe"}
         )
@@ -29,7 +29,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         )
 
         self.assertTrue(opening["requires_full_market_rank"])
-        self.assertFalse(adding["requires_full_market_rank"])
+        self.assertTrue(adding["requires_full_market_rank"])
         self.assertFalse(reversing["requires_full_market_rank"])
 
     def _non_rank_deployment(self):
@@ -127,6 +127,15 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
 
     def _ranked_new_risk_contract(self):
         rank_trace = self._rank_trace()
+        rank_trace.update(
+            {
+                "selected_for_capital_deployment": True,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "original_target_lots": 1,
+                "deployed_target_lots": 1,
+                "deployed_lots_delta": 1,
+            }
+        )
         pm_trace = {
             "contract_lifecycle_port": "open_add_new_risk",
             "rank_lifecycle": "open_add_new_risk",
@@ -367,7 +376,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         pm_errors = check_final_action_contract(missing_pm_trace)["errors"]
         self.assertIn("pm_lifecycle_learning_trace_missing", pm_errors)
 
-    def test_pm_contract_self_check_rejects_rank_on_add_or_scale(self):
+    def test_pm_contract_self_check_accepts_complete_rank_on_add_or_scale(self):
         contract = self._ranked_new_risk_contract()
         contract.update(
             {
@@ -380,11 +389,33 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract["evidence_used"]["position_sizing_result"].update(
             {"current_lots": 1, "target_lots": 2, "lots_delta": 1}
         )
+        contract["capital_deployment"].update(
+            {
+                "selected_for_capital_deployment": True,
+                "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
+                "original_target_lots": 2,
+                "deployed_target_lots": 2,
+                "deployed_lots_delta": 1,
+            }
+        )
+
+        result = check_final_action_contract(contract)
+
+        self.assertTrue(result["ok"], result["errors"])
+
+    def test_pm_contract_self_check_rejects_add_without_rank(self):
+        contract = self._complete_contract(
+            final_action="scale",
+            current_lots=1,
+            target_lots=2,
+            lots_delta=1,
+            position_sizing_result={"current_lots": 1, "target_lots": 2, "lots_delta": 1},
+        )
 
         result = check_final_action_contract(contract)
 
         self.assertFalse(result["ok"])
-        self.assertIn("non_opening_contract_has_full_market_rank", result["errors"])
+        self.assertIn("new_risk_exposure_missing_full_market_rank", result["errors"])
 
     def test_pm_contract_self_check_requires_non_rank_learning_trace_when_learning_consumed(self):
         contract = self._complete_contract(

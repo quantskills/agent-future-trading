@@ -20,6 +20,55 @@ from tools.common.final_action_semantics import (
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
 
+
+def build_scc_market_confirmation(
+    signal_collection_contract: Mapping[str, Any] | None,
+    *,
+    target_direction: str,
+) -> dict[str, Any]:
+    """Translate the validated SCC into PM's existing confirmation input shape."""
+    contract = signal_collection_contract if isinstance(signal_collection_contract, Mapping) else {}
+    evidence_items = [
+        dict(item)
+        for item in (contract.get("evidence_items") or [])
+        if isinstance(item, Mapping)
+    ]
+    fusion = contract.get("evidence_fusion") if isinstance(contract.get("evidence_fusion"), Mapping) else {}
+    target = str(target_direction or "").strip().lower()
+    dominant = str(contract.get("dominant_side") or "flat").strip().lower()
+    consensus_score = _safe_float(fusion.get("multi_evidence_consensus_score"), 0.0)
+    direction_supported = target in {"long", "short"} and dominant == target
+    confirmations = [
+        str(item.get("analyst") or "")
+        for item in evidence_items
+        if str(item.get("side") or "").lower() == target
+    ]
+    opposing = [
+        str(item.get("analyst") or "")
+        for item in evidence_items
+        if target in {"long", "short"}
+        and str(item.get("side") or "").lower() in {"long", "short"}
+        and str(item.get("side") or "").lower() != target
+    ]
+    conflicts = [str(item) for item in (fusion.get("cross_analyst_conflicts") or [])]
+    conflicts.extend(f"opposing_analyst:{name}" for name in opposing if name)
+    if target in {"long", "short"} and dominant not in {target, "flat"}:
+        conflicts.append(f"scc_dominant_side:{dominant}")
+    return {
+        "enabled": bool(contract),
+        "target_direction": target,
+        "confirmation_score": round(consensus_score if direction_supported else 0.0, 4),
+        "features": evidence_items,
+        "confirmations": sorted(set(name for name in confirmations if name)),
+        "conflicts": sorted(set(conflicts)),
+        "data_missing": [str(item) for item in (contract.get("missing_evidence") or [])],
+        "data_unavailable": [],
+        "fallback_covered_missing": [],
+        "errors": [],
+        "parameter_errors": [],
+        "status": "supported" if direction_supported else "not_supported",
+    }
+
 def normalize_analyst_name(value: Any) -> str:
     return str(value or "")
 
@@ -100,19 +149,7 @@ def _signal_side(signal: Any) -> str:
 
 def _contract_value(signal: Any, key: str, default: Any = None) -> Any:
     metadata = getattr(signal, "metadata", None)
-    contract = None
-    if isinstance(metadata, Mapping):
-        contract = metadata.get("action_evidence_contract")
-        if not isinstance(contract, Mapping):
-            research_contract = metadata.get("trade_research_contract")
-            if isinstance(research_contract, Mapping):
-                contract = research_contract.get("action_evidence_contract")
-        if not isinstance(contract, Mapping):
-            contract = metadata.get("trade_research_contract")
-    if not isinstance(contract, Mapping):
-        contract = getattr(signal, "next_round_memory_contract", None)
-    if not isinstance(contract, Mapping):
-        contract = getattr(signal, "research_contract", None)
+    contract = metadata.get("action_evidence_contract") if isinstance(metadata, Mapping) else None
     if isinstance(contract, Mapping):
         return contract.get(key, default)
     return default

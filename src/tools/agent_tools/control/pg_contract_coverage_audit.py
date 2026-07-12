@@ -647,7 +647,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
             _rule(
                 "src/tools/agent_tools/decision/pm_full_market_capital_deployment.py",
                 ("opportunity_rank", "apply_full_market_capital_deployment"),
-                "PM full-market capital deployment uses score components to rank flat-to-position opening candidates",
+                "PM full-market capital deployment uses score components to rank all incremental-risk candidates",
             ),
             _rule(
                 "src/evaluation/analyze_strategy_attribution.py",
