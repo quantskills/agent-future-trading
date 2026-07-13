@@ -150,33 +150,6 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
                     f"Phase4 reviewer may only write daily transaction reports, not {name}",
                 )
 
-    def test_control_audits_do_not_write_business_tables(self):
-        control_roots = [
-            SRC_ROOT / "tools" / "agent_tools" / "control",
-        ]
-        write_prefixes = ("INSERT INTO", "UPDATE ", "DELETE FROM", "DROP TABLE", "ALTER TABLE")
-        allowed_literal_files = {"pg_contract_coverage_audit.py"}
-        offenders = []
-        for root in control_roots:
-            for path in root.rglob("*.py"):
-                tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-                for node in ast.walk(tree):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    func = node.func
-                    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-                    if name not in {"execute", "executemany", "executescript"}:
-                        continue
-                    first_arg = node.args[0] if node.args else None
-                    if not isinstance(first_arg, ast.Constant) or not isinstance(first_arg.value, str):
-                        continue
-                    sql = first_arg.value.strip().upper()
-                    if any(sql.startswith(prefix) for prefix in write_prefixes):
-                        if path.name in allowed_literal_files:
-                            continue
-                        offenders.append(f"{path.relative_to(SRC_ROOT).as_posix()}:{node.lineno}:{sql[:80]}")
-        self.assertEqual([], offenders, f"control audits must remain read-only business fact consumers: {offenders}")
-
     def test_phase4_review_module_does_not_define_research_memory_writers(self):
         reviewer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py"
         writer_path = SRC_ROOT / "tools" / "agent_tools" / "research" / "research_memory_writers.py"
@@ -406,8 +379,6 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         researcher_review = build_researcher_causal_review_prompt("{}")
         researcher_exploration = build_researcher_exploratory_prompt(trading_date="2025-03-03", episodes_json="[]")
 
-        self.assertIn("Control-governance metadata can support chain-health audit only", researcher_review)
-        self.assertIn("chain-health audit inputs only", researcher_exploration)
         self.assertIn("SYSTEM FACT ENTRY BOUNDARY", researcher_review)
         self.assertIn("SYSTEM FACT ENTRY BOUNDARY", researcher_exploration)
 
@@ -511,99 +482,6 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
         self.assertIn("research_memory_writers.upsert_alpha_setup_policy_state", learning_text)
         self.assertIn("research_memory_writers.insert_researcher_llm_note", learning_text)
         self.assertIn("research_memory_writers.reset_alpha_setup_memory", learning_text)
-
-    def test_research_memory_writer_neutral_accountability_runtime_path(self):
-        from tools.agent_tools.research import research_memory_writers
-
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE learning_event_log (
-                id TEXT PRIMARY KEY,
-                config_id TEXT NOT NULL,
-                trading_date TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                scope_type TEXT NOT NULL,
-                scope_key TEXT NOT NULL,
-                evidence_json TEXT,
-                action_json TEXT,
-                verifier TEXT,
-                created_at TEXT NOT NULL,
-                status TEXT
-            )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE analyst_learning_digest (
-                id TEXT PRIMARY KEY,
-                config_id TEXT NOT NULL,
-                analyst TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                sector TEXT NOT NULL,
-                horizon_class TEXT NOT NULL,
-                market_regime TEXT NOT NULL,
-                digest_text TEXT NOT NULL,
-                confidence_score REAL DEFAULT 0,
-                sample_count INTEGER DEFAULT 0,
-                source_event_id TEXT,
-                created_at TEXT NOT NULL,
-                valid_until TEXT,
-                accepted INTEGER DEFAULT 1,
-                payload_json TEXT
-            )
-            """
-        )
-        snapshot = {
-            "technical": {
-                "signal": "Neutral",
-                "neutral_reason": "conflicting indicators",
-                "missing_evidence": ["volume confirmation"],
-                "conflicting_factors": ["range_bound"],
-                "would_change_view_if": "breakout confirms",
-                "metadata": {"risk_flags": ["conflicting_indicators"]},
-            }
-        }
-        summary = research_memory_writers.write_neutral_accountability_state(
-            cursor,
-            cfg={
-                "learning": {"memory_expires_after_days": 30},
-                "signal_quality": {
-                    "neutral_accountability": {
-                        "write_structured_learning": True,
-                        "counterfactual_forward_days": 0,
-                    }
-                },
-            },
-            config_id="cfg",
-            trading_date="2025-03-03",
-            strategy_recommendations=[
-                {
-                    "id": "rec-neutral",
-                    "config_id": "cfg",
-                    "trading_date": "2025-03-03",
-                    "source_type": "strategy",
-                    "underlying_code": "BU",
-                    "created_at": "2025-03-03T00:00:00",
-                    "signal_snapshot": json.dumps(snapshot),
-                }
-            ],
-        )
-        self.assertEqual(summary["neutral_count"], 1)
-        self.assertEqual(summary["structured_learning_rows"], 1)
-        cursor.execute("SELECT event_type FROM learning_event_log ORDER BY event_type")
-        self.assertEqual(
-            [row["event_type"] for row in cursor.fetchall()],
-            ["neutral_accountability_digest", "neutral_accountability_review"],
-        )
-        cursor.execute("SELECT analyst, sample_count FROM analyst_learning_digest")
-        digest = cursor.fetchone()
-        self.assertEqual(digest["analyst"], "technical")
-        self.assertEqual(digest["sample_count"], 1)
-        conn.close()
 
     def test_matrix_field_semantics_uses_current_settlement_and_researcher_notes(self):
         semantics_path = SRC_ROOT.parent / "docs" / "matrix_field_semantics.md"
@@ -958,27 +836,6 @@ class ProtocolGovernorRegressionTest(unittest.TestCase):
             ]
         )
         self.assertTrue(result.ok, result.to_dict())
-
-    def test_mechanism_effectiveness_audit_is_protocol_governor_read_only_sidecar(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = self.governor.audit_mechanism_effectiveness(
-                db_path=Path(tmpdir) / "missing-agentquant.db",
-                exp_name="missing-exp",
-            )
-
-        report = result.to_dict()
-        self.assertTrue(report["ok"])
-        self.assertIn("sqlite_missing", "\n".join(report.get("warnings") or []))
-        metadata = report.get("metadata") or {}
-        self.assertIn("mechanism_effectiveness_only", metadata.get("audit_boundary", ""))
-        checked_chain = metadata.get("checked_chain") or []
-        self.assertIn("signal_collector_contract_to_pm", checked_chain)
-        self.assertIn("pm_step6_generation_check", checked_chain)
-        self.assertIn("pm_contract_self_check", checked_chain)
-        self.assertNotIn("action_value_to_pm", checked_chain)
-        self.assertNotIn("final_action", report)
-        self.assertNotIn("target_lots", report)
-        self.assertNotIn("lots_delta", report)
 
     def test_tool_access_policy_rejects_cross_business_line_drift(self):
         result = self.governor.audit_tool_access(

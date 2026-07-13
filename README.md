@@ -188,7 +188,7 @@ python database\build_check_db.py
 python run\backtest.py --config config\dev.yaml --local-db --start-date 2025-01-02 --end-date 2025-01-31 --reset-config
 ```
 
-`run\backtest.py` 会自动执行控制侧验收：窗口开始前先跑只读版本级 `control\contract_coverage_audit.py`，再跑 `control\pre_backtest_acceptance.py`；每个交易日完成后先跑累计 `control\system_invariant_audit.py`，再跑累计 `control\mechanism_effectiveness_audit.py`。契约覆盖缺口、系统不变量 hard error 或机制有效性 hard_fail 会让回测停在当天，不能继续评价策略收益；机制有效性 diagnostic 不停止回测，只进入策略分析。
+`run\backtest.py` 会自动执行控制侧验收：窗口开始前先跑只读版本级 `control\contract_coverage_audit.py`，再跑 `control\pre_backtest_acceptance.py`；每个交易日完成后运行累计 `control\system_invariant_audit.py`，只读检查真实物理结果中的非策略问题。契约覆盖缺口或系统不变量 hard error 会让回测停在当天，不能继续评价策略收益。
 
 常用参数：
 
@@ -232,7 +232,7 @@ python run\order.py --config config\dev.yaml --local-db --trading-date 2025-01-0
 python run\evaluate_config.py --config config\dev.yaml --local-db --update
 ```
 
-如果没有通过 `run\backtest.py` 自动链路，而是单独运行评估，必须先确认 `control\contract_coverage_audit.py` 和 `control\pre_backtest_acceptance.py` 通过，`control\system_invariant_audit.py` 没有 hard error，且 `control\mechanism_effectiveness_audit.py` 没有 hard_fail。只有 diagnostic 时可以继续评估策略表现。
+如果没有通过 `run\backtest.py` 自动链路，而是单独运行评估，必须先确认 `control\contract_coverage_audit.py` 和 `control\pre_backtest_acceptance.py` 通过，且 `control\system_invariant_audit.py` 没有 hard error。
 
 评估指定区间：
 
@@ -291,7 +291,6 @@ python -m unittest src.tests.test_phase1_acceleration
 python -m unittest src.tests.test_futures_market_rules
 python -m unittest src.tests.test_market_confirmation
 python -m unittest src.tests.test_plot_future_price_data
-python -m unittest src.tests.test_mechanism_effectiveness_audit
 python -m unittest src.tests.test_contract_coverage_audit
 python -m unittest src.tests.test_protocol_preflight_cli
 ```

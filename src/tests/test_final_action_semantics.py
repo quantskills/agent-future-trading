@@ -9,7 +9,6 @@ if str(SRC_ROOT) not in sys.path:
 
 from tools.common.final_action_semantics import (
     ACTION_PREFERENCE_VALUES,
-    audit_pm_memory_consumption,
     authority_allows_entry,
     canonical_action_family,
     canonicalize_final_action_contract_for_persistence,
@@ -806,116 +805,6 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertTrue(contract_requires_conditional_intraday_result(contract))
         self.assertTrue(classify_final_action_contract(contract)["requires_intraday_result"])
 
-    def test_pm_memory_consumption_audit_checks_declared_and_landed_memory(self):
-        contract = {
-            "current_lots": 2,
-            "target_lots": 0,
-            "lots_delta": -2,
-            "final_action": "exit",
-        }
-        requirements = derive_memory_requirements(contract)
-        landed_row = {
-            "side": "long",
-            "learning_lane": "exit",
-            "action_value_lane": "exit",
-            "memory_side_role": "current_position_side",
-            "action_preference": "positive_candidate_exit",
-        }
-        audited_contract = {
-            **contract,
-            "learning_used": {
-                "memory_requirements": requirements,
-                "memory_retrieval": {
-                    "requirement_details": [
-                        {
-                            "side": "long",
-                            "lane": "exit",
-                            "memory_side_role": "current_position_side",
-                            "row_count": 1,
-                        }
-                    ]
-                },
-                "alpha_setup_action_values": [landed_row],
-            },
-        }
-
-        audit = audit_pm_memory_consumption(audited_contract)
-
-        self.assertTrue(audit["ok"], audit)
-        self.assertFalse(audit["auditor_reads_research_db"])
-        self.assertFalse(audit["trader_reads_pm_action_value"])
-        self.assertFalse(audit["accountant_reads_memory"])
-
-    def test_pm_memory_consumption_audit_flags_unlanded_available_memory(self):
-        contract = {
-            "current_lots": 2,
-            "target_lots": 0,
-            "lots_delta": -2,
-            "final_action": "exit",
-        }
-        requirements = derive_memory_requirements(contract)
-        audited_contract = {
-            **contract,
-            "learning_used": {
-                "memory_requirements": requirements,
-                "memory_retrieval": {
-                    "requirement_details": [
-                        {
-                            "side": "long",
-                            "lane": "exit",
-                            "memory_side_role": "current_position_side",
-                            "row_count": 1,
-                        }
-                    ]
-                },
-                "alpha_setup_action_values": [],
-            },
-        }
-
-        audit = audit_pm_memory_consumption(audited_contract)
-
-        self.assertFalse(audit["ok"])
-        self.assertIn("pm_required_memory_not_landed_in_alpha_setup_action_values", audit["errors"])
-
-    def test_open_learning_does_not_cover_position_lifecycle_memory(self):
-        contract = {
-            "current_lots": 2,
-            "target_lots": 0,
-            "lots_delta": -2,
-            "final_action": "exit",
-        }
-        requirements = derive_memory_requirements(contract)
-        audited_contract = {
-            **contract,
-            "learning_used": {
-                "memory_requirements": requirements,
-                "memory_retrieval": {
-                    "requirement_details": [
-                        {
-                            "side": "long",
-                            "lane": "exit",
-                            "memory_side_role": "current_position_side",
-                            "row_count": 1,
-                        }
-                    ]
-                },
-                "alpha_setup_action_values": [
-                    {
-                        "side": "long",
-                        "learning_lane": "open",
-                        "action_value_lane": "open",
-                        "memory_side_role": "current_position_side",
-                        "action_preference": "positive_candidate_open",
-                    }
-                ],
-            },
-        }
-
-        audit = audit_pm_memory_consumption(audited_contract)
-
-        self.assertFalse(audit["ok"])
-        self.assertIn("pm_required_memory_not_landed_in_alpha_setup_action_values", audit["errors"])
-
     def test_contract_learning_filter_rejects_mismatched_open_and_execution_rows_for_hold(self):
         contract = {
             "current_lots": -22,
@@ -1002,63 +891,6 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
         self.assertFalse(validation["ok"])
         self.assertIn("positive_open_action_value_not_open_preference", validation["errors"])
-
-    def test_increase_can_use_open_and_current_hold_memory(self):
-        contract = {
-            "current_lots": 1,
-            "target_lots": 3,
-            "lots_delta": 2,
-            "final_action": "add",
-        }
-        requirements = derive_memory_requirements(contract)
-        audited_contract = {
-            **contract,
-            "learning_used": {
-                "memory_requirements": requirements,
-                "memory_retrieval": {
-                    "requirement_details": [
-                        {
-                            "side": "long",
-                            "lane": "add",
-                            "memory_side_role": "target_side",
-                            "row_count": 1,
-                        },
-                        {
-                            "side": "long",
-                            "lane": "open",
-                            "memory_side_role": "target_side",
-                            "row_count": 1,
-                        },
-                        {
-                            "side": "long",
-                            "lane": "hold",
-                            "memory_side_role": "current_position_side",
-                            "row_count": 1,
-                        },
-                    ]
-                },
-                "alpha_setup_action_values": [
-                    {
-                        "side": "long",
-                        "learning_lane": "open",
-                        "action_value_lane": "open",
-                        "memory_side_role": "target_side",
-                        "action_preference": "positive_candidate_open",
-                    },
-                    {
-                        "side": "long",
-                        "learning_lane": "hold",
-                        "action_value_lane": "hold",
-                        "memory_side_role": "current_position_side",
-                        "action_preference": "positive_candidate_hold",
-                    },
-                ],
-            },
-        }
-
-        audit = audit_pm_memory_consumption(audited_contract)
-
-        self.assertTrue(audit["ok"], audit)
 
     def test_hold_exit_no_change_explanation_requires_lifecycle_reason(self):
         base = {

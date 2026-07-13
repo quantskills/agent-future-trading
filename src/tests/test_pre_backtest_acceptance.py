@@ -344,14 +344,6 @@ class PreBacktestAcceptanceRegressionTest(unittest.TestCase):
             "evidence_trigger_boundary",
         )
         self.assertEqual(
-            INVARIANT_TO_CHECK["strategy_recommendation_pm_step6_generation_check_missing"],
-            "single_trade_exit",
-        )
-        self.assertEqual(
-            INVARIANT_TO_CHECK["strategy_recommendation_pm_step6_generation_check_failed"],
-            "single_trade_exit",
-        )
-        self.assertEqual(
             INVARIANT_TO_CHECK["strategy_recommendation_pm_legacy_lifecycle_field"],
             "single_trade_exit",
         )

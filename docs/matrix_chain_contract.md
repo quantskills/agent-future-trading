@@ -80,7 +80,6 @@
 | `contract_coverage_audit` | PG，回测前 | 代码、配置、文档、测试 | 版本级契约覆盖矩阵 | pre-backtest report | 开发者、回测闸门 | pre-backtest acceptance | producer/consumer/audit/test 覆盖缺口；核心契约缺字段表登记 | 覆盖完整但真实样本少 |
 | `pre_backtest_acceptance` | PG，回测前 | DB schema、代码、配置、fixture、契约覆盖、系统不变量 | 回测前 readiness 结论 | pre-backtest report | 开发者、回测脚本 | 回测前闸门 | 历史失败 fixture 失败；schema 断裂；越权字段；contract coverage 缺口；字段矩阵断裂 | LLM auth 未检查、真实数据缺口 warning |
 | `system_invariant_audit` | PG，每日回测后 | 当日 DB、artifact、phase、字段矩阵 | 系统不变量报告 | daily gate output | 开发者、回测脚本 | daily gate | final contract 缺失、自检失败、SCC 缺失、artifact 污染、越权、交易不来自合约、字段语义断裂 | 学习为空、observe 空 preference、无交易、收益差 |
-| `mechanism_effectiveness_audit` | PG，每日回测后 | 当日与累计 DB、artifact、action-value、PM score/rank、交易链路 | 机制连通性报告 | daily gate output | 开发者、策略评估 | daily gate | 机制断链：学习存在但 PM 未消费、rank 写入未影响合约且无解释、条件合约无结果、持仓/退出学习未落地 | 高 rank 亏损、资金利用率低、正 alpha 放大不足 |
 
 ## 4. 回测前失败形态 fixture 矩阵
 

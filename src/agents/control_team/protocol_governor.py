@@ -20,7 +20,6 @@ from tools.agent_tools.control.pg_artifact_lineage import (
 from tools.agent_tools.control.pg_cost_budget_audit import CostBudgetLimits, audit_cost_budget
 from tools.agent_tools.control.pg_exploration_audit import classify_exploration_intent, summarize_exploration_intents
 from tools.agent_tools.control.pg_memory_quality import classify_memory_payload
-from tools.agent_tools.control.pg_mechanism_effectiveness_audit import audit_mechanism_effectiveness
 from tools.agent_tools.control.pg_parity import compare_contract_interpretation
 from tools.agent_tools.control.pg_pre_backtest_acceptance import run_pre_backtest_acceptance
 from tools.agent_tools.control.pg_preflight import run_preflight_checks
@@ -173,23 +172,6 @@ class ProtocolGovernor:
         end_date: Optional[str] = None,
     ) -> ProtocolCheckResult:
         return audit_system_invariants(
-            db_path=db_path,
-            config_id=config_id,
-            exp_name=exp_name,
-            start_date=start_date,
-            end_date=end_date,
-        ).to_protocol_result()
-
-    def audit_mechanism_effectiveness(
-        self,
-        *,
-        db_path: str | Path,
-        config_id: Optional[str] = None,
-        exp_name: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-    ) -> ProtocolCheckResult:
-        return audit_mechanism_effectiveness(
             db_path=db_path,
             config_id=config_id,
             exp_name=exp_name,

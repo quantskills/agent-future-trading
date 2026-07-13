@@ -42,7 +42,6 @@ PRE_BACKTEST_TEST_MODULES = [
     "src.tests.test_evidence_fusion_semantics",
     "src.tests.test_reviewer_transaction_log_readability",
     "src.tests.test_system_invariant_audit",
-    "src.tests.test_mechanism_effectiveness_audit",
     "src.tests.test_contract_coverage_audit",
     "src.tests.test_config_parameter_mapping",
     "src.tests.test_pre_backtest_acceptance",

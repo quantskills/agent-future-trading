@@ -350,11 +350,6 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py",
-                ("is_conditional_monitor_contract", "mechanism_conditional_probe_missing_intraday_result"),
-                "mechanism audit uses the shared semantics for conditional monitor requirements",
-            ),
-            _rule(
                 "src/tools/agent_tools/control/pg_system_invariants.py",
                 ("recommendation_final_action_contract", "transaction_not_derived_from_final_action_contract", "is_conditional_monitor_contract"),
                 "daily audit checks the single trade truth through shared final-action semantics",
@@ -409,14 +404,6 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
         ),
         audits=(
             _rule(
-                "src/tools/agent_tools/control/pg_system_invariants.py",
-                (
-                    "strategy_recommendation_pm_step6_generation_check_missing",
-                    "strategy_recommendation_pm_six_step_self_check_missing",
-                ),
-                "daily system invariants audit both PM step-6 gates after persistence",
-            ),
-            _rule(
                 "docs/matrix_field_semantics.md",
                 (
                     "pm_six_step_trace.step6_contract_generation_check",
@@ -430,14 +417,6 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "src/tests/test_pre_backtest_pm_workflow_contracts.py",
                 ("step6_contract_generation_check", "pm_contract_self_check"),
                 "pre-backtest PM/workflow gate covers both step-6 trace checks",
-            ),
-            _rule(
-                "src/tests/test_system_invariant_audit.py",
-                (
-                    "test_system_invariant_audit_rejects_missing_step6_generation_check",
-                    "test_system_invariant_audit_rejects_failed_step6_generation_check",
-                ),
-                "system invariant tests cover missing and failed step-6 generation checks",
             ),
         ),
     ),
@@ -956,7 +935,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("scc_missing", "scc_source_agent_boundary_invalid"), "pre-backtest failure fixtures cover SCC missing and invalid boundary"),
         ),
         daily_pg_audit=(
-            _rule("src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py", ("mechanism_signal_collection_contract_missing", "mechanism_signal_collection_contract_invalid_source_agent"), "daily mechanism audit checks final SCC landing"),
+            _rule("docs/agent_pg.md", ("SCC 协议 `agentquant.signal_collection.v1`", "每日回测后检测项"), "daily PG scope registers persisted SCC as a result-level contract"),
         ),
         real_path_test=(
             _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_scc_source_agent_and_boundary_are_hard_inputs",), "real PM Step6 path rejects invalid SCC"),
@@ -1001,7 +980,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/graph/workflow.py", ('trace = snapshot.get("pm_six_step_trace")', "pm_contract_self_check"), "workflow reads Step6 gates before persistence"),
         ),
         consumer=(
-            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_six_step_self_check_missing",), "PG consumes persisted PM Step6 trace"),
+            _rule("src/graph/workflow.py", ('trace = snapshot.get("pm_six_step_trace")', "pm_contract_self_check"), "workflow consumes PM Step6 trace before persistence"),
         ),
         self_or_role_check=(
             _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("pm_contract_self_check", "writes_db"), "PM self-check is deterministic and side-effect free"),
@@ -1010,7 +989,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("step2_step6_trace_mixed",), "pre-backtest failure fixture covers Step2/Step6 trace mixing"),
         ),
         daily_pg_audit=(
-            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_step6_generation_check_failed",), "daily PG audits PM Step6 generation check"),
+            _rule("docs/agent_pg.md", ("不检查智能体内部机制", "不重复 PM 自检"), "daily PG explicitly excludes PM internal self-check replay"),
         ),
         real_path_test=(
             _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_three_pm_paths_sign_exactly_one_final_contract",), "PM workflow tests cover final Step6 trace"),
@@ -1037,7 +1016,7 @@ MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = (
             _rule("src/tools/agent_tools/control/pg_pre_backtest_failure_fixtures.py", ("step2_step6_trace_mixed", "execution_profile_pollutes_decision_rows"), "pre-backtest failure fixtures cover lifecycle trace pollution"),
         ),
         daily_pg_audit=(
-            _rule("src/tools/agent_tools/control/pg_system_invariants.py", ("strategy_recommendation_pm_contract_self_check_failed",), "daily PG reads PM self-check result"),
+            _rule("docs/agent_pg.md", ("不检查智能体内部机制", "不重复 PM 自检"), "daily PG explicitly excludes PM internal lifecycle self-check replay"),
         ),
         real_path_test=(
             _rule("src/tests/test_final_action_semantics.py", ("test_rank_lifecycle_route_requires_step6_final_trace", "open_rank_mixed_forbidden_learning_lanes"), "final-action semantic tests cover final decision rows"),

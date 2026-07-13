@@ -3892,10 +3892,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             cursor = conn.cursor()
             self._create_feedback_recommendation_table(cursor)
             snapshot = {
-                "technical": {"signal": "Bullish", "setup_type": "breakout", "horizon_class": "short"},
-                "fundamental": {"signal": "Neutral"},
-                "commodity_news": {"signal": "Neutral"},
-                "horizon_scope": {"decision_horizon": "short"},
                 "final_action_contract": {
                     "contract_version": "agentquant.final_action.v1",
                     "ticker": "BU",
@@ -3945,10 +3941,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                             "final_target_position_ratio": 0.08,
                         },
                     },
-                },
-                "active_opportunity_audit": {
-                    "decision": {"authority_type": "real_budget_entry"},
-                    "reason_codes": ["learning_mechanism:alpha_promotion"],
                 },
                 "execution_result": {"no_trade_reason": ""},
             }
@@ -4588,15 +4580,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "learning_used": {},
                 },
                 "execution_result": {"no_trade_reason": "intraday_trigger_not_met"},
-                "horizon_scope": {"decision_horizon": "short"},
-                "trade_research_contracts": {
-                    "technical": {
-                        "opportunity_type": "trend_continuation",
-                        "opportunity_state": "tradeable_candidate",
-                        "factor_focus": ["trend"],
-                        "current_evidence_conflict": [],
-                    }
-                },
             }
             cursor.executemany(
                 "INSERT INTO daily_settlement VALUES (?, ?)",

@@ -72,7 +72,6 @@ protocol_governor
 -> contract_coverage_audit
 -> pre_backtest_acceptance
 -> system_invariant_audit
--> mechanism_effectiveness_audit
 ```
 
 控制组只审非策略问题：字段漂移、artifact 污染、越权、前视、schema 断裂、阶段断链、合约缺失、自检失败、交易不来自合约。控制组不评价策略收益，不替 PM 判断方向、rank、手数和资金部署。
@@ -148,7 +147,6 @@ protocol_governor
 | `src/tools/common/evidence_fusion_semantics.py` | 解释证据融合、冲突、确认需求和复盘归因，不签合约 |
 | `src/tools/agent_tools/decision/pm_contract_self_check.py` | PM 最终合约自检，不审策略对错 |
 | `src/tools/agent_tools/control/pg_system_invariants.py` | 每日系统不变量，只读检查契约断裂 |
-| `src/tools/agent_tools/control/pg_mechanism_effectiveness_audit.py` | 每日机制连通性，只读检查链路是否落地 |
 | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py` | 回测前非策略风险验收 |
 
 ## 9. Artifact 总边界

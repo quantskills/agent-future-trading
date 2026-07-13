@@ -55,13 +55,6 @@
 | `completed_at` | `trading_day_phase` | 阶段完成时间。 |
 | `message` | `trading_day_phase` | 阶段说明。 |
 | `incomplete_trading_day_phase` | 验收错误码 | 交易日存在推荐、成交、盘中决策或学习记录，但 phase1-4 未全部 completed；必须删除或重跑当天，不能进入策略结论或学习。 |
-| `mechanism_effectiveness_audit` | Protocol Governor 只读报告 / 回测后机制验收 | 机制链路有效性报告；按交易生命周期场景检查 action-value、PM score/rank、唯一合约、持仓/减仓/退出和条件 probe 是否接通，不评价收益，不创建交易权限。 |
-| `hard_failures` | `mechanism_effectiveness_audit` | 机制断链列表；如学习存在但 PM 未读取、开仓/加仓/条件监控学习没有进入 score/rank、rank 写入但未影响合约且无解释、持仓/退出学习没有落到减仓/退出或解释、条件 probe 消失等。非空时回测应 fail-fast，不能进入策略收益评价；减仓/退出场景不强制要求 `opportunity_rank`。 |
-| `diagnostics` | `mechanism_effectiveness_audit` / 评估报告 | 机制已接通但效果差的诊断列表；如高 rank 亏损、资金利用率低、正 alpha 放大不足。不会停止回测，只进入策略分析。 |
-| `checked_chain` | `mechanism_effectiveness_audit.metadata` | 本次机制审计检查的链路节点，如 action_value_to_pm、score_to_rank、rank_to_final_action_contract、conditional_probe_to_trader_result。 |
-| `checked_scenarios` | `mechanism_effectiveness_audit.metadata` | 本次机制审计的生命周期场景矩阵，如 open_increase、conditional_monitor、reduce_exit、position_hold、unselected_candidate、flat_wait；只定义审计口径，不是交易权限。 |
-| `scenarios` | `mechanism_effectiveness_audit.counts` | 本次审计中各生命周期场景命中的推荐数量；只用于解释审计覆盖，不评价策略收益。 |
-| `classification` | `mechanism_effectiveness_audit.metadata` | 区分 `hard_fail` 与 `diagnostic` 的报告分类说明；不能作为交易字段。 |
 | `contract_coverage_audit` | Protocol Governor 只读版本级闸门 / 回测前验收 | 契约覆盖报告；检查关键契约是否有 producer、consumer、audit、test、字段表、配置/提示词/文档对齐，并要求关键智能体边界存在 producer-to-consumer 保真测试；不读收益、不写 DB、不创建交易权限。 |
 | `matrix` | `contract_coverage_audit` | 契约覆盖矩阵列表；每行对应一个核心契约。 |
 | `artifact_phase_boundary` | `contract_coverage_audit.matrix[].contract` / Protocol Governor 只读边界名 | artifact 阶段保存边界；规定 PM、审计员、交易员、会计师、复盘员、研究员 artifact 能保存和禁止保存的字段集合。只用于回测前契约覆盖和系统不变量审计，不是交易字段，不创建合约或交易权限。 |

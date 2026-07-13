@@ -23,7 +23,6 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.pg_mechanism_effectiveness_audit import audit_mechanism_effectiveness
 from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
 from util.config_normalizer import normalize_config
 
@@ -69,24 +68,16 @@ def main() -> int:
         start_date=args.start_date,
         end_date=args.end_date,
     ).to_dict()
-    mechanism_report = audit_mechanism_effectiveness(
-        db_path=db_path,
-        config_id=args.config_id,
-        exp_name=cfg.get("exp_name"),
-        start_date=args.start_date,
-        end_date=args.end_date,
-    ).to_dict()
-
     report = {
         "agent_name": "protocol_governor",
         "contract_version": "agentquant.backtest_daily_test.v1",
-        "ok": bool(invariant_report.get("ok") and mechanism_report.get("ok")),
+        "ok": bool(invariant_report.get("ok")),
         "system_invariants": invariant_report,
-        "mechanism_effectiveness": mechanism_report,
         "metadata": {
             "runtime_only": True,
             "static_tests_moved_to": "src/run/pre_backtest_test.py",
             "daily_boundary": "reads_real_backtest_db_artifacts_and_payloads_only",
+            "internal_mechanisms_checked": False,
         },
     }
 
@@ -95,7 +86,7 @@ def main() -> int:
     else:
         print("AgentQuant daily backtest test gate")
         print(f"  ok: {report['ok']}")
-        for key in ("system_invariants", "mechanism_effectiveness"):
+        for key in ("system_invariants",):
             section = report[key]
             print(f"  {key}: ok={section.get('ok')}")
             for error in section.get("errors") or section.get("failures") or section.get("hard_failures") or []:

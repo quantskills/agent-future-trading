@@ -762,7 +762,6 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                         "opportunity_rank": 1,
                     },
                 },
-                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 1}},
             },
         )
         rec_high = FuturesRecommendation(
@@ -795,7 +794,6 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                         "opportunity_rank": 2,
                     },
                 },
-                "active_opportunity_audit": {"opportunity": {"opportunity_rank": 2}},
             },
         )
 
@@ -852,7 +850,6 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             "not_selected_by_full_market_pm_capital_queue",
             rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],
         )
-        self.assertNotIn("active_opportunity_audit", rec_low.signal_snapshot)
         self.assertEqual(len(updates), 2)
 
     def test_pm_step6_signer_requires_single_pm_state_inputs(self):
@@ -10285,7 +10282,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertIn("authority_type=real_budget_entry", recommendation.justification)
         self.assertNotIn("analyst_prior_audit", snapshot)
         self.assertNotIn("position_budget_policy", snapshot)
-        self.assertNotIn("active_opportunity_audit", snapshot)
 
     def test_phase1_semantic_no_trade_text_blocks_open_recommendation(self):
         portfolio = SimpleNamespace(id="pf1")
@@ -10578,7 +10574,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         authority = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(authority["authority_type"], "watchlist_only")
         self.assertIn("final_contract_authority_probe_lacks_current_evidence", authority["reason_codes"])
-        self.assertNotIn("active_opportunity_audit", recommendation.signal_snapshot)
 
     def test_phase1_structured_authority_ignores_opposite_side_trigger_evidence(self):
         portfolio = SimpleNamespace(id="pf1")
@@ -10654,244 +10649,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         authority = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(authority["authority_type"], "watchlist_only")
         self.assertIn("final_contract_authority_probe_lacks_current_evidence", authority["reason_codes"])
-
-    def test_active_opportunity_audit_tracks_watchlist_without_changing_decision(self):
-        portfolio = SimpleNamespace(id="pf1")
-        decision = FuturesDecision(
-            ticker="ZZ",
-            action=FuturesAction.HOLD,
-            lots=0,
-            price=100.0,
-            settle_price=100.0,
-            margin_rate=0.1,
-            contract_multiplier=10.0,
-            contract_code="ZZ2505",
-            justification="watchlist",
-        )
-        signal = AnalystSignal(
-            agent_name="technical",
-            signal=Signal.NEUTRAL,
-            confidence=0.45,
-            opportunity_state="watch_for_trigger",
-            neutral_trigger_condition="breakout above 101 with volume confirmation",
-            counterfactual_side="long",
-            neutral_watchlist_priority="medium",
-            metadata={"learning_scope": {"setup_family": "range_breakout"}},
-        )
-        recommendation = _build_signed_pm_recommendation(
-            config_id="cfg",
-            portfolio=portfolio,
-            ticker="ZZ",
-            trading_date="2025-03-03",
-            contract_code="ZZ2505",
-            decision=decision,
-            morning_price_context=SimpleNamespace(
-                base_price=100.0,
-                base_price_source=None,
-                base_price_date="2025-03-03",
-                open_price=100.0,
-                prev_close_price=99.0,
-                warning_message=None,
-            ),
-            analyst_signals=[signal],
-            plan_snapshot={
-                "reason_codes": "final_contract_authority_not_met",
-                "strategy_controls": {
-                    "diagnostics": {},
-                    "reasons": ["watch_for_trigger_cannot_open_position"],
-                },
-                "opportunity_scorecard": {
-                    "preferred_side": "long",
-                    "long": {"final_state": "watch_for_trigger", "score": 0.44},
-                },
-            },
-            pm_state_update=_pm_state_fixture({
-                "contract_version": "agentquant.final_action.v1",
-                "contract_type": "strategy",
-                "ticker": "ZZ",
-                "final_action": "wait",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "lots_delta_abs": 0,
-                "target_position_ratio": 0.0,
-                "authority_type": "watchlist_only",
-                "open_action_evidence": False,
-                "strong_current_evidence": False,
-                "max_allowed_margin_ratio": 0.0,
-                "reason_codes": ["watch_for_trigger_cannot_open_position"],
-                "consistency": {"status": "ok"},
-                "single_source_of_trade_truth": True,
-                "candidate_sources_do_not_bypass_contract": True,
-            }, ticker="ZZ"),
-            full_config={},
-        )
-
-        snapshot = recommendation.signal_snapshot
-        self.assertEqual(recommendation.action, RecommendationAction.HOLD)
-        self.assertEqual(recommendation.lots, 0)
-        self.assertNotIn("active_opportunity_audit", snapshot)
-        self.assertEqual(snapshot["final_action_contract"]["authority_type"], "watchlist_only")
-
-    def test_active_opportunity_audit_reads_preferred_side_final_state(self):
-        portfolio = SimpleNamespace(id="pf1")
-        decision = FuturesDecision(
-            ticker="RB",
-            action=FuturesAction.HOLD,
-            lots=0,
-            price=3500.0,
-            settle_price=3500.0,
-            margin_rate=0.1,
-            contract_multiplier=10.0,
-            contract_code="rb2505",
-            justification="watchlist",
-        )
-        recommendation = _build_signed_pm_recommendation(
-            config_id="cfg",
-            portfolio=portfolio,
-            ticker="RB",
-            trading_date="2025-03-06",
-            contract_code="rb2505",
-            decision=decision,
-            morning_price_context=SimpleNamespace(
-                base_price=3500.0,
-                base_price_source=None,
-                base_price_date="2025-03-06",
-                open_price=3500.0,
-                prev_close_price=3480.0,
-                warning_message=None,
-            ),
-            analyst_signals=[],
-            plan_snapshot={
-                "reason_codes": "scorecard_watchlist",
-                "strategy_controls": {
-                    "diagnostics": {},
-                    "reasons": ["scorecard_watchlist"],
-                },
-                "opportunity_scorecard": {
-                    "preferred_side": "short",
-                    "long": {"final_state": "no_opportunity", "score": 0.10},
-                    "short": {"final_state": "tradeable_candidate", "score": 0.64},
-                },
-            },
-            pm_state_update=_pm_state_fixture({
-                "contract_version": "agentquant.final_action.v1",
-                "contract_type": "strategy",
-                "ticker": "RB",
-                "final_action": "wait",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "lots_delta_abs": 0,
-                "target_position_ratio": 0.0,
-                "authority_type": "watchlist_only",
-                "open_action_evidence": False,
-                "strong_current_evidence": False,
-                "max_allowed_margin_ratio": 0.0,
-                "reason_codes": ["scorecard_watchlist"],
-                "consistency": {"status": "ok"},
-                "single_source_of_trade_truth": True,
-                "candidate_sources_do_not_bypass_contract": True,
-            }, ticker="RB"),
-            full_config={},
-        )
-
-        self.assertNotIn("active_opportunity_audit", recommendation.signal_snapshot)
-        self.assertEqual(recommendation.signal_snapshot["final_action_contract"]["final_action"], "wait")
-
-    def test_active_opportunity_audit_lists_clean_conditional_monitor_candidate(self):
-        portfolio = SimpleNamespace(id="pf1")
-        signal = AnalystSignal(
-            agent_name="technical",
-            signal=Signal.BEARISH,
-            confidence=0.62,
-            opportunity_state="watch_for_trigger",
-            entry_trigger="wait for post-open break below support with volume confirmation",
-            invalidation_level=3520.0,
-            trigger_valid=False,
-            evidence_role="entry_timing",
-            metadata={
-                "action_evidence_contract": {
-                    "opportunity_state": "watch_for_trigger",
-                    "setup_quality_ok": True,
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "invalidation_present": True,
-                    "entry_trigger": "wait for post-open break below support with volume confirmation",
-                }
-            },
-        )
-        decision = FuturesDecision(
-            ticker="HC",
-            action=FuturesAction.HOLD,
-            lots=0,
-            price=3500.0,
-            settle_price=3500.0,
-            margin_rate=0.1,
-            contract_multiplier=10.0,
-            contract_code="hc2505",
-            justification="conditional monitor",
-        )
-
-        recommendation = _build_signed_pm_recommendation(
-            config_id="cfg",
-            portfolio=portfolio,
-            ticker="HC",
-            trading_date="2025-03-05",
-            contract_code="hc2505",
-            decision=decision,
-            morning_price_context=SimpleNamespace(
-                base_price=3500.0,
-                base_price_source=None,
-                base_price_date="2025-03-05",
-                open_price=3500.0,
-                prev_close_price=3510.0,
-                warning_message=None,
-            ),
-            analyst_signals=[signal],
-            plan_snapshot={
-                "reason_codes": "conditional_watch",
-                "strategy_controls": {
-                    "diagnostics": {},
-                    "reasons": ["conditional_watch"],
-                },
-                "opportunity_scorecard": {
-                    "preferred_side": "short",
-                    "short": {
-                        "final_state": "watch_for_trigger",
-                        "score": 0.52,
-                        "setup_quality_ok": True,
-                        "trigger_valid": False,
-                        "current_trigger_confirmed": False,
-                        "invalidation_present": True,
-                        "entry_trigger": "wait for post-open break below support with volume confirmation",
-                    },
-                },
-            },
-            pm_state_update=_pm_state_fixture({
-                "contract_version": "agentquant.final_action.v1",
-                "contract_type": "strategy",
-                "ticker": "HC",
-                "final_action": "wait",
-                "current_lots": 0,
-                "target_lots": 0,
-                "lots_delta": 0,
-                "lots_delta_abs": 0,
-                "target_position_ratio": 0.0,
-                "authority_type": "watchlist_only",
-                "open_action_evidence": False,
-                "strong_current_evidence": False,
-                "max_allowed_margin_ratio": 0.0,
-                "reason_codes": ["pm_watch_for_trigger_probe_cap"],
-                "consistency": {"status": "ok"},
-                "single_source_of_trade_truth": True,
-                "candidate_sources_do_not_bypass_contract": True,
-            }, ticker="HC"),
-            full_config={},
-        )
-
-        self.assertNotIn("active_opportunity_audit", recommendation.signal_snapshot)
-        self.assertEqual(recommendation.signal_snapshot["final_action_contract"]["final_action"], "wait")
 
     def test_strong_real_budget_entry_passes_phase1_and_phase2(self):
         portfolio = SimpleNamespace(id="pf1")

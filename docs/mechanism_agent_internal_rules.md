@@ -872,7 +872,6 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | 回测前 DB schema、硬数据、配置和环境验收 | `src/tests/test_pre_backtest_acceptance.py` | `pre_backtest_test.py` | 不进入 |
 | 协议管理员能力卡、LLM 边界、planner 封存、工具权限 | `src/tests/test_protocol_governor.py` | `pre_backtest_test.py` | 不进入 |
 | 系统不变量样例：字段越界、交易事实错位、artifact 污染、条件触发执行一致性 | `src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 `system_invariant_audit` |
-| 机制有效性样例：学习链路、PM 学习消费、研究反馈是否接通 | `src/tests/test_mechanism_effectiveness_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 `mechanism_effectiveness_audit` |
 | Reviewer 不写学习、Researcher 只写未来学习 | `src/tests/test_reviewer_learning.py`、`src/tests/test_fact_entry_boundaries.py` | 相关单测按需运行 | 由日后新增时纳入 |
 | 统一字段迁移和旧字段残留 | `src/tests/test_unified_field_migration.py`、`src/tests/test_evaluation_unified_semantics.py` | 相关单测按需运行 | 不进入 |
 | 市场确认和硬交易规则 | `src/tests/test_market_confirmation.py`、`src/tests/test_futures_market_rules.py` | 相关单测按需运行 | 不进入 |
@@ -887,7 +886,6 @@ src/run/pre_backtest_test.py
 -> test_pm_state_transition_matrix
 -> test_analyst_output_landing
 -> test_system_invariant_audit
--> test_mechanism_effectiveness_audit
 -> test_contract_coverage_audit
 -> test_pre_backtest_acceptance
 -> test_protocol_governor
@@ -897,7 +895,6 @@ src/run/pre_backtest_test.py
 
 src/run/backtest_daily_test.py
 -> system_invariant_audit
--> mechanism_effectiveness_audit
 ```
 
 测试硬规则：

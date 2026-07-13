@@ -259,7 +259,6 @@ Reviewer fusion_attribution_label
 - 复盘员不调用 LLM、不触发研究员学习、不写最终 action-value。
 - `pg_pre_backtest_acceptance.py` 通过。
 - `system_invariant_audit.py` 对现有库没有 hard error。
-- `pg_mechanism_effectiveness_audit.py` 没有 hard_fail；diagnostic 只说明机制已接通但排序、资金部署或学习效果需要策略层分析。
 - 字段语义表仍是唯一字段来源。
 - 未完成交易日不会进入学习。
 - 策略单、rollover、forced_risk 按 `source_type` 分账。
@@ -270,5 +269,3 @@ Reviewer fusion_attribution_label
 ## 研究机制审计边界补充（2026-07-07）
 
 PG 可以审计研究记忆是否按未来学习边界写入、是否未污染当日交易、是否未被 Trader/Accountant 直接消费；但 PG 不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit，也不判断 PM 为什么 rank 或不 rank。PM 对研究成果的消费是否形成合法交易事实，只由 Step6 最终 `final_action_contract`、`pm_six_step_trace.pm_contract_self_check` 和 `pm_six_step_trace.step6_contract_generation_check` 表达；Step4 临时路由不进入最终自检输入。
-
-`pg_mechanism_effectiveness_audit.py` 的 hard fail 只表示机制链路断开、必要 artifact 缺失、PM 自检失败、条件监控缺少执行事实等协议问题。排序收益、学习效果、资金部署质量属于诊断或研究分析，不作为 PG 替代 PM 的交易语义判定。

@@ -60,3 +60,9 @@
 （17）[Researcher 双层确定性校验] `researcher_learning.py`、`research_learning.py`、`research_memory_writers.py`、`research_review_helpers.py` 与 `prompt.py` 在 LLM 前校验来源、日期、结算、SCC、最终合约、审计和执行事实，在 LLM 后过滤无证据、越权、未来数据及动作语义非法结论；结构化输出禁止额外字段，失败或无效结果不写候选，数据库不保存原始提示词和未校验原始响应。原因：研究结果只能基于完整已结算事实链形成未来交易日可消费的 action-value、profile、calibration 和 policy/state，不能回写当日事实或直接授予交易权限。
 
 （18）[主链回归验证] 新增和调整 SCC、PM、Auditor、Trader、Reviewer、Researcher、字段边界与 Phase-flow 回归测试；主业务链定向测试 246 项、Phase-flow 315 项通过，`compileall`、`system_invariant_audit` 和 `git diff --check` 通过。全量 866 项中 7 项失败均来自本轮明确排除修改的 Protocol Governor 静态规则及其 contract coverage/pre-backtest 包装测试；本地 SQLite 已被清空导致门禁仅报告数据库缺失警告。原因：确认主业务链已按统一工作流运行，同时保留旁路治理规则待后续单独迁移，不以修改主链迎合旧旁路断言。
+
+（19）[冗余测试清理] `test_final_action_semantics.py` 删除仅覆盖已退出主链的 `audit_pm_memory_consumption` 旧复审函数的 4 项测试；`test_phase_flow_regression.py` 删除已移除 `active_opportunity_audit` 的 3 项重复测试；`test_protocol_governor.py` 删除与 `test_fact_entry_boundaries.py` 重复的控制组只读扫描和仍使用旧顶层分析师 snapshot 的 neutral-accountability 测试，并移除 Researcher prompt 必须复制 PG 控制元数据措辞的旧断言；保留测试夹具同步清除 `active_opportunity_audit`、`trade_research_contracts` 和旧顶层分析师副本。原因：测试必须覆盖当前 SCC、唯一最终合约、PM 自检和角色边界，不能继续维护已删除机制、重复审计和第二套证据读取路径。
+
+==========2026年7月13日==========
+
+（1）[每日回测后检测边界收口] `backtest_daily_test.py` 删除 `mechanism_effectiveness` 调用和报告项，`pg_system_invariants.py` 停止读取 `pm_six_step_trace` 中的 PM 自检与 Step6 生成检查；同步删除机制有效性工具、PG 接口、自循环单元测试和回测前测试注册，并调整契约覆盖与相关测试。原因：每日回测后检测只依据真实 DB、artifact、执行、成交、结算和学习落地结果识别非策略问题，不复查 PM 或其他智能体内部机制。

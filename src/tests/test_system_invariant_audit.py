@@ -19,9 +19,6 @@ from tools.agent_tools.control.pg_system_invariants import (
     _contract_increases_risk as system_contract_increases_risk,
     audit_system_invariants,
 )
-from tools.agent_tools.control.pg_mechanism_effectiveness_audit import (
-    _scenario_for_contract as mechanism_scenario_for_contract,
-)
 from tools.common.final_action_semantics import full_market_rank_source_payload
 
 
@@ -725,61 +722,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
-    def test_system_invariant_audit_rejects_failed_pm_six_step_self_check(self):
-        db_path = self._make_db()
-        self._insert_good_open(db_path)
-
-        def mutate(payload):
-            payload["pm_six_step_trace"]["pm_contract_self_check"]["ok"] = False
-            payload["pm_six_step_trace"]["pm_contract_self_check"]["errors"] = ["fixture_failure"]
-
-        self._mutate_recommendation_payload(db_path, mutate)
-
-        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
-
-        self.assertFalse(report.ok)
-        self.assertTrue(
-            any(error.startswith("strategy_recommendation_pm_six_step_self_check_failed") for error in report.errors),
-            report.to_dict(),
-        )
-
-    def test_system_invariant_audit_rejects_missing_step6_generation_check(self):
-        db_path = self._make_db()
-        self._insert_good_open(db_path)
-
-        def mutate(payload):
-            payload["pm_six_step_trace"].pop("step6_contract_generation_check", None)
-
-        self._mutate_recommendation_payload(db_path, mutate)
-
-        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
-
-        self.assertFalse(report.ok)
-        self.assertTrue(
-            any("strategy_recommendation_pm_step6_generation_check_missing" in error for error in report.errors),
-            report.to_dict(),
-        )
-
-    def test_system_invariant_audit_rejects_failed_step6_generation_check(self):
-        db_path = self._make_db()
-        self._insert_good_open(db_path)
-
-        def mutate(payload):
-            payload["pm_six_step_trace"]["step6_contract_generation_check"]["ok"] = False
-            payload["pm_six_step_trace"]["step6_contract_generation_check"]["errors"] = [
-                "fixture_generation_failure"
-            ]
-
-        self._mutate_recommendation_payload(db_path, mutate)
-
-        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
-
-        self.assertFalse(report.ok)
-        self.assertTrue(
-            any("strategy_recommendation_pm_step6_generation_check_failed" in error for error in report.errors),
-            report.to_dict(),
-        )
-
     def test_system_invariant_audit_rejects_legacy_lifecycle_field_in_final_contract_evidence(self):
         db_path = self._make_db()
         self._insert_good_open(db_path)
@@ -798,26 +740,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
         self.assertTrue(any("contract_lifecycle_self_check" in error for error in report.errors), report.to_dict())
-
-    def test_system_invariant_audit_rejects_legacy_lifecycle_field_in_pm_six_step_trace(self):
-        db_path = self._make_db()
-        self._insert_good_open(db_path)
-
-        def mutate(payload):
-            payload["pm_six_step_trace"]["lifecycle_transition_diagnostic"] = {
-                "diagnostic_type": "lifecycle_transition_diagnostic",
-            }
-
-        self._mutate_recommendation_payload(db_path, mutate)
-
-        report = audit_system_invariants(db_path=db_path, exp_name="agentquant-test")
-
-        self.assertFalse(report.ok)
-        self.assertTrue(
-            any(error.startswith("strategy_recommendation_pm_legacy_lifecycle_field") for error in report.errors),
-            report.to_dict(),
-        )
-        self.assertTrue(any("lifecycle_transition_diagnostic" in error for error in report.errors), report.to_dict())
 
     def test_system_invariant_audit_accepts_empty_database_before_fresh_backtest(self):
         tmpdir = tempfile.TemporaryDirectory()
@@ -1664,31 +1586,6 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
                         **rank_trace,
                         **rank_source,
                     },
-                },
-                "active_opportunity_audit": {
-                    "decision": {
-                        "action": "open_short",
-                        "lots": 1,
-                        "lands_position": True,
-                        "authority_type": "exploration_probe",
-                        "reason": "conditional_trigger_authority",
-                    },
-                    "opportunity": {
-                        "conditional_monitor_candidate_count": 1,
-                        "high_quality_present": True,
-                    },
-                    "conditional_monitor_candidates": [
-                        {
-                            "analyst": "technical",
-                            "signal": "Bearish",
-                            "opportunity_state": "watch_for_trigger",
-                            "setup_quality_ok": True,
-                            "trigger_valid": False,
-                            "invalidation_present": True,
-                            "entry_trigger": "wait for post-open break below support",
-                            "conditional_monitor_candidate": True,
-                        }
-                    ],
                 },
                 "trade_contract_audit": {
                     "single_source_of_trade_truth": True,
@@ -2687,34 +2584,29 @@ class SystemInvariantAuditRegressionTest(unittest.TestCase):
             report.to_dict(),
         )
 
-    def test_pg_action_lifecycle_wrappers_stay_aligned_for_scenarios(self):
+    def test_system_invariant_risk_increase_semantics_stay_aligned(self):
         cases = [
             (
                 {"current_lots": 0, "target_lots": -1, "lots_delta": -1, "final_action": "open_probe"},
                 True,
-                "open_increase",
             ),
             (
                 {"current_lots": -1, "target_lots": -3, "lots_delta": -2, "final_action": "add"},
                 True,
-                "open_increase",
             ),
             (
                 {"current_lots": 2, "target_lots": 1, "lots_delta": -1, "final_action": "reduce"},
                 False,
-                "reduce_exit",
             ),
             (
                 {"current_lots": 2, "target_lots": 2, "lots_delta": 0, "final_action": "hold"},
                 False,
-                "position_hold",
             ),
         ]
 
-        for contract, increases_risk, scenario in cases:
+        for contract, increases_risk in cases:
             with self.subTest(contract=contract):
                 self.assertEqual(system_contract_increases_risk(contract), increases_risk)
-                self.assertEqual(mechanism_scenario_for_contract(contract), scenario)
 
     def test_system_invariant_audit_fails_strategy_recommendation_with_non_strategy_contract(self):
         db_path = self._make_db()

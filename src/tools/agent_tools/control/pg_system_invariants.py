@@ -79,7 +79,6 @@ PROTOCOL_AUDIT_BOUNDARIES = [
     "recommendation_top_level_action_lots_must_match_final_contract",
     "incomplete_trading_day_cannot_enter_strategy_evaluation",
     "pm_action_value_transport_must_preserve_preference_reward_and_scope",
-    "pg_reads_pm_step6_self_checks_not_pm_internal_trade_semantics",
     "protocol_governor_checks_artifact_boundaries_not_strategy_profitability",
 ]
 DAILY_PG_HARD_FAIL_BOUNDARIES = [
@@ -316,13 +315,7 @@ ERROR_CATEGORY_PREFIXES = {
         "recommendation_final_action_contract_lots_delta_mismatch",
         "recommendation_final_action_contract_action_mismatch",
         "strategy_recommendation_missing_signal_snapshot_final_action_contract",
-        "strategy_recommendation_pm_contract_self_check_failed",
-        "strategy_recommendation_pm_contract_runtime_boundary_failed",
         "strategy_recommendation_pm_legacy_lifecycle_field",
-        "strategy_recommendation_pm_six_step_self_check_missing",
-        "strategy_recommendation_pm_six_step_self_check_failed",
-        "strategy_recommendation_pm_step6_generation_check_missing",
-        "strategy_recommendation_pm_step6_generation_check_failed",
         "recommendation_top_level_action_lots_mismatch_final_action_contract",
         "strategy_recommendation_non_strategy_final_action_contract",
         "opportunity_ranking_field_used_in_execution_trade_intent",
@@ -992,7 +985,6 @@ def _audit_recommendation_final_contract_consistency(
             )
             continue
         if source_type == STRATEGY_SOURCE_TYPE:
-            pm_trace = _dict(snapshot.get("pm_six_step_trace"))
             legacy_hits = []
             legacy_hits.extend(
                 find_forbidden_pm_final_artifact_field_keys(
@@ -1000,27 +992,11 @@ def _audit_recommendation_final_contract_consistency(
                     prefix="signal_snapshot.final_action_contract",
                 )
             )
-            legacy_hits.extend(
-                find_forbidden_pm_final_artifact_field_keys(
-                    pm_trace,
-                    prefix="signal_snapshot.pm_six_step_trace",
-                )
-            )
             if legacy_hits:
                 errors.append(
                     "strategy_recommendation_pm_legacy_lifecycle_field:"
                     f"{label}:{sorted(set(legacy_hits))}"
                 )
-            pm_check = _dict(pm_trace.get("pm_contract_self_check"))
-            if not pm_check:
-                errors.append(f"strategy_recommendation_pm_six_step_self_check_missing:{label}")
-            elif pm_check.get("ok") is not True:
-                errors.append(f"strategy_recommendation_pm_six_step_self_check_failed:{label}")
-            generation_check = _dict(pm_trace.get("step6_contract_generation_check"))
-            if not generation_check:
-                errors.append(f"strategy_recommendation_pm_step6_generation_check_missing:{label}")
-            elif generation_check.get("ok") is not True:
-                errors.append(f"strategy_recommendation_pm_step6_generation_check_failed:{label}")
         if source_type in OPERATIONAL_SOURCE_TYPES:
             continue
         required = {"current_lots", "target_lots", "lots_delta", "final_action"}
