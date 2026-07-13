@@ -100,7 +100,14 @@ def persist_analyst_signal(
     signal: Any,
 ) -> Any:
     """Persist one analyst signal and retain its DB record id for lineage."""
-    signal_id = db.save_signal(portfolio_id, analyst, ticker, prompt, signal)
+    _ = prompt
+    signal_id = db.save_signal(
+        portfolio_id,
+        analyst,
+        ticker,
+        "analyst_prompt_not_persisted",
+        signal,
+    )
     if signal_id:
         metadata = dict(getattr(signal, "metadata", {}) or {})
         metadata["signal_record_id"] = signal_id

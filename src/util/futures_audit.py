@@ -385,60 +385,22 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
-def _first_signal_value(snapshot: Dict[str, Any], field_names: List[str]) -> Any:
-    analyst_keys = ("technical", "fundamental", "commodity_news")
-    for analyst in analyst_keys:
-        item = snapshot.get(analyst)
-        if not isinstance(item, dict):
-            continue
-        for field_name in field_names:
-            value = item.get(field_name)
-            if value not in (None, "", "unknown"):
-                return value
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        for context_name in ("technical_context", "market_context", "signal_context"):
-            context = metadata.get(context_name) if isinstance(metadata.get(context_name), dict) else {}
-            for field_name in field_names:
-                value = context.get(field_name)
-                if value not in (None, "", "unknown"):
-                    return value
-    return None
-
-
 def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Return execution-relevant lifecycle fields emitted by analysts or Phase1 planning."""
+    """Return only PM-signed lifecycle facts from the final action contract."""
     if not isinstance(snapshot, dict):
         return {}
-    expected_days = _optional_int(_first_signal_value(snapshot, ["expected_horizon_days"]))
-    horizon_class = _first_signal_value(snapshot, ["horizon_class"])
-    if not horizon_class and expected_days is not None:
-        if expected_days <= 0:
-            horizon_class = "flat"
-        elif expected_days <= 2:
-            horizon_class = "short"
-        elif expected_days <= 5:
-            horizon_class = "medium"
-        else:
-            horizon_class = "long"
+    contract = final_action_contract_from_snapshot(snapshot)
+    if not isinstance(contract, dict) or not contract:
+        return {}
     lifecycle = {
-        "horizon_class": str(horizon_class) if horizon_class else None,
-        "expected_horizon_days": expected_days,
-        "price_percentile": _optional_float(
-            _first_signal_value(snapshot, ["price_percentile", "price_percentile_lookback", "current_price_percentile"])
-        ),
-        "entry_trigger": _first_signal_value(snapshot, ["entry_trigger"]),
-        "action_name": _first_signal_value(snapshot, ["action_name"]),
-        "invalidation_level": _optional_float(
-            _first_signal_value(snapshot, ["invalidation_level", "stop_level", "stop_loss_level", "invalid_price"])
-        ),
-        "target_return": _optional_float(
-            _first_signal_value(snapshot, ["target_return", "expected_return", "target_return_ratio", "expected_return_ratio"])
-        ),
-        "atr_stop_distance": _optional_float(
-            _first_signal_value(snapshot, ["atr_stop_distance", "atr_stop", "atr_distance"])
-        ),
-        "setup_type": _first_signal_value(snapshot, ["setup_type"]),
-        "business_quality_score": _optional_float(_first_signal_value(snapshot, ["business_quality_score"])),
+        "horizon_class": contract.get("horizon_class"),
+        "expected_horizon_days": _optional_int(contract.get("expected_horizon_days")),
+        "entry_trigger": contract.get("entry_trigger"),
+        "action_name": contract.get("final_action"),
+        "invalidation_level": _optional_float(contract.get("invalidation_level")),
+        "atr_stop_distance": _optional_float(contract.get("atr_stop_distance")),
+        "setup_type": contract.get("setup_type"),
+        "market_regime": contract.get("market_regime"),
     }
     return {key: value for key, value in lifecycle.items() if value is not None}
 

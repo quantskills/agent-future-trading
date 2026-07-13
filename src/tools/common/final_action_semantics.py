@@ -487,16 +487,8 @@ def _rank_value_from_contract(
 ) -> Any:
     if _non_empty(opportunity_rank):
         return opportunity_rank
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
     deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), Mapping) else {}
-    for value in (
-        deployment.get("opportunity_rank"),
-        evidence.get("opportunity_rank"),
-        contract.get("opportunity_rank"),
-    ):
-        if _non_empty(value):
-            return value
-    return None
+    return deployment.get("opportunity_rank") if _non_empty(deployment.get("opportunity_rank")) else None
 
 
 def full_market_rank_source_payload() -> dict[str, str]:
@@ -564,20 +556,14 @@ def canonicalize_final_action_contract_for_persistence(
     if not _non_empty(rank):
         if is_full_market_rank_source(deployment):
             rank = _rank_value_from_contract({"capital_deployment": deployment})
-        elif is_full_market_rank_source(evidence):
-            rank = _rank_value_from_contract({"evidence_used": evidence})
     if _non_empty(rank):
         metadata = rank_metadata if isinstance(rank_metadata, Mapping) else {}
-        evidence["opportunity_rank"] = rank
         deployment["opportunity_rank"] = rank
         for field in sorted(RANK_CAPITAL_LAYER_FIELDS):
             value = metadata.get(field)
             if not _non_empty(value):
-                value = evidence.get(field)
-            if not _non_empty(value):
                 value = deployment.get(field)
             if _non_empty(value):
-                evidence[field] = value
                 deployment[field] = value
         for field in (
             "rank_semantics_version",
@@ -587,35 +573,39 @@ def canonicalize_final_action_contract_for_persistence(
         ):
             value = metadata.get(field)
             if not _non_empty(value):
-                value = evidence.get(field)
-            if not _non_empty(value):
                 value = deployment.get(field)
             if not _non_empty(value):
                 value = canonical.get(field)
             if _non_empty(value):
-                evidence[field] = value
                 deployment[field] = value
         for field in sorted(RANK_CAPITAL_SOURCE_FIELDS):
             value = metadata.get(field)
             if not _non_empty(value):
-                value = evidence.get(field)
-            if not _non_empty(value):
                 value = deployment.get(field)
             if _non_empty(value):
-                evidence[field] = value
                 deployment[field] = value
         for field in sorted(RANK_CAPITAL_TRACE_FIELDS):
             value = metadata.get(field)
             if not isinstance(value, Mapping):
-                value = evidence.get(field)
-            if not isinstance(value, Mapping):
                 value = deployment.get(field)
             if isinstance(value, Mapping):
-                evidence[field] = dict(value)
                 deployment[field] = dict(value)
-        canonical["evidence_used"] = evidence
         canonical["capital_deployment"] = deployment
         canonical.pop("opportunity_rank", None)
+        for field in (
+            set(RANK_CAPITAL_LAYER_FIELDS)
+            | set(RANK_CAPITAL_SOURCE_FIELDS)
+            | set(RANK_CAPITAL_RANK_TRACE_FIELDS)
+            | {
+                "opportunity_rank",
+                "rank_semantics_version",
+                "opportunity_rank_meaning",
+                "rank_is_capital_priority",
+                "rank_is_not_trade_authority",
+            }
+        ):
+            evidence.pop(field, None)
+        canonical["evidence_used"] = evidence
     else:
         rank_fields = (
             set(RANK_CAPITAL_LAYER_FIELDS)
@@ -689,7 +679,6 @@ def classify_final_action_reason_codes(contract: Mapping[str, Any] | None) -> di
     capital_explanation = any(
         bool(value)
         for value in (
-            evidence.get("capital_allocation_reason"),
             evidence.get("learning_adjustment_summary"),
             deployment.get("capital_allocation_reason"),
             deployment.get("allocation_explanation"),
@@ -830,7 +819,6 @@ def contract_requires_full_market_capital_rank(contract: Mapping[str, Any] | Non
 def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) -> bool:
     """Return whether the contract has a valid full-market opportunity rank."""
     contract = contract if isinstance(contract, Mapping) else {}
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
     deployment = (
         contract.get("capital_deployment")
         if isinstance(contract.get("capital_deployment"), Mapping)
@@ -839,7 +827,7 @@ def contract_has_full_market_capital_rank(contract: Mapping[str, Any] | None) ->
     rank = _rank_value_from_contract(contract)
     if not _non_empty(rank):
         return False
-    return bool(is_full_market_rank_source(deployment) or is_full_market_rank_source(evidence))
+    return bool(is_full_market_rank_source(deployment))
 
 
 def contract_is_unselected_no_new_exposure_candidate(contract: Mapping[str, Any] | None) -> bool:
@@ -962,6 +950,8 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
         errors.append("non_increasing_risk_contract_has_full_market_rank")
     if contract_has_rank:
         errors.append("top_level.opportunity_rank_forbidden")
+    if evidence_has_rank:
+        errors.append("evidence_used.opportunity_rank_forbidden")
     if not deployment:
         errors.append("capital_deployment_missing")
     elif not deployment_has_rank:
@@ -969,22 +959,14 @@ def rank_capital_layer_contract_errors(contract: Mapping[str, Any] | None) -> li
     for field in sorted(RANK_CAPITAL_LAYER_FIELDS):
         if deployment and deployment.get(field) in (None, ""):
             errors.append(f"capital_deployment.{field}_missing")
-        if evidence_has_rank and evidence.get(field) in (None, ""):
-            errors.append(f"evidence_used.{field}_missing")
     for field in sorted(RANK_CAPITAL_SOURCE_FIELDS):
         if deployment and deployment.get(field) in (None, ""):
             errors.append(f"capital_deployment.{field}_missing")
-        if evidence_has_rank and evidence.get(field) in (None, ""):
-            errors.append(f"evidence_used.{field}_missing")
     for field in sorted(RANK_CAPITAL_TRACE_FIELDS):
         if deployment and not isinstance(deployment.get(field), Mapping):
             errors.append(f"capital_deployment.{field}_missing")
-        if evidence_has_rank and not isinstance(evidence.get(field), Mapping):
-            errors.append(f"evidence_used.{field}_missing")
     if deployment_has_rank and deployment and not is_full_market_rank_source(deployment):
         errors.append("capital_deployment.rank_source_not_full_market")
-    if evidence_has_rank and evidence and not is_full_market_rank_source(evidence):
-        errors.append("evidence_used.rank_source_not_full_market")
     return errors
 
 
@@ -995,20 +977,15 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
         return []
     if _rank_value_from_contract(contract) in (None, ""):
         return []
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
     deployment = (
         contract.get("capital_deployment")
         if isinstance(contract.get("capital_deployment"), Mapping)
         else {}
     )
     trace = deployment.get("lifecycle_learning_trace")
-    if not isinstance(trace, Mapping):
-        trace = evidence.get("lifecycle_learning_trace")
-    evidence_trace = evidence.get("lifecycle_learning_trace")
-    decision_trace = _pm_lifecycle_decision_trace(evidence_trace)
+    decision_trace = learning_used.get("pm_lifecycle_learning_trace")
     impact = deployment.get("learning_impact_delta")
-    if not isinstance(impact, Mapping):
-        impact = evidence.get("learning_impact_delta")
     errors: list[str] = []
     if not isinstance(trace, Mapping):
         errors.append("lifecycle_learning_trace_missing")
@@ -1094,16 +1071,11 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
     rows = learning_used.get("alpha_setup_action_values") if isinstance(learning_used.get("alpha_setup_action_values"), list) else []
     if not rows:
         return []
-    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), Mapping) else {}
-    trace = evidence.get("lifecycle_learning_trace")
-    impact = evidence.get("learning_impact_delta")
+    trace = learning_used.get("pm_lifecycle_learning_trace")
+    impact = learning_used.get("pm_lifecycle_learning_impact_delta")
     errors: list[str] = []
     if not isinstance(trace, Mapping):
         errors.append("lifecycle_learning_trace_missing")
-        return errors
-    trace = _pm_lifecycle_decision_trace(trace)
-    if not isinstance(trace, Mapping):
-        errors.append("pm_final_contract_lifecycle_trace_missing")
         return errors
     if not isinstance(impact, Mapping):
         errors.append("learning_impact_delta_missing")
@@ -2025,7 +1997,13 @@ def derive_review_expectation(
     semantics = classify_final_action_contract(contract)
     accounting = derive_accounting_expectation(contract, execution_result)
     memory = derive_memory_requirements(contract)
-    memory_audit = audit_pm_memory_consumption(contract)
+    contract = contract if isinstance(contract, Mapping) else {}
+    learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), Mapping) else {}
+    action_values = (
+        learning_used.get("alpha_setup_action_values")
+        if isinstance(learning_used.get("alpha_setup_action_values"), list)
+        else []
+    )
     return {
         "contract": "final_action_semantics.review_expectation.v1",
         "action": semantics["action"],
@@ -2039,11 +2017,7 @@ def derive_review_expectation(
         "requires_intraday_result": semantics["requires_intraday_result"],
         "settlement_basis": accounting["settlement_basis"],
         "required_pm_memory": memory["required_pm_memory"],
-        "pm_memory_consumption_ok": memory_audit["ok"],
-        "pm_memory_consumption_errors": memory_audit["errors"],
-        "historical_learning_influenced_contract": bool(
-            memory_audit["alpha_setup_action_value_count"] and not memory_audit["errors"]
-        ),
+        "historical_learning_influenced_contract": bool(action_values),
     }
 
 

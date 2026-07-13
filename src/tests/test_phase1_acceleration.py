@@ -215,7 +215,7 @@ class Phase1AccelerationTest(unittest.TestCase):
         self.assertEqual(pm_order, ["A", "B"])
         self.assertEqual([rec.underlying_code for rec in fake_db.saved_recommendations], ["A", "B"])
         self.assertEqual(len(fake_db.saved_signals), 4)
-        self.assertTrue(all("prompt for" in row[3] for row in fake_db.saved_signals))
+        self.assertTrue(all(row[3] == "analyst_prompt_not_persisted" for row in fake_db.saved_signals))
         self.assertTrue(all(getattr(row[4], "metadata", {}).get("decision_report_path") for row in fake_db.saved_signals))
         self.assertTrue(
             all(

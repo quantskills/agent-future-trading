@@ -115,7 +115,10 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             analyst_signals=[signal],
             enabled_analysts=["commodity_news"],
         )
-        self.assertEqual(scc["source_contracts"][0]["product_profile_evidence"], contract["product_profile_evidence"])
+        self.assertEqual(
+            scc["source_contracts"][0]["action_evidence_contract"]["product_profile_evidence"],
+            contract["product_profile_evidence"],
+        )
 
     def test_profile_is_applied_before_unique_formal_contract_and_stays_in_sync(self):
         profile = get_product_price_behavior_profile("RB")
@@ -206,6 +209,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertEqual(signal_id, "row-id-123")
         self.assertEqual(signal.metadata["signal_record_id"], "row-id-123")
+        self.assertEqual(db.calls[0][3], "analyst_prompt_not_persisted")
 
     def test_runtime_prompts_request_evidence_not_formal_contract_or_trade_actions(self):
         prompts = (

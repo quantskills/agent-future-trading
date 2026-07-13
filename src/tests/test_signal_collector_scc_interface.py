@@ -4,6 +4,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ from agents.decision_team.signal_collector import signal_collector_agent
 from agents.decision_team import portfolio_manager
 from agents.decision_team.portfolio_manager import finalize_pm_full_market_contracts
 from graph.schema import Portfolio
+from graph.workflow import AgentWorkflow
 from tests.test_pm_atomic_contract_flow import _pm_state
 from tools.agent_tools.decision import pm_signal_fusion
 from tools.agent_tools.decision.pm_invalidation_policy import (
@@ -161,6 +163,87 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         self.assertTrue(nested_only.issubset(contract["evidence_fusion"]))
         self.assertFalse(nested_only.intersection(contract))
 
+    def test_scc_preserves_each_aec_once_without_profile_or_fusion_copies(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long"),
+                _formal_signal("fundamental", side="long"),
+                _formal_signal("commodity_news", side="flat"),
+            ],
+        )
+        self.assertEqual(
+            set(contract["source_contracts"][0]),
+            {"analyst", "action_evidence_contract", "signal_record_id"},
+        )
+        self.assertNotIn("fusion_evidence", contract["evidence_items"][0])
+        self.assertIn(
+            "fusion_evidence",
+            contract["source_contracts"][0]["action_evidence_contract"],
+        )
+        self.assertIn(
+            "product_profile_evidence",
+            contract["source_contracts"][0]["action_evidence_contract"],
+        )
+
+    def test_scc_data_quality_flags_are_derived_from_nested_source_facts(self):
+        technical = _formal_signal("technical", side="flat")
+        fundamental = _formal_signal("fundamental", side="flat")
+        news = _formal_signal("commodity_news", side="flat")
+        technical.metadata["action_evidence_contract"]["data_usage_summary"] = {
+            "ticker": "BU",
+            "trading_date": "2025-03-25",
+            "analyst": "technical",
+            "sources": {
+                "pandaai_market": {
+                    "available": False,
+                    "used_in_signal": True,
+                }
+            },
+        }
+        fundamental.metadata["action_evidence_contract"]["data_usage_summary"] = {
+            "ticker": "BU",
+            "trading_date": "2025-03-25",
+            "analyst": "fundamental",
+            "sources": {
+                "finoview_fundamental": {
+                    "available": True,
+                    "used_in_signal": True,
+                    "stale_indicator_count": 2,
+                    "supports_trade_setup": False,
+                }
+            },
+        }
+        news.metadata["action_evidence_contract"]["data_usage_summary"] = {
+            "ticker": "BU",
+            "trading_date": "2025-03-25",
+            "analyst": "commodity_news",
+            "sources": {
+                "finoview_news_txt": {
+                    "available": True,
+                    "used_in_signal": False,
+                }
+            },
+        }
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[technical, fundamental, news],
+        )
+        self.assertIn(
+            "data_source_unavailable:technical:pandaai_market",
+            contract["data_quality_flags"],
+        )
+        self.assertIn(
+            "data_source_stale:fundamental:finoview_fundamental",
+            contract["data_quality_flags"],
+        )
+        self.assertIn(
+            "data_source_not_used:commodity_news:finoview_news_txt",
+            contract["data_quality_flags"],
+        )
+
     def test_duplicate_and_non_enabled_sources_are_contract_errors(self):
         with self.assertRaisesRegex(ValueError, "duplicate_analyst"):
             build_signal_collection_contract(
@@ -206,6 +289,7 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             trading_date="2025-03-25",
             enabled_analysts=["technical", "fundamental", "commodity_news"],
             analyst_signals=signals,
+            require_signal_record_ids=True,
         )
         self.assertIs(checked, contract)
         self.assertEqual(checked["source_contracts"][0]["signal_record_id"], "technical-signal-id")
@@ -216,6 +300,14 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         polluted_source["source_contracts"][0]["collector_snapshot"] = {}
         with self.assertRaisesRegex(ValueError, "unregistered_source_contract_field"):
             validate_signal_collection_contract(polluted_source)
+
+        missing_record_id = deepcopy(contract)
+        missing_record_id["source_contracts"][0]["signal_record_id"] = None
+        with self.assertRaisesRegex(ValueError, "missing_signal_record_id"):
+            validate_signal_collection_contract(
+                missing_record_id,
+                require_signal_record_ids=True,
+            )
 
     def test_shared_action_contract_validator_rejects_semantic_drift(self):
         signal = _formal_signal("technical", side="long")
@@ -362,6 +454,55 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         self.assertNotIn("data_unavailable_reason", contract)
         self.assertIn("pre_open_reference_price_unavailable", contract["data_quality_flags"])
         validate_signal_collection_contract(contract, ticker="BU", trading_date="2025-03-25")
+
+    def test_data_unavailable_workflow_persists_sources_before_pm(self):
+        saved_signals = []
+
+        class _DB:
+            def save_signal(self, portfolio_id, analyst, ticker, prompt, signal):
+                saved_signals.append((portfolio_id, analyst, ticker, signal))
+                return f"signal-{ticker}-{analyst}"
+
+        workflow = AgentWorkflow.__new__(AgentWorkflow)
+        workflow.allow_analyst_db_writes = True
+        workflow.workflow_analysts = ["technical", "fundamental", "commodity_news"]
+        workflow.tickers = ["BU"]
+        workflow.config = {}
+        workflow.db = _DB()
+        captured = {}
+
+        def _pm(state):
+            captured.update(state)
+            return {"pm_state": {"ticker": state["ticker"]}}
+
+        state = {
+            "ticker": "BU",
+            "trading_date": "2025-03-25",
+            "enabled_analysts": list(workflow.workflow_analysts),
+            "pre_open_reference_price_unavailable": True,
+            "pre_open_reference_price_unavailable_reason": "missing_reference",
+        }
+        with patch(
+            "agents.decision_team.portfolio_manager.portfolio_agent_futures",
+            side_effect=_pm,
+        ):
+            workflow._run_phase1_portfolio_only(
+                state,
+                SimpleNamespace(id="portfolio-1"),
+            )
+        self.assertEqual(len(saved_signals), 3)
+        source_ids = [
+            row["signal_record_id"]
+            for row in captured["signal_collection_contract"]["source_contracts"]
+        ]
+        self.assertEqual(
+            source_ids,
+            [
+                "signal-BU-technical",
+                "signal-BU-fundamental",
+                "signal-BU-commodity_news",
+            ],
+        )
 
     def test_pm_source_uses_raw_signals_only_for_lineage_validation(self):
         source = inspect.getsource(portfolio_manager._run_pm_six_step_decision)

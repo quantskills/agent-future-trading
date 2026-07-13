@@ -154,7 +154,12 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
         )
 
         self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
-        self.assertEqual(contract["source_contracts"][0]["product_profile_evidence"]["product_profile_id"], usage["product_profile_id"])
+        source = contract["source_contracts"][0]
+        self.assertNotIn("product_profile_evidence", source)
+        self.assertEqual(
+            source["action_evidence_contract"]["product_profile_evidence"]["product_profile_id"],
+            usage["product_profile_id"],
+        )
         self.assertEqual(contract["evidence_items"][0]["product_profile_id"], usage["product_profile_id"])
         for forbidden in ("final_action_contract", "target_lots", "lots_delta", "authority_type", "reason_codes"):
             self.assertNotIn(forbidden, contract)

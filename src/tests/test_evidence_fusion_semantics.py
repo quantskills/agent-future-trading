@@ -162,11 +162,8 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         self.assertNotIn("capital_layer", contract["evidence_used"])
         self.assertNotIn("capital_ratio_source", contract["evidence_used"])
         self.assertNotIn("rank_reason", contract["evidence_used"])
-        self.assertFalse(contract["evidence_used"]["rank_capital_priority_real_budget_release"])
-        self.assertEqual(
-            contract["evidence_used"]["rank_capital_priority_release_detail"]["decision"],
-            "reject",
-        )
+        self.assertNotIn("rank_capital_priority_real_budget_release", contract["evidence_used"])
+        self.assertNotIn("rank_capital_priority_release_detail", contract["evidence_used"])
         recommendation = {
             "id": "rec-1",
             "source_type": "strategy",
@@ -175,8 +172,35 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             "signal_snapshot": {"final_action_contract": contract},
         }
         audit = audit_futures_recommendation(recommendation=recommendation, full_config={"max_total_margin_ratio": 0.20})
-        self.assertIn("pm_fusion_explanation_audit", audit.audit_payload)
-        self.assertTrue(audit.audit_payload["pm_fusion_explanation_audit"]["auditor_boundary"].startswith("audit_pm_contract"))
+        self.assertNotIn("pm_fusion_explanation_audit", audit.audit_payload)
+        self.assertNotIn("pm_memory_consumption_audit", audit.audit_payload)
+
+    def test_auditor_accepts_numeric_invalidation_from_signed_contract(self):
+        recommendation = {
+            "id": "rec-numeric-invalidation",
+            "source_type": "strategy",
+            "underlying_code": "RB",
+            "effective_trade_date": "2025-05-06",
+            "signal_snapshot": {
+                "final_action_contract": {
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "final_action": "open_probe",
+                    "contract_code": "rb2510",
+                    "invalidation_level": 3100.0,
+                    "target_margin_ratio_estimate": 0.01,
+                }
+            },
+        }
+
+        audit = audit_futures_recommendation(
+            recommendation=recommendation,
+            full_config={"max_total_margin_ratio": 0.20},
+        )
+
+        self.assertNotIn("missing_invalidation_condition", audit.hard_risk_reasons)
+        self.assertEqual(audit.audit_verdict, "approve")
 
     def test_final_contract_preserves_execution_trigger_profile_learning_route(self):
         action_values = [

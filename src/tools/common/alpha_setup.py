@@ -158,12 +158,10 @@ def _deployment_outcome_from_contract(
         "current_lots": current_lots,
         "target_lots": target_lots,
         "lots_delta": lots_delta,
-        "opportunity_rank": evidence_used.get("opportunity_rank"),
+        "opportunity_rank": capital_deployment.get("opportunity_rank"),
         "opportunity_score": evidence_used.get("opportunity_score"),
         "capital_allocation_reason": (
-            capital_deployment.get("capital_allocation_reason")
-            or evidence_used.get("capital_allocation_reason")
-            or ""
+            capital_deployment.get("capital_allocation_reason") or ""
         ),
     }
 
@@ -336,42 +334,39 @@ def infer_setup_type(
         str(opportunity_type or ""),
         str(opportunity_state or ""),
     ]
-    summary = (
-        snapshot.get("pm_research_contract_summary")
-        if isinstance(snapshot.get("pm_research_contract_summary"), Mapping)
+    final_contract = (
+        snapshot.get("final_action_contract")
+        if isinstance(snapshot.get("final_action_contract"), Mapping)
         else {}
     )
     raw_parts.extend([
-        str(summary.get("primary_opportunity_type") or ""),
-        str(summary.get("primary_opportunity_state") or ""),
+        str(final_contract.get("setup_type") or ""),
+        str(final_contract.get("entry_trigger") or ""),
+        str(final_contract.get("market_regime") or ""),
     ])
-    contracts = snapshot.get("trade_research_contracts") if isinstance(snapshot.get("trade_research_contracts"), Mapping) else {}
-    for contract in contracts.values():
+    scc = (
+        snapshot.get("signal_collection_contract")
+        if isinstance(snapshot.get("signal_collection_contract"), Mapping)
+        else {}
+    )
+    for source in scc.get("source_contracts") or []:
+        if not isinstance(source, Mapping):
+            continue
+        contract = source.get("action_evidence_contract")
         if not isinstance(contract, Mapping):
             continue
         raw_parts.extend([
+            str(contract.get("setup_type") or ""),
+            str(contract.get("action_name") or ""),
             str(contract.get("opportunity_type") or ""),
             str(contract.get("opportunity_state") or ""),
             str(contract.get("entry_trigger") or ""),
             str(contract.get("event_type") or ""),
             " ".join(str(item) for item in (contract.get("factor_focus") or []) if item),
-        ])
-    for analyst_name in ("technical", "fundamental", "commodity_news"):
-        payload = snapshot.get(analyst_name)
-        if not isinstance(payload, Mapping):
-            continue
-        raw_parts.extend([
-            str(payload.get("setup_type") or ""),
-            str(payload.get("entry_trigger") or ""),
-            str(payload.get("action_name") or ""),
-            str(payload.get("opportunity_type") or ""),
-            str(payload.get("opportunity_state") or ""),
-            str(payload.get("entry_trigger") or ""),
-            str(payload.get("event_type") or ""),
-            str(payload.get("primary_business_driver") or ""),
-            str(payload.get("supply_demand_state") or ""),
-            str(payload.get("basis_state") or ""),
-            str(payload.get("inventory_state") or ""),
+            str(contract.get("primary_business_driver") or ""),
+            str(contract.get("supply_demand_state") or ""),
+            str(contract.get("basis_state") or ""),
+            str(contract.get("inventory_state") or ""),
         ])
     text = " ".join(raw_parts).lower()
     if any(token in text for token in ("news", "event", "catalyst")):

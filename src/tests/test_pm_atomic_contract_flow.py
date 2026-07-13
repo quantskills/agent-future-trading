@@ -35,7 +35,10 @@ def _signal_collection_contract(ticker: str) -> dict:
         "entry_trigger": "breakout",
         "invalidation_present": True,
         "invalidation_condition": "close_below_trigger",
+        "invalidation_level": 2950.0,
+        "atr_stop_distance": 40.0,
         "horizon_class": "short",
+        "expected_horizon_days": 3,
         "market_regime": "trend",
         "evidence_quality": "high",
         "current_evidence_conflict": [],
@@ -44,7 +47,10 @@ def _signal_collection_contract(ticker: str) -> dict:
     }
     signal = SimpleNamespace(
         agent_name="technical",
-        metadata={"action_evidence_contract": action_contract},
+        metadata={
+            "action_evidence_contract": action_contract,
+            "signal_record_id": f"signal-{ticker}-technical",
+        },
     )
     return build_signal_collection_contract(
         ticker=ticker,
@@ -137,6 +143,7 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
             "effective_trade_date": "2025-03-25",
             "source_type": RecommendationSourceType.STRATEGY,
             "underlying_code": ticker,
+            "contract_code": f"{ticker}2505",
             "base_price": 3000.0,
             "status": RecommendationStatus.PENDING,
             "justification": "fixture",
@@ -145,6 +152,43 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
 
 
 class PMAtomicContractFlowTests(unittest.TestCase):
+    def test_step6_contract_has_final_execution_scope_without_internal_duplicates(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["contract_code"], "BU2505")
+        self.assertEqual(contract["setup_type"], "trend_continuation")
+        self.assertEqual(contract["horizon_class"], "short")
+        self.assertEqual(contract["expected_horizon_days"], 3)
+        self.assertEqual(contract["market_regime"], "trend")
+        self.assertEqual(contract["invalidation_level"], 2950.0)
+        self.assertEqual(contract["atr_stop_distance"], 40.0)
+        for duplicate in (
+            "recommendation_intent",
+            "action_candidates",
+            "analyst_execution_roles",
+            "risk_flags",
+        ):
+            self.assertNotIn(duplicate, contract)
+        for rank_field in (
+            "opportunity_rank",
+            "rank_source",
+            "rank_scope",
+            "capital_layer",
+            "capital_allocation_reason",
+        ):
+            self.assertNotIn(rank_field, contract["evidence_used"])
+            self.assertIn(rank_field, contract["capital_deployment"])
+
     def test_learning_retrieval_starts_only_after_step3_lifecycle_port(self):
         source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
             encoding="utf-8-sig"
@@ -287,7 +331,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         recommendation = result[0][1]
         contract = recommendation.signal_snapshot["final_action_contract"]
         self.assertEqual(contract["final_action"], "open_probe")
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
         self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
         self.assertEqual(contract["evidence_used"]["position_sizing_result"]["target_lots"], 1)
 
@@ -368,7 +412,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 self.assertEqual(contract["final_action"], "scale")
                 self.assertEqual(contract["current_lots"], current_lots)
                 self.assertEqual(contract["target_lots"], target_lots)
-                self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+                self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
                 self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
 
     def test_open_and_add_compete_in_same_full_market_rank(self):
@@ -395,8 +439,8 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
 
         contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
-        self.assertEqual(contracts["ADD"]["evidence_used"]["opportunity_rank"], 1)
-        self.assertEqual(contracts["OPEN"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contracts["ADD"]["capital_deployment"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["OPEN"]["capital_deployment"]["opportunity_rank"], 2)
 
     def test_ranked_add_rejection_restores_existing_position_to_hold(self):
         state = _pm_state("BU", 2, 3, with_scorecard=True)
@@ -431,7 +475,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         self.assertEqual(contract["current_lots"], 2)
         self.assertEqual(contract["target_lots"], 2)
         self.assertEqual(contract["lots_delta"], 0)
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
         self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
 
     def test_add_budget_consumes_only_incremental_margin(self):
@@ -497,7 +541,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         contract = result[0][1].signal_snapshot["final_action_contract"]
         self.assertEqual(contract["final_action"], "wait")
         self.assertEqual(contract["target_lots"], 0)
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
         self.assertFalse(contract["capital_deployment"]["selected_for_capital_deployment"])
         self.assertTrue(
             str(contract["capital_deployment"]["capital_allocation_reason"]).startswith(
@@ -546,9 +590,9 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
 
         contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
-        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["BU"]["capital_deployment"]["opportunity_rank"], 1)
         self.assertTrue(contracts["BU"]["capital_deployment"]["selected_for_capital_deployment"])
-        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contracts["ZN"]["capital_deployment"]["opportunity_rank"], 2)
         self.assertFalse(contracts["ZN"]["capital_deployment"]["selected_for_capital_deployment"])
 
     def test_rank_preserves_probe_and_real_budget_authority(self):
@@ -593,9 +637,9 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
 
         contracts = {ticker: rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
-        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["ZN"]["capital_deployment"]["opportunity_rank"], 1)
         self.assertEqual(contracts["ZN"]["capital_deployment"]["capital_layer"], "real_budget_entry")
-        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contracts["BU"]["capital_deployment"]["opportunity_rank"], 2)
         self.assertEqual(contracts["BU"]["capital_deployment"]["capital_layer"], "exploration_probe")
         self.assertEqual(probe_state["final_entry_authority"]["authority_type"], "exploration_probe")
         self.assertEqual(probe_state["final_entry_authority"]["max_allowed_margin_ratio"], 0.015)
@@ -623,8 +667,8 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         )
 
         contracts = {ticker.upper(): rec.signal_snapshot["final_action_contract"] for ticker, rec in result}
-        self.assertEqual(contracts["BU"]["evidence_used"]["opportunity_rank"], 1)
-        self.assertEqual(contracts["ZN"]["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contracts["BU"]["capital_deployment"]["opportunity_rank"], 1)
+        self.assertEqual(contracts["ZN"]["capital_deployment"]["opportunity_rank"], 2)
 
 
 if __name__ == "__main__":

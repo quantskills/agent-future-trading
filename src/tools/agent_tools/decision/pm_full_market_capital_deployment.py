@@ -431,22 +431,6 @@ def _set_daily_opportunity_rank(snapshot: Dict[str, Any], side: str, rank: int) 
         row["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
         row["rank_is_capital_priority"] = True
         row["rank_is_not_trade_authority"] = True
-    active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-    active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
-    if isinstance(active_opportunity, dict):
-        active_opportunity["opportunity_rank"] = rank
-        active_opportunity.update(rank_metadata)
-        active_opportunity.update(rank_trace)
-        active_opportunity["rank_semantics_version"] = CAPITAL_PRIORITY_RANK_SEMANTICS_VERSION
-        active_opportunity["opportunity_rank_meaning"] = CAPITAL_PRIORITY_RANK_MEANING
-        active_opportunity["rank_is_capital_priority"] = True
-        active_opportunity["rank_is_not_trade_authority"] = True
-    consistency = snapshot.get("pm_landing_consistency_audit") if isinstance(snapshot.get("pm_landing_consistency_audit"), dict) else {}
-    alignment = consistency.get("opportunity_scorecard_alignment") if isinstance(consistency.get("opportunity_scorecard_alignment"), dict) else {}
-    if isinstance(alignment, dict):
-        alignment["opportunity_rank"] = rank
-        alignment.update(rank_metadata)
-        alignment.update(rank_trace)
 
 
 def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
@@ -478,12 +462,6 @@ def _clear_non_full_market_rank_fields(snapshot: Dict[str, Any]) -> None:
         row = scorecard.get(side)
         if isinstance(row, dict):
             clear_mapping(row)
-    active = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-    opportunity = active.get("opportunity") if isinstance(active.get("opportunity"), dict) else {}
-    clear_mapping(opportunity)
-    consistency = snapshot.get("pm_landing_consistency_audit") if isinstance(snapshot.get("pm_landing_consistency_audit"), dict) else {}
-    alignment = consistency.get("opportunity_scorecard_alignment") if isinstance(consistency.get("opportunity_scorecard_alignment"), dict) else {}
-    clear_mapping(alignment)
 
 
 def _contract_target_lots(pm_state: Dict[str, Any]) -> int:

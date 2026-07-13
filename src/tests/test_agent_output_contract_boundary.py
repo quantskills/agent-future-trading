@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.execution_team import trader as trader_agent
 from llm.prompt import build_researcher_causal_review_prompt
+from tools.agent_tools.analysis.analyst_data_usage import data_usage_from_snapshot
 from tools.agent_tools.research import research_review_helpers
 from tools.common.contracts import (
     final_contract_execution_fields,
@@ -30,6 +31,7 @@ from tools.common.final_action_semantics import (
     validate_final_action_lot_transition,
 )
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from util.futures_audit import extract_signal_lifecycle
 
 
 LEGACY_PM_LIFECYCLE_FIELDS = {
@@ -148,6 +150,73 @@ def _final_action_contract():
 
 
 class AgentOutputContractBoundaryTest(unittest.TestCase):
+    def test_reviewer_and_researcher_helpers_read_analysts_from_scc_only(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[_analyst_signal("technical")],
+            enabled_analysts=["technical"],
+        )
+        snapshot = {
+            "technical": {"signal": "Bearish", "confidence": 0.01},
+            "signal_collection_contract": contract,
+        }
+        payloads = research_review_helpers._analyst_payloads(snapshot)
+        self.assertEqual(payloads["technical"], _analyst_action_contract())
+        self.assertEqual(
+            research_review_helpers._signal_combo_from_snapshot(snapshot),
+            ["Bullish", "Neutral", "Neutral"],
+        )
+
+        contract["source_contracts"][0]["action_evidence_contract"]["data_usage_summary"] = {
+            "analyst": "technical",
+            "sources": {"pandaai_market": {"available": True, "used_in_signal": True}},
+        }
+        usage = data_usage_from_snapshot({"signal_collection_contract": contract})
+        self.assertIn("pandaai_market", usage["analysts"]["technical"]["sources"])
+
+    def test_reviewer_does_not_apply_account_risk_hard_gate_or_second_audit(self):
+        source = _source("tools/agent_tools/research/reviewer_phase4_review.py")
+        self.assertNotIn("_apply_account_margin_hard_gate", source)
+        self.assertNotIn("reviewer_hard_gate", source)
+        reviewer_source = _source("agents/research_team/reviewer.py")
+        self.assertNotIn("Validating phase flow", reviewer_source)
+        self.assertIn("Reviewing settled trading facts", reviewer_source)
+
+    def test_trader_lifecycle_reads_only_final_action_contract(self):
+        snapshot = {
+            "technical": {
+                "horizon_class": "long",
+                "target_return": 0.50,
+                "invalidation_level": 1.0,
+            },
+            "final_action_contract": {
+                "final_action": "open_real",
+                "horizon_class": "short",
+                "expected_horizon_days": 3,
+                "entry_trigger": "breakout",
+                "invalidation_level": 2950.0,
+                "atr_stop_distance": 40.0,
+                "setup_type": "trend_continuation",
+                "market_regime": "trend",
+            },
+        }
+        lifecycle = extract_signal_lifecycle(snapshot)
+        self.assertEqual(
+            lifecycle,
+            {
+                "horizon_class": "short",
+                "expected_horizon_days": 3,
+                "entry_trigger": "breakout",
+                "action_name": "open_real",
+                "invalidation_level": 2950.0,
+                "atr_stop_distance": 40.0,
+                "setup_type": "trend_continuation",
+                "market_regime": "trend",
+            },
+        )
+        self.assertNotIn("target_return", lifecycle)
+
     def test_analyst_output_is_evidence_only_and_common_semantics_can_read_it(self):
         artifact = {
             "producer": "technical",
@@ -296,7 +365,8 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         auditor_source = _source("agents/decision_team/auditor.py")
         self.assertIn("final_action_contract_from_snapshot", auditor_source)
         self.assertIn("contract_increases_risk_position", auditor_source)
-        self.assertIn("derive_protocol_semantic_checks", auditor_source)
+        self.assertNotIn("audit_pm_memory_consumption", auditor_source)
+        self.assertNotIn("audit_pm_fusion_explanation", auditor_source)
         self.assertNotIn("def _contract_target_lots", auditor_source)
         self.assertNotIn("def _contract_current_lots", auditor_source)
 
@@ -410,7 +480,8 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
         self.assertIn("PM plan budget drift", prompt)
         self.assertIn("factual attribution", prompt)
         self.assertIn("research input", prompt)
-        self.assertIn("reviewer_hard_gate=false", prompt)
+        self.assertNotIn("reviewer_hard_gate", prompt)
+        self.assertIn("research input and factual attribution", prompt)
         self.assertIn("max_net_exposure", prompt)
         self.assertIn("target_margin_ratio_*", prompt)
         self.assertIn("probe_margin_ratio", prompt)

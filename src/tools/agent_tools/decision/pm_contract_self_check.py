@@ -256,14 +256,9 @@ def _pm_lifecycle_trace_errors(contract: Mapping[str, Any]) -> List[str]:
     if not requires_trace:
         return []
 
-    evidence = _mapping(contract.get("evidence_used"))
     learning_used = _mapping(contract.get("learning_used"))
-    trace = evidence.get("pm_lifecycle_learning_trace")
-    if not isinstance(trace, Mapping):
-        trace = learning_used.get("pm_lifecycle_learning_trace")
-    impact = evidence.get("pm_lifecycle_learning_impact_delta")
-    if not isinstance(impact, Mapping):
-        impact = learning_used.get("pm_lifecycle_learning_impact_delta")
+    trace = learning_used.get("pm_lifecycle_learning_trace")
+    impact = learning_used.get("pm_lifecycle_learning_impact_delta")
 
     errors: List[str] = []
     if not isinstance(trace, Mapping):

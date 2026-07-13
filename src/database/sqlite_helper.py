@@ -2507,7 +2507,13 @@ class SQLiteDB(BaseDB):
                         snapshot = {}
                 item_combo = self._signal_combo_from_snapshot(snapshot)
                 item["signal_combo"] = list(item_combo)
-                item["market_confirmation"] = snapshot.get("market_confirmation") if isinstance(snapshot, dict) else None
+                final_contract = snapshot.get("final_action_contract") if isinstance(snapshot, dict) else {}
+                evidence = final_contract.get("evidence_used") if isinstance(final_contract, dict) else {}
+                item["market_confirmation"] = {
+                    "confirmation_score": evidence.get("market_confirmation_score"),
+                    "conflicts": evidence.get("market_confirmation_conflicts") or [],
+                    "source": "final_action_contract.evidence_used",
+                } if isinstance(evidence, dict) and evidence else None
                 item["pm_risk_gate"] = self._pm_risk_gate_from_snapshot(snapshot)
                 if normalized_combo is not None and item_combo != normalized_combo:
                     continue
@@ -3925,9 +3931,14 @@ class SQLiteDB(BaseDB):
 
     def _signal_combo_from_snapshot(self, snapshot: Dict[str, Any]) -> tuple[str, str, str]:
         def signal_value(analyst: str) -> str:
-            item = snapshot.get(analyst)
-            if isinstance(item, dict) and item.get("signal"):
-                return str(item.get("signal"))
+            contract = snapshot.get("signal_collection_contract")
+            if isinstance(contract, dict):
+                for source in contract.get("source_contracts") or []:
+                    if not isinstance(source, dict) or source.get("analyst") != analyst:
+                        continue
+                    item = source.get("action_evidence_contract")
+                    if isinstance(item, dict) and item.get("signal"):
+                        return str(item.get("signal"))
             return "Neutral"
 
         return (
@@ -3937,15 +3948,6 @@ class SQLiteDB(BaseDB):
         )
 
     def _pm_risk_gate_from_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        audit = snapshot.get("active_opportunity_audit")
-        if isinstance(audit, dict):
-            decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
-            if decision:
-                return {
-                    "decision": decision.get("audit_decision") or decision.get("decision") or decision.get("authority_type"),
-                    "reasons": audit.get("reason_codes") or decision.get("reason_codes") or [],
-                    "source": "active_opportunity_audit",
-                }
         contract = snapshot.get("final_action_contract")
         if isinstance(contract, dict):
             return {

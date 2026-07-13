@@ -60,9 +60,15 @@ def _nested_dict(payload: Mapping[str, Any], key: str) -> Dict[str, Any]:
 
 def analyst_payloads_from_snapshot(snapshot: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     payloads: Dict[str, Dict[str, Any]] = {}
-    for analyst in ANALYST_KEYS:
-        value = snapshot.get(analyst)
-        if isinstance(value, Mapping):
+    contract = snapshot.get("signal_collection_contract")
+    if not isinstance(contract, Mapping):
+        return payloads
+    for source in contract.get("source_contracts") or []:
+        if not isinstance(source, Mapping):
+            continue
+        analyst = str(source.get("analyst") or "")
+        value = source.get("action_evidence_contract")
+        if analyst in ANALYST_KEYS and isinstance(value, Mapping):
             payloads[analyst] = dict(value)
     return payloads
 

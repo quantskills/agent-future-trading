@@ -109,7 +109,6 @@ from tools.agent_tools.execution.accountant_futures_settlement import FuturesDai
 from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
 from tools.agent_tools.execution.trader_entry_timing import phase2_entry_audit
 from tools.agent_tools.research.reviewer_phase4_review import (
-    _apply_account_margin_hard_gate,
     _apply_net_exposure_review,
     _build_daily_transaction_report,
     _build_capital_deployment_diagnostics,
@@ -119,7 +118,7 @@ from tools.agent_tools.research.reviewer_phase4_review import (
     _learning_mechanisms_from_recommendation,
     _loss_failure_family,
     _execution_result_from_snapshot,
-    _validate_recommendation_execution_audit,
+    _review_recommendation_execution_facts,
 )
 from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
 from tools.agent_tools.decision.pm_capital_allocator import adaptive_policy_record
@@ -191,7 +190,10 @@ def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
     }
     signal = SimpleNamespace(
         agent_name="technical",
-        metadata={"action_evidence_contract": action_contract},
+        metadata={
+            "action_evidence_contract": action_contract,
+            "signal_record_id": f"signal-{ticker}-technical",
+        },
     )
     return build_signal_collection_contract(
         ticker=ticker,
@@ -199,6 +201,19 @@ def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
         analyst_signals=[signal],
         enabled_analysts=["technical"],
     )
+
+
+def _scc_from_test_payloads(**payloads) -> dict:
+    return {
+        "source_contracts": [
+            {
+                "analyst": analyst,
+                "signal_record_id": f"signal-{analyst}",
+                "action_evidence_contract": {"analyst": analyst, **payload},
+            }
+            for analyst, payload in payloads.items()
+        ]
+    }
 
 
 def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | None = None, execution_fields: dict | None = None) -> dict:
@@ -808,13 +823,13 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_layer"],
             CAPITAL_LAYER_REAL_BUDGET,
         )
-        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["opportunity_rank"], 1)
         self.assertEqual(
-            rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["rank_semantics_version"],
+            rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_semantics_version"],
             "agentquant.capital_priority_rank.v1",
         )
         self.assertEqual(
-            rec_high.signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank_meaning"],
+            rec_high.signal_snapshot["final_action_contract"]["capital_deployment"]["opportunity_rank_meaning"],
             "rank_1_is_current_highest_capital_priority_not_trade_authority",
         )
         self.assertTrue(
@@ -835,7 +850,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         )
         self.assertIn(
             "not_selected_by_full_market_pm_capital_queue",
-            rec_low.signal_snapshot["final_action_contract"]["evidence_used"]["capital_allocation_reason"],
+            rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],
         )
         self.assertNotIn("active_opportunity_audit", rec_low.signal_snapshot)
         self.assertEqual(len(updates), 2)
@@ -1114,7 +1129,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         contract = rec_best_watch.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
         self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
         self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
         self.assertEqual(deployment["capital_ratio_source"], CAPITAL_RATIO_SOURCE_EXPLORATION)
@@ -1211,9 +1226,9 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         contract_2 = rec_rank_2.signal_snapshot["final_action_contract"]
         deployment_1 = contract_1["capital_deployment"]
         deployment_2 = contract_2["capital_deployment"]
-        components_1 = contract_1["evidence_used"]["rank_input_components"]["rank_score_components"]
+        components_1 = contract_1["capital_deployment"]["rank_input_components"]["rank_score_components"]
 
-        self.assertEqual(contract_1["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract_1["capital_deployment"]["opportunity_rank"], 1)
         self.assertTrue(deployment_1["selected_for_capital_deployment"])
         self.assertEqual(contract_1["target_lots"], 1)
         self.assertEqual(contract_1["target_margin_ratio_estimate"], 0.008)
@@ -1221,7 +1236,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertTrue(deployment_1["net_exposure_budget_ok"])
         self.assertGreater(components_1["capital_efficiency"], 0.0)
 
-        self.assertEqual(contract_2["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(contract_2["capital_deployment"]["opportunity_rank"], 2)
         self.assertFalse(deployment_2["selected_for_capital_deployment"])
         self.assertEqual(contract_2["target_lots"], 0)
         self.assertEqual(contract_2["lots_delta"], 0)
@@ -1231,7 +1246,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertIn("no_rank_or_budget_no_new_exposure", contract_2["reason_codes"])
         self.assertIn(
             "not_selected_by_full_market_pm_capital_queue",
-            contract_2["evidence_used"]["capital_allocation_reason"],
+            contract_2["capital_deployment"]["capital_allocation_reason"],
         )
 
     def test_fifteen_watch_candidates_receive_unique_full_market_rank_one_to_n(self):
@@ -1325,17 +1340,17 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         for ticker, recommendation in recommendations:
             contract = recommendation.signal_snapshot["final_action_contract"]
             deployment = contract["capital_deployment"]
-            components = contract["evidence_used"]["rank_input_components"]["rank_score_components"]
-            observed.append(contract["evidence_used"]["opportunity_rank"])
+            components = contract["capital_deployment"]["rank_input_components"]["rank_score_components"]
+            observed.append(contract["capital_deployment"]["opportunity_rank"])
             self.assertEqual(contract["target_margin_ratio_estimate"], 0.008)
             self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
             self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
-            self.assertEqual(deployment["rank_budget_sequence"], contract["evidence_used"]["opportunity_rank"])
+            self.assertEqual(deployment["rank_budget_sequence"], contract["capital_deployment"]["opportunity_rank"])
             self.assertGreater(components["capital_efficiency"], 0.0)
 
         self.assertEqual(sorted(observed), list(range(1, 16)))
-        self.assertEqual(recommendations[0][1].signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 1)
-        self.assertEqual(recommendations[-1][1].signal_snapshot["final_action_contract"]["evidence_used"]["opportunity_rank"], 15)
+        self.assertEqual(recommendations[0][1].signal_snapshot["final_action_contract"]["capital_deployment"]["opportunity_rank"], 1)
+        self.assertEqual(recommendations[-1][1].signal_snapshot["final_action_contract"]["capital_deployment"]["opportunity_rank"], 15)
         self.assertEqual(len(updates), 15)
 
     def test_workflow_canonicalizes_flat_skipped_contract_to_wait_before_persistence(self):
@@ -1564,8 +1579,8 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         positive_contract = rec_positive.signal_snapshot["final_action_contract"]
         negative_contract = rec_negative.signal_snapshot["final_action_contract"]
-        self.assertEqual(positive_contract["evidence_used"]["opportunity_rank"], 1)
-        self.assertEqual(negative_contract["evidence_used"]["opportunity_rank"], 2)
+        self.assertEqual(positive_contract["capital_deployment"]["opportunity_rank"], 1)
+        self.assertEqual(negative_contract["capital_deployment"]["opportunity_rank"], 2)
         self.assertEqual(positive_contract["target_lots"], 2)
         self.assertEqual(positive_contract["lots_delta"], 2)
         self.assertEqual(rec_positive.action, RecommendationAction.OPEN_LONG)
@@ -1669,7 +1684,7 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
 
         contract = recommendation.signal_snapshot["final_action_contract"]
         deployment = contract["capital_deployment"]
-        self.assertEqual(contract["evidence_used"]["opportunity_rank"], 1)
+        self.assertEqual(contract["capital_deployment"]["opportunity_rank"], 1)
         self.assertEqual(deployment["opportunity_rank"], 1)
         self.assertEqual(deployment["rank_capital_role"], RANK_CAPITAL_ROLE_EXPLORATION)
         self.assertEqual(deployment["capital_layer"], CAPITAL_LAYER_EXPLORATION)
@@ -3568,7 +3583,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 agent_name="technical",
                 signal=Signal.NEUTRAL,
                 confidence=0.5,
-                metadata={"action_evidence_contract": {
+                metadata={"signal_record_id": "signal-J-technical", "action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "technical",
                     "signal": "Neutral",
@@ -3584,7 +3599,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 agent_name="fundamental",
                 signal=Signal.BEARISH,
                 confidence=0.6,
-                metadata={"action_evidence_contract": {
+                metadata={"signal_record_id": "signal-J-fundamental", "action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "fundamental",
                     "signal": "Bearish",
@@ -3600,7 +3615,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 agent_name="commodity_news",
                 signal=Signal.NEUTRAL,
                 confidence=0.4,
-                metadata={"action_evidence_contract": {
+                metadata={"signal_record_id": "signal-J-commodity_news", "action_evidence_contract": {
                     "contract_version": "agentquant.action_evidence.v1",
                     "analyst": "commodity_news",
                     "signal": "Neutral",
@@ -4775,7 +4790,7 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("PM plan budget drift", warnings[0])
         self.assertEqual(len(diagnostics), 1)
-        self.assertFalse(diagnostics[0]["reviewer_hard_gate"])
+        self.assertNotIn("reviewer_hard_gate", diagnostics[0])
         self.assertEqual(diagnostics[0]["planned_budget_parameter"], "net_exposure_control.max_net_exposure")
 
     def test_net_exposure_review_records_material_budget_drift_without_phase4_error(self):
@@ -4798,7 +4813,7 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(diagnostics[0]["realized_value"], 0.525)
         self.assertIn(
             "position_budget_policy.probe_margin_ratio",
-            diagnostics[0]["pm_plan_budget_parameters_not_reviewer_hard_gate"],
+            diagnostics[0]["pm_plan_budget_parameters_are_review_context"],
         )
 
     def test_net_exposure_review_attributes_conditional_leg_budget_drift(self):
@@ -4858,22 +4873,11 @@ class ValidationRegressionTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("dynamic alpha-release cap", warnings[0])
 
-    def test_account_margin_hard_gate_rejects_real_account_boundary_breach(self):
-        errors = []
-
-        _apply_account_margin_hard_gate(
-            trading_date="2025-01-14",
-            cfg={
-                "max_total_margin_ratio": 0.20,
-                "position_budget_policy": {"hard_max_total_margin_ratio": 0.20},
-                "capital_utilization_control": {"max_margin_ratio_after_scaling": 0.20},
-            },
-            settlement_row={"current_balance": 780000.0, "current_margin": 220000.0},
-            errors=errors,
+    def test_reviewer_does_not_apply_account_margin_hard_gate(self):
+        source = (SRC_ROOT / "tools" / "agent_tools" / "research" / "reviewer_phase4_review.py").read_text(
+            encoding="utf-8-sig"
         )
-
-        self.assertEqual(len(errors), 1)
-        self.assertIn("account margin hard limit exceeded", errors[0])
+        self.assertNotIn("_apply_account_margin_hard_gate", source)
 
     def test_market_confirmation_quality_warnings_are_aggregated_by_status(self):
         recommendations = [
@@ -4919,19 +4923,13 @@ class ValidationRegressionTest(unittest.TestCase):
 
         warnings, summary = _collect_recommendation_quality_warnings(recommendations)
 
-        self.assertTrue(any("market confirmation parameter errors" in item for item in warnings))
-        self.assertFalse(any("market confirmation no data" in item for item in warnings))
-        self.assertFalse(any("market confirmation fallback covered missing" in item for item in warnings))
-        self.assertTrue(any("market confirmation optional no data" in item for item in summary["info_messages"]))
-        self.assertTrue(any("market confirmation fallback covered optional missing" in item for item in summary["info_messages"]))
-        self.assertFalse(any(": market confirmation data missing:" in item for item in warnings))
-        self.assertEqual(summary["missing_by_status"]["parameter_error"], ["BU"])
-        self.assertEqual(summary["missing_by_status_feature"]["no_data"]["warehouse_receipt"], ["RB"])
-        self.assertEqual(summary["fallback_covered_by_feature"]["net_flow_long"], ["M"])
+        self.assertEqual(warnings, [])
+        self.assertEqual(summary["ticker_count"], 0)
+        self.assertEqual(summary["missing_by_status"], {})
 
     def test_reviewer_execution_audit_accepts_hold_recommendation_without_transactions(self):
         errors = []
-        counter = _validate_recommendation_execution_audit(
+        counter = _review_recommendation_execution_facts(
             recommendations=[
                 {
                     "id": "rec-hold",
@@ -4970,7 +4968,11 @@ class ValidationRegressionTest(unittest.TestCase):
                         "reason_codes": "capital_release_candidate",
                         "final_action": "scale",
                         "reason_codes": ["capital_utilization_guard"],
-                        "authority_type": "allow",
+                        "authority_type": "real_budget_entry",
+                        "authority_decision": "allow_real_new_entry",
+                        "evidence_used": {
+                            "market_confirmation_score": 0.72,
+                        },
                         "learning_used": {
                             "memory_state": "protected",
                             "capital_utilization_learning": {
@@ -4990,9 +4992,6 @@ class ValidationRegressionTest(unittest.TestCase):
                             },
                         },
                     },
-                    "active_opportunity_audit": {"decision": {"authority_type": "allow"}},
-                    "market_confirmation": {"confirmation_score": 0.72},
-                    "technical": {"signal": "Bullish", "confidence": 0.70},
                     "execution_result": {"no_trade_reason": "capital_release_candidate"},
                     "pm_draft_pm_internal_draft_not_trade_source": True,
                     "pm_draft_for_test_only": {
@@ -5035,10 +5034,12 @@ class ValidationRegressionTest(unittest.TestCase):
                         "reason_codes": "intraday_trigger_not_met",
                         "final_action": "open_real",
                         "reason_codes": [],
-                        "authority_type": "allow",
+                        "authority_type": "real_budget_entry",
+                        "authority_decision": "allow_real_new_entry",
+                        "evidence_used": {
+                            "market_confirmation_score": 0.66,
+                        },
                     },
-                    "active_opportunity_audit": {"decision": {"authority_type": "allow"}},
-                    "market_confirmation": {"confirmation_score": 0.66},
                     "execution_result": {"no_trade_reason": "intraday_trigger_not_met"},
                 },
             },
@@ -5054,13 +5055,12 @@ class ValidationRegressionTest(unittest.TestCase):
                         "reason_codes": "pm_risk_gate_block",
                         "final_action": "wait",
                         "reason_codes": ["analyst_quality_low_tradeability"],
-                        "authority_type": "block",
+                        "authority_type": "not_applicable",
+                        "authority_decision": "blocked",
+                        "evidence_used": {
+                            "market_confirmation_score": 0.40,
+                        },
                     },
-                    "active_opportunity_audit": {
-                        "decision": {"authority_type": "block"},
-                        "reason_codes": ["analyst_quality_low_tradeability"],
-                    },
-                    "market_confirmation": {"confirmation_score": 0.40},
                     "execution_result": {"no_trade_reason": "pm_risk_gate_block"},
                 },
             },
@@ -5132,7 +5132,11 @@ class ValidationRegressionTest(unittest.TestCase):
                         "reason_codes": "minimum_new_entry_threshold",
                         "final_action": "open_probe",
                         "reason_codes": ["minimum_new_entry_threshold"],
-                        "authority_type": "allow",
+                        "authority_type": "exploration_probe",
+                        "authority_decision": "allow_exploration_probe",
+                        "evidence_used": {
+                            "market_confirmation_score": 0.72,
+                        },
                         "learning_used": {
                             "memory_state": "protected",
                             "capital_utilization_learning": {
@@ -5152,9 +5156,6 @@ class ValidationRegressionTest(unittest.TestCase):
                             },
                         },
                     },
-                    "active_opportunity_audit": {"decision": {"authority_type": "allow"}},
-                    "market_confirmation": {"confirmation_score": 0.72},
-                    "technical": {"signal": "Bullish", "confidence": 0.72},
                     "execution_result": {"no_trade_reason": "minimum_new_entry_threshold"},
                 },
             }
@@ -5849,22 +5850,19 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(contract["candidate_sources_do_not_bypass_contract"])
         self.assertEqual(contract["authority_type"], "real_budget_entry")
         self.assertEqual(contract["target_lots"], 5)
-        self.assertEqual(contract["action_candidates"][0]["source"], "alpha_setup_action_value")
+        self.assertNotIn("action_candidates", contract)
         self.assertEqual(contract["evidence_used"]["opportunity_score"], 0.72)
         self.assertNotIn("opportunity_rank", contract["evidence_used"])
         self.assertEqual(contract["evidence_used"]["side_priority"], 1)
-        self.assertEqual(
-            contract["evidence_used"]["capital_allocation_reason"],
-            "ranked_deployable_candidate_with_complete_current_evidence",
-        )
+        self.assertNotIn("capital_allocation_reason", contract["evidence_used"])
         self.assertEqual(contract["learning_used"]["learning_adjustment_summary"]["effect"], "boosted")
         self.assertEqual(
-            contract["evidence_used"]["lifecycle_learning_trace"]["contract_lifecycle_port"],
+            contract["learning_used"]["pm_lifecycle_learning_trace"]["contract_lifecycle_port"],
             "open_add_new_risk",
         )
-        self.assertIn("open", contract["evidence_used"]["lifecycle_learning_trace"]["used_lanes"])
+        self.assertIn("open", contract["learning_used"]["pm_lifecycle_learning_trace"]["used_lanes"])
         self.assertEqual(
-            contract["evidence_used"]["learning_impact_delta"]["lots_delta"],
+            contract["learning_used"]["pm_lifecycle_learning_impact_delta"]["lots_delta"],
             5,
         )
         self.assertNotIn("opportunity_score", contract)
@@ -5901,8 +5899,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertEqual(contract["execution_profile"], "vwap_confirmed")
         self.assertEqual(contract["trigger_source"], "execution_action_value_vwap")
-        trace = contract["evidence_used"]["lifecycle_learning_trace"]
-        impact = contract["evidence_used"]["learning_impact_delta"]
+        trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+        impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(trace["contract_lifecycle_port"], "open_add_new_risk")
         self.assertFalse(trace["execution_profile_signal_direct_to_rank"])
         self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
@@ -5965,15 +5963,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(contract["final_action"], "open_probe")
-        self.assertEqual(contract["action_candidates"][0]["source"], "conditional_monitor")
-        self.assertEqual(contract["action_candidates"][0]["action"], "conditional_probe")
-        self.assertTrue(contract["action_candidates"][0]["requires_intraday_confirmation"])
+        self.assertNotIn("action_candidates", contract)
         self.assertEqual(
-            contract["evidence_used"]["lifecycle_learning_trace"]["contract_lifecycle_port"],
+            contract["learning_used"]["pm_lifecycle_learning_trace"]["contract_lifecycle_port"],
             "conditional_monitor",
         )
         self.assertEqual(
-            contract["evidence_used"]["learning_impact_delta"]["conditional_monitor_decision"],
+            contract["learning_used"]["pm_lifecycle_learning_impact_delta"]["conditional_monitor_decision"],
             "allow_conditional_monitor_probe",
         )
         self.assertNotIn("scorecard_current_tradeable_probe_seed", contract["reason_codes"])
@@ -6020,8 +6016,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
         )
 
-        trace = contract["evidence_used"]["lifecycle_learning_trace"]
-        impact = contract["evidence_used"]["learning_impact_delta"]
+        trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+        impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(contract["final_action"], "hold")
         self.assertEqual(trace["contract_lifecycle_port"], "hold")
         self.assertIn("hold", trace["used_lanes"])
@@ -6069,8 +6065,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ],
         )
 
-        trace = contract["evidence_used"]["lifecycle_learning_trace"]
-        impact = contract["evidence_used"]["learning_impact_delta"]
+        trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+        impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(contract["final_action"], "reduce")
         self.assertEqual(trace["contract_lifecycle_port"], "reduce_exit")
         self.assertIn("exit", trace["used_lanes"])
@@ -11852,8 +11848,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertEqual(execution_contract["trigger_source"], "technical_pullback")
         self.assertTrue(execution_contract["requires_intraday_confirmation"])
         self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
-        technical_role = execution_contract["analyst_execution_roles"]["technical"]
-        self.assertEqual(technical_role["learning_scope"]["setup_family"], "trend_pullback")
+        self.assertNotIn("analyst_execution_roles", execution_contract)
         learning = _setup_execution_learning_context({
             "final_action_contract": {
                 **execution_contract,
@@ -11866,8 +11861,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "lots_delta": 2,
             },
         })
-        self.assertIn("technical", learning["analyst_action_evidence_contracts"])
-        self.assertEqual(learning["analyst_learning_scopes"]["technical"]["setup_family"], "trend_pullback")
+        self.assertNotIn("analyst_action_evidence_contracts", learning)
+        self.assertNotIn("analyst_learning_scopes", learning)
 
     def test_pm_does_not_treat_fundamental_pending_trigger_as_current_trigger(self):
         signal = AnalystSignal(
@@ -11907,9 +11902,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             control_reasons=["controlled_probe"],
         )
 
-        role = plan["analyst_execution_roles"]["fundamental"]
-        self.assertFalse(role["trigger_valid"])
-        self.assertEqual(role["entry_timing_signal"], "requires_technical_or_market_timing")
+        self.assertNotIn("analyst_execution_roles", plan)
+        self.assertTrue(plan["requires_intraday_confirmation"])
 
     def test_pm_execution_contract_classifies_authorized_event_immediate(self):
         plan = _build_pm_decision_context(
@@ -12535,9 +12529,11 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "r1",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bullish"},
-                                "fundamental": {"signal": "Bullish"},
-                                "commodity_news": {"signal": "Neutral"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bullish"},
+                                    fundamental={"signal": "Bullish"},
+                                    commodity_news={"signal": "Neutral"},
+                                ),
                             }
                         ),
                     ),
@@ -12545,9 +12541,11 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "r2",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bearish"},
-                                "fundamental": {"signal": "Neutral"},
-                                "commodity_news": {"signal": "Bearish"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bearish"},
+                                    fundamental={"signal": "Neutral"},
+                                    commodity_news={"signal": "Bearish"},
+                                ),
                             }
                         ),
                     ),
@@ -12555,9 +12553,11 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "r3",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bullish"},
-                                "fundamental": {"signal": "Bullish"},
-                                "commodity_news": {"signal": "Neutral"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bullish"},
+                                    fundamental={"signal": "Bullish"},
+                                    commodity_news={"signal": "Neutral"},
+                                ),
                             }
                         ),
                     ),
@@ -12688,9 +12688,9 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "bu-r1",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bullish"},
-                                "fundamental": {"signal": "Bullish"},
-                                "commodity_news": {"signal": "Neutral"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bullish"}, fundamental={"signal": "Bullish"}, commodity_news={"signal": "Neutral"}
+                                ),
                             }
                         ),
                     ),
@@ -12698,9 +12698,9 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "bu-r2",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bullish"},
-                                "fundamental": {"signal": "Bullish"},
-                                "commodity_news": {"signal": "Neutral"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bullish"}, fundamental={"signal": "Bullish"}, commodity_news={"signal": "Neutral"}
+                                ),
                             }
                         ),
                     ),
@@ -12708,9 +12708,9 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "bu-r3",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bullish"},
-                                "fundamental": {"signal": "Bullish"},
-                                "commodity_news": {"signal": "Neutral"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bullish"}, fundamental={"signal": "Bullish"}, commodity_news={"signal": "Neutral"}
+                                ),
                             }
                         ),
                     ),
@@ -12718,9 +12718,9 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "p-r1",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bearish"},
-                                "fundamental": {"signal": "Neutral"},
-                                "commodity_news": {"signal": "Bullish"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bearish"}, fundamental={"signal": "Neutral"}, commodity_news={"signal": "Bullish"}
+                                ),
                             }
                         ),
                     ),
@@ -12728,9 +12728,9 @@ class ConditionalPerformanceRegressionTest(unittest.TestCase):
                         "p-r2",
                         json.dumps(
                             {
-                                "technical": {"signal": "Bearish"},
-                                "fundamental": {"signal": "Neutral"},
-                                "commodity_news": {"signal": "Bullish"},
+                                "signal_collection_contract": _scc_from_test_payloads(
+                                    technical={"signal": "Bearish"}, fundamental={"signal": "Neutral"}, commodity_news={"signal": "Bullish"}
+                                ),
                             }
                         ),
                     ),
@@ -14719,22 +14719,20 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             margin_used=0.0,
             positions={},
         )
-        signal_snapshot = {
-            "technical": {
-                "signal": "Bearish",
+        final_contract = self._strategy_contract("TA", target_lots=-26)
+        final_contract.update(
+            {
                 "horizon_class": "short",
                 "expected_horizon_days": 2,
                 "invalidation_level": 4400.0,
-                "target_return": 0.03,
-            },
+            }
+        )
+        signal_snapshot = {
             "pm_internal_draft": {
                 "target_position_ratio": -0.12,
                 "target_lots": -26,
             },
-            "final_action_contract": self._strategy_contract(
-                "TA",
-                target_lots=-26,
-            ),
+            "final_action_contract": final_contract,
         }
         recommendation = {
             "underlying_code": "TA",
@@ -14825,7 +14823,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         )
 
         translation = snapshot.get("execution_translation", {})
-        lifecycle_filter = translation.get("signal_lifecycle_direction_filter", {})
         self.assertEqual(decision.action, FuturesAction.OPEN_SHORT)
         self.assertEqual(decision.lots, 7)
         self.assertNotIn("signal_invalidation_level", translation.get("rewrite_reasons", []))
@@ -14834,9 +14831,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "invalidation_level",
             translation.get("phase2_order_plan", {}).get("signal_lifecycle", {}),
         )
-        self.assertEqual(lifecycle_filter.get("target_side"), "short")
-        self.assertIsNone(lifecycle_filter.get("effective_invalidation_level"))
-        self.assertEqual(lifecycle_filter.get("ignored_opposing", [])[0]["analyst"], "fundamental")
+        self.assertNotIn("signal_lifecycle_direction_filter", translation)
 
     def test_phase2_ignores_opposing_invalidation_level_for_long_target(self):
         portfolio = Portfolio(
@@ -14893,7 +14888,6 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         )
 
         translation = snapshot.get("execution_translation", {})
-        lifecycle_filter = translation.get("signal_lifecycle_direction_filter", {})
         self.assertEqual(decision.action, FuturesAction.OPEN_LONG)
         self.assertEqual(decision.lots, 5)
         self.assertNotIn("signal_invalidation_level", translation.get("rewrite_reasons", []))
@@ -14902,9 +14896,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             "invalidation_level",
             translation.get("phase2_order_plan", {}).get("signal_lifecycle", {}),
         )
-        self.assertEqual(lifecycle_filter.get("target_side"), "long")
-        self.assertIsNone(lifecycle_filter.get("effective_invalidation_level"))
-        self.assertEqual(lifecycle_filter.get("ignored_opposing", [])[0]["analyst"], "fundamental")
+        self.assertNotIn("signal_lifecycle_direction_filter", translation)
 
     def test_phase2_no_trade_reason_keeps_signal_invalidation_before_position_matched(self):
         portfolio = Portfolio(

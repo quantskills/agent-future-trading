@@ -394,12 +394,8 @@ def calculate_optimization_acceptance_metrics(
                     }
                 )
                 contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-                audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-                audit_decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
                 decision = str(
-                    audit_decision.get("audit_decision")
-                    or audit_decision.get("decision")
-                    or contract.get("authority_type")
+                    contract.get("authority_type")
                     or contract.get("final_action")
                     or "none"
                 )
@@ -482,12 +478,7 @@ def calculate_optimization_acceptance_metrics(
             def _collect_reasons(snapshot: Dict) -> List[str]:
                 reasons: List[str] = []
                 contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-                audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-                for key in ("reason_codes", "risk_flags"):
-                    value = contract.get(key)
-                    if isinstance(value, list):
-                        reasons.extend(str(item) for item in value if item)
-                value = audit.get("reason_codes")
+                value = contract.get("reason_codes")
                 if isinstance(value, list):
                     reasons.extend(str(item) for item in value if item)
                 return reasons

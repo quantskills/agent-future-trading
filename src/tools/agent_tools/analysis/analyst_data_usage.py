@@ -449,10 +449,20 @@ def data_usage_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(usage, dict):
         return usage
     analysts: Dict[str, Any] = {}
-    for analyst in ("technical", "fundamental", "commodity_news"):
-        payload = snapshot.get(analyst)
-        if isinstance(payload, dict):
-            analysts[analyst] = extract_signal_data_usage(payload)
+    contract = snapshot.get("signal_collection_contract")
+    if isinstance(contract, dict):
+        for source in contract.get("source_contracts") or []:
+            if not isinstance(source, dict):
+                continue
+            analyst = str(source.get("analyst") or "")
+            action_contract = source.get("action_evidence_contract")
+            if analyst not in {"technical", "fundamental", "commodity_news"}:
+                continue
+            if isinstance(action_contract, dict) and isinstance(
+                action_contract.get("data_usage_summary"),
+                dict,
+            ):
+                analysts[analyst] = dict(action_contract["data_usage_summary"])
     return {"analysts": analysts, "pm_sources": {}}
 
 

@@ -584,6 +584,9 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
     """Build the Researcher post-trade causal-review prompt."""
     return (
         "You are AgentQuant Researcher doing post-trade causal research. "
+        "The supplied trading_date is the fact cutoff: never use or infer later information. "
+        "Distinguish settled facts, causal attribution, research hypotheses, and future validation suggestions. "
+        "Every conclusion must be traceable to fields in the supplied evidence; do not fabricate market, order, PnL, or account facts. "
         "Use only pre_trade_evidence for ex-ante causes and post_trade_outcome for labels. "
         "Return concise structured lessons, next-round usable memory, usage boundaries, "
         "and validation ideas. Do not provide direct trading authority. "
@@ -603,10 +606,9 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "are PM Step5 planning-budget parameters; realized execution drift after conditional legs, executed subsets, "
         "price changes, or slippage is not final_action_contract invalidation, not a day-end trade violation, "
         "not same-day trade authority, and cannot bypass final_action_contract. "
-        "When reviewer_hard_gate=false is present, preserve that meaning explicitly in the lesson boundary. "
         "Also review whether PM opportunity_score/opportunity_rank and capital_allocation_reason "
         "actually moved capital toward stronger alpha as research diagnostics only. Do not use this review "
-        "to rejudge PM contract legality, replace PG audit, invalidate the signed final_action_contract, "
+        "to rejudge PM contract legality, invalidate the signed final_action_contract, "
         "or create trade authority. If ranking was helpful, propose a candidate ranking preference; if ranking "
         "was harmful, propose a lower-priority preference. These are Researcher memories only, not direct trade authority. "
         + ACTION_VALUE_USAGE_BOUNDARY
@@ -623,9 +625,7 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
         "entry selection caused the result. "
         "Each lesson must state who may use it: analysts only via signal_calibration, "
         "PM via matching open/add/hold/reduce/exit/conditional_monitor/execution lane and memory_side_role, Trader only through final_action_contract execution fields after independent audit_verdict approval; trade_contract_audit is an execution audit mirror, "
-        "and protocol-governor only for audit. "
-        "Control-governance metadata can support chain-health audit only; it cannot become market alpha, "
-        "an action-preference reward, or a direct PM/Trader instruction. "
+        "Do not emit next-day direction, lots, margin, budget, or executable authority. "
         + SYSTEM_FACT_ENTRY_BOUNDARY
         + ARTIFACT_PHASE_BOUNDARY
         + "Separate lessons by technical setup family, fundamental factor group, news catalyst class, market regime, "
@@ -637,9 +637,10 @@ def build_researcher_causal_review_prompt(evidence_json: str) -> str:
 
 def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str) -> str:
     """Build the Researcher exploratory-hypothesis prompt."""
-    _ = trading_date  # kept for call-site clarity and future prompt extensions
     return (
         "You are the AgentQuant Researcher acting as a research memory curator. "
+        f"The fact cutoff is {trading_date}; use only episodes completed by that date. "
+        "Separate settled facts from hypotheses and cite the supplied episode evidence in evidence_summary. "
         "Study completed futures trade episodes and propose exploratory trading hypotheses. "
         "The goal is free exploration of commodity-specific trading rules, not rigid constraints. "
         "Do not recommend breaking hard controls: total deployed margin must stay <=20%, no lookahead, "
@@ -651,8 +652,7 @@ def build_researcher_exploratory_prompt(*, trading_date: str, episodes_json: str
         "they must not be written as hard product bans, permanent blacklists, or unconditional sizing rules. "
         "Hypotheses should improve future signal generation and action routing: which analyst should check which evidence, "
         "what current trigger is required, what execution confirmation PM should encode into final_action_contract for Trader, and how Researcher will validate same-scope outcomes. "
-        "Protocol-governor, cost, tool-access, and preflight findings are chain-health audit inputs only; "
-        "do not convert them into alpha, hard trade bans, or unconditional sizing rules.\n"
+        "Do not output next-day direction, lots, margin, budget, direct execution instructions, or trade authority.\n"
         + SYSTEM_FACT_ENTRY_BOUNDARY
         + ARTIFACT_PHASE_BOUNDARY
         + episodes_json

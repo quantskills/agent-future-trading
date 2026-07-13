@@ -384,6 +384,8 @@ def build_final_action_contract(
     market_confirmation: dict | None,
     alpha_setup_action_values: list | None,
     execution_contract_fields: dict | None = None,
+    contract_code: str | None = None,
+    final_contract_scope: dict | None = None,
     select_learning_trace_action_values: Callable[[list | None, int], List[dict]] | None = None,
     safe_float: Callable[[Any, float], float] | None = None,
     futures_action_cls: Any | None = None,
@@ -392,6 +394,7 @@ def build_final_action_contract(
     diagnostics = control_diagnostics if isinstance(control_diagnostics, dict) else {}
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
     execution_contract_payload = dict(execution_contract_fields) if isinstance(execution_contract_fields, dict) else {}
+    final_scope = dict(final_contract_scope) if isinstance(final_contract_scope, dict) else {}
     coerce_float = safe_float or _safe_float
     select_learning_trace = select_learning_trace_action_values or _default_learning_trace
     target_side = "long" if int(target_lots or 0) > 0 else "short" if int(target_lots or 0) < 0 else "flat"
@@ -409,74 +412,6 @@ def build_final_action_contract(
         target_lots=target_lots,
         final_entry_authority=authority,
     )
-    candidates: list[dict] = []
-    scorecard_seed = diagnostics.get("scorecard_current_tradeable_probe_seed")
-    if isinstance(scorecard_seed, dict):
-        candidates.append({
-            "action": "open_probe",
-            "source": "opportunity_scorecard",
-            "status": scorecard_seed.get("status") or (
-                "applied" if "scorecard_current_tradeable_probe_seed" in control_reasons else "candidate"
-            ),
-            "side": scorecard_seed.get("side"),
-            "ratio": scorecard_seed.get("ratio"),
-            "scorecard_state": (
-                (scorecard_seed.get("scorecard") or {}).get("final_state")
-                if isinstance(scorecard_seed.get("scorecard"), dict)
-                else None
-            ),
-        })
-    conditional_monitor_seed = diagnostics.get("conditional_monitor_probe_seed")
-    if isinstance(conditional_monitor_seed, dict):
-        candidates.append({
-            "action": "conditional_probe",
-            "source": "conditional_monitor",
-            "status": conditional_monitor_seed.get("status") or "candidate",
-            "side": conditional_monitor_seed.get("side"),
-            "ratio": conditional_monitor_seed.get("ratio"),
-            "requires_intraday_confirmation": bool(
-                conditional_monitor_seed.get("requires_intraday_confirmation")
-            ),
-            "scorecard_state": (
-                (conditional_monitor_seed.get("scorecard") or {}).get("final_state")
-                if isinstance(conditional_monitor_seed.get("scorecard"), dict)
-                else None
-            ),
-        })
-    learned_seed = diagnostics.get("positive_open_action_value_seed")
-    if isinstance(learned_seed, dict):
-        candidates.append({
-            "action": "open_probe" if final_action == "open_probe" else "open_real",
-            "source": "alpha_setup_action_value",
-            "status": "applied" if "positive_open_action_value_seed" in control_reasons else "candidate",
-            "side": learned_seed.get("target_side"),
-            "ratio": learned_seed.get("seed_position_ratio"),
-            "reward_mean": (
-                (learned_seed.get("selected_action_value") or {}).get("reward_mean")
-                if isinstance(learned_seed.get("selected_action_value"), dict)
-                else None
-            ),
-        })
-    winning = diagnostics.get("winning_template_continuation")
-    if isinstance(winning, dict) and winning.get("decision"):
-        candidates.append({
-            "action": "exit" if winning.get("protective_exit") else "reduce",
-            "source": "hold_exit_profit_protection",
-            "status": "applied" if final_action in {"reduce", "exit"} else "candidate",
-            "decision": winning.get("decision"),
-            "pnl_ratio": winning.get("pnl_ratio"),
-            "confirmation_score": winning.get("confirmation_score"),
-        })
-    lifecycle = diagnostics.get("holding_rebalance_control")
-    if isinstance(lifecycle, dict) and lifecycle.get("decision"):
-        candidates.append({
-            "action": final_action,
-            "source": "position_lifecycle",
-            "status": "applied",
-            "decision": lifecycle.get("decision"),
-            "classification": lifecycle.get("lifecycle_classification"),
-        })
-
     selected_action_values = select_learning_trace(alpha_setup_action_values, 10)
     memory_requirements = (
         diagnostics.get("final_action_memory_requirements")
@@ -504,7 +439,6 @@ def build_final_action_contract(
             "requires_intraday_confirmation",
             "can_execute_without_intraday_trigger",
             "execution_action_value_preference",
-            "analyst_execution_roles",
         )
         if key in execution_contract_payload
     }
@@ -532,19 +466,6 @@ def build_final_action_contract(
         diagnostics=diagnostics,
         execution_contract_payload=execution_contract_payload,
     )
-    scorecard_rank_trace = scorecard_side.get("lifecycle_learning_trace") or {}
-    scorecard_learning_impact = scorecard_side.get("learning_impact_delta") or {}
-    is_new_capital_port = pm_lifecycle_trace.get("contract_lifecycle_port") == "open_add_new_risk"
-    lifecycle_learning_trace = (
-        {**scorecard_rank_trace, "pm_final_contract_lifecycle_trace": pm_lifecycle_trace}
-        if is_new_capital_port and isinstance(scorecard_rank_trace, dict) and scorecard_rank_trace
-        else pm_lifecycle_trace
-    )
-    learning_impact_delta = (
-        {**scorecard_learning_impact, "pm_lifecycle_impact_delta": pm_lifecycle_impact}
-        if is_new_capital_port and isinstance(scorecard_learning_impact, dict) and scorecard_learning_impact
-        else pm_lifecycle_impact
-    )
     capital_deployment = _contract_capital_deployment(
         execution_fields=execution_contract_payload,
         current_lots=current_lots,
@@ -565,6 +486,7 @@ def build_final_action_contract(
     contract = {
         "contract_version": FINAL_ACTION_CONTRACT_VERSION,
         "ticker": ticker,
+        "contract_code": contract_code,
         "final_action": final_action,
         "current_lots": int(current_lots or 0),
         "target_lots": int(target_lots or 0),
@@ -584,29 +506,22 @@ def build_final_action_contract(
         "weak_conflict_probe": bool(authority.get("weak_conflict_probe")),
         "max_allowed_margin_ratio": float(coerce_float(authority.get("max_allowed_margin_ratio"), 0.0)),
         "reason_codes": sorted(reason_codes),
-        "recommendation_intent": recommendation_intent,
-        "action_candidates": candidates,
+        "setup_type": final_scope.get("setup_type"),
+        "horizon_class": final_scope.get("horizon_class"),
+        "expected_horizon_days": final_scope.get("expected_horizon_days"),
+        "market_regime": final_scope.get("market_regime"),
+        "invalidation_level": final_scope.get("invalidation_level"),
+        "atr_stop_distance": final_scope.get("atr_stop_distance"),
         "evidence_used": {
             "scorecard_preferred_side": scorecard.get("preferred_side"),
             "scorecard_state": scorecard_side.get("final_state"),
             "scorecard_score": scorecard_side.get("score"),
             "opportunity_score": scorecard_side.get("opportunity_score", scorecard_side.get("score")),
-            "lifecycle_learning_trace": lifecycle_learning_trace,
-            "learning_impact_delta": learning_impact_delta,
             "opportunity_score_components": scorecard_side.get("opportunity_score_components") or {},
             "analyst_direction_evidence": scorecard_side.get("analyst_direction_evidence") or {},
             "direction_evidence_strength": scorecard_side.get("direction_evidence_strength"),
             "direction_evidence_components": scorecard_side.get("direction_evidence_components") or {},
             "direction_evidence_boundary": scorecard_side.get("direction_evidence_boundary"),
-            "rank_capital_priority_real_budget_release": bool(
-                authority.get("rank_capital_priority_real_budget_release")
-            ),
-            "rank_capital_priority_release_detail": (
-                authority.get("rank_capital_priority_release_detail")
-                if isinstance(authority.get("rank_capital_priority_release_detail"), dict)
-                else {}
-            ),
-            "capital_allocation_reason": scorecard_side.get("capital_allocation_reason"),
             "pm_fusion_diagnostics": scorecard_side.get("pm_fusion_diagnostics") or {},
             "pm_conflict_resolution": scorecard_side.get("pm_conflict_resolution") or {},
             "market_confirmation_score": (
@@ -652,7 +567,6 @@ def build_final_action_contract(
             "pm_lifecycle_learning_trace": pm_lifecycle_trace,
             "pm_lifecycle_learning_impact_delta": pm_lifecycle_impact,
         },
-        "risk_flags": sorted(reason_codes),
         **execution_fields,
         "execution_profile": execution_contract_payload.get("execution_profile") or "",
         "entry_trigger": execution_contract_payload.get("entry_trigger") or "",

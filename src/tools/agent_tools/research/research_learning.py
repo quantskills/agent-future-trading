@@ -14,9 +14,9 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Mapping, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from database.artifact_store import externalize_json_for_db, externalize_text_for_db, load_externalized_json
+from database.artifact_store import externalize_json_for_db, load_externalized_json
 from llm.prompt import (
     build_researcher_causal_review_prompt,
     build_researcher_exploratory_prompt,
@@ -36,6 +36,7 @@ from util.logger import logger
 
 
 class CausalReviewLLMOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     primary_cause: str = Field(default="unknown")
     direction_error: bool = Field(default=False)
     horizon_error: bool = Field(default=False)
@@ -60,6 +61,7 @@ class CausalReviewLLMOutput(BaseModel):
 
 
 class ExploratoryHypothesisItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     hypothesis_text: str = Field(default="")
     ticker: str = Field(default="*")
     sector: str = Field(default="*")
@@ -77,6 +79,7 @@ class ExploratoryHypothesisItem(BaseModel):
 
 
 class ExploratoryHypothesisLLMOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     hypotheses: List[ExploratoryHypothesisItem] = Field(default_factory=list)
     researcher_note: str = Field(default="")
 
@@ -87,6 +90,119 @@ class ExploratoryHypothesisLLMOutput(BaseModel):
 
 
 from tools.agent_tools.research import research_review_helpers as _review_helpers
+
+
+_CAUSAL_PM_ACTION_HINTS = {
+    "watchlist",
+    "probe",
+    "open",
+    "add",
+    "reduce",
+    "exit",
+    "hold",
+    "no_trade",
+}
+_POSITION_EFFECT_LIMITS = {
+    "candidate_memory_only_no_direct_sizing",
+    "candidate_memory_only",
+    "probe_only_until_validated",
+    "reduce_or_exit_bias",
+    "may_support_alpha_scaling_after_validation",
+}
+
+
+def _validate_researcher_input_facts(
+    *,
+    trading_date: str,
+    settlement_row: Optional[Dict[str, Any]],
+    strategy_recommendations: List[Dict[str, Any]],
+) -> None:
+    """Reject incomplete, future-dated, or unsigned facts before any LLM call/write."""
+    errors: list[str] = []
+    date_text = str(trading_date or "")[:10]
+    if not isinstance(settlement_row, dict) or not settlement_row:
+        errors.append("settlement_missing")
+    else:
+        settlement_date = str(
+            settlement_row.get("trading_date")
+            or settlement_row.get("portfolio_trading_date")
+            or date_text
+        )[:10]
+        if settlement_date and settlement_date > date_text:
+            errors.append("future_settlement")
+    if not strategy_recommendations:
+        errors.append("strategy_recommendations_missing")
+    for recommendation in strategy_recommendations or []:
+        ticker = str(recommendation.get("underlying_code") or "unknown")
+        recommendation_date = str(
+            recommendation.get("effective_trade_date")
+            or recommendation.get("trading_date")
+            or date_text
+        )[:10]
+        if recommendation_date and recommendation_date > date_text:
+            errors.append(f"future_recommendation:{ticker}")
+        snapshot = _review_helpers._json_loads(recommendation.get("signal_snapshot")) or {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        scc = snapshot.get("signal_collection_contract")
+        contract = snapshot.get("final_action_contract")
+        if not isinstance(scc, dict) or not scc:
+            errors.append(f"scc_missing:{ticker}")
+        else:
+            for source in scc.get("source_contracts") or []:
+                if not isinstance(source, dict) or not source.get("signal_record_id"):
+                    errors.append(f"signal_record_id_missing:{ticker}")
+                    break
+        if not isinstance(contract, dict) or not contract:
+            errors.append(f"final_action_contract_missing:{ticker}")
+        if not isinstance(snapshot.get("auditor"), dict) and not recommendation.get("audit_payload"):
+            errors.append(f"audit_fact_missing:{ticker}")
+        if not isinstance(snapshot.get("execution_result"), dict):
+            errors.append(f"execution_result_missing:{ticker}")
+    if errors:
+        raise ValueError("researcher_input_fact_validation_failed:" + ",".join(sorted(set(errors))))
+
+
+def _validate_causal_llm_output(output: CausalReviewLLMOutput) -> dict:
+    payload = output.model_dump()
+    confidence = _review_helpers._safe_float(payload.get("confidence_score"), -1.0)
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError("researcher_causal_confidence_out_of_range")
+    if not str(payload.get("primary_cause") or "").strip():
+        raise ValueError("researcher_causal_primary_cause_missing")
+    action_hint = str(payload.get("pm_action_hint") or "").strip().lower()
+    if action_hint and action_hint not in _CAUSAL_PM_ACTION_HINTS:
+        raise ValueError("researcher_causal_pm_action_hint_invalid")
+    position_limit = str(payload.get("position_effect_limit") or "").strip()
+    if position_limit not in _POSITION_EFFECT_LIMITS:
+        raise ValueError("researcher_causal_position_effect_limit_invalid")
+    payload["confidence_score"] = confidence
+    return payload
+
+
+def _validate_exploratory_llm_output(output: ExploratoryHypothesisLLMOutput) -> list[dict]:
+    validated: list[dict] = []
+    forbidden_text = ("target_lots", "lots=", "margin_ratio", "direct trade authority")
+    for item in output.hypotheses or []:
+        payload = item.model_dump()
+        text = str(payload.get("hypothesis_text") or "").strip()
+        evidence = str(payload.get("evidence_summary") or "").strip()
+        validation_plan = str(payload.get("validation_plan") or "").strip()
+        side = str(payload.get("side") or "*").strip().lower()
+        confidence = _review_helpers._safe_float(payload.get("confidence_score"), -1.0)
+        if not text or not evidence or not validation_plan:
+            continue
+        if side not in {"long", "short", "flat", "*"}:
+            continue
+        if not 0.0 <= confidence <= 1.0:
+            continue
+        combined = " ".join(str(value or "") for value in payload.values()).lower()
+        if any(token in combined for token in forbidden_text):
+            continue
+        payload["side"] = side
+        payload["confidence_score"] = confidence
+        validated.append(payload)
+    return validated
 
 
 def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -521,12 +637,9 @@ def write_alpha_setup_profiles(
             for analyst_name, payload in analyst_payloads.items():
                 if not isinstance(payload, dict):
                     continue
-                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-                contract = metadata.get("action_evidence_contract")
-                if isinstance(contract, dict):
-                    action_contracts[str(analyst_name)] = contract
-                    if isinstance(contract.get("learning_scope"), dict):
-                        learning_scopes[str(analyst_name)] = contract["learning_scope"]
+                action_contracts[str(analyst_name)] = payload
+                if isinstance(payload.get("learning_scope"), dict):
+                    learning_scopes[str(analyst_name)] = payload["learning_scope"]
         scope_tags: List[str] = []
         for analyst_name, scope in learning_scopes.items():
             if not isinstance(scope, dict):
@@ -649,7 +762,7 @@ def write_alpha_setup_profiles(
                     else []
                 ),
                 "data_usage_summary": data_usage,
-                "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
+                "market_confirmation": _review_helpers._market_confirmation(snapshot),
                 "final_action_contract": final_contract,
                 "learning_boundary": {
                     "learning_source": "final_action_contract",
@@ -734,7 +847,7 @@ def write_alpha_setup_profiles(
                         else learning_scopes
                     ),
                     "analyst_payloads": analyst_payloads,
-                    "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
+                    "market_confirmation": _review_helpers._market_confirmation(snapshot),
                     "final_action_contract": final_contract,
                     "learning_boundary": {
                         "learning_source": "final_action_contract",
@@ -1305,6 +1418,11 @@ def run_researcher_causal_review(
     review_cfg = learning_cfg.get("researcher_causal_review") or {}
     if not bool(review_cfg.get("enabled", False)):
         return 0
+    _validate_researcher_input_facts(
+        trading_date=trading_date,
+        settlement_row=settlement_row,
+        strategy_recommendations=strategy_recommendations,
+    )
     evidence = _build_causal_evidence_pack(
         config_id=config_id,
         trading_date=trading_date,
@@ -1315,43 +1433,24 @@ def run_researcher_causal_review(
     prompt = build_researcher_causal_review_prompt(
         _review_helpers._json_dumps(evidence)[:12000]
     )
-    raw_response = ""
-    output = CausalReviewLLMOutput()
-    if bool(review_cfg.get("use_llm", False)):
-        try:
-            from llm.inference import agent_call
+    if not bool(review_cfg.get("use_llm", False)):
+        return 0
+    try:
+        from llm.inference import agent_call
 
-            output = agent_call(
-                prompt=prompt,
-                llm_config=cfg.get("llm", {}),
-                pydantic_model=CausalReviewLLMOutput,
-            )
-            raw_response = _review_helpers._json_dumps(output.model_dump())
-        except Exception as exc:
-            raw_response = f"llm_causal_research_failed: {exc}"
-            logger.warning(f"Researcher LLM causal review failed on {trading_date}: {exc}")
-    else:
-        raw_response = "llm disabled; deterministic candidate only"
+        output = agent_call(
+            prompt=prompt,
+            llm_config=cfg.get("llm", {}),
+            pydantic_model=CausalReviewLLMOutput,
+        )
+        candidate_payload = _validate_causal_llm_output(output)
+    except Exception as exc:
+        logger.warning(f"Researcher LLM causal review rejected on {trading_date}: {exc}")
+        return 0
 
     note_id = str(uuid.uuid4())
-    prompt_ext = externalize_text_for_db(
-        prompt,
-        category="researcher_llm_notes",
-        record_id=note_id,
-        field_name="raw_prompt",
-        config_id=config_id,
-        trading_date=trading_date,
-    )
-    response_ext = externalize_text_for_db(
-        raw_response,
-        category="researcher_llm_notes",
-        record_id=note_id,
-        field_name="raw_response",
-        config_id=config_id,
-        trading_date=trading_date,
-    )
     payload_ext = externalize_json_for_db(
-        evidence,
+        {"evidence": evidence, "validated_output": candidate_payload},
         category="researcher_llm_notes",
         record_id=note_id,
         field_name="payload",
@@ -1365,24 +1464,23 @@ def run_researcher_causal_review(
         trading_date=trading_date,
         evidence_pack_id=evidence["evidence_pack_id"],
         ticker="*",
-        raw_prompt=prompt_ext.inline_value,
-        raw_response=response_ext.inline_value,
+        raw_prompt="",
+        raw_response="",
         created_at=_review_helpers._utc_now(),
         payload_json=payload_ext.inline_value,
-        raw_prompt_artifact_path=prompt_ext.artifact_path,
-        raw_prompt_sha256=prompt_ext.sha256,
-        raw_prompt_size=prompt_ext.size_bytes,
-        raw_prompt_summary_json=prompt_ext.summary_json,
-        raw_response_artifact_path=response_ext.artifact_path,
-        raw_response_sha256=response_ext.sha256,
-        raw_response_size=response_ext.size_bytes,
-        raw_response_summary_json=response_ext.summary_json,
+        raw_prompt_artifact_path=None,
+        raw_prompt_sha256=None,
+        raw_prompt_size=0,
+        raw_prompt_summary_json=None,
+        raw_response_artifact_path=None,
+        raw_response_sha256=None,
+        raw_response_size=0,
+        raw_response_summary_json=None,
         payload_artifact_path=payload_ext.artifact_path,
         payload_sha256=payload_ext.sha256,
         payload_size=payload_ext.size_bytes,
         payload_summary_json=payload_ext.summary_json,
     )
-    candidate_payload = output.model_dump() if hasattr(output, "model_dump") else {}
     candidate_payload["agent_name"] = "researcher"
     research_memory_writers.insert_causal_review_candidate(
         cursor,
@@ -1392,7 +1490,7 @@ def run_researcher_causal_review(
         evidence_pack_id=evidence["evidence_pack_id"],
         candidate_type="post_trade_causal_research",
         confidence_score=_review_helpers._safe_float(candidate_payload.get("confidence_score"), 0.0),
-        rule_validation_status="notes_only_pending_rule_validation",
+        rule_validation_status="deterministic_output_validation_passed",
         created_at=_review_helpers._utc_now(),
         valid_until=(
             datetime.strptime(str(trading_date)[:10], "%Y-%m-%d") + timedelta(days=10)
@@ -1450,44 +1548,27 @@ def write_exploratory_hypotheses(
         trading_date=trading_date,
         episodes_json=_review_helpers._json_dumps({"trading_date": trading_date, "episodes": episodes})[:12000],
     )
-    output = ExploratoryHypothesisLLMOutput()
-    raw_response = ""
-    if bool(research_cfg.get("use_llm", True)):
-        try:
-            from llm.inference import agent_call
+    if not bool(research_cfg.get("use_llm", True)):
+        return {"rows": 0, "status": "llm_disabled", "episode_count": len(episodes)}
+    try:
+        from llm.inference import agent_call
 
-            output = agent_call(
-                prompt=prompt,
-                llm_config=cfg.get("llm", {}),
-                pydantic_model=ExploratoryHypothesisLLMOutput,
-            )
-            raw_response = _review_helpers._json_dumps(output.model_dump())
-        except Exception as exc:
-            raw_response = f"llm_exploratory_research_failed: {exc}"
-            logger.warning(f"Researcher exploratory research failed on {trading_date}: {exc}")
-    else:
-        raw_response = "llm disabled; no exploratory hypotheses generated"
+        output = agent_call(
+            prompt=prompt,
+            llm_config=cfg.get("llm", {}),
+            pydantic_model=ExploratoryHypothesisLLMOutput,
+        )
+        validated_hypotheses = _validate_exploratory_llm_output(output)
+    except Exception as exc:
+        logger.warning(f"Researcher exploratory research rejected on {trading_date}: {exc}")
+        return {"rows": 0, "status": "llm_output_rejected", "episode_count": len(episodes)}
+    if not validated_hypotheses:
+        return {"rows": 0, "status": "no_validated_hypotheses", "episode_count": len(episodes)}
 
     note_id = str(uuid.uuid4())
-    prompt_ext = externalize_text_for_db(
-        prompt,
-        category="researcher_llm_notes",
-        record_id=note_id,
-        field_name="raw_prompt",
-        config_id=config_id,
-        trading_date=trading_date,
-    )
-    response_ext = externalize_text_for_db(
-        raw_response,
-        category="researcher_llm_notes",
-        record_id=note_id,
-        field_name="raw_response",
-        config_id=config_id,
-        trading_date=trading_date,
-    )
     evidence = {"agent_name": "researcher", "trading_date": trading_date, "episodes": episodes}
     payload_ext = externalize_json_for_db(
-        evidence,
+        {"evidence": evidence, "validated_output": validated_hypotheses},
         category="researcher_llm_notes",
         record_id=note_id,
         field_name="payload",
@@ -1501,18 +1582,18 @@ def write_exploratory_hypotheses(
         trading_date=trading_date,
         evidence_pack_id=f"exploratory:{note_id}",
         ticker="*",
-        raw_prompt=prompt_ext.inline_value,
-        raw_response=response_ext.inline_value,
+        raw_prompt="",
+        raw_response="",
         created_at=_review_helpers._utc_now(),
         payload_json=payload_ext.inline_value,
-        raw_prompt_artifact_path=prompt_ext.artifact_path,
-        raw_prompt_sha256=prompt_ext.sha256,
-        raw_prompt_size=prompt_ext.size_bytes,
-        raw_prompt_summary_json=prompt_ext.summary_json,
-        raw_response_artifact_path=response_ext.artifact_path,
-        raw_response_sha256=response_ext.sha256,
-        raw_response_size=response_ext.size_bytes,
-        raw_response_summary_json=response_ext.summary_json,
+        raw_prompt_artifact_path=None,
+        raw_prompt_sha256=None,
+        raw_prompt_size=0,
+        raw_prompt_summary_json=None,
+        raw_response_artifact_path=None,
+        raw_response_sha256=None,
+        raw_response_size=0,
+        raw_response_summary_json=None,
         payload_artifact_path=payload_ext.artifact_path,
         payload_sha256=payload_ext.sha256,
         payload_size=payload_ext.size_bytes,
@@ -1524,8 +1605,7 @@ def write_exploratory_hypotheses(
     now = _review_helpers._utc_now()
     max_hypotheses = int(research_cfg.get("max_hypotheses_per_day", 5) or 5)
     rows = 0
-    for item in (output.hypotheses or [])[:max_hypotheses]:
-        payload = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+    for payload in validated_hypotheses[:max_hypotheses]:
         text = str(payload.get("hypothesis_text") or "").strip()
         if not text:
             continue
@@ -1651,7 +1731,12 @@ def apply_researcher_learning(
     no_trade_reason_counter: Counter,
     transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """Persist Phase4 learning after reviewer validation passes."""
+    """Persist future-only learning after deterministic settled-fact validation."""
+    _validate_researcher_input_facts(
+        trading_date=trading_date,
+        settlement_row=settlement_row,
+        strategy_recommendations=strategy_recommendations,
+    )
     cursor.execute("PRAGMA foreign_keys = ON")
     if hasattr(db, "_ensure_reviewer_learning_schema"):
         db._ensure_reviewer_learning_schema(cursor)

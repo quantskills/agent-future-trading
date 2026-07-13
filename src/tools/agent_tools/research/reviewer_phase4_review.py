@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-"""Phase4 validation, reporting, and daily transaction log helpers."""
+"""Phase4 fact replay, attribution, and daily transaction report helpers."""
 
 import json
 import os
@@ -95,7 +95,6 @@ def _fetchone(cursor, query: str, params: tuple):
 def _final_action_semantic_summary(recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
     lifecycle_counts: Counter = Counter()
     memory_influenced_counts: Counter = Counter()
-    memory_error_count = 0
     intraday_required = 0
     for recommendation in recommendations:
         raw_snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation, dict) else {}
@@ -108,14 +107,12 @@ def _final_action_semantic_summary(recommendations: List[Dict[str, Any]]) -> Dic
         lifecycle_counts[str(semantic_state.get("lifecycle_state") or "unknown")] += 1
         if semantic_state.get("historical_learning_influenced_contract"):
             memory_influenced_counts[str(semantic_state.get("lifecycle_state") or "unknown")] += 1
-        memory_error_count += len(semantic_state.get("pm_memory_consumption_errors") or [])
         if semantic_state.get("requires_intraday_result"):
             intraday_required += 1
     return {
         "contract": "final_action_semantics.reviewer_summary.v1",
         "lifecycle_counts": dict(sorted(lifecycle_counts.items())),
         "historical_learning_influenced_contract_counts": dict(sorted(memory_influenced_counts.items())),
-        "pm_memory_consumption_error_count": memory_error_count,
         "intraday_result_required_count": intraday_required,
         "reviewer_does_not_modify_trade_facts": True,
         "reviewer_writes_action_value": False,
@@ -231,15 +228,14 @@ def _append_budget_drift_diagnostic(
         "untriggered_conditional_legs": context["untriggered_conditional_legs"],
         "executed_subset_effect": context["executed_subset_effect"],
         "no_trade_reason_counts": context["no_trade_reason_counts"],
-        "pm_plan_budget_parameters_not_reviewer_hard_gate": list(PM_PLAN_BUDGET_PARAMETER_FAMILIES),
-        "reviewer_hard_gate": False,
+        "pm_plan_budget_parameters_are_review_context": list(PM_PLAN_BUDGET_PARAMETER_FAMILIES),
     }
     if budget_drift_diagnostics is not None:
         budget_drift_diagnostics.append(diagnostic)
     warnings.append(
         f"PM plan budget drift on {trading_date}: {planned_budget_parameter} "
         f"limit={planned_budget_limit:.2%}, realized={realized_value:.2%}, "
-        f"drift_reason={context['drift_reason']}; reviewer_hard_gate=false"
+        f"drift_reason={context['drift_reason']}; review_only=true"
     )
 
 
@@ -306,42 +302,6 @@ def _apply_net_exposure_review(
         )
 
 
-def _account_margin_hard_limit(cfg: Dict[str, Any]) -> float:
-    candidates: List[float] = []
-    for value in (
-        cfg.get("max_total_margin_ratio"),
-        (cfg.get("position_budget_policy") or {}).get("hard_max_total_margin_ratio"),
-        (cfg.get("capital_utilization_control") or {}).get("max_margin_ratio_after_scaling"),
-    ):
-        ratio = _safe_float(value, 0.0)
-        if ratio > 0.0:
-            candidates.append(ratio)
-    return min(candidates) if candidates else 0.20
-
-
-def _apply_account_margin_hard_gate(
-    *,
-    trading_date: str,
-    cfg: Dict[str, Any],
-    settlement_row: Dict[str, Any],
-    errors: List[str],
-) -> None:
-    account_equity = _futures_account_equity(
-        settlement_row.get("current_balance"),
-        settlement_row.get("current_margin"),
-    )
-    if account_equity <= 0:
-        return
-    current_margin = _safe_float(settlement_row.get("current_margin"), 0.0)
-    realized_margin_ratio = current_margin / account_equity
-    hard_limit = _account_margin_hard_limit(cfg)
-    if realized_margin_ratio > hard_limit + 0.001:
-        errors.append(
-            f"account margin hard limit exceeded on {trading_date}: "
-            f"{realized_margin_ratio:.2%} > {hard_limit:.2%}"
-        )
-
-
 def _group_transactions_by_recommendation(transactions: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for transaction in transactions:
@@ -369,7 +329,7 @@ def _resolve_no_trade_reason(recommendation: Dict[str, Any], has_transactions: b
     return None
 
 
-def _actual_transactions_from_recommendation_audit(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _actual_transactions_from_execution_result(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
     snapshot = _json_loads(recommendation.get("signal_snapshot")) or {}
     if not isinstance(snapshot, dict):
         return []
@@ -384,7 +344,7 @@ def _actual_transactions_from_recommendation_audit(recommendation: Dict[str, Any
     return build_actual_transactions([item for item in actual_transactions if isinstance(item, dict)])
 
 
-def _validate_recommendation_execution_audit(
+def _review_recommendation_execution_facts(
     recommendations: List[Dict[str, Any]],
     transactions_by_recommendation: Dict[str, List[Dict[str, Any]]],
     errors: List[str],
@@ -393,7 +353,7 @@ def _validate_recommendation_execution_audit(
     for recommendation in recommendations:
         recommendation_id = str(recommendation.get("id") or "")
         transactions = transactions_by_recommendation.get(recommendation_id, [])
-        expected_transactions = _actual_transactions_from_recommendation_audit(recommendation)
+        expected_transactions = _actual_transactions_from_execution_result(recommendation)
         if expected_transactions and not transactions:
             reason = _resolve_no_trade_reason(recommendation, has_transactions=False)
             if reason:
@@ -415,8 +375,13 @@ def _validate_recommendation_execution_audit(
 
 
 def _market_confirmation_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    confirmation = snapshot.get("market_confirmation")
-    return confirmation if isinstance(confirmation, dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    return {
+        "confirmation_score": evidence.get("market_confirmation_score"),
+        "conflicts": evidence.get("market_confirmation_conflicts") or [],
+        "source": "final_action_contract.evidence_used",
+    } if evidence else {}
 
 
 def _format_compact_list(values: Iterable[Any], limit: int = 8) -> str:
@@ -633,7 +598,7 @@ def _collect_recommendation_quality_warnings(recommendations: List[Dict[str, Any
             continue
         ticker = recommendation.get("underlying_code") or recommendation.get("ticker")
         contract = final_action_contract_from_snapshot(snapshot)
-        reasons = contract.get("reason_codes") or contract.get("risk_flags") or []
+        reasons = contract.get("reason_codes") or []
         if reasons:
             warnings.append(f"{ticker}: strategy controls recorded: {reasons}")
     return warnings, market_summary
@@ -1285,7 +1250,7 @@ def run_phase4_review(
     config_id: str,
     trading_date: str,
 ) -> Dict[str, Any]:
-    """Run deterministic Phase4 reviewer validation and daily reporting."""
+    """Replay settled facts, attribute outcomes, and write the daily report."""
     expected_tickers = len(cfg.get("tickers", []))
     errors: List[str] = []
     warnings: List[str] = []
@@ -1457,13 +1422,6 @@ def run_phase4_review(
                     f"settlement equity formula mismatch: actual_change={actual_equity_change:.2f}, "
                     f"expected_change={expected_equity_change:.2f}"
                 )
-            _apply_account_margin_hard_gate(
-                trading_date=trading_date,
-                cfg=cfg,
-                settlement_row=settlement_row,
-                errors=errors,
-            )
-
             if latest_portfolio and _normalize_date(latest_portfolio.get("trading_date")) == trading_date:
                 account_equity = current_account_equity
                 portfolio_margin = float(latest_portfolio.get("margin_used") or 0.0)
@@ -1524,7 +1482,7 @@ def run_phase4_review(
                 f"found {len(same_day_rollovers)} same-day rollover recommendation(s) on {trading_date}"
             )
 
-        no_trade_reason_counter = _validate_recommendation_execution_audit(
+        no_trade_reason_counter = _review_recommendation_execution_facts(
             recommendations,
             transactions_by_recommendation,
             errors,
@@ -1610,13 +1568,13 @@ def run_phase4_review(
                     phase2_transactions=phase2_transactions,
                     phase4_status_override="failed",
                     phase4_completed_at_override="",
-                    phase4_message_override=f"Phase flow validation failed with {len(errors)} error(s)",
+                    phase4_message_override=f"Phase4 fact review incomplete with {len(errors)} error(s)",
                 )
                 logger.info(f"Daily transaction report written: {report_path}")
             except Exception as report_exc:
                 errors.append(f"daily transaction report generation failed: {report_exc}")
                 logger.error(f"Daily transaction report generation failed: {report_exc}")
-            raise RuntimeError(f"Phase flow validation failed with {len(errors)} error(s)")
+            raise RuntimeError(f"Phase4 fact review incomplete with {len(errors)} error(s)")
 
         conn.commit()
 
@@ -1625,7 +1583,7 @@ def run_phase4_review(
             trading_date,
             TradingPhase.PHASE4,
             "completed",
-            "reviewer validation passed",
+            "reviewer fact review completed",
         )
         phase4_completed_at = datetime.now(timezone.utc).isoformat()
         try:
@@ -1641,14 +1599,14 @@ def run_phase4_review(
                 phase2_transactions=phase2_transactions,
                 phase4_status_override="completed",
                 phase4_completed_at_override=phase4_completed_at,
-                phase4_message_override="reviewer validation passed",
+                phase4_message_override="reviewer fact review completed",
             )
             logger.info(f"Daily transaction report written: {report_path}")
         except Exception as report_exc:
             logger.error(f"Daily transaction report generation failed: {report_exc}")
             raise RuntimeError(f"daily transaction report generation failed: {report_exc}") from report_exc
 
-        logger.info("Phase4 reviewer validation passed")
+        logger.info("Phase4 reviewer fact review completed")
         return {
             "status": "completed",
             "warnings": warnings,

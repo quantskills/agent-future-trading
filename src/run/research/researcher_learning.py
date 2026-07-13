@@ -20,7 +20,7 @@ from tools.agent_tools.research.reviewer_phase4_review import (
     _fetchone,
     _group_transactions_by_recommendation,
     _normalize_date,
-    _validate_recommendation_execution_audit,
+    _review_recommendation_execution_facts,
 )
 from tools.agent_tools.research import research_memory_writers
 from tools.agent_tools.research.research_snapshot_reports import _write_historical_learning_snapshot_report
@@ -74,7 +74,7 @@ def main() -> None:
         execution_phase=TradingPhase.PHASE2,
     )
     transactions_by_recommendation = _group_transactions_by_recommendation(phase2_transactions)
-    no_trade_reason_counter: Counter = _validate_recommendation_execution_audit(
+    no_trade_reason_counter: Counter = _review_recommendation_execution_facts(
         recommendations,
         transactions_by_recommendation,
         [],

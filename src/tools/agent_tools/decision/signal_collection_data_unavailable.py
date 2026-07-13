@@ -24,7 +24,14 @@ def _enabled_analysts(enabled_analysts: Iterable[Any] | None) -> list[str]:
     return names or ["technical", "fundamental", "commodity_news"]
 
 
-def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_message: str | None) -> AnalystSignal:
+def _data_unavailable_signal(
+    *,
+    ticker: str,
+    trading_date: Any,
+    analyst: str,
+    reason: str,
+    warning_message: str | None,
+) -> AnalystSignal:
     action_evidence_contract = {
         "contract_version": "agentquant.action_evidence.v1",
         "analyst": analyst,
@@ -49,14 +56,17 @@ def _data_unavailable_signal(*, ticker: str, analyst: str, reason: str, warning_
         "no_lookahead_status": "ok",
         "data_usage_summary": {
             "ticker": ticker,
+            "trading_date": str(trading_date)[:10],
             "analyst": analyst,
-            "pandaai_pre_open_reference": {
-                "available": False,
-                "used_in_signal": True,
-                "reason": reason,
+            "sources": {
+                "pandaai_pre_open_reference": {
+                    "available": False,
+                    "used_in_signal": True,
+                    "reason": reason,
+                    "missing_data": ["pre_open_reference_price"],
+                    "data_quality_flags": ["pre_open_reference_price_unavailable"],
+                }
             },
-            "missing_data": ["pre_open_reference_price"],
-            "data_quality_flags": ["pre_open_reference_price_unavailable"],
         },
     }
     trade_research_contract = {
@@ -147,6 +157,7 @@ def build_data_unavailable_signal_package(
     analyst_signals = [
         _data_unavailable_signal(
             ticker=ticker,
+            trading_date=trading_date,
             analyst=analyst,
             reason=reason_text,
             warning_message=warning_message,

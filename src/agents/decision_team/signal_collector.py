@@ -14,7 +14,7 @@ from tools.common.signal_evidence_collection import (
 
 def signal_collector_agent(state: FundState):
     """Collect analyst evidence into one PM-facing structured contract."""
-    if state.get("pre_open_reference_price_unavailable"):
+    if state.get("pre_open_reference_price_unavailable") and not state.get("analyst_signals"):
         reason = (
             state.get("pre_open_reference_price_unavailable_reason")
             or state.get("pre_open_reference_price_unavailable_warning")
@@ -41,5 +41,6 @@ def signal_collector_agent(state: FundState):
             trading_date=state["trading_date"],
             enabled_analysts=state.get("enabled_analysts", []),
             analyst_signals=state.get("analyst_signals", []),
+            require_signal_record_ids=True,
         )
     }

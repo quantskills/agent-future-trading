@@ -18,11 +18,9 @@ from tools.common.contracts import (
     validate_final_action_contract,
 )
 from tools.common.final_action_semantics import (
-    audit_pm_memory_consumption,
+    classify_final_action_contract,
     contract_increases_risk_position,
-    derive_protocol_semantic_checks,
 )
-from tools.common.evidence_fusion_semantics import audit_pm_fusion_explanation
 
 
 APPROVED_AUDIT_VERDICTS = {"approve", "approve_with_warning"}
@@ -101,11 +99,7 @@ def _is_new_or_increasing_exposure(contract: Dict[str, Any]) -> bool:
 
 def _hard_margin_limit(config: Dict[str, Any]) -> float:
     hard_cap = _safe_float((config or {}).get("max_total_margin_ratio"), 0.20)
-    capital_cfg = (config or {}).get("capital_utilization_control") or {}
-    learned_cap = _safe_float(capital_cfg.get("max_margin_ratio_after_scaling"), hard_cap)
-    return min(value for value in (hard_cap, learned_cap) if value > 0) if any(
-        value > 0 for value in (hard_cap, learned_cap)
-    ) else 0.20
+    return hard_cap if hard_cap > 0 else 0.20
 
 
 def _contract_margin_estimate(contract: Dict[str, Any]) -> float:
@@ -117,7 +111,8 @@ def _contract_margin_estimate(contract: Dict[str, Any]) -> float:
         value = _safe_float(contract.get(key), -1.0)
         if value >= 0:
             return value
-    sizing = contract.get("position_sizing_result")
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    sizing = evidence.get("position_sizing_result")
     if isinstance(sizing, dict):
         value = _safe_float(sizing.get("target_margin_ratio_estimate"), -1.0)
         if value >= 0:
@@ -153,24 +148,25 @@ class Auditor:
         if _enum_value(recommendation.get("source_type")) == "strategy" and not contract:
             hard_reasons.append("missing_pm_final_action_contract")
 
-        memory_consumption_audit = audit_pm_memory_consumption(contract)
-        for reason in memory_consumption_audit.get("errors") or []:
-            if reason == "pm_required_memory_not_landed_in_alpha_setup_action_values":
-                hard_reasons.append(reason)
-            else:
-                soft_reasons.append(reason)
-
-        fusion_explanation_audit = audit_pm_fusion_explanation(contract)
-        hard_reasons.extend(str(reason) for reason in (fusion_explanation_audit.get("errors") or []))
-        soft_reasons.extend(str(reason) for reason in (fusion_explanation_audit.get("warnings") or []))
-
         if _is_new_or_increasing_exposure(contract):
-            if not contract.get("invalidation_condition") and not contract.get("invalidation"):
+            if not contract.get("contract_code"):
+                hard_reasons.append("missing_contract_code")
+            if not any(
+                contract.get(field) not in (None, "")
+                for field in (
+                    "invalidation_condition",
+                    "invalidation",
+                    "invalidation_level",
+                    "atr_stop_distance",
+                )
+            ):
                 hard_reasons.append("missing_invalidation_condition")
             target_margin = _contract_margin_estimate(contract)
             hard_cap = _hard_margin_limit(payload.full_config or self.config)
             if target_margin > hard_cap + 1e-12:
                 hard_reasons.append("margin_hard_cap_exceeded")
+            if str(payload.account_state.get("risk_status") or "").upper() == "LIQUIDATION":
+                hard_reasons.append("account_liquidation_blocks_new_risk")
 
         if payload.data_quality:
             status = str(payload.data_quality.get("status") or payload.data_quality.get("quality_status") or "")
@@ -214,7 +210,6 @@ class Auditor:
                 "trader_requires_approved_audit_verdict": True,
                 "research_memory_not_consumed": True,
                 "auditor_reads_research_db": False,
-                "auditor_checks_pm_memory_consumption_from_contract_only": True,
             },
             "contract_summary": {
                 "final_action": contract.get("final_action"),
@@ -226,10 +221,9 @@ class Auditor:
             },
             "semantic_state": {
                 key: value
-                for key, value in derive_protocol_semantic_checks(contract).items()
+                for key, value in classify_final_action_contract(contract).items()
                 if key
                 in {
-                    "contract",
                     "lifecycle_state",
                     "requires_intraday_result",
                     "hard_block_reasons",
@@ -237,8 +231,6 @@ class Auditor:
                     "semantic_errors",
                 }
             },
-            "pm_memory_consumption_audit": memory_consumption_audit,
-            "pm_fusion_explanation_audit": fusion_explanation_audit,
         }
         validate_auditor_artifact_boundary(audit_payload)
         return AuditorOutput(

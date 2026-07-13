@@ -91,8 +91,6 @@ SCC_ALLOWED_TOP_LEVEL_FIELDS = {
 SCC_SOURCE_CONTRACT_FIELDS = {
     "analyst",
     "action_evidence_contract",
-    "product_profile_evidence",
-    "fusion_evidence",
     "signal_record_id",
 }
 SCC_EVIDENCE_ITEM_FIELDS = {
@@ -112,7 +110,6 @@ SCC_EVIDENCE_ITEM_FIELDS = {
     "evidence_quality",
     "current_evidence_conflict",
     "missing_evidence",
-    "fusion_evidence",
     "evidence_strength",
     "evidence_freshness",
     "confirmation_requirements",
@@ -350,7 +347,6 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
         "evidence_quality": _text(contract.get("evidence_quality"), "unknown"),
         "current_evidence_conflict": _list(contract.get("current_evidence_conflict")),
         "missing_evidence": _list(contract.get("missing_evidence")),
-        "fusion_evidence": fusion_evidence,
         "evidence_strength": _text(
             fusion_evidence.get("evidence_strength") or contract.get("evidence_strength")
         ),
@@ -365,6 +361,48 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
             product_profile_evidence.get("profile_analysis_boundary")
         ),
     }
+
+
+def _data_quality_flags_from_usage(analyst: str, data_usage: Any) -> list[str]:
+    """Summarize registered nested source facts without copying source payloads."""
+    if not isinstance(data_usage, Mapping):
+        return []
+    flags: list[str] = []
+    sources = data_usage.get("sources")
+    if not isinstance(sources, Mapping):
+        return flags
+    for source_name, source_payload in sources.items():
+        if not isinstance(source_payload, Mapping):
+            continue
+        prefix = f"{analyst}:{source_name}"
+        if source_payload.get("available") is False:
+            flags.append(f"data_source_unavailable:{prefix}")
+        if source_payload.get("used_in_signal") is False:
+            flags.append(f"data_source_not_used:{prefix}")
+        stale_count = source_payload.get("stale_indicator_count")
+        try:
+            stale = int(stale_count or 0) > 0
+        except (TypeError, ValueError):
+            stale = False
+        try:
+            stale = stale or float(source_payload.get("stale_ratio") or 0.0) > 0.0
+        except (TypeError, ValueError):
+            pass
+        if stale:
+            flags.append(f"data_source_stale:{prefix}")
+        for item in _list(source_payload.get("data_missing")):
+            if _text(item):
+                flags.append(f"data_source_missing:{prefix}:{_text(item)}")
+        for item in _list(source_payload.get("missing_data")):
+            if _text(item):
+                flags.append(f"data_source_missing:{prefix}:{_text(item)}")
+        for item in _list(source_payload.get("data_quality_flags")):
+            if _text(item):
+                flags.append(_text(item))
+        for item in _list(source_payload.get("errors")):
+            if _text(item):
+                flags.append(f"data_source_error:{prefix}:{_text(item)}")
+    return flags
 
 
 def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
@@ -449,6 +487,7 @@ def validate_signal_collection_contract(
     trading_date: Any = None,
     enabled_analysts: Iterable[str] | None = None,
     analyst_signals: Iterable[Any] | None = None,
+    require_signal_record_ids: bool = False,
 ) -> dict:
     """Validate the one SCC contract at producer and PM-consumer boundaries."""
     if not isinstance(contract, dict) or not contract:
@@ -482,6 +521,10 @@ def validate_signal_collection_contract(
         if source_extras:
             raise ValueError(
                 f"signal_collection_unregistered_source_contract_field:{','.join(source_extras)}"
+            )
+        if require_signal_record_ids and not _text(source.get("signal_record_id")):
+            raise ValueError(
+                f"signal_collection_missing_signal_record_id:{_text(source.get('analyst'))}"
             )
     for item in evidence_items:
         if not isinstance(item, dict):
@@ -529,18 +572,6 @@ def validate_signal_collection_contract(
             validate_action_evidence_contract(action_contract, analyst=source_name)
         except ValueError as exc:
             raise ValueError(f"signal_collection_invalid_action_evidence_contract:{source_name}:{exc}") from exc
-        action_profile = action_contract.get("product_profile_evidence")
-        action_profile = dict(action_profile) if isinstance(action_profile, Mapping) else {}
-        source_profile = source.get("product_profile_evidence")
-        source_profile = dict(source_profile) if isinstance(source_profile, Mapping) else {}
-        if source_profile != action_profile:
-            raise ValueError(f"signal_collection_source_profile_mismatch:{source_name}")
-        action_fusion = action_contract.get("fusion_evidence")
-        action_fusion = dict(action_fusion) if isinstance(action_fusion, Mapping) else {}
-        source_fusion = source.get("fusion_evidence")
-        source_fusion = dict(source_fusion) if isinstance(source_fusion, Mapping) else {}
-        if source_fusion != action_fusion:
-            raise ValueError(f"signal_collection_source_fusion_mismatch:{source_name}")
         expected_items.append(_evidence_item_from_source(source))
     for expected_item, actual_item in zip(expected_items, evidence_items):
         analyst = expected_item["analyst"]
@@ -621,8 +652,8 @@ def build_pm_evidence_signals_from_scc(contract: Mapping[str, Any]) -> list[Any]
         )
         payload["metadata"] = {
             "action_evidence_contract": action_contract,
-            "product_profile_evidence": dict(source.get("product_profile_evidence") or {}),
-            "fusion_evidence": dict(source.get("fusion_evidence") or {}),
+            "product_profile_evidence": dict(action_contract.get("product_profile_evidence") or {}),
+            "fusion_evidence": dict(action_contract.get("fusion_evidence") or {}),
             "signal_record_id": source.get("signal_record_id"),
             "data_usage_summary": dict(action_contract.get("data_usage_summary") or {}),
         }
@@ -703,9 +734,7 @@ def build_signal_collection_contract(
 
         missing_evidence.extend(str(item) for item in _list(contract.get("missing_evidence")) if str(item))
         data_usage = contract.get("data_usage_summary") or {}
-        if isinstance(data_usage, Mapping):
-            for key in ("data_quality_flags", "risk_flags", "missing_data", "stale_data"):
-                data_quality_flags.extend(str(item) for item in _list(data_usage.get(key)) if str(item))
+        data_quality_flags.extend(_data_quality_flags_from_usage(agent, data_usage))
         no_lookahead_status = _text(contract.get("no_lookahead_status"), "unchecked")
         if no_lookahead_status not in {"ok", "pass", "clean"}:
             data_quality_flags.append(f"no_lookahead_status:{no_lookahead_status}")
@@ -742,7 +771,6 @@ def build_signal_collection_contract(
             "evidence_quality": _text(contract.get("evidence_quality"), "unknown"),
             "current_evidence_conflict": _list(contract.get("current_evidence_conflict")),
             "missing_evidence": _list(contract.get("missing_evidence")),
-            "fusion_evidence": fusion_evidence,
             "evidence_strength": _text(fusion_evidence.get("evidence_strength") or contract.get("evidence_strength")),
             "evidence_freshness": _text(fusion_evidence.get("evidence_freshness")),
             "confirmation_requirements": _list(fusion_evidence.get("confirmation_requirements") or contract.get("confirmation_requirements")),
@@ -754,8 +782,6 @@ def build_signal_collection_contract(
         source_contracts.append({
             "analyst": agent,
             "action_evidence_contract": contract,
-            "product_profile_evidence": product_profile_evidence,
-            "fusion_evidence": fusion_evidence,
             "signal_record_id": _metadata(signal).get("signal_record_id"),
         })
 

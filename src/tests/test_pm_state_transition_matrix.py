@@ -154,7 +154,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
                 "pm_lifecycle_learning_trace": pm_trace,
                 "pm_lifecycle_learning_impact_delta": {"net_lifecycle_learning_delta": 0.04},
             },
-            evidence_used=dict(rank_trace),
+            evidence_used={},
             capital_deployment=dict(rank_trace),
             position_sizing_result={"target_lots": 1, "target_position_ratio": 0.01},
         )
@@ -192,11 +192,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
                 "pm_lifecycle_learning_trace": pm_trace,
                 "pm_lifecycle_learning_impact_delta": {"deployment": "not_selected"},
             },
-            evidence_used={
-                **rank_trace,
-                "pm_lifecycle_learning_trace": pm_trace,
-                "pm_lifecycle_learning_impact_delta": {"deployment": "not_selected"},
-            },
+            evidence_used={},
             capital_deployment=deployment,
             position_sizing_result={"target_lots": 0, "target_position_ratio": 0.0},
             conditional_trigger_authority=False,
@@ -360,13 +356,11 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         self.assertTrue(check_final_action_contract(complete)["ok"])
 
         missing_rank_trace = copy.deepcopy(complete)
-        missing_rank_trace["evidence_used"].pop("rank_input_components")
         missing_rank_trace["capital_deployment"].pop("rank_input_components")
         rank_trace_errors = check_final_action_contract(missing_rank_trace)["errors"]
         self.assertTrue(any("rank_input_components_missing" in error for error in rank_trace_errors))
 
         missing_lifecycle = copy.deepcopy(complete)
-        missing_lifecycle["evidence_used"].pop("lifecycle_learning_trace")
         missing_lifecycle["capital_deployment"].pop("lifecycle_learning_trace")
         lifecycle_errors = check_final_action_contract(missing_lifecycle)["errors"]
         self.assertTrue(any("lifecycle_learning_trace_missing" in error for error in lifecycle_errors))
@@ -442,16 +436,6 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
 
         contract["evidence_used"] = {
             "position_sizing_result": self._position_sizing(),
-            "lifecycle_learning_trace": {
-                "contract_lifecycle_port": "hold",
-                "used_lanes": ["hold"],
-                "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
-                "trigger_profile_learning_rows": [],
-                "execution_profile_learning_direct_to_rank": False,
-                "trigger_profile_learning_direct_to_rank": False,
-                "execution_profile_signal_direct_to_rank": False,
-            },
-            "learning_impact_delta": {"hold_decision": "continue_hold"},
         }
         contract["learning_used"]["pm_lifecycle_learning_trace"] = {
             "contract_lifecycle_port": "hold",
@@ -494,18 +478,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
                     "hold_decision": "continue_hold",
                 },
             },
-            evidence_used={
-                "lifecycle_learning_trace": {
-                    "contract_lifecycle_port": "hold",
-                    "used_lanes": ["hold"],
-                    "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
-                    "trigger_profile_learning_rows": [],
-                    "execution_profile_learning_direct_to_rank": False,
-                    "trigger_profile_learning_direct_to_rank": False,
-                    "execution_profile_signal_direct_to_rank": False,
-                },
-                "learning_impact_delta": {"hold_decision": "continue_hold"},
-            },
+            evidence_used={},
         )
 
         result = check_final_action_contract(contract)

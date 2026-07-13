@@ -136,8 +136,13 @@ class AgentWorkflow:
         finally:
             timings[label] = timings.get(label, 0.0) + (perf_counter() - started_at)
 
-    def _save_prefetched_analyst_outputs(self, analysis_state: Dict[str, Any]) -> None:
-        if self.allow_analyst_db_writes:
+    def _save_prefetched_analyst_outputs(
+        self,
+        analysis_state: Dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> None:
+        if self.allow_analyst_db_writes and not force:
             return
         portfolio = analysis_state.get("portfolio")
         portfolio_id = getattr(portfolio, "id", "") if portfolio is not None else ""
@@ -149,7 +154,6 @@ class AgentWorkflow:
         }
         for signal in analysis_state.get("analyst_signals", []) or []:
             output = outputs_by_agent.get(getattr(signal, "agent_name", ""))
-            prompt = output.get("prompt") if output else ""
             if output:
                 report_path = write_analyst_report(
                     analyst=output.get("analyst") or getattr(signal, "agent_name", "unknown"),
@@ -167,7 +171,7 @@ class AgentWorkflow:
                 portfolio_id,
                 getattr(signal, "agent_name", "unknown"),
                 ticker,
-                prompt or "[parallel phase1 analysis prompt unavailable]",
+                "analyst_prompt_not_persisted",
                 signal,
             )
             if signal_id:
@@ -498,6 +502,10 @@ class AgentWorkflow:
         state["recommendation"] = None
         collector_output = signal_collector_agent(state)
         state.update(collector_output)
+        if state.get("pre_open_reference_price_unavailable"):
+            self._save_prefetched_analyst_outputs(state, force=True)
+            collector_output = signal_collector_agent(state)
+            state.update(collector_output)
         self._validate_phase1_analyst_outputs(
             str(state.get("ticker") or ""),
             list(state.get("enabled_analysts") or self.workflow_analysts),
@@ -766,12 +774,6 @@ class AgentWorkflow:
                     self._run_phase1_portfolio_only,
                     missing_basis_state,
                     portfolio,
-                )
-                self._timed_call(
-                    timings,
-                    "save_missing_basis_analyst_outputs",
-                    self._save_prefetched_analyst_outputs,
-                    final_state,
                 )
                 pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
                 generated_pm_states.append((ticker, pm_state))

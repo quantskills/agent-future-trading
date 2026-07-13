@@ -78,13 +78,20 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _analyst_contract_from_snapshot(snapshot: Dict[str, Any], analyst: str) -> Dict[str, Any]:
+    contract = snapshot.get("signal_collection_contract")
+    if not isinstance(contract, dict):
+        return {}
+    for source in contract.get("source_contracts") or []:
+        if not isinstance(source, dict) or source.get("analyst") != analyst:
+            continue
+        action_contract = source.get("action_evidence_contract")
+        return action_contract if isinstance(action_contract, dict) else {}
+    return {}
+
+
 def _fundamental_context_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    analyst_payload = _as_dict(snapshot.get("fundamental"))
-    metadata = _as_dict(analyst_payload.get("metadata"))
-    context = analyst_payload.get("fundamental_context")
-    if not isinstance(context, dict):
-        context = metadata.get("fundamental_context")
-    return context if isinstance(context, dict) else {}
+    return _analyst_contract_from_snapshot(snapshot, "fundamental")
 
 
 def _source_type(value: Any) -> str:
@@ -94,7 +101,7 @@ def _source_type(value: Any) -> str:
 
 
 def _signal_value(snapshot: Dict[str, Any], analyst: str) -> str:
-    item = snapshot.get(analyst)
+    item = _analyst_contract_from_snapshot(snapshot, analyst)
     if isinstance(item, dict):
         value = item.get("signal")
         if value:
@@ -114,15 +121,6 @@ def _signal_combo(snapshot: Dict[str, Any]) -> str:
 
 
 def _pm_risk_gate(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    audit = snapshot.get("active_opportunity_audit")
-    if isinstance(audit, dict):
-        decision = audit.get("decision") if isinstance(audit.get("decision"), dict) else {}
-        if decision:
-            return {
-                "decision": decision.get("audit_decision") or decision.get("decision") or decision.get("authority_type"),
-                "reasons": audit.get("reason_codes") or decision.get("reason_codes") or [],
-                "source": "active_opportunity_audit",
-            }
     contract = snapshot.get("final_action_contract")
     if isinstance(contract, dict):
         return {
@@ -131,6 +129,21 @@ def _pm_risk_gate(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "source": "final_action_contract",
         }
     return {}
+
+
+def _market_confirmation(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    contract = snapshot.get("final_action_contract")
+    if not isinstance(contract, dict):
+        return {}
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    score = evidence.get("market_confirmation_score")
+    if score is None:
+        return {}
+    return {
+        "confirmation_score": _safe_float(score),
+        "conflicts": evidence.get("market_confirmation_conflicts") or [],
+        "source": "final_action_contract.evidence_used",
+    }
 
 
 def _rebalance_summary_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -220,11 +233,8 @@ def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
     evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
-    audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-    opportunity = audit.get("opportunity") if isinstance(audit.get("opportunity"), dict) else {}
+    deployment = contract.get("capital_deployment") if isinstance(contract.get("capital_deployment"), dict) else {}
     score = evidence.get("opportunity_score")
-    if score is None:
-        score = opportunity.get("opportunity_score")
     score_value = _safe_float(score, -1.0)
     if score_value >= 0.65:
         bucket = "high_score"
@@ -236,15 +246,13 @@ def _opportunity_ranking_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         bucket = "unknown_score"
     components = evidence.get("opportunity_score_components")
     if not isinstance(components, dict):
-        components = opportunity.get("opportunity_score_components")
-    if not isinstance(components, dict):
         components = {}
     return {
         "opportunity_score": score_value if score_value >= 0 else None,
         "opportunity_score_bucket": bucket,
         "opportunity_score_components": components,
-        "opportunity_rank": evidence.get("opportunity_rank") or opportunity.get("opportunity_rank"),
-        "capital_allocation_reason": evidence.get("capital_allocation_reason") or opportunity.get("capital_allocation_reason") or "unknown",
+        "opportunity_rank": deployment.get("opportunity_rank"),
+        "capital_allocation_reason": deployment.get("capital_allocation_reason") or "unknown",
         "learning_adjustment_summary": (
             (contract.get("learning_used") or {}).get("learning_adjustment_summary")
             if isinstance(contract.get("learning_used"), dict)
@@ -267,7 +275,7 @@ def _attach_open_recommendation_context(
             if not isinstance(snapshot, dict):
                 snapshot = {}
         item["signal_combo"] = _signal_combo(snapshot)
-        item["market_confirmation"] = snapshot.get("market_confirmation") if isinstance(snapshot, dict) else None
+        item["market_confirmation"] = _market_confirmation(snapshot)
         risk_gate = _pm_risk_gate(snapshot)
         item["pm_risk_gate"] = risk_gate
         item["pm_risk_gate_decision"] = risk_gate.get("decision", "none") if risk_gate else "none"
@@ -343,7 +351,7 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
         contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         if isinstance(contract.get("strategy_controls"), str):
             free_text_control_violation_count += 1
-        for reason in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []):
+        for reason in contract.get("reason_codes") or []:
             control_reason_counts[str(reason)] += 1
 
         context = _fundamental_context_from_snapshot(snapshot)
@@ -390,16 +398,10 @@ def _recommendation_diagnostics(recommendations: List[Dict[str, Any]]) -> Dict[s
         if no_trade_reason:
             no_trade_reason_counts[str(no_trade_reason)] += 1
 
-        market_confirmation = snapshot.get("market_confirmation")
-        if isinstance(market_confirmation, dict) and market_confirmation.get("enabled"):
+        market_confirmation = _market_confirmation(snapshot)
+        if market_confirmation:
             market_confirmation_count += 1
             market_scores.append(float(market_confirmation.get("confirmation_score") or 0.0))
-            for feature in market_confirmation.get("features") or []:
-                if isinstance(feature, dict):
-                    feature_name = feature.get("feature") or feature.get("name") or str(feature)
-                else:
-                    feature_name = feature
-                market_feature_counts[str(feature_name)] += 1
 
     avg_score = sum(market_scores) / len(market_scores) if market_scores else 0.0
     return {

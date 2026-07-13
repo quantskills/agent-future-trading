@@ -918,11 +918,6 @@ def _build_structured_pm_justification(
     signal_snapshot: dict,
 ) -> str:
     """Render PM text from the final structured outlet, not from raw rationale."""
-    audit = (
-        signal_snapshot.get("active_opportunity_audit")
-        if isinstance(signal_snapshot.get("active_opportunity_audit"), dict)
-        else {}
-    )
     action = decision.action.value if hasattr(decision.action, "value") else str(decision.action)
     lots = int(getattr(decision, "lots", 0) or 0)
     action_contract = (
@@ -934,14 +929,10 @@ def _build_structured_pm_justification(
     target_lots = action_contract.get("target_lots")
     target_ratio = action_contract.get("target_position_ratio")
     lots_delta = action_contract.get("lots_delta")
-    authority_type = action_contract.get("authority_type") or (audit.get("decision") or {}).get("authority_type") or "not_applicable"
+    authority_type = action_contract.get("authority_type") or "not_applicable"
     reason_codes = action_contract.get("reason_codes") or []
     consistency = action_contract.get("consistency") if isinstance(action_contract.get("consistency"), dict) else {}
     consistency_status = consistency.get("status") or "unknown"
-    semantic_gate = signal_snapshot.get("pm_semantic_consistency_gate")
-    semantic_text = ""
-    if isinstance(semantic_gate, dict) and semantic_gate.get("passed") is False:
-        semantic_text = f"; semantic_gate={semantic_gate.get('block_reason')}"
     return _sanitize_visible_text(
         (
             f"PM final structured outlet for {ticker}: action={action}, lots={lots}; "
@@ -950,8 +941,7 @@ def _build_structured_pm_justification(
             f"target_position_ratio={target_ratio}; "
             f"lots_delta={lots_delta}; "
             f"reason_codes={','.join(str(item) for item in reason_codes) if reason_codes else 'none'}; "
-            f"recommendation_position_consistency={consistency_status}"
-            f"{semantic_text}."
+            f"recommendation_position_consistency={consistency_status}."
         )
     )
 
@@ -990,6 +980,8 @@ def _build_final_action_contract(
     market_confirmation: dict | None,
     alpha_setup_action_values: list | None,
     execution_contract_fields: dict | None = None,
+    contract_code: str | None = None,
+    final_contract_scope: dict | None = None,
 ) -> dict:
     return _pm_tool_build_final_action_contract(
         ticker=ticker,
@@ -1008,10 +1000,64 @@ def _build_final_action_contract(
         market_confirmation=market_confirmation,
         alpha_setup_action_values=alpha_setup_action_values,
         execution_contract_fields=execution_contract_fields,
+        contract_code=contract_code,
+        final_contract_scope=final_contract_scope,
         select_learning_trace_action_values=_select_learning_trace_action_values,
         safe_float=_safe_float,
         futures_action_cls=FuturesAction,
     )
+
+
+def _final_contract_scope_from_scc(
+    *,
+    signal_collection_contract: dict,
+    current_lots: int,
+    target_lots: int,
+    final_action: str,
+) -> dict:
+    """Select final execution-scope facts from direction-aligned formal AECs."""
+    side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
+    if not side and final_action in {"reduce", "exit"}:
+        side = "long" if current_lots > 0 else "short" if current_lots < 0 else ""
+    if not side:
+        return {}
+    aligned: list[tuple[int, float, dict]] = []
+    order = {name: index for index, name in enumerate(ANALYST_ORDER)}
+    for source in signal_collection_contract.get("source_contracts") or []:
+        if not isinstance(source, dict):
+            continue
+        contract = source.get("action_evidence_contract")
+        if not isinstance(contract, dict) or str(contract.get("side") or "").lower() != side:
+            continue
+        analyst = str(source.get("analyst") or contract.get("analyst") or "")
+        aligned.append(
+            (
+                order.get(analyst, len(order)),
+                -_safe_float(contract.get("confidence"), 0.0),
+                contract,
+            )
+        )
+    if not aligned:
+        return {}
+    aligned.sort(key=lambda row: (row[1], row[0]))
+    primary = aligned[0][2]
+    technical = next(
+        (
+            contract
+            for _order, _confidence, contract in aligned
+            if str(contract.get("analyst") or "") == "technical"
+        ),
+        None,
+    )
+    invalidation_source = technical or primary
+    return {
+        "setup_type": primary.get("setup_type"),
+        "horizon_class": primary.get("horizon_class"),
+        "expected_horizon_days": primary.get("expected_horizon_days"),
+        "market_regime": primary.get("market_regime"),
+        "invalidation_level": invalidation_source.get("invalidation_level"),
+        "atr_stop_distance": invalidation_source.get("atr_stop_distance"),
+    }
 
 
 def _build_pm_memory_state_update(
@@ -1426,6 +1472,18 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
             "capital_deployment": deployment,
         }
     execution_fields["capital_deployment"] = deployment
+    recommendation_context = dict(pm_state.get("recommendation_context") or {})
+    final_action = _final_action_from_lots(
+        current_lots=current_lots,
+        target_lots=target_lots,
+        final_entry_authority=final_entry_authority,
+    )
+    final_contract_scope = _final_contract_scope_from_scc(
+        signal_collection_contract=signal_collection_contract,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        final_action=final_action,
+    )
     contract_inputs = {
         "ticker": str(pm_state.get("ticker") or ""),
         "current_lots": current_lots,
@@ -1443,6 +1501,8 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         "market_confirmation": dict(pm_state.get("market_confirmation") or {}),
         "alpha_setup_action_values": list(pm_state.get("alpha_setup_action_values") or []),
         "execution_contract_fields": execution_fields,
+        "contract_code": recommendation_context.get("contract_code"),
+        "final_contract_scope": final_contract_scope,
     }
     contract_inputs = _attach_incomplete_prior_diagnostics_to_contract_state(contract_inputs)
 
@@ -1466,60 +1526,7 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         if isinstance(execution_fields.get("pm_landing_consistency_audit"), dict):
             learning_used["pm_landing_consistency_audit"] = execution_fields["pm_landing_consistency_audit"]
         final_action_contract["learning_used"] = learning_used
-    evidence_used = (
-        final_action_contract.get("evidence_used")
-        if isinstance(final_action_contract.get("evidence_used"), dict)
-        else {}
-    )
-    for field in (
-        "pm_lifecycle_learning_router",
-    ):
-        value = execution_fields.get(field)
-        if value is not None:
-            evidence_used[field] = value
     final_action_contract["capital_deployment"] = dict(deployment)
-    rank_fields = (
-        "opportunity_rank",
-        "rank_source",
-        "rank_scope",
-        "capital_rank_generated_by",
-        "rank_capital_role",
-        "capital_layer",
-        "capital_ratio_source",
-        "rank_reason",
-        "rank_input_components",
-        "lifecycle_learning_trace",
-        "learning_impact_delta",
-        "rank_semantics_version",
-        "opportunity_rank_meaning",
-        "rank_is_capital_priority",
-        "rank_is_not_trade_authority",
-    )
-    for field in rank_fields:
-        if field in deployment:
-            value = deployment[field]
-            if field == "lifecycle_learning_trace" and isinstance(value, dict):
-                existing_trace = evidence_used.get("lifecycle_learning_trace")
-                existing_trace = existing_trace if isinstance(existing_trace, dict) else {}
-                pm_final_trace = existing_trace.get("pm_final_contract_lifecycle_trace")
-                if not isinstance(pm_final_trace, dict):
-                    pm_final_trace = existing_trace
-                if isinstance(pm_final_trace, dict):
-                    value = dict(value)
-                    if isinstance(pm_final_trace.get("decision_learning_rows"), list):
-                        value["decision_learning_rows"] = list(pm_final_trace["decision_learning_rows"])
-                    if isinstance(pm_final_trace.get("trigger_profile_learning_rows"), list):
-                        value["trigger_profile_learning_rows"] = list(pm_final_trace["trigger_profile_learning_rows"])
-                    for flag in (
-                        "execution_profile_learning_direct_to_rank",
-                        "trigger_profile_learning_direct_to_rank",
-                    ):
-                        if flag in pm_final_trace:
-                            value[flag] = bool(pm_final_trace.get(flag))
-                    value["pm_final_contract_lifecycle_trace"] = dict(pm_final_trace)
-            evidence_used[field] = value
-    evidence_used["capital_allocation_reason"] = deployment.get("capital_allocation_reason")
-    final_action_contract["evidence_used"] = evidence_used
     step6_contract_generation_check = _pm_step6_build_contract_generation_check(
         final_action_contract=final_action_contract,
         deployment=deployment,
@@ -3771,15 +3778,6 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
             "event_type": str(getattr(signal, "event_type", "") or ""),
             "confidence": _safe_float(getattr(signal, "confidence", 0.0), 0.0),
         }
-        metadata = _signal_metadata(signal)
-        action_contract = (
-            metadata.get("action_evidence_contract")
-            if isinstance(metadata.get("action_evidence_contract"), dict)
-            else {}
-        )
-        if action_contract:
-            payload["action_evidence_contract"] = action_contract
-            payload["learning_scope"] = action_contract.get("learning_scope") or {}
         existing = payloads.get(agent_name)
         if existing is None or (payload["side"] == target_side and existing.get("side") != target_side):
             payloads[agent_name] = payload
@@ -3910,7 +3908,6 @@ def _build_execution_contract_fields(
             str(item) for item in (final_entry_authority.get("reason_codes") or [])
         ])),
         "execution_action_value_preference": execution_preference,
-        "analyst_execution_roles": signal_payloads,
         "recommendation_action": str((recommendation_intent or {}).get("action") or ""),
         "business_boundary": "trader_executes_pm_plan_only_no_strategy_creation",
     }
@@ -9441,6 +9438,7 @@ def _run_pm_six_step_decision(state: FundState):
             trading_date=trading_date,
             enabled_analysts=enabled_analysts,
             analyst_signals=source_analyst_signals,
+            require_signal_record_ids=True,
         )
     except ValueError as exc:
         error = str(exc)

@@ -125,7 +125,6 @@ EXECUTION_CONTRACT_KEYS = {
     "max_allowed_margin_ratio",
     "reason_codes",
     "execution_action_value_preference",
-    "analyst_execution_roles",
 }
 
 FINAL_CONTRACT_EXECUTION_FIELD_KEYS = {
@@ -141,6 +140,12 @@ FINAL_CONTRACT_EXECUTION_FIELD_KEYS = {
     "entry_trigger",
     "invalidation",
     "invalidation_condition",
+    "invalidation_level",
+    "atr_stop_distance",
+    "setup_type",
+    "horizon_class",
+    "expected_horizon_days",
+    "market_regime",
     "requires_intraday_confirmation",
     "can_execute_without_intraday_trigger",
     "execution_profile",

@@ -1226,7 +1226,7 @@ def _write_signal_context_history(
                 _entry_trigger_label(snapshot, side),
                 _action_name(recommendation, snapshot),
                 _invalidation_level(snapshot),
-                _target_return(snapshot),
+                None,
                 analyst_ext.inline_value,
                 market_ext.inline_value,
                 final_contract_ext.inline_value,
@@ -1561,13 +1561,6 @@ def _write_trade_episode_memory(
         data_usage = data_usage_from_snapshot(snapshot)
         data_usage_notes = compact_data_usage_notes(data_usage)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-        position_quality_controls = {}
-        opportunity_scorecard = (
-            snapshot.get("opportunity_scorecard")
-            if isinstance(snapshot.get("opportunity_scorecard"), dict)
-            else {}
-        )
         open_tx = transaction_lookup.get(str(pair.get("open_transaction_id") or "")) or {}
         close_tx = transaction_lookup.get(str(pair.get("close_transaction_id") or "")) or {}
         safe_snapshot = _learning_safe_snapshot(snapshot)
@@ -1586,28 +1579,25 @@ def _write_trade_episode_memory(
             "data_usage_summary": data_usage,
             "data_usage_notes": data_usage_notes,
             "final_action_contract": final_contract,
-            "active_opportunity_audit": active_audit,
             "learning_source": "final_action_contract",
-            "opportunity_scorecard": opportunity_scorecard,
             "opportunity_ranking_trace": opportunity_ranking_trace,
-            "position_quality_controls": position_quality_controls,
             "learning_to_position_trace": (
                 (final_contract.get("learning_used") or {})
                 if isinstance(final_contract.get("learning_used"), dict)
                 else {}
             ),
             "position_lifecycle_trace": (
-                {"action_candidates": final_contract.get("action_candidates") or []}
-                if isinstance(final_contract.get("action_candidates"), list)
+                (final_contract.get("learning_used") or {}).get("pm_lifecycle_learning_trace") or {}
+                if isinstance(final_contract.get("learning_used"), dict)
                 else {}
             ),
             "loss_template_research_trace": (
-                {"risk_flags": final_contract.get("risk_flags") or []}
+                {"reason_codes": final_contract.get("reason_codes") or []}
                 if final_contract
                 else {}
             ),
             "execution_result": _execution_result_from_snapshot(snapshot),
-            "market_confirmation": snapshot.get("market_confirmation") if isinstance(snapshot.get("market_confirmation"), dict) else {},
+            "market_confirmation": _market_confirmation(snapshot),
             "created_from": "phase4_reviewer",
             "episode_date": episode_date,
             "review_trading_date": trading_date,
@@ -1627,7 +1617,7 @@ def _write_trade_episode_memory(
             usable_memory=[
                 lesson,
                 f"outcome={payload['pair'].get('net_pnl')}; holding_days={payload['pair'].get('holding_days')}",
-                f"opportunity_state={payload.get('opportunity_state')}; setup_quality={((opportunity_scorecard or {}).get(side) or {}).get('max_setup_quality') if isinstance((opportunity_scorecard or {}).get(side), dict) else None}",
+                f"opportunity_state={payload.get('opportunity_state')}",
                 f"opportunity_score={opportunity_ranking_trace.get('opportunity_score')}; rank={opportunity_ranking_trace.get('opportunity_rank')}; allocation_reason={opportunity_ranking_trace.get('capital_allocation_reason')}",
                 *data_usage_notes[:3],
             ],
@@ -1762,10 +1752,8 @@ def _write_research_position_feedback(
         snapshot = _recommendation_snapshot(recommendation)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
-        action_candidates = final_contract.get("action_candidates") if isinstance(final_contract.get("action_candidates"), list) else []
         trace = {
             "learning_used": learning_used,
-            "action_candidates": action_candidates,
             "source": "final_action_contract",
         }
         memory_refs, policy_refs = _feedback_learning_refs(trace)
@@ -1799,8 +1787,8 @@ def _write_research_position_feedback(
             "source": "final_action_semantics.research_fact_state",
         }
         opportunity_to_position = {
-            "action_candidates": action_candidates,
-            "source": "final_action_contract",
+            "pm_lifecycle_learning_trace": learning_used.get("pm_lifecycle_learning_trace") or {},
+            "source": "final_action_contract.learning_used",
         }
         target_lots = _safe_int(position_effect.get("target_lots"), 0)
         current_lots = _safe_int(position_effect.get("current_lots"), 0)
@@ -2673,24 +2661,13 @@ def _write_no_trade_opportunity_memory(
         lots = _safe_int(recommendation.get("lots"), 0)
         action = str(recommendation.get("action") or "").lower()
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        active_audit = (
-            snapshot.get("active_opportunity_audit")
-            if isinstance(snapshot.get("active_opportunity_audit"), dict)
-            else {}
-        )
-        auditor_reasons: List[str] = []
-        for source in (final_contract, active_audit):
-            if not isinstance(source, dict):
-                continue
-            for key in ("reason_codes", "risk_flags", "reasons"):
-                value = source.get(key)
-                if isinstance(value, list):
-                    auditor_reasons.extend(str(item) for item in value if item)
+        auditor = snapshot.get("auditor") if isinstance(snapshot.get("auditor"), dict) else {}
+        auditor_reasons = [
+            str(item)
+            for item in (auditor.get("audit_reason_codes") or [])
+            if item
+        ]
         auditor_reasons = sorted(set(auditor_reasons))
-        opportunity_scorecard = (
-            snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
-        )
-        position_quality_controls = {}
         execution_result = _execution_result_from_snapshot(snapshot)
         execution_no_trade_reason = normalize_no_trade_reason(execution_result.get("no_trade_reason"))
         limit_locked_execution = execution_no_trade_reason == "limit_locked_no_fill"
@@ -2768,9 +2745,7 @@ def _write_no_trade_opportunity_memory(
             "recommendation_id": recommendation.get("id"),
             "signal_snapshot": safe_snapshot,
             "trade_research_contract_summary": _opportunity_contract_summary(snapshot),
-            "opportunity_scorecard": opportunity_scorecard,
             "opportunity_ranking_trace": opportunity_ranking_trace,
-            "position_quality_controls": position_quality_controls,
             "data_usage_summary": data_usage,
             "data_usage_notes": data_usage_notes,
             "final_action_contract": final_contract,
@@ -2781,12 +2756,12 @@ def _write_no_trade_opportunity_memory(
                 else {}
             ),
             "position_lifecycle_trace": (
-                {"action_candidates": final_contract.get("action_candidates") or []}
-                if isinstance(final_contract.get("action_candidates"), list)
+                (final_contract.get("learning_used") or {}).get("pm_lifecycle_learning_trace") or {}
+                if isinstance(final_contract.get("learning_used"), dict)
                 else {}
             ),
             "loss_template_research_trace": (
-                {"risk_flags": final_contract.get("risk_flags") or []}
+                {"reason_codes": final_contract.get("reason_codes") or []}
                 if final_contract
                 else {}
             ),
@@ -4689,16 +4664,10 @@ def _write_contextual_rule_calibration_state(
             break
         snapshot = _recommendation_snapshot(recommendation)
         final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
-        action_candidates = final_contract.get("action_candidates") if isinstance(final_contract.get("action_candidates"), list) else []
-        holding = {}
-        for candidate in action_candidates:
-            if not isinstance(candidate, dict):
-                continue
-            if candidate.get("source") == "position_lifecycle":
-                holding = candidate
-                break
-        holding = holding if isinstance(holding, dict) else {}
-        decision = str(holding.get("decision") or "")
+        learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
+        impact = learning_used.get("pm_lifecycle_learning_impact_delta")
+        impact = impact if isinstance(impact, dict) else {}
+        decision = str(impact.get("hold_decision") or impact.get("reduce_exit_decision") or "")
         if decision not in {
             "skip_horizon_mismatch_new_entry",
             "reduce_failed_new_loss_revalidation",

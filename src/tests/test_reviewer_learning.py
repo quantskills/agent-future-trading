@@ -86,6 +86,22 @@ from tools.agent_tools.research.research_memory_writers import (
 from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
 
 
+def _scc_from_analyst_payloads(**payloads):
+    return {
+        "source_contracts": [
+            {
+                "analyst": analyst,
+                "signal_record_id": f"signal-{analyst}",
+                "action_evidence_contract": {
+                    "analyst": analyst,
+                    **payload,
+                },
+            }
+            for analyst, payload in payloads.items()
+        ]
+    }
+
+
 class _FakeLearningDB:
     def __init__(self):
         self.budgets = []
@@ -718,32 +734,20 @@ class ReviewerLearningContextTest(unittest.TestCase):
         )
         _ensure_reviewer_learning_schema(cursor)
         snapshot = {
-            "technical": {
-                "signal": "Bullish",
-                "confidence": 0.72,
-                "setup_type": "breakout",
-                "horizon_class": "short",
-                "opportunity_state": "watch_for_trigger",
-                "opportunity_type": "unknown",
-            },
-            "fundamental": {"signal": "Neutral", "confidence": 0.40, "horizon_class": "medium"},
-            "commodity_news": {"signal": "Bullish", "confidence": 0.61, "horizon_class": "event_short"},
-            "horizon_scope": {"decision_horizon": "short"},
-            "opportunity_scorecard": {
-                "preferred_side": "long",
-                "long": {
-                    "final_state": "tradeable_candidate",
-                    "dominant_opportunity_type": "trend_continuation",
-                    "max_setup_quality": 0.72,
-                },
-            },
-            "pm_research_contract_summary": {
-                "contract_version": "agentquant.research.v1",
-                "dominant_opportunity_types": ["trend_continuation"],
-                "opportunity_states": ["tradeable_candidate"],
-                "opportunity_states": ["probe_candidate"],
-                "factor_focus": ["trend"],
-                "current_evidence_conflict": [],
+            "signal_collection_contract": {
+                **_scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "confidence": 0.72,
+                        "setup_type": "breakout",
+                        "horizon_class": "short",
+                        "opportunity_state": "tradeable_candidate",
+                        "opportunity_type": "trend_continuation",
+                    },
+                    fundamental={"signal": "Neutral", "confidence": 0.40, "horizon_class": "medium"},
+                    commodity_news={"signal": "Bullish", "confidence": 0.61, "horizon_class": "event_short"},
+                ),
+                "horizon_scope": {"decision_horizon": "short"},
             },
             "final_action_contract": {
                 "contract_version": "agentquant.final_action.v1",
@@ -756,7 +760,6 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 "horizon_class": "short",
                 "market_regime": "trend",
             },
-            "market_confirmation": {"confirmation_score": 0.74},
         }
         cursor.execute(
             """
@@ -1470,13 +1473,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
             """
         )
         note = dict(cursor.fetchone())
-        raw_prompt = load_externalized_text(
-            note["raw_prompt"],
-            note["raw_prompt_artifact_path"],
-            note["raw_prompt_sha256"],
-        )
-        self.assertIn("AgentQuant Researcher", raw_prompt)
-        self.assertNotIn("AgentQuant Reviewer acting as a research memory curator", raw_prompt)
+        self.assertEqual(note["raw_prompt"], "")
+        self.assertIsNone(note["raw_prompt_artifact_path"])
+        self.assertIsNone(note["raw_prompt_sha256"])
         self.assertEqual(payload["invalidation_condition"], "breakout fails before close")
         conn.close()
 
@@ -1526,12 +1525,30 @@ class ReviewerLearningContextTest(unittest.TestCase):
                         "underlying_code": "BU",
                         "action": "open_long",
                         "lots": 1,
+                        "audit_payload": {"audit_verdict": "approve"},
                         "signal_snapshot": json.dumps(
                             {
-                                "pm_internal_draft": {
-                                    "target_position_ratio": 0.04,
-                                    "market_confirmation": {"confirmation_score": 0.58},
+                                "signal_collection_contract": {
+                                    "source_contracts": [
+                                        {
+                                            "analyst": "technical",
+                                            "signal_record_id": "signal-1",
+                                            "action_evidence_contract": {
+                                                "analyst": "technical",
+                                                "signal": "Bullish",
+                                                "side": "long",
+                                            },
+                                        }
+                                    ]
                                 }
+                                ,"final_action_contract": {
+                                    "final_action": "open_probe",
+                                    "current_lots": 0,
+                                    "target_lots": 1,
+                                    "lots_delta": 1,
+                                },
+                                "auditor": {"audit_verdict": "approve"},
+                                "execution_result": {"outcome": "filled"},
                             }
                         ),
                     }
@@ -1552,6 +1569,14 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(payload["pm_action_hint"], "probe")
         self.assertEqual(payload["position_effect_limit"], "probe_only_until_validated")
         self.assertEqual(payload["expected_trade_behavior_change"], "avoid full-size opens without trigger confirmation")
+        note = cursor.execute(
+            "SELECT raw_prompt, raw_response, raw_prompt_artifact_path, raw_response_artifact_path "
+            "FROM researcher_llm_notes WHERE config_id='cfg'"
+        ).fetchone()
+        self.assertEqual(note["raw_prompt"], "")
+        self.assertEqual(note["raw_response"], "")
+        self.assertIsNone(note["raw_prompt_artifact_path"])
+        self.assertIsNone(note["raw_response_artifact_path"])
         conn.close()
 
 
@@ -2469,7 +2494,17 @@ class StrictCompletionRegressionTest(unittest.TestCase):
             cfg={},
         )
         summary = build_neutral_accountability_summary(
-            [{"id": "rec-1", "underlying_code": "BU", "signal_snapshot": snapshot}],
+            [{
+                "id": "rec-1",
+                "underlying_code": "BU",
+                "signal_snapshot": {
+                    "signal_collection_contract": _scc_from_analyst_payloads(
+                        technical=snapshot["technical"],
+                        fundamental=snapshot["fundamental"],
+                        commodity_news=snapshot["commodity_news"],
+                    )
+                },
+            }],
             {},
         )
 
@@ -2556,7 +2591,17 @@ class StrictCompletionRegressionTest(unittest.TestCase):
             cfg={},
         )
         summary = build_neutral_accountability_summary(
-            [{"id": "rec-1", "underlying_code": "BU", "signal_snapshot": snapshot}],
+            [{
+                "id": "rec-1",
+                "underlying_code": "BU",
+                "signal_snapshot": {
+                    "signal_collection_contract": _scc_from_analyst_payloads(
+                        technical=snapshot["technical"],
+                        fundamental=snapshot["fundamental"],
+                        commodity_news=snapshot["commodity_news"],
+                    )
+                },
+            }],
             {},
         )
 
@@ -2568,12 +2613,14 @@ class StrictCompletionRegressionTest(unittest.TestCase):
 
     def test_reviewer_horizon_prefers_decision_scope_over_short_technical(self):
         snapshot = {
-            "horizon_scope": {
-                "decision_horizon": "medium",
-                "analyst_horizons": {
-                    "technical": {"analyst_horizon": "short"},
-                    "fundamental": {"analyst_horizon": "medium"},
-                    "commodity_news": {"analyst_horizon": "event_short"},
+            "signal_collection_contract": {
+                "horizon_scope": {
+                    "decision_horizon": "medium",
+                    "analyst_horizons": {
+                        "technical": {"analyst_horizon": "short"},
+                        "fundamental": {"analyst_horizon": "medium"},
+                        "commodity_news": {"analyst_horizon": "event_short"},
+                    },
                 },
             },
             "pm_internal_draft": {"expected_horizon_days": 2},
@@ -3167,7 +3214,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
         self.assertEqual(summary["lifecycle_counts"].get("exit"), 1, summary)
         self.assertEqual(summary["historical_learning_influenced_contract_counts"].get("exit"), 1, summary)
-        self.assertEqual(summary["pm_memory_consumption_error_count"], 0)
+        self.assertNotIn("pm_memory_consumption_error_count", summary)
         self.assertFalse(summary["reviewer_writes_action_value"])
 
     def test_infer_setup_type_ignores_pm_draft_pm_internal_draft(self):
@@ -3178,11 +3225,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "pm_decision_layer": "tradeable_candidate",
                     "opportunity_scorecard": {"preferred_side": "short"},
                 },
-                "technical": {
-                    "signal": "Bullish",
-                    "setup_type": "trend_breakout",
-                    "entry_trigger": "breakout confirmed",
-                },
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "setup_type": "trend_breakout",
+                        "entry_trigger": "breakout confirmed",
+                    }
+                ),
             },
             setup_type="",
             opportunity_type="",
@@ -3247,14 +3296,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             reason_codes = [learning_reason]
             learning_used = {"adaptive_policy_applied": [{"policy_type": "causal_review_rule"}]}
         return {
-            "technical": {
-                "signal": "Bullish",
-                "setup_type": "reversal_confirmed",
-                "horizon_class": "short",
+            "signal_collection_contract": {
+                **_scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "setup_type": "reversal_confirmed",
+                        "horizon_class": "short",
+                    },
+                    fundamental={"signal": "Bullish"},
+                    commodity_news={"signal": "Neutral"},
+                ),
+                "horizon_scope": {"decision_horizon": "short"},
             },
-            "fundamental": {"signal": "Bullish"},
-            "commodity_news": {"signal": "Neutral"},
-            "horizon_scope": {"decision_horizon": "short"},
             "final_action_contract": {
                 "contract_version": "agentquant.final_action.v1",
                 "ticker": "ZZ",
@@ -3266,7 +3319,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "horizon_class": "short",
                 "market_regime": "trend",
                 "reason_codes": reason_codes,
-                "risk_flags": [],
                 "learning_used": learning_used,
             },
         }
@@ -3805,7 +3857,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             old_cap = cursor.execute(
                 "SELECT active, reason FROM adaptive_policy_state WHERE id='old-cap'"
             ).fetchone()
-            self.assertEqual(old_cap["active"], 0)
+            self.assertEqual(old_cap["active"], 0, result)
             self.assertIn("counterfactual reversal", old_cap["reason"])
         finally:
             conn.close()
@@ -4259,15 +4311,17 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "id": "rec-neutral",
                         "underlying_code": "ZZ",
                         "signal_snapshot": {
-                            "technical": {
-                                "signal": "Neutral",
-                                "neutral_reason": "needs confirmation",
-                                "missing_evidence": ["volume"],
-                                "conflicting_factors": [],
-                                "would_change_view_if": "breakout confirms",
-                            },
-                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
-                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                            "signal_collection_contract": _scc_from_analyst_payloads(
+                                technical={
+                                    "signal": "Neutral",
+                                    "neutral_reason": "needs confirmation",
+                                    "missing_evidence": ["volume"],
+                                    "conflicting_factors": [],
+                                    "would_change_view_if": "breakout confirms",
+                                },
+                                fundamental={"signal": "Bullish", "confidence": 0.70},
+                                commodity_news={"signal": "Bullish", "confidence": 0.65},
+                            ),
                         },
                     }
                 ],
@@ -4337,9 +4391,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "id": "rec-neutral",
                         "underlying_code": "ZZ",
                         "signal_snapshot": {
-                            "technical": {"signal": "Neutral"},
-                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
-                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                            "signal_collection_contract": _scc_from_analyst_payloads(
+                                technical={"signal": "Neutral"},
+                                fundamental={"signal": "Bullish", "confidence": 0.70},
+                                commodity_news={"signal": "Bullish", "confidence": 0.65},
+                            ),
                         },
                     }
                 ],
@@ -4412,9 +4468,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "ZZ",
                     json.dumps(
                         {
-                            "technical": {"signal": "Neutral"},
-                            "fundamental": {"signal": "Bullish", "confidence": 0.70},
-                            "commodity_news": {"signal": "Bullish", "confidence": 0.65},
+                            "signal_collection_contract": _scc_from_analyst_payloads(
+                                technical={"signal": "Neutral"},
+                                fundamental={"signal": "Bullish", "confidence": 0.70},
+                                commodity_news={"signal": "Bullish", "confidence": 0.65},
+                            ),
                         }
                     ),
                     None,
@@ -4481,41 +4539,43 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             )
             cursor.execute("INSERT INTO portfolio VALUES (?, ?)", ("p1", "cfg"))
             snapshot = {
-                "technical": {
-                    "signal": "Bullish",
-                    "confidence": 0.7,
-                    "setup_type": "breakout",
-                    "horizon_class": "short",
-                    "opportunity_type": "trend_continuation",
-                    "opportunity_state": "tradeable_candidate",
-                    "factor_focus": ["trend"],
-                    "current_evidence_conflict": [],
-                },
-                "fundamental": {"signal": "Bullish", "confidence": 0.6},
-                "commodity_news": {
-                    "signal": "Neutral",
-                    "confidence": 0.3,
-                    "neutral_reason": "news impact needs price confirmation",
-                    "missing_evidence": [],
-                    "conflicting_factors": [],
-                    "would_change_view_if": "price confirms upside event follow-through",
-                    "neutral_opportunity_bucket": "watchlist_trigger",
-                    "neutral_trigger_condition": "price confirms upside event follow-through",
-                    "counterfactual_side": "long",
-                    "neutral_watchlist_priority": "medium",
-                    "metadata": {
-                        "neutral_opportunity_contract": {
-                            "bucket": "watchlist_trigger",
-                            "trigger_condition": "price confirms upside event follow-through",
-                            "counterfactual_side": "long",
-                            "watchlist_priority": "medium",
-                            "tracking_only": True,
-                            "opportunity_state": "watch_for_trigger",
-                            "trigger_valid": False,
-                            "action_preference": "watch_for_trigger",
-                        }
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "confidence": 0.7,
+                        "setup_type": "breakout",
+                        "horizon_class": "short",
+                        "opportunity_type": "trend_continuation",
+                        "opportunity_state": "tradeable_candidate",
+                        "factor_focus": ["trend"],
+                        "current_evidence_conflict": [],
                     },
-                },
+                    fundamental={"signal": "Bullish", "confidence": 0.6},
+                    commodity_news={
+                        "signal": "Neutral",
+                        "confidence": 0.3,
+                        "neutral_reason": "news impact needs price confirmation",
+                        "missing_evidence": [],
+                        "conflicting_factors": [],
+                        "would_change_view_if": "price confirms upside event follow-through",
+                        "neutral_opportunity_bucket": "watchlist_trigger",
+                        "neutral_trigger_condition": "price confirms upside event follow-through",
+                        "counterfactual_side": "long",
+                        "neutral_watchlist_priority": "medium",
+                        "metadata": {
+                            "neutral_opportunity_contract": {
+                                "bucket": "watchlist_trigger",
+                                "trigger_condition": "price confirms upside event follow-through",
+                                "counterfactual_side": "long",
+                                "watchlist_priority": "medium",
+                                "tracking_only": True,
+                                "opportunity_state": "watch_for_trigger",
+                                "trigger_valid": False,
+                                "action_preference": "watch_for_trigger",
+                            }
+                        },
+                    },
+                ),
                 "final_action_contract": {
                     "contract_version": "agentquant.final_action.v1",
                     "ticker": "BU",
@@ -4893,54 +4953,30 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 """
             )
             snapshot = {
-                "technical": {
-                    "signal": "Bearish",
-                    "confidence": 0.68,
-                    "evidence_role": "entry_timing",
-                    "entry_trigger": "opening range breakdown",
-                    "invalidation": "recover above VWAP",
-                    "metadata": {
-                        "technical_context": {"market_regime": "trend"},
-                        "action_evidence_contract": {
-                            "contract_version": "agentquant.action_evidence.v1",
-                            "analyst": "technical",
-                            "learning_scope": {
-                                "setup_family": "trend_breakout",
-                                "sector_setup_alignment": "preferred",
-                                "market_regime": "trend",
-                            },
-                            "execution": {
-                                "trigger_source": "technical",
-                                "execution_focus": "opening_range_breakdown",
-                            },
-                        },
-                    },
-                },
-                "fundamental": {"signal": "Bullish", "evidence_role": "background"},
-                "commodity_news": {"signal": "Bullish", "evidence_role": "catalyst"},
-                "pm_internal_draft": {
-                    "decision_horizon": "short",
-                    "market_regime": "trend",
-                    "pm_decision_layer": "exploration_probe",
-                    "opportunity_state": "tradeable_candidate",
-                    "opportunity_scorecard": {
-                        "short": {
-                            "final_state": "tradeable_candidate",
-                            "max_setup_quality": 0.62,
-                        }
-                    },
-                    "execution_contract": {
-                        "execution_profile": "breakout",
-                        "trigger_source": "technical_breakout",
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={
+                        "contract_version": "agentquant.action_evidence.v1",
+                        "signal": "Bearish",
+                        "confidence": 0.68,
+                        "evidence_role": "entry_timing",
+                        "opportunity_state": "probe_candidate",
+                        "opportunity_type": "trend_breakout",
                         "entry_trigger": "opening range breakdown",
                         "invalidation": "recover above VWAP",
+                        "market_regime": "trend",
+                        "learning_scope": {
+                            "setup_family": "trend_breakout",
+                            "sector_setup_alignment": "preferred",
+                            "market_regime": "trend",
+                        },
+                        "execution": {
+                            "trigger_source": "technical",
+                            "execution_focus": "opening_range_breakdown",
+                        },
                     },
-                },
-                "pm_research_contract_summary": {
-                    "contract_version": "agentquant.research.v1",
-                    "opportunity_states": ["tradeable_candidate"],
-                    "opportunity_states": ["probe_candidate"],
-                },
+                    fundamental={"signal": "Bullish", "evidence_role": "background"},
+                    commodity_news={"signal": "Bullish", "evidence_role": "catalyst"},
+                ),
                 "final_action_contract": {
                     "contract_version": "agentquant.final_action.v1",
                     "ticker": "EB",
@@ -4952,7 +4988,6 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "horizon_class": "short",
                     "market_regime": "trend",
                     "setup_type": "trend_breakout_setup",
-                    "opportunity_state": "tradeable_candidate",
                     "execution_contract": {
                         "execution_profile": "breakout",
                         "trigger_source": "technical_breakout",
@@ -5597,6 +5632,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "side": "short",
                 "sector": "chemical",
                 "horizon_class": "short",
+                "setup_type": "reversal_confirmed",
                 "market_regime": "range",
                 "setup_type": "trend_breakout_setup",
                 "data_combo": "technical:used|fundamental:used|news:fresh",
@@ -5627,9 +5663,9 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "capital_deployment": {
                             "selected_for_capital_deployment": True,
                             "capital_allocation_reason": "ranked_deployable_candidate",
+                            "opportunity_rank": 1,
                         },
                         "evidence_used": {
-                            "opportunity_rank": 1,
                             "opportunity_score": 0.81,
                         },
                     },
@@ -6499,9 +6535,19 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "underlying_code": ticker,
                         "reference_portfolio_id": "phase1-p",
                         "signal_snapshot": {
-                            "commodity_news": {"signal": "Neutral"},
-                            "fundamental": {"signal": "Neutral"},
-                            "technical": {"signal": "Neutral"},
+                            "signal_collection_contract": {
+                                "source_contracts": [
+                                    {
+                                        "analyst": analyst,
+                                        "signal_record_id": f"{ticker}-{analyst}",
+                                        "action_evidence_contract": {
+                                            "analyst": analyst,
+                                            "signal": "Neutral",
+                                        },
+                                    }
+                                    for analyst in ("commodity_news", "fundamental", "technical")
+                                ]
+                            },
                         },
                     }
                 )
@@ -6540,17 +6586,18 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "id": "rec-1",
                         "underlying_code": "BU",
                         "signal_snapshot": {
-                            "technical": {
-                                "signal": "Bullish",
-                                "horizon_class": "short",
-                                "expected_horizon_days": 2,
-                                "trend_stage": "low_position_reversal",
-                                "price_percentile": 0.24,
-                                "entry_trigger": "reversal_confirmed",
-                                "action_name": "initial",
-                                "invalidation_level": 3220.0,
-                                "target_return": 0.035,
-                            },
+                            "signal_collection_contract": _scc_from_analyst_payloads(
+                                technical={
+                                    "signal": "Bullish",
+                                    "horizon_class": "short",
+                                    "expected_horizon_days": 2,
+                                    "trend_stage": "low_position_reversal",
+                                    "price_percentile": 0.24,
+                                    "entry_trigger": "reversal_confirmed",
+                                    "action_name": "initial",
+                                    "invalidation_level": 3220.0,
+                                },
+                            ),
                             "final_action_contract": {
                                 "contract_version": "agentquant.final_action.v1",
                                 "ticker": "BU",
@@ -6559,6 +6606,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                                 "target_lots": 1,
                                 "lots_delta": 1,
                                 "target_position_ratio": 0.08,
+                                "horizon_class": "short",
+                                "expected_horizon_days": 2,
+                                "entry_trigger": "reversal_confirmed",
+                                "invalidation_level": 3220.0,
                             },
                         },
                     }
@@ -6571,7 +6622,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(row["ticker"], "BU")
             self.assertAlmostEqual(row["price_percentile"], 0.24)
             self.assertAlmostEqual(row["invalidation_level"], 3220.0)
-            self.assertAlmostEqual(row["target_return"], 0.035)
+            self.assertIsNone(row["target_return"])
         finally:
             conn.close()
 
@@ -6686,14 +6737,16 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "now",
                     json.dumps(
                         {
-                            "technical": {
-                                "signal": "Neutral",
-                                "neutral_reason": "conflicting indicators",
-                                "missing_evidence": ["volume confirmation"],
-                                "conflicting_factors": ["range_bound"],
-                                "would_change_view_if": "breakout confirms",
-                                "metadata": {"risk_flags": ["conflicting_indicators"]},
-                            }
+                            "signal_collection_contract": _scc_from_analyst_payloads(
+                                technical={
+                                    "signal": "Neutral",
+                                    "neutral_reason": "conflicting indicators",
+                                    "missing_evidence": ["volume confirmation"],
+                                    "conflicting_factors": ["range_bound"],
+                                    "would_change_view_if": "breakout confirms",
+                                    "metadata": {"risk_flags": ["conflicting_indicators"]},
+                                }
+                            )
                         }
                     ),
                 ),

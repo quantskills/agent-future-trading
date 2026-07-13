@@ -328,15 +328,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": 1,
             "lots_delta": 1,
-            "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_capital_role": "best_exploration_probe_candidate",
-                "capital_layer": "exploration_probe",
-                "capital_ratio_source": "probe_margin_ratio_0.008",
-                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                **self._rank_trace(),
-                **full_market_rank_source_payload(),
-            },
+            "evidence_used": {},
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "opportunity_rank": 1,
@@ -379,18 +371,15 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": -1,
             "lots_delta": -1,
             "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_capital_role": "best_exploration_probe_candidate",
-                "capital_layer": "exploration_probe",
-                "capital_ratio_source": "probe_margin_ratio_0.008",
-                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                **self._rank_trace(),
-                **full_market_rank_source_payload(),
             },
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "capital_allocation_reason": "selected_by_full_market_pm_capital_queue",
                 "opportunity_rank": 1,
+                "rank_capital_role": "best_exploration_probe_candidate",
+                "capital_layer": "exploration_probe",
+                "capital_ratio_source": "probe_margin_ratio_0.008",
+                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
                 **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
@@ -415,25 +404,6 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "alpha_setup_action_values": [
                     {"learning_lane": "hold", "action_name": "hold"},
                 ],
-            },
-            "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_source": "ticker_side_priority",
-                "rank_input_components": {"old_local_rank_score": 0.9},
-                "capital_layer": "exploration_probe",
-                "lifecycle_learning_trace": {
-                    "contract_lifecycle_port": "hold",
-                    "used_lanes": ["hold"],
-                    "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
-                    "trigger_profile_learning_rows": [],
-                    "execution_profile_learning_direct_to_rank": False,
-                    "trigger_profile_learning_direct_to_rank": False,
-                    "execution_profile_signal_direct_to_rank": False,
-                },
-                "learning_impact_delta": {
-                    "hold_decision": "continue_hold",
-                    "net_lifecycle_learning_delta": 0.03,
-                },
                 "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "hold",
                     "used_lanes": ["hold"],
@@ -445,6 +415,12 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "pm_lifecycle_learning_impact_delta": {
                     "hold_decision": "continue_hold",
                 },
+            },
+            "evidence_used": {
+                "opportunity_rank": 1,
+                "rank_source": "ticker_side_priority",
+                "rank_input_components": {"old_local_rank_score": 0.9},
+                "capital_layer": "exploration_probe",
             },
             "capital_deployment": {
                 "opportunity_rank": 1,
@@ -466,9 +442,8 @@ class FinalActionSemanticsTest(unittest.TestCase):
         self.assertNotIn("opportunity_rank", deployment)
         self.assertNotIn("rank_source", deployment)
         self.assertNotIn("rank_input_components", deployment)
-        self.assertEqual(evidence["lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
-        self.assertEqual(evidence["learning_impact_delta"]["hold_decision"], "continue_hold")
-        self.assertEqual(evidence["pm_lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(canonical["learning_used"]["pm_lifecycle_learning_trace"]["contract_lifecycle_port"], "hold")
+        self.assertEqual(canonical["learning_used"]["pm_lifecycle_learning_impact_delta"]["hold_decision"], "continue_hold")
         self.assertEqual(lifecycle_learning_decision_contract_errors(canonical), [])
 
     def test_rank_lifecycle_route_rejects_hold_or_execution_learning_in_open_rank(self):
@@ -477,15 +452,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": 1,
             "lots_delta": 1,
-            "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_capital_role": "best_exploration_probe_candidate",
-                "capital_layer": "exploration_probe",
-                "capital_ratio_source": "probe_margin_ratio_0.008",
-                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                **self._rank_trace(),
-                **full_market_rank_source_payload(),
-            },
+            "evidence_used": {},
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "opportunity_rank": 1,
@@ -497,12 +464,16 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
+            "learning_used": {
+                "pm_lifecycle_learning_trace": dict(
+                    self._rank_trace()["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]
+                ),
+            },
         }
-        for container in (contract["evidence_used"], contract["capital_deployment"]):
-            container["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]["decision_learning_rows"] = [
-                {"id": "open-1", "learning_lane": "open", "action_name": "open"},
-                {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"},
-            ]
+        contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"] = [
+            {"id": "open-1", "learning_lane": "open", "action_name": "open"},
+            {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"},
+        ]
 
         errors = rank_lifecycle_learning_route_errors(contract)
 
@@ -514,15 +485,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": 1,
             "lots_delta": 1,
-            "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_capital_role": "best_exploration_probe_candidate",
-                "capital_layer": "exploration_probe",
-                "capital_ratio_source": "probe_margin_ratio_0.008",
-                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                **self._rank_trace(),
-                **full_market_rank_source_payload(),
-            },
+            "evidence_used": {},
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "opportunity_rank": 1,
@@ -534,14 +497,19 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
+            "learning_used": {
+                "pm_lifecycle_learning_trace": dict(
+                    self._rank_trace()["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]
+                ),
+            },
         }
-        contract["evidence_used"]["lifecycle_learning_trace"].pop("pm_final_contract_lifecycle_trace")
+        contract["learning_used"].pop("pm_lifecycle_learning_trace")
         self.assertIn(
             "pm_final_contract_lifecycle_trace_missing",
             rank_lifecycle_learning_route_errors(contract),
         )
 
-        contract["evidence_used"]["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"] = {
+        contract["learning_used"]["pm_lifecycle_learning_trace"] = {
             "trace_version": "agentquant.pm_lifecycle_learning_trace.v1",
             "contract_lifecycle_port": "hold",
             "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
@@ -572,8 +540,8 @@ class FinalActionSemanticsTest(unittest.TestCase):
             ["lifecycle_learning_trace_missing"],
         )
 
-        contract["evidence_used"] = {
-            "lifecycle_learning_trace": {
+        contract["learning_used"].update({
+            "pm_lifecycle_learning_trace": {
                 "contract_lifecycle_port": "hold",
                 "used_lanes": ["hold"],
                 "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
@@ -582,11 +550,11 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 "trigger_profile_learning_direct_to_rank": False,
                 "execution_profile_signal_direct_to_rank": False,
             },
-            "learning_impact_delta": {"hold_decision": "continue_hold"},
-        }
+            "pm_lifecycle_learning_impact_delta": {"hold_decision": "continue_hold"},
+        })
         self.assertEqual(lifecycle_learning_decision_contract_errors(contract), [])
 
-        contract["evidence_used"]["lifecycle_learning_trace"]["decision_learning_rows"].append(
+        contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"].append(
             {"learning_lane": "open", "action_name": "open"}
         )
         errors = lifecycle_learning_decision_contract_errors(contract)
@@ -598,8 +566,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": -5,
             "lots_delta": 5,
             "final_action": "reduce",
-            "evidence_used": {
-                "lifecycle_learning_trace": {
+            "evidence_used": {},
+            "learning_used": {
+                "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "reduce_exit",
                     "used_lanes": ["reduce", "execution"],
                     "decision_learning_rows": [
@@ -611,12 +580,10 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "execution_profile_learning_direct_to_rank": False,
                     "trigger_profile_learning_direct_to_rank": False,
                 },
-                "learning_impact_delta": {
+                "pm_lifecycle_learning_impact_delta": {
                     "reduce_exit_decision": "reduce_exposure",
                     "execution_profile_learning_direct_to_rank": False,
                 },
-            },
-            "learning_used": {
                 "alpha_setup_action_values": [
                     {"id": "reduce-1", "learning_lane": "reduce", "action_name": "reduce"},
                     {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"},
@@ -632,8 +599,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": -5,
             "lots_delta": 5,
             "final_action": "reduce",
-            "evidence_used": {
-                "lifecycle_learning_trace": {
+            "evidence_used": {},
+            "learning_used": {
+                "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "reduce_exit",
                     "decision_learning_rows": [
                         {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"}
@@ -642,9 +610,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "execution_profile_learning_direct_to_rank": False,
                     "trigger_profile_learning_direct_to_rank": False,
                 },
-                "learning_impact_delta": {"reduce_exit_decision": "reduce_exposure"},
-            },
-            "learning_used": {
+                "pm_lifecycle_learning_impact_delta": {"reduce_exit_decision": "reduce_exposure"},
                 "alpha_setup_action_values": [
                     {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"}
                 ]
@@ -662,15 +628,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "current_lots": 0,
             "target_lots": 1,
             "lots_delta": 1,
-            "evidence_used": {
-                "opportunity_rank": 1,
-                "rank_capital_role": "best_exploration_probe_candidate",
-                "capital_layer": "exploration_probe",
-                "capital_ratio_source": "probe_margin_ratio_0.008",
-                "rank_reason": "best_watch_for_trigger_by_evidence_trigger_learning_and_risk",
-                **self._rank_trace(),
-                **full_market_rank_source_payload(),
-            },
+            "evidence_used": {},
             "capital_deployment": {
                 "selected_for_capital_deployment": True,
                 "opportunity_rank": 1,
@@ -682,15 +640,18 @@ class FinalActionSemanticsTest(unittest.TestCase):
                 **self._rank_trace(),
                 **full_market_rank_source_payload(),
             },
+            "learning_used": {
+                "pm_lifecycle_learning_trace": dict(
+                    self._rank_trace()["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]
+                ),
+            },
         }
         trigger_row = {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"}
-        for container in (contract["evidence_used"], contract["capital_deployment"]):
-            container["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]["trigger_profile_learning_rows"] = [trigger_row]
+        contract["learning_used"]["pm_lifecycle_learning_trace"]["trigger_profile_learning_rows"] = [trigger_row]
 
         self.assertEqual(rank_lifecycle_learning_route_errors(contract), [])
 
-        for container in (contract["evidence_used"], contract["capital_deployment"]):
-            container["lifecycle_learning_trace"]["pm_final_contract_lifecycle_trace"]["decision_learning_rows"] = [trigger_row]
+        contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"] = [trigger_row]
         self.assertIn(
             "open_rank_mixed_forbidden_learning_lanes:execution",
             rank_lifecycle_learning_route_errors(contract),
@@ -702,8 +663,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": 3,
             "lots_delta": 0,
             "final_action": "hold",
-            "evidence_used": {
-                "lifecycle_learning_trace": {
+            "evidence_used": {},
+            "learning_used": {
+                "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "hold",
                     "decision_learning_rows": [
                         {"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}
@@ -714,9 +676,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "execution_profile_learning_direct_to_rank": False,
                     "trigger_profile_learning_direct_to_rank": False,
                 },
-                "learning_impact_delta": {"hold_decision": "continue_hold"},
-            },
-            "learning_used": {
+                "pm_lifecycle_learning_impact_delta": {"hold_decision": "continue_hold"},
                 "alpha_setup_action_values": [
                     {"id": "hold-1", "learning_lane": "hold", "action_name": "hold"},
                     {"id": "exec-1", "learning_lane": "execution", "action_name": "execution"},
@@ -724,7 +684,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             },
         }
         self.assertEqual(lifecycle_learning_decision_contract_errors(hold_contract), [])
-        hold_contract["evidence_used"]["lifecycle_learning_trace"]["decision_learning_rows"] = [
+        hold_contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"] = [
             {"id": "exit-1", "learning_lane": "exit", "action_name": "exit"}
         ]
         self.assertIn(
@@ -740,8 +700,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "conditional_trigger_authority": True,
             "requires_intraday_confirmation": True,
             "can_execute_without_intraday_trigger": False,
-            "evidence_used": {
-                "lifecycle_learning_trace": {
+            "evidence_used": {},
+            "learning_used": {
+                "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "conditional_monitor",
                     "decision_learning_rows": [
                         {
@@ -754,9 +715,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "execution_profile_learning_direct_to_rank": False,
                     "trigger_profile_learning_direct_to_rank": False,
                 },
-                "learning_impact_delta": {"conditional_monitor_decision": "watch"},
-            },
-            "learning_used": {
+                "pm_lifecycle_learning_impact_delta": {"conditional_monitor_decision": "watch"},
                 "alpha_setup_action_values": [
                     {
                         "id": "monitor-1",
@@ -767,7 +726,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
             },
         }
         self.assertEqual(lifecycle_learning_decision_contract_errors(conditional_contract), [])
-        conditional_contract["evidence_used"]["lifecycle_learning_trace"]["decision_learning_rows"] = [
+        conditional_contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"] = [
             {"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}
         ]
         self.assertIn(
@@ -781,8 +740,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
             "target_lots": 2,
             "lots_delta": 0,
             "final_action": "hold",
-            "evidence_used": {
-                "lifecycle_learning_trace": {
+            "evidence_used": {},
+            "learning_used": {
+                "pm_lifecycle_learning_trace": {
                     "contract_lifecycle_port": "hold",
                     "decision_learning_rows": [
                         {"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}
@@ -790,9 +750,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "execution_profile_learning_direct_to_rank": False,
                     "trigger_profile_learning_direct_to_rank": False,
                 },
-                "learning_impact_delta": {"hold_decision": "continue_hold"},
-            },
-            "learning_used": {
+                "pm_lifecycle_learning_impact_delta": {"hold_decision": "continue_hold"},
                 "alpha_setup_action_values": [
                     {"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}
                 ]
@@ -800,8 +758,8 @@ class FinalActionSemanticsTest(unittest.TestCase):
         }
         self.assertIn("trigger_profile_learning_rows_missing", lifecycle_learning_decision_contract_errors(contract))
 
-        contract["evidence_used"]["lifecycle_learning_trace"].pop("decision_learning_rows")
-        contract["evidence_used"]["lifecycle_learning_trace"]["trigger_profile_learning_rows"] = []
+        contract["learning_used"]["pm_lifecycle_learning_trace"].pop("decision_learning_rows")
+        contract["learning_used"]["pm_lifecycle_learning_trace"]["trigger_profile_learning_rows"] = []
         self.assertIn("decision_learning_rows_missing", lifecycle_learning_decision_contract_errors(contract))
 
     def test_unselected_conditional_candidate_does_not_require_intraday_result(self):

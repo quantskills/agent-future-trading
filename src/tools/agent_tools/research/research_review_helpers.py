@@ -323,7 +323,12 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     confirmation = _market_confirmation(snapshot)
     execution_result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
     contract = final_action_contract_from_snapshot(snapshot)
-    position_budget = snapshot.get("position_budget_policy") if isinstance(snapshot.get("position_budget_policy"), dict) else {}
+    capital_deployment = (
+        contract.get("capital_deployment")
+        if isinstance(contract.get("capital_deployment"), dict)
+        else {}
+    )
+    auditor = snapshot.get("auditor") if isinstance(snapshot.get("auditor"), dict) else {}
     final_trade_authority = contract
     ticker = str(recommendation.get("underlying_code") or recommendation.get("ticker") or "").upper()
     semantic_view = _final_action_semantic_view(contract, execution_result)
@@ -341,7 +346,9 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
     )
     no_trade_reason = normalize_no_trade_reason(no_trade_reason) if no_trade_reason else ""
     control_reasons = [str(item) for item in (contract.get("reason_codes") or []) if item]
-    auditor_decision = str(contract.get("authority_type") or final_trade_authority.get("authority_type") or "")
+    auditor_decision = str(
+        auditor.get("audit_verdict") or auditor.get("audit_status") or ""
+    ).strip().lower()
     learning_used = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
     capital_learning = (
         learning_used.get("capital_utilization_learning")
@@ -391,15 +398,23 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
         and no_trade_reason not in CAPITAL_NON_RELEASE_NO_TRADE_REASONS
         and not hard_capital_reason
         and auditor_decision not in {"block", "reduce_only"}
+        and final_trade_authority.get("authority_decision") != "blocked"
         and "weak_block" not in memory_state
         and alpha_release_tier in {"normal", "boost", "max_boost"}
     )
     capital_utilization_skip = ""
-    position_budget_decision = str(position_budget.get("decision") or "")
-    final_trade_authority_decision = str(final_trade_authority.get("decision") or "")
+    position_budget_decision = str(capital_deployment.get("capital_allocation_reason") or "")
+    final_trade_authority_decision = str(
+        final_trade_authority.get("authority_decision")
+        or ""
+    )
     if target_side not in {"long", "short"} or abs(target_ratio) <= 1e-12:
         capital_path_stage = "no_directional_target"
-    elif hard_capital_reason or auditor_decision in {"block", "reduce_only"}:
+    elif (
+        hard_capital_reason
+        or auditor_decision in {"block", "reduce_only"}
+        or final_trade_authority_decision == "blocked"
+    ):
         capital_path_stage = "hard_or_pm_risk_gate_block"
     elif final_trade_authority_decision and final_trade_authority_decision != "allow_real_new_entry":
         capital_path_stage = "final_trade_authority"
@@ -448,8 +463,12 @@ def _recommendation_capital_item(recommendation: Dict[str, Any], cfg: Dict[str, 
         "dynamic_allocation_tier": "",
         "dynamic_opportunity_margin_ratio_budget": 0.0,
         "position_budget_decision": position_budget_decision,
-        "position_budget_target_margin_after": _safe_float(position_budget.get("target_margin_after")),
-        "position_budget_min_required_margin": _safe_float(position_budget.get("min_required_margin")),
+        "position_budget_target_margin_after": _safe_float(
+            capital_deployment.get("queue_margin_ratio_after_if_selected")
+        ),
+        "position_budget_min_required_margin": _safe_float(
+            capital_deployment.get("candidate_margin_ratio")
+        ),
         "final_trade_authority_decision": final_trade_authority_decision,
         "final_trade_authority_requires_authority": bool(final_trade_authority.get("requires_authority")),
     }
@@ -608,6 +627,7 @@ def _build_capital_deployment_diagnostics(
         }
         for item in recommendation_items
         if item["auditor_decision"] in {"block", "reduce_only", "probe_only", "scale_down"}
+        or item["final_trade_authority_decision"] == "blocked"
         or any(
             str(reason) in {
                 "pm_risk_gate_block",
@@ -872,9 +892,10 @@ def _signal_side(signal: Any) -> str:
 
 
 def _signal_combo_from_snapshot(snapshot: Dict[str, Any]) -> List[str]:
+    payloads = _analyst_payloads(snapshot)
     values = []
     for analyst in ANALYSTS:
-        item = snapshot.get(analyst)
+        item = payloads.get(analyst)
         values.append(str(item.get("signal") if isinstance(item, dict) else "Neutral"))
     while len(values) < 3:
         values.append("Neutral")
@@ -882,17 +903,19 @@ def _signal_combo_from_snapshot(snapshot: Dict[str, Any]) -> List[str]:
 
 
 def _first_analyst_field(snapshot: Dict[str, Any], field_name: str, default: Any = None) -> Any:
+    payloads = _analyst_payloads(snapshot)
     for analyst in ANALYSTS:
-        item = snapshot.get(analyst)
+        item = payloads.get(analyst)
         if isinstance(item, dict) and item.get(field_name) not in (None, "", "unknown"):
             return item.get(field_name)
     return default
 
 
 def _analyst_field(snapshot: Dict[str, Any], analyst: str, field_name: str, default: Any = None) -> Any:
+    payloads = _analyst_payloads(snapshot)
     keys = [analyst]
     for key in keys:
-        item = snapshot.get(key)
+        item = payloads.get(key)
         if not isinstance(item, dict):
             continue
         value = item.get(field_name)
@@ -942,8 +965,13 @@ def _learning_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _market_confirmation(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    confirmation = snapshot.get("market_confirmation")
-    return confirmation if isinstance(confirmation, dict) else {}
+    contract = final_action_contract_from_snapshot(snapshot)
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    return {
+        "confirmation_score": evidence.get("market_confirmation_score"),
+        "conflicts": evidence.get("market_confirmation_conflicts") or [],
+        "source": "final_action_contract.evidence_used",
+    } if evidence else {}
 
 
 def _market_regime(snapshot: Dict[str, Any]) -> str:
@@ -953,11 +981,6 @@ def _market_regime(snapshot: Dict[str, Any]) -> str:
     contract = final_action_contract_from_snapshot(snapshot)
     if isinstance(contract, dict) and contract.get("market_regime") not in (None, "", "unknown"):
         return str(contract.get("market_regime"))
-    technical = snapshot.get("technical")
-    if isinstance(technical, dict):
-        context = ((technical.get("metadata") or {}).get("technical_context") or {})
-        if isinstance(context, dict) and context.get("market_regime"):
-            return str(context.get("market_regime"))
     summary = _opportunity_contract_summary(snapshot)
     if summary.get("market_regime"):
         return str(summary.get("market_regime"))
@@ -968,13 +991,6 @@ def _price_stage(snapshot: Dict[str, Any]) -> str:
     explicit = _first_analyst_field(snapshot, "trend_stage")
     if explicit:
         return str(explicit)
-    technical = snapshot.get("technical")
-    if isinstance(technical, dict):
-        context = ((technical.get("metadata") or {}).get("technical_context") or {})
-        if isinstance(context, dict):
-            stage = context.get("price_stage") or context.get("trend_stage") or context.get("tradeability")
-            if stage:
-                return str(stage)
     return "unknown"
 
 
@@ -993,22 +1009,6 @@ def _first_structured_signal_value(snapshot: Dict[str, Any], field_names: Iterab
         value = _first_analyst_field(snapshot, field_name)
         if value not in (None, "", "unknown"):
             return value
-    for analyst in ANALYSTS:
-        item = snapshot.get(analyst)
-        if not isinstance(item, dict):
-            continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        candidate_contexts = [
-            metadata,
-            metadata.get("technical_context") if isinstance(metadata.get("technical_context"), dict) else {},
-            metadata.get("market_context") if isinstance(metadata.get("market_context"), dict) else {},
-            metadata.get("signal_context") if isinstance(metadata.get("signal_context"), dict) else {},
-        ]
-        for context in candidate_contexts:
-            for field_name in names:
-                value = context.get(field_name) if isinstance(context, dict) else None
-                if value not in (None, "", "unknown"):
-                    return value
     return None
 
 
@@ -1030,15 +1030,6 @@ def _invalidation_level(snapshot: Dict[str, Any]) -> Optional[float]:
     )
 
 
-def _target_return(snapshot: Dict[str, Any]) -> Optional[float]:
-    return _optional_float(
-        _first_structured_signal_value(
-            snapshot,
-            ("target_return", "expected_return", "target_return_ratio", "expected_return_ratio"),
-        )
-    )
-
-
 def _expected_horizon_days(snapshot: Dict[str, Any], side: str) -> int:
     explicit_from_analyst = _safe_int(_first_analyst_field(snapshot, "expected_horizon_days"), 0)
     if explicit_from_analyst > 0:
@@ -1055,7 +1046,12 @@ def _expected_horizon_days(snapshot: Dict[str, Any], side: str) -> int:
 
 def _horizon_class(days: int, snapshot: Optional[Dict[str, Any]] = None) -> str:
     if snapshot:
-        scope = snapshot.get("horizon_scope") if isinstance(snapshot.get("horizon_scope"), dict) else {}
+        scc = (
+            snapshot.get("signal_collection_contract")
+            if isinstance(snapshot.get("signal_collection_contract"), dict)
+            else {}
+        )
+        scope = scc.get("horizon_scope") if isinstance(scc.get("horizon_scope"), dict) else {}
         decision_horizon = scope.get("decision_horizon")
         if decision_horizon and str(decision_horizon) != "unknown":
             return str(decision_horizon)
@@ -1250,11 +1246,19 @@ def _dotted_config_value(cfg: Dict[str, Any], key: str, default: Any = None) -> 
 
 
 def _analyst_payloads(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    payloads = {}
-    for analyst in ANALYSTS:
-        item = snapshot.get(analyst)
-        if isinstance(item, dict):
-            payloads[analyst] = item
+    payloads: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(snapshot, dict):
+        return payloads
+    contract = snapshot.get("signal_collection_contract")
+    if not isinstance(contract, dict):
+        return payloads
+    for source in contract.get("source_contracts") or []:
+        if not isinstance(source, dict):
+            continue
+        analyst = str(source.get("analyst") or "")
+        action_contract = source.get("action_evidence_contract")
+        if analyst in ANALYSTS and isinstance(action_contract, dict):
+            payloads[analyst] = action_contract
     return payloads
 
 
@@ -1325,15 +1329,11 @@ def _sector_for_ticker(cfg: Dict[str, Any], ticker: str) -> str:
 
 
 def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    summary = snapshot.get("pm_research_contract_summary") if isinstance(snapshot.get("pm_research_contract_summary"), dict) else {}
-    if summary:
-        return summary
-    contracts = snapshot.get("trade_research_contracts") if isinstance(snapshot.get("trade_research_contracts"), dict) else {}
     opportunity_types = []
     opportunity_states = []
     factor_focus = []
     conflicts = []
-    for contract in contracts.values():
+    for contract in _analyst_payloads(snapshot).values():
         if not isinstance(contract, dict):
             continue
         if contract.get("opportunity_type"):
@@ -1342,7 +1342,7 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             opportunity_states.append(str(contract.get("opportunity_state")))
         factor_focus.extend(str(item) for item in (contract.get("factor_focus") or []))
         conflicts.extend(str(item) for item in (contract.get("current_evidence_conflict") or []))
-    if contracts:
+    if opportunity_types or opportunity_states or factor_focus or conflicts:
         return {
             "contract_version": "agentquant.research.v1",
             "dominant_opportunity_types": sorted(set(opportunity_types)),
@@ -1360,18 +1360,14 @@ def _opportunity_contract_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _scorecard_side_row(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
-    scorecard = (
-        snapshot.get("opportunity_scorecard") if isinstance(snapshot.get("opportunity_scorecard"), dict) else {}
-    )
-    if not isinstance(scorecard, dict):
-        return {}
-    normalized_side = str(side or "").lower()
-    if normalized_side in {"long", "short"} and isinstance(scorecard.get(normalized_side), dict):
-        return scorecard[normalized_side]
-    preferred = str(scorecard.get("preferred_side") or "").lower()
-    if preferred in {"long", "short"} and isinstance(scorecard.get(preferred), dict):
-        return scorecard[preferred]
-    return {}
+    _ = side
+    contract = final_action_contract_from_snapshot(snapshot)
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    return {
+        **evidence,
+        "final_state": evidence.get("scorecard_state"),
+        "score": evidence.get("scorecard_score"),
+    }
 
 
 def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict[str, Any]:
@@ -1380,8 +1376,6 @@ def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict
     evidence_used = final_contract.get("evidence_used") if isinstance(final_contract.get("evidence_used"), dict) else {}
     deployment = final_contract.get("capital_deployment") if isinstance(final_contract.get("capital_deployment"), dict) else {}
     learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
-    active_audit = snapshot.get("active_opportunity_audit") if isinstance(snapshot.get("active_opportunity_audit"), dict) else {}
-    active_opportunity = active_audit.get("opportunity") if isinstance(active_audit.get("opportunity"), dict) else {}
     return {
         "opportunity_score": (
             scorecard_side.get("opportunity_score")
@@ -1393,17 +1387,12 @@ def _opportunity_ranking_trace(snapshot: Dict[str, Any], side: str = "") -> Dict
             if isinstance(scorecard_side.get("opportunity_score_components"), dict)
             else evidence_used.get("opportunity_score_components") if isinstance(evidence_used.get("opportunity_score_components"), dict) else {}
         ),
-        "opportunity_rank": (
-            deployment.get("opportunity_rank")
-            if deployment.get("opportunity_rank") is not None
-            else evidence_used.get("opportunity_rank")
-        ),
+        "opportunity_rank": deployment.get("opportunity_rank"),
         "side_priority": scorecard_side.get("side_priority"),
         "ticker_side_priority": scorecard_side.get("ticker_side_priority"),
         "capital_allocation_reason": (
-            scorecard_side.get("capital_allocation_reason")
-            or evidence_used.get("capital_allocation_reason")
-            or active_opportunity.get("capital_allocation_reason")
+            deployment.get("capital_allocation_reason")
+            or scorecard_side.get("capital_allocation_reason")
             or ""
         ),
         "learning_adjustment_summary": (
@@ -2046,7 +2035,7 @@ def _learning_attribution_from_recommendation(recommendation: Dict[str, Any]) ->
     snapshot = _recommendation_snapshot(recommendation or {})
     contract = final_action_contract_from_snapshot(snapshot)
     diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
-    reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
+    reasons = [str(item) for item in (contract.get("reason_codes") or []) if item]
     return (
         learning_tags_from_context(reasons, diagnostics),
         learning_effects_from_context(reasons, diagnostics),
@@ -2061,7 +2050,7 @@ def _learning_mechanisms_from_recommendation(
     snapshot = _recommendation_snapshot(recommendation or {})
     contract = final_action_contract_from_snapshot(snapshot)
     diagnostics = contract.get("learning_used") if isinstance(contract.get("learning_used"), dict) else {}
-    reasons = [str(item) for item in (contract.get("reason_codes") or []) + (contract.get("risk_flags") or []) if item]
+    reasons = [str(item) for item in (contract.get("reason_codes") or []) if item]
     return learning_mechanisms_from_context(
         reasons,
         diagnostics,

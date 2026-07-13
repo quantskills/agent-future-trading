@@ -172,89 +172,6 @@ def _signal_invalidation_breached(current_price: Optional[float], target_lots: i
     return False
 
 
-def _signal_side(signal_value: Any) -> str:
-    value = str(_enum_value(signal_value) or "").strip().lower()
-    if value in {"bullish", "long", "buy"}:
-        return "long"
-    if value in {"bearish", "short", "sell"}:
-        return "short"
-    return "flat"
-
-
-def _safe_lifecycle_float(value: Any) -> Optional[float]:
-    if value in (None, "", "unknown", "UNKNOWN"):
-        return None
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def _align_signal_lifecycle_to_target(
-    snapshot: Dict[str, Any],
-    target_lots: int,
-    lifecycle: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Keep execution invalidation aligned with the final target direction.
-
-    Analysts can disagree. A bullish fundamental invalidation boundary is not a
-    valid stop for a short order, and vice versa. Without this guard Phase2 can
-    incorrectly invalidate a trade before intraday confirmation has a chance to
-    evaluate it.
-    """
-    if target_lots == 0 or not isinstance(snapshot, dict):
-        return lifecycle
-
-    target_side = "long" if target_lots > 0 else "short"
-    selected = None
-    ignored = []
-    for analyst in ("technical", "fundamental", "commodity_news"):
-        item = snapshot.get(analyst)
-        if not isinstance(item, dict):
-            continue
-        level = _safe_lifecycle_float(item.get("invalidation_level"))
-        if level is None:
-            continue
-        side = _signal_side(item.get("signal"))
-        payload = {"analyst": analyst, "side": side, "invalidation_level": level}
-        if side == target_side and selected is None:
-            selected = payload
-        elif side in {"long", "short"} and side != target_side:
-            ignored.append(payload)
-
-    aligned = dict(lifecycle or {})
-    original_level = aligned.get("invalidation_level")
-    if selected is not None:
-        aligned["invalidation_level"] = selected["invalidation_level"]
-    elif ignored and original_level is not None:
-        aligned.pop("invalidation_level", None)
-
-    if ignored or selected is not None:
-        ensure_execution_translation(snapshot)["signal_lifecycle_direction_filter"] = {
-            "target_side": target_side,
-            "selected": selected,
-            "ignored_opposing": ignored,
-            "original_invalidation_level": original_level,
-            "effective_invalidation_level": aligned.get("invalidation_level"),
-        }
-    return aligned
-
-
-def _target_return_price(current_price: Optional[float], target_lots: int, lifecycle: Dict[str, Any]) -> Optional[float]:
-    if current_price is None or target_lots == 0 or lifecycle.get("target_return") is None:
-        return None
-    try:
-        price = float(current_price)
-        target_return = abs(float(lifecycle["target_return"]))
-    except Exception:
-        return None
-    if target_lots > 0:
-        return round(price * (1.0 + target_return), 6)
-    if target_lots < 0:
-        return round(price * (1.0 - target_return), 6)
-    return None
-
-
 def _build_executable_recommendation(
     recommendation: Dict[str, Any],
     decision: FuturesDecision,
@@ -453,21 +370,6 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
     final_contract = _final_action_contract_from_snapshot(snapshot)
     target_lots = _safe_int(final_contract.get("target_lots"), 0)
     preferred_side = "long" if target_lots > 0 else "short" if target_lots < 0 else "flat"
-    analyst_roles = (
-        execution_contract.get("analyst_execution_roles")
-        if isinstance(execution_contract.get("analyst_execution_roles"), dict)
-        else {}
-    )
-    action_contracts = {
-        key: value.get("action_evidence_contract")
-        for key, value in analyst_roles.items()
-        if isinstance(value, dict) and isinstance(value.get("action_evidence_contract"), dict)
-    }
-    learning_scopes = {
-        key: value.get("learning_scope")
-        for key, value in analyst_roles.items()
-        if isinstance(value, dict) and isinstance(value.get("learning_scope"), dict)
-    }
     return {
         "consumer_scope": "trader_execution_learning",
         "learning_lane": "execution",
@@ -481,8 +383,6 @@ def _setup_execution_learning_context(snapshot: Dict[str, Any]) -> Dict[str, Any
         "preferred_side": preferred_side or "flat",
         "execution_contract": execution_contract,
         "final_contract_execution_fields": execution_fields,
-        "analyst_action_evidence_contracts": action_contracts,
-        "analyst_learning_scopes": learning_scopes,
         "execution_contract_summary": {
             "profile": execution_contract.get("execution_profile"),
             "trigger_source": execution_contract.get("trigger_source"),
@@ -602,11 +502,6 @@ def _record_phase2_order_plan(
 ) -> None:
     translation = ensure_execution_translation(snapshot)
     lifecycle = dict(signal_lifecycle or extract_signal_lifecycle(snapshot) or {})
-    if lifecycle and target_lots != 0:
-        target_price = _target_return_price(current_price, target_lots, lifecycle)
-        if target_price is not None:
-            lifecycle = dict(lifecycle)
-            lifecycle["target_price"] = target_price
     consistency_diagnostics = build_lot_intent_consistency(
         current_lots=current_lots,
         target_lots=target_lots,
@@ -1049,10 +944,6 @@ def _translate_pre_open_recommendation_to_order(
     snapshot = _merge_recommendation_signal_snapshot(snapshot, recommendation)
     ticker = recommendation["underlying_code"]
     signal_snapshot = recommendation.get("signal_snapshot") or {}
-    if isinstance(signal_snapshot, dict):
-        market_confirmation = signal_snapshot.get("market_confirmation")
-        if isinstance(market_confirmation, dict) and not isinstance(snapshot.get("market_confirmation"), dict):
-            snapshot["market_confirmation"] = dict(market_confirmation)
     signal_lifecycle = extract_signal_lifecycle(snapshot)
     if not signal_lifecycle and isinstance(signal_snapshot, dict):
         signal_lifecycle = extract_signal_lifecycle(signal_snapshot)
@@ -1225,7 +1116,6 @@ def _translate_pre_open_recommendation_to_order(
             "target_lots": int(target_lots),
             "lots_delta": int(target_lots - current_lots),
         }
-        signal_lifecycle = _align_signal_lifecycle_to_target(snapshot, target_lots, signal_lifecycle)
         ensure_execution_translation(snapshot)["signal_lifecycle"] = dict(signal_lifecycle or {})
         signal_invalidation_observed = _signal_invalidation_breached(
             current_price,
@@ -1450,7 +1340,6 @@ def _translate_pre_open_recommendation_to_order(
     else:
         target_lots = current_lots
 
-    signal_lifecycle = _align_signal_lifecycle_to_target(snapshot, target_lots, signal_lifecycle)
     ensure_execution_translation(snapshot)["signal_lifecycle"] = dict(signal_lifecycle or {})
     if _signal_invalidation_breached(current_price, target_lots, signal_lifecycle):
         target_lots = 0
