@@ -1,11 +1,4 @@
-"""Run daily post-backtest runtime artifact checks.
-
-Static rule, boundary, schema, and conversion tests live in
-src/tests/test_*.py and are orchestrated by src/run/pre_backtest_test.py before
-the backtest starts. This script only reads the DB/artifacts produced by the
-current backtest window and runs runtime audits that cannot be proven before
-the day has actually executed.
-"""
+"""Run PG once after one completed backtest day and Researcher."""
 
 from __future__ import annotations
 
@@ -23,13 +16,13 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.control.pg_system_invariants import audit_system_invariants
+from agents.control_team.protocol_governor import ProtocolGovernor
 from util.config_normalizer import normalize_config
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run AgentQuant daily backtest test gate.")
-    parser.add_argument("--config", type=str, required=True, help="Path to YAML config, e.g. config/dev.yaml")
+    parser = argparse.ArgumentParser(description="Run AgentQuant daily post-backtest checks.")
+    parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--config-id", type=str, default=None)
     parser.add_argument("--start-date", type=str, default=None)
     parser.add_argument("--end-date", type=str, default=None)
@@ -50,48 +43,31 @@ def _resolve_config_path(config_path: str) -> Path:
 
 
 def _load_config(config_path: Path) -> dict:
-    with config_path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-    return normalize_config(raw, config_path)
+    with config_path.open("r", encoding="utf-8") as handle:
+        return normalize_config(yaml.safe_load(handle) or {}, config_path)
 
 
 def main() -> int:
     args = parse_args()
-    config_path = _resolve_config_path(args.config)
-    cfg = _load_config(config_path)
+    cfg = _load_config(_resolve_config_path(args.config))
     db_path = Path(args.db_path) if args.db_path else SRC_ROOT / "assets" / "agentquant.db"
-
-    invariant_report = audit_system_invariants(
+    report = ProtocolGovernor().audit_daily_results(
         db_path=db_path,
         config_id=args.config_id,
         exp_name=cfg.get("exp_name"),
         start_date=args.start_date,
         end_date=args.end_date,
     ).to_dict()
-    report = {
-        "agent_name": "protocol_governor",
-        "contract_version": "agentquant.backtest_daily_test.v1",
-        "ok": bool(invariant_report.get("ok")),
-        "system_invariants": invariant_report,
-        "metadata": {
-            "runtime_only": True,
-            "static_tests_moved_to": "src/run/pre_backtest_test.py",
-            "daily_boundary": "reads_real_backtest_db_artifacts_and_payloads_only",
-            "internal_mechanisms_checked": False,
-        },
-    }
-
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print("AgentQuant daily backtest test gate")
-        print(f"  ok: {report['ok']}")
-        for key in ("system_invariants",):
-            section = report[key]
-            print(f"  {key}: ok={section.get('ok')}")
-            for error in section.get("errors") or section.get("failures") or section.get("hard_failures") or []:
-                print(f"    - {error}")
-    return 0 if report["ok"] else 1
+        print("AgentQuant daily post-backtest gate")
+        print(f"  status: {report['status']}")
+        for check in report["checks"]:
+            print(f"  {check['check_name']}: {check['status']}")
+            for code in check["violation_codes"]:
+                print(f"    - {code}")
+    return 0 if report["status"] == "passed" else 1
 
 
 if __name__ == "__main__":

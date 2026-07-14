@@ -15,6 +15,8 @@ technical / fundamental / commodity_news
 
 本次只形成审计结论，没有修改生产代码、配置、测试、数据库及其他机制文档。
 
+本文是当时上游信息传递状态的只读审计快照，不是 PG 字段或审计权限的规范来源。后续 PG 只能服从 `agent_pg.md`、`matrix_field_semantics.md` 和 `matrix_action_canonical.md`：不得读取智能体内部机制，不得把本文中的历史消费者关系当成当前权限，也不得据此创建未登记字段、别名、容器键或动作语义。
+
 ## 一、唯一结论
 
 正常路径下，三个分析师已经把正式预测证据完整写入 `action_evidence_contract`，Signal Collector 也通过 `source_contracts[].action_evidence_contract` 保真保存完整 AEC，PM 只从 SCC 重建证据读取对象。上游不存在“分析师证据整体丢失”。

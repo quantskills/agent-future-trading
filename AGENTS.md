@@ -18,7 +18,7 @@
 
 AgentQuant 的目标是让多智能体期货交易系统在回测、模拟盘和实盘链路中一比一复刻同一套交易逻辑，并在系统链路干净后继续提升净收益、稳定性、资金利用率、回撤控制和学习闭环质量。
 
-LLM 只能用于分析师、复盘员、研究员形成结构化证据和研究结果，不能直接决定仓位、手数、资金部署、审计结论和最终交易合约。
+LLM 只能用于三个分析师形成结构化预测证据，以及研究员形成结构化研究结果。复盘员是确定性事实复盘者，不调用 LLM。LLM 不能直接决定仓位、手数、资金部署、审计结论和最终交易合约。
 
 判断开发工作价值的标准：
 
@@ -146,7 +146,7 @@ PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 sign
 
 ### 6.4 auditor
 
-只审 PM 合约和硬风险边界，不改方向、不改手数、不新建合约、不直接消费研究记录。
+只读审计 PM 唯一最终合约的必需字段、基本动作逻辑、账户硬风险、保证金硬上限、合约/失效边界和数据质量；不改方向、不改手数、不新建合约、不直接消费研究记录，也不复审 PM 的学习、融合、rank、预算和 sizing 过程。
 
 ### 6.5 trader
 
@@ -160,7 +160,7 @@ PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 sign
 
 ### 6.7 reviewer
 
-只复盘交易事实、执行事实、结算事实和合约一致性。复盘员可提供研究材料，不能直接写最终 action-value。
+只复盘决策、审计、执行、成交和结算等已落地事实，核对物理事实一致性并做结果归因；不重新裁决合约合法性和账户硬风险。复盘员可提供研究材料，不能直接写最终 action-value。
 
 ### 6.8 researcher
 
@@ -173,6 +173,10 @@ PM 禁止重建、补造、改写 SCC。SCC 必须来自 workflow state 中 sign
 只做旁路治理和系统不变量审计，不参与交易消费，不评价策略收益。
 
 PG 审 artifact 边界、字段语义、可追溯性、越权、中间态污染、契约断链。PG 不复刻 PM rank、手数、方向、资金部署判断。
+
+PG 的输入路径、判定字段和输出报告只能使用 `docs/matrix_field_semantics.md` 已登记字段；动作解释只能使用 `docs/matrix_action_canonical.md`。`metadata`、`payload` 和 JSON 容器不能绕过登记。现有字段不足时，必须先证明真实功能缺口并登记，再修改 PG 代码；禁止先在控制工具中自创字段、别名或私有动作语义。
+
+回测前 PG 必须通过现有只读数据入口检查指定回测区间和配置品种的真实数据就绪性。交易日、PandaAI 日线开收盘价、官方结算价、主力合约映射、合约乘数、保证金率、具体合约信息及 Trader 分钟行情接口能力属于交易必需检查；Finoview 和新闻只检查路径、可读性、解析及日期边界，不要求每品种每日齐全。该检查不调用 LLM、不运行策略、不写正式业务库。
 
 ## 7. 唯一交易真相
 
@@ -222,13 +226,13 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 动手前必须完成：
 
 1. 先读 `AGENTS.md`，确认执行规范。
-2. 再读 `docs/matrix_chain_contract.md`，定位本次任务对应的生产端、落点、消费端、自检、pre-backtest gate、daily PG audit、测试、机制文档。
+2. 再读 `docs/matrix_chain_contract.md`，分别定位本次任务对应的生产端、落点、消费端、角色自身校验、pre-backtest gate、daily PG 物理结果审计、测试和机制文档；不得让 daily PG 复查角色内部机制。
 3. 明确任务属于系统 bug、策略表现、配置、数据、学习、文档对齐中的哪一类。
 4. 阅读 `docs/work_log.md`、相关机制文档、相关代码、测试、最近回测记录和审计结果。
 5. 沿完整链路排查，不只盯单个函数。
 6. 先确定业务契约，再确定实现，再确定审计。
 
-修改 bug 时必须先在 `docs/matrix_chain_contract.md` 定位对应契约行，再按生产端、落点、消费端、自检、pre-backtest gate、daily PG audit、测试、机制文档的顺序核对。
+修改 bug 时必须先在 `docs/matrix_chain_contract.md` 定位对应契约行，再按生产端、落点、消费端、角色自身校验、pre-backtest gate、daily PG 物理结果审计、测试和机制文档的顺序核对。
 
 修改时必须守住：
 
@@ -250,7 +254,7 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 ```powershell
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m compileall src
 C:\ProgramData\miniconda3\envs\deepfund\python.exe -m unittest
-C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py --config src\config\dev.yaml --local-db --check-llm-auth --json
+C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\pre_backtest_test.py --config src\config\dev.yaml --local-db --json
 C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.py --config src\config\dev.yaml --local-db --json
 ```
 
@@ -261,16 +265,14 @@ C:\ProgramData\miniconda3\envs\deepfund\python.exe src\run\backtest_daily_test.p
 - `compileall`
 - `pre_backtest_acceptance`
 - `system_invariant_audit`
-- `mechanism_effectiveness_audit`
 - `contract_coverage_audit`
 - `git diff --check`
 
 ## 12. 回测判断
 
 - `system_invariant_audit` hard fail 时，停止收益讨论，按系统 bug 处理。
-- `mechanism_effectiveness_audit` hard fail 时，停止收益讨论，按机制断链处理。
-- 两类 audit clean 后，收益差才进入策略层分析。
-- daily gate 是真实 DB 与真实 artifact 的运行后检查，不承载静态代码扫描职责。
+- `system_invariant_audit` clean 后，收益差才进入策略层分析。
+- daily gate 只检查真实 DB、artifact 和 payload 中的物理运行结果，不读取或复查 PM 自检、rank、学习作用过程及任何智能体内部机制，也不承载静态代码扫描职责。
 - pre-backtest gate 是回测前 readiness 检查，不代表策略一定盈利。
 
 ## 13. 工作日志

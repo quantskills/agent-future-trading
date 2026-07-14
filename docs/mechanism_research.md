@@ -49,7 +49,7 @@ Phase1 投资组合经理 final_action_contract
 
 ## 二、Phase4 与研究学习分工
 
-复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、合约、成交、结算是否一致，完整交易日志是否输出，字段语义和阶段状态是否可审计。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。`max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`strong_opportunity_*`、`recovery_*` 等 PM 计划预算参数在真实成交后出现偏离时，只能进入复盘事实归因、warning 和研究输入材料；复盘员不能把这类计划预算偏离当作日终 hard fail 或策略违规裁决。账户保证金硬上限、阶段断链、成交/结算不一致、越权成交和 artifact 污染仍属于 Phase4 hard fail。
+复盘员是确定性复盘者，不调用 LLM、不下单、不改账、不写最终 action-value。它检查 Phase1-3 是否完成，推荐、审计、执行、成交、结算等已落地事实是否完整一致，完整交易日志是否输出，并对交易结果做事实归因。复盘员可以输出事实归因、交易日志和研究输入材料，但未来学习由研究员输出并持久化。`max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`strong_opportunity_*`、`recovery_*` 等 PM 计划预算参数在真实成交后出现偏离时，只能进入复盘事实归因、warning 和研究输入材料；复盘员不能把这类计划预算偏离当作日终 hard fail 或策略违规裁决。阶段断链、应落地事实缺失、成交与执行不一致、成交未入账、结算或账户公式不一致以及来源链断裂可以使 Phase4 事实复盘失败；账户硬风险合法性已经由 Auditor 和运营风控链负责，复盘员不得二次裁决。
 
 Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_memory` 刷新、学习 retention 清理、研究表写入或任何未来学习状态更新。
 
@@ -268,4 +268,4 @@ Reviewer fusion_attribution_label
 
 ## 研究机制审计边界补充（2026-07-07）
 
-PG 可以审计研究记忆是否按未来学习边界写入、是否未污染当日交易、是否未被 Trader/Accountant 直接消费；但 PG 不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit，也不判断 PM 为什么 rank 或不 rank。PM 对研究成果的消费是否形成合法交易事实，只由 Step6 最终 `final_action_contract`、`pm_six_step_trace.pm_contract_self_check` 和 `pm_six_step_trace.step6_contract_generation_check` 表达；Step4 临时路由不进入最终自检输入。
+PG 只对实际落库的研究记忆检查来源日期、未来学习边界、当日事实未被改写，以及 Trader/Accountant 未直接消费；不读取或复查 Researcher 的内部研究过程，也不判断 PM 如何把研究记忆转化为 open/hold/reduce/exit、为什么 rank 或不 rank。PM 对研究成果的消费是否合法由 PM Step6 和 PM 自身最终合约检查负责，不属于 daily PG 审计对象。

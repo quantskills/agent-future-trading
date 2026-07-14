@@ -424,7 +424,7 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | 正向学习释放 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.alpha_setup_ev_fusion` | `positive_expectancy_multiplier`、`min_action_value_samples`、`min_action_value_confidence`、`require_tradeable_support_for_release`、`require_invalidation_for_release` | 只能提高 PM 优先级或释放仓位层级；不能单独生成动作、手数或交易权限 |
 | 条件触发候选 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.watch_for_trigger_new_entry` | `semantic_role`、`requires_final_contract_authority`、`allow_probe`、`probe_max_ratio`、`probe_floor_ratio` | 只允许 PM 写入需要盘中确认的条件触发合约；Trader 未触发不得成交 |
 | 失效边界控制 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.holding_rebalance_control.position_lifecycle` | `require_pretrade_invalidation_for_new_entry`、`missing_invalidation_cap_multiplier`、`missing_invalidation_probe_max_ratio` | 新开/加仓必须有失效边界；缺失时只能降级或阻断，不能正常开仓 |
-| 账户硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破；复盘员可把真实账户保证金硬线突破作为 Phase4 hard fail |
+| 账户硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破；Auditor 与运营风控链负责硬边界，复盘员只记录真实账户风险事实和归因，不做二次合法性裁决 |
 | PM 计划预算和复盘诊断 | `src/config/dev.yaml: position_budget_policy / capital_utilization_control / net_exposure_control` | `max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_margin_ratio*`、`warning_target_margin_ratio_max`、`recovery_*` | 只服务 PM Step5 计划预算、rank/部署和资金层级；真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时，复盘员只能写事实归因/预警，不能作为日终 hard fail |
 | 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling` | 只作为账户级风险边界或降级依据；不能创建交易机会 |
 | 市场确认和冲突降级 | `src/config/portfolio_policy_catalog.yaml: market_confirmation` | `min_confirmation_score_for_new_entry`、`quality_gate_cap_multiplier`、`conflict_cap_multiplier`、`data_gap_cap_multiplier` | 只确认、降级或阻断当前机会；不能替代分析师 setup 或 PM 合约 |
@@ -557,19 +557,19 @@ final_action_contract + 账户/持仓/保证金/数据质量/硬风险
 
 | 输入情况 | 审计输出 | 边界 |
 |---|---|---|
-| 合约字段完整、手数一致、保证金安全、价格/数据有效 | approve / allow | 允许进入 Trader |
+| 合约字段完整、动作与手数一致、保证金未超硬上限、合约/失效边界和数据有效 | approve | 允许进入 Trader |
 | 缺少必需字段、`lots_delta` 不一致、无效合约 | block | 不改合约，只给原因 |
-| 保证金超过硬上限、账户资金不足、价格异常 | block | 不创建替代交易 |
-| 风险较高但未触发硬风险 | approve_with_limit / probe_only_allowed / reduce_only_allowed | 只限制 PM 合约可执行范围，不自行改方向或给手数 |
-| PM 合约为退出、减仓或风险处置 | approve / reduce_only_allowed / block | 只审合法性和风险，不生成新减仓手数 |
-| 数据质量不足以执行 | block 或 require_review | 不能补造行情 |
+| 新增风险缺具体合约或失效边界 | block | 不创建替代交易 |
+| 目标保证金超过硬上限，或账户处于 `LIQUIDATION` 且合约新增风险 | block | 不创建替代交易 |
+| 数据质量为 warning / degraded | approve_with_warning | 只记录软风险，不修改合约 |
+| 数据质量为 invalid / hard_fail / future_leak | block | 不能补造行情或放行前视数据 |
 
 ### 7.2 审计员可以输出
 
-- 审计通过/拒绝/降级裁决；
+- `approve`、`approve_with_warning` 或 `block` 裁决；
 - 硬风险原因；
-- 数据质量原因；
-- 保证金、持仓、合约一致性检查结果；
+- 软风险和数据质量原因；
+- 被审合约动作、手数和语义状态摘要；
 - 审计 payload。
 
 ### 7.3 审计员禁止事项
@@ -583,10 +583,11 @@ final_action_contract + 账户/持仓/保证金/数据质量/硬风险
 - 用研究记忆改变交易权限；
 - 用收益好坏判断是否允许交易；
 - 把软风险当硬风险无限叠加；
-- 代替 PM 做资金部署。
+- 代替 PM 做资金部署；
+- 复审 PM 的学习消费、证据融合解释、方向、rank、预算部署或 sizing 过程。
 
 审计员只能让不合法或风险越界的合约停下，不能把一个没有 PM 授权的机会变成交易。
-审计员不能直接改 `target_lots`。如果审计裁决要求降级、只允许试探或只允许减仓，必须由 PM 已签合约的已有字段承接，或由 PM 重新签发合约；交易员不能执行审计员临时给出的新手数。
+审计员不能直接改 `target_lots`，也不输出临时降级手数或第二张交易合约。
 
 ## 八、交易员内部机制
 
@@ -794,6 +795,8 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 
 协议管理员不调用 LLM。协议管理员不是交易智能体，不生成业务事实，只做只读治理。
 
+协议管理员不存在独立字段体系。所有读取路径、判定字段和报告字段只允许来自 `matrix_field_semantics.md`，所有动作解释只允许来自 `matrix_action_canonical.md`。已有字段不足时，必须先证明必要性并完成矩阵登记，不能先写控制代码再以 `metadata`、`payload` 或私有字典键补语义。
+
 固定转换：
 
 ```text
@@ -820,7 +823,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 - schema 是否匹配；
 - 测试是否覆盖；
 - 非策略 hard error 是否存在；
-- 回测前硬数据是否足够。
+- 回测前是否已通过现有只读数据入口确认交易必需的真实行情、合约和时间边界数据足够；基本面与新闻不按每日齐全硬拦。
 
 ### 12.3 协议管理员禁止事项
 
@@ -833,6 +836,9 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 - 修改成交或结算；
 - 用收益好坏改审计规则；
 - 猜测 DB 字段；
+- 使用未在字段矩阵登记的输入或输出字段；
+- 在 `metadata`、`payload`、JSON 容器中创建未登记控制字段；
+- 维护私有动作集合、字段别名、兼容路径或 reason code 语义；
 - 把 warning 当作策略门控。
 
 协议管理员的职责是“证明系统边界没坏”，不是“替策略做交易判断”。
@@ -858,7 +864,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 
 ### 13.1 测试映射表
 
-所有测试逻辑必须放在 `src/tests/test_*.py`；运行编排脚本只放在 `src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py`。内部转换、字段边界、权限边界、固定公式、系统不变量样例和机制有效性样例都在回测前一次性检测；每日回测后只读取真实 DB、artifact、payload，检查真实运行产物、系统不变量和机制接通情况。新增内部状态流转或边界规则时，必须补下表对应测试，不能只改代码。
+所有测试逻辑必须放在 `src/tests/test_*.py`；运行编排脚本只放在 `src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py`。内部转换、字段边界、权限边界、固定公式和系统不变量样例都在回测前一次性检测；每日回测后只读取真实 DB、artifact、payload，检查真实物理结果和系统不变量，不读取或复查任何智能体内部机制。新增内部状态流转或边界规则时，必须补下表对应测试，不能只改代码。
 
 | 关键规则 | 覆盖测试文件 | 回测前总入口 | 每日回测后总入口 |
 |---|---|---|---|
@@ -870,8 +876,8 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | Accountant 手续费、保证金、权益、PnL 固定公式 | `src/tests/test_accountant_settlement_formulas.py` | `pre_backtest_test.py` | 不进入 |
 | 契约覆盖：producer、consumer、audit、test、文档、字段、配置、提示词对齐 | `src/tests/test_contract_coverage_audit.py` | `pre_backtest_test.py` | 不进入 |
 | 回测前 DB schema、硬数据、配置和环境验收 | `src/tests/test_pre_backtest_acceptance.py` | `pre_backtest_test.py` | 不进入 |
-| 协议管理员能力卡、LLM 边界、planner 封存、工具权限 | `src/tests/test_protocol_governor.py` | `pre_backtest_test.py` | 不进入 |
-| 系统不变量样例：字段越界、交易事实错位、artifact 污染、条件触发执行一致性 | `src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 `system_invariant_audit` |
+| PG 单一报告字段、无 LLM、固定入口和无交易权限边界 | `src/tests/test_protocol_governor.py` | `pre_backtest_test.py` | 不进入 |
+| 每日物理结果不变量样例：阶段、交易来源、审计放行、执行成交、结算账户和学习日期 | `src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只读检查该日真实产物 |
 | Reviewer 不写学习、Researcher 只写未来学习 | `src/tests/test_reviewer_learning.py`、`src/tests/test_fact_entry_boundaries.py` | 相关单测按需运行 | 由日后新增时纳入 |
 | 统一字段迁移和旧字段残留 | `src/tests/test_unified_field_migration.py`、`src/tests/test_evaluation_unified_semantics.py` | 相关单测按需运行 | 不进入 |
 | 市场确认和硬交易规则 | `src/tests/test_market_confirmation.py`、`src/tests/test_futures_market_rules.py` | 相关单测按需运行 | 不进入 |
@@ -907,11 +913,11 @@ src/run/backtest_daily_test.py
 
 ## PG 审计边界补充（2026-07-07）
 
-Protocol Governor 只检查协议边界，不替 PM 解释交易语义。对 PM 返回后由保存层物理化的 recommendation artifact，PG 只读取已签出的结果：`final_action_contract`、`pm_six_step_trace.pm_contract_self_check`、`pm_six_step_trace.step6_contract_generation_check` 和 `signal_snapshot.signal_collection_contract`。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
+Protocol Governor 只检查协议边界和已落地物理结果，不替 PM 解释交易语义。对 PM 返回后由保存层物理化的 recommendation artifact，daily PG 只读取 `final_action_contract` 和 `signal_snapshot.signal_collection_contract` 核对唯一交易事实来源、来源边界和外部字段污染；不读取 `pm_six_step_trace` 复查 PM 自检或 Step6 生成过程。PG 不判断 PM 为什么 wait/hold/open/exit，不判断 PM 为什么 rank、不 rank、部署或不部署资金，也不复刻 PM 三类合约矩阵。
 
 PG 对 `signal_snapshot.signal_collection_contract` 只审存在性、`source_agent="signal_collector"`、`collector_decision_boundary="no_trade_authority"`，以及 SCC 内不得出现 PM 越权字段，例如 `final_action`、`target_lots`、`lots_delta`、`opportunity_rank`、`opportunity_score`、`rank_score`、`position_sizing_result`、`capital_deployment`、`final_action_contract` 或 `pm_six_step_trace`。`final_action_contract.signal_collection_contract_ref` 只是摘要，不是主证据，不能替代完整 SCC。
 
-PG 对 PM 的 hard fail 只来自协议断链或 artifact 污染：缺最终合约、缺 PM 六步 trace、自检结果不是 ok、缺完整 SCC、SCC source_agent/boundary/越权字段非法、残留 Step1–5 中间状态或出现第二套交易事实。PM 内部 reason code 的合法性由 PM Step6 最终生成检查和最终合约自身检查负责。
+PG 对 PM 外部物理结果的 hard fail 只来自协议断链或 artifact 污染：实际进入策略路径却缺最终合约、缺完整 SCC、SCC source_agent/boundary/越权字段非法、残留 Step1–5 中间状态或出现第二套交易事实。PM 自检、内部 reason code、rank、预算、sizing 和学习作用过程只由 PM 自身机制及回测前测试负责，daily PG 不读取、不复查。
 
 测试体系按职责分层：`src/tests` 只构造样本并断言对应工具是否判对；`src/run/pre_backtest_test.py` 和 `src/run/backtest_daily_test.py` 只负责编排，不写审计规则。PG 专用审计规则只放在 `src/tools/agent_tools/control/pg_*.py`。
 

@@ -1,158 +1,118 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""Shared schemas for the protocol-governor sidecar.
-
-These objects are intentionally deterministic and side-effect free. They do
-not decide trades; they describe, validate, and audit how existing agents
-exchange structured artifacts.
-"""
+"""Registered output schemas shared by Protocol Governor checks."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Iterable, List
 
 
-TASK_PHASES = [
-    "data_ready",
-    "analyst_done",
-    "pm_candidate",
-    "final_action_ready",
-    "audited",
-    "execution_checked",
-    "executed",
-    "skipped",
-    "settled",
-    "reviewed",
-    "learned",
-]
+PG_CONTRACT_VERSION = "agentquant.protocol_governor.v1"
+PG_SOURCE_AGENT = "protocol_governor"
+PG_PASSED = "passed"
+PG_FAILED = "failed"
+PG_SKIPPED = "skipped"
 
-TERMINAL_EXECUTION_PHASES = {"executed", "skipped"}
 
-MEMORY_QUALITY_LEVELS = {
-    "exact_real_state",
-    "partial_real_state",
-    "similar_sql_prior",
-    "counterfactual_prior",
-    "stale_or_conflicted_memory",
-    "unqualified",
-}
+def _stable_codes(values: Iterable[str] | None) -> List[str]:
+    return list(dict.fromkeys(str(value).strip() for value in values or [] if str(value).strip()))
 
 
 @dataclass(frozen=True)
 class ProtocolCheckResult:
-    ok: bool
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    """One registered PG check result.
+
+    The serialized form intentionally contains no catch-all metadata, payload,
+    warning, or error containers. Every result uses only fields registered in
+    ``matrix_field_semantics.md``.
+    """
+
+    check_name: str
+    status: str = PG_PASSED
+    violation_codes: List[str] = field(default_factory=list)
+    diagnostic_codes: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.status not in {PG_PASSED, PG_FAILED, PG_SKIPPED}:
+            raise ValueError(f"invalid_protocol_check_status:{self.status}")
+        object.__setattr__(self, "violation_codes", _stable_codes(self.violation_codes))
+        object.__setattr__(self, "diagnostic_codes", _stable_codes(self.diagnostic_codes))
+        if self.status == PG_PASSED and self.violation_codes:
+            raise ValueError("passed_protocol_check_cannot_have_violation_codes")
+        if self.status == PG_FAILED and not self.violation_codes:
+            raise ValueError("failed_protocol_check_requires_violation_codes")
+
+    @property
+    def passed(self) -> bool:
+        return self.status in {PG_PASSED, PG_SKIPPED}
 
     @classmethod
     def pass_result(
         cls,
+        check_name: str,
         *,
-        warnings: Optional[Iterable[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        diagnostic_codes: Iterable[str] | None = None,
     ) -> "ProtocolCheckResult":
         return cls(
-            ok=True,
-            errors=[],
-            warnings=list(warnings or []),
-            metadata=dict(metadata or {}),
+            check_name=check_name,
+            status=PG_PASSED,
+            diagnostic_codes=_stable_codes(diagnostic_codes),
         )
 
     @classmethod
     def fail_result(
         cls,
-        errors: Iterable[str],
+        check_name: str,
+        violation_codes: Iterable[str],
         *,
-        warnings: Optional[Iterable[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        diagnostic_codes: Iterable[str] | None = None,
     ) -> "ProtocolCheckResult":
         return cls(
-            ok=False,
-            errors=list(errors or []),
-            warnings=list(warnings or []),
-            metadata=dict(metadata or {}),
+            check_name=check_name,
+            status=PG_FAILED,
+            violation_codes=_stable_codes(violation_codes),
+            diagnostic_codes=_stable_codes(diagnostic_codes),
         )
 
-    def merge(self, other: "ProtocolCheckResult") -> "ProtocolCheckResult":
-        return ProtocolCheckResult(
-            ok=self.ok and other.ok,
-            errors=[*self.errors, *other.errors],
-            warnings=[*self.warnings, *other.warnings],
-            metadata={**self.metadata, **other.metadata},
+    @classmethod
+    def skipped_result(
+        cls,
+        check_name: str,
+        *,
+        diagnostic_codes: Iterable[str] | None = None,
+    ) -> "ProtocolCheckResult":
+        return cls(
+            check_name=check_name,
+            status=PG_SKIPPED,
+            diagnostic_codes=_stable_codes(diagnostic_codes),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict:
         return {
-            "ok": self.ok,
-            "errors": list(self.errors),
-            "warnings": list(self.warnings),
-            "metadata": dict(self.metadata),
-        }
-
-
-@dataclass(frozen=True)
-class AgentCapabilityCard:
-    agent_name: str
-    team: str
-    reads: List[str] = field(default_factory=list)
-    writes: List[str] = field(default_factory=list)
-    outputs: List[str] = field(default_factory=list)
-    may_call_llm: bool = False
-    may_create_trade_authority: bool = False
-    may_modify_lots_or_margin: bool = False
-    may_execute_orders: bool = False
-    may_write_settlement: bool = False
-    may_write_future_learning: bool = False
-    required_contract_versions: List[str] = field(default_factory=list)
-    failure_mode: str = "degrade_to_audit_warning"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "agent_name": self.agent_name,
-            "team": self.team,
-            "reads": list(self.reads),
-            "writes": list(self.writes),
-            "outputs": list(self.outputs),
-            "may_call_llm": self.may_call_llm,
-            "may_create_trade_authority": self.may_create_trade_authority,
-            "may_modify_lots_or_margin": self.may_modify_lots_or_margin,
-            "may_execute_orders": self.may_execute_orders,
-            "may_write_settlement": self.may_write_settlement,
-            "may_write_future_learning": self.may_write_future_learning,
-            "required_contract_versions": list(self.required_contract_versions),
-            "failure_mode": self.failure_mode,
-        }
-
-
-@dataclass(frozen=True)
-class TaskLifecycleEvent:
-    task_id: str
-    context_id: str
-    phase: str
-    agent_name: str
-    trading_date: str
-    ticker: str
-    config_id: str
-    input_artifacts: List[str] = field(default_factory=list)
-    output_artifacts: List[str] = field(default_factory=list)
-    status: str = "ok"
-    reasons: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "task_id": self.task_id,
-            "context_id": self.context_id,
-            "phase": self.phase,
-            "agent_name": self.agent_name,
-            "trading_date": self.trading_date,
-            "ticker": self.ticker,
-            "config_id": self.config_id,
-            "input_artifacts": list(self.input_artifacts),
-            "output_artifacts": list(self.output_artifacts),
+            "check_name": self.check_name,
             "status": self.status,
-            "reasons": list(self.reasons),
-            "metadata": dict(self.metadata),
+            "violation_codes": list(self.violation_codes),
+            "diagnostic_codes": list(self.diagnostic_codes),
         }
 
 
+@dataclass(frozen=True)
+class ProtocolGovernorReport:
+    checks: List[ProtocolCheckResult]
+    contract_version: str = PG_CONTRACT_VERSION
+    source_agent: str = PG_SOURCE_AGENT
+
+    @property
+    def status(self) -> str:
+        return PG_PASSED if all(check.passed for check in self.checks) else PG_FAILED
+
+    @property
+    def passed(self) -> bool:
+        return self.status == PG_PASSED
+
+    def to_dict(self) -> dict:
+        return {
+            "contract_version": self.contract_version,
+            "source_agent": self.source_agent,
+            "status": self.status,
+            "checks": [check.to_dict() for check in self.checks],
+        }

@@ -1,11 +1,9 @@
+import inspect
+import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
-
-import yaml
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -13,389 +11,51 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from llm.inference import _normalize_llm_config, get_model, llm_audit_metadata
-from llm.provider import Provider
-from run.pre_backtest_test import _load_config, _run_protocol_preflight
-from tools.agent_tools.control.pg_preflight import run_llm_preflight_check
+from run import backtest
+from run import pre_backtest_test
+from tools.agent_tools.control.pg_preflight import run_preflight_checks
 
 
-class ProtocolPreflightCliRegressionTest(unittest.TestCase):
-    def _load_dev_llm_config(self):
-        cfg = yaml.safe_load((SRC_ROOT / "config" / "dev.yaml").read_text(encoding="utf-8"))
-        return cfg["llm"]
-
-    def test_dev_yaml_llm_route_is_codex_only_with_tqxai_commented_backup(self):
-        llm_config = self._load_dev_llm_config()
-        metadata = llm_audit_metadata(llm_config)
-        raw_config = (SRC_ROOT / "config" / "dev.yaml").read_text(encoding="utf-8")
-
-        self.assertEqual(llm_config.get("provider"), "CodexOpenAI")
-        self.assertEqual(llm_config.get("model"), "gpt-5.5")
-        self.assertNotIn("deepseek", llm_config)
-        self.assertNotIn("tqxai", llm_config)
-        self.assertEqual(metadata.get("base_url"), "http://47.74.0.65/v1")
-        self.assertEqual(metadata.get("reasoning_effort"), "medium")
-        self.assertIn('# provider: "TQXAI"', raw_config)
-        self.assertIn("# tqxai:", raw_config)
-
-    def test_codex_runtime_model_carries_medium_reasoning_extra_body(self):
-        llm_config = self._load_dev_llm_config()
-        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-            model = get_model(_normalize_llm_config(llm_config))
-
-        self.assertEqual(getattr(model, "model_name", None), "gpt-5.5")
-        self.assertEqual(str(getattr(model, "openai_api_base", "")), "http://47.74.0.65/v1")
-        self.assertEqual(getattr(model, "extra_body", None), {"reasoning_effort": "medium"})
-        self.assertIsNone(getattr(model, "temperature", None))
-
-    def test_env_example_documents_codex_current_route_and_tqx_backup(self):
-        raw_env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
-
-        self.assertIn("Backup third-party multi-model LLM gateway (TQX)", raw_env_example)
-        self.assertIn("Active CodexOpenAI GPT-5.5 gateway", raw_env_example)
-        self.assertIn("Current AgentQuant main route is CodexOpenAI gpt-5.5", raw_env_example)
-        self.assertNotIn("Current AgentQuant main route: https://llm.tqx.ai", raw_env_example)
-        self.assertNotIn("Old third-party Codex GPT-5.5 fallback gateway", raw_env_example)
-        self.assertIn("CODEX_OPENAI_BASE_URL=http://47.74.0.65", raw_env_example)
-
-    def test_deepseek_provider_remains_available_for_non_runtime_configs(self):
-        self.assertEqual(Provider.DEEPSEEK.value, "DeepSeek")
-        llm_config = {
-            "provider": "DeepSeek",
-            "model": "deepseek-chat",
-            "deepseek": {"thinking": {"enabled": False}, "reasoning_effort": None},
-        }
-        metadata = llm_audit_metadata(llm_config)
-
-        self.assertEqual(metadata.get("provider"), "DeepSeek")
-        self.assertEqual(metadata.get("base_url"), "https://api.deepseek.com")
-        self.assertEqual(metadata.get("api_key_env"), "DEEPSEEK_API_KEY")
-
-    def test_llm_preflight_rejects_runtime_deepseek_block_when_codex_is_selected(self):
+class ProtocolPreflightCliTest(unittest.TestCase):
+    def test_preflight_checks_llm_configuration_without_calling_llm(self):
         llm_config = {
             "provider": "CodexOpenAI",
-            "model": "gpt-5.5",
+            "model": "switchable-model",
             "codex_openai": {
-                "base_url": "http://47.74.0.65",
-                "reasoning_effort": "medium",
-                "api_key_env": "CODEX_OPENAI_API_KEY",
-                "api_key_env_fallbacks": [],
-            },
-            "deepseek": {"thinking": {"enabled": False}, "reasoning_effort": None},
-        }
-        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-            result = run_llm_preflight_check(llm_config, check_auth=False)
-
-        self.assertFalse(result.ok)
-        self.assertIn("llm_runtime_provider_block_not_allowed:deepseek", result.errors)
-
-    def test_llm_preflight_rejects_active_tqxai_block_when_codex_is_selected(self):
-        llm_config = {
-            "provider": "CodexOpenAI",
-            "model": "gpt-5.5",
-            "codex_openai": {
-                "base_url": "http://47.74.0.65",
-                "reasoning_effort": "medium",
-                "api_key_env": "CODEX_OPENAI_API_KEY",
-                "api_key_env_fallbacks": [],
-            },
-            "tqxai": {
-                "base_url": "https://llm.tqx.ai",
-                "reasoning_effort": None,
-                "api_key_env": "TQX_LLM_API_KEY",
-                "api_key_env_fallbacks": [],
+                "base_url": "http://example.invalid",
+                "api_key_env": "PG_TEST_KEY",
             },
         }
-        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-            result = run_llm_preflight_check(llm_config, check_auth=False)
+        with patch.dict(os.environ, {"PG_TEST_KEY": "present"}, clear=False):
+            result = run_preflight_checks(repo_root=PROJECT_ROOT, llm_config=llm_config)
+        self.assertTrue(result.passed, result.to_dict())
+        source = inspect.getsource(run_preflight_checks)
+        self.assertNotIn("get_model", source)
+        self.assertNotIn("invoke", source)
 
-        self.assertFalse(result.ok)
-        self.assertIn("llm_provider_block_mismatch:tqxai:selected=CodexOpenAI", result.errors)
+    def test_pre_backtest_runner_has_no_llm_auth_option(self):
+        source = inspect.getsource(pre_backtest_test.parse_args)
+        self.assertNotIn("check-llm-auth", source)
 
-    def test_llm_preflight_rejects_old_codex_gateway(self):
-        llm_config = {
-            "provider": "CodexOpenAI",
-            "model": "gpt-5.5",
-            "codex_openai": {
-                "base_url": "http://47.245.121.52",
-                "reasoning_effort": "medium",
-                "api_key_env": "CODEX_OPENAI_API_KEY",
-                "api_key_env_fallbacks": [],
-            },
-        }
-        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-            result = run_llm_preflight_check(llm_config, check_auth=False)
-
-        self.assertFalse(result.ok)
-        self.assertIn("llm_codex_gateway_mismatch:http://47.245.121.52/v1", result.errors)
-
-    def test_pre_backtest_gate_protocol_preflight_runs_without_real_api_call(self):
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            tmp = Path(raw_tmp)
-            fake_python = tmp / "deepfund" / "python.exe"
-            fake_python.parent.mkdir()
-            fake_python.write_text("", encoding="utf-8")
-            config_path = SRC_ROOT / "config" / "dev.yaml"
-            args = SimpleNamespace(
-                local_db=False,
-                deepfund_python=str(fake_python),
-                check_llm_auth=False,
-            )
-            with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-                report = _run_protocol_preflight(args, config_path, _load_config(config_path))
-
-        self.assertTrue(report["ok"], report)
-        self.assertTrue(report["preflight"]["ok"], report)
-
-    def test_pre_backtest_gate_protocol_preflight_reports_missing_deepfund(self):
-        config_path = SRC_ROOT / "config" / "dev.yaml"
-        args = SimpleNamespace(
-            local_db=False,
-            deepfund_python=str(PROJECT_ROOT / "missing_deepfund" / "python.exe"),
-            check_llm_auth=False,
-        )
-        with patch.dict("os.environ", {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
-            report = _run_protocol_preflight(args, config_path, _load_config(config_path))
-
-        self.assertFalse(report["ok"])
-        self.assertFalse(report["preflight"]["ok"])
-        self.assertIn("deepfund_python_missing", "\n".join(report["errors"]))
-
-    def test_pre_backtest_gate_initializes_local_sqlite_schema_before_acceptance(self):
-        import run.pre_backtest_test as pre_gate
-
-        argv = [
-            "pre_backtest_test.py",
-            "--config",
-            str(SRC_ROOT / "config" / "dev.yaml"),
-            "--local-db",
-        ]
-        calls = []
-
-        class _Report:
-            def __init__(self, ok=True):
-                self.ok = ok
-
-            def to_dict(self):
-                return {"ok": self.ok, "errors": [], "warnings": []}
-
-        def fake_create_pre_backtest_db(db_path, *, exp_name):
-            calls.append("create_pre_backtest_fake_db")
-            self.assertTrue(exp_name)
-            return db_path
-
-        def fake_unittest(_modules):
-            calls.append("unittest")
-            return {"ok": True, "tests_run": 0, "errors": [], "failures": []}
-
-        def fake_protocol(*_args, **_kwargs):
-            calls.append("protocol")
-            return {"ok": True, "errors": [], "warnings": []}
-
-        def fake_acceptance(**_kwargs):
-            calls.append("acceptance")
-            return _Report()
-
-        with patch.object(sys, "argv", argv), patch.object(
-            pre_gate,
-            "_create_pre_backtest_fake_db",
-            side_effect=fake_create_pre_backtest_db,
-        ), patch.object(pre_gate, "_run_unittest_modules", side_effect=fake_unittest), patch.object(
-            pre_gate,
-            "_run_protocol_preflight",
-            side_effect=fake_protocol,
-        ), patch.object(pre_gate, "run_pre_backtest_acceptance", side_effect=fake_acceptance):
-            result = pre_gate.main()
-
-        self.assertEqual(result, 0)
-        self.assertEqual(
-            calls,
-            ["create_pre_backtest_fake_db", "unittest", "unittest", "protocol", "acceptance"],
+    def test_backtest_calls_precheck_before_reset(self):
+        source = inspect.getsource(backtest.main)
+        self.assertLess(
+            source.index("run_pre_backtest_test("),
+            source.index("reset_existing_config_if_requested("),
         )
 
-    def test_backtest_pre_backtest_command_uses_integrated_gate(self):
-        import run.backtest as backtest
+    def test_backtest_daily_gate_is_single_day_and_has_no_final_duplicate(self):
+        source = inspect.getsource(backtest.main)
+        self.assertIn("config_arg,\n            trading_day,\n            trading_day", source)
+        self.assertEqual(source.count("run_backtest_daily_test("), 1)
 
-        command = []
-
-        def fake_run_command(raw_command, env):
-            command.extend(raw_command)
-            return 0
-
-        with patch.object(backtest, "run_command", side_effect=fake_run_command):
-            result = backtest.run_pre_backtest_test(
-                str(SRC_ROOT / "config" / "dev.yaml"),
-                "2025-03-01",
-                "2025-03-10",
-                local_db=True,
-            )
-
-        self.assertEqual(result, 0)
-        self.assertIn(str(SRC_ROOT / "run" / "pre_backtest_test.py"), command)
-        self.assertIn("--config", command)
-        self.assertIn("--start-date", command)
-        self.assertIn("2025-03-01", command)
-        self.assertIn("--end-date", command)
-        self.assertIn("2025-03-10", command)
-        self.assertIn("--local-db", command)
-
-    def test_backtest_daily_command_uses_integrated_gate(self):
-        import run.backtest as backtest
-
-        command = []
-
-        def fake_run_command(raw_command, env):
-            command.extend(raw_command)
-            return 0
-
-        with patch.object(backtest, "run_command", side_effect=fake_run_command):
-            result = backtest.run_backtest_daily_test(
-                str(SRC_ROOT / "config" / "dev.yaml"),
-                "2025-03-01",
-                "2025-03-10",
-                local_db=True,
-            )
-
-        self.assertEqual(result, 0)
-        self.assertIn(str(SRC_ROOT / "run" / "backtest_daily_test.py"), command)
-        self.assertIn("--config", command)
-        self.assertIn("--start-date", command)
-        self.assertIn("2025-03-01", command)
-        self.assertIn("--end-date", command)
-        self.assertIn("2025-03-10", command)
-        self.assertIn("--local-db", command)
-
-    def test_backtest_main_stops_before_trading_loop_when_pre_backtest_gate_fails(self):
-        import run.backtest as backtest
-
-        argv = [
-            "backtest.py",
-            "--config",
-            str(SRC_ROOT / "config" / "dev.yaml"),
-            "--start-date",
-            "2025-03-01",
-            "--end-date",
-            "2025-03-10",
-            "--local-db",
-        ]
-
-        with patch.object(sys, "argv", argv), patch.object(
-            backtest,
-            "load_yaml_config",
-            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
-        ), patch.object(backtest, "run_pre_backtest_test", return_value=1) as pre_gate, patch.object(
-            backtest, "resolve_trading_days"
-        ) as resolve_days:
-            result = backtest.main()
-
-        self.assertEqual(result, 1)
-        pre_gate.assert_called_once_with(
-            str((SRC_ROOT / "config" / "dev.yaml").resolve()),
-            "2025-03-01",
-            "2025-03-10",
-            True,
-        )
-        resolve_days.assert_not_called()
-
-    def test_backtest_reset_clears_existing_config_before_pre_backtest_gate(self):
-        import run.backtest as backtest
-
-        argv = [
-            "backtest.py",
-            "--config",
-            str(SRC_ROOT / "config" / "dev.yaml"),
-            "--start-date",
-            "2025-03-01",
-            "--end-date",
-            "2025-03-10",
-            "--local-db",
-            "--reset-config",
-        ]
-        calls = []
-
-        def fake_reset(_config, _reset_config, _local_db):
-            calls.append("reset")
-
-        def fake_pre_gate(*_args, **_kwargs):
-            calls.append("pre_gate")
-            return 1
-
-        with patch.object(sys, "argv", argv), patch.object(
-            backtest,
-            "load_yaml_config",
-            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
-        ), patch.object(backtest, "reset_existing_config_if_requested", side_effect=fake_reset), patch.object(
-            backtest, "run_pre_backtest_test", side_effect=fake_pre_gate
-        ), patch.object(backtest, "resolve_trading_days") as resolve_days:
-            result = backtest.main()
-
-        self.assertEqual(result, 1)
-        self.assertEqual(calls, ["reset", "pre_gate"])
-        resolve_days.assert_not_called()
-
-    def test_backtest_main_stops_on_first_daily_gate_failure(self):
-        import run.backtest as backtest
-
-        argv = [
-            "backtest.py",
-            "--config",
-            str(SRC_ROOT / "config" / "dev.yaml"),
-            "--start-date",
-            "2025-03-06",
-            "--end-date",
-            "2025-04-30",
-            "--local-db",
-        ]
-        trading_days = ["2025-03-27", "2025-03-28", "2025-03-29"]
-        executed_scripts = []
-        daily_windows = []
-
-        def fake_phase_record(*_args, **_kwargs):
-            return None
-
-        def fake_run_command(command, env):
-            script_name = Path(command[1]).name
-            trading_date = None
-            if "--trading-date" in command:
-                trading_date = command[command.index("--trading-date") + 1]
-            executed_scripts.append((script_name, trading_date))
-            return 0
-
-        def fake_daily_gate(config_arg, start_date, trading_day, local_db):
-            daily_windows.append((start_date, trading_day, local_db))
-            return 7 if trading_day == "2025-03-28" else 0
-
-        with patch.object(sys, "argv", argv), patch.object(
-            backtest,
-            "load_yaml_config",
-            return_value={"market_type": "china_futures", "tickers": ["RB"], "exp_name": "agentquant-test"},
-        ), patch.object(backtest, "run_pre_backtest_test", return_value=0), patch.object(
-            backtest,
-            "resolve_trading_days",
-            return_value=trading_days,
-        ), patch.object(backtest, "get_phase_record", side_effect=fake_phase_record), patch.object(
-            backtest,
-            "run_command",
-            side_effect=fake_run_command,
-        ), patch.object(
-            backtest,
-            "run_daily_cumulative_backtest_test",
-            side_effect=fake_daily_gate,
-        ), patch.object(backtest, "run_backtest_daily_test") as final_daily_gate:
-            result = backtest.main()
-
-        self.assertEqual(result, 7)
-        self.assertEqual(
-            daily_windows,
-            [
-                ("2025-03-27", "2025-03-27", True),
-                ("2025-03-27", "2025-03-28", True),
-            ],
-        )
-        self.assertIn(("validate_phase_flow.py", "2025-03-28"), executed_scripts)
-        self.assertNotIn(("proposal.py", "2025-03-29"), executed_scripts)
-        self.assertNotIn(("evaluate_config.py", None), executed_scripts)
-        final_daily_gate.assert_not_called()
+    def test_integrated_commands_keep_fixed_main_runner_paths(self):
+        commands = []
+        with patch.object(backtest, "run_command", side_effect=lambda command, _env: commands.append(command) or 0):
+            backtest.run_pre_backtest_test("config.yaml", "2025-01-02", "2025-01-03", True)
+            backtest.run_backtest_daily_test("config.yaml", "2025-01-02", "2025-01-02", True)
+        self.assertTrue(str(commands[0][1]).endswith("pre_backtest_test.py"))
+        self.assertTrue(str(commands[1][1]).endswith("backtest_daily_test.py"))
 
 
 if __name__ == "__main__":

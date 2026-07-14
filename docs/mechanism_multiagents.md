@@ -74,7 +74,7 @@ protocol_governor
 -> system_invariant_audit
 ```
 
-控制组只审非策略问题：字段漂移、artifact 污染、越权、前视、schema 断裂、阶段断链、合约缺失、自检失败、交易不来自合约。控制组不评价策略收益，不替 PM 判断方向、rank、手数和资金部署。
+控制组只审可静态证明的协议边界和已落地物理结果中的非策略问题：字段漂移、artifact 污染、越权、前视、schema 断裂、阶段断链、应落地合约缺失、交易不来自唯一合法来源。控制组不读取或复查智能体内部机制，不评价策略收益，不替 PM 判断方向、rank、手数和资金部署。
 
 ## 4. 阶段顺序
 
@@ -83,7 +83,7 @@ protocol_governor
 | Phase1 | 盘前策略生成 | `src/run/proposal.py` | Analyst、Signal Collector、PM、Auditor | recommendation、`final_action_contract`、`audit_verdict` | 只能用盘前可见信息 |
 | Phase2 | 开盘后执行 | `src/run/order.py` | Trader | transaction、execution result、intraday decision | 只能执行审计通过的 PM 合约 |
 | Phase3 | 收盘后结算 | `src/run/settlement.py` | Accountant | settlement、PnL、保证金、持仓事实 | 只按成交和结算事实入账 |
-| Phase4 | 收盘后复盘 | `src/run/validate_phase_flow.py` | Reviewer | Phase4 验收、交易日志、事实归因 | 只复盘，不写最终 action-value |
+| Phase4 | 收盘后复盘 | `src/run/validate_phase_flow.py` | Reviewer | Phase4 事实复盘、交易日志、事实归因 | 只核对已落地事实，不重新裁决合约合法性和账户硬风险，不写最终 action-value |
 | Phase4 后 | 研究学习 | `src/run/research/researcher_learning.py` | Researcher | 结构化研究与学习记录 | 只影响未来交易日 |
 
 回测、模拟盘、实盘共享同一阶段顺序和字段契约。回测可以连续跑历史交易日，每个交易日内部仍按 Phase1 -> Phase2 -> Phase3 -> Phase4 -> Research 顺序执行。
@@ -97,12 +97,12 @@ protocol_governor
 | `commodity_news` | 截止当前交易日可见的新闻、事件、政策、舆情，新闻校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新事件时如实表达无当前催化，确无可用数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造新闻催化；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `signal_collector` | 三类分析师结构化预测证据 | `signal_collection_contract` | 否 | 读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
 | `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot` | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划 | Auditor；审计通过后由 workflow 编排层交给 Trader |
-| `auditor` | PM 最终合约、账户、持仓、保证金、硬风险边界 | `audit_verdict`、审计 payload、risk reasons | 否 | 改方向、改手数、新建合约、直接消费研究记忆改交易权限 | Trader |
+| `auditor` | PM 最终合约、账户状态、配置硬保证金上限、数据质量 | `approve` / `approve_with_warning` / `block`、审计 payload、hard/soft risk reasons | 否 | 改方向、改手数、新建合约；消费研究记忆；复审 PM 学习、融合、rank、预算和 sizing | Trader |
 | `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发 | Accountant、Reviewer |
 | `accountant` | 成交、持仓、结算价、费用、保证金率、合约乘数 | settlement、PnL、保证金、权益、持仓状态 | 否 | 用 LLM、学习、复盘改账；写交易动作 | Reviewer |
-| `reviewer` | recommendation、合约、成交、结算、执行结果、阶段状态 | Phase4 验收、交易日志、事实归因、研究输入材料 | 否 | 下单、调仓、写最终 action-value、触发 Researcher LLM | Researcher |
+| `reviewer` | recommendation、审计、执行结果、成交、结算、账户/持仓和阶段状态 | Phase4 事实复盘、交易日志、事实归因、研究输入材料 | 否 | 下单、调仓、写最终 action-value、重新裁决合约合法性或账户硬风险、触发 Researcher LLM | Researcher |
 | `researcher` | 复盘事实、完整 episode、未交易机会、未触发条件机会、执行结果 | 结构化研究、action-value、profile、state、分析师校准信息 | 受限可调 | 改当天合约、成交、结算、PnL、交易员权限 | 分析师、PM 记忆读取 |
-| `protocol_governor` | 代码、配置、DB、artifact、字段语义、契约覆盖 | 回测前/每日非策略风险报告、机制断链报告 | 否 | 生成交易动作、改手数、写业务表、评价收益为 pass/fail | 开发与回测闸门 |
+| `protocol_governor` | 代码、配置、DB、artifact、字段语义、契约覆盖；只读取字段矩阵已登记路径 | 只由字段矩阵已登记字段组成的回测前就绪报告和每日物理结果非策略风险报告 | 否 | 读取或复查智能体内部机制；使用未登记字段或通用容器补字段；自建动作语义；生成交易动作、改手数、写业务表、评价收益为 pass/fail | 开发与回测闸门 |
 
 ## 6. 唯一事实入口总原则
 
@@ -167,22 +167,26 @@ protocol_governor
 
 - 字段语义漂移。
 - artifact 越权。
-- PM 自检契约断裂。
+- PM 对外最终合约生成与返回边界断裂。
 - SCC 生产和落盘断裂。
 - action-value family/lane/preference 断裂。
 - Trader、Reviewer、Researcher 越权字段。
-- 历史失败形态 fixture 断裂。
+- 代表性 fixture 证明的通用字段、动作、职责、阶段或唯一交易事实不变量断裂；历史问题只可作为样本来源，不作为检测目的。
+- 指定窗口与配置品种的交易日、PandaAI 日线开收盘价、官方结算价、主力合约映射、合约乘数、保证金率、具体合约信息或 Trader 分钟行情接口能力不可用。
 
-每日 PG 审计只 hard fail 系统契约断裂：
+回测前 PG 通过现有数据入口只读调用真实数据；不运行分析、决策、执行和结算，不调用 LLM，不写正式业务库。Finoview 和新闻只检查路径、可读性、解析与日期过滤，某品种某日没有新增基本面或新闻不阻断回测。
+
+每日 PG 审计只读取当日已落地 DB、artifact 和 payload，并只 hard fail 外部物理事实中的系统契约断裂：
 
 - 缺 `final_action_contract`。
-- PM self-check failed。
 - SCC 缺失、source_agent 错、boundary 错。
 - Trader 成交不来自最终合约。
 - artifact 污染。
 - 字段语义不一致。
 - phase 未完成。
 - 越权字段进入下游 artifact。
+
+每日 PG 不读取 `pm_six_step_trace` 判断 PM 自检，不检查学习如何影响 score/rank/手数/动作，也不复查 Auditor、Trader、Reviewer、Researcher 的内部判断过程。
 
 每日 PG 不 hard fail 策略质量问题：
 

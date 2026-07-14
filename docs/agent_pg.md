@@ -30,6 +30,31 @@
 26. Artifact 协议 `agentquant.artifact.v1` 与 `agentquant.signal_artifact.v1`（回测前检测项、每日回测后检测项）
 27. PG 治理协议 `agentquant.protocol_governor.v1`（回测前检测项）
 
+固定字段与动作边界：
+
+- PG 的检测输入、字段路径、判定依据和报告输出只能使用 `matrix_field_semantics.md` 已登记字段及其固定语义。
+- PG 对交易动作和 action-value 的解释只能使用 `matrix_action_canonical.md` 已登记动作、family、lane 和 preference 语义。
+- `metadata`、`payload`、`payload_json`、`artifact_json`、`signal_snapshot` 及其他 JSON 容器不能承载未登记字段、别名、私有状态或第二套语义。
+- PG 不得因为审计实现方便而自创字段、错误字段别名、动作集合、reason code 语义或兼容路径。
+- 现有字段不能表达确属 PG 必需的非策略检测事实时，必须先证明真实功能缺口、唯一生产者和唯一消费者，再先登记到字段矩阵；未经登记不得进入代码、报告、artifact 或数据库。
+- 当前代码中已经存在但字段矩阵未登记的 PG 报告字段，不构成正式协议；后续改造时无必要者删除，确有必要者按上述顺序登记后使用。
+
+PG 回测前报告和每日回测后报告统一使用同一结构：
+
+```text
+protocol_governor_report
+→ contract_version
+→ source_agent
+→ status
+→ checks[]
+   → check_name
+   → status
+   → violation_codes
+   → diagnostic_codes
+```
+
+PG 报告不得输出 `ok`、`errors`、`warnings`、`metadata`、内部计数、能力卡或智能体内部检查结果。
+
 ## 二、回测前检测
 
 检测目的：在不调用 LLM、不运行真实回测的前提下，尽可能提前发现系统运行断点和违反既定业务逻辑的问题。该检测属于事前运行就绪检查，不评价策略收益和信号质量，也不以历史错误复现作为主要检测方式。
@@ -57,6 +82,7 @@
 - 字段及路径服从 `matrix_field_semantics.md`。
 - 动作及 action-value 服从 `matrix_action_canonical.md`。
 - 禁止旧字段、别名和第二套语义。
+- PG 自身回测前报告也服从相同字段规则，不得以通用容器或临时字典键绕过登记。
 - 各智能体只调用现有职责范围内的工具。
 - 启用运行链中的 LLM 调用位置只能出现在现有分析师和 Researcher 链路。
 
@@ -160,6 +186,8 @@ AnalystSignal/action_evidence_contract
 ## 三、每日回测后检测
 
 检测目的：通过只读检查每日回测形成的物理结果，判断当日系统是否出现非策略问题。该检测不检查智能体内部机制，不重复 PM 自检和 Auditor 审计，不评价收益、信号、复盘或学习质量。真实成交和行情造成账户保证金比例、净敞口或多空比例超过 PM 规划预算门槛，不直接判定为系统错误。
+
+每日检测只读取字段矩阵已经登记的物理字段，并只按动作矩阵解释动作语义；每日 PG 报告不得新增未登记字段、别名、私有诊断对象或第二套动作解释。
 
 运行机制：既可通过独立入口 `src/run/backtest_daily_test.py` 单独执行，也由自动化回测入口 `src/run/backtest.py` 在每个交易日的 Phase1–4 与 Researcher 全部结束后调用。它只在单日业务链结束后运行，不进入 Phase1–4、Researcher 或任何智能体的内部运行阶段。
 

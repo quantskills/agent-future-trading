@@ -1,107 +1,47 @@
 from __future__ import annotations
 
-"""Preflight health checks.
-
-The default checks are deterministic and local-only. Expensive or external
-checks must be requested explicitly by the CLI/backtest entrypoint so unit tests
-do not depend on live provider credentials.
-"""
+"""Deterministic local preflight checks; this module never calls an LLM."""
 
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
-from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
-from llm.inference import (
-    _classify_llm_error,
-    _load_llm_env_files,
-    _normalize_llm_config,
-    get_model,
-    llm_audit_metadata,
-)
-from llm.provider import Provider
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 
 
-class LLMPreflightProbe(BaseModel):
-    ok: bool = Field(default=True)
-
-
-EXPECTED_CODEX_OPENAI_BASE_URL = "http://47.74.0.65/v1"
 _PROVIDER_BLOCK_KEYS = {
-    Provider.CODEX_OPENAI: "codex_openai",
-    Provider.TQXAI: "tqxai",
+    "codexopenai": "codex_openai",
+    "tqxai": "tqxai",
 }
-_DISALLOWED_RUNTIME_LLM_BLOCK_KEYS = {"deepseek"}
 
 
-def _check_writable_dir(path: Path) -> bool:
-    return path.exists() and path.is_dir() and os.access(str(path), os.W_OK)
-
-
-def run_llm_preflight_check(
-    llm_config: Dict[str, Any],
-    *,
-    check_auth: bool = False,
-) -> ProtocolCheckResult:
-    errors: List[str] = []
-    warnings: List[str] = []
-    metadata: Dict[str, Any] = {"check_auth": bool(check_auth)}
-
-    try:
-        _load_llm_env_files()
-        llm_cfg = _normalize_llm_config(llm_config)
-        provider = Provider(llm_cfg.provider)
-        audit_metadata = llm_audit_metadata(llm_config)
-        selected_block = _PROVIDER_BLOCK_KEYS.get(provider)
-        for block_key in sorted(_DISALLOWED_RUNTIME_LLM_BLOCK_KEYS):
-            if block_key in llm_config:
-                errors.append(f"llm_runtime_provider_block_not_allowed:{block_key}")
-        for block_provider, block_key in _PROVIDER_BLOCK_KEYS.items():
-            if block_key == selected_block:
-                continue
-            if block_key in llm_config:
-                errors.append(f"llm_provider_block_mismatch:{block_key}:selected={provider.value}")
-        if provider == Provider.CODEX_OPENAI and audit_metadata.get("base_url") != EXPECTED_CODEX_OPENAI_BASE_URL:
-            errors.append(f"llm_codex_gateway_mismatch:{audit_metadata.get('base_url')}")
-        metadata.update(
-            {
-                "provider": provider.value,
-                "model": llm_cfg.model,
-                "base_url": audit_metadata.get("base_url"),
-                "api_key_env": audit_metadata.get("api_key_env"),
-            }
-        )
-        provider_config = provider.config
-        if provider_config.requires_api_key:
-            env_key = audit_metadata.get("api_key_env")
-            if not env_key:
-                errors.append(f"llm_api_key_env_missing:{provider.value}")
-            elif not os.getenv(str(env_key)):
-                errors.append(f"llm_api_key_missing:{provider.value}:{env_key}")
-        if check_auth and not errors:
-            llm = get_model(llm_cfg)
-            method = llm_cfg.structured_output_method or provider_config.structured_output_method
-            probe = llm.with_structured_output(LLMPreflightProbe, method=method).invoke(
-                "Return JSON only: {\"ok\": true}"
-            )
-            if isinstance(probe, dict):
-                probe = LLMPreflightProbe(**probe)
-            if probe is None or not getattr(probe, "ok", False):
-                errors.append(f"llm_auth_probe_invalid_response:{provider.value}:{llm_cfg.model}")
-    except Exception as exc:
-        error_type = _classify_llm_error(exc)
-        provider_name = metadata.get("provider", "unknown")
-        model_name = metadata.get("model", "unknown")
-        errors.append(f"llm_preflight_failed:{provider_name}:{model_name}:{error_type}:{exc}")
-
-    return (
-        ProtocolCheckResult.fail_result(errors, warnings=warnings, metadata=metadata)
-        if errors
-        else ProtocolCheckResult.pass_result(warnings=warnings, metadata=metadata)
-    )
+def _llm_config_codes(llm_config: Dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    provider = str(llm_config.get("provider") or "").strip()
+    model = str(llm_config.get("model") or "").strip()
+    if not provider:
+        codes.append("llm_provider_missing")
+    if not model:
+        codes.append("llm_model_missing")
+    block_name = _PROVIDER_BLOCK_KEYS.get(provider.lower())
+    block = llm_config.get(block_name) if block_name else None
+    if block_name is None:
+        codes.append("llm_provider_not_supported_by_current_config")
+        return codes
+    if not isinstance(block, dict):
+        codes.append("llm_selected_provider_block_missing")
+        return codes
+    env_name = str(block.get("api_key_env") or "").strip()
+    if not env_name:
+        codes.append("llm_api_key_env_missing")
+    elif not os.getenv(env_name):
+        codes.append("llm_api_key_missing")
+    if not str(block.get("base_url") or "").strip():
+        codes.append("llm_base_url_missing")
+    return codes
 
 
 def run_preflight_checks(
@@ -112,49 +52,47 @@ def run_preflight_checks(
     required_files: Optional[Iterable[Path]] = None,
     deepfund_python: Optional[Path] = None,
     llm_config: Optional[Dict[str, Any]] = None,
-    check_llm_auth: bool = False,
 ) -> ProtocolCheckResult:
-    errors: List[str] = []
-    warnings: List[str] = []
-    metadata: Dict[str, Any] = {}
+    violations: list[str] = []
+    diagnostics: list[str] = []
 
+    if repo_root is not None:
+        load_dotenv(Path(repo_root) / ".env", override=False)
     if repo_root is not None and not Path(repo_root).exists():
-        errors.append("repo_root_missing")
-
+        violations.append("repo_root_missing")
     if deepfund_python is not None:
         python_path = Path(deepfund_python)
-        metadata["deepfund_python"] = str(python_path)
         if not python_path.exists():
-            errors.append("deepfund_python_missing")
+            violations.append("deepfund_python_missing")
         elif "deepfund" not in str(python_path).lower():
-            warnings.append("python_path_does_not_look_like_deepfund")
-
+            diagnostics.append("python_path_name_not_deepfund")
     for raw_path in required_files or []:
-        path = Path(raw_path)
-        if not path.exists():
-            errors.append(f"required_file_missing:{path}")
-
+        if not Path(raw_path).exists():
+            violations.append("required_file_missing")
     for raw_dir in writable_dirs or []:
         path = Path(raw_dir)
-        if not _check_writable_dir(path):
-            errors.append(f"writable_dir_unavailable:{path}")
-
+        if not path.exists() or not path.is_dir() or not os.access(str(path), os.W_OK):
+            violations.append("writable_directory_unavailable")
     for raw_db in sqlite_paths or []:
         db_path = Path(raw_db)
         if not db_path.exists():
-            warnings.append(f"sqlite_missing:{db_path}")
+            diagnostics.append("optional_sqlite_database_missing")
             continue
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            conn.execute("select 1")
-            conn.close()
-        except sqlite3.Error as exc:
-            errors.append(f"sqlite_unreadable:{db_path}:{exc}")
-
-    result = ProtocolCheckResult.fail_result(errors, warnings=warnings, metadata=metadata) if errors else ProtocolCheckResult.pass_result(
-        warnings=warnings,
-        metadata=metadata,
-    )
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                conn.execute("SELECT 1")
+        except sqlite3.Error:
+            violations.append("sqlite_database_unreadable")
     if llm_config is not None:
-        result = result.merge(run_llm_preflight_check(llm_config, check_auth=check_llm_auth))
-    return result
+        violations.extend(_llm_config_codes(llm_config))
+
+    if violations:
+        return ProtocolCheckResult.fail_result(
+            "environment_and_entry",
+            violations,
+            diagnostic_codes=diagnostics,
+        )
+    return ProtocolCheckResult.pass_result(
+        "environment_and_entry",
+        diagnostic_codes=diagnostics,
+    )

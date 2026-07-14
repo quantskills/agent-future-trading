@@ -170,7 +170,7 @@ def run_pre_backtest_test(config_arg: str, start_date: str, end_date: str, local
 
 
 def reset_existing_config_if_requested(config: dict, reset_config: bool, local_db: bool) -> None:
-    """Delete the old config before pre-backtest checks when the run is explicitly reset."""
+    """Delete the old config after pre-backtest checks when reset is requested."""
     if not reset_config:
         return
     from util.db_helper import db_initialize, get_db
@@ -181,7 +181,7 @@ def reset_existing_config_if_requested(config: dict, reset_config: bool, local_d
     config_id = db.get_config_id_by_name(exp_name)
     if not config_id:
         return
-    print(f"[backtest] Resetting existing config before pre_backtest_test.py: {config_id[:8]}...")
+    print(f"[backtest] Resetting existing config after pre_backtest_test.py: {config_id[:8]}...")
     if not db.delete_config_and_portfolios(config_id):
         raise RuntimeError(f"Failed to reset existing config before pre-backtest checks: {config_id}")
 
@@ -201,16 +201,6 @@ def run_backtest_daily_test(config_arg: str, start_date: str, end_date: str, loc
         command.append("--local-db")
     print("[backtest] Running backtest_daily_test.py")
     return run_command(command, os.environ.copy())
-
-
-def run_daily_cumulative_backtest_test(
-    config_arg: str,
-    start_date: str,
-    trading_day: str,
-    local_db: bool,
-) -> int:
-    print(f"[backtest] Running backtest_daily_test.py through {trading_day}")
-    return run_backtest_daily_test(config_arg, start_date, trading_day, local_db)
 
 
 def main() -> int:
@@ -234,8 +224,6 @@ def main() -> int:
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
 
-    reset_existing_config_if_requested(config, args.reset_config, args.local_db)
-
     pre_backtest_return_code = run_pre_backtest_test(
         config_arg,
         args.start_date,
@@ -245,6 +233,8 @@ def main() -> int:
     if pre_backtest_return_code != 0:
         print(f"[backtest] pre_backtest_test.py failed with exit code {pre_backtest_return_code}")
         return pre_backtest_return_code
+
+    reset_existing_config_if_requested(config, args.reset_config, args.local_db)
 
     trading_days = resolve_trading_days(config, start_date, end_date)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -330,9 +320,9 @@ def main() -> int:
                 )
                 return return_code
 
-        daily_test_return_code = run_daily_cumulative_backtest_test(
+        daily_test_return_code = run_backtest_daily_test(
             config_arg,
-            trading_days[0],
+            trading_day,
             trading_day,
             args.local_db,
         )
@@ -360,16 +350,6 @@ def main() -> int:
         if eval_return_code != 0:
             print(f"[backtest] evaluate_config.py failed with exit code {eval_return_code}")
             return eval_return_code
-
-    final_daily_test_return_code = run_backtest_daily_test(
-        config_arg,
-        trading_days[0],
-        trading_days[-1],
-        args.local_db,
-    )
-    if final_daily_test_return_code != 0:
-        print(f"[backtest] backtest_daily_test.py failed with exit code {final_daily_test_return_code}")
-        return final_daily_test_return_code
 
     if args.plot:
         plot_command = [sys.executable, str(RUN_DIR / "plot_config.py"), "--config", config_arg]

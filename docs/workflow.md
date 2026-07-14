@@ -961,8 +961,6 @@ audit_payload（策略审计后）
 → boundary
 → contract_summary
 → semantic_state
-→ pm_memory_consumption_audit
-→ pm_fusion_explanation_audit
 
 audit_payload（执行后）
 → trade_contract_audit
@@ -2329,7 +2327,6 @@ boundary（audit_payload策略审计后）
 → trader_requires_approved_audit_verdict
 → research_memory_not_consumed
 → auditor_reads_research_db
-→ auditor_checks_pm_memory_consumption_from_contract_only
 
 contract_summary（audit_payload策略审计后）
 → final_action
@@ -2340,36 +2337,11 @@ contract_summary（audit_payload策略审计后）
 → can_execute_without_intraday_trigger
 
 semantic_state（audit_payload策略审计后）
-→ contract
 → lifecycle_state
 → requires_intraday_result
 → hard_block_reasons
 → soft_limit_reasons
 → semantic_errors
-
-pm_memory_consumption_audit（audit_payload策略审计后）
-→ contract
-→ ok
-→ errors
-→ warnings
-→ expected_memory_requirements
-→ declared_memory_requirements
-→ expected_requirement_keys
-→ declared_requirement_keys
-→ uncovered_required_pm_memory
-→ alpha_setup_action_value_count
-→ auditor_reads_research_db
-→ trader_reads_pm_action_value
-→ accountant_reads_memory
-
-pm_fusion_explanation_audit（audit_payload策略审计后）
-→ contract_version
-→ ok
-→ errors
-→ warnings
-→ pm_fusion_diagnostics
-→ pm_conflict_resolution
-→ auditor_boundary
 
 【Trader：执行后audit_payload嵌套结构】
 trade_contract_audit（audit_payload执行后）

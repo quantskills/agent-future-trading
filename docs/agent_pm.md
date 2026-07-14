@@ -88,7 +88,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 最终合约先进入内存中的 `FuturesRecommendation.signal_snapshot.final_action_contract`。
 
-`workflow` 编排层只接收 PM 返回的 `FuturesRecommendation`，再负责组织后续审计和保存。
+`workflow` 编排层接收 PM 返回的 `FuturesRecommendation` 后，先由保存层物理化，再组织独立 Auditor 审计并把审计结果更新回同一条 recommendation 记录。
 
 最终合约生成时不读取 DB 中已经落盘的 PM 输出，不读取本地 artifact，不读取运行日志。
 
@@ -226,7 +226,7 @@ PM 的直接输出到此结束。Auditor 审计结果、DB 记录、本地 artif
 
 PM 返回时不填充 Auditor 审计结果和 `audit_payload`。
 
-`workflow` 编排层接收后先交给独立 Auditor 审计；审计完成后，`workflow` 编排层 / 保存层才把 recommendation 和审计结果保存为 DB 记录和本地 artifact。
+`workflow` 编排层接收后，先由保存层把 PM 返回的 `FuturesRecommendation` 及其初始 `signal_snapshot` 写入 DB，并在需要时生成 recommendation artifact；随后把已经取得持久化 ID 的同一 `FuturesRecommendation` 交给独立 Auditor 审计。审计完成后，`workflow` 编排层 / 保存层只更新同一条 DB 记录中的 Auditor 摘要和 `audit_payload`，必要时同步更新对应 recommendation artifact，不生成第二条 recommendation 或第二张合约。
 
 #### 2.2 DB 推荐记录
 
@@ -242,7 +242,7 @@ DB 字段沿用既有 `futures_recommendation` 表结构；本文件不新增保
 
 ##### 2.2.3 来源
 
-来自 PM 返回的 `FuturesRecommendation` 和后续独立 Auditor 审计结果，由 `workflow` 编排层 / 保存层在审计完成后写入 `futures_recommendation` 表。
+初始记录来自 PM 返回的 `FuturesRecommendation`，由 `workflow` 编排层 / 保存层先写入 `futures_recommendation` 表。后续独立 Auditor 审计结果由保存层更新到同一条记录，不另建 recommendation。
 
 其中 `action`、`lots`、`base_price`、`signal_snapshot` 必须由 `final_action_contract` 对齐生成。
 
@@ -269,7 +269,7 @@ DB 字段沿用既有 `futures_recommendation` 表结构；本文件不新增保
 
 recommendation-level 摘要字段来自最终合约，不另造第二套事实。
 
-Auditor 审计结果不属于 PM 返回时的 `signal_snapshot`；由 `workflow` 编排层在 PM 返回后单独交给保存层物理化。
+Auditor 审计结果不属于 PM 返回时的初始 `signal_snapshot`；由 `workflow` 编排层在初始 recommendation 已保存后，将 Auditor 摘要更新至同一条记录的 `signal_snapshot.auditor`，并将完整结果更新至同一条记录的 `audit_payload`。
 
 #### 2.4 本地 recommendation artifact
 
@@ -312,9 +312,9 @@ PM 正常返回后，`workflow` 编排层只记录最终返回状态和安全摘
 
 ### 3. 后续处理边界
 
-Auditor 在 PM 返回 `FuturesRecommendation` 后审计最终合约。
+`workflow` 编排层 / 保存层在 PM 返回后先将 `FuturesRecommendation` 写入 DB，并按既有外置规则生成本地 artifact。
 
-`workflow` 编排层 / 保存层负责将 `FuturesRecommendation` 写入 DB，并生成本地 artifact。
+Auditor 随后读取已保存且带持久化 ID 的同一 `FuturesRecommendation`，只读审计其中的唯一最终合约；`workflow` 编排层 / 保存层再把审计摘要和 `audit_payload` 更新回同一条 recommendation 记录。
 
 运行日志由 `workflow` 编排层、Auditor 和保存层在 PM 返回或 PM 调用结束后写入。PM Step1–5 不产生独立日志输出。
 

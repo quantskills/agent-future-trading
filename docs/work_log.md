@@ -66,3 +66,9 @@
 ==========2026年7月13日==========
 
 （1）[每日回测后检测边界收口] `backtest_daily_test.py` 删除 `mechanism_effectiveness` 调用和报告项，`pg_system_invariants.py` 停止读取 `pm_six_step_trace` 中的 PM 自检与 Step6 生成检查；同步删除机制有效性工具、PG 接口、自循环单元测试和回测前测试注册，并调整契约覆盖与相关测试。原因：每日回测后检测只依据真实 DB、artifact、执行、成交、结算和学习落地结果识别非策略问题，不复查 PM 或其他智能体内部机制。
+（2）[PG 单一报告契约] `protocol_governor.py`、`pg_schemas.py`、两个固定主运行脚本和 control 包装入口统一只输出 `contract_version/source_agent/status/checks[]`，单项检查只使用 `check_name/status/violation_codes/diagnostic_codes`；删除 `ok/errors/warnings/metadata`、能力卡、任务生命周期和私有诊断容器。原因：PG 报告必须服从字段矩阵，不能借通用容器自创第二套控制字段或泄露智能体内部信息。
+（3）[回测前十项就绪检测] `pg_pre_backtest_acceptance.py`、`pg_preflight.py`、`pg_db_schema_contract.py` 与 `pre_backtest_test.py` 重构为环境入口、配置映射、字段动作职责、真实数据就绪、时间边界、正式临时库、无 LLM 链路预演、现有业务路径、编排物理边界和判定边界十项；移除 LLM 实际鉴权调用和手写假 schema，改用正式 `sqlite_setup` 隔离库并验证 DB helper 与 artifact 回读。原因：回测前门禁只做事前系统就绪检测，不跑真实回测、不调用 LLM、不评价策略，也不以历史故障复现为中心。
+（4）[每日七项物理事实检测] `pg_system_invariants.py` 与 `backtest_daily_test.py` 重写为只读检查当日阶段完成、物理落地、唯一交易来源、审计放行与执行结果、执行成交、结算账户及学习日期边界；strategy、rollover、forced_risk 分别按合法来源检查，允许合法未触发、无交易和非每日学习，不读取 PM 自检、rank、预算、sizing、学习作用过程或 Reviewer 结论。原因：每日 PG 只判断真实回测产物是否存在非策略断点，不重复 PM、Auditor 或 Reviewer，也不因真实账户预算漂移压死交易。
+（5）[PG 编排顺序] `backtest.py` 将回测前检测移动到 reset 和正式业务写入之前，每个交易日只在 Phase1–4 与 Researcher 完成后对该单日运行一次每日检测，删除整段回测结束后的重复每日检测。原因：保证旁路门禁不污染正式库、不进入智能体内部阶段，也不重复读取整段历史。
+（6）[PG 冗余机制清理] 删除生产零引用的 PG action-preference、能力卡、artifact lineage、成本预算、exploration、memory quality、parity、任务生命周期、工具访问策略、历史故障 fixture 工具及对应旧测试；`pg_contract_coverage_audit.py` 收口为当前业务链 producer→landing→consumer→role-check→real-path-test→mechanism-doc 静态覆盖。原因：控制组只保留回测前与每日回测后两条真实职责链，避免废弃机制复查主业务智能体内部过程。
+（7）[PG 回归测试重建] 重写 PG、preflight、pre-backtest、daily invariant 和 contract coverage 测试，覆盖十项/七项、统一字段、无 LLM、正式临时库、precheck-before-reset、单日一次、合法无交易、审计阻断、执行成交一致、结算公式、换约/强制风控和学习前视。原因：测试必须验证新旁路审计的实际边界，不能继续维护已删除内部复审机制。

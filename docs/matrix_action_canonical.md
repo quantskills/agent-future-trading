@@ -68,7 +68,9 @@ PM 最终合约里的 `decision_learning_rows` 只能是 Step6 按最终生命�
 
 ## PG Audit Rule
 
-PG 审计检查统一语义一致性，不审死字符串，也不根据学习偏向反推具体交易动作：
+PM、Auditor、Trader 及回测前契约测试使用统一动作语义，不审死字符串，也不根据学习偏向反推具体交易动作；每日 PG 只核对已落地动作与成交事实是否一致：
+
+- PG 只能读取 `matrix_field_semantics.md` 已登记路径中的动作字段，并按本表已登记的 action、family、lane 和 preference 解释；不得创建私有动作、别名、兼容集合或未登记的动作诊断字段。
 
 - `positive_candidate_open` 必须满足 `canonical_action_family=open_add_new_risk`，且 lane 属于 `open/add/scale/increase`。
 - `positive_candidate_exit` 必须满足 `canonical_action_family=reduce_exit`，且 lane 属于 `reduce/exit`。

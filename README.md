@@ -47,10 +47,10 @@ src/agents/
 | 期货新闻面分析师 | 读取本地期货新闻，分析事件方向、强度、新鲜度、相关性和可交易性 |
 | 信号收集员 | 不调用 LLM，收集三类分析师结构化预测证据，输出 `signal_collection_contract` |
 | 投资组合经理 | 不调用 LLM；Step1–5 只更新同一个内存状态，Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract` |
-| 审计员 | 做确定性交易审核，审投资组合经理的最终合约，输出 allow、scale_down、probe_only、reduce_only 或 block，不调用 LLM |
+| 审计员 | 不调用 LLM；只读审计唯一最终合约的必需字段、基本动作逻辑、账户硬风险、保证金硬上限、合约/失效边界和数据质量，输出 approve、approve_with_warning 或 block，不复算 PM 方向、rank、预算和手数 |
 | 交易员 | 只执行审计后的 `final_action_contract`，处理盘中触发、开平仓、反手、换约、滑点、涨跌停和未成交原因 |
 | 会计师 | 做 Phase3 日终结算、手续费、保证金、持仓、账户权益和 PnL |
-| 复盘员 | 做 Phase4 确定性验收并输出完整交易日志，不调用 LLM |
+| 复盘员 | 不调用 LLM；复盘决策、审计、执行、成交和结算事实，核对物理事实一致性并输出事实归因和完整交易日志，不二次审计合约合法性 |
 | 研究员 | 在复盘员验证通过后输出结构化研究信息，可受限调用 LLM 做研究 |
 | 规划员 | 封存开发组件，默认 `planner_mode=false`，当前主流程不启用；`planner_mode=true` 必须 fail-fast |
 
@@ -188,7 +188,7 @@ python database\build_check_db.py
 python run\backtest.py --config config\dev.yaml --local-db --start-date 2025-01-02 --end-date 2025-01-31 --reset-config
 ```
 
-`run\backtest.py` 会自动执行控制侧验收：窗口开始前先跑只读版本级 `control\contract_coverage_audit.py`，再跑 `control\pre_backtest_acceptance.py`；每个交易日完成后运行累计 `control\system_invariant_audit.py`，只读检查真实物理结果中的非策略问题。契约覆盖缺口或系统不变量 hard error 会让回测停在当天，不能继续评价策略收益。
+`run\backtest.py` 会自动执行控制侧验收：窗口开始前运行一次 `run\pre_backtest_test.py`，通过现有只读数据入口检查指定窗口和配置品种的真实行情、主力合约、结算价、合约信息、分钟行情能力及 Finoview/新闻读取边界，但不调用 LLM、不运行真实回测、不写正式业务库。每个交易日完成 Phase1–4 与 Researcher 后，对该单日运行一次 `run\backtest_daily_test.py`，只读检查真实物理结果中的非策略问题。PG 的输入、判定和报告字段只能来自 `docs/matrix_field_semantics.md`，动作解释只能来自 `docs/matrix_action_canonical.md`，不得通过通用 JSON 容器自创字段或语义。契约覆盖缺口、交易必需数据断裂或系统不变量 hard error 会阻止回测继续评价策略收益。
 
 常用参数：
 
@@ -232,7 +232,7 @@ python run\order.py --config config\dev.yaml --local-db --trading-date 2025-01-0
 python run\evaluate_config.py --config config\dev.yaml --local-db --update
 ```
 
-如果没有通过 `run\backtest.py` 自动链路，而是单独运行评估，必须先确认 `control\contract_coverage_audit.py` 和 `control\pre_backtest_acceptance.py` 通过，且 `control\system_invariant_audit.py` 没有 hard error。
+如果没有通过 `run\backtest.py` 自动链路，而是单独运行评估，必须先确认 `run\pre_backtest_test.py` 通过，且对应交易日的 `run\backtest_daily_test.py` 没有 hard error。
 
 评估指定区间：
 

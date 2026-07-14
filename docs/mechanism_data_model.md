@@ -89,7 +89,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 审计员
 
-不调用 LLM。只审计投资组合经理签发的 `final_action_contract`，输出 `audit_verdict` 和审计 payload。不能改方向、改手数或新建合约。
+不调用 LLM。只读审计投资组合经理签发的 `final_action_contract`，检查必需字段、基本动作逻辑、账户硬风险、配置硬保证金上限、合约/失效边界和数据质量，输出 `approve`、`approve_with_warning` 或 `block` 及审计 payload。不能改方向、改手数或新建合约，也不复审 PM 学习、融合、rank、预算和 sizing。
 
 ### 交易员
 
@@ -116,7 +116,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 协议管理员
 
-不调用 LLM。只运行契约覆盖、机制断链、字段语义、系统不变量和回测前非策略风险检查。不能参与交易动作或收益判断。
+不调用 LLM。回测前只运行契约覆盖、字段语义、系统不变量样例和非策略就绪检查；每日只读检查已落地物理结果。不能读取或复查智能体内部机制，不能参与交易动作或收益判断。PG 没有独立字段层：输入、判定和输出只能使用 `matrix_field_semantics.md` 已登记字段，动作只能按 `matrix_action_canonical.md` 解释；通用 JSON 容器不得引入未登记控制字段。
 
 ## 四、研究信息边界
 
@@ -132,7 +132,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 间接消费研究信息：
 
 - 信号收集员只读取已被分析师校准后的结构化信号；
-- 审计员只审合约里的 `learning_used` 和资金理由；
+- 审计员只读审计唯一 `final_action_contract` 的必需字段、基本动作逻辑、账户硬风险、保证金硬上限、合约与失效边界及数据质量；不复审 `learning_used`、融合解释、rank、预算部署和 sizing 过程；
 - 交易员只执行已吸收研究影响后的合约和合约化触发规则；
 - 会计师只结算真实成交；
 - 复盘员只复盘合约、执行和结算结果；
@@ -218,18 +218,20 @@ artifact 边界校验必须按值类型和载体语义识别事实，不能只�
 - 回测区间内交易宇宙每个品种的 PandaAI 日线行情、开收盘价、官方结算价和主力合约映射必须通过硬覆盖检查；
 - 基本面和新闻只检查可见性、时间边界和质量降级，不做每日齐全硬拦。
 
-回测中每日必须检查：
+回测中每日只根据已落地物理结果检查：
 
 - 无前视数据；
-- 合约、执行、结算、复盘链路一致；
-- 学习是否按生命周期正确落地；
-- 减仓/退出不被开仓 rank 规则误杀；
-- 条件监控必须写出盘中触发或未触发事实。
+- 应进入的阶段及物理落点是否完成；
+- strategy 成交是否来自已审计的唯一 `FuturesRecommendation` 和 `final_action_contract`，rollover / forced_risk 是否来自各自合法 `source_type`；
+- 审计放行、执行结果、成交、结算和账户事实是否一致；
+- 实际生成的研究学习记录是否来源日期合法、无前视且未改写当日事实。
+
+每日 PG 不检查 PM 自检、学习是否影响生命周期或 rank、非新增风险动作是否被 PM 内部规则处理正确，也不复查其他智能体的内部判断。
 
 ## PG 审计数据模型补充（2026-07-07）
 
-PG 审计读取的是已落地 artifact 和数据库事实，不生成新的交易事实。对 futures recommendation 的 PM 部分，运行期审计只承认四类保存链字段：`signal_snapshot.final_action_contract`、`signal_snapshot.pm_six_step_trace.pm_contract_self_check`、`signal_snapshot.pm_six_step_trace.step6_contract_generation_check`、`signal_snapshot.signal_collection_contract`。
+PG 审计读取的是已落地 artifact 和数据库事实，不生成新的交易事实。对 futures recommendation 的策略部分，运行期只读取 `signal_snapshot.final_action_contract` 和 `signal_snapshot.signal_collection_contract` 核对唯一交易事实来源、来源边界和物理落地完整性；不读取 `pm_six_step_trace` 复查 PM 自检或 Step6 生成过程。
 
 PM 中间态字段不得成为保存 artifact：`pm_internal_candidate`、`pm_internal_candidate_contract`、`pm_capital_deployment_decision`、`pm_internal_draft`、`pm_scoring_draft`、`pm_ranking_draft`、`pm_capital_deployment_draft`。PG 可以检查这些字段是否污染保存结果，但不能根据 PM reason code 重新推断交易动作是否正确。
 
-回测前检测不读取真实行情、不调 LLM、不写真实 DB；真实行情覆盖、执行、结算和复盘事实只在实际运行或每日后置只读审计中检查。
+回测前检测必须通过现有数据路由和合约信息入口只读检查真实数据就绪性，但不调 LLM、不运行策略、不生成交易事实、不写正式 DB。指定回测区间与配置品种的交易日、PandaAI 日线开盘价、收盘价、官方结算价、主力合约映射、合约乘数、保证金率和具体合约信息必须可取；Trader 分钟行情入口必须可调用且返回现有执行所需字段结构。Finoview 和新闻只检查路径、文件可读性、解析函数与日期过滤，不要求每个品种每天都有新增基本面或新闻。真实执行、成交、结算和复盘结果仍只在实际运行及每日后置只读审计中检查。

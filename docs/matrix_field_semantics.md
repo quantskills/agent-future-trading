@@ -13,8 +13,9 @@
 - Researcher 写分动作 action-value 学习。
 - 换月、强平、回放、反事实观察不是策略交易，必须用 `source_type != strategy` 分账，不能污染策略 action-value。
 - `payload`、`payload_json`、`artifact_json`、`signal_snapshot`、`evidence_json`、`result_json`、`features_json` 等只允许作为结构化容器；容器里的业务字段必须属于本文字段，不能形成第二套语义。
+- Protocol Governor 的回测前与每日报告同样受本文约束：读取路径、判定字段和输出字段必须先在本文按精确路径登记；通用 `metadata`、`payload`、字典键和错误详情容器不能成为未登记控制字段的入口。确有新功能且现有字段无法表达时，必须先登记生产者、落点、消费者和语义，再进入 PG 代码。
 
-共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓、退出，以及 action-value 的 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference`。动作 canonical 矩阵见 `docs/matrix_action_canonical.md`；可执行口径以 `final_action_semantics.py` 为准。Protocol Governor 只能通过该工具解释学习 family/lane 匹配、`final_action + current_lots + target_lots + lots_delta` 一致性、no-change / rank / learning 无仓位变化解释、active opportunity rejection 和 open transaction blocker；PG 不得保留私有 reason code 词表、私有 action-value 动作集合和私有 final_action 推断口径。
+共享解释器：`src/tools/common/final_action_semantics.py` 是全系统唯一的确定性交易语义状态机。它不调用 LLM，不签合约，不下单，不入账，不写研究；只统一解释分析师证据禁用字段、信号收集边界、`final_action_contract` 全生命周期、`reason_codes` 分类、条件监控、直接执行、普通持有、硬阻断、软降级、未触发、已触发成交、扩大交易、减仓、退出，以及 action-value 的 `action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference`。动作 canonical 矩阵见 `docs/matrix_action_canonical.md`；可执行口径以 `final_action_semantics.py` 为准。Protocol Governor 只能对已落地物理字段使用该工具核对动作、手数变化和交易来源语义，不得借该工具复判 PM 的 no-change、rank、learning、active opportunity rejection 等内部形成过程，也不得保留私有 reason code 词表、私有 action-value 动作集合和私有 final_action 推断口径。
 
 分析师差异化分析协议：`src/config/product_price_behavior_profiles.yaml` 是三类分析师的商品价格行为冷启动配置；`src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 是三类分析师共享的确定性读取与格式化工具。它只服务 `technical`、`fundamental`、`commodity_news` 的证据分析，输出 `product_profile_evidence`，用于区分品种价格行为、趋势惯性、波动阈值、产业链确认、季节窗口、假突破风险和适合的 setup。它不调用 LLM，不读研究库，不签合约，不下单，不入账，不写研究；PM 只能从 `signal_collection_contract` 读取它作为证据上下文，Auditor、Trader、Accountant 不直接读取或解释该 profile。
 
@@ -49,12 +50,17 @@
 | `snapshot_at` | memory history / 快照记录 | 快照生成时间。 |
 | `valid_until` | 记忆 / 策略 / 学习 | 有效截止日期。 |
 | `active` | 记忆 / 策略 / 学习 | 是否启用。 |
-| `status` | 生命周期记录 | pending、executed、skipped、failed、open、candidate、applied 等状态。 |
+| `status` | 生命周期记录 / Protocol Governor 报告及 `checks[]` | 业务记录沿用既有生命周期状态；PG 报告只使用 `passed`、`failed`，单项检查可额外使用 `skipped`。 |
+| `checks` | Protocol Governor 回测前报告 / 每日回测后报告 | PG 已执行检查的有序列表；每项只能包含已登记的 `check_name`、`status`、`violation_codes` 和 `diagnostic_codes`。 |
+| `check_name` | Protocol Governor `checks[]` | 检查项稳定名称；只能对应 `agent_pg.md` 已确认的回测前十项或每日回测后七项，不承载交易语义。 |
+| `violation_codes` | Protocol Governor `checks[]` | 导致本项检测失败的稳定违规代码列表；只能描述系统断点、字段或动作漂移、职责越权、前视、数据硬缺口、账务或物理事实链断裂。 |
+| `diagnostic_codes` | Protocol Governor `checks[]` | 不导致检测失败的稳定诊断代码列表；用于记录合法缺数、合法无交易、可选路径未进入等事实，不评价策略、收益、学习质量或智能体内部机制。 |
 | `phase` | `trading_day_phase` / workflow | 当前阶段。 |
 | `started_at` | `trading_day_phase` | 阶段开始时间。 |
 | `completed_at` | `trading_day_phase` | 阶段完成时间。 |
 | `message` | `trading_day_phase` | 阶段说明。 |
 | `incomplete_trading_day_phase` | 验收错误码 | 交易日存在推荐、成交、盘中决策或学习记录，但 phase1-4 未全部 completed；必须删除或重跑当天，不能进入策略结论或学习。 |
+| `protocol_governor_report` | Protocol Governor 回测前入口 / 每日回测后入口 | PG 唯一报告结构；顶层只能包含 `contract_version`、`source_agent`、`status` 和 `checks`，不落交易库、不创建交易权限。 |
 | `contract_coverage_audit` | Protocol Governor 只读版本级闸门 / 回测前验收 | 契约覆盖报告；检查关键契约是否有 producer、consumer、audit、test、字段表、配置/提示词/文档对齐，并要求关键智能体边界存在 producer-to-consumer 保真测试；不读收益、不写 DB、不创建交易权限。 |
 | `matrix` | `contract_coverage_audit` | 契约覆盖矩阵列表；每行对应一个核心契约。 |
 | `artifact_phase_boundary` | `contract_coverage_audit.matrix[].contract` / Protocol Governor 只读边界名 | artifact 阶段保存边界；规定 PM、审计员、交易员、会计师、复盘员、研究员 artifact 能保存和禁止保存的字段集合。只用于回测前契约覆盖和系统不变量审计，不是交易字段，不创建合约或交易权限。 |
@@ -251,7 +257,7 @@
 |---|---|---|
 | `signal_collection_contract` | `signal_collector` 输出 / PM 输入 | 信号收集员给投资组合经理的盘前统一结构化预测证据包；不是交易合约，不能包含手数、仓位比例或最终交易动作。 |
 | `source_contracts` | `signal_collection_contract` | 被收集的上游分析师 `action_evidence_contract` 引用列表。 |
-| `signal_record_id` | `signal_collection_contract.source_contracts` | 分析师 `signal` 表记录 ID，唯一合法生产者是workflow 编排层的分析师signal保存入口；正常与数据不可用路径均必须先物理化来源记录。仅用于 Reviewer、Researcher 和 PG 追溯，不创建交易权限。 |
+| `signal_record_id` | `signal_collection_contract.source_contracts` | 分析师 `signal` 表记录 ID，唯一合法生产者是workflow 编排层的分析师signal保存入口；正常与数据不可用路径均必须先物理化来源记录。仅用于 Reviewer 和 Researcher 追溯，不创建交易权限。 |
 | `evidence_items` | `signal_collection_contract` | 逐条结构化证据明细，必须保留来源分析师、来源字段和证据含义，不能只写汇总文字。 |
 | `product_profile_id` | `signal_collection_contract.evidence_items` | collector 保真传递的分析师商品 profile 来源 ID；不是交易权限。 |
 | `product_profile_used` | `signal_collection_contract.evidence_items` | collector 保真传递的 profile 使用状态；collector 不解释、不评分。 |
@@ -343,7 +349,7 @@
 | `invalidation_level` | `final_action_contract.invalidation_level` | 分析师在AEC生产数值失效价位；PM Step6只在真实数值存在且来源方向与最终方向一致时写入，禁止默认值和反方向填充。Auditor、Trader、Reviewer和Researcher只读消费。 |
 | `atr_stop_distance` | `final_action_contract.atr_stop_distance` | technical在AEC生产ATR止损距离；PM Step6只在真实生产且与最终方向及setup一致时写入，禁止默认值。Trader、Reviewer和Researcher只读消费。 |
 | `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
-| `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / PM 学习审计 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作。 |
+| `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / `final_action_contract.learning_used` 摘要 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作；Auditor 不消费或复审该摘要。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
 | `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `contract_code`、`setup_type`、`horizon_class`、`expected_horizon_days`、`market_regime`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`atr_stop_distance`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含完整AEC、`analyst_execution_roles`、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
@@ -361,8 +367,8 @@
 | `semantic_state` | Auditor / Reviewer / Researcher 只读摘要 | 对同一张 `final_action_contract` 的生命周期解释，如 `conditional_monitor`、`open`、`increase`、`decrease`、`exit`、`ordinary_hold`、`hard_block`；不得包含改手数、改方向或新合约字段。 |
 | `scorecard_current_tradeable_probe_seed` | `final_action_contract.reason_codes` / PM 诊断 | PM scorecard 将当前可交易候选释放为受控 probe 的原因代码；只适用于 `probe_candidate` / `tradeable_candidate` 或当前触发已成立的候选，不能用于 `watch_for_trigger` 条件监控。 |
 | `evidence_used` | `final_action_contract` | PM 使用的证据摘要。 |
-| `pm_fusion_diagnostics` | PM scorecard / `final_action_contract.evidence_used` / Auditor / Reviewer | PM 从 `signal_collection_contract.evidence_fusion` 派生的融合诊断，记录共识分、冲突数量、反向证据数量、缺失证据、确认需求和 score 调整；不是第二合约。 |
-| `pm_conflict_resolution` | PM scorecard / `final_action_contract.evidence_used` / Auditor / Reviewer | PM 对主要冲突、反向证据和确认需求的解释结果；Auditor 只审是否存在且自洽，不重新融合证据、不改方向手数。 |
+| `pm_fusion_diagnostics` | PM scorecard / `final_action_contract.evidence_used` / Reviewer / Researcher | PM 从 `signal_collection_contract.evidence_fusion` 派生的融合诊断，记录共识分、冲突数量、反向证据数量、缺失证据、确认需求和 score 调整；不是第二合约。Auditor 不消费或复审该诊断。 |
+| `pm_conflict_resolution` | PM scorecard / `final_action_contract.evidence_used` / Reviewer / Researcher | PM 对主要冲突、反向证据和确认需求的解释结果；只供后续复盘与研究归因，Auditor 不重新融合证据、不复审 PM 解释。 |
 | `fusion_score_adjustment` | `pm_fusion_diagnostics` / `opportunity_score_components` | 由融合证据冲突、缺失和共识形成的 PM 排序分项调整；不能单独创建交易机会。 |
 | `risk_controls` | `final_action_contract` | 风险控制项。 |
 | `capital_controls` | `final_action_contract` | 资金控制项。 |
@@ -405,13 +411,13 @@
 | `side_priority_semantics_version` | `pm_ticker_side_selection` | 单品种方向优先级语义版本，固定为 `agentquant.ticker_side_priority.v1`。 |
 | `side_priority_is_not_capital_rank` | `pm_ticker_side_selection` | 布尔声明：单品种方向优先级不是全市场资金 rank。 |
 | `opportunity_rank` | PM 全市场资金部署工具 `pm_full_market_capital_deployment` / `final_action_contract.evidence_used` / `capital_deployment` / 复盘评估 | 当日所有实际增加风险的候选进入同一个全市场资金候选池后的唯一资金优先级排序；包括 `current_lots=0` 且 `target_lots!=0` 的新开仓，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale`。`rank=1` 固定表示当天全市场最值得优先占用新增风险资金的产品机会。它可以对应小探、正常真实资金或学习验证后的放大资金，但不生成第二张合约。PM scorecard 的单品种方向排序不得写入该字段；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控不得生成该字段，反转只有在旧方向退出后形成新的反向开仓合约时才重新排名。 |
-| `rank_capital_layer_contract` | PG / contract coverage / `final_action_contract` 完整性检查 | 版本级契约名：凡最终 PM 合约出现 `opportunity_rank`，必须同时在同一合约的资金部署事实中写入 `rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`lifecycle_learning_trace`、`learning_impact_delta`、`rank_source`、`rank_scope`、`capital_rank_generated_by`。缺任一项是非策略契约错误，不是策略收益诊断。 |
+| `rank_capital_layer_contract` | PM self-check / pre-backtest contract coverage / `final_action_contract` 完整性检查 | 版本级契约名：凡最终 PM 合约出现 `opportunity_rank`，必须同时在同一合约的资金部署事实中写入 `rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`lifecycle_learning_trace`、`learning_impact_delta`、`rank_source`、`rank_scope`、`capital_rank_generated_by`。缺任一项由 PM 自身检查和回测前契约覆盖处理，daily PG 不复查。 |
 | `rank_capital_priority_real_budget_release` | `final_action_contract.reason_codes` / `final_action_contract.final_entry_authority` / PM 诊断 | PM 最终出口原因代码，表示唯一资金优先级 rank 支持真实资金部署资格。它只能在 `tradeable_candidate`、`rank=1`、`capital_priority_score/tier` 达标、当前新增风险证据成立、失效边界存在、无技术反对且硬风险通过时出现；rank 本身仍不是交易权限，不能绕过唯一合约和审计。 |
 | `rank_semantics_version` | `final_action_contract.evidence_used` / `capital_deployment` | 唯一全市场资金 rank 语义版本，固定为 `agentquant.capital_priority_rank.v1`；用于证明 rank 含义已经收束为资金优先级。 |
 | `opportunity_rank_meaning` | `final_action_contract.evidence_used` / `capital_deployment` | 固定值 `rank_1_is_current_highest_capital_priority_not_trade_authority`；说明 rank=1 是当前最高资金优先级，不是交易权限。 |
 | `rank_is_capital_priority` | `final_action_contract.evidence_used` / `capital_deployment` | 布尔声明：该 rank 表达全市场资金优先级。 |
 | `rank_is_not_trade_authority` | `final_action_contract.evidence_used` / `capital_deployment` | 布尔声明：该 rank 不是交易授权，不能绕过 PM 唯一合约、Auditor 审计和 Trader 执行边界。 |
-| `rank_source` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 来源，固定为 `full_market_capital_deployment`；PG 必须拒绝 PM scorecard 局部 rank 泄漏到最终合约。 |
+| `rank_source` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 来源，固定为 `full_market_capital_deployment`；PM self-check 与回测前契约测试必须拒绝 PM scorecard 局部 rank 泄漏到最终合约，daily PG 不复查 rank 形成过程。 |
 | `rank_scope` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 范围，固定为 `daily_full_market_capital_pool`；说明同一交易日所有产品代表候选同池排序。 |
 | `capital_rank_generated_by` | `final_action_contract.evidence_used` / `capital_deployment` | 最终资金 rank 生成入口，固定为 `pm_full_market_capital_deployment`。 |
 | `rank_capital_role` | `final_action_contract.evidence_used` / `capital_deployment` | 唯一 rank 对当前资金层级的角色解释。固定取值包括 `best_exploration_probe_candidate`、`best_real_budget_candidate`、`best_alpha_scale_candidate`；它说明 rank=1 是最值得小额探针、正常真实资金还是放大资金占用的候选，不新增第二套 rank。 |
@@ -427,7 +433,7 @@
 | `primary_lifecycle_action_port` | `portfolio_manager.py` 第 3 步 / PM 内部学习与诊断 trace | PM 主链第 3 步生命周期分流口，必须在第 2 步方向选择后、学习路由前由 `pm_lifecycle_action_port.py` 生成。它只服务 PM 内部分流、学习路由和 provenance；不得写入 `final_action_contract.evidence_used`，也不得作为 Step6 最终合约失败依据。Step6 是否需要 Step5 只能按第 4 步最终候选是否实际增加风险判定：从空仓建立非零仓位，或同方向且 `abs(target_lots)>abs(current_lots)`，均为 `requires_full_market_rank=true`；不增加风险为 false。 |
 | `lifecycle_transition_diagnostic` | `pm_lifecycle_action_port.py` / PM 内部学习与诊断 trace | PM 内部用于解释候选生命周期曾经如何从 Step2 路径变化到后续候选形态的 provenance diagnostic。它不是最终合约自检，不是 workflow/PG 保存闸门，不得写入 `final_action_contract.evidence_used`，不得替代 `pm_six_step_trace.step6_contract_generation_check` 或 `pm_contract_self_check`。 |
 | `pm_six_step_trace.step6_contract_generation_check` | `signal_snapshot.pm_six_step_trace` | Step6 签约时生成的最终合约生成合法性检查。它只检查最终 `final_action_contract` 是否由合法 PM 机制生成，包括手数动作自洽、实际增加风险是否具备 Step5 deployment、非新增风险合约不伪造 rank、Step5 未部署是否还原为 `target_lots=current_lots` 且无本次新增风险权限、`capital_deployment` 语义完整、PM 中间态不得进入保存 artifact。它不比较 Step2 与 Step6 是否一致。 |
-| `pm_six_step_trace.pm_contract_self_check` | `signal_snapshot.pm_six_step_trace` | `pm_contract_self_check.py` 对最终 `final_action_contract` 自身做机制边界检查的结果。它检查基础字段、手数动作一致性、rank/非 rank/Step5 未部署边界、`capital_deployment` 和 `position_sizing_result` 语义完整、无空对象冒充事实、无盘中触发权限残留、无 PM 中间态污染。生命周期学习污染只审 Step6 final lifecycle trace 的 `decision_learning_rows`，不得读取 Step2 router、rank 外层 provenance 或 deployment 旧 trace 作为最终决策层学习行；`trigger_profile_learning_rows` 中的 execution/profile 学习只能作为触发画像证据，且 direct-to-rank 标志必须为 false。workflow 和 PG 只读取该结果，不修合同。 |
+| `pm_six_step_trace.pm_contract_self_check` | `signal_snapshot.pm_six_step_trace` | `pm_contract_self_check.py` 对最终 `final_action_contract` 自身做机制边界检查的结果。它检查基础字段、手数动作一致性、rank/非 rank/Step5 未部署边界、`capital_deployment` 和 `position_sizing_result` 语义完整、无空对象冒充事实、无盘中触发权限残留、无 PM 中间态污染。生命周期学习污染只审 Step6 final lifecycle trace 的 `decision_learning_rows`，不得读取 Step2 router、rank 外层 provenance 或 deployment 旧 trace 作为最终决策层学习行；`trigger_profile_learning_rows` 中的 execution/profile 学习只能作为触发画像证据，且 direct-to-rank 标志必须为 false。该结果由 PM 自身和回测前 PM 输出契约测试负责；daily PG 不读取、不复查，也不修合同。 |
 | `initial_primary_lifecycle_action_port` / `contract_lifecycle_self_check` / `historical_lifecycle_transition_diagnostic` / `lifecycle_port_transition_reason` | 废弃旧字段名 / 旧迁移与负向测试 | 这些旧字段不得作为最终合约字段、不得写入 `final_action_contract.evidence_used`、不得作为 PM 最终闸门。若历史数据或旧输入里出现，Step6 必须清理，最终保存链只接受 `pm_six_step_trace.step6_contract_generation_check.ok == true` 与 `pm_six_step_trace.pm_contract_self_check.ok == true`。 |
 | `pm_lifecycle_decision_port` | `final_action_contract.evidence_used` | 兼容性辅助快照，来自 `pm_lifecycle_learning_trace.contract_lifecycle_port`，只描述最终合约形态；不得反向替代 Step2 的 `primary_lifecycle_action_port`，也不得作为 Step6 最终合约失败依据。 |
 | `pm_lifecycle_trace_landed_in_contract` | `final_action_contract.evidence_used` | 布尔声明：PM 在最终合约签出后已把安全的 `learning_to_position_summary` 与生命周期学习 trace 回填到 `final_action_contract`；内部 `learning_to_position_trace`、`adaptive_policy_state`、`strategy_memory` 和策略行对象不得进入 PM artifact。 |
@@ -437,7 +443,7 @@
 | `capital_deployment` | `final_action_contract` / PM 资金部署 / 复盘评估 | PM 资金部署结果对象，记录候选是否入选、原目标手数、部署后目标手数、部署手数变化、部署原因和新增风险排名；只能解释并回写同一张 `final_action_contract`，不能作为第二交易权限。所有最终合约都必须原子写入该对象；只有实际增加风险的对象允许包含 `opportunity_rank`，包括新开仓和同方向扩大绝对手数的 `add/scale`。 |
 | `no_rank_no_new_exposure` | `final_action_contract.reason_codes` / `capital_deployment.capital_allocation_reason` | 新增风险候选未获得 PM 全市场 rank 时的确定性还原原因；最终合约必须把 `target_lots` 还原为 `current_lots`，空仓形成 `wait`、已有持仓形成 `hold`，不得由 workflow fallback 保留 `open/open_probe/open_real/add/scale/conditional open` 的新增风险目标。 |
 | `no_rank_or_budget_no_new_exposure` | `final_action_contract.reason_codes` / `capital_deployment.capital_allocation_reason` | 新增风险候选已经进入全市场 rank 队列，但按 rank 顺序消耗总保证金、单品种或净敞口预算时未被选中；最终合约必须还原为 `target_lots=current_lots`，空仓形成 `wait`、已有持仓形成 `hold`，不能绕过预算继续增加风险。 |
-| `contract_requires_conditional_intraday_result` | `final_action_semantics` / PG 机制审计 / Trader 盘中结果要求 | 条件候选是否需要 Trader 写盘中触发/未触发结果的统一只读语义。只有最终合约仍然部署实际新增风险目标的条件开仓才需要盘中结果；已经被 `no_rank_no_new_exposure` 或明确未选中原因还原为 `target_lots=current_lots`、`selected_for_capital_deployment=false` 的未部署条件候选，不要求 `opportunity_rank`，也不要求 Trader 写盘中结果。同方向实际扩大绝对手数的 `add/scale` 必须经过全市场 rank；当前反转退出腿不经过 rank。 |
+| `contract_requires_conditional_intraday_result` | `final_action_semantics` / pre-backtest output-contract test / Trader 盘中结果要求 | 条件候选是否需要 Trader 写盘中触发/未触发结果的统一只读语义。只有最终合约仍然部署实际新增风险目标的条件开仓才需要盘中结果；已经被 `no_rank_no_new_exposure` 或明确未选中原因还原为 `target_lots=current_lots`、`selected_for_capital_deployment=false` 的未部署条件候选，不要求 `opportunity_rank`，也不要求 Trader 写盘中结果。同方向实际扩大绝对手数的 `add/scale` 必须经过全市场 rank；当前反转退出腿不经过 rank。daily PG 只核对实际进入执行路径后的外部执行与成交事实，不复查该内部语义推导。 |
 | `pm_internal_draft` / `pm_scoring_draft` / `pm_ranking_draft` / `pm_capital_deployment_draft` / `pm_contract_submission_draft` / `internal_pm_draft` | PM 内部内存草稿名，非系统事实字段 | PM 可在内部内存分步形成评分、排序、资金部署和提交草稿；这些名字不得进入 DB、artifact、payload、`signal_snapshot` 或跨智能体消息。出现即为系统事实入口越界。 |
 | `learning_adjustment_summary` | 分析师证据 / PM scorecard / `final_action_contract.learning_used` / Researcher / 复盘评估 | 历史学习如何影响本次证据、评分或资金排序；不能直接改变 Trader 方向或手数。 |
 | `opportunity_state_counts` | PM scorecard / PM 诊断 | 按 `opportunity_state` 统计的分析师证据数量。 |
@@ -455,7 +461,7 @@
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
-| `audit_verdict` | Auditor 输出 / recommendation `audit_payload` / signal snapshot auditor 摘要 | 独立审计员对 PM 已签 `final_action_contract` 的审计裁决；只允许 `approve`、`approve_with_warning`、`block`、`require_review`。 |
+| `audit_verdict` | Auditor 输出 / recommendation `audit_payload` / signal snapshot auditor 摘要 | 独立审计员对 PM 已签 `final_action_contract` 的审计裁决；当前 Auditor 只生成 `approve`、`approve_with_warning`、`block`。 |
 | `audit_status` | Auditor 输出 / recommendation `audit_payload` / signal snapshot auditor 摘要 | 审计状态，如 `approved`、`blocked`。 |
 | `hard_risk_reasons` | Auditor 输出 | 合约字段、保证金、价格、数据质量等硬阻断原因；不能改合约。 |
 | `soft_risk_reasons` | Auditor 输出 | 警告或降级说明；不能直接改方向或手数。 |
@@ -961,15 +967,10 @@
 | `audit_payload.audited_by` / `audited_at` | Auditor 完整 payload | 独立审计主体和审计时间。 |
 | `audit_payload.source.pm_recommendation_id` / `final_action_contract_hash_source` | Auditor 来源 | 被审推荐 ID 和唯一合约哈希来源路径。 |
 | `audit_payload.boundary.auditor_does_not_modify_final_action_contract` / `auditor_does_not_create_trade_authority` / `trader_requires_approved_audit_verdict` | Auditor 边界 | Auditor 不改合约、不建权限且 Trader 只执行审计通过合约。 |
-| `audit_payload.boundary.research_memory_not_consumed` / `auditor_reads_research_db` / `auditor_checks_pm_memory_consumption_from_contract_only` | Auditor 边界 | Auditor 不读研究库，只从最终合约检查 PM 学习消费。 |
+| `audit_payload.boundary.research_memory_not_consumed` / `auditor_reads_research_db` | Auditor 边界 | Auditor 不读取研究库，也不审计 PM 的学习消费过程。 |
 | `audit_payload.contract_summary.final_action` / `current_lots` / `target_lots` / `lots_delta` / `requires_intraday_confirmation` / `can_execute_without_intraday_trigger` | Auditor 合约摘要 | 被审唯一合约的动作、手数和盘中确认权限摘要。 |
-| `audit_payload.semantic_state.contract` / `lifecycle_state` / `requires_intraday_result` / `hard_block_reasons` / `soft_limit_reasons` / `semantic_errors` | Auditor 统一语义状态 | 公共 final-action 语义工具生成的生命周期、盘中结果要求及硬/软问题。 |
-| `audit_payload.pm_memory_consumption_audit.contract` / `ok` / `errors` / `warnings` | Auditor PM 学习审计 | PM 学习消费契约、结果、错误和警告。 |
-| `pm_memory_consumption_audit.expected_memory_requirements` / `declared_memory_requirements` / `expected_requirement_keys` / `declared_requirement_keys` / `uncovered_required_pm_memory` | Auditor PM 学习审计 | 最终生命周期应有与合约声明的记忆要求及未覆盖项。 |
-| `pm_memory_consumption_audit.alpha_setup_action_value_count` / `auditor_reads_research_db` / `trader_reads_pm_action_value` / `accountant_reads_memory` | Auditor PM 学习审计 | 合约正式 action-value 数量及下游不得越权读取学习的边界。 |
-| `audit_payload.pm_fusion_explanation_audit.contract_version` / `ok` / `errors` / `warnings` | Auditor SCC 融合解释审计 | PM 是否在最终合约保留并解释 SCC 融合冲突。 |
-| `pm_fusion_explanation_audit.pm_fusion_diagnostics` / `pm_conflict_resolution` / `auditor_boundary` | Auditor SCC 融合解释审计 | 被审 PM 融合诊断、冲突处理和 Auditor 只读边界。 |
-| `signal_snapshot.auditor` / `audit_payload.contract_summary` / `pm_memory_consumption_audit` / `pm_fusion_explanation_audit` | Auditor 审计对象 | snapshot 审计摘要、合约摘要、PM 学习审计和融合解释审计对象。 |
+| `audit_payload.semantic_state.lifecycle_state` / `requires_intraday_result` / `hard_block_reasons` / `soft_limit_reasons` / `semantic_errors` | Auditor 统一语义状态 | 公共 final-action 语义工具生成的生命周期、盘中结果要求及硬/软问题。 |
+| `signal_snapshot.auditor` / `audit_payload.source` / `boundary` / `contract_summary` / `semantic_state` | Auditor 审计对象 | 对唯一 `final_action_contract` 的来源、只读边界、动作手数摘要和硬风险语义状态；不包含 PM 学习消费审计或融合解释审计。 |
 | `signal_snapshot.auditor.audit_verdict` | Auditor snapshot 摘要 | Auditor 对唯一合法合约的最终裁决。 |
 | `auditor_verdict` | Auditor 输出 / snapshot / audit payload | 对唯一合法合约的独立审计裁决。 |
 
@@ -1080,10 +1081,10 @@
 | `src/config/dev.yaml::config_catalogs.*` | `src/util/config_normalizer.py::normalize_config` | 主配置到各业务 catalog 的唯一加载索引。 |
 | `src/config/dev.yaml::runtime.phase1.**` | `src/graph/workflow.py::_phase1_acceleration_enabled` | Phase1 并行、预取、计时及分析师写库方式。 |
 | `src/config/dev.yaml::runtime.data_cache.**` | `src/tools/agent_tools/analysis/analyst_data_usage.py::prefetch_pandaai_daily_data` | 本地数据与 PandaAI 日级缓存预取开关。 |
-| `src/config/dev.yaml::control_governance.protocol_governor.*` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_consistency_check` | PG 不得创建交易权限、修改手数/保证金或执行订单的验收开关。 |
+| `src/config/dev.yaml::control_governance.protocol_governor.*` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_mapping_check` | PG 不得创建交易权限、修改手数/保证金或执行订单的验收开关。 |
 | `src/config/dev.yaml::exp_name`、`src/config/dev.yaml::market_type`、`src/config/dev.yaml::tickers`、`src/config/dev.yaml::planner_mode`、`src/config/dev.yaml::workflow_analysts` | `src/graph/workflow.py::__init__` | 实验身份、市场、交易宇宙和固定 workflow 编排入口。 |
 | `src/config/dev.yaml::cashflow` | `src/run/proposal.py::main` | 新建或显式重建实验账户时的初始现金。 |
-| `src/config/dev.yaml::max_total_margin_ratio` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_consistency_check` | 账户总保证金硬上限。 |
+| `src/config/dev.yaml::max_total_margin_ratio` | `src/tools/agent_tools/control/pg_pre_backtest_acceptance.py::_config_mapping_check` | 账户总保证金硬上限。 |
 | `src/config/dev.yaml::position_budget_policy.**` | `src/agents/decision_team/portfolio_manager.py::_position_budget_policy_config` | Step5/Step6 的 probe、正常、deployable、exceptional 资金层级及单品种约束。 |
 | `src/config/dev.yaml::analyst_weight_policy.**` | `src/agents/decision_team/portfolio_manager.py::_final_contract_authority` | 静态分析师先验的证据路由边界；不得创建交易权限。 |
 | `src/config/dev.yaml::risk_control.**` | `src/agents/decision_team/portfolio_manager.py::check_risk_level` | 账户风险等级阈值及不同风险等级的仓位缩放/单仓上限。 |
