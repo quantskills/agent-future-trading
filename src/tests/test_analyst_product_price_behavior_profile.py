@@ -30,6 +30,7 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
 from agents.analysis_team.commodity_news import _build_no_news_signal
 from agents.analysis_team.fundamental import _build_no_fundamental_data_signal
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_aec
 
 
 EXPECTED_TICKERS = {"BU", "C", "CF", "EB", "HC", "I", "J", "M", "MA", "P", "PB", "RB", "SR", "TA", "ZN"}
@@ -128,21 +129,16 @@ class AnalystProductPriceBehaviorProfileTest(unittest.TestCase):
             signal=Signal.NEUTRAL,
             confidence=0.42,
             metadata={
-                "product_profile_evidence": usage,
-                "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "commodity_news",
-                    "signal": "Neutral",
-                    "side": "flat",
-                    "confidence": 0.42,
-                    "opportunity_state": "watch_for_trigger",
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "setup_type": "news_event_setup",
-                    "evidence_quality": "medium",
-                    "invalidation_present": True,
-                    "product_profile_evidence": usage,
-                },
+                "action_evidence_contract": build_test_aec(
+                    "commodity_news",
+                    ticker="SR",
+                    trading_date="2025-03-05",
+                    signal="Neutral",
+                    side="flat",
+                    confidence=0.42,
+                    extra={"product_profile_evidence": usage},
+                ),
+                "signal_record_id": "commodity-news-fixture",
             },
         )
 

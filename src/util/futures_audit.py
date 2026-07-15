@@ -678,8 +678,16 @@ def _build_trade_contract_audit(snapshot: Dict[str, Any], contract: Dict[str, An
     }
 
 
-def build_audit_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
+def build_audit_payload(
+    snapshot: Dict[str, Any],
+    *,
+    original_audit_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = (
+        deepcopy(original_audit_payload)
+        if isinstance(original_audit_payload, dict)
+        else {}
+    )
     translation = snapshot.get("execution_translation")
     result = snapshot.get("execution_result")
     phase2_execution = snapshot.get("phase2_execution")

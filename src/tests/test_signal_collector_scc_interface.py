@@ -16,13 +16,11 @@ from agents.decision_team import portfolio_manager
 from agents.decision_team.portfolio_manager import finalize_pm_full_market_contracts
 from graph.schema import Portfolio
 from graph.workflow import AgentWorkflow
+from tests.contract_test_fixtures import build_test_aec
 from tests.test_pm_atomic_contract_flow import _pm_state
 from tools.agent_tools.decision import pm_signal_fusion
 from tools.agent_tools.decision.pm_invalidation_policy import (
     _has_structured_invalidation_condition,
-)
-from tools.agent_tools.decision.signal_collection_data_unavailable import (
-    build_data_unavailable_signal_package,
 )
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
@@ -43,46 +41,18 @@ def _formal_signal(
     raw_signal: str = "Neutral",
 ):
     signal_text = "Bullish" if side == "long" else "Bearish" if side == "short" else "Neutral"
-    contract = {
-        "contract_version": "agentquant.action_evidence.v1",
-        "analyst": analyst,
-        "signal": signal_text,
-        "side": side,
-        "confidence": confidence,
-        "opportunity_type": "trend_continuation" if side != "flat" else "no_trade",
-        "opportunity_state": (
-            "tradeable_candidate"
-            if side != "flat" and trigger_valid
-            else "watch_for_trigger"
-            if side != "flat"
-            else "no_opportunity"
-        ),
-        "setup_type": "trend_continuation" if side != "flat" else "no_trade",
-        "setup_quality_ok": side != "flat",
-        "trigger_valid": trigger_valid,
-        "current_trigger_confirmed": trigger_confirmed,
-        "entry_trigger": "breakout" if side != "flat" else "none",
-        "horizon_class": "short" if side != "flat" else "flat",
-        "market_regime": "trend" if side != "flat" else "unknown",
-        "evidence_quality": "high" if side != "flat" else "low",
-        "current_evidence_conflict": [],
-        "missing_evidence": [],
-        "invalidation_present": side != "flat",
-        "invalidation_condition": "close_beyond_invalidation" if side != "flat" else "",
-        "no_lookahead_status": "ok",
-        "data_usage_summary": {"data_quality_flags": []},
-        "fusion_evidence": {
-            "evidence_strength": "strong" if side != "flat" else "weak",
-            "evidence_strength_score": confidence,
-            "evidence_freshness": "fresh",
-            "confirmation_requirements": [],
-            "missing_evidence": [],
-        },
-        "product_profile_evidence": {
+    contract = build_test_aec(
+        analyst,
+        signal=signal_text,
+        side=side,
+        confidence=confidence,
+        trigger_valid=trigger_valid,
+        current_trigger_confirmed=trigger_confirmed,
+    )
+    contract["product_profile_evidence"] = {
             "product_profile_id": "BU.default",
             "product_profile_used": True,
             "profile_analysis_boundary": "analyst_evidence_calibration_only",
-        },
     }
     return SimpleNamespace(
         agent_name=analyst,
@@ -155,12 +125,12 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "evidence_strength_by_analyst",
             "evidence_freshness_by_analyst",
             "evidence_alignment_state",
-            "direction_alignment",
             "cross_analyst_conflicts",
             "dominant_opposing_evidence",
             "multi_evidence_consensus_score",
         }
         self.assertTrue(nested_only.issubset(contract["evidence_fusion"]))
+        self.assertNotIn("direction_alignment", contract["evidence_fusion"])
         self.assertFalse(nested_only.intersection(contract))
 
     def test_scc_preserves_each_aec_once_without_profile_or_fusion_copies(self):
@@ -197,8 +167,12 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "analyst": "technical",
             "sources": {
                 "pandaai_market": {
+                    "source": "PandaAI",
+                    "dataset": "daily_continuous_candles",
                     "available": False,
                     "used_in_signal": True,
+                    "pre_open_only": True,
+                    "info_cutoff": "pre_open",
                 }
             },
         }
@@ -208,8 +182,12 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "analyst": "fundamental",
             "sources": {
                 "finoview_fundamental": {
+                    "source": "Finoview",
+                    "dataset": "local_feather_fundamental",
                     "available": True,
                     "used_in_signal": True,
+                    "pre_open_only": True,
+                    "info_cutoff": "pre_open",
                     "stale_indicator_count": 2,
                     "supports_trade_setup": False,
                 }
@@ -221,8 +199,12 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "analyst": "commodity_news",
             "sources": {
                 "finoview_news_txt": {
+                    "source": "Finoview",
+                    "dataset": "local_news_txt",
                     "available": True,
                     "used_in_signal": False,
+                    "pre_open_only": True,
+                    "info_cutoff": "pre_open",
                 }
             },
         }
@@ -255,11 +237,14 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
                 ],
                 enabled_analysts=["technical"],
             )
+        unexpected = _formal_signal("technical", side="long")
+        unexpected.agent_name = "unexpected"
+        unexpected.metadata["action_evidence_contract"]["analyst"] = "unexpected"
         with self.assertRaisesRegex(ValueError, "unexpected_analyst"):
             build_signal_collection_contract(
                 ticker="BU",
                 trading_date="2025-03-25",
-                analyst_signals=[_formal_signal("unexpected", side="long")],
+                analyst_signals=[unexpected],
                 enabled_analysts=["technical"],
             )
 
@@ -438,33 +423,27 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         output = signal_collector_agent(state)
         self.assertEqual(set(output), {"signal_collection_contract"})
 
-    def test_data_unavailable_path_keeps_trace_without_duplicate_snapshot(self):
-        output = build_data_unavailable_signal_package(
-            ticker="BU",
-            trading_date="2025-03-25",
-            enabled_analysts=["technical", "fundamental", "commodity_news"],
-            reason="pre_open_reference_price_unavailable",
-        )
-        self.assertIn("signal_collection_contract", output)
-        self.assertIn("analyst_signals", output)
-        self.assertNotIn("signal_collection_contracts", output)
-        self.assertNotIn("signal_snapshot", output)
-        contract = output["signal_collection_contract"]
-        self.assertNotIn("collection_status", contract)
-        self.assertNotIn("data_unavailable_reason", contract)
-        self.assertIn("pre_open_reference_price_unavailable", contract["data_quality_flags"])
-        validate_signal_collection_contract(contract, ticker="BU", trading_date="2025-03-25")
+    def test_data_unavailable_collector_requires_formal_analyst_signals(self):
+        with self.assertRaisesRegex(ValueError, "signal_collection_missing_source_contracts"):
+            signal_collector_agent(
+                {
+                    "ticker": "BU",
+                    "trading_date": "2025-03-25",
+                    "enabled_analysts": ["technical", "fundamental", "commodity_news"],
+                    "analyst_signals": [],
+                    "pre_open_reference_price_unavailable": True,
+                }
+            )
 
     def test_data_unavailable_workflow_persists_sources_before_pm(self):
         saved_signals = []
 
         class _DB:
-            def save_signal(self, portfolio_id, analyst, ticker, prompt, signal):
+            def save_signal(self, portfolio_id, analyst, ticker, signal):
                 saved_signals.append((portfolio_id, analyst, ticker, signal))
                 return f"signal-{ticker}-{analyst}"
 
         workflow = AgentWorkflow.__new__(AgentWorkflow)
-        workflow.allow_analyst_db_writes = True
         workflow.workflow_analysts = ["technical", "fundamental", "commodity_news"]
         workflow.tickers = ["BU"]
         workflow.config = {}
@@ -479,9 +458,18 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "ticker": "BU",
             "trading_date": "2025-03-25",
             "enabled_analysts": list(workflow.workflow_analysts),
+            "portfolio": SimpleNamespace(id="portfolio-1"),
+            "analyst_signals": [
+                _formal_signal("technical", side="flat", signal_record_id=""),
+                _formal_signal("fundamental", side="flat", signal_record_id=""),
+                _formal_signal("commodity_news", side="flat", signal_record_id=""),
+            ],
             "pre_open_reference_price_unavailable": True,
             "pre_open_reference_price_unavailable_reason": "missing_reference",
         }
+        for signal in state["analyst_signals"]:
+            signal.metadata.pop("signal_record_id", None)
+        workflow._persist_prefetched_analyst_signals(state)
         with patch(
             "agents.decision_team.portfolio_manager.portfolio_agent_futures",
             side_effect=_pm,

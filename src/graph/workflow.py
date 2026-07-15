@@ -24,6 +24,7 @@ from time import perf_counter
 from apis.router import APISource, Router
 from tools.agent_tools.analysis.analyst_learning_context import clear_learning_context_cache
 from agents.decision_team.auditor import audit_futures_recommendation
+from tools.common.signal_evidence_collection import build_scc_data_quality_summary
 
 class AgentWorkflow:
     """Trading Decision Workflow."""
@@ -46,7 +47,6 @@ class AgentWorkflow:
         if not portfolio:
             raise RuntimeError(f"Failed to find settled portfolio for config {self.exp_name}")
         self.init_portfolio = Portfolio(**portfolio)
-        logger.info(f"Portfolio ID: {self.init_portfolio.id}")
         
         if config.get('planner_mode', False):
             raise RuntimeError(
@@ -59,20 +59,16 @@ class AgentWorkflow:
         if not config.get('workflow_analysts'):
             raise ValueError("workflow_analysts must be provided in config")
             
-        # Validate analysts and remove invalid ones
+        # Validate the configured analyst set before building the graph.
         self.workflow_analysts = config['workflow_analysts']
         invalid_analysts = [a for a in self.workflow_analysts if not AgentRegistry.check_agent_key(a)]
         if invalid_analysts:
-            logger.warning(f"Invalid analyst keys removed: {invalid_analysts}")
-            self.workflow_analysts = [a for a in self.workflow_analysts if a not in invalid_analysts]
+            raise ValueError("workflow_analysts_contains_unregistered_agent")
             
         if not self.workflow_analysts:
             raise ValueError("No valid analysts remaining after validation")
         self.runtime_cfg = config.get("runtime", {}) or {}
         self.phase1_runtime_cfg = self.runtime_cfg.get("phase1", {}) or {}
-        self.allow_analyst_db_writes = bool(
-            self.phase1_runtime_cfg.get("allow_parallel_analyst_db_writes", False)
-        )
         self._compiled_workflows: Dict[tuple[str, ...], Callable] = {}
 
     def _safe_positive_ratio(self, value, default: float) -> float:
@@ -116,9 +112,6 @@ class AgentWorkflow:
     def _phase1_prefetch_enabled(self) -> bool:
         return bool(self.phase1_runtime_cfg.get("prefetch_pre_open_reference_prices", True))
 
-    def _phase1_timing_enabled(self) -> bool:
-        return bool(self.phase1_runtime_cfg.get("log_timing_breakdown", True))
-
     def _phase1_max_workers(self) -> int:
         configured = self.phase1_runtime_cfg.get("max_parallel_analysis_tickers")
         try:
@@ -136,49 +129,39 @@ class AgentWorkflow:
         finally:
             timings[label] = timings.get(label, 0.0) + (perf_counter() - started_at)
 
-    def _save_prefetched_analyst_outputs(
+    def _persist_prefetched_analyst_signals(
         self,
         analysis_state: Dict[str, Any],
         *,
         force: bool = False,
     ) -> None:
-        if self.allow_analyst_db_writes and not force:
-            return
+        _ = force
         portfolio = analysis_state.get("portfolio")
         portfolio_id = getattr(portfolio, "id", "") if portfolio is not None else ""
         ticker = analysis_state.get("ticker")
-        outputs_by_agent = {
-            str(output.get("analyst")): output
-            for output in analysis_state.get("analyst_outputs", []) or []
-            if isinstance(output, dict)
-        }
         for signal in analysis_state.get("analyst_signals", []) or []:
-            output = outputs_by_agent.get(getattr(signal, "agent_name", ""))
-            if output:
-                report_path = write_analyst_report(
-                    analyst=output.get("analyst") or getattr(signal, "agent_name", "unknown"),
-                    ticker=output.get("ticker") or ticker,
-                    trading_date=output.get("trading_date") or analysis_state.get("trading_date"),
-                    signal=signal,
-                    full_config=analysis_state.get("full_config") or self.config,
-                    sections=output.get("report_sections") or {},
-                )
-                if report_path:
-                    metadata = getattr(signal, "metadata", {}) or {}
-                    metadata["decision_report_path"] = report_path
-                    signal.metadata = metadata
+            write_analyst_report(
+                analyst=getattr(signal, "agent_name", "unknown"),
+                ticker=ticker,
+                trading_date=analysis_state.get("trading_date"),
+                signal=signal,
+                full_config=analysis_state.get("full_config") or self.config,
+            )
             signal_id = self.db.save_signal(
                 portfolio_id,
                 getattr(signal, "agent_name", "unknown"),
                 ticker,
-                "analyst_prompt_not_persisted",
                 signal,
             )
-            if signal_id:
-                metadata = getattr(signal, "metadata", {}) or {}
-                metadata["signal_record_id"] = signal_id
-                metadata["parallel_phase1_saved_by"] = "AgentWorkflow"
-                signal.metadata = metadata
+            if not signal_id:
+                raise RuntimeError(
+                    f"Failed to persist {getattr(signal, 'agent_name', 'unknown')} signal for {ticker}"
+                )
+            metadata = getattr(signal, "metadata", {}) or {}
+            signal.metadata = {
+                "action_evidence_contract": metadata["action_evidence_contract"],
+                "signal_record_id": signal_id,
+            }
 
     def _validate_phase1_signal_persistence(self, portfolio: Portfolio, tickers: list[str]) -> None:
         expected_pairs = len(tickers) * len(self.workflow_analysts)
@@ -224,9 +207,9 @@ class AgentWorkflow:
                     portfolio=self.init_portfolio,
                 )
             )
-        except Exception as exc:
-            logger.error(f"PM Step6 finalization failed after PM call ended: {exc}")
-            raise
+        except Exception:
+            logger.error("pm_step6_finalization_failed")
+            raise RuntimeError("pm_step6_finalization_failed") from None
         if len(signed) != len(generated):
             raise RuntimeError("PM Step6 did not return one recommendation for every PM state")
         for ticker, recommendation in signed:
@@ -263,26 +246,67 @@ class AgentWorkflow:
         if not isinstance(generation_check, dict) or generation_check.get("ok") is not True:
             raise RuntimeError(f"{ticker} PM step6 contract generation check not ok before persistence")
 
+    def _auditor_hard_risk_config(self) -> Dict[str, float]:
+        value = self.config.get("max_total_margin_ratio")
+        try:
+            hard_limit = float(value)
+        except (TypeError, ValueError):
+            raise RuntimeError("max_total_margin_ratio missing for Auditor") from None
+        if hard_limit <= 0:
+            raise RuntimeError("max_total_margin_ratio must be positive for Auditor")
+        return {"max_total_margin_ratio": hard_limit}
+
+    def _auditor_position_state(self, ticker: str) -> Dict[str, Any]:
+        position = self.init_portfolio.positions.get(ticker)
+        return {
+            "ticker": ticker,
+            "current_lots": int(getattr(position, "shares", 0) or 0) if position is not None else 0,
+            "contract_code": getattr(position, "contract_code", None) if position is not None else None,
+            "margin_used": float(getattr(position, "margin_used", 0.0) or 0.0) if position is not None else 0.0,
+            "margin_rate": getattr(position, "margin_rate", None) if position is not None else None,
+            "contract_multiplier": getattr(position, "contract_multiplier", None) if position is not None else None,
+        }
+
+    def _auditor_contract_state(self, ticker: str) -> Dict[str, Any]:
+        position = self.init_portfolio.positions.get(ticker)
+        current_lots = int(getattr(position, "shares", 0) or 0) if position is not None else 0
+        if current_lots != 0:
+            return {
+                "contract_code": getattr(position, "contract_code", None),
+                "underlying_code": ticker,
+                "as_of_date": getattr(self.init_portfolio, "last_settle_date", None),
+                "source": "portfolio_position",
+                "contract_multiplier": getattr(position, "contract_multiplier", None),
+                "margin_rate": getattr(position, "margin_rate", None),
+            }
+        states = getattr(self, "_phase1_contract_states", {}) or {}
+        value = states.get(ticker)
+        return dict(value) if isinstance(value, dict) else {}
+
     def _audit_phase1_strategy_recommendations(self, generated: List[Tuple[str, FuturesRecommendation]]) -> None:
         """Run the independent Auditor after PM capital deployment finalizes contracts."""
         for ticker, recommendation in generated:
             source_type = getattr(recommendation.source_type, "value", recommendation.source_type)
-            if recommendation.status == RecommendationStatus.SKIPPED:
-                continue
             if source_type != RecommendationSourceType.STRATEGY.value:
                 continue
             recommendation_dict = recommendation.model_dump() if hasattr(recommendation, "model_dump") else dict(recommendation)
+            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
+            scc = snapshot.get("signal_collection_contract")
+            if not isinstance(scc, dict) or not scc:
+                raise RuntimeError(f"{ticker}: strategy recommendation missing SCC before Auditor")
             audit_output = audit_futures_recommendation(
                 recommendation=recommendation_dict,
-                full_config=self.config,
+                hard_risk_config=self._auditor_hard_risk_config(),
                 account_state={
                     "account_equity": getattr(self.init_portfolio, "account_equity", None),
-                    "cashflow": getattr(self.init_portfolio, "cashflow", None),
                     "margin_used": getattr(self.init_portfolio, "margin_used", None),
                     "margin_ratio": getattr(self.init_portfolio, "margin_ratio", None),
+                    "risk_status": getattr(self.init_portfolio, "risk_status", None),
                 },
+                position_state=self._auditor_position_state(ticker),
+                contract_state=self._auditor_contract_state(ticker),
+                data_quality=build_scc_data_quality_summary(scc),
             )
-            snapshot = recommendation.signal_snapshot if isinstance(recommendation.signal_snapshot, dict) else {}
             snapshot["auditor"] = {
                 "producer": "auditor",
                 "audit_status": audit_output.audit_status,
@@ -315,7 +339,7 @@ class AgentWorkflow:
         return str(name or "").strip()
 
     @classmethod
-    def _validate_phase1_analyst_outputs(
+    def _validate_phase1_analyst_signals(
         cls,
         ticker: str,
         analysts: list[str],
@@ -333,11 +357,14 @@ class AgentWorkflow:
         duplicate = [analyst for analyst, count in seen.items() if analyst in expected and count > 1]
         extra = [analyst for analyst in seen if analyst not in expected]
         if missing or duplicate or extra:
-            raise RuntimeError(
-                f"{ticker} phase1 analyst output incomplete before PM: "
-                f"expected={expected}, seen={seen}, missing={missing}, "
-                f"duplicate={duplicate}, extra={extra}"
-            )
+            raise RuntimeError(f"{ticker}: phase1_analyst_signal_set_invalid")
+
+    def _persist_phase1_analyst_signals_node(self, state: FundState) -> Dict[str, Any]:
+        analysts = list(state.get("enabled_analysts") or self.workflow_analysts)
+        signals = list(state.get("analyst_signals") or [])
+        self._validate_phase1_analyst_signals(str(state.get("ticker") or ""), analysts, signals)
+        self._persist_prefetched_analyst_signals(dict(state))
+        return {}
 
     def _get_compiled_workflow(self, analysts: list[str]):
         key = tuple(analysts)
@@ -359,6 +386,8 @@ class AgentWorkflow:
             raise RuntimeError("AgentWorkflow.build() now supports china_futures only.")
         from agents.decision_team.signal_collector import signal_collector_agent
         from agents.decision_team.portfolio_manager import portfolio_agent_futures
+        persistence_node = "analyst_persistence"
+        graph.add_node(persistence_node, self._persist_phase1_analyst_signals_node)
         graph.add_node(AgentKey.SIGNAL_COLLECTOR, signal_collector_agent)
         portfolio_agent = portfolio_agent_futures
         graph.add_node(AgentKey.PORTFOLIO, portfolio_agent)
@@ -368,8 +397,9 @@ class AgentWorkflow:
             agent_func = AgentRegistry.get_agent_func_by_key(analyst)
             graph.add_node(analyst, agent_func)
             graph.add_edge(START, analyst)
-            graph.add_edge(analyst, AgentKey.SIGNAL_COLLECTOR)
+            graph.add_edge(analyst, persistence_node)
 
+        graph.add_edge(persistence_node, AgentKey.SIGNAL_COLLECTOR)
         graph.add_edge(AgentKey.SIGNAL_COLLECTOR, AgentKey.PORTFOLIO)
         graph.add_edge(AgentKey.PORTFOLIO, END)
 
@@ -382,10 +412,7 @@ class AgentWorkflow:
         """
         Load all configured analysts for the fixed futures workflow.
         """
-        logger.info("Using all verified analysts")
         self.current_analysts = self.workflow_analysts.copy()
-            
-        logger.info(f"Active analysts for {ticker}: {self.current_analysts}")
 
     def _require_pm_memory_state(self, ticker: str, final_state: Dict[str, Any]) -> Dict[str, Any]:
         """Collect the one PM memory state before full-market Step5/Step6."""
@@ -428,6 +455,11 @@ class AgentWorkflow:
     ):
         state = self._build_futures_phase1_state(ticker, portfolio, morning_price_context)
         state["enabled_analysts"] = list(analysts)
+        if morning_price_context is None or morning_price_context.base_price is None:
+            state["pre_open_reference_price_unavailable"] = True
+            state["pre_open_reference_price_unavailable_reason"] = (
+                "pre_open_reference_price_unavailable"
+            )
         return state
 
     def _run_phase1_analysis_only(
@@ -445,8 +477,6 @@ class AgentWorkflow:
         )
         state["portfolio"] = portfolio
         analyst_signals = []
-        analyst_outputs = []
-        started_at = perf_counter()
         with ThreadPoolExecutor(max_workers=max(1, len(analysts))) as executor:
             futures = {
                 executor.submit(AgentRegistry.get_agent_func_by_key(analyst), state): analyst
@@ -456,20 +486,15 @@ class AgentWorkflow:
                 analyst = futures[future]
                 try:
                     result = future.result()
-                except Exception as exc:
-                    logger.error(f"{ticker}: {analyst} phase1 analysis failed: {exc}")
-                    raise RuntimeError(f"Failed to run {analyst} analysis for {ticker}") from exc
+                except Exception:
+                    logger.error(f"{ticker}: {analyst} phase1_analysis_failed")
+                    raise RuntimeError(f"Failed to run {analyst} analysis for {ticker}") from None
                 analyst_signals.extend((result or {}).get("analyst_signals", []) or [])
-                analyst_outputs.extend((result or {}).get("analyst_outputs", []) or [])
 
         order = {name: idx for idx, name in enumerate(analysts)}
         analyst_signals.sort(key=lambda signal: order.get(getattr(signal, "agent_name", ""), 999))
-        self._validate_phase1_analyst_outputs(ticker, analysts, analyst_signals)
-        logger.info(
-            f"{ticker} phase1 analyst fanout completed: analysts={analysts}, "
-            f"signals={len(analyst_signals)}, elapsed={perf_counter() - started_at:.2f}s"
-        )
-        return {
+        self._validate_phase1_analyst_signals(ticker, analysts, analyst_signals)
+        result = {
             "ticker": ticker,
             "exp_name": self.exp_name,
             "config_id": self.config_id,
@@ -482,14 +507,19 @@ class AgentWorkflow:
             "pre_open_only": True,
             "info_cutoff": "pre_open",
             "num_tickers": len(self.tickers),
-            "save_analyst_outputs": self.allow_analyst_db_writes,
             "config": self._phase1_compat_config(),
             "full_config": self.config,
             "router": self.router,
             "portfolio": portfolio,
             "analyst_signals": analyst_signals,
-            "analyst_outputs": analyst_outputs,
         }
+        for field in (
+            "pre_open_reference_price_unavailable",
+            "pre_open_reference_price_unavailable_reason",
+        ):
+            if field in state:
+                result[field] = state[field]
+        return result
 
     def _run_phase1_portfolio_only(self, analysis_state: Dict[str, Any], portfolio: Portfolio) -> Dict[str, Any]:
         from agents.decision_team.signal_collector import signal_collector_agent
@@ -502,11 +532,7 @@ class AgentWorkflow:
         state["recommendation"] = None
         collector_output = signal_collector_agent(state)
         state.update(collector_output)
-        if state.get("pre_open_reference_price_unavailable"):
-            self._save_prefetched_analyst_outputs(state, force=True)
-            collector_output = signal_collector_agent(state)
-            state.update(collector_output)
-        self._validate_phase1_analyst_outputs(
+        self._validate_phase1_analyst_signals(
             str(state.get("ticker") or ""),
             list(state.get("enabled_analysts") or self.workflow_analysts),
             list(state.get("analyst_signals") or []),
@@ -542,9 +568,11 @@ class AgentWorkflow:
                 ticker = futures[future]
                 try:
                     contexts[ticker] = future.result()
-                except Exception as exc:
-                    logger.error(f"{ticker}: pre-open reference price prefetch failed: {exc}")
-                    contexts[ticker] = None
+                except Exception:
+                    logger.error(f"{ticker}: pre_open_reference_price_prefetch_failed")
+                    raise RuntimeError(
+                        f"{ticker}: pre_open_reference_price_prefetch_failed"
+                    ) from None
         timings["pre_open_reference_price_prefetch"] = timings.get("pre_open_reference_price_prefetch", 0.0) + (
             perf_counter() - started_at
         )
@@ -556,13 +584,6 @@ class AgentWorkflow:
         timings["local_daily_data_prefetch"] = timings.get("local_daily_data_prefetch", 0.0) + (
             perf_counter() - started_at
         )
-        if result.get("enabled"):
-            logger.info(
-                "Local daily data cache prefetch completed: "
-                f"finoview={result.get('finoview_files_loaded')}, "
-                f"news={result.get('news_files_loaded')}, "
-                f"failed={result.get('finoview_files_failed', 0) + result.get('news_files_failed', 0)}"
-            )
         return result
 
     def _prefetch_pandaai_daily_data(self, timings: Dict[str, float]) -> Dict[str, Any]:
@@ -571,12 +592,6 @@ class AgentWorkflow:
         timings["pandaai_daily_data_prefetch"] = timings.get("pandaai_daily_data_prefetch", 0.0) + (
             perf_counter() - started_at
         )
-        if result.get("enabled"):
-            logger.info(
-                "PandaAI daily data cache prefetch completed: "
-                f"market={result.get('market_requests')}, extra={result.get('extra_requests')}, "
-                f"failed={result.get('market_failed', 0) + result.get('extra_failed', 0)}"
-            )
         return result
 
     def _prefetch_phase1_analysis(
@@ -592,16 +607,10 @@ class AgentWorkflow:
         analysis_results: Dict[str, Dict[str, Any]] = {}
         started_at = perf_counter()
         self.current_analysts = self.workflow_analysts.copy()
-        logger.info(
-            f"Phase1 analysis prefetch enabled: tickers={len(self.tickers)}, max_workers={max_workers}, "
-            f"analysts={self.workflow_analysts}"
-        )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for ticker in self.tickers:
                 morning_price_context = morning_contexts.get(ticker)
-                if morning_price_context is None or morning_price_context.base_price is None:
-                    continue
                 futures[
                     executor.submit(
                         self._run_phase1_analysis_only,
@@ -615,11 +624,6 @@ class AgentWorkflow:
                 ticker = futures[future]
                 analysis_results[ticker] = future.result()
         timings["analysis_prefetch"] = timings.get("analysis_prefetch", 0.0) + (perf_counter() - started_at)
-        if not self.allow_analyst_db_writes:
-            logger.info(
-                "Phase1 parallel analyst DB/report writes are centralized after prefetch "
-                "to avoid SQLite write contention and duplicate artifacts."
-            )
         return analysis_results
 
     def _apply_virtual_pending_rollovers(self, portfolio: Portfolio) -> Portfolio:
@@ -629,12 +633,6 @@ class AgentWorkflow:
             source_type=RecommendationSourceType.ROLLOVER,
             status=RecommendationStatus.PENDING,
         )
-
-        if recommendations:
-            logger.info(
-                f"Applying {len(recommendations)} pending rollover recommendation(s) "
-                "to the pre-open planning portfolio"
-            )
 
         for recommendation in recommendations:
             ticker = recommendation.get("underlying_code")
@@ -750,6 +748,10 @@ class AgentWorkflow:
         self._prefetch_local_daily_data(timings)
         self._prefetch_pandaai_daily_data(timings)
         morning_contexts = self._prefetch_pre_open_reference_prices(timings)
+        self._phase1_contract_states = {
+            ticker: dict(getattr(context, "contract_facts", None) or {})
+            for ticker, context in morning_contexts.items()
+        }
         prefetched_analysis = self._prefetch_phase1_analysis(portfolio, morning_contexts, timings)
         generated_pm_states: List[Tuple[str, Dict[str, Any]]] = []
 
@@ -757,69 +759,42 @@ class AgentWorkflow:
             ticker_started_at = perf_counter()
             self._timed_call(timings, "load_analysts", self.load_analysts, ticker)
             morning_price_context = morning_contexts.get(ticker)
-            if morning_price_context is None or morning_price_context.base_price is None:
-                warning_message = (
-                    getattr(morning_price_context, "warning_message", None)
-                    if morning_price_context is not None else None
+            try:
+                analysis_state = prefetched_analysis.get(ticker)
+                if analysis_state is None:
+                    analysis_state = self._timed_call(
+                        timings,
+                        "analyst_fanout",
+                        self._run_phase1_analysis_only,
+                        ticker,
+                        portfolio.model_copy(deep=True),
+                        morning_price_context,
+                        self.workflow_analysts.copy(),
+                    )
+                self._timed_call(
+                    timings,
+                    "persist_analyst_signals",
+                    self._persist_prefetched_analyst_signals,
+                    analysis_state,
                 )
-                missing_basis_state = self._build_futures_phase1_state(ticker, portfolio, morning_price_context)
-                missing_basis_state["pre_open_reference_price_unavailable"] = True
-                missing_basis_state["pre_open_reference_price_unavailable_reason"] = (
-                    warning_message or "pre_open_reference_price_unavailable"
-                )
-                missing_basis_state["pre_open_reference_price_unavailable_warning"] = warning_message
                 final_state = self._timed_call(
                     timings,
                     "portfolio_manager",
                     self._run_phase1_portfolio_only,
-                    missing_basis_state,
+                    analysis_state,
                     portfolio,
                 )
-                pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
-                generated_pm_states.append((ticker, pm_state))
-                warning_message = (pm_state.get("recommendation_context") or {}).get("warning_message")
-                logger.warning(f"{ticker} phase1 skipped: {warning_message}")
-                logger.log_portfolio(f"{ticker} phase1 position update", portfolio)
-                if self.planner_mode:
-                    self.current_analysts = None
-                elif prefetched_analysis:
-                    self.current_analysts = self.workflow_analysts.copy()
-                timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
-                continue
-
-            try:
-                if ticker in prefetched_analysis:
-                    self._timed_call(
-                        timings,
-                        "save_prefetched_analyst_outputs",
-                        self._save_prefetched_analyst_outputs,
-                        prefetched_analysis[ticker],
-                    )
-                    final_state = self._timed_call(
-                        timings,
-                        "portfolio_manager",
-                        self._run_phase1_portfolio_only,
-                        prefetched_analysis[ticker],
-                        portfolio,
-                    )
-                else:
-                    state = self._build_futures_phase1_state(ticker, portfolio, morning_price_context)
-                    workflow = self._timed_call(
-                        timings,
-                        "workflow_compile_or_reuse",
-                        self._get_compiled_workflow,
-                        self.current_analysts,
-                    )
-                    logger.info(f"{ticker} phase1 workflow ready")
-                    final_state = self._timed_call(timings, "workflow_invoke", workflow.invoke, state)
-            except Exception as e:
-                logger.error(f"Error running futures phase1 workflow: {e}")
-                raise RuntimeError(f"Failed to generate futures phase1 recommendation for {ticker}")
+            except Exception:
+                logger.error(f"{ticker}: futures_phase1_workflow_failed")
+                raise RuntimeError(
+                    f"Failed to generate futures phase1 recommendation for {ticker}"
+                ) from None
 
             pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
             generated_pm_states.append((ticker, pm_state))
 
-            logger.log_portfolio(f"{ticker} phase1 recommendation collected", portfolio)
+            if analysis_state.get("pre_open_reference_price_unavailable"):
+                logger.warning(f"{ticker}: phase1_required_market_data_unavailable")
 
             if self.planner_mode:
                 self.current_analysts = None
@@ -834,16 +809,7 @@ class AgentWorkflow:
         for _, recommendation in generated_recommendations:
             if recommendation.status != RecommendationStatus.SKIPPED:
                 portfolio = self._project_signed_contract_to_virtual_portfolio(portfolio, recommendation)
-        logger.log_portfolio("Phase1 Intraday Portfolio", portfolio)
         elapsed = perf_counter() - start_time
-        if self._phase1_timing_enabled():
-            summary_keys = [key for key in sorted(timings) if not key.endswith(".total")]
-            timing_summary = ", ".join(f"{key}={timings[key]:.2f}s" for key in summary_keys)
-            ticker_summary = ", ".join(
-                f"{key[:-6]}={timings[key]:.2f}s" for key in sorted(timings) if key.endswith(".total")
-            )
-            logger.info(f"Phase1 timing summary: total={elapsed:.2f}s | {timing_summary}")
-            logger.info(f"Phase1 ticker timing summary: {ticker_summary}")
         return elapsed
     
     def run(self, config_id: str) -> float:

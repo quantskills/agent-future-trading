@@ -15,7 +15,10 @@ from tools.common.contracts import (
     validate_trade_research_contract,
 )
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
-from tools.common.signal_evidence_collection import ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS
+from tools.common.signal_evidence_collection import (
+    ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS,
+    validate_action_evidence_contract,
+)
 from tools.agent_tools.analysis.analyst_market_confirmation import score_pandaai_extra_records
 from tools.agent_tools.analysis.analyst_output_landing import apply_analyst_output_landing_check
 from util.logger import logger
@@ -2339,11 +2342,15 @@ def write_analyst_report(
     trading_date: Any,
     signal: AnalystSignal,
     full_config: Dict[str, Any],
-    sections: Dict[str, Any],
 ) -> Optional[str]:
     cfg = get_analyst_llm_config(full_config, analyst)
     if not cfg.get("write_decision_reports", True):
         return None
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    contract = validate_action_evidence_contract(
+        metadata.get("action_evidence_contract"),
+        analyst=analyst,
+    )
 
     trading_date_value = normalize_trading_date(trading_date)
     report_dir = Path(logger.log_dir) / "analyst_decisions" / logger.run_id
@@ -2353,41 +2360,21 @@ def write_analyst_report(
 
     title = analyst.replace("_", " ").title()
     lines = [
-        f"# {title} Decision Report",
+        f"# {title} Action Evidence Contract",
         "",
         f"Ticker: {ticker}",
         f"Trading Date: {trading_date_value}",
-        f"LLM Path: {sections.get('llm_path', 'cloud_only')}",
-        f"Model: {cfg.get('model')}",
-        f"Signal: {signal_value(signal.signal)}",
-        f"Confidence: {float(signal.confidence or 0.0):.2f}",
-        f"Tradeability: {sections.get('tradeability', signal.metadata.get('tradeability', 'unknown'))}",
-        f"Opportunity Type: {getattr(signal, 'opportunity_type', 'unknown')}",
-        f"Opportunity State: {getattr(signal, 'opportunity_state', 'watch_for_trigger')}",
-        f"Entry Trigger: {getattr(signal, 'entry_trigger', '')}",
-        f"Exit Hint: {getattr(signal, 'exit_hint', '')}",
-        f"Holding Period Hint: {getattr(signal, 'holding_period_hint', '')}",
-        f"Factor Focus: {', '.join(getattr(signal, 'factor_focus', []) or []) or 'unknown'}",
-        f"Evidence Conflicts: {', '.join(getattr(signal, 'current_evidence_conflict', []) or []) or 'none'}",
-        f"Sector: {sections.get('sector', get_sector(ticker))}",
         "",
+        "```json",
+        sanitize_visible_text(_format_json_block(contract)),
+        "```",
     ]
-    for name, payload in sections.items():
-        if name in {"llm_path", "tradeability", "sector"}:
-            continue
-        lines.extend([f"## {name}", ""])
-        if isinstance(payload, str):
-            lines.extend([sanitize_visible_text(payload), ""])
-        else:
-            lines.extend(["```json", sanitize_visible_text(_format_json_block(payload)), "```", ""])
-    lines.extend(["## Final Reason", "", sanitize_visible_text(signal.justification), ""])
 
     path.write_text("\n".join(lines), encoding="utf-8")
     rel_path = os.path.relpath(path, logger.log_dir)
     logger.info(
         f"[ANALYST SUMMARY] {ticker} {analyst} signal={signal_value(signal.signal)} "
         f"confidence={float(signal.confidence or 0.0):.2f} "
-        f"tradeability={sections.get('tradeability', signal.metadata.get('tradeability', 'unknown'))} "
         f"report=logs/{rel_path}"
     )
     return str(path)

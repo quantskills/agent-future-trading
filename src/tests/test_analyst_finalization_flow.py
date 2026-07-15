@@ -19,7 +19,6 @@ from llm.prompt import (
 )
 from tools.agent_tools.analysis.analyst_output_finalization import (
     finalize_analyst_signal,
-    persist_analyst_signal,
     resolve_analyst_llm_config,
 )
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
@@ -28,16 +27,7 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     get_product_price_behavior_profile,
 )
 from tools.common.signal_evidence_collection import build_signal_collection_contract
-
-
-class _SavingDB:
-    def __init__(self, signal_id="signal-row-1"):
-        self.signal_id = signal_id
-        self.calls = []
-
-    def save_signal(self, portfolio_id, analyst, ticker, prompt, signal):
-        self.calls.append((portfolio_id, analyst, ticker, prompt, signal))
-        return self.signal_id
+from tests.contract_test_fixtures import build_test_aec
 
 
 def _finalize_data_gap(signal, *, analyst, ticker):
@@ -134,7 +124,13 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             factor_focus=["trend", "volume", "open_interest", "rebar_inventory_confirmation"],
             evidence_quality="high",
             data_freshness="fresh",
-            metadata={"data_usage_summary": {"data_available": True}},
+            metadata={
+                "data_usage_summary": build_test_aec(
+                    "technical",
+                    ticker="RB",
+                    trading_date="2025-03-05",
+                )["data_usage_summary"]
+            },
         )
         pre_contract = apply_profile_usage_to_signal(signal.model_copy(deep=True), usage)
         self.assertNotIn("action_evidence_contract", pre_contract.metadata)
@@ -160,11 +156,10 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             product_profile_usage=usage,
         )
         contract = finalized.metadata["action_evidence_contract"]
-        self.assertEqual(contract["product_profile_evidence"], finalized.metadata["product_profile_evidence"])
+        self.assertEqual(set(finalized.metadata), {"action_evidence_contract"})
         self.assertEqual(contract["factor_focus"], finalized.factor_focus)
         self.assertIn("product_profile:RB", finalized.factor_focus)
         self.assertTrue(contract["product_profile_evidence"]["profile_supported_evidence"])
-        self.assertNotIn("action_evidence_contract", finalized.metadata["trade_research_contract"])
         for legacy in ("open", "hold", "exit", "execution", "state_permissions", "money_objective", "has_invalidation"):
             self.assertNotIn(legacy, contract)
 
@@ -196,21 +191,6 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         self.assertEqual(resolved["provider"], "AlternateProvider")
         self.assertEqual(resolved["model"], "alternate-model")
 
-    def test_serial_signal_save_preserves_database_record_id_for_lineage(self):
-        db = _SavingDB("row-id-123")
-        signal = AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL)
-        signal_id = persist_analyst_signal(
-            db,
-            portfolio_id="portfolio-1",
-            analyst="technical",
-            ticker="RB",
-            prompt="prompt",
-            signal=signal,
-        )
-        self.assertEqual(signal_id, "row-id-123")
-        self.assertEqual(signal.metadata["signal_record_id"], "row-id-123")
-        self.assertEqual(db.calls[0][3], "analyst_prompt_not_persisted")
-
     def test_runtime_prompts_request_evidence_not_formal_contract_or_trade_actions(self):
         prompts = (
             build_futures_technical_prompt(ticker="RB", signal_results_compact={"trend": "UP"}),
@@ -233,7 +213,9 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             source = (SRC_ROOT / relative).read_text(encoding="utf-8-sig")
             self.assertIn("resolve_analyst_llm_config", source, relative)
             self.assertIn("finalize_analyst_signal", source, relative)
-            self.assertIn("persist_analyst_signal", source, relative)
+            self.assertIn("build_required_market_data_unavailable_signal", source, relative)
+            self.assertNotIn("persist_analyst_signal", source, relative)
+            self.assertNotIn('"prompt": prompt', source, relative)
             self.assertNotIn("llm_config = state[\"llm_config\"]", source, relative)
         news_source = (SRC_ROOT / "agents/analysis_team/commodity_news.py").read_text(encoding="utf-8-sig")
         self.assertNotIn("FUTURES_INSTRUMENT_CONTEXT", news_source)

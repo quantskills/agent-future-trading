@@ -91,23 +91,21 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
     if not bool(prior_cfg.get("enabled", False)) or not bool(prior_cfg.get("load_on_research_init", False)):
         return 0
     if not hasattr(db, "_get_connection") or not hasattr(db, "_ensure_strategy_memory_schema"):
-        logger.warning("Template prior load skipped: current DB backend does not expose local strategy_memory schema")
+        logger.warning("template_prior_backend_unsupported")
         return 0
 
     prior_path = _project_path(str(prior_cfg.get("path") or "src/logs/attribution/template_prior.json"))
     if not prior_path.exists():
-        logger.info(f"Template prior not found, cold-start memory bootstrap skipped: {prior_path}")
         return 0
 
     try:
         payload = json.loads(prior_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning(f"Template prior load skipped: failed to parse {prior_path}: {exc}")
+    except Exception:
+        logger.warning("template_prior_parse_failed")
         return 0
 
     templates = payload.get("templates") if isinstance(payload, dict) else None
     if not isinstance(templates, list) or not templates:
-        logger.info(f"Template prior has no templates, skipped: {prior_path}")
         return 0
     source_marker = _template_prior_marker(payload)
     reclassify_on_load = bool(prior_cfg.get("reclassify_on_load", True))
@@ -141,10 +139,6 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
         existing_row = cursor.fetchone()
         loaded_marker = _loaded_template_prior_marker(existing_row["payload_json"] if existing_row else None)
         if loaded_marker == source_marker:
-            logger.info(
-                f"Template prior already loaded for config {config_id[:8]}... "
-                f"marker={source_marker}, skipped"
-            )
             return 0
         cursor.execute(
             "DELETE FROM strategy_memory WHERE config_id = ? AND source = 'template_prior'",
@@ -167,7 +161,6 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
             setup_type = str(item.get("setup_type") or item.get("setup_type") or "unknown")
             horizon_class = str(item.get("horizon_class") or "unknown")
             row_payload = {
-                "source_file": str(prior_path),
                 "loaded_at_trading_date": trading_day_value,
                 "ticker": ticker,
                 "side": side,
@@ -212,11 +205,9 @@ def load_template_prior_if_enabled(cfg: Dict[str, Any], db, config_id: str) -> i
             )
             inserted += 1
         conn.commit()
-        if inserted:
-            logger.info(f"Loaded {inserted} template prior rows into strategy_memory from {prior_path}")
         return inserted
-    except Exception as exc:
-        logger.warning(f"Template prior load skipped: {exc}")
+    except Exception:
+        logger.warning("template_prior_load_failed")
         return 0
     finally:
         if conn:

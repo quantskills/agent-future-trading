@@ -362,6 +362,11 @@ class MorningExecutionBasis(BaseModel):
     base_price_date: Optional[str] = Field(default=None, description="Basis price trade date")
     open_price: Optional[float] = Field(default=None, description="T-day open price")
     prev_close_price: Optional[float] = Field(default=None, description="Previous close price")
+    contract_code: Optional[str] = Field(default=None, description="Concrete contract visible at the basis cutoff")
+    contract_facts: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Concrete contract facts visible at the basis cutoff",
+    )
     warning_message: Optional[str] = Field(default=None, description="Audit warning message")
     intraday_audit: Optional[Dict[str, Any]] = Field(default=None, description="Intraday execution audit payload")
 
@@ -435,7 +440,6 @@ class FuturesTransaction(BaseModel):
     warning_message: Optional[str] = Field(default=None, description="Audit warning message")
     booked_in_settlement: bool = Field(default=False, description="Whether settlement has booked this transaction")
     justification: str = Field(default="", description="Transaction rationale")
-    llm_prompt: Optional[str] = Field(default=None, description="Prompt audit")
     created_at: Optional[str] = Field(default=None, description="Created timestamp")
 
 
@@ -505,6 +509,8 @@ class FundState(TypedDict):
     full_config: Dict[str, Any]
     router: Any
     analyst_signals: Annotated[List[AnalystSignal], operator.add]
+    pre_open_reference_price_unavailable: bool
+    pre_open_reference_price_unavailable_reason: str
     signal_collection_contract: Dict[str, Any]
     decision: FuturesDecision
     pm_state: Dict[str, Any]

@@ -74,10 +74,16 @@ def accountant_agent(argv: Optional[List[str]] = None) -> None:
             f"Phase3 completed for {cfg['exp_name']} on {trading_date_value}: "
             f"balance={settlement_record.current_balance:,.2f}"
         )
-    except Exception as exc:
-        db.complete_trading_day_phase(config_id, trading_date_value, TradingPhase.PHASE3, "failed", str(exc))
-        logger.error(f"Phase3 accountant settlement failed: {exc}")
-        raise
+    except Exception:
+        db.complete_trading_day_phase(
+            config_id,
+            trading_date_value,
+            TradingPhase.PHASE3,
+            "failed",
+            "phase3_settlement_failed",
+        )
+        logger.error("phase3_settlement_failed")
+        raise RuntimeError("phase3_settlement_failed") from None
 
 
 def main(argv: Optional[List[str]] = None) -> None:

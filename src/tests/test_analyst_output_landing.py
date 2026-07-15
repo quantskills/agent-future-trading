@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from pathlib import Path
 import sys
 
@@ -13,10 +14,24 @@ from tools.agent_tools.analysis.analyst_output_landing import (
     analyst_output_landing_violations,
     apply_analyst_output_landing_check,
 )
+from tests.contract_test_fixtures import build_test_aec
 
 
 class AnalystOutputLandingTest(unittest.TestCase):
     def _signal(self, **kwargs) -> AnalystSignal:
+        action_contract = build_test_aec(
+            "technical",
+            signal="Bullish",
+            side="long",
+            confidence=0.7,
+            opportunity_state="watch_for_trigger",
+            trigger_valid=False,
+            current_trigger_confirmed=False,
+            invalidation_present=True,
+            entry_trigger="break above morning range",
+            invalidation_condition="close below morning range",
+            extra={"factor_focus": []},
+        )
         defaults = {
             "agent_name": "technical",
             "signal": Signal.BULLISH,
@@ -25,21 +40,22 @@ class AnalystOutputLandingTest(unittest.TestCase):
             "entry_trigger": "break above morning range",
             "invalidation_present": True,
             "trigger_valid": False,
-            "metadata": {
-                "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "technical",
-                    "signal": "Bullish",
-                    "side": "long",
-                    "confidence": 0.7,
-                    "opportunity_state": "watch_for_trigger",
-                    "entry_trigger": "break above morning range",
-                    "trigger_valid": False,
-                    "invalidation_present": True,
-                    "factor_focus": [],
-                }
-            },
+            "metadata": {"action_evidence_contract": action_contract},
         }
+        metadata_overrides = kwargs.pop("metadata", None)
+        if metadata_overrides is not None:
+            metadata = deepcopy(defaults["metadata"])
+            contract_overrides = metadata_overrides.get("action_evidence_contract")
+            if isinstance(contract_overrides, dict):
+                metadata["action_evidence_contract"].update(contract_overrides)
+            metadata.update(
+                {
+                    key: value
+                    for key, value in metadata_overrides.items()
+                    if key != "action_evidence_contract"
+                }
+            )
+            defaults["metadata"] = metadata
         defaults.update(kwargs)
         return AnalystSignal(**defaults)
 
@@ -106,17 +122,6 @@ class AnalystOutputLandingTest(unittest.TestCase):
     def test_product_learning_calibration_view_is_allowed_when_trade_authority_aliases_are_safe(self):
         signal = self._signal(
             metadata={
-                "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "technical",
-                    "signal": "Bullish",
-                    "side": "long",
-                    "confidence": 0.7,
-                    "opportunity_state": "watch_for_trigger",
-                    "trigger_valid": False,
-                    "invalidation_present": True,
-                    "factor_focus": [],
-                },
                 "reviewer_learning_context": {
                     "memory_trace": {
                         "selected_memory_refs": [

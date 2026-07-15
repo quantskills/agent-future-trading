@@ -15,36 +15,21 @@ from agents.decision_team.portfolio_manager import (
 )
 from graph.schema import Portfolio, Position, RecommendationSourceType, RecommendationStatus
 from graph.workflow import AgentWorkflow
+from tests.contract_test_fixtures import build_test_aec
 from tools.common.final_action_semantics import full_market_rank_source_payload
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 
 
 def _signal_collection_contract(ticker: str) -> dict:
-    action_contract = {
-        "contract_version": "agentquant.action_evidence.v1",
-        "analyst": "technical",
-        "signal": "Bullish",
-        "side": "long",
-        "confidence": 0.8,
-        "opportunity_type": "trend_continuation",
-        "opportunity_state": "watch_for_trigger",
-        "setup_type": "trend_continuation",
-        "setup_quality_ok": True,
-        "trigger_valid": False,
-        "current_trigger_confirmed": False,
-        "entry_trigger": "breakout",
-        "invalidation_present": True,
-        "invalidation_condition": "close_below_trigger",
-        "invalidation_level": 2950.0,
-        "atr_stop_distance": 40.0,
-        "horizon_class": "short",
-        "expected_horizon_days": 3,
-        "market_regime": "trend",
-        "evidence_quality": "high",
-        "current_evidence_conflict": [],
-        "missing_evidence": [],
-        "no_lookahead_status": "ok",
-    }
+    action_contract = build_test_aec(
+        "technical",
+        ticker=ticker,
+        signal="Bullish",
+        side="long",
+        confidence=0.8,
+        invalidation_condition="close_below_trigger",
+        extra={"invalidation_level": 2950.0, "atr_stop_distance": 40.0},
+    )
     signal = SimpleNamespace(
         agent_name="technical",
         metadata={

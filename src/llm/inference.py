@@ -26,12 +26,12 @@ class LLMConfig:
 
 
 DEFAULT_FAILURE_POLICY = {
-    "parse_error": "retry_then_default",
+    "parse_error": "retry_then_raise",
     "rate_limit": "retry_with_backoff",
-    "auth_error": "fail_fast",
-    "invalid_request": "fail_fast",
-    "server_error": "retry_then_default",
-    "unknown": "retry_then_default",
+    "auth_error": "raise",
+    "invalid_request": "raise",
+    "server_error": "retry_then_raise",
+    "unknown": "retry_then_raise",
 }
 
 
@@ -267,9 +267,9 @@ def get_model(config: LLMConfig):
     
     try:
         return model_config.model_class(**kwargs)
-    except Exception as e:
-        logger.error(f"{provider} Chat Error: {e}")
-        raise ValueError(f"{provider} Chat Error: {e}")
+    except Exception:
+        logger.error("llm_model_initialization_failed")
+        raise RuntimeError("llm_model_initialization_failed") from None
 
 def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseModel):
     """
@@ -280,13 +280,12 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
         llm_config: Configuration for the LLM
         output_model: The Pydantic model to use for structured output
     Returns:
-        An instance of output_model (with defaults if error occurs)
+        A validated structured model instance.
     """
     llm_cfg = _normalize_llm_config(llm_config)
     llm = get_model(llm_cfg)
     provider = Provider(llm_cfg.provider)
     model_config = provider.config
-    audit_metadata = llm_audit_metadata(llm_config)
     semaphore = _resolve_llm_semaphore(llm_cfg)
 
     structured_method = llm_cfg.structured_output_method or model_config.structured_output_method
@@ -304,23 +303,10 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
         )
 
     llm = llm.with_structured_output(pydantic_model, method=structured_method)
-    logger.info(
-        f"LLM call configured: provider={provider.value}, model={llm_cfg.model}, "
-        f"reasoning_effort={audit_metadata.get('reasoning_effort')}, "
-        f"base_url={audit_metadata.get('base_url')}, "
-        f"api_key_env={audit_metadata.get('api_key_env')}, "
-        f"structured_output={structured_method}, max_retries={llm_cfg.max_retries}, "
-        f"max_concurrent_calls={llm_cfg.max_concurrent_calls or 'unlimited'}"
-    )
 
     for attempt in range(llm_cfg.max_retries):
-        started_at = time.monotonic()
         try:
             if semaphore is not None:
-                logger.info(
-                    f"LLM concurrency gate entered: provider={provider.value}, "
-                    f"model={llm_cfg.model}, max_concurrent_calls={llm_cfg.max_concurrent_calls}"
-                )
                 with semaphore:
                     result = llm.invoke(prompt)
             else:
@@ -329,40 +315,19 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
                 raise ValueError("LLM returned None")
             if isinstance(result, dict):
                 result = pydantic_model(**result)
-            elapsed = time.monotonic() - started_at
-            logger.info(
-                f"LLM call succeeded: provider={provider.value}, model={llm_cfg.model}, "
-                f"attempt={attempt + 1}, elapsed={elapsed:.2f}s"
-            )
             return result
-        except Exception as e:
-            error_type = _classify_llm_error(e)
+        except Exception as exc:
+            error_type = _classify_llm_error(exc)
             action = _resolve_failure_policy(llm_cfg, error_type)
-            elapsed = time.monotonic() - started_at
-            logger.warning(
-                f"Attempt {attempt + 1}/{llm_cfg.max_retries} failed: "
-                f"provider={provider.value}, model={llm_cfg.model}, "
-                f"error_type={error_type}, policy={action}, elapsed={elapsed:.2f}s, error={e}"
-            )
-            if action in {"raise", "fail_hard"}:
-                logger.error(
-                    f"LLM call raising on provider/config error: provider={provider.value}, "
-                    f"model={llm_cfg.model}, error_type={error_type}"
-                )
-                raise RuntimeError(
-                    f"LLM call failed: provider={provider.value}, model={llm_cfg.model}, "
-                    f"error_type={error_type}, error={e}"
-                ) from e
-            if action == "fail_fast":
-                logger.error(
-                    f"LLM call failed fast: provider={provider.value}, model={llm_cfg.model}, "
-                    f"error_type={error_type}"
-                )
-                return pydantic_model()
+            logger.warning(f"llm_inference_attempt_failed:{error_type}")
+            if action in {"raise", "fail_hard", "fail_fast"}:
+                logger.error(f"llm_inference_failed:{error_type}")
+                raise RuntimeError(f"llm_inference_failed:{error_type}") from None
             if attempt == llm_cfg.max_retries - 1:
-                logger.error(f"All {llm_cfg.max_retries} attempts failed")
-                return pydantic_model()
+                logger.error(f"llm_inference_failed:{error_type}")
+                raise RuntimeError(f"llm_inference_failed:{error_type}") from None
             if action == "retry_with_backoff":
                 time.sleep(min(2 ** attempt, 8))
-    
-    return pydantic_model() 
+
+    logger.error("llm_inference_failed:no_attempts")
+    raise RuntimeError("llm_inference_failed:no_attempts")

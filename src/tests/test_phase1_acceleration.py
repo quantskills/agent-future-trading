@@ -15,6 +15,7 @@ from graph.schema import AnalystSignal, FuturesAction, FuturesRecommendation, Re
 from graph.workflow import AgentWorkflow
 from database.artifact_store import load_externalized_json
 from database.sqlite_helper import SQLiteDB
+from tests.contract_test_fixtures import build_test_aec
 
 
 class _FakeDB:
@@ -37,14 +38,14 @@ class _FakeDB:
     def get_futures_recommendations_by_effective_date(self, **kwargs):
         return []
 
-    def save_signal(self, portfolio_id, analyst, ticker, prompt, signal):
-        self.saved_signals.append((portfolio_id, analyst, ticker, prompt, signal))
+    def save_signal(self, portfolio_id, analyst, ticker, signal):
+        self.saved_signals.append((portfolio_id, analyst, ticker, signal))
         return f"sig-{ticker}-{analyst}"
 
     def get_signal_persistence_counts(self, portfolio_id, tickers, analysts):
         rows = [
             {"ticker": ticker, "analyst": analyst}
-            for saved_portfolio_id, analyst, ticker, _prompt, _signal in self.saved_signals
+            for saved_portfolio_id, analyst, ticker, _signal in self.saved_signals
             if saved_portfolio_id == portfolio_id
         ]
         pairs = [(str(row["ticker"]).upper(), str(row["analyst"])) for row in rows]
@@ -104,8 +105,6 @@ class Phase1AccelerationTest(unittest.TestCase):
                     "enable_analysis_parallelism": True,
                     "max_parallel_analysis_tickers": 2,
                     "prefetch_pre_open_reference_prices": True,
-                    "log_timing_breakdown": False,
-                    "allow_parallel_analyst_db_writes": False,
                 }
             },
             "max_total_margin_ratio": 0.2,
@@ -124,31 +123,14 @@ class Phase1AccelerationTest(unittest.TestCase):
                     confidence=0.5,
                     justification=f"{analyst} neutral",
                     metadata={
-                        "action_evidence_contract": {
-                            "contract_version": "agentquant.action_evidence.v1",
-                            "analyst": analyst,
-                            "signal": "Neutral",
-                            "side": "flat",
-                            "confidence": 0.5,
-                            "opportunity_state": "no_opportunity",
-                            "trigger_valid": False,
-                            "current_trigger_confirmed": False,
-                        }
+                        "action_evidence_contract": build_test_aec(
+                            analyst,
+                            ticker=state["ticker"],
+                            trading_date="2025-01-02",
+                        )
                     },
                 )
-                return {
-                    "analyst_signals": [signal],
-                    "analyst_outputs": [
-                        {
-                            "analyst": analyst,
-                            "ticker": state["ticker"],
-                            "trading_date": state["trading_date"],
-                            "prompt": f"{analyst} prompt for {state['ticker']}",
-                            "signal": signal,
-                            "report_sections": {"llm_path": "test", "tradeability": "low"},
-                        }
-                    ],
-                }
+                return {"analyst_signals": [signal]}
 
             return _agent
 
@@ -160,13 +142,14 @@ class Phase1AccelerationTest(unittest.TestCase):
                     "ticker": ticker,
                     "current_lots": 0,
                     "target_lots": 0,
+                    "signal_collection_contract": state["signal_collection_contract"],
                     "recommendation_context": {"underlying_code": ticker},
                 }
             }
 
         def fake_finalize_pm_contracts(*, generated, config, portfolio):
             signed = []
-            for ticker, _ in generated:
+            for ticker, pm_state in generated:
                 recommendation = FuturesRecommendation(
                     config_id="cfg",
                     reference_portfolio_id="p1",
@@ -179,6 +162,7 @@ class Phase1AccelerationTest(unittest.TestCase):
                     base_price=100.0,
                     justification="test PM final",
                     signal_snapshot={
+                    "signal_collection_contract": pm_state["signal_collection_contract"],
                     "final_action_contract": {
                         "ticker": ticker,
                         "contract_code": f"{ticker}01",
@@ -207,7 +191,9 @@ class Phase1AccelerationTest(unittest.TestCase):
         ), patch(
             "agents.decision_team.portfolio_manager.finalize_pm_full_market_contracts",
             side_effect=fake_finalize_pm_contracts,
-        ):
+        ), patch("graph.workflow.logger.info") as info_log, patch(
+            "graph.workflow.logger.log_portfolio"
+        ) as portfolio_log:
             workflow = AgentWorkflow(self._config(), "cfg")
             elapsed = workflow.run("cfg")
 
@@ -215,18 +201,34 @@ class Phase1AccelerationTest(unittest.TestCase):
         self.assertEqual(pm_order, ["A", "B"])
         self.assertEqual([rec.underlying_code for rec in fake_db.saved_recommendations], ["A", "B"])
         self.assertEqual(len(fake_db.saved_signals), 4)
-        self.assertTrue(all(row[3] == "analyst_prompt_not_persisted" for row in fake_db.saved_signals))
-        self.assertTrue(all(getattr(row[4], "metadata", {}).get("decision_report_path") for row in fake_db.saved_signals))
         self.assertTrue(
             all(
-                getattr(row[4], "metadata", {}).get("signal_record_id")
+                getattr(row[3], "metadata", {}).get("signal_record_id")
                 == f"sig-{row[2]}-{row[1]}"
+                for row in fake_db.saved_signals
+            )
+        )
+        self.assertTrue(
+            all(
+                set(getattr(row[3], "metadata", {}))
+                == {"action_evidence_contract", "signal_record_id"}
                 for row in fake_db.saved_signals
             )
         )
         self.assertTrue(
             all(rec.status != RecommendationStatus.SKIPPED for rec in fake_db.saved_recommendations)
         )
+        portfolio_log.assert_not_called()
+        logged = "\n".join(str(call.args[0]) for call in info_log.call_args_list)
+        for forbidden in (
+            "Portfolio ID",
+            "Active analysts",
+            "fanout completed",
+            "prefetch",
+            "DB/report writes",
+            "timing summary",
+        ):
+            self.assertNotIn(forbidden, logged)
 
     def test_sqlite_signal_save_replaces_same_ticker_analyst_scope(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,16 +245,38 @@ class Phase1AccelerationTest(unittest.TestCase):
                 signal=Signal.NEUTRAL,
                 confidence=0.4,
                 justification="early signal",
+                metadata={
+                    "action_evidence_contract": build_test_aec(
+                        "technical",
+                        ticker="A",
+                        trading_date="2025-01-02",
+                    )
+                },
             )
             second = AnalystSignal(
                 agent_name="technical",
                 signal=Signal.BULLISH,
                 confidence=0.7,
                 justification="final signal",
+                metadata={
+                    "action_evidence_contract": build_test_aec(
+                        "technical",
+                        ticker="A",
+                        trading_date="2025-01-02",
+                        signal="Bullish",
+                        side="long",
+                        confidence=0.7,
+                    )
+                },
             )
 
-            db.save_signal(portfolio_id, "technical", "A", "early prompt", first)
-            final_id = db.save_signal(portfolio_id, "technical", "A", "final prompt", second)
+            db.save_signal(portfolio_id, "technical", "A", first)
+            final_id = db.save_signal(
+                portfolio_id,
+                "technical",
+                "A",
+                second,
+            )
 
             conn = db._get_connection()
             try:
@@ -266,7 +290,7 @@ class Phase1AccelerationTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], final_id)
         self.assertIn("Bullish", rows[0]["signal"])
-        self.assertEqual(rows[0]["justification"], "final signal")
+        self.assertEqual(rows[0]["justification"], "")
 
     def test_sqlite_signal_artifact_exposes_machine_readable_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -283,6 +307,11 @@ class Phase1AccelerationTest(unittest.TestCase):
                 confidence=0.5,
                 justification="metadata audit",
                 metadata={
+                    "action_evidence_contract": build_test_aec(
+                        "technical",
+                        ticker="TA",
+                        trading_date="2025-01-02",
+                    ),
                     "llm_path": "cloud:g5.4:high",
                     "data_usage_summary": {"pandaai_daily": {"available": True, "used_in_signal": True}},
                     "technical_parameter_calibration": {"applied": True, "source": "policy"},
@@ -290,7 +319,12 @@ class Phase1AccelerationTest(unittest.TestCase):
                 },
             )
 
-            db.save_signal(portfolio["id"], "technical", "TA", "prompt", signal)
+            db.save_signal(
+                portfolio["id"],
+                "technical",
+                "TA",
+                signal,
+            )
 
             conn = db._get_connection()
             try:
@@ -310,10 +344,11 @@ class Phase1AccelerationTest(unittest.TestCase):
             row["artifact_json_artifact_path"],
             row["artifact_json_sha256"],
         )
-        self.assertEqual(payload["llm_path"], "cloud:g5.4:high")
-        self.assertTrue(payload["data_usage_summary"]["pandaai_daily"]["used_in_signal"])
-        self.assertTrue(payload["technical_parameter_calibration"]["applied"])
-        self.assertEqual(payload["adaptive_params"]["ema_long"], 52)
+        self.assertEqual(set(payload), {"metadata", "signal_artifact_metadata"})
+        self.assertEqual(set(payload["metadata"]), {"action_evidence_contract"})
+        self.assertNotIn("llm_path", payload)
+        self.assertNotIn("technical_parameter_calibration", payload)
+        self.assertNotIn("adaptive_params", payload)
         self.assertEqual(payload["signal_artifact_metadata"]["contract_version"], "agentquant.signal_artifact.v1")
 
 

@@ -76,6 +76,7 @@ from agents.decision_team.portfolio_manager import (
 )
 from agents.decision_team.signal_collector import signal_collector_agent
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_aec
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
     _execution_contract_from_snapshot,
@@ -166,28 +167,20 @@ class _FakeRouter:
 
 
 def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
-    action_contract = {
-        "contract_version": "agentquant.action_evidence.v1",
-        "analyst": "technical",
-        "signal": "Bullish",
-        "side": "long",
-        "confidence": 0.8,
-        "opportunity_type": "trend_continuation",
-        "opportunity_state": "watch_for_trigger",
-        "setup_type": "trend_continuation",
-        "setup_quality_ok": True,
-        "trigger_valid": False,
-        "current_trigger_confirmed": False,
-        "entry_trigger": "breakout",
-        "invalidation_present": True,
-        "invalidation_condition": "close_below_trigger",
-        "horizon_class": "short",
-        "market_regime": "trend",
-        "evidence_quality": "high",
-        "current_evidence_conflict": [],
-        "missing_evidence": [],
-        "no_lookahead_status": "ok",
-    }
+    action_contract = build_test_aec(
+        "technical",
+        ticker=ticker,
+        trading_date="2025-03-25",
+        signal="Bullish",
+        side="long",
+        confidence=0.8,
+        opportunity_state="watch_for_trigger",
+        trigger_valid=False,
+        current_trigger_confirmed=False,
+        invalidation_present=True,
+        entry_trigger="breakout",
+        invalidation_condition="close_below_trigger",
+    )
     signal = SimpleNamespace(
         agent_name="technical",
         metadata={
@@ -552,14 +545,14 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
                 signals,
             )
 
-    def test_workflow_rejects_incomplete_parallel_analyst_outputs_before_pm(self):
+    def test_workflow_rejects_incomplete_parallel_analyst_signals_before_pm(self):
         signals = [
             AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.7),
             AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.2),
         ]
 
-        with self.assertRaisesRegex(RuntimeError, "analyst output incomplete before PM"):
-            AgentWorkflow._validate_phase1_analyst_outputs(
+        with self.assertRaisesRegex(RuntimeError, "phase1_analyst_signal_set_invalid"):
+            AgentWorkflow._validate_phase1_analyst_signals(
                 "SR",
                 ["technical", "fundamental", "commodity_news"],
                 signals,
@@ -578,27 +571,18 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             signals,
         )
 
-    def test_signal_collector_builds_data_unavailable_no_trade_package(self):
-        output = signal_collector_agent({
-            "ticker": "ZN",
-            "trading_date": datetime(2025, 1, 2),
-            "enabled_analysts": ["technical", "fundamental", "commodity_news"],
-            "pre_open_reference_price_unavailable": True,
-            "pre_open_reference_price_unavailable_reason": (
-                "ZN has no previous close available before 2025-01-02"
-            ),
-        })
-
-        signals = output["analyst_signals"]
-        self.assertEqual(len(signals), 3)
-        self.assertEqual({signal.agent_name for signal in signals}, {"technical", "fundamental", "commodity_news"})
-        self.assertTrue(all(signal.opportunity_state == "no_opportunity" for signal in signals))
-        self.assertTrue(all(signal.tradeability_reason == "pre_open_reference_price_unavailable" for signal in signals))
-        contract = output["signal_collection_contract"]
-        self.assertIn("pre_open_reference_price_unavailable", contract["data_quality_flags"])
-        self.assertEqual(contract["collector_decision_boundary"], "no_trade_authority")
-        self.assertNotIn("signal_snapshot", output)
-        self.assertEqual(signals[0].metadata["no_trade_category"], "data")
+    def test_signal_collector_rejects_data_unavailable_state_without_formal_analyst_signals(self):
+        with self.assertRaisesRegex(ValueError, "signal_collection_missing_source_contracts"):
+            signal_collector_agent({
+                "ticker": "ZN",
+                "trading_date": datetime(2025, 1, 2),
+                "enabled_analysts": ["technical", "fundamental", "commodity_news"],
+                "analyst_signals": [],
+                "pre_open_reference_price_unavailable": True,
+                "pre_open_reference_price_unavailable_reason": (
+                    "ZN has no previous close available before 2025-01-02"
+                ),
+            })
 
     def test_virtual_phase1_portfolio_uses_final_contract_not_internal_draft(self):
         workflow = AgentWorkflow.__new__(AgentWorkflow)
@@ -3580,49 +3564,55 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 agent_name="technical",
                 signal=Signal.NEUTRAL,
                 confidence=0.5,
-                metadata={"signal_record_id": "signal-J-technical", "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "technical",
-                    "signal": "Neutral",
-                    "side": "flat",
-                    "confidence": 0.5,
-                    "opportunity_state": "no_opportunity",
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "invalidation_present": False,
-                }},
+                metadata={
+                    "signal_record_id": "signal-J-technical",
+                    "action_evidence_contract": build_test_aec(
+                        "technical",
+                        ticker="J",
+                        trading_date="2025-05-09",
+                        signal="Neutral",
+                        side="flat",
+                        confidence=0.5,
+                    ),
+                },
             ),
             AnalystSignal(
                 agent_name="fundamental",
                 signal=Signal.BEARISH,
                 confidence=0.6,
-                metadata={"signal_record_id": "signal-J-fundamental", "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "fundamental",
-                    "signal": "Bearish",
-                    "side": "short",
-                    "confidence": 0.6,
-                    "opportunity_state": "watch_for_trigger",
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "invalidation_present": True,
-                }},
+                metadata={
+                    "signal_record_id": "signal-J-fundamental",
+                    "action_evidence_contract": build_test_aec(
+                        "fundamental",
+                        ticker="J",
+                        trading_date="2025-05-09",
+                        signal="Bearish",
+                        side="short",
+                        confidence=0.6,
+                        opportunity_state="watch_for_trigger",
+                        trigger_valid=False,
+                        current_trigger_confirmed=False,
+                        invalidation_present=True,
+                        entry_trigger="wait_for_fundamental_price_confirmation",
+                        invalidation_condition="fundamental_setup_invalidated",
+                    ),
+                },
             ),
             AnalystSignal(
                 agent_name="commodity_news",
                 signal=Signal.NEUTRAL,
                 confidence=0.4,
-                metadata={"signal_record_id": "signal-J-commodity_news", "action_evidence_contract": {
-                    "contract_version": "agentquant.action_evidence.v1",
-                    "analyst": "commodity_news",
-                    "signal": "Neutral",
-                    "side": "flat",
-                    "confidence": 0.4,
-                    "opportunity_state": "no_opportunity",
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "invalidation_present": False,
-                }},
+                metadata={
+                    "signal_record_id": "signal-J-commodity_news",
+                    "action_evidence_contract": build_test_aec(
+                        "commodity_news",
+                        ticker="J",
+                        trading_date="2025-05-09",
+                        signal="Neutral",
+                        side="flat",
+                        confidence=0.4,
+                    ),
+                },
             ),
         ]
         state = {
@@ -3788,13 +3778,15 @@ class PandaAIContractNormalizationRegressionTest(unittest.TestCase):
         original_shared = PandaAIAPI._shared_token_initialized
         PandaAIAPI._shared_token_initialized = True
         try:
-            result = api._call_pandaai("get_market_data", symbol="ZN_DOMINANT.SHF")
+            with patch("apis.pandaai.api.logger.warning") as warning_log:
+                result = api._call_pandaai("get_market_data", symbol="ZN_DOMINANT.SHF")
         finally:
             PandaAIAPI._shared_token_initialized = original_shared
 
         self.assertEqual(result[0]["close"], 25265.0)
         self.assertEqual(fake.init_calls, 1)
         self.assertEqual(fake.market_calls, 2)
+        warning_log.assert_called_once_with("pandaai_token_refresh_required")
 
 
 class _FailingSettlementRouter:

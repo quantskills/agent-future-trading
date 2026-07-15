@@ -861,8 +861,8 @@ def _ensure_research_learning_schema(cursor: sqlite3.Cursor) -> None:
         from database.sqlite_setup import _ensure_reviewer_learning_schema
 
         _ensure_reviewer_learning_schema(cursor)
-    except Exception as exc:
-        logger.warning(f"Reviewer learning schema ensure skipped: {exc}")
+    except Exception:
+        logger.warning("reviewer_learning_schema_ensure_failed")
 
 def _deactivate_adaptive_policy_state(
     cursor: sqlite3.Cursor,
@@ -5574,6 +5574,18 @@ def _insert_researcher_llm_note(
     payload_size: Optional[int],
     payload_summary_json: Optional[str],
 ) -> None:
+    forbidden_values = (
+        raw_prompt,
+        raw_response,
+        raw_prompt_artifact_path,
+        raw_prompt_sha256,
+        raw_prompt_summary_json,
+        raw_response_artifact_path,
+        raw_response_sha256,
+        raw_response_summary_json,
+    )
+    if any(value not in (None, "") for value in forbidden_values) or raw_prompt_size not in (None, 0) or raw_response_size not in (None, 0):
+        raise ValueError("researcher_raw_llm_content_forbidden")
     cursor.execute(
         """
         INSERT INTO researcher_llm_notes (

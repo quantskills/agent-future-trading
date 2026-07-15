@@ -19,8 +19,10 @@ workflow 编排层以交易日期和主配置启动 technical、fundamental、co
 workflow 编排层将三个分析师返回的 AnalystSignal
 写入 state["analyst_signals"]，继续在内存中向下传递；
 同时物理化为：
-→ 三条 signal SQL记录，artifact_json保存完整 AnalystSignal
-→ 三份分析师报告
+→ 三条 signal SQL记录，artifact_json只保存经过共享校验的action_evidence_contract
+→ 三份只呈现同一action_evidence_contract的分析师报告
+分析师最终出口清除自由文本justification、LLM路由、内部参数、校准过程、学习检索上下文、report_sections和其他中间状态；
+Workflow取得真实ID后，每份内存信号metadata只允许action_evidence_contract和signal_record_id
         ↓
 【内存：Signal Collector】
 workflow 编排层将 state["analyst_signals"] 中的三份 AnalystSignal 传入
@@ -136,14 +138,15 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 
 | 智能体 | 传入信息 | 传出信息 |
 |---|---|---|
-| 分析师（`technical`、`fundamental`、`commodity_news`） | 交易日期、主配置；PandaAI行情、Finoview基本面文件、新闻txt中的本专业数据；当前交易日前的本专业研究学习SQL成果 | 三份 `AnalystSignal`；每份正式证据位于 `metadata.action_evidence_contract` |
-| 信号收集员 | `state["analyst_signals"]` 中的三份 `AnalystSignal`，实际提取各自 `metadata.action_evidence_contract` | 唯一 `signal_collection_contract`，写回 `state["signal_collection_contract"]` |
-| PM | state["analyst_signals"]，仅用于核对启用分析师的身份、数量及SCC来源引用；state["signal_collection_contract"]，作为PM唯一正式证据；账户、持仓、合约信息和主配置；Step4从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果 | FuturesRecommendation；其 signal_snapshot 内含 signal_collection_contract、final_action_contract、pm_six_step_trace |
-| 审计员 | 已保存的 `FuturesRecommendation`、账户状态和配置；从 `FuturesRecommendation.signal_snapshot["final_action_contract"]` 读取唯一合约 | `audit_verdict`、`audit_payload`；不修改 `final_action_contract` |
+| 分析师（`technical`、`fundamental`、`commodity_news`） | 交易日期、主配置；PandaAI行情、Finoview基本面文件、新闻txt中的本专业数据；当前交易日前的本专业研究学习SQL成果 | 三份 `AnalystSignal`；每份正式证据位于 `metadata.action_evidence_contract`。基本面/新闻无当日新增只影响本分析师；必需市场事实不可用时三个入口各自产生合法中性 AEC且不调用LLM |
+| workflow 编排层 | 三个分析师正式输出 | 共享校验后保存三份 `AnalystSignal`，取得三个真实 `signal_record_id`，再交给 Signal Collector；signal artifact和报告只保存同一份AEC，不传递或保存 prompt、原始 response、自由文本justification、LLM路由、内部参数、校准过程、学习检索上下文和中间工作状态；普通LLM调用失败不得生成默认信号，重试耗尽直接以稳定错误码终止该入口 |
+| 信号收集员 | `state["analyst_signals"]` 中已带真实ID的三份 `AnalystSignal`，实际提取并共享校验各自 `metadata.action_evidence_contract` | 唯一 `signal_collection_contract`，写回 `state["signal_collection_contract"]`；不生成信号或ID |
+| PM | state["analyst_signals"]，仅用于核对启用分析师的身份、数量及SCC来源引用；state["signal_collection_contract"]，作为PM唯一正式证据；账户、持仓、Router具体合约事实和主配置；Step4从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果 | FuturesRecommendation；其 signal_snapshot 内含 signal_collection_contract、final_action_contract、pm_six_step_trace |
+| 审计员 | 完整FAC；账户权益、保证金、保证金比例、`risk_status`；当前持仓；SCC数据质量摘要；具体合约及失效边界事实；主配置硬风控参数 | `audit_verdict`、完整 `audit_payload`；不修改 `final_action_contract` |
 | 交易员 | 审计后的 `FuturesRecommendation`、当前账户、持仓和主配置；从 `signal_snapshot["final_action_contract"]` 读取执行合约；通过行情路由读取盘中行情 | `intraday decision`、`execution_result`、`futures_transaction`；更新后的 recommendation状态和执行价格 |
 | 会计师 | 交易日期、主配置；最近已结算 `portfolio`；当日未入账 `futures_transaction`；结算行情和合约信息 | 结算后的 `portfolio`、`position`、`daily_settlement`、`ticker_daily_pnl`；已回填结算价并标记入账的 `futures_transaction` |
 | 复盘员 | Phase1–3阶段状态、分析师signal、审计及执行后的 `futures_recommendation`、`futures_transaction`、`daily_settlement`、最新 `portfolio` 和 `position` | Phase4复盘结果、复盘摘要、每日交易报告和事实归因；不产生第二次合约审计结论 |
-| 研究员 | 已完成的Phase4状态、审计及执行后的 `futures_recommendation`、当日 `futures_transaction`、`daily_settlement`、交易日期和主配置 | 交易episode、未交易机会、action-value、profile、policy/state、历史学习快照和 `researcher_learning_completed` 事件，供下一交易日分析师及PM读取 |
+| 研究员 | 已完成的Phase4和结算事实；通过正式ID链追溯的AEC、SCC、FAC、Auditor、`execution_result`、transaction、settlement | 经验证的结构化交易episode、未交易机会、action-value、profile、policy/state、历史学习快照和 `researcher_learning_completed` 事件；成果可为空，供下一交易日分析师及PM通过正式检索接口读取 |
 
 ## 三、信息传递核心载体
 
@@ -155,7 +158,9 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 
 - `action_evidence_contract` 由 `technical`、`fundamental`、`commodity_news` 分别生成，是分析师本专业的正式结构化证据。
 - `action_evidence_contract` 位于 `AnalystSignal.metadata["action_evidence_contract"]`，不是与 `AnalystSignal` 并列传递的独立对象。
-- workflow 编排层传递和保存完整 `AnalystSignal`；Signal Collector只从中提取 `action_evidence_contract` 的正式证据语义。
+- workflow 编排层以 `AnalystSignal` 作为类型载体，但分析师最终出口的 metadata 只能含 `action_evidence_contract`，Workflow保存后只追加真实 `signal_record_id`；Signal Collector发现其他metadata立即拒绝。signal SQL的自由文本理由列固定为空，artifact和分析师报告都只保存同一份经过共享校验的AEC。
+- 必需市场事实不可用时，三个分析师仍分别经自己的正式入口生成同一共享校验可接受的中性 AEC；不得调用LLM补数据，也不得伪造方向、profile、trigger、权限或市场事实。
+- 基本面或新闻没有当日新增记录不是全局市场数据不可用；对应分析师使用截止点前最近有效事实并写明时效/质量，或输出本专业合法 `no_opportunity` AEC。
 - Signal Collector必须保真消费该契约，不得改写分析师原始证据。Reviewer和Researcher通过已保存的 `FuturesRecommendation.signal_snapshot["signal_collection_contract"]` 追溯分析师证据及其来源。
 - `action_evidence_contract` 只承载分析师预测证据，不具有交易决策权限，禁止包含最终交易动作、手数、rank、资金部署和 `final_action_contract`。
 
@@ -385,6 +390,7 @@ AnalystSignal.metadata.action_evidence_contract.data_usage_summary
 → ticker
 → trading_date
 → analyst
+→ data_available（仅必需市场事实不可用时出现，类型为bool）
 → sources
 
 AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.pandaai_market（technical）
@@ -434,9 +440,7 @@ AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.panda
 → record_counts
 → feature_status
 → data_missing
-→ errors
-→ direction_hint
-→ tradeability
+→ error_count
 
 AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.finoview_news_txt（commodity_news）
 → source
@@ -446,19 +450,26 @@ AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.finov
 → pre_open_only
 → info_cutoff
 → news_cutoff
-→ file_path
-→ encoding
 → raw_block_count
 → parsed_news_count
 → selected_news_count
 → latest_news_date
 → freshness_score
 → relevance_score
-→ event_type_counts
-→ direction_counts
+
+AnalystSignal.metadata.action_evidence_contract.data_usage_summary.sources.pandaai_pre_open_reference（三个分析师的正式全局数据不可用状态）
+→ source
+→ dataset
+→ available=false
+→ used_in_signal=false
+→ pre_open_only=true
+→ info_cutoff
+→ missing_data
+→ data_quality_flags
+→ reason=pre_open_reference_price_unavailable
 ```
 
-每个来源记录必须保留来源名、数据集、可用状态、是否用于信号、盘前边界、信息截止时间及本来源实际生成的数据覆盖、时效、缺失和质量字段。分析师不得遗漏 `learning_scope`、`product_profile_evidence`、`fusion_evidence` 或 `data_usage_summary`，也不得把LLM自由文本当作正式字段补偿路径。
+每个来源记录必须保留来源名、数据集、可用状态、是否用于信号、盘前边界、信息截止时间及本来源实际生成的数据覆盖、时效、缺失和质量字段。共享校验器按上述四种正常来源及 `pandaai_pre_open_reference` 的固定身份、字段集合和基础类型拒绝未登记字段。`local_availability_audit` 只允许覆盖数量、分组、比例、状态和稳定错误计数，不得包含本机目录、源文件路径、编码、原始解析错误、内部说明、请求参数或工具原始结果。分析师不得遗漏 `learning_scope`、`product_profile_evidence`、`fusion_evidence` 或 `data_usage_summary`，也不得把LLM自由文本当作正式字段补偿路径。
 
 ### 2. `signal_collection_contract`
 
@@ -554,7 +565,6 @@ state["signal_collection_contract"].evidence_fusion
 → evidence_strength_by_analyst
 → evidence_freshness_by_analyst
 → evidence_alignment_state
-→ direction_alignment
 → cross_analyst_conflicts
 → dominant_opposing_evidence
 → confirmation_requirements
@@ -585,7 +595,7 @@ state["signal_collection_contract"].evidence_fusion.dominant_opposing_evidence[]
 → conflicts
 ```
 
-Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。`data_quality_flags` 必须由Signal Collector从AEC内真实 `data_usage_summary.sources.*` 的可用性、时效、缺失和可交易支持事实汇总，不得读取不存在的顶层补偿字段。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
+Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。`trigger_status` 只使用主方向对应分析师的触发证据；主方向为flat/mixed时固定为 `not_applicable`。`data_quality_flags` 必须由Signal Collector从AEC内真实 `data_usage_summary.sources.*` 的可用性、时效、缺失和可交易支持事实汇总，不得读取不存在的顶层补偿字段。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
 
 ### 3. `FuturesRecommendation`
 
@@ -681,7 +691,7 @@ PM Step6必须生成唯一 `FuturesRecommendation.signal_snapshot.final_action_c
 
 | 唯一落点 | 合法生产者 | 固定选择规则 | 合法消费者 |
 |---|---|---|---|
-| `final_action_contract.contract_code` | PM Step6 | 从PM已读取的合约信息与当前持仓事实中选定，与最终动作绑定 | Auditor、Trader、Reviewer、Researcher |
+| `final_action_contract.contract_code` | Router/当前持仓提供事实；PM Step6只绑定 | 已有持仓优先绑定持仓合约；新增风险只绑定Router在截止点内可见的具体合约，缺失时不得新增风险，禁止默认或猜测 | Auditor、Trader、Reviewer、Researcher |
 | `final_action_contract.setup_type` | 分析师生产原始事实；PM Step6生产最终事实 | PM只从SCC中选择与最终方向、动作及学习作用域一致的setup，不得取第一个分析师或反方向值 | Trader、Reviewer、Researcher |
 | `final_action_contract.horizon_class` | 分析师生产原始事实；PM Step6生产最终事实 | PM只从SCC中选择与最终方向、动作及Step4学习作用域一致的期限类别 | Trader、Reviewer、Researcher |
 | `final_action_contract.expected_horizon_days` | 分析师生产原始事实；PM Step6生产最终事实 | 只从与最终方向和 `horizon_class` 一致的真实AEC期限中选择，缺失时保持缺失 | Trader、Reviewer、Researcher |
@@ -705,6 +715,8 @@ FuturesRecommendation.signal_snapshot.pm_six_step_trace
 
 ##### 3.2.5 Auditor追加：审计摘要与audit_payload
 
+Workflow只向Auditor传入完整FAC、账户权益/保证金/保证金比例/`risk_status`、当前持仓、共享SCC数据质量摘要、具体合约及失效边界事实和主配置 `max_total_margin_ratio`。完整策略配置、PM学习、融合、rank、预算和sizing过程不属于Auditor输入。
+
 Auditor只允许追加：
 
 ```text
@@ -712,7 +724,7 @@ FuturesRecommendation.signal_snapshot.auditor
 FuturesRecommendation.audit_payload
 ```
 
-`signal_snapshot.auditor` 必须保留审计生产者、状态、结论、原因、时间和独立审计边界；`audit_payload` 必须保留完整策略审计事实。Auditor不得修改PM已生成的SCC、`final_action_contract`、`pm_six_step_trace`、方向、rank、预算和手数，也不得生成第二张合约。
+`signal_snapshot.auditor` 是安全摘要；`audit_payload` 必须保留原始结论、来源、边界、hard/soft reasons、contract summary和semantic state。Auditor只核对FAC结构、动作/方向/手数变化基本合法性、硬保证金上限、清算状态、具体合约、失效边界和硬数据质量错误；新增风险的硬保证金检查固定使用“账户当前组合保证金比例 + max(0, FAC目标品种保证金比例 - 当前品种保证金比例)”形成投影组合比例，不得把单品种目标比例误当成组合比例。Auditor不得修改PM已生成的SCC、`final_action_contract`、`pm_six_step_trace`、方向、rank、预算、sizing和策略参数，也不得生成第二张合约。
 
 ##### 3.2.6 Trader追加：phase2_execution完整结构
 
@@ -746,7 +758,7 @@ FuturesRecommendation.signal_snapshot.execution_result
 
 该结构必须保留结果、状态、成交数量、实际成交、实际动作、实际手数、不交易原因及分类、执行学习轨迹、警告和一致性诊断。成交与未成交都必须形成明确结果，禁止只更新顶层状态而遗漏执行事实。
 
-Trader写入执行审计时必须保留Auditor已生成的完整审计事实，并在同一 `audit_payload` 中增加执行审计字段。禁止用仅含 `independent_auditor` 摘要的执行payload覆盖并丢失原始Auditor payload。
+Trader写入执行审计时必须以Auditor已生成的完整 `audit_payload` 为基底，仅追加 `trade_contract_audit`、`execution_translation`、`execution_result` 和 `phase2_execution`。禁止用仅含 `independent_auditor` 摘要的执行payload覆盖、替换或截断原始Auditor payload。
 
 ##### 3.2.9 换约链生成与Trader执行：rollover_policy完整结构
 
@@ -963,6 +975,7 @@ audit_payload（策略审计后）
 → semantic_state
 
 audit_payload（执行后）
+→ 保留上述全部Auditor字段
 → trade_contract_audit
 → independent_auditor
 → execution_translation
@@ -2320,6 +2333,8 @@ consistency_diagnostics（execution_result）
 source（audit_payload策略审计后）
 → pm_recommendation_id
 → final_action_contract_hash_source
+→ contract_state_source
+→ data_quality_source
 
 boundary（audit_payload策略审计后）
 → auditor_does_not_modify_final_action_contract
@@ -2333,6 +2348,8 @@ contract_summary（audit_payload策略审计后）
 → current_lots
 → target_lots
 → lots_delta
+→ contract_code
+→ invalidation_present
 → requires_intraday_confirmation
 → can_execute_without_intraday_trigger
 

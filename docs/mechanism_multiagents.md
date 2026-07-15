@@ -49,6 +49,7 @@ AgentQuant 是多智能体期货交易系统。LLM 只用于分析师和研究�
 3. 合约唯一：策略交易唯一真相是 PM 签出的 `final_action_contract`。
 4. 旁路只读：PG、contract coverage、pre-backtest acceptance、system invariant、mechanism audit 只审系统链路，不生成交易动作。
 5. 研究只影响未来：Reviewer 与 Researcher 不改当天合约、成交、结算和交易权限。
+6. 内部信息隔离：智能体间只传共享校验通过的正式契约；prompt、原始response、内部推理、中间工作状态、隐藏上下文和未验证工具结果不得持久化、跨角色传递或写日志/异常。
 
 ## 3. 固定业务链
 
@@ -95,13 +96,13 @@ protocol_governor
 | `technical` | 行情、技术指标、仅限历史交易日的技术校准研究、商品差异化 profile、数据截止时间、主 `llm` 配置 | 唯一正式 `action_evidence_contract`，保真承载技术方向、trigger、invalidation、`product_profile_evidence` 和 `fusion_evidence` | 是 | 私有模型路由；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `fundamental` | 截止当前交易日可见的库存、仓单、基差、供需、产业数据，基本面校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新增数据时使用最近有效数据并标注时效，确无数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造缺失数据；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
 | `commodity_news` | 截止当前交易日可见的新闻、事件、政策、舆情，新闻校准研究、商品差异化 profile、主 `llm` 配置 | 唯一正式 `action_evidence_contract`；无当日新事件时如实表达无当前催化，确无可用数据时输出合法 `no_opportunity` 证据 | 是 | 私有模型路由；伪造新闻催化；输出手数、仓位、资金部署、`final_action_contract` | Signal Collector |
-| `signal_collector` | 三类分析师结构化预测证据 | `signal_collection_contract` | 否 | 读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
+| `signal_collector` | Workflow已保存、带真实 `signal_record_id` 且共享校验通过的三份AEC | 唯一 `signal_collection_contract` | 否 | 生成AnalystSignal或ID、读取研究库、输出 score/rank、手数、交易动作、`final_action_contract` | PM |
 | `portfolio_manager` | SCC、账户、持仓、合约信息、配置、PM 工具输出、有效学习 | 第 6 步原子返回唯一 `FuturesRecommendation`；最终合约与两个最终检查位于 `signal_snapshot` | 否 | 调 LLM、重建 SCC、Step1–5 输出中间对象、输出第二套交易计划 | Auditor；审计通过后由 workflow 编排层交给 Trader |
-| `auditor` | PM 最终合约、账户状态、配置硬保证金上限、数据质量 | `approve` / `approve_with_warning` / `block`、审计 payload、hard/soft risk reasons | 否 | 改方向、改手数、新建合约；消费研究记忆；复审 PM 学习、融合、rank、预算和 sizing | Trader |
+| `auditor` | 完整FAC；权益、保证金、保证金比例、`risk_status`；持仓；SCC数据质量摘要；具体合约及失效边界；主配置硬上限 | `approve` / `approve_with_warning` / `block`、完整审计 payload、hard/soft risk reasons | 否 | 改方向、改手数、改FAC、新建合约；消费研究记忆；复审 PM 学习、融合、rank、预算和 sizing | Trader |
 | `trader` | 审计通过的 PM 合约、盘中行情、执行配置 | 成交/未成交、触发事实、执行结果 | 否 | 读研究库或 action-value 下单、改 PM 方向、改目标手数、放宽触发 | Accountant、Reviewer |
 | `accountant` | 成交、持仓、结算价、费用、保证金率、合约乘数 | settlement、PnL、保证金、权益、持仓状态 | 否 | 用 LLM、学习、复盘改账；写交易动作 | Reviewer |
 | `reviewer` | recommendation、审计、执行结果、成交、结算、账户/持仓和阶段状态 | Phase4 事实复盘、交易日志、事实归因、研究输入材料 | 否 | 下单、调仓、写最终 action-value、重新裁决合约合法性或账户硬风险、触发 Researcher LLM | Researcher |
-| `researcher` | 复盘事实、完整 episode、未交易机会、未触发条件机会、执行结果 | 结构化研究、action-value、profile、state、分析师校准信息 | 受限可调 | 改当天合约、成交、结算、PnL、交易员权限 | 分析师、PM 记忆读取 |
+| `researcher` | Phase4与结算完成后，通过正式ID链验证的AEC、SCC、FAC、审计、执行、成交和结算事实 | 可为空的验证后结构化研究、action-value、profile、state、分析师校准信息 | 受限可调 | 保存原始模型内容；改当天合约、成交、结算、PnL、交易员权限；强制每笔交易学习 | 分析师正式校准检索、PM `decision_memory_retrieval` |
 | `protocol_governor` | 代码、配置、DB、artifact、字段语义、契约覆盖；只读取字段矩阵已登记路径 | 只由字段矩阵已登记字段组成的回测前就绪报告和每日物理结果非策略风险报告 | 否 | 读取或复查智能体内部机制；使用未登记字段或通用容器补字段；自建动作语义；生成交易动作、改手数、写业务表、评价收益为 pass/fail | 开发与回测闸门 |
 
 ## 6. 唯一事实入口总原则

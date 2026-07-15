@@ -631,7 +631,21 @@ class FactEntryBoundaryTest(unittest.TestCase):
         }
         output = audit_futures_recommendation(
             recommendation=recommendation,
-            full_config={"auditor": {"enabled": True}, "max_total_margin_ratio": 0.20},
+            hard_risk_config={"max_total_margin_ratio": 0.20},
+            account_state={
+                "account_equity": 1_000_000.0,
+                "margin_used": 0.0,
+                "margin_ratio": 0.0,
+                "risk_status": "NORMAL",
+            },
+            position_state={"current_lots": 0, "contract_code": None},
+            contract_state={
+                "contract_code": "bu2506",
+                "underlying_code": "BU",
+                "as_of_date": "2025-03-02",
+                "source": "test_contract_fact",
+            },
+            data_quality={"status": "clean", "flags": [], "source": "signal_collection_contract"},
         )
         self.assertEqual(output.audit_verdict, "approve")
         self.assertEqual(recommendation["signal_snapshot"]["final_action_contract"], contract)
@@ -652,6 +666,7 @@ class FactEntryBoundaryTest(unittest.TestCase):
             "lots_delta": -2,
             "final_action": "exit",
             "authority_type": "exit",
+            "contract_code": "rb2505",
             "target_margin_ratio_estimate": 0.0,
         }
         contract["learning_used"] = {
@@ -680,7 +695,16 @@ class FactEntryBoundaryTest(unittest.TestCase):
 
         output = audit_futures_recommendation(
             recommendation=recommendation,
-            full_config={"auditor": {"enabled": True}, "max_total_margin_ratio": 0.20},
+            hard_risk_config={"max_total_margin_ratio": 0.20},
+            account_state={
+                "account_equity": 1_000_000.0,
+                "margin_used": 20_000.0,
+                "margin_ratio": 0.02,
+                "risk_status": "NORMAL",
+            },
+            position_state={"current_lots": 2, "contract_code": "rb2505"},
+            contract_state={},
+            data_quality={"status": "clean", "flags": [], "source": "signal_collection_contract"},
         )
 
         self.assertEqual(output.audit_verdict, "approve")

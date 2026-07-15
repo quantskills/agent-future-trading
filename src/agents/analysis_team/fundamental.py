@@ -8,19 +8,17 @@ from llm.inference import agent_call
 from llm.prompt import build_futures_fundamental_prompt
 from util.db_helper import get_db
 from util.logger import logger
-from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_quality import (
     format_fundamental_summary_for_prompt,
     llm_path_label,
     parse_fundamental_factors,
     summarize_pandaai_extra_factors,
-    write_analyst_report,
 )
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_fundamental_data_usage
 from tools.agent_tools.analysis.analyst_output_finalization import (
+    build_required_market_data_unavailable_signal,
     finalize_analyst_signal,
-    persist_analyst_signal,
     resolve_analyst_llm_config,
 )
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
@@ -29,37 +27,6 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     get_product_price_behavior_profile,
 )
 from util.trading_calendar import get_previous_trading_day
-
-
-def _build_fundamental_audit_note(
-    trading_date,
-    pre_open_only: bool,
-    info_cutoff: str,
-    metadata: Optional[Dict[str, Any]],
-) -> str:
-    trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
-    audit_parts = [
-        f"pre_open_only={pre_open_only}",
-        f"info_cutoff={info_cutoff}",
-        f"fundamental_cutoff=<{trading_date_value}",
-    ]
-
-    if metadata:
-        configured = int(metadata.get("configured_indicator_count") or 0)
-        loaded = int(metadata.get("loaded_indicator_count") or 0)
-        stale = int(metadata.get("stale_indicator_count") or 0)
-        low_confidence = int(metadata.get("low_confidence_indicator_count") or 0)
-        missing_like = (
-            int(metadata.get("missing_file_count") or 0)
-            + int(metadata.get("empty_frame_count") or 0)
-            + int(metadata.get("no_data_before_count") or 0)
-        )
-        audit_parts.append(f"raw_loaded={loaded}/{configured}")
-        audit_parts.append(f"stale={stale}")
-        audit_parts.append(f"low_confidence={low_confidence}")
-        audit_parts.append(f"missing_like={missing_like}")
-
-    return f"[Audit: {'; '.join(audit_parts)}]"
 
 
 def _build_fundamental_signal_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -108,6 +75,15 @@ def _build_no_fundamental_data_signal(
     info_cutoff: str,
 ) -> AnalystSignal:
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
+    data_usage_summary = build_fundamental_data_usage(
+        ticker=ticker,
+        trading_date=trading_date,
+        fundamentals_metadata=metadata,
+        pandaai_extra_context={},
+        pre_open_only=pre_open_only,
+        info_cutoff=info_cutoff,
+    )
+    data_usage_summary["data_available"] = False
     signal = AnalystSignal(
         agent_name=agent_name,
         signal=Signal.NEUTRAL,
@@ -151,15 +127,7 @@ def _build_no_fundamental_data_signal(
         do_not_trade_reason="fundamental_data_unavailable",
         metadata={
             **_build_fundamental_signal_metadata(metadata),
-            "data_usage_summary": {
-                "ticker": ticker,
-                "trading_date": trading_date_value,
-                "pre_open_only": pre_open_only,
-                "info_cutoff": info_cutoff,
-                "data_available": False,
-                "data_gap_reason": "local_finoview_fundamental_data_unavailable",
-                "metadata": metadata or {},
-            },
+            "data_usage_summary": data_usage_summary,
             "analysis_strategy_trace": {
                 "analyst": "fundamental",
                 "data_gap_no_trade": True,
@@ -196,7 +164,6 @@ def apply_confidence_discount(
     - sparse data and mixed signals reduce confidence
     - neutral signals are capped at low confidence
     """
-    original_confidence = signal.confidence
     discount_reasons = []
 
     basis_pct = None
@@ -354,31 +321,6 @@ def apply_confidence_discount(
 
     signal.confidence = max(0.1, min(signal.confidence, 1.0))
 
-    if discount_reasons:
-        primary_reason = discount_reasons[0]
-        extra_reasons = discount_reasons[1:]
-        if extra_reasons:
-            logger.info(
-                f"{ticker}: Fundamental confidence adjusted: {original_confidence:.2f} -> "
-                f"{signal.confidence:.2f}"
-            )
-            logger.info(f"  Base reason: {primary_reason}")
-            logger.info(f"  Extra discounts: {', '.join(extra_reasons)}")
-            signal.justification += (
-                f"\n[Confidence adjustment: {original_confidence:.2f} -> {signal.confidence:.2f}; "
-                f"base reason: {primary_reason}; extra discounts: {', '.join(extra_reasons)}]"
-            )
-        else:
-            logger.info(
-                f"{ticker}: Fundamental confidence set: {signal.confidence:.2f} "
-                f"(from {original_confidence:.2f})"
-            )
-            logger.info(f"  Reason: {primary_reason}")
-            signal.justification += (
-                f"\n[Confidence adjustment: {original_confidence:.2f} -> {signal.confidence:.2f}; "
-                f"reason: {primary_reason}]"
-            )
-
     return signal
 
 
@@ -387,14 +329,23 @@ def fundamental_agent(state: FundState):
     agent_name = AgentKey.FUNDAMENTAL
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = resolve_analyst_llm_config(state)
-    portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     pre_open_only = bool(state.get("pre_open_only", False))
     info_cutoff = state.get("info_cutoff") or ("pre_open" if pre_open_only else "unspecified")
-    save_outputs = bool(state.get("save_analyst_outputs", True))
     cfg = state.get("config", {}) or {}
     full_config = state.get("full_config", cfg) or {}
+
+    if state.get("pre_open_reference_price_unavailable"):
+        signal = build_required_market_data_unavailable_signal(
+            analyst="fundamental",
+            ticker=ticker,
+            trading_date=trading_date,
+            full_config=full_config,
+            info_cutoff=info_cutoff,
+        )
+        return {"analyst_signals": [signal]}
+
+    llm_config = resolve_analyst_llm_config(state)
 
     if market_type != "china_futures":
         message = (
@@ -407,7 +358,6 @@ def fundamental_agent(state: FundState):
     product_profile_usage = build_profile_usage_contract(ticker, "fundamental", product_profile)
 
     db = get_db()
-    logger.log_agent_status(agent_name, ticker, "Analyzing fundamental data")
 
     try:
         router = Router(APISource.PANDAAI, market_type=market_type, config=full_config)
@@ -447,52 +397,9 @@ def fundamental_agent(state: FundState):
                 product_profile=product_profile,
                 product_profile_usage=product_profile_usage,
             )
-            prompt = (
-                f"{ticker} fundamental data unavailable before {trading_date}; "
-                "deterministic no_trade artifact produced.\n"
-                + format_profile_for_fundamental(ticker, product_profile)
-            )
-            report_sections = {
-                "Data Usage Summary": signal.metadata.get("data_usage_summary"),
-                "Data Quality": (fundamentals_metadata or {}),
-                "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
-                "Reason": "local_finoview_fundamental_data_unavailable",
-            }
-            if save_outputs:
-                report_path = write_analyst_report(
-                    analyst="fundamental",
-                    ticker=ticker,
-                    trading_date=trading_date,
-                    signal=signal,
-                    full_config=full_config,
-                    sections=report_sections,
-                )
-                if report_path:
-                    signal.metadata["decision_report_path"] = report_path
-                persist_analyst_signal(
-                    db,
-                    portfolio_id=portfolio_id,
-                    analyst=agent_name,
-                    ticker=ticker,
-                    prompt=prompt,
-                    signal=signal,
-                )
             logger.log_signal(agent_name, ticker, signal)
-            return {
-                "analyst_signals": [signal],
-                "analyst_outputs": [
-                    {
-                        "analyst": agent_name,
-                        "ticker": ticker,
-                        "trading_date": trading_date,
-                        "prompt": prompt,
-                        "signal": signal,
-                        "report_sections": report_sections,
-                    }
-                ],
-            }
+            return {"analyst_signals": [signal]}
 
-        logger.info(f"{ticker}: Got fundamental data from router:\n{fundamentals}")
         fundamental_context = parse_fundamental_factors(fundamentals, fundamentals_metadata, ticker)
         fundamental_context["product_profile_evidence"] = product_profile_usage
         pandaai_extra_context = {}
@@ -519,22 +426,16 @@ def fundamental_agent(state: FundState):
                 )
                 pandaai_extra_context = summarize_pandaai_extra_factors(pandaai_extra_snapshot)
                 fundamental_context["pandaai_extra_factors"] = pandaai_extra_context
-                logger.info(
-                    f"{ticker}: PandaAI extra fundamental factors | "
-                    f"direction={pandaai_extra_context.get('direction_hint')} | "
-                    f"tradeability={pandaai_extra_context.get('tradeability')} | "
-                    f"features={len(pandaai_extra_context.get('features') or [])}"
-                )
-            except Exception as exc:
+            except Exception:
                 pandaai_extra_context = {
                     "enabled": True,
                     "tradeability": "low",
                     "direction_hint": "neutral",
                     "features": [],
-                    "errors": [str(exc)],
+                    "errors": ["pandaai_extra_fundamental_context_unavailable"],
                 }
                 fundamental_context["pandaai_extra_factors"] = pandaai_extra_context
-                logger.warning(f"{ticker}: PandaAI extra fundamental factor context skipped: {exc}")
+                logger.warning(f"{ticker}: pandaai_extra_fundamental_context_unavailable")
 
         fundamentals_for_prompt = fundamentals + format_fundamental_summary_for_prompt(fundamental_context)
 
@@ -557,19 +458,19 @@ def fundamental_agent(state: FundState):
             product_profile_context=format_profile_for_fundamental(ticker, product_profile),
             learning_context_text=learning_context.get("text", ""),
         )
-        logger.info(f"{ticker}: Fundamental prompt created, length={len(prompt)}")
-    except Exception as exc:
-        logger.error(f"{ticker}: Failed to fetch futures fundamentals: {exc}")
-        import traceback
+    except Exception:
+        logger.error(f"{ticker}: fundamental_data_pipeline_failed")
+        raise RuntimeError(f"{ticker}: fundamental_data_pipeline_failed") from None
 
-        logger.error(traceback.format_exc())
-        raise RuntimeError(f"{ticker}: Failed to fetch futures fundamentals: {exc}") from exc
-
-    signal = agent_call(
-        prompt=prompt,
-        llm_config=llm_config,
-        pydantic_model=AnalystSignal,
-    )
+    try:
+        signal = agent_call(
+            prompt=prompt,
+            llm_config=llm_config,
+            pydantic_model=AnalystSignal,
+        )
+    except Exception:
+        logger.error(f"{ticker}: fundamental_inference_failed")
+        raise RuntimeError(f"{ticker}: fundamental_inference_failed") from None
 
     signal.agent_name = agent_name
     signal.horizon_class = signal.horizon_class if signal.horizon_class != "unknown" else "medium"
@@ -629,67 +530,6 @@ def fundamental_agent(state: FundState):
         product_profile=product_profile,
         product_profile_usage=product_profile_usage,
     )
-    signal.justification += "\n" + _build_fundamental_audit_note(
-        trading_date=trading_date,
-        pre_open_only=pre_open_only,
-        info_cutoff=info_cutoff,
-        metadata=fundamentals_metadata,
-    )
-    signal.justification += (
-        f"\n[Fundamental context: sector={fundamental_context.get('sector')}; "
-        f"tradeability={fundamental_context.get('tradeability')}; llm_path={llm_path}; "
-        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
-    )
-
-    signal.justification = sanitize_visible_text(signal.justification)
-
-    report_sections = {
-        "llm_path": llm_path,
-        "tradeability": fundamental_context.get("tradeability"),
-        "sector": fundamental_context.get("sector"),
-        "Sector Guidance": fundamental_context.get("sector_guidance"),
-        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
-        "Factor Groups": fundamental_context.get("factor_groups"),
-        "Factor Group Counts": fundamental_context.get("factor_group_counts"),
-        "Data Quality": fundamental_context.get("data_quality"),
-        "Data Usage Summary": data_usage_summary,
-        "Basis": fundamental_context.get("basis") or "unavailable",
-        "PandaAI Extra Factors": fundamental_context.get("pandaai_extra_factors") or "disabled_or_unavailable",
-        "Risk Flags": fundamental_context.get("risk_flags"),
-    }
-    if save_outputs:
-        report_path = write_analyst_report(
-            analyst="fundamental",
-            ticker=ticker,
-            trading_date=trading_date,
-            signal=signal,
-            full_config=full_config,
-            sections=report_sections,
-        )
-        if report_path:
-            signal.metadata["decision_report_path"] = report_path
-
     logger.log_signal(agent_name, ticker, signal)
-    if save_outputs:
-        persist_analyst_signal(
-            db,
-            portfolio_id=portfolio_id,
-            analyst=agent_name,
-            ticker=ticker,
-            prompt=prompt,
-            signal=signal,
-        )
 
-    return {
-        "analyst_signals": [signal],
-        "analyst_outputs": [
-            {
-                "analyst": agent_name,
-                "ticker": ticker,
-                "trading_date": trading_date,
-                "prompt": prompt,
-                "signal": signal,
-                "report_sections": report_sections,
-            }
-        ],
-    }
+    return {"analyst_signals": [signal]}

@@ -103,9 +103,9 @@ def prefetch_local_daily_data(config: Dict[str, Any], tickers: Iterable[str]) ->
                 try:
                     read_finoview_feather_cached(path)
                     stats["finoview_files_loaded"] += 1
-                except Exception as exc:
+                except Exception:
                     stats["finoview_files_failed"] += 1
-                    logger.warning(f"Finoview cache prefetch failed for {path}: {exc}")
+                    logger.warning("analyst_finoview_cache_prefetch_failed")
     news_cfg = factor_cfg.get("news") or {}
     if bool(runtime_cfg.get("prefetch_news_txt", True)) and bool(news_cfg.get("enabled", True)):
         news_dir = _resolve_project_path(news_cfg.get("data_dir"), "data/News_data/Future_news")
@@ -116,9 +116,9 @@ def prefetch_local_daily_data(config: Dict[str, Any], tickers: Iterable[str]) ->
             try:
                 read_text_cached(path)
                 stats["news_files_loaded"] += 1
-            except Exception as exc:
+            except Exception:
                 stats["news_files_failed"] += 1
-                logger.warning(f"News cache prefetch failed for {path}: {exc}")
+                logger.warning("analyst_news_cache_prefetch_failed")
     return stats
 
 
@@ -140,9 +140,9 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
             try:
                 router.get_daily_candles_df(ticker=ticker, trading_date=trading_date)
                 stats["market_requests"] += 1
-            except Exception as exc:
+            except Exception:
                 stats["market_failed"] += 1
-                logger.warning(f"{ticker}: PandaAI market cache prefetch failed: {exc}")
+                logger.warning("analyst_market_cache_prefetch_failed")
     elif bool(runtime_cfg.get("prefetch_pandaai_market", False)):
         stats["market_skipped"] = "router_missing_get_daily_candles_df"
     extra_cfg = config.get("pandaai_extra_data", {}) or {}
@@ -159,8 +159,8 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
                     trading_date=reference_date,
                     underlying_code=ticker_list[0] if ticker_list else None,
                 )
-        except Exception as exc:
-            logger.warning(f"PandaAI extra cache prefetch skipped: reference date unavailable: {exc}")
+        except Exception:
+            logger.warning("analyst_extra_cache_reference_date_unavailable")
             return stats
         features = extra_cfg.get("features", {}) or {}
         lookback_days = int(extra_cfg.get("lookback_days", 5))
@@ -173,9 +173,9 @@ def prefetch_pandaai_daily_data(router: Any, config: Dict[str, Any], tickers: It
                     features=features,
                 )
                 stats["extra_requests"] += 1
-            except Exception as exc:
+            except Exception:
                 stats["extra_failed"] += 1
-                logger.warning(f"{ticker}: PandaAI extra cache prefetch failed: {exc}")
+                logger.warning("analyst_extra_cache_prefetch_failed")
     elif bool(runtime_cfg.get("prefetch_pandaai_extra", False)) and bool(extra_cfg.get("enabled", False)):
         stats["extra_skipped"] = "router_missing_get_pandaai_futures_extra_snapshot"
     return stats
@@ -255,6 +255,34 @@ def build_fundamental_data_usage(
     metadata = fundamentals_metadata or {}
     extra = pandaai_extra_context or {}
     availability_audit = metadata.get("local_finoview_availability_audit") or {}
+    formal_availability_fields = (
+        "runtime_data_boundary",
+        "index_declared_count",
+        "local_feather_count",
+        "catalog_entry_count",
+        "known_catalog_factor_count",
+        "required_groups",
+        "covered_required_groups",
+        "missing_required_groups",
+        "missing_feather_from_index_map_count",
+        "local_feather_not_in_index_map_count",
+        "catalog_missing_or_unknown_count",
+        "local_vs_index_ratio",
+        "known_catalog_ratio",
+        "coverage_status",
+        "supports_fundamental_trade_setup",
+        "no_future_data",
+        "not_product_rule",
+    )
+    formal_availability_audit = {
+        field: availability_audit[field]
+        for field in formal_availability_fields
+        if field in availability_audit
+    }
+    parse_errors = availability_audit.get("index_map_parse_errors")
+    formal_availability_audit["index_map_parse_error_count"] = (
+        len(parse_errors) if isinstance(parse_errors, dict) else 0
+    )
     finoview_available = int(metadata.get("loaded_indicator_count") or 0) > 0
     extra_features = extra.get("features") if isinstance(extra.get("features"), list) else []
     return {
@@ -279,7 +307,7 @@ def build_fundamental_data_usage(
                 "factor_groups": metadata.get("indicator_role_counts") or {},
                 "freshness_score": metadata.get("factor_freshness_score"),
                 "no_lookahead_status": metadata.get("no_lookahead_status", "unchecked"),
-                "local_availability_audit": availability_audit,
+                "local_availability_audit": formal_availability_audit,
                 "coverage_status": (
                     availability_audit.get("coverage_status")
                     if isinstance(availability_audit, dict)
@@ -309,9 +337,7 @@ def build_fundamental_data_usage(
                 "record_counts": extra.get("record_counts") or {},
                 "feature_status": extra.get("feature_status") or {},
                 "data_missing": extra.get("data_missing") or [],
-                "errors": extra.get("errors") or [],
-                "direction_hint": extra.get("direction_hint"),
-                "tradeability": extra.get("tradeability"),
+                "error_count": len(extra.get("errors") or []),
             },
         },
     }
@@ -341,16 +367,12 @@ def build_news_data_usage(
                 "pre_open_only": bool(pre_open_only),
                 "info_cutoff": info_cutoff,
                 "news_cutoff": metadata.get("news_cutoff"),
-                "file_path": metadata.get("file_path"),
-                "encoding": metadata.get("encoding"),
                 "raw_block_count": int(metadata.get("raw_block_count") or 0),
                 "parsed_news_count": int(metadata.get("parsed_news_count") or 0),
                 "selected_news_count": int(metadata.get("selected_news_count") or 0),
                 "latest_news_date": metadata.get("latest_news_date"),
                 "freshness_score": context.get("freshness_score"),
                 "relevance_score": context.get("relevance_score"),
-                "event_type_counts": context.get("event_type_counts") or {},
-                "direction_counts": context.get("direction_counts") or {},
             }
         },
     }

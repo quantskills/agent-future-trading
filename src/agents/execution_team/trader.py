@@ -484,6 +484,19 @@ def _record_phase2_state(
         audit["intraday_selection"] = selection.to_audit_payload()
 
 
+def _record_phase2_failure(db, config_id: str, trading_date_value: str) -> None:
+    """Persist only the stable Phase2 boundary code."""
+    code = "phase2_execution_failed"
+    db.complete_trading_day_phase(
+        config_id,
+        trading_date_value,
+        TradingPhase.PHASE2,
+        "failed",
+        code,
+    )
+    logger.error(code)
+
+
 def _record_phase2_order_plan(
     snapshot: Dict[str, Any],
     *,
@@ -664,7 +677,10 @@ def _mark_intraday_non_execution(
             RecommendationStatus.PENDING,
             warning_message=selection.reason if selection is not None else "intraday_waiting_for_trigger",
             signal_snapshot=audit_snapshot,
-            audit_payload=build_audit_payload(audit_snapshot),
+            audit_payload=build_audit_payload(
+                audit_snapshot,
+                original_audit_payload=recommendation.get("audit_payload"),
+            ),
         )
         return
 
@@ -717,7 +733,10 @@ def _mark_intraday_non_execution(
         RecommendationStatus.SKIPPED,
         warning_message=no_trade_reason,
         signal_snapshot=audit_snapshot,
-        audit_payload=build_audit_payload(audit_snapshot),
+        audit_payload=build_audit_payload(
+            audit_snapshot,
+            original_audit_payload=recommendation.get("audit_payload"),
+        ),
     )
 
 
@@ -1694,7 +1713,10 @@ def _process_strategy_recommendations(
                 RecommendationStatus.SKIPPED,
                 warning_message="Independent Auditor did not approve this PM contract.",
                 signal_snapshot=audit_snapshot,
-                audit_payload=build_audit_payload(audit_snapshot),
+                audit_payload=build_audit_payload(
+                    audit_snapshot,
+                    original_audit_payload=recommendation.get("audit_payload"),
+                ),
             )
             logger.warning(
                 f"Strategy execution skipped {ticker}: independent Auditor verdict not approved "
@@ -1743,7 +1765,10 @@ def _process_strategy_recommendations(
                 RecommendationStatus.SKIPPED,
                 warning_message=morning_price_context.warning_message,
                 signal_snapshot=audit_snapshot,
-                audit_payload=build_audit_payload(audit_snapshot),
+                audit_payload=build_audit_payload(
+                    audit_snapshot,
+                    original_audit_payload=recommendation.get("audit_payload"),
+                ),
             )
             logger.warning(
                 f"Open-order skipped {ticker}: no executable basis is available. "
@@ -1894,7 +1919,10 @@ def _process_strategy_recommendations(
             selection=intraday_selection,
         )
         executable_recommendation["signal_snapshot"] = audit_snapshot
-        executable_recommendation["audit_payload"] = build_audit_payload(audit_snapshot)
+        executable_recommendation["audit_payload"] = build_audit_payload(
+            audit_snapshot,
+            original_audit_payload=recommendation.get("audit_payload"),
+        )
         portfolio = execution_engine.execute_recommendation(
             recommendation_id=recommendation["id"],
             recommendation=executable_recommendation,
@@ -1930,7 +1958,10 @@ def _process_strategy_recommendations(
                 morning_price_context=execution_price_context,
             )
             follow_up_recommendation["signal_snapshot"] = audit_snapshot
-            follow_up_recommendation["audit_payload"] = build_audit_payload(audit_snapshot)
+            follow_up_recommendation["audit_payload"] = build_audit_payload(
+                audit_snapshot,
+                original_audit_payload=recommendation.get("audit_payload"),
+            )
             portfolio = execution_engine.execute_recommendation(
                 recommendation_id=recommendation["id"],
                 recommendation=follow_up_recommendation,
@@ -2120,10 +2151,9 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
             f"transactions={len(phase2_transactions)}"
         )
         _log_phase2_summary("Phase2 total execution summary", total_summary)
-    except Exception as exc:
-        db.complete_trading_day_phase(config_id, trading_date_value, TradingPhase.PHASE2, "failed", str(exc))
-        logger.error(f"Phase2 trader execution failed: {exc}")
-        raise
+    except Exception:
+        _record_phase2_failure(db, config_id, trading_date_value)
+        raise RuntimeError("phase2_execution_failed") from None
 
 
 def main(argv: Optional[List[str]] = None) -> None:

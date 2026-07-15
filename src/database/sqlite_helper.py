@@ -1412,7 +1412,7 @@ class SQLiteDB(BaseDB):
             if conn:
                 conn.close()
         
-    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: AnalystSignal) -> Optional[str]:
+    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, signal: AnalystSignal) -> Optional[str]:
         """Save the final signal for one portfolio/ticker/analyst scope."""
         conn = None
         try:
@@ -1430,14 +1430,6 @@ class SQLiteDB(BaseDB):
                 self._normalize_trading_day_value(portfolio_row["trading_date"])
                 if portfolio_row and "trading_date" in portfolio_row.keys()
                 else None
-            )
-            prompt_ext = externalize_text_for_db(
-                prompt,
-                category="signal",
-                record_id=signal_id,
-                field_name="llm_prompt",
-                config_id=config_id,
-                trading_date=trading_date,
             )
             artifact_payload = build_signal_artifact_payload(signal)
             artifact_ext = externalize_json_for_db(
@@ -1471,18 +1463,18 @@ class SQLiteDB(BaseDB):
                 portfolio_id,
                 datetime.now(timezone.utc).isoformat(), # UTC time 
                 ticker_key,
-                prompt_ext.inline_value,
+                "",
                 analyst_key,
                 str(signal.signal),
-                signal.justification,
+                "",
                 artifact_ext.inline_value,
                 float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 str(getattr(signal, "horizon_class", "unknown") or "unknown"),
                 str(getattr(signal, "setup_type", "unknown") or "unknown"),
-                prompt_ext.artifact_path,
-                prompt_ext.sha256,
-                prompt_ext.size_bytes,
-                prompt_ext.summary_json,
+                None,
+                None,
+                0,
+                None,
                 artifact_ext.artifact_path,
                 artifact_ext.sha256,
                 artifact_ext.size_bytes,
@@ -1491,8 +1483,8 @@ class SQLiteDB(BaseDB):
             
             conn.commit()
             return signal_id
-        except Exception as e:
-            logger.error(f"Error saving signal: {e}")
+        except Exception:
+            logger.error("signal_persistence_failed")
             return None
         finally:
             if conn:
@@ -1904,9 +1896,11 @@ class SQLiteDB(BaseDB):
 
     def save_futures_transaction(self, transaction: Any) -> Optional[str]:
         """Save a futures transaction under the new execution schema."""
+        transaction_dict = self._model_to_dict(transaction)
+        if transaction_dict.get("llm_prompt") not in (None, ""):
+            raise ValueError("transaction_raw_prompt_persistence_forbidden")
         conn = None
         try:
-            transaction_dict = self._model_to_dict(transaction)
             validate_execution_artifact_boundary(transaction_dict.get("audit_payload") or {})
             transaction_id = transaction_dict.get("id") or str(uuid.uuid4())
             created_at = transaction_dict.get("created_at") or datetime.now(timezone.utc).isoformat()
@@ -1938,15 +1932,6 @@ class SQLiteDB(BaseDB):
                 config_id=config_id,
                 trading_date=trading_date,
             )
-            prompt_ext = externalize_text_for_db(
-                transaction_dict.get("llm_prompt"),
-                category="transaction",
-                record_id=transaction_id,
-                field_name="llm_prompt",
-                config_id=config_id,
-                trading_date=trading_date,
-            )
-
             cursor.execute(
                 '''
                 INSERT INTO futures_transactions (
@@ -2003,11 +1988,11 @@ class SQLiteDB(BaseDB):
                     audit_ext.summary_json,
                     transaction_dict.get("warning_message"),
                     transaction_dict.get("justification"),
-                    prompt_ext.inline_value,
-                    prompt_ext.artifact_path,
-                    prompt_ext.sha256,
-                    prompt_ext.size_bytes,
-                    prompt_ext.summary_json,
+                    "",
+                    None,
+                    None,
+                    0,
+                    None,
                     1 if transaction_dict.get("booked_in_settlement", False) else 0,
                     created_at,
                 ),
@@ -2282,8 +2267,8 @@ class SQLiteDB(BaseDB):
             for row in cursor.fetchall():
                 memory.append(f"{row['trading_date']} {row['action']} {row['lots']}@{row['execution_price']}")
             return memory
-        except Exception as e:
-            logger.warning(f"No futures transaction memory found for {ticker}: {e}")
+        except Exception:
+            logger.warning("futures_transaction_memory_unavailable")
             return []
         finally:
             if conn:
@@ -2316,8 +2301,8 @@ class SQLiteDB(BaseDB):
                 (config_id, ticker, trading_day_value, trading_day_value, f"-{lookback_days} days"),
             )
             return [dict(row) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"Error getting signal history for {ticker}: {e}")
+        except Exception:
+            logger.error("signal_history_unavailable")
             return []
         finally:
             if conn:
@@ -2362,8 +2347,8 @@ class SQLiteDB(BaseDB):
                 "win_rate": (win_days / trade_days) if trade_days > 0 else 0.0,
                 "avg_daily_pnl": (cumulative_pnl / trade_days) if trade_days > 0 else 0.0,
             }
-        except Exception as e:
-            logger.error(f"Error getting ticker performance for {ticker}: {e}")
+        except Exception:
+            logger.error("ticker_performance_unavailable")
             return {
                 "cumulative_pnl": 0.0,
                 "trade_days": 0,
@@ -2412,8 +2397,8 @@ class SQLiteDB(BaseDB):
             summary["side"] = str(side).lower()
             summary["ticker"] = ticker.upper()
             return summary
-        except Exception as e:
-            logger.error(f"Error getting trade-pair performance for {ticker} {side}: {e}")
+        except Exception:
+            logger.error("trade_pair_performance_unavailable")
             return {
                 "ticker": ticker.upper(),
                 "side": str(side).lower(),
@@ -2528,8 +2513,8 @@ class SQLiteDB(BaseDB):
             summary["cutoff_trading_date"] = trading_day_value
             summary["include_rollover"] = bool(include_rollover)
             return summary
-        except Exception as e:
-            logger.error(f"Error getting conditional trade performance for {ticker} {side}: {e}")
+        except Exception:
+            logger.error("conditional_trade_performance_unavailable")
             return {
                 "ticker": ticker.upper(),
                 "side": str(side).lower(),
@@ -2569,8 +2554,8 @@ class SQLiteDB(BaseDB):
             )
             conn.commit()
             return count
-        except Exception as e:
-            logger.error(f"Error refreshing strategy memory: {e}")
+        except Exception:
+            logger.error("strategy_memory_refresh_failed")
             return 0
         finally:
             if conn:
@@ -2649,8 +2634,8 @@ class SQLiteDB(BaseDB):
                 "side_memory": side_row,
                 "records": rows,
             }
-        except Exception as e:
-            logger.error(f"Error getting strategy memory for {ticker} {side}: {e}")
+        except Exception:
+            logger.error("strategy_memory_unavailable")
             return {
                 "enabled": False,
                 "ticker": ticker.upper(),
@@ -2659,7 +2644,7 @@ class SQLiteDB(BaseDB):
                 "combo": None,
                 "side_memory": None,
                 "records": [],
-                "error": str(e),
+                "error": "strategy_memory_unavailable",
             }
         finally:
             if conn:
@@ -2717,8 +2702,8 @@ class SQLiteDB(BaseDB):
                 item["previous_value"] = self._deserialize_json(item.get("previous_value_json"))
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Config learning overlay unavailable: {e}")
+        except Exception:
+            logger.warning("config_learning_overlay_unavailable")
             return []
         finally:
             if conn:
@@ -2765,8 +2750,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Signal-template performance unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("signal_template_performance_unavailable")
             return []
         finally:
             if conn:
@@ -2837,8 +2822,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Adaptive policy state unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("adaptive_policy_state_unavailable")
             return []
         finally:
             if conn:
@@ -2921,8 +2906,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Alpha setup profiles unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("alpha_setup_profiles_unavailable")
             return []
         finally:
             if conn:
@@ -3105,8 +3090,8 @@ class SQLiteDB(BaseDB):
                 self._promote_action_value_payload_fields(item)
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Alpha setup action values unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("alpha_setup_action_values_unavailable")
             return []
         finally:
             if conn:
@@ -3164,8 +3149,8 @@ class SQLiteDB(BaseDB):
                 item["rollback_value"] = self._deserialize_json(item.get("rollback_value_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Provisional policy state unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("provisional_policy_state_unavailable")
             return []
         finally:
             if conn:
@@ -3251,8 +3236,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Analyst learning digest unavailable for {ticker}/{analyst}: {e}")
+        except Exception:
+            logger.warning("analyst_learning_digest_unavailable")
             return []
         finally:
             if conn:
@@ -3319,8 +3304,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_external_json(item, "payload")
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Trade episode memory unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("trade_episode_memory_unavailable")
             return []
         finally:
             if conn:
@@ -3667,8 +3652,8 @@ class SQLiteDB(BaseDB):
                 )
             )
             return result[: int(limit)]
-        except Exception as e:
-            logger.warning(f"Similar alpha setup action-value retrieval unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("similar_alpha_setup_action_value_unavailable")
             return []
         finally:
             if conn:
@@ -3740,8 +3725,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_external_json(item, "payload")
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"No-trade opportunity memory unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("no_trade_opportunity_memory_unavailable")
             return []
         finally:
             if conn:
@@ -3809,8 +3794,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_external_json(item, "payload")
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Exploratory hypotheses unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("exploratory_hypotheses_unavailable")
             return []
         finally:
             if conn:
@@ -3857,8 +3842,8 @@ class SQLiteDB(BaseDB):
                 item["payload"] = self._deserialize_json(item.get("payload_json")) or {}
                 rows.append(item)
             return rows
-        except Exception as e:
-            logger.warning(f"Analyst performance unavailable for {ticker}: {e}")
+        except Exception:
+            logger.warning("analyst_performance_unavailable")
             return []
         finally:
             if conn:
@@ -3914,8 +3899,8 @@ class SQLiteDB(BaseDB):
             )
             conn.commit()
             return True
-        except Exception as e:
-            logger.warning(f"Learning context budget was not persisted: {e}")
+        except Exception:
+            logger.warning("learning_context_budget_persistence_failed")
             return False
         finally:
             if conn:

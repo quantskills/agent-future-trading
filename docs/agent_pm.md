@@ -434,7 +434,7 @@ PM 使用矩阵登记的价格字段：
 - `prev_close_price`。
 - Phase1 价格只用于计划测算，不代表真实成交价。
 
-PM 使用矩阵登记的 `contract_code`、`contract_multiplier` 和 `margin_rate`，主力合约信息只作为合约选择输入，不新增 contract context 字段。
+PM 使用矩阵登记的 `contract_code`、`contract_multiplier` 和 `margin_rate`。已有持仓的 `contract_code` 只来自持仓事实；新增风险的 `contract_code` 只来自Router在盘前截止点内可见的具体合约事实。PM只在Step6绑定该事实，不默认、不猜测、不以主品种代码代替；缺具体合约时不得新增风险。静态合约缓存只补充乘数、保证金率等已知属性，不生产具体合约代码，也不新增 contract context 字段。
 
 合约信息读取工具：`FuturesContractInfoCache.get_contract_info`。
 

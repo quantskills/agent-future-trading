@@ -50,7 +50,7 @@ class BaseDB(ABC):
         pass
 
     @abstractmethod
-    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: dict) -> str:
+    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, signal: dict) -> str:
         pass
 
     # ========== Futures settlement interfaces ==========

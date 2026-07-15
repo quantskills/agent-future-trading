@@ -4,6 +4,7 @@ import math
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
+from typing import Any
 from graph.constants import AgentKey
 from graph.schema import (
     FundState,
@@ -1194,10 +1195,10 @@ def _require_step6_signal_collection_contract(signal_collection_contract: object
     except ValueError as exc:
         error = str(exc)
         if "invalid_decision_boundary" in error:
-            raise ValueError("pm_step6_invalid_signal_collection_contract_boundary") from exc
+            raise ValueError("pm_step6_invalid_signal_collection_contract_boundary") from None
         if "invalid_source_agent" in error:
-            raise ValueError("pm_step6_invalid_signal_collection_contract_source_agent") from exc
-        raise ValueError(f"pm_step6_invalid_signal_collection_contract:{error}") from exc
+            raise ValueError("pm_step6_invalid_signal_collection_contract_source_agent") from None
+        raise ValueError("pm_step6_invalid_signal_collection_contract") from None
     return contract
 
 
@@ -4513,13 +4514,13 @@ def _retrieve_lifecycle_pm_memory(
                 trading_date=trading_date,
                 limit=12,
             )
-        except Exception as exc:
+        except Exception:
             details.append({
                 "side": side,
                 "lane": lane,
                 "memory_side_role": requirement.get("memory_side_role"),
                 "row_count": 0,
-                "error": str(exc),
+                "error": "pm_memory_retrieval_failed",
             })
             continue
         action_values = memory_result.get("action_values") or []
@@ -5491,166 +5492,6 @@ def _contract_safe_learning_to_position_summary(trace: dict | None) -> dict:
     }
 
 
-def _build_active_opportunity_audit(
-    *,
-    analyst_signals: list,
-    plan_snapshot: dict | None,
-    decision_action: str,
-    decision_lots: int,
-    final_entry_authority: dict | None,
-    opportunity_scorecard: dict | None,
-) -> dict:
-    """Summarize active opportunities without changing trading decisions."""
-
-    scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
-    final_entry_authority = final_entry_authority if isinstance(final_entry_authority, dict) else {}
-    plan_snapshot = plan_snapshot if isinstance(plan_snapshot, dict) else {}
-    controls = plan_snapshot.get("strategy_controls") if isinstance(plan_snapshot.get("strategy_controls"), dict) else {}
-    diagnostics = controls.get("diagnostics") if isinstance(controls.get("diagnostics"), dict) else {}
-    preferred_side = str(scorecard.get("preferred_side") or "flat")
-    preferred_card = (
-        scorecard.get(preferred_side)
-        if preferred_side in {"long", "short"} and isinstance(scorecard.get(preferred_side), dict)
-        else {}
-    )
-    analyst_candidates = []
-    conditional_monitor_candidates = []
-    watchlist_items = []
-    conflict_items = []
-    for signal in analyst_signals or []:
-        agent = _normalize_agent_name(str(getattr(signal, "agent_name", "") or "unknown"))
-        state = _signal_opportunity_state(signal)
-        contract_fields = _derive_signal_contract_fields(signal, agent)
-        trigger = str(contract_fields.get("entry_trigger") or "")
-        neutral_trigger = str(getattr(signal, "neutral_trigger_condition", "") or "")
-        counterfactual_side = str(getattr(signal, "counterfactual_side", "flat") or "flat").lower()
-        priority = str(getattr(signal, "neutral_watchlist_priority", "none") or "none").lower()
-        trigger_valid = _canonical_trigger_valid(signal)
-        invalidation_present = _canonical_invalidation_present(signal)
-        candidate = {
-            "analyst": agent,
-            "signal": _signal_to_text(getattr(signal, "signal", None)),
-            "evidence_role": str(contract_fields.get("evidence_role") or getattr(signal, "evidence_role", "") or ""),
-            "opportunity_state": state,
-            "opportunity_type": str(getattr(signal, "opportunity_type", "unknown") or "unknown"),
-            "trigger_valid": trigger_valid,
-            "invalidation_present": invalidation_present,
-            "entry_trigger": trigger,
-            "neutral_trigger_condition": neutral_trigger,
-            "counterfactual_side": counterfactual_side if counterfactual_side in {"long", "short", "flat"} else "flat",
-            "watchlist_priority": priority if priority in {"none", "low", "medium", "high"} else "none",
-            "setup_quality_ok": False,
-            "conditional_monitor_candidate": False,
-            "learning_scope": (
-                (getattr(signal, "metadata", {}) or {}).get("learning_scope")
-                if isinstance(getattr(signal, "metadata", {}), dict)
-                else None
-            ),
-        }
-        metadata = getattr(signal, "metadata", {}) or {}
-        if isinstance(metadata, dict):
-            action_contract = metadata.get("action_evidence_contract") if isinstance(metadata.get("action_evidence_contract"), dict) else {}
-            if action_contract:
-                candidate["action_evidence_contract"] = action_contract
-                candidate["learning_scope"] = action_contract.get("learning_scope") or candidate["learning_scope"]
-                candidate["setup_quality_ok"] = bool(action_contract.get("setup_quality_ok"))
-        clean_conditional_monitor = bool(
-            state == "watch_for_trigger"
-            and candidate["setup_quality_ok"]
-            and not candidate["trigger_valid"]
-            and invalidation_present
-            and trigger
-            and candidate["signal"].lower() in {"bullish", "bearish"}
-        )
-        candidate["conditional_monitor_candidate"] = clean_conditional_monitor
-        if state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"} or candidate["trigger_valid"]:
-            analyst_candidates.append(candidate)
-        elif clean_conditional_monitor:
-            conditional_monitor_candidates.append(candidate)
-        if neutral_trigger or candidate["watchlist_priority"] in {"medium", "high"} or candidate["counterfactual_side"] in {"long", "short"}:
-            watchlist_items.append(candidate)
-        conflicts = getattr(signal, "current_evidence_conflict", None) or []
-        if conflicts:
-            conflict_items.append({
-                "analyst": agent,
-                "conflicts": [str(item) for item in conflicts][:5],
-            })
-
-    authority_type = str(final_entry_authority.get("authority_type") or "not_applicable")
-    decision_lands_position = bool(
-        str(decision_action or "").lower() in {"open_long", "open_short", "add_long", "add_short"}
-        and int(decision_lots or 0) > 0
-    )
-    high_quality_present = bool(
-        analyst_candidates
-        or conditional_monitor_candidates
-        or str(preferred_card.get("final_state") or "") in {"probe_candidate", "tradeable_candidate"}
-        or diagnostics.get("mature_alpha_release")
-        or diagnostics.get("fast_candidate_alpha_probe")
-    )
-    no_trade_reason = (
-        (controls.get("reasons") or [""])[0]
-        if controls
-        else final_entry_authority.get("authority_decision")
-        or final_entry_authority.get("decision")
-        or ""
-    )
-    learning_follow_up = []
-    if high_quality_present and not decision_lands_position:
-        learning_follow_up.append("high_quality_or_triggered_candidate_not_landed")
-    if watchlist_items:
-        learning_follow_up.append("track_watchlist_or_counterfactual_forward_outcome")
-    if conflict_items:
-        learning_follow_up.append("review_conflict_effect_on_entry_or_exit")
-    if authority_type in {"watch_for_trigger", "exploration_probe"}:
-        learning_follow_up.append("verify_authority_type_outcome_after_settlement")
-
-    return {
-        "version": "active_opportunity_audit_v1",
-        "purpose": "visibility_only_not_position_rule",
-        "decision": {
-            "action": str(decision_action or "hold"),
-            "lots": int(decision_lots or 0),
-            "lands_position": decision_lands_position,
-            "authority_type": authority_type,
-            "reason": str(no_trade_reason or ""),
-        },
-        "opportunity": {
-            "preferred_side": preferred_side,
-            "preferred_state": str(preferred_card.get("final_state") or "unknown"),
-            "preferred_score": preferred_card.get("score"),
-            "opportunity_score": preferred_card.get("opportunity_score", preferred_card.get("score")),
-            "opportunity_score_components": preferred_card.get("opportunity_score_components") or {},
-            "side_priority": preferred_card.get("side_priority"),
-            "ticker_side_priority": preferred_card.get("ticker_side_priority"),
-            "capital_allocation_reason": preferred_card.get("capital_allocation_reason"),
-            "learning_adjustment_summary": preferred_card.get("learning_adjustment_summary") or {},
-            "analyst_candidate_count": len(analyst_candidates),
-            "conditional_monitor_candidate_count": len(conditional_monitor_candidates),
-            "watchlist_or_counterfactual_count": len(watchlist_items),
-            "conflict_count": len(conflict_items),
-            "high_quality_present": high_quality_present,
-        },
-        "analyst_candidates": analyst_candidates[:8],
-        "conditional_monitor_candidates": conditional_monitor_candidates[:8],
-        "watchlist_or_counterfactual": watchlist_items[:8],
-        "conflicts": conflict_items[:8],
-        "research_follow_up": learning_follow_up,
-        "research_contract": {
-            "phase4_should_classify": [
-                "missed_opportunity",
-                "reasonable_avoidance",
-                "correct_probe",
-                "bad_probe",
-                "late_exit",
-                "protected_winner",
-            ],
-            "next_round_use": "analyst_checks_pm_action_value_trader_timing",
-            "no_current_decision_impact": True,
-        },
-    }
-
-
 def _build_pm_landing_consistency_audit(
     *,
     ticker: str,
@@ -6020,9 +5861,13 @@ def _drawdown_hard_streak_state(
             "consecutive_hard_days": hard_streak,
             "latest_hard_date": latest_hard_date,
         }
-    except Exception as exc:
+    except Exception:
         pass
-        return {"consecutive_hard_days": 0, "latest_hard_date": None, "error": str(exc)}
+        return {
+            "consecutive_hard_days": 0,
+            "latest_hard_date": None,
+            "error": "drawdown_state_query_failed",
+        }
     finally:
         if conn:
             conn.close()
@@ -6193,14 +6038,14 @@ def _drawdown_recovery_probe_history(
             "consecutive_profit_days": consecutive_profit_days,
             "recent_probe_days": ordered_probe_days[-5:],
         }
-    except Exception as exc:
+    except Exception:
         pass
         return {
             "probe_days": 0,
             "loss_count": 0,
             "consecutive_profit_days": 0,
             "cooldown_active": False,
-            "error": str(exc),
+            "error": "drawdown_probe_history_query_failed",
         }
     finally:
         if conn:
@@ -9410,6 +9255,16 @@ def _apply_holding_rebalance_control(
     return position_ratio, reasons, notes, diagnostics
 
 
+def _resolve_phase1_contract_code(existing_position: Any, morning_price_context: Any) -> str | None:
+    """Bind the actual held contract, then the cutoff-visible Router contract."""
+    current_lots = int(getattr(existing_position, "shares", 0) or 0) if existing_position is not None else 0
+    if current_lots != 0:
+        held_contract = str(getattr(existing_position, "contract_code", "") or "").strip().upper()
+        return held_contract or None
+    visible_contract = str(getattr(morning_price_context, "contract_code", "") or "").strip().upper()
+    return visible_contract or None
+
+
 def _run_pm_six_step_decision(state: FundState):
     """Run PM steps 1-4 and return the single mutable memory state."""
     agent_name = AgentKey.PORTFOLIO
@@ -9443,10 +9298,10 @@ def _run_pm_six_step_decision(state: FundState):
     except ValueError as exc:
         error = str(exc)
         if "invalid_decision_boundary" in error:
-            raise RuntimeError("pm_invalid_signal_collection_contract_boundary") from exc
+            raise RuntimeError("pm_invalid_signal_collection_contract_boundary") from None
         if "invalid_source_agent" in error:
-            raise RuntimeError("pm_invalid_signal_collection_contract_source_agent") from exc
-        raise RuntimeError(f"pm_invalid_signal_collection_contract:{error}") from exc
+            raise RuntimeError("pm_invalid_signal_collection_contract_source_agent") from None
+        raise RuntimeError("pm_invalid_signal_collection_contract") from None
     analyst_signals = build_pm_evidence_signals_from_scc(signal_collection_contract)
 
     cfg = state.get("config", {})
@@ -9541,6 +9396,8 @@ def _run_pm_six_step_decision(state: FundState):
         )
 
     multiplier = contract_info['contract_multiplier']
+    existing_position = portfolio.positions.get(ticker)
+    contract_code = _resolve_phase1_contract_code(existing_position, morning_price_context)
 
     if morning_price_context is None or morning_price_context.base_price is None:
         current_lots_for_missing_basis = (
@@ -9561,7 +9418,7 @@ def _run_pm_six_step_decision(state: FundState):
             portfolio=portfolio,
             ticker=ticker,
             trading_date=trading_date,
-            contract_code=None,
+            contract_code=contract_code,
             decision=hold_decision,
             morning_price_context=morning_price_context,
             analyst_signals=analyst_signals,
@@ -9593,12 +9450,6 @@ def _run_pm_six_step_decision(state: FundState):
     try:
         current_price = morning_price_context.base_price
         settle_price = current_price
-        contract_code = None  # execution and settlement both need the actual contract code
-
-        # Phase1 stores a pre-open plan rather than a live trade decision.
-        existing_position = portfolio.positions.get(ticker)
-        contract_code = getattr(existing_position, "contract_code", None) if existing_position is not None else None
-        pass
 
         price_sanity = _dynamic_price_sanity_result(
             ticker=underlying_code,
@@ -9772,9 +9623,8 @@ def _run_pm_six_step_decision(state: FundState):
                             ),
                         )
 
-    except Exception as e:
-        pass
-        raise RuntimeError(f"Error while evaluating futures risk for {ticker}: {e}") from e
+    except Exception:
+        raise RuntimeError(f"{ticker}: pm_risk_evaluation_failed") from None
 
     analyst_count = len(enabled_analysts)
     max_position_ratio = 1
@@ -9785,8 +9635,6 @@ def _run_pm_six_step_decision(state: FundState):
 
         # Apply the tighter of the diversification cap and the margin cap.
         max_position_ratio = min(base_max_ratio, margin_max_ratio)
-
-    formatted_signals_lines = []
 
     # Group analyst outputs by agent name for downstream weighting.
     signals_by_agent = {}
@@ -9820,54 +9668,6 @@ def _run_pm_six_step_decision(state: FundState):
         weights = fusion_context["quality_adjusted_weights"]
 
         pass
-
-    for signal in analyst_signals:
-        if hasattr(signal, 'agent_name') and signal.agent_name:
-            signals_by_agent[signal.agent_name] = signal
-        else:
-            pass
-
-    for analyst_name in enabled_analysts:
-        signal = signals_by_agent.get(analyst_name)
-
-        if not signal:
-            pass
-            continue
-
-        analyst_display = {
-            AgentKey.TECHNICAL: "Technical Analyst",
-            AgentKey.FUNDAMENTAL: "Fundamental Analyst",
-            AgentKey.COMMODITY_NEWS: "Commodity News Analyst"
-        }.get(analyst_name, analyst_name)
-
-        signal_text = _signal_to_text(signal.signal)
-        signal_value = {"BULLISH": "+1", "BEARISH": "-1", "NEUTRAL": "0"}.get(signal_text.upper(), "0")
-
-        justification = _sanitize_visible_text(signal.justification)
-        if len(justification) > 200:
-            justification = justification[:200] + "..."
-
-        quality = (fusion_context.get("analyst_quality") or {}).get(analyst_name, {})
-        quality_suffix = (
-            f"Tradeability={quality.get('tradeability', 'unknown')}, "
-            f"EffectiveConfidence={quality.get('effective_confidence', signal.confidence):.2f}, "
-            f"BusinessQuality={getattr(signal, 'business_quality_score', 0.0):.2f}, "
-            f"SetupType={getattr(signal, 'setup_type', 'unknown')}, "
-            f"Horizon={getattr(signal, 'horizon_class', 'unknown')}, "
-            f"RiskFlags={quality.get('risk_flags', [])}"
-        )
-
-        formatted_line = (
-            f"{analyst_display}: Signal={signal.signal}({signal_value}), "
-            f"Confidence={signal.confidence:.2f}, "
-            f"{quality_suffix}, "
-            f"Justification: {justification}"
-        )
-        formatted_signals_lines.append(formatted_line)
-
-    formatted_signals = "\n".join(formatted_signals_lines)
-
-    pass
 
     pm_learning_audit = {
         "enabled": bool(db and config_id),
@@ -10185,11 +9985,11 @@ def _run_pm_six_step_decision(state: FundState):
             pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
             pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
             pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
-        except Exception as exc:
+        except Exception:
             pm_learning_audit["decision_memory_retrieval_initial"] = {
                 "tool": "decision_memory_retrieval",
                 "status": "unavailable",
-                "reason": str(exc),
+                "reason": "decision_memory_retrieval_failed",
             }
 
     step2_opportunity_scorecard = opportunity_scorecard

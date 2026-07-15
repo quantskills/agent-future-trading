@@ -63,6 +63,216 @@ ACTION_EVIDENCE_ALLOWED_FIELDS = (
     - ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS
     | ACTION_EVIDENCE_EXTRA_FIELDS
 )
+ACTION_EVIDENCE_REQUIRED_FIELDS = {
+    "contract_version",
+    "analyst",
+    "side",
+    "signal",
+    "confidence",
+    "opportunity_type",
+    "opportunity_state",
+    "setup_type",
+    "setup_quality_ok",
+    "trigger_valid",
+    "current_trigger_confirmed",
+    "invalidation_present",
+    "entry_trigger",
+    "exit_hint",
+    "horizon_class",
+    "expected_horizon_days",
+    "market_regime",
+    "evidence_quality",
+    "evidence_strength",
+    "evidence_freshness",
+    "confirmation_requirements",
+    "missing_evidence",
+    "current_evidence_conflict",
+    "factor_focus",
+    "no_lookahead_status",
+    "data_usage_summary",
+    "learning_scope",
+    "product_profile_evidence",
+    "fusion_evidence",
+}
+ACTION_EVIDENCE_TEXT_FIELDS = {
+    "contract_version",
+    "analyst",
+    "side",
+    "signal",
+    "opportunity_type",
+    "opportunity_state",
+    "setup_type",
+    "entry_trigger",
+    "exit_hint",
+    "horizon_class",
+    "market_regime",
+    "evidence_quality",
+    "evidence_strength",
+    "evidence_freshness",
+    "no_lookahead_status",
+}
+ACTION_EVIDENCE_BOOLEAN_FIELDS = {
+    "setup_quality_ok",
+    "trigger_valid",
+    "current_trigger_confirmed",
+    "invalidation_present",
+}
+ACTION_EVIDENCE_LIST_FIELDS = {
+    "confirmation_requirements",
+    "missing_evidence",
+    "current_evidence_conflict",
+    "factor_focus",
+}
+ACTION_EVIDENCE_MAPPING_FIELDS = {
+    "data_usage_summary",
+    "learning_scope",
+    "product_profile_evidence",
+    "fusion_evidence",
+}
+ACTION_EVIDENCE_FORBIDDEN_INTERNAL_FIELDS = {
+    "prompt",
+    "raw_prompt",
+    "response",
+    "raw_response",
+    "internal_state",
+    "internal_reasoning",
+    "hidden_context",
+    "intermediate_state",
+    "unvalidated_tool_result",
+    "report_sections",
+    "llm_path",
+    "adaptive_params",
+    "technical_parameter_calibration",
+    "reviewer_learning_context",
+    "file_path",
+    "encoding",
+    "fetcher_index_map_path",
+    "local_feather_dir",
+    "catalog_path",
+    "index_map_parse_errors",
+    "analyst_pm_instruction",
+}
+ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS = {
+    "source",
+    "dataset",
+    "available",
+    "used_in_signal",
+    "pre_open_only",
+    "info_cutoff",
+}
+ACTION_EVIDENCE_DATA_SOURCE_FIELDS = {
+    "pandaai_market": ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS
+    | {"latest_data_date", "row_count", "fields_used", "indicators_used"},
+    "finoview_fundamental": ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS
+    | {
+        "configured_indicator_count",
+        "loaded_indicator_count",
+        "missing_like_count",
+        "stale_indicator_count",
+        "near_stale_indicator_count",
+        "coverage_ratio",
+        "stale_ratio",
+        "factor_groups",
+        "freshness_score",
+        "no_lookahead_status",
+        "local_availability_audit",
+        "coverage_status",
+        "supports_trade_setup",
+        "runtime_data_boundary",
+    },
+    "pandaai_extra": ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS
+    | {
+        "reference_date",
+        "lookback_days",
+        "feature_count",
+        "record_counts",
+        "feature_status",
+        "data_missing",
+        "error_count",
+    },
+    "finoview_news_txt": ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS
+    | {
+        "news_cutoff",
+        "raw_block_count",
+        "parsed_news_count",
+        "selected_news_count",
+        "latest_news_date",
+        "freshness_score",
+        "relevance_score",
+    },
+    "pandaai_pre_open_reference": ACTION_EVIDENCE_DATA_SOURCE_BASE_FIELDS
+    | {"missing_data", "data_quality_flags", "reason"},
+}
+ACTION_EVIDENCE_DATA_SOURCE_IDENTITIES = {
+    "pandaai_market": ("PandaAI", "daily_continuous_candles"),
+    "finoview_fundamental": ("Finoview", "local_feather_fundamental"),
+    "pandaai_extra": ("PandaAI", "futures_derivative_snapshot"),
+    "finoview_news_txt": ("Finoview", "local_news_txt"),
+    "pandaai_pre_open_reference": (
+        "PandaAI",
+        "previous_trading_day_main_contract_quote",
+    ),
+}
+ACTION_EVIDENCE_DATA_USAGE_FIELDS = {
+    "ticker",
+    "trading_date",
+    "analyst",
+    "data_available",
+    "sources",
+}
+ACTION_EVIDENCE_DATA_SOURCE_INTEGER_FIELDS = {
+    "row_count",
+    "configured_indicator_count",
+    "loaded_indicator_count",
+    "missing_like_count",
+    "stale_indicator_count",
+    "near_stale_indicator_count",
+    "lookback_days",
+    "feature_count",
+    "error_count",
+    "raw_block_count",
+    "parsed_news_count",
+    "selected_news_count",
+}
+ACTION_EVIDENCE_DATA_SOURCE_NUMBER_FIELDS = {
+    "coverage_ratio",
+    "stale_ratio",
+    "freshness_score",
+    "relevance_score",
+}
+ACTION_EVIDENCE_DATA_SOURCE_LIST_FIELDS = {
+    "fields_used",
+    "indicators_used",
+    "data_missing",
+    "missing_data",
+    "data_quality_flags",
+}
+ACTION_EVIDENCE_DATA_SOURCE_MAPPING_FIELDS = {
+    "factor_groups",
+    "local_availability_audit",
+    "record_counts",
+    "feature_status",
+}
+FINOVIEW_AVAILABILITY_ALLOWED_FIELDS = {
+    "runtime_data_boundary",
+    "index_declared_count",
+    "local_feather_count",
+    "catalog_entry_count",
+    "known_catalog_factor_count",
+    "required_groups",
+    "covered_required_groups",
+    "missing_required_groups",
+    "missing_feather_from_index_map_count",
+    "local_feather_not_in_index_map_count",
+    "catalog_missing_or_unknown_count",
+    "local_vs_index_ratio",
+    "known_catalog_ratio",
+    "coverage_status",
+    "supports_fundamental_trade_setup",
+    "no_future_data",
+    "not_product_rule",
+    "index_map_parse_error_count",
+}
 
 SCC_ALLOWED_TOP_LEVEL_FIELDS = {
     "contract_version",
@@ -122,7 +332,6 @@ SCC_EVIDENCE_FUSION_FIELDS = {
     "evidence_strength_by_analyst",
     "evidence_freshness_by_analyst",
     "evidence_alignment_state",
-    "direction_alignment",
     "cross_analyst_conflicts",
     "dominant_opposing_evidence",
     "confirmation_requirements",
@@ -218,11 +427,39 @@ def validate_action_evidence_contract(
         raise ValueError(
             "action_evidence_contract_forbidden_trade_field:" + ",".join(forbidden)
         )
+    internal = _nested_forbidden_paths(
+        contract,
+        forbidden_keys=ACTION_EVIDENCE_FORBIDDEN_INTERNAL_FIELDS,
+    )
+    if internal:
+        raise ValueError(
+            "action_evidence_contract_forbidden_internal_field:" + ",".join(internal)
+        )
     if contract.get("contract_version") != ACTION_EVIDENCE_CONTRACT_VERSION:
         raise ValueError("action_evidence_contract_invalid_version")
     extras = sorted(set(contract) - ACTION_EVIDENCE_ALLOWED_FIELDS)
     if extras:
         raise ValueError("action_evidence_contract_unregistered_field:" + ",".join(extras))
+    missing_required = sorted(ACTION_EVIDENCE_REQUIRED_FIELDS - set(contract))
+    if missing_required:
+        raise ValueError(
+            "action_evidence_contract_missing_required_field:" + ",".join(missing_required)
+        )
+    for field in ACTION_EVIDENCE_TEXT_FIELDS:
+        if not isinstance(contract.get(field), str):
+            raise ValueError(f"action_evidence_contract_invalid_text:{field}")
+    for field in ACTION_EVIDENCE_BOOLEAN_FIELDS:
+        if not isinstance(contract.get(field), bool):
+            raise ValueError(f"action_evidence_contract_invalid_boolean:{field}")
+    for field in ACTION_EVIDENCE_LIST_FIELDS:
+        if not isinstance(contract.get(field), list):
+            raise ValueError(f"action_evidence_contract_invalid_list:{field}")
+    for field in ACTION_EVIDENCE_MAPPING_FIELDS:
+        if not isinstance(contract.get(field), Mapping):
+            raise ValueError(f"action_evidence_contract_invalid_mapping:{field}")
+    expected_horizon_days = contract.get("expected_horizon_days")
+    if isinstance(expected_horizon_days, bool) or not isinstance(expected_horizon_days, int):
+        raise ValueError("action_evidence_contract_invalid_integer:expected_horizon_days")
     contract_analyst = _text(contract.get("analyst"))
     if contract_analyst not in ANALYST_ORDER:
         raise ValueError("action_evidence_contract_invalid_analyst")
@@ -247,9 +484,6 @@ def validate_action_evidence_contract(
     opportunity_state = _text(contract.get("opportunity_state")).lower()
     if opportunity_state not in ACTION_EVIDENCE_OPPORTUNITY_STATES:
         raise ValueError("action_evidence_contract_invalid_opportunity_state")
-    for field in ("trigger_valid", "current_trigger_confirmed", "invalidation_present"):
-        if field in contract and not isinstance(contract.get(field), bool):
-            raise ValueError(f"action_evidence_contract_invalid_boolean:{field}")
     if opportunity_state in {"probe_candidate", "tradeable_candidate"}:
         if contract.get("trigger_valid") is not True:
             raise ValueError("action_evidence_contract_candidate_without_current_trigger")
@@ -257,10 +491,106 @@ def validate_action_evidence_contract(
             raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
     if opportunity_state == "watch_for_trigger" and contract.get("invalidation_present") is not True:
         raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
-    for field in ("product_profile_evidence", "fusion_evidence", "data_usage_summary"):
-        value = contract.get(field)
-        if value is not None and not isinstance(value, Mapping):
-            raise ValueError(f"action_evidence_contract_invalid_mapping:{field}")
+    data_usage = contract["data_usage_summary"]
+    usage_extras = sorted(set(data_usage) - ACTION_EVIDENCE_DATA_USAGE_FIELDS)
+    if usage_extras:
+        raise ValueError(
+            "action_evidence_contract_unregistered_data_usage_field:"
+            + ",".join(usage_extras)
+        )
+    for field in ("ticker", "trading_date", "analyst", "sources"):
+        if field not in data_usage:
+            raise ValueError(f"action_evidence_contract_data_usage_missing_field:{field}")
+    if _text(data_usage.get("analyst")) != contract_analyst:
+        raise ValueError("action_evidence_contract_data_usage_analyst_mismatch")
+    for field in ("ticker", "trading_date", "analyst"):
+        if not isinstance(data_usage.get(field), str) or not data_usage[field].strip():
+            raise ValueError(f"action_evidence_contract_invalid_data_usage_text:{field}")
+    if "data_available" in data_usage and not isinstance(
+        data_usage.get("data_available"), bool
+    ):
+        raise ValueError("action_evidence_contract_invalid_data_available")
+    sources = data_usage.get("sources")
+    if not isinstance(sources, Mapping) or not sources:
+        raise ValueError("action_evidence_contract_data_usage_sources_missing")
+    for source_name, source in sources.items():
+        if not _text(source_name) or not isinstance(source, Mapping):
+            raise ValueError("action_evidence_contract_invalid_data_source")
+        allowed_source_fields = ACTION_EVIDENCE_DATA_SOURCE_FIELDS.get(str(source_name))
+        if allowed_source_fields is None:
+            raise ValueError(
+                f"action_evidence_contract_unregistered_data_source:{source_name}"
+            )
+        source_extras = sorted(set(source) - allowed_source_fields)
+        if source_extras:
+            raise ValueError(
+                f"action_evidence_contract_unregistered_data_source_field:{source_name}:"
+                + ",".join(source_extras)
+            )
+        for field in (
+            "source",
+            "dataset",
+            "available",
+            "used_in_signal",
+            "pre_open_only",
+            "info_cutoff",
+        ):
+            if field not in source:
+                raise ValueError(
+                    f"action_evidence_contract_data_source_missing_field:{source_name}:{field}"
+                )
+        for field in ("available", "used_in_signal", "pre_open_only"):
+            if not isinstance(source.get(field), bool):
+                raise ValueError(
+                    f"action_evidence_contract_invalid_data_source_boolean:{source_name}:{field}"
+                )
+        expected_source, expected_dataset = ACTION_EVIDENCE_DATA_SOURCE_IDENTITIES[str(source_name)]
+        if source.get("source") != expected_source or source.get("dataset") != expected_dataset:
+            raise ValueError(
+                f"action_evidence_contract_data_source_identity_mismatch:{source_name}"
+            )
+        if not isinstance(source.get("info_cutoff"), str) or not source["info_cutoff"].strip():
+            raise ValueError(
+                f"action_evidence_contract_invalid_data_source_text:{source_name}:info_cutoff"
+            )
+        for field in ACTION_EVIDENCE_DATA_SOURCE_INTEGER_FIELDS.intersection(source):
+            value = source.get(field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(
+                    f"action_evidence_contract_invalid_data_source_integer:{source_name}:{field}"
+                )
+        for field in ACTION_EVIDENCE_DATA_SOURCE_NUMBER_FIELDS.intersection(source):
+            value = source.get(field)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise ValueError(
+                    f"action_evidence_contract_invalid_data_source_number:{source_name}:{field}"
+                )
+        for field in ACTION_EVIDENCE_DATA_SOURCE_LIST_FIELDS.intersection(source):
+            if not isinstance(source.get(field), list):
+                raise ValueError(
+                    f"action_evidence_contract_invalid_data_source_list:{source_name}:{field}"
+                )
+        for field in ACTION_EVIDENCE_DATA_SOURCE_MAPPING_FIELDS.intersection(source):
+            if not isinstance(source.get(field), Mapping):
+                raise ValueError(
+                    f"action_evidence_contract_invalid_data_source_mapping:{source_name}:{field}"
+                )
+        if source_name == "finoview_fundamental" and "local_availability_audit" in source:
+            availability = source.get("local_availability_audit")
+            if not isinstance(availability, Mapping):
+                raise ValueError("action_evidence_contract_invalid_finoview_availability_audit")
+            availability_extras = sorted(
+                set(availability) - FINOVIEW_AVAILABILITY_ALLOWED_FIELDS
+            )
+            if availability_extras:
+                raise ValueError(
+                    "action_evidence_contract_unregistered_finoview_availability_field:"
+                    + ",".join(availability_extras)
+                )
     return contract
 
 
@@ -285,19 +615,37 @@ def _quality_label(score: float) -> str:
     return "unknown"
 
 
-def _nested_forbidden_paths(value: Any, *, path: str = "") -> list[str]:
+def _nested_forbidden_paths(
+    value: Any,
+    *,
+    path: str = "",
+    forbidden_keys: set[str] | None = None,
+) -> list[str]:
+    forbidden_keys = forbidden_keys or SCC_FORBIDDEN_TRADE_FIELDS
     hits: list[str] = []
     if isinstance(value, Mapping):
         for key, child in value.items():
             key_text = str(key)
             child_path = f"{path}.{key_text}" if path else key_text
-            if key_text in SCC_FORBIDDEN_TRADE_FIELDS:
+            if key_text in forbidden_keys:
                 hits.append(child_path)
-            hits.extend(_nested_forbidden_paths(child, path=child_path))
+            hits.extend(
+                _nested_forbidden_paths(
+                    child,
+                    path=child_path,
+                    forbidden_keys=forbidden_keys,
+                )
+            )
     elif isinstance(value, list):
         for index, child in enumerate(value):
             child_path = f"{path}[{index}]" if path else f"[{index}]"
-            hits.extend(_nested_forbidden_paths(child, path=child_path))
+            hits.extend(
+                _nested_forbidden_paths(
+                    child,
+                    path=child_path,
+                    forbidden_keys=forbidden_keys,
+                )
+            )
     return hits
 
 
@@ -315,8 +663,11 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
     side = _side_from_contract(contract)
     trigger_valid = _bool(contract.get("trigger_valid"))
     trigger_confirmed = _bool(contract.get("current_trigger_confirmed"))
+    opportunity_state = _text(contract.get("opportunity_state"), "unknown")
     trigger_status = (
-        "confirmed"
+        "not_applicable"
+        if opportunity_state == "no_opportunity"
+        else "confirmed"
         if trigger_valid and trigger_confirmed
         else "valid_unconfirmed"
         if trigger_valid
@@ -335,7 +686,7 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
         "side": side,
         "confidence": _confidence(contract),
         "signal": _text(contract.get("signal")),
-        "opportunity_state": _text(contract.get("opportunity_state"), "unknown"),
+        "opportunity_state": opportunity_state,
         "trigger_valid": trigger_valid,
         "current_trigger_confirmed": trigger_confirmed,
         "trigger_status": trigger_status,
@@ -462,7 +813,9 @@ def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
     strength = _quality_label(sum(strength_scores) / len(strength_scores)) if strength_scores else "unknown"
     dominant_trigger_states = trigger_states_by_side.get(dominant_side, Counter())
     trigger_status = (
-        "confirmed"
+        "not_applicable"
+        if dominant_side in {"flat", "mixed"}
+        else "confirmed"
         if dominant_trigger_states.get("confirmed")
         else "valid_unconfirmed"
         if dominant_trigger_states.get("valid_unconfirmed")
@@ -633,6 +986,32 @@ def validate_signal_collection_contract(
     return contract
 
 
+def build_scc_data_quality_summary(contract: Mapping[str, Any]) -> dict:
+    """Project one validated SCC into the canonical Auditor quality input."""
+    validated = validate_signal_collection_contract(dict(contract))
+    flags = sorted({_text(item) for item in validated.get("data_quality_flags") or [] if _text(item)})
+    missing_evidence = sorted(
+        {_text(item) for item in validated.get("missing_evidence") or [] if _text(item)}
+    )
+    hard_flags = {
+        "pre_open_reference_price_unavailable",
+        "required_market_data_unavailable",
+        "future_leak",
+    }
+    hard_failure = any(
+        flag in hard_flags
+        or flag.startswith("no_lookahead_status:violation")
+        or flag.startswith("no_lookahead_status:future_leak")
+        for flag in flags
+    )
+    return {
+        "status": "hard_fail" if hard_failure else "warning" if flags else "clean",
+        "flags": flags,
+        "missing_evidence": missing_evidence,
+        "source": "signal_collection_contract",
+    }
+
+
 def build_pm_evidence_signals_from_scc(contract: Mapping[str, Any]) -> list[Any]:
     """Build PM's internal evidence view solely from the already validated SCC."""
     validate_signal_collection_contract(dict(contract))
@@ -703,6 +1082,15 @@ def build_signal_collection_contract(
         if agent in seen_agents:
             raise ValueError(f"signal_collection_duplicate_analyst:{agent}")
         seen_agents.add(agent)
+        metadata_fields = set(_metadata(signal))
+        forbidden_metadata = sorted(
+            metadata_fields - {"action_evidence_contract", "signal_record_id"}
+        )
+        if forbidden_metadata:
+            raise ValueError(
+                f"signal_collection_forbidden_source_metadata:{agent}:"
+                f"{','.join(forbidden_metadata)}"
+            )
         contract = _action_contract(signal)
         if not contract:
             raise ValueError(f"signal_collection_missing_action_evidence_contract:{agent}")
@@ -714,8 +1102,11 @@ def build_signal_collection_contract(
         confidence = _confidence(contract)
         trigger_valid = _bool(contract.get("trigger_valid"))
         trigger_confirmed = _bool(contract.get("current_trigger_confirmed"))
+        opportunity_state = _text(contract.get("opportunity_state"), "unknown")
         trigger_status = (
-            "confirmed"
+            "not_applicable"
+            if opportunity_state == "no_opportunity"
+            else "confirmed"
             if trigger_valid and trigger_confirmed
             else "valid_unconfirmed"
             if trigger_valid
@@ -759,7 +1150,7 @@ def build_signal_collection_contract(
             "side": side,
             "confidence": confidence,
             "signal": _text(contract.get("signal")),
-            "opportunity_state": _text(contract.get("opportunity_state"), "unknown"),
+            "opportunity_state": opportunity_state,
             "trigger_valid": trigger_valid,
             "current_trigger_confirmed": trigger_confirmed,
             "trigger_status": trigger_status,
@@ -823,7 +1214,9 @@ def build_signal_collection_contract(
     conflict_level = "high" if len(opposing) >= 2 else "medium" if opposing else "low"
     dominant_trigger_states = trigger_states_by_side.get(dominant_side, Counter())
     aggregate_trigger = (
-        "confirmed"
+        "not_applicable"
+        if dominant_side in {"flat", "mixed"}
+        else "confirmed"
         if dominant_trigger_states.get("confirmed")
         else "valid_unconfirmed"
         if dominant_trigger_states.get("valid_unconfirmed")

@@ -1031,6 +1031,24 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         self.assertEqual(metadata["undated_indicator_count"], metadata["configured_indicator_count"])
         self.assertEqual(metadata["loaded_indicator_count"], 0)
 
+    def test_fundamental_loader_rejects_missing_value_column_instead_of_fabricating_zero(self):
+        router = self._build_router()
+        df = pd.DataFrame(
+            {
+                "tradeDate": pd.to_datetime(["2025-03-03", "2025-03-04"]),
+                "unexpected_column": [7.0, 8.0],
+            }
+        )
+
+        with patch("apis.router.Path.exists", return_value=True), patch(
+            "apis.router.read_finoview_feather_cached",
+            return_value=df,
+        ):
+            result = router.get_china_futures_fundamentals("BU", "2025-03-05")
+
+        self.assertIsNone(result)
+        self.assertEqual(router.last_fundamentals_metadata["loaded_indicator_count"], 0)
+
     def test_fundamental_basis_uses_previous_trading_day_price_not_t_day_close(self):
         router = self._build_router()
 
@@ -1075,7 +1093,7 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         ), patch(
             "apis.router.get_previous_trading_day",
             return_value=pd.Timestamp("2025-03-04"),
-        ):
+        ), patch("apis.router.logger.info") as info_log:
             result = router.get_china_futures_fundamentals("BU", "2025-03-05")
 
         self.assertIsNotNone(result)
@@ -1083,6 +1101,10 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         self.assertEqual(basis["date"], "2025-03-04")
         self.assertEqual(basis["pre_open_reference_date"], "2025-03-04")
         self.assertEqual(basis["futures_price"], 3400.0)
+        logged = "\n".join(str(call.args[0]) for call in info_log.call_args_list)
+        self.assertNotIn("latest=", logged)
+        self.assertNotIn("Basis:", logged)
+        self.assertNotIn("Formatted fundamental data", logged)
 
 
 class NewsDataBoundaryTest(unittest.TestCase):

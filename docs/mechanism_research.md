@@ -41,7 +41,7 @@ Phase1 投资组合经理 final_action_contract
 
 信号收集员、审计员、交易员、会计师、复盘员都不能直接读取研究库来生成或改变交易权限。
 
-`template_prior` 是冷启动研究种子，只能通过 `src/run/research/load_template_prior.py` 显式加载。它不属于 Phase1 盘前策略生成，不由 `proposal.py` 自动写入研究记忆，也不能使用当天或未来交易结果。
+`template_prior` 是冷启动研究种子，只能通过 `src/run/research/load_template_prior.py` 显式加载。它不属于 Phase1 盘前策略生成，不由 `proposal.py` 自动写入研究记忆，也不能使用当天或未来交易结果。加载后的结构化学习记录不得保存源文件绝对路径，加载日志不得输出路径、原始 payload 或原始异常。
 
 `product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究；下一交易日同一批合格的 `learning_context` 和 `analyst_learning_calibration` 先进入 `technical`、`fundamental`、`commodity_news` 的提示词，再在 LLM 返回后确定性校对信号。静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
 
@@ -53,9 +53,11 @@ Phase1 投资组合经理 final_action_contract
 
 Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_memory` 刷新、学习 retention 清理、研究表写入或任何未来学习状态更新。
 
-研究员可以按配置调用 LLM，但只能在复盘员验证后的事实底座上运行。研究员输出结构化研究信息：分析师校准类研究、交易决策类 action-value、alpha setup profile、adaptive policy state、执行学习、排序偏好和研究反馈；这些信息供其他智能体按各自权限直接或间接使用，持久化到研究库只是保存方式。研究员不能下交易指令，不能改账，不能绕过投资组合经理、审计员或交易员。
+研究员可以按配置调用 LLM，但只能在Phase4 completed且结算事实形成后运行。运行前必须以真实 `signal_record_id`、recommendation ID、transaction recommendation ID、交易日期和config ID验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement；零成交是合法链路。研究员只保存验证后的结构化 evidence pack 和研究结果，不保存prompt、原始response、内部推理、隐藏上下文或未验证工具结果。研究信息包括分析师校准类研究、交易决策类 action-value、alpha setup profile、adaptive policy state、执行学习、排序偏好和研究反馈；这些信息供其他智能体按各自权限通过正式检索接口使用。研究员不能下交易指令，不能改账，不能绕过投资组合经理、审计员或交易员。
 
 未完成交易日必须硬拦。若某天推荐、成交、盘中决策或学习记录已存在，但 phase1-4 没有全部 completed，系统应报 `incomplete_trading_day_phase`；该日不能进入收益判断，也不能被研究员当成学习样本。
+
+学习成果允许为空。不是每笔交易都具备形成学习成果的代表性，也不是每次分析或PM决策都必须命中学习记录；空检索是合法冷启动，不能触发默认学习、伪样本或替代策略。
 
 ## 三、研究对象与消费边界
 
@@ -217,7 +219,7 @@ Reviewer fusion_attribution_label
 
 ## 八、相似 setup 检索和防未来函数
 
-当前系统使用结构化检索和轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action lane 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
+当前系统唯一正式术语是 RAG（Retrieval-Augmented Generation/检索增强）；`REG` 不是项目术语，也不得作为兼容别名或第三套机制。系统使用结构化检索和轻量 SQL 相似 setup 检索，不使用长文本向量 RAG 作为交易授权。检索按 ticker、sector、side、setup_type、horizon、regime、action lane 等结构化键聚合 compact evidence，并强制历史样本 `trading_date < decision_date`。
 
 同品种同作用域真实样本优先；同板块样本、similar SQL/RAG、shadow 样本只能作弱先验。它们不能 seed 新开仓，不能覆盖同作用域负期望，不能绕过 `decision_memory_retrieval`、PM 生命周期路由、必要的 Step5 全市场资金部署、Step6 `final_action_contract`、审计员、交易员和保证金硬上限。
 

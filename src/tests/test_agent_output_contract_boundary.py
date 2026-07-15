@@ -31,6 +31,7 @@ from tools.common.final_action_semantics import (
     validate_final_action_lot_transition,
 )
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_aec
 from util.futures_audit import extract_signal_lifecycle
 
 
@@ -65,42 +66,39 @@ def _nested_key_paths(value, forbidden, prefix=""):
 
 
 def _analyst_action_contract():
-    return {
-        "contract_version": "agentquant.action_evidence.v1",
-        "analyst": "technical",
-        "signal": "Bullish",
-        "side": "long",
-        "confidence": 0.68,
-        "opportunity_state": "watch_for_trigger",
-        "trigger_valid": True,
-        "current_trigger_confirmed": True,
-        "entry_trigger": "breakout_above_prior_high",
-        "setup_type": "trend_breakout",
-        "setup_quality_ok": True,
-        "horizon_class": "swing",
-        "market_regime": "trend",
-        "evidence_quality": "high",
-        "current_evidence_conflict": [],
-        "missing_evidence": [],
-        "invalidation_present": True,
-        "invalidation_condition": "close_below_support",
-        "no_lookahead_status": "ok",
-        "fusion_evidence": {
-            "evidence_strength": "high",
-            "evidence_freshness": "fresh",
-            "confirmation_requirements": ["intraday_breakout"],
+    return build_test_aec(
+        "technical",
+        signal="Bullish",
+        side="long",
+        confidence=0.68,
+        opportunity_state="watch_for_trigger",
+        trigger_valid=True,
+        current_trigger_confirmed=True,
+        invalidation_present=True,
+        entry_trigger="breakout_above_prior_high",
+        invalidation_condition="close_below_support",
+        extra={
+            "setup_type": "trend_breakout",
+            "horizon_class": "swing",
+            "market_regime": "trend",
+            "product_profile_evidence": {
+                "product_profile_id": "BU.default",
+                "product_profile_used": True,
+                "profile_analysis_boundary": "analyst_evidence_calibration_only",
+            },
+            "fusion_evidence": {
+                "evidence_strength": "high",
+                "evidence_freshness": "fresh",
+                "confirmation_requirements": ["intraday_breakout"],
+            },
         },
-        "product_profile_evidence": {
-            "product_profile_id": "BU.default",
-            "product_profile_used": True,
-            "profile_analysis_boundary": "analyst_evidence_calibration_only",
-        },
-    }
+    )
 
 
 def _analyst_signal(agent_name="technical"):
     contract = _analyst_action_contract()
     contract["analyst"] = agent_name
+    contract["data_usage_summary"]["analyst"] = agent_name
     return SimpleNamespace(
         agent_name=agent_name,
         signal=contract["signal"],
@@ -110,8 +108,6 @@ def _analyst_signal(agent_name="technical"):
         invalidation_present=contract["invalidation_present"],
         metadata={
             "action_evidence_contract": contract,
-            "product_profile_evidence": contract["product_profile_evidence"],
-            "fusion_evidence": contract["fusion_evidence"],
             "signal_record_id": f"{agent_name}-fixture",
         },
     )

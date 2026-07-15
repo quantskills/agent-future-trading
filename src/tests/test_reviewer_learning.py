@@ -84,6 +84,8 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_validated_causal_policy_rules,
 )
 from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
+from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_signal
 
 
 def _scc_from_analyst_payloads(**payloads):
@@ -647,17 +649,21 @@ class ReviewerLearningContextTest(unittest.TestCase):
         )
 
     def test_config_overlay_uses_allowlist(self):
-        config = apply_config_learning_overlay(
-            {"learning": {"enabled": True, "config_overlay": {"enabled": True}}, "llm": {"model": "keep"}},
-            db=_FakeOverlayDB(),
-            config_id="cfg",
-            trading_date="2025-02-10",
-        )
+        with patch(
+            "tools.agent_tools.analysis.analyst_learning_context.logger.info"
+        ) as info_log:
+            config = apply_config_learning_overlay(
+                {"learning": {"enabled": True, "config_overlay": {"enabled": True}}, "llm": {"model": "keep"}},
+                db=_FakeOverlayDB(),
+                config_id="cfg",
+                trading_date="2025-02-10",
+            )
 
         self.assertEqual(config["capital_utilization_control"]["target_margin_ratio_min"], 0.16)
         self.assertEqual(config["llm"]["model"], "keep")
         self.assertEqual(len(config["runtime_learning_overlay"]["applied"]), 1)
         self.assertEqual(len(config["runtime_learning_overlay"]["skipped"]), 1)
+        info_log.assert_not_called()
 
     def test_reviewer_writes_trade_episode_memory_from_closed_trade(self):
         conn = sqlite3.connect(":memory:")
@@ -1484,6 +1490,34 @@ class ReviewerLearningContextTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         _ensure_reviewer_learning_schema(conn.cursor())
         cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT, trading_date TEXT)"
+        )
+        cursor.execute(
+            "CREATE TABLE signal (id TEXT PRIMARY KEY, portfolio_id TEXT, analyst TEXT, ticker TEXT)"
+        )
+        cursor.execute(
+            "INSERT INTO portfolio(id, config_id, trading_date) VALUES ('portfolio-1', 'cfg', '2025-03-13')"
+        )
+        for analyst in ("technical", "fundamental", "commodity_news"):
+            cursor.execute(
+                "INSERT INTO signal(id, portfolio_id, analyst, ticker) VALUES (?, 'portfolio-1', ?, 'BU')",
+                (f"signal-{analyst}", analyst),
+            )
+        scc = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-13",
+            analyst_signals=[
+                build_test_signal(
+                    analyst,
+                    signal_record_id=f"signal-{analyst}",
+                    ticker="BU",
+                    trading_date="2025-03-13",
+                )
+                for analyst in ("technical", "fundamental", "commodity_news")
+            ],
+            enabled_analysts=["technical", "fundamental", "commodity_news"],
+        )
 
         captured = {}
 
@@ -1518,37 +1552,55 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 },
                 config_id="cfg",
                 trading_date="2025-03-13",
-                settlement_row={"daily_pnl": -1200, "commission": 25, "margin_ratio": 0.04},
+                settlement_row={
+                    "trading_date": "2025-03-13",
+                    "daily_pnl": -1200,
+                    "commission": 25,
+                    "margin_ratio": 0.04,
+                },
                 strategy_recommendations=[
                     {
                         "id": "rec-1",
+                        "config_id": "cfg",
                         "underlying_code": "BU",
+                        "effective_trade_date": "2025-03-13",
                         "action": "open_long",
                         "lots": 1,
-                        "audit_payload": {"audit_verdict": "approve"},
+                        "audit_payload": {
+                            "producer": "auditor",
+                            "recommendation_id": "rec-1",
+                            "audit_verdict": "approve",
+                            "hard_risk_reasons": [],
+                            "soft_risk_reasons": [],
+                            "source": {"pm_recommendation_id": "rec-1"},
+                            "boundary": {"auditor_does_not_modify_final_action_contract": True},
+                            "contract_summary": {"final_action": "open_probe"},
+                            "semantic_state": {"lifecycle_state": "open"},
+                        },
                         "signal_snapshot": json.dumps(
                             {
-                                "signal_collection_contract": {
-                                    "source_contracts": [
-                                        {
-                                            "analyst": "technical",
-                                            "signal_record_id": "signal-1",
-                                            "action_evidence_contract": {
-                                                "analyst": "technical",
-                                                "signal": "Bullish",
-                                                "side": "long",
-                                            },
-                                        }
-                                    ]
-                                }
-                                ,"final_action_contract": {
+                                "signal_collection_contract": scc,
+                                "final_action_contract": {
+                                    "contract_version": "agentquant.final_action.v1",
+                                    "ticker": "BU",
+                                    "contract_code": "BU2506",
                                     "final_action": "open_probe",
                                     "current_lots": 0,
                                     "target_lots": 1,
                                     "lots_delta": 1,
+                                    "authority_type": "exploration_probe",
+                                    "invalidation_condition": "close below validated setup boundary",
+                                    "target_margin_ratio_estimate": 0.01,
+                                    "requires_intraday_confirmation": True,
+                                    "can_execute_without_intraday_trigger": False,
                                 },
-                                "auditor": {"audit_verdict": "approve"},
-                                "execution_result": {"outcome": "filled"},
+                                "execution_result": {
+                                    "outcome": "not_triggered",
+                                    "status": "skipped",
+                                    "transaction_count": 0,
+                                    "actual_transactions": [],
+                                    "no_trade_reason": "intraday_trigger_not_met",
+                                },
                             }
                         ),
                     }
@@ -2703,6 +2755,7 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(row["memory_state"], "protected")
         self.assertEqual(row["source"], "template_prior")
         self.assertEqual(row["source_trading_date"], "2025-01-02")
+        self.assertNotIn("source_file", json.loads(row["payload_json"]))
 
     def test_template_prior_refreshes_when_source_marker_changes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6794,17 +6847,21 @@ class _FakeReviewerWeightDB:
 
 class ReviewerDynamicWeightsRegressionTest(unittest.TestCase):
     def test_dynamic_weights_consume_template_performance_and_adaptive_policy(self):
-        weights = calibrate_weights_by_signal_history(
-            db=_FakeReviewerWeightDB(),
-            config_id="cfg",
-            ticker="BU",
-            trading_date="2025-02-10",
-            current_weights={"technical": 1 / 3, "fundamental": 1 / 3, "commodity_news": 1 / 3},
-        )
+        with patch(
+            "tools.agent_tools.analysis.analyst_dynamic_weights.logger.info"
+        ) as info_log:
+            weights = calibrate_weights_by_signal_history(
+                db=_FakeReviewerWeightDB(),
+                config_id="cfg",
+                ticker="BU",
+                trading_date="2025-02-10",
+                current_weights={"technical": 1 / 3, "fundamental": 1 / 3, "commodity_news": 1 / 3},
+            )
 
         self.assertGreater(weights["technical"], 1 / 3)
         self.assertLess(weights["fundamental"], 1 / 3)
         self.assertAlmostEqual(sum(weights.values()), 1.0)
+        info_log.assert_not_called()
 
 
 if __name__ == "__main__":

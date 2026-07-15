@@ -316,22 +316,13 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(quote.ticker, "m2505")
         self.assertFalse(any(call["func"] == "get_future_detail" for call in fake.calls))
 
-    def test_market_data_call_logs_provider_symbol_and_row_count(self):
+    def test_market_data_call_does_not_log_provider_request_or_result_details(self):
         fake, env_patch, module_patch = self._build_api()
         with env_patch, module_patch, patch("apis.pandaai.api.logger") as logger_mock:
             api = PandaAIAPI()
             api.get_main_contract_quote_on_date("M", datetime(2025, 1, 4))
 
-        messages = [call.args[0] for call in logger_mock.info.call_args_list]
-        self.assertTrue(
-            any(
-                "provider=PandaAI" in message
-                and "symbol=M_DOMINANT.DCE" in message
-                and "rows=3" in message
-                and "data_type=future" in message
-                for message in messages
-            )
-        )
+        logger_mock.info.assert_not_called()
 
     def test_short_zhengzhou_contract_code_expands_at_pandaai_boundary(self):
         fake, env_patch, module_patch = self._build_api()

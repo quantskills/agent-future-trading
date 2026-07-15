@@ -164,8 +164,8 @@ class PandaAIAPI:
             self._sdk_user_cache_root = cache_root
         try:
             cache_root.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            logger.warning(f"PandaAI SDK user cache root unavailable at {cache_root}: {exc}")
+        except Exception:
+            logger.warning("pandaai_sdk_cache_unavailable")
             return
 
         cache_root_text = str(cache_root)
@@ -173,7 +173,6 @@ class PandaAIAPI:
         def _agentquant_sdk_project_root(current_path: str, markers: list | None = None) -> str:
             return cache_root_text
 
-        patched_modules = []
         for module_name in (
             "panda_data.utils.common_utils",
             "panda_data.readers.init_token",
@@ -187,15 +186,9 @@ class PandaAIAPI:
                 continue
             if hasattr(module, "find_project_root"):
                 setattr(module, "find_project_root", _agentquant_sdk_project_root)
-                patched_modules.append(module_name)
 
         os.environ.setdefault("PANDAAI_SDK_USER_CACHE_DIR", cache_root_text)
         self.__class__._shared_sdk_user_cache_configured = True
-        if patched_modules:
-            logger.info(
-                "PandaAI SDK user cache redirected to writable AgentQuant runtime directory: "
-                f"{cache_root_text}"
-            )
 
     def _ensure_token(self) -> None:
         if self._panda_data is None:
@@ -311,10 +304,7 @@ class PandaAIAPI:
                 return method(**kwargs)
             except Exception as exc:
                 if self._is_token_expired_error(exc) and not token_refreshed:
-                    logger.warning(
-                        "PandaAI token expired; re-authenticating and retrying once | "
-                        f"method={sdk_method_name} | error={exc}"
-                    )
+                    logger.warning("pandaai_token_refresh_required")
                     self._refresh_token_after_expiry()
                     sdk_method_name = self._resolve_sdk_method_name(method_name)
                     method = getattr(self._panda_data, sdk_method_name, None)
@@ -331,11 +321,7 @@ class PandaAIAPI:
                 if (not is_rate_limited and not is_transient_network) or attempt >= attempts:
                     raise
                 if is_transient_network:
-                    logger.warning(
-                        "PandaAI transient network/socket error; retrying | "
-                        f"method={sdk_method_name} | attempt={attempt}/{attempts} | "
-                        f"sleep={network_wait_seconds:.1f}s | error={exc}"
-                    )
+                    logger.warning("pandaai_transient_request_retry")
                     with self.__class__._request_lock:
                         self.__class__._rate_limit_cooldown_until = max(
                             self.__class__._rate_limit_cooldown_until,
@@ -347,11 +333,7 @@ class PandaAIAPI:
                         max(network_wait_seconds * 2.0, 1.0),
                     )
                     continue
-                logger.warning(
-                    "PandaAI request rate-limited; retrying | "
-                    f"method={sdk_method_name} | attempt={attempt}/{attempts} | "
-                    f"sleep={wait_seconds:.1f}s | error={exc}"
-                )
+                logger.warning("pandaai_rate_limit_retry")
                 with self.__class__._request_lock:
                     self.__class__._rate_limit_cooldown_until = max(
                         self.__class__._rate_limit_cooldown_until,
@@ -407,8 +389,8 @@ class PandaAIAPI:
             records = json.loads(row[0])
             if isinstance(records, list):
                 return [dict(item) for item in records if isinstance(item, dict)]
-        except Exception as exc:
-            logger.warning(f"PandaAI persistent market cache read failed: {exc}")
+        except Exception:
+            logger.warning("pandaai_market_cache_read_failed")
         return None
 
     def _write_persistent_market_cache(
@@ -441,8 +423,8 @@ class PandaAIAPI:
                     ),
                 )
                 conn.commit()
-        except Exception as exc:
-            logger.warning(f"PandaAI persistent market cache write failed: {exc}")
+        except Exception:
+            logger.warning("pandaai_market_cache_write_failed")
 
     def _resolve_sdk_method_name(self, method_name: str) -> str:
         """Map documented/legacy PandaAI names to the installed SDK names."""
@@ -479,11 +461,6 @@ class PandaAIAPI:
         cached_records = self._read_persistent_market_cache(symbol, start_key, end_key)
         if cached_records is not None:
             self._history_cache[cache_key] = cached_records
-            logger.info(
-                "PandaAI futures market data loaded from persistent cache | "
-                f"provider=PandaAI | method=get_market_data | data_type=future | "
-                f"symbol={symbol.upper()} | start={start_key} | end={end_key} | rows={len(cached_records)}"
-            )
             return list(cached_records)
 
         response = self._call_pandaai(
@@ -497,11 +474,6 @@ class PandaAIAPI:
             st=None,
         )
         records = self._records_from_response(response)
-        logger.info(
-            "PandaAI futures market data loaded | "
-            f"provider=PandaAI | method=get_market_data | data_type=future | "
-            f"symbol={symbol.upper()} | start={start_key} | end={end_key} | rows={len(records)}"
-        )
         self._history_cache[cache_key] = records
         self._write_persistent_market_cache(symbol, start_key, end_key, records)
         return list(records)
@@ -536,12 +508,6 @@ class PandaAIAPI:
             time_zone=time_zone,
         )
         records = self._records_from_response(response)
-        logger.info(
-            "PandaAI futures minute data loaded | "
-            f"provider=PandaAI | method=get_market_min_data | data_type=future | "
-            f"symbol={symbol.upper()} | frequency={frequency} | "
-            f"start={start_key} | end={end_key} | rows={len(records)}"
-        )
         self._minute_cache[cache_key] = records
         return list(records)
 
@@ -581,18 +547,13 @@ class PandaAIAPI:
             diagnostic["params"] = dict(kwargs)
             self._extra_cache[cache_key] = []
             self._extra_diagnostics_cache[cache_key] = dict(diagnostic)
-            logger.info(
-                "PandaAI futures extra data skipped from availability cache | "
-                f"provider=PandaAI | method={method_name} | status={diagnostic.get('status')} | "
-                f"reason={diagnostic.get('reason')} | params={kwargs}"
-            )
             return diagnostic
 
         self._ensure_token()
         sdk_method_name = self._resolve_sdk_method_name(method_name)
         method = getattr(self._panda_data, sdk_method_name, None)
         if method is None:
-            logger.warning(f"PandaAI extra data method is unavailable: {method_name}")
+            logger.warning("pandaai_extra_method_unavailable")
             self._extra_cache[cache_key] = []
             status = "unsupported_feature"
             reason = "sdk_method_unavailable"
@@ -624,11 +585,6 @@ class PandaAIAPI:
             records = self._records_from_response(response)
             status = "ok" if records else "no_data"
             reason = None if records else "empty_response"
-            logger.info(
-                "PandaAI futures extra data loaded | "
-                f"provider=PandaAI | method={method_name} | sdk_method={sdk_method_name} | "
-                f"rows={len(records)} | params={kwargs}"
-            )
             self._extra_cache[cache_key] = records
             diagnostic = {
                 "records": list(records),
@@ -644,11 +600,7 @@ class PandaAIAPI:
             return dict(diagnostic)
         except Exception as exc:
             status, reason = self._classify_extra_data_error(exc)
-            logger.warning(
-                "PandaAI futures extra data skipped | "
-                f"provider=PandaAI | method={method_name} | sdk_method={sdk_method_name} | status={status} | "
-                f"reason={reason} | params={kwargs} | error={exc}"
-            )
+            logger.warning("pandaai_extra_data_unavailable")
             self._extra_cache[cache_key] = []
             diagnostic = {
                 "records": [],

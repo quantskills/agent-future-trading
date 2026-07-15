@@ -1556,7 +1556,7 @@ def run_phase4_review(
 
         if errors:
             try:
-                report_path = _write_daily_transaction_report(
+                _write_daily_transaction_report(
                     cfg=cfg,
                     config_id=config_id,
                     trading_date=trading_date,
@@ -1570,11 +1570,10 @@ def run_phase4_review(
                     phase4_completed_at_override="",
                     phase4_message_override=f"Phase4 fact review incomplete with {len(errors)} error(s)",
                 )
-                logger.info(f"Daily transaction report written: {report_path}")
-            except Exception as report_exc:
-                errors.append(f"daily transaction report generation failed: {report_exc}")
-                logger.error(f"Daily transaction report generation failed: {report_exc}")
-            raise RuntimeError(f"Phase4 fact review incomplete with {len(errors)} error(s)")
+            except Exception:
+                errors.append("daily_transaction_report_generation_failed")
+                logger.error("daily_transaction_report_generation_failed")
+            raise RuntimeError("phase4_fact_review_failed")
 
         conn.commit()
 
@@ -1587,7 +1586,7 @@ def run_phase4_review(
         )
         phase4_completed_at = datetime.now(timezone.utc).isoformat()
         try:
-            report_path = _write_daily_transaction_report(
+            _write_daily_transaction_report(
                 cfg=cfg,
                 config_id=config_id,
                 trading_date=trading_date,
@@ -1601,10 +1600,9 @@ def run_phase4_review(
                 phase4_completed_at_override=phase4_completed_at,
                 phase4_message_override="reviewer fact review completed",
             )
-            logger.info(f"Daily transaction report written: {report_path}")
-        except Exception as report_exc:
-            logger.error(f"Daily transaction report generation failed: {report_exc}")
-            raise RuntimeError(f"daily transaction report generation failed: {report_exc}") from report_exc
+        except Exception:
+            logger.error("daily_transaction_report_generation_failed")
+            raise RuntimeError("daily_transaction_report_generation_failed") from None
 
         logger.info("Phase4 reviewer fact review completed")
         return {
@@ -1622,16 +1620,22 @@ def run_phase4_review(
                 "no_trade_reason_counts": dict(no_trade_reason_counter),
             },
         }
-    except Exception as exc:
+    except Exception:
         if conn is not None:
             try:
                 conn.rollback()
                 conn.close()
                 conn = None
-            except sqlite3.Error as rollback_exc:
-                logger.warning(f"Phase4 rollback before failure status failed: {rollback_exc}")
-        db.complete_trading_day_phase(config_id, trading_date, TradingPhase.PHASE4, "failed", str(exc))
-        raise
+            except sqlite3.Error:
+                logger.warning("phase4_rollback_failed")
+        db.complete_trading_day_phase(
+            config_id,
+            trading_date,
+            TradingPhase.PHASE4,
+            "failed",
+            "phase4_fact_review_failed",
+        )
+        raise RuntimeError("phase4_fact_review_failed") from None
     finally:
         if conn is not None:
             conn.close()

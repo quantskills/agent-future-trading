@@ -39,6 +39,7 @@ from tools.agent_tools.decision.pm_ticker_side_selection import (
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_aec
 from tests.test_pm_atomic_contract_flow import _pm_state
 
 
@@ -78,29 +79,29 @@ class FakeMemoryDB:
 
 
 def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overrides) -> AnalystSignal:
-    contract = {
-        "contract_version": "agentquant.action_evidence.v1",
-        "analyst": agent_name,
-        "signal": signal.value,
-        "side": "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat",
-        "confidence": confidence,
-        "opportunity_state": "tradeable_candidate",
-        "trigger_valid": True,
-        "current_trigger_confirmed": True,
-        "setup_type": "trend_breakout",
-        "setup_quality_ok": True,
-        "horizon_class": "short",
-        "market_regime": "trend",
-        "evidence_quality": "high",
-        "invalidation_present": True,
-        "invalidation_condition": "invalid if price closes back into range",
-    }
+    side = "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat"
+    contract = build_test_aec(
+        agent_name,
+        ticker="BU",
+        trading_date="2025-03-05",
+        signal=signal.value,
+        side=side,
+        confidence=confidence,
+        opportunity_state="tradeable_candidate" if side != "flat" else "no_opportunity",
+        trigger_valid=side != "flat",
+        current_trigger_confirmed=side != "flat",
+        invalidation_present=side != "flat",
+        invalidation_condition="invalid if price closes back into range" if side != "flat" else None,
+    )
     contract.update(contract_overrides)
     return AnalystSignal(
         agent_name=agent_name,
         signal=signal,
         confidence=confidence,
-        metadata={"action_evidence_contract": contract},
+        metadata={
+            "action_evidence_contract": contract,
+            "signal_record_id": f"{agent_name}-fixture",
+        },
     )
 
 
@@ -112,7 +113,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             analyst_signals=[
                 _signal("technical", Signal.BEARISH, 0.72),
                 _signal("fundamental", Signal.BEARISH, 0.66),
-                _signal("commodity_news", Signal.NEUTRAL, 0.40, opportunity_state="watch_for_trigger"),
+                _signal("commodity_news", Signal.NEUTRAL, 0.40),
             ],
             enabled_analysts=["technical", "fundamental", "commodity_news"],
         )

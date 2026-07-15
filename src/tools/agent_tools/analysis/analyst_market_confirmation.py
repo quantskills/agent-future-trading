@@ -351,8 +351,10 @@ class MarketConfirmationEngine:
                     trading_date=reference_date,
                     underlying_code=underlying_code,
                 )
-        except Exception as exc:
-            logger.warning(f"{underlying_code}: unable to resolve PandaAI confirmation cutoff: {exc}")
+        except Exception:
+            logger.warning(
+                f"{underlying_code}: pandaai_confirmation_reference_date_unavailable"
+            )
             return {
                 "enabled": True,
                 "target_direction": target_direction,
@@ -360,14 +362,14 @@ class MarketConfirmationEngine:
                 "features": [],
                 "confirmations": [],
                 "conflicts": [],
-                "data_missing": [f"reference_date_unavailable: {exc}"],
-                "data_unavailable": [f"reference_date_unavailable: {exc}"],
+                "data_missing": ["reference_date_unavailable"],
+                "data_unavailable": ["reference_date_unavailable"],
                 "fallback_covered_missing": [],
                 "record_counts": {},
                 "feature_status": {},
                 "feature_diagnostics": {},
                 "data_status_groups": {},
-                "errors": [str(exc)],
+                "errors": ["pandaai_confirmation_reference_date_unavailable"],
             }
 
         snapshot = self.router.get_pandaai_futures_extra_snapshot(
@@ -436,11 +438,6 @@ class MarketConfirmationEngine:
             "unsupported_features": data_status_groups.get("unsupported_feature", []),
             "errors": snapshot.get("errors", []),
         }
-        logger.info(
-            f"{underlying_code}: PandaAI confirmation | target={target_direction} | "
-            f"score={confirmation_score:.2f} | confirmations={result['confirmations']} | "
-            f"conflicts={result['conflicts']} | cutoff={result['reference_date']}"
-        )
         return result
 
     def _score_features(self, records: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:

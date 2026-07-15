@@ -1,14 +1,12 @@
 import math
 try:
     import pandas as pd
-    _PANDAS_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - depends on runtime environment
+except Exception:  # pragma: no cover - depends on runtime environment
     class _PandasStub:
         DataFrame = object
         Series = object
 
     pd = _PandasStub()
-    _PANDAS_IMPORT_ERROR = exc
 from graph.schema import FundState, AnalystSignal
 from graph.constants import Signal, AgentKey
 from llm.inference import agent_call
@@ -16,22 +14,19 @@ from llm.prompt import build_futures_technical_prompt
 from apis.router import Router, APISource
 from util.db_helper import get_db
 from util.logger import logger
-from util.text_sanitize import sanitize_visible_text
 from typing import Optional, Dict, Any
 from tools.agent_tools.analysis.analyst_quality import (
     build_technical_context,
     format_technical_summary_for_prompt,
     llm_path_label,
-    signal_value,
-    write_analyst_report,
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import retrieve_analyst_policy_calibration
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_technical_data_usage
 from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
 from tools.agent_tools.analysis.analyst_output_finalization import (
+    build_required_market_data_unavailable_signal,
     finalize_analyst_signal,
-    persist_analyst_signal,
     resolve_analyst_llm_config,
 )
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
@@ -179,14 +174,25 @@ def technical_agent(state: FundState):
     agent_name = AgentKey.TECHNICAL
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = resolve_analyst_llm_config(state)
-    portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     phase = state.get("phase")
     morning_price_context = state.get("morning_price_context")
     pre_open_only = bool(state.get("pre_open_only", False))
     info_cutoff = state.get("info_cutoff") or ("pre_open" if pre_open_only else "unspecified")
-    save_outputs = bool(state.get("save_analyst_outputs", True))
+    cfg = state.get("config", {}) or {}
+    full_config = state.get("full_config", cfg) or {}
+
+    if state.get("pre_open_reference_price_unavailable"):
+        signal = build_required_market_data_unavailable_signal(
+            analyst="technical",
+            ticker=ticker,
+            trading_date=trading_date,
+            full_config=full_config,
+            info_cutoff=info_cutoff,
+        )
+        return {"analyst_signals": [signal]}
+
+    llm_config = resolve_analyst_llm_config(state)
 
     if market_type != "china_futures":
         message = (
@@ -197,8 +203,6 @@ def technical_agent(state: FundState):
 
     # Get db instance
     db = get_db()
-
-    logger.log_agent_status(agent_name, ticker, "Analyzing price data")
 
     # Futures-only technical analysis uses the configured PandaAI futures feed.
     api_source = APISource.PANDAAI
@@ -213,54 +217,24 @@ def technical_agent(state: FundState):
 
         # Ensure the returned frame contains the core close-price series.
         if prices_df.empty or 'close' not in prices_df.columns:
-            columns = prices_df.columns.tolist() if not prices_df.empty else "DataFrame is empty"
-            message = f"Price data for {ticker} is empty or missing 'close' column. Columns: {columns}"
+            message = f"{ticker}: technical_price_contract_invalid"
             logger.error(message)
             raise RuntimeError(message)
 
-        logger.info(f"Successfully loaded {len(prices_df)} rows of price data for {ticker}")
-        cfg = state.get("config", {}) or {}
-        full_config = state.get("full_config", cfg) or {}
-        if (full_config.get("audit", {}) or {}).get("log_technical_price_window", True):
-            try:
-                first_date = str(prices_df.index.min())[:10]
-                last_date = str(prices_df.index.max())[:10]
-                logger.info(
-                    f"{ticker}: Technical price window | first={first_date} | last={last_date} | "
-                    f"rows={len(prices_df)} | info_cutoff={info_cutoff}"
-                )
-            except Exception as exc:
-                logger.warning(f"{ticker}: Failed to audit technical price window: {exc}")
+    except Exception:
+        logger.error(f"{ticker}: technical_price_data_fetch_failed")
+        raise RuntimeError(f"Failed to fetch price data for {ticker}") from None
 
-    except Exception as e:
-        logger.error(f"Failed to fetch price data for {ticker}: {e}")
-        raise RuntimeError(f"Failed to fetch price data for {ticker}: {e}") from e
-
-    latest_price_data_date = _validate_pre_open_price_window(
+    _validate_pre_open_price_window(
         ticker=ticker,
         trading_date=trading_date,
         prices_df=prices_df,
         pre_open_only=pre_open_only,
     )
-    logger.info(
-        f"{ticker}: Technical no-lookahead boundary ok | latest_price_data_date={latest_price_data_date} | "
-        f"trading_date={trading_date} | pre_open_only={pre_open_only}"
-    )
-
     # Compute adaptive market features before building indicator signals.
     features = calculate_market_features(prices_df)
-    logger.info(
-        f"{ticker}: Market features | volatility={features['volatility']:.2%} | "
-        f"trend_strength(ADX)={features['trend_strength']:.2f} | "
-        f"price_range={features['price_range']:.2%} | "
-        f"volume_ratio={features['volume_ratio']:.2f}"
-    )
-
     phase_value = str(getattr(phase, "value", phase)) if phase else ""
     if pre_open_only:
-        logger.info(
-            f"{ticker}: Pre-open mode active; disabling T-day open-dependent gap analysis"
-        )
         gap_analysis = (
             "Unavailable in pre-open mode: T-day open-dependent gap analysis is disabled "
             "until the open-order execution phase."
@@ -322,25 +296,12 @@ def technical_agent(state: FundState):
                 ),
             )
             technical_calibration_diag["policy_safety"] = policy_safety
-        except Exception as exc:
-            adaptive_params = initial_adaptive_params
-            technical_calibration_diag = {
-                **technical_calibration_diag,
-                "applied": [],
-                "error": str(exc),
-            }
-            logger.warning(f"{ticker}: technical parameter calibration skipped: {exc}")
+        except Exception:
+            logger.error(f"{ticker}: technical_parameter_calibration_failed")
+            raise RuntimeError(f"{ticker}: technical_parameter_calibration_failed") from None
 
     signal_results = _build_technical_signal_results(prices_df, adaptive_params, gap_analysis)
     technical_context = build_technical_context(ticker, signal_results, features)
-    logger.info(
-        f"{ticker}: Adaptive params | EMA short={adaptive_params['trend']['short']} / "
-        f"EMA long={adaptive_params['trend']['long']} | "
-        f"RSI thresholds={adaptive_params['rsi']['bullish']}/{adaptive_params['rsi']['bearish']} | "
-        f"initial_regime={initial_technical_context.get('market_regime')} | "
-        f"final_regime={technical_context.get('market_regime')} | "
-        f"technical_calibration_applied={len(technical_calibration_diag.get('applied') or [])}"
-    )
     product_profile = get_product_price_behavior_profile(ticker, full_config)
     product_profile_usage = build_profile_usage_contract(ticker, "technical", product_profile)
     technical_context["product_profile_evidence"] = product_profile_usage
@@ -384,11 +345,15 @@ def technical_agent(state: FundState):
     )
 
     # Get LLM signal
-    signal = agent_call(
-        prompt=prompt,
-        llm_config=llm_config,
-        pydantic_model=AnalystSignal
-    )
+    try:
+        signal = agent_call(
+            prompt=prompt,
+            llm_config=llm_config,
+            pydantic_model=AnalystSignal,
+        )
+    except Exception:
+        logger.error(f"{ticker}: technical_inference_failed")
+        raise RuntimeError(f"{ticker}: technical_inference_failed") from None
 
     # Preserve agent identity explicitly for downstream ordering and auditing.
     signal.agent_name = agent_name
@@ -461,66 +426,9 @@ def technical_agent(state: FundState):
         product_profile=product_profile,
         product_profile_usage=product_profile_usage,
     )
-    signal.justification += (
-        f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
-        f"latest_price_data_date={latest_price_data_date}; "
-        f"gap_analysis={'disabled_pre_open' if pre_open_only else 'standard'}; "
-        f"llm_path={llm_path}; tradeability={technical_context.get('tradeability')}; "
-        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
-    )
-    signal.justification = sanitize_visible_text(signal.justification)
-
-    report_sections = {
-        "llm_path": llm_path,
-        "tradeability": technical_context.get("tradeability"),
-        "sector": technical_context.get("sector"),
-        "Market Regime": technical_context.get("market_regime"),
-        "Indicators Used": {
-            name: signal_value(value) if isinstance(value, Signal) else str(value)
-            for name, value in signal_results.items()
-        },
-        "Data Usage Summary": data_usage_summary,
-        "Technical Parameter Calibration": technical_calibration_diag,
-        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
-        "Structured Technical Context": technical_context,
-    }
-    if save_outputs:
-        report_path = write_analyst_report(
-            analyst="technical",
-            ticker=ticker,
-            trading_date=trading_date,
-            signal=signal,
-            full_config=full_config,
-            sections=report_sections,
-        )
-        if report_path:
-            signal.metadata["decision_report_path"] = report_path
-
-    # save signal
     logger.log_signal(agent_name, ticker, signal)
-    if save_outputs:
-        persist_analyst_signal(
-            db,
-            portfolio_id=portfolio_id,
-            analyst=agent_name,
-            ticker=ticker,
-            prompt=prompt,
-            signal=signal,
-        )
 
-    return {
-        "analyst_signals": [signal],
-        "analyst_outputs": [
-            {
-                "analyst": agent_name,
-                "ticker": ticker,
-                "trading_date": trading_date,
-                "prompt": prompt,
-                "signal": signal,
-                "report_sections": report_sections,
-            }
-        ],
-    }
+    return {"analyst_signals": [signal]}
 
 def calculate_market_features(prices_df: pd.DataFrame) -> dict:
     """

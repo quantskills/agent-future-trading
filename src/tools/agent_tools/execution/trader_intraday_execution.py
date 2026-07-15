@@ -112,11 +112,11 @@ def resolve_intraday_execution_basis(
             finalize_untriggered=finalize_untriggered,
             force_immediate=force_immediate,
         )
-    except Exception as exc:
+    except Exception:
         selection = IntradayExecutionSelection(
             decision="skip" if finalize_untriggered else "wait",
             reason="intraday_no_valid_bar",
-            features={"error": str(exc), "underlying_code": underlying_code, "contract_code": contract_code},
+            features={"underlying_code": underlying_code, "contract_code": contract_code},
         )
 
     basis = MorningExecutionBasis(

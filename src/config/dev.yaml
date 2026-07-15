@@ -33,8 +33,6 @@ runtime:
     enable_analysis_parallelism: true
     max_parallel_analysis_tickers: 4
     prefetch_pre_open_reference_prices: true
-    log_timing_breakdown: true
-    allow_parallel_analyst_db_writes: false
   data_cache:
     enabled: true
     prefetch_pandaai_market: true
@@ -251,10 +249,6 @@ execution:
 rollover:
   mode: reconcile_with_strategy
 
-# 审计日志配置只影响记录细节，不改变审计裁决或交易权限。
-audit:
-  log_technical_price_window: true
-
 # ---------------------------------------------------------------------------
 # 8. 交易宇宙、启用分析师与 LLM 路由
 # ---------------------------------------------------------------------------
@@ -302,9 +296,9 @@ analyst_llm:
 # 8.5 LLM 主通道与备用通道
 # 当前启用 CodexOpenAI；TQXAI 作为第二 LLM 通道保留但停用，不删除、不自动切换。
 llm:
-  # 当前主路由：CodexOpenAI / gpt-5.5 / medium reasoning；API key 只读 .env。
+  # 当前主路由：CodexOpenAI / gpt-5.6-sol / medium reasoning；API key 只读 .env。
   provider: "CodexOpenAI"
-  model: "gpt-5.5"
+  model: "gpt-5.6-sol"
   # provider: "TQXAI"
   # model: "claude-opus-4-6-1"
 
@@ -312,11 +306,11 @@ llm:
   max_concurrent_calls: 4
   structured_output_method: "json_mode"
   failure_policy:
-    parse_error: "retry_then_default"
+    parse_error: "retry_then_raise"
     rate_limit: "retry_with_backoff"
     auth_error: "raise"
     invalid_request: "raise"
-    server_error: "retry_then_default"
+    server_error: "retry_then_raise"
 
   codex_openai:
     base_url: "http://47.74.0.65"

@@ -229,16 +229,16 @@ class SupabaseDB(BaseDB):
             logger.error(f"Error updating portfolio: {e}")
             return False
 
-    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, prompt: str, signal: AnalystSignal) -> Optional[str]:
+    def save_signal(self, portfolio_id: str, analyst: str, ticker: str, signal: AnalystSignal) -> Optional[str]:
         """Save a new signal."""
         try:
             data = {
                 'portfolio_id': portfolio_id,
                 'ticker': ticker,
-                'llm_prompt': prompt,
+                'llm_prompt': "",
                 'analyst': analyst,
                 'signal': str(signal.signal),
-                'justification': signal.justification,
+                'justification': "",
                 'artifact_json': build_signal_artifact_payload(signal),
                 'business_quality_score': float(getattr(signal, "business_quality_score", 0.0) or 0.0),
                 'horizon_class': str(getattr(signal, "horizon_class", "unknown") or "unknown"),
@@ -250,8 +250,8 @@ class SupabaseDB(BaseDB):
             if response.data and len(response.data) > 0:
                 return response.data[0]['id']
             return None
-        except Exception as e:
-            logger.error(f"Error saving signal: {e}")
+        except Exception:
+            logger.error("signal_persistence_failed")
             return None
 
 # Initialize global instance

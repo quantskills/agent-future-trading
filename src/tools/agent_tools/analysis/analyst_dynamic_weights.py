@@ -97,11 +97,6 @@ class DynamicWeightCalculator:
         self.min_weight = dynamic_config.get("min_weight", 0.05)
         self.max_weight = dynamic_config.get("max_weight", 0.80)
 
-        if self.enabled:
-            logger.info("Dynamic weight calculator enabled")
-        else:
-            logger.info("Dynamic weight calculator disabled; using static weights")
-
     def calculate(
         self,
         basis_pct: float,
@@ -113,10 +108,8 @@ class DynamicWeightCalculator:
         abs_basis = abs(basis_pct)
         if abs_basis >= 10:
             weights = self.STRONG_BASIS_WEIGHTS.copy()
-            logger.debug(f"Using strong-basis weight profile (basis={basis_pct:+.2f}%)")
         else:
             weights = self.NORMAL_MARKET_WEIGHTS.copy()
-            logger.debug(f"Using normal-market weight profile (basis={basis_pct:+.2f}%)")
 
         if not self.enabled:
             return weights
@@ -135,12 +128,6 @@ class DynamicWeightCalculator:
         weights = self._normalize_weights(weights)
         weights = self._apply_weight_constraints(weights)
 
-        logger.debug(
-            "Dynamic weights: "
-            f"fundamental={weights['fundamental']:.2%}, "
-            f"technical={weights['technical']:.2%}, "
-            f"news={weights['commodity_news']:.2%}"
-        )
         return weights
 
     def _apply_fundamental_quality_adjustment(
@@ -172,24 +159,18 @@ class DynamicWeightCalculator:
             stale_ratio = int(quality.get("stale_indicator_count") or 0) / configured
 
         penalty = 1.0
-        reasons = []
         if coverage_ratio < float(quality_config.get("min_coverage_ratio", 0.65)):
             penalty *= float(quality_config.get("low_coverage_multiplier", 0.70))
-            reasons.append(f"coverage={coverage_ratio:.0%}")
 
         if float(missing_ratio) >= float(quality_config.get("missing_ratio_severe", 0.40)):
             penalty *= float(quality_config.get("missing_severe_multiplier", 0.65))
-            reasons.append(f"missing={float(missing_ratio):.0%}")
         elif float(missing_ratio) >= float(quality_config.get("missing_ratio_warn", 0.20)):
             penalty *= float(quality_config.get("missing_warn_multiplier", 0.85))
-            reasons.append(f"missing={float(missing_ratio):.0%}")
 
         if float(stale_ratio) >= float(quality_config.get("stale_ratio_severe", 0.35)):
             penalty *= float(quality_config.get("stale_severe_multiplier", 0.65))
-            reasons.append(f"stale={float(stale_ratio):.0%}")
         elif float(stale_ratio) >= float(quality_config.get("stale_ratio_warn", 0.20)):
             penalty *= float(quality_config.get("stale_warn_multiplier", 0.85))
-            reasons.append(f"stale={float(stale_ratio):.0%}")
 
         penalty = max(float(quality_config.get("min_multiplier", 0.35)), min(1.0, penalty))
         if penalty >= 0.999:
@@ -198,10 +179,6 @@ class DynamicWeightCalculator:
         adjusted = weights.copy()
         original = adjusted["fundamental"]
         adjusted["fundamental"] = original * penalty
-        logger.info(
-            f"Fundamental quality penalty: weight {original:.2%} -> "
-            f"{adjusted['fundamental']:.2%}; {', '.join(reasons)}"
-        )
         return adjusted
 
     def _get_market_state_adjustment(self, market_state: str) -> Dict[str, float]:
@@ -216,29 +193,21 @@ class DynamicWeightCalculator:
 
         if "|" in state_lower:
             if "revers" in state_lower:
-                logger.info(f"Mapped composite market state '{market_state}' to reversal")
                 return self.MARKET_STATE_ADJUSTMENTS["reversal"]
             if "trend" in state_lower:
-                logger.info(f"Mapped composite market state '{market_state}' to trending")
                 return self.MARKET_STATE_ADJUSTMENTS["trending"]
-            logger.info(f"Mapped composite market state '{market_state}' to ranging")
             return self.MARKET_STATE_ADJUSTMENTS["ranging"]
 
         if "revers" in state_lower:
-            logger.info(f"Mapped market state '{market_state}' to reversal")
             return self.MARKET_STATE_ADJUSTMENTS["reversal"]
 
         if "trend" in state_lower:
-            logger.info(f"Mapped market state '{market_state}' to trending")
             return self.MARKET_STATE_ADJUSTMENTS["trending"]
 
         if "range" in state_lower or "sideways" in state_lower:
-            logger.info(f"Mapped market state '{market_state}' to ranging")
             return self.MARKET_STATE_ADJUSTMENTS["ranging"]
 
-        logger.warning(
-            f"Unrecognized market state '{market_state}'; defaulting to ranging"
-        )
+        logger.warning("analyst_dynamic_weight_market_state_unrecognized")
         return self.MARKET_STATE_ADJUSTMENTS["ranging"]
 
     def _apply_market_state_adjustment(
@@ -260,9 +229,6 @@ class DynamicWeightCalculator:
                 1 + (adjust_factor - 1) * confidence_factor
             )
 
-        logger.debug(
-            f"Applied market-state adjustment: state={market_state}, confidence={confidence:.2f}"
-        )
         return adjusted_weights
 
     def _apply_fundamental_adjustment(
@@ -292,9 +258,6 @@ class DynamicWeightCalculator:
             for token in ["tight", "loose", "shortage", "surplus", "imbalanced"]
         ):
             adjustments["fundamental"] = 1.15
-            logger.debug(
-                f"Supply-demand regime '{supply_demand}' increases fundamental weight"
-            )
 
         if any(
             token in inventory_trend_lower
@@ -396,8 +359,8 @@ def calibrate_weights_by_signal_history(
             trading_date=trading_date,
             lookback_days=lookback_days,
         )
-    except Exception as exc:
-        logger.warning(f"Signal-history calibration unavailable for {ticker}: {exc}")
+    except Exception:
+        logger.warning("analyst_signal_history_calibration_unavailable")
         recent_signals = []
 
     adjusted = current_weights.copy()
@@ -424,11 +387,6 @@ def calibrate_weights_by_signal_history(
 
             original_weight = adjusted[analyst]
             adjusted[analyst] = original_weight * discount_factor
-            logger.info(
-                f"Signal calibration for {ticker}: {analyst} skewed "
-                f"({dominant_ratio:.0%} same direction over {len(analyst_signals)} signals), "
-                f"weight {original_weight:.2%} -> {adjusted[analyst]:.2%}"
-            )
 
     if hasattr(db, "get_analyst_performance"):
         try:
@@ -438,8 +396,8 @@ def calibrate_weights_by_signal_history(
                 trading_date=trading_date,
                 limit=30,
             )
-        except Exception as exc:
-            logger.warning(f"Research analyst-performance calibration unavailable for {ticker}: {exc}")
+        except Exception:
+            logger.warning("analyst_performance_calibration_unavailable")
             performance_rows = []
 
         for row in performance_rows:
@@ -456,19 +414,9 @@ def calibrate_weights_by_signal_history(
             if net_pnl > 0 and hit_rate >= 0.55:
                 multiplier = 1.0 + min(0.25, 0.20 * confidence)
                 adjusted[analyst] = original_weight * multiplier
-                logger.info(
-                    f"Analyst calibration lifted {ticker} {analyst} weight "
-                    f"{original_weight:.2%}->{adjusted[analyst]:.2%}; "
-                    f"hit_rate={hit_rate:.0%}, samples={sample_count}, pnl={net_pnl:.0f}"
-                )
             elif net_pnl < 0 or hit_rate <= 0.45:
                 multiplier = max(0.60, 1.0 - min(0.30, 0.25 * confidence))
                 adjusted[analyst] = original_weight * multiplier
-                logger.info(
-                    f"Analyst calibration discounted {ticker} {analyst} weight "
-                    f"{original_weight:.2%}->{adjusted[analyst]:.2%}; "
-                    f"hit_rate={hit_rate:.0%}, samples={sample_count}, pnl={net_pnl:.0f}"
-                )
 
     if hasattr(db, "get_setup_type_performance"):
         try:
@@ -478,8 +426,8 @@ def calibrate_weights_by_signal_history(
                 trading_date=trading_date,
                 limit=30,
             )
-        except Exception as exc:
-            logger.warning(f"Research signal-template calibration unavailable for {ticker}: {exc}")
+        except Exception:
+            logger.warning("analyst_signal_template_calibration_unavailable")
             template_rows = []
 
         for row in template_rows:
@@ -496,19 +444,9 @@ def calibrate_weights_by_signal_history(
             if net_pnl > 0 and win_rate >= 0.55:
                 multiplier = 1.0 + min(0.18, 0.15 * confidence)
                 adjusted[owner] = original_weight * multiplier
-                logger.info(
-                    f"Analyst calibration template learning lifted {ticker} {owner} weight "
-                    f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
-                    f"horizon={row.get('horizon_class')}, samples={sample_count}, pnl={net_pnl:.0f}"
-                )
             elif net_pnl < 0 or win_rate <= 0.45:
                 multiplier = max(0.65, 1.0 - min(0.25, 0.22 * max(confidence, 0.50)))
                 adjusted[owner] = original_weight * multiplier
-                logger.info(
-                    f"Analyst calibration template learning discounted {ticker} {owner} weight "
-                    f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
-                    f"horizon={row.get('horizon_class')}, samples={sample_count}, pnl={net_pnl:.0f}"
-                )
 
     policy_rows, policy_safety = retrieve_analyst_policy_calibration(
         db,
@@ -517,12 +455,7 @@ def calibrate_weights_by_signal_history(
         trading_date=trading_date,
     )
     if policy_safety.get("error"):
-        logger.warning(f"Analyst adaptive-policy calibration unavailable for {ticker}: {policy_safety.get('error')}")
-    if policy_safety.get("blocked_count"):
-        logger.info(
-            f"Analyst adaptive-policy calibration ignored {policy_safety['blocked_count']} unsafe "
-            f"adaptive row(s) for {ticker}: {policy_safety.get('blocked_examples')}"
-        )
+        logger.warning("analyst_adaptive_policy_calibration_unavailable")
 
     for row in policy_rows:
         owner = _horizon_weight_owner(row.get("horizon_class"), row.get("setup_type"))
@@ -540,11 +473,6 @@ def calibrate_weights_by_signal_history(
             adjusted[owner] = original_weight * multiplier
         else:
             continue
-        logger.info(
-            f"Analyst adaptive policy adjusted {ticker} {owner} weight "
-            f"{original_weight:.2%}->{adjusted[owner]:.2%}; "
-            f"action={action}, horizon={row.get('horizon_class')}, confidence={confidence:.0%}"
-        )
 
     total = sum(adjusted.values())
     if total <= 0:

@@ -72,3 +72,19 @@
 （5）[PG 编排顺序] `backtest.py` 将回测前检测移动到 reset 和正式业务写入之前，每个交易日只在 Phase1–4 与 Researcher 完成后对该单日运行一次每日检测，删除整段回测结束后的重复每日检测。原因：保证旁路门禁不污染正式库、不进入智能体内部阶段，也不重复读取整段历史。
 （6）[PG 冗余机制清理] 删除生产零引用的 PG action-preference、能力卡、artifact lineage、成本预算、exploration、memory quality、parity、任务生命周期、工具访问策略、历史故障 fixture 工具及对应旧测试；`pg_contract_coverage_audit.py` 收口为当前业务链 producer→landing→consumer→role-check→real-path-test→mechanism-doc 静态覆盖。原因：控制组只保留回测前与每日回测后两条真实职责链，避免废弃机制复查主业务智能体内部过程。
 （7）[PG 回归测试重建] 重写 PG、preflight、pre-backtest、daily invariant 和 contract coverage 测试，覆盖十项/七项、统一字段、无 LLM、正式临时库、precheck-before-reset、单日一次、合法无交易、审计阻断、执行成交一致、结算公式、换约/强制风控和学习前视。原因：测试必须验证新旁路审计的实际边界，不能继续维护已删除内部复审机制。
+
+==========2026年7月14日==========
+
+（1）[LLM 主路由升级] `src/config/dev.yaml`、`.env` 与 `.env.example` 将 AgentQuant 主 LLM 从 `CodexOpenAI/gpt-5.5` 切换为 `CodexOpenAI/gpt-5.6-sol`，继续使用 `reasoning_effort=medium`、`CODEX_OPENAI_API_KEY` 和既有 Codex 网关；TQXAI 的 Claude 接口继续保留为停用备用通道。原因：统一三个分析师和 Researcher 的主配置模型，同时不改变智能体职责、提示词、结构化输出和交易业务链。
+
+（2）[分析师到 SCC 正式单链] `technical.py`、`fundamental.py`、`commodity_news.py`、`analyst_output_finalization.py`、`workflow.py`、`signal_collector.py` 与 `signal_evidence_collection.py` 将必需市场事实不可用收口为三个分析师各自生成并通过共享校验的中性 AEC，由 Workflow 统一保存三份信号并取得真实记录 ID，再由 Collector 只校验和聚合唯一 SCC；删除 Collector 伪造分析师信号的数据不可用工具。原因：正常与不可用状态共用同一生产、持久化和校验链，基本面或新闻当日无新增只影响对应分析师，不以 LLM、默认字段或虚假事实补造结果。
+
+（3）[具体合约与 Auditor 硬边界] `router.py`、`portfolio_manager.py`、`workflow.py`、`auditor.py` 与 `portfolio_policy_catalog.yaml` 固定 Router 提供交易日可见的具体合约事实，已有持仓优先绑定持仓合约，新增风险缺失合法具体合约时不得增加手数；Workflow 向 Auditor 传入完整 FAC、账户、持仓、SCC 数据质量、具体合约和主配置硬风控事实，Auditor 只检查动作手数、保证金硬上限、清算状态、合约、失效边界和硬数据错误。原因：补齐独立审计所需的真实生产事实，同时不改 PM 六步、方向、rank、预算、sizing 和策略参数，也不允许 Auditor 重做或改写 PM 决策。
+
+（4）[Trader 审计保真与信息隔离] `futures_audit.py`、`trader.py`、Trader/Accountant执行工具、三个分析师、`analyst_output_finalization.py`、`analyst_quality.py`、`analyst_data_usage.py`、`analyst_dynamic_weights.py`、`workflow.py`、`inference.py`、PandaAI适配器、`signal_artifact.py`、数据库 helper、`template_prior.py`、Reviewer/Researcher写入口与`logger.py`以原始完整 `audit_payload` 为基底追加交易合约审计、执行翻译、执行结果和 Phase2 事实，禁止摘要覆盖；分析师最终出口重建只含AEC字段的正式对象，取消 `analyst_outputs/report_sections` 通道，保存前metadata仅AEC、保存后仅AEC与真实ID，signal artifact和报告只保留同一AEC，自由文本justification固定为空。持久化入口拒绝 prompt、原始 response、内部参数、校准过程、学习检索上下文、本机路径和未验证工具结果；Workflow不再记录Portfolio/fanout/prefetch/timing，PandaAI、LLM、学习检索、执行和阶段失败只记录稳定边界码。LLM允许重试但耗尽后必须抛错，删除默认Pydantic输出。原因：执行层只追加成交或未成交事实，智能体间只传递已校验正式契约，不泄露内部工作信息，也不以调用失败补造默认事实。
+
+（5）[Researcher 正式追溯] `research_learning.py` 与 `research_memory_writers.py` 要求 Phase4 和结算完成后，按真实信号记录、SCC 来源、FAC、完整 Auditor payload、execution_result、transaction 和 settlement 的 ID/日期/品种/配置关系完成输入校验；零交易与零学习结果均为合法状态，只持久化验证后的结构化学习成果。原因：保持既有 RAG 与强化学习算法和正式检索消费接口不变，同时禁止每笔交易强制产出学习或用学习记录反向改写当日事实。
+
+（6）[共享字段与配置收口] `signal_evidence_collection.py`、`evidence_fusion_semantics.py`、`analyst_data_usage.py`、`schema.py`、数据库接口、`dev.yaml` 与相关消费者统一 AEC/SCC 数据质量、主方向 trigger、Auditor payload、execution_result 和 action-value 的字段层级与类型；AEC共享校验登记五种正式数据源身份、允许字段和基础类型，新闻/基本面追溯只保留日期、计数、质量和稳定错误数量，拒绝路径、编码、原始错误、内部方向提示及隐藏字段；基本面缺数值列直接不可用，不再写入0。删除 `direction_alignment`、零引用机会审计、分析师并行写库/时序日志开关、可关闭 Auditor 开关、`retry_then_default` 及原始 prompt 持久化入口。原因：字段矩阵、canonical 动作矩阵、共享校验器和真实消费者只保留一套语义，正式中性 AEC 是显式业务状态而不是兜底。
+
+（7）[冻结主线验收] 新增失败优先回归并同步调整现行正式夹具；第一批修复前新增集出现 6 个失败和 6 个错误，组合保证金投影另出现1个失败，第一轮信息隔离出现5个失败和1个错误；后续运行时日志、基本面默认0、AEC内部字段、Router自由文本、PandaAI/模板路径、LLM默认输出和Workflow完整状态日志又逐项形成13个失败证据，均先红后修。最终冻结主线21项、信息隔离与PandaAI组合31项、AEC/SCC/分析师组合87项、Auditor相关44项、核心契约150项、Phase-flow 312项、Reviewer/Researcher 99项、组合主线411项及全量742项全部通过；最终全量耗时69.760秒，`compileall src`通过。正式 `pre_backtest_acceptance --config src/config/dev.yaml --local-db --json` 总状态passed，九项通过，数据就绪因未请求日期窗口按设计跳过；`system_invariant_audit --local-db` 因正式daily database缺失返回 `daily_database_missing`，其余六项按 `daily_database_unavailable` 跳过，未伪造数据库或默认事实消除环境阻断。原因：以真实生产消费者和正式门禁闭环八项主线修改，并保持PG旁路实现及冻结业务算法不变。

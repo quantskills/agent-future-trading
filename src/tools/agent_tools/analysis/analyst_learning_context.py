@@ -162,8 +162,8 @@ def resolve_config_id(db: Any, full_config: Dict[str, Any], explicit_config_id: 
     try:
         exp_name = full_config.get("exp_name")
         return db.get_config_id_by_name(exp_name) if exp_name else ""
-    except Exception as exc:
-        logger.warning(f"Unable to resolve config_id for learning context: {exc}")
+    except Exception:
+        logger.warning("analyst_learning_config_id_unavailable")
         return ""
 
 
@@ -599,8 +599,8 @@ def build_learning_context(
                         trading_date=trading_date,
                         limit=max(episode_limit * 2, episode_limit),
                     )
-        except Exception as exc:
-            logger.warning(f"{ticker}: trade episode memory retrieval skipped: {exc}")
+        except Exception:
+            logger.warning("analyst_trade_episode_memory_unavailable")
             episode_items = []
         raw_episode_lines = []
         for item in episode_items:
@@ -648,8 +648,8 @@ def build_learning_context(
                         trading_date=trading_date,
                         limit=max(no_trade_limit * 2, no_trade_limit),
                     )
-        except Exception as exc:
-            logger.warning(f"{ticker}: no-trade opportunity memory retrieval skipped: {exc}")
+        except Exception:
+            logger.warning("analyst_no_trade_memory_unavailable")
             no_trade_items = []
         raw_no_trade_lines = []
         for item in no_trade_items:
@@ -712,8 +712,8 @@ def build_learning_context(
                         trading_date=trading_date,
                         limit=max(hypothesis_limit * 2, hypothesis_limit),
                     )
-        except Exception as exc:
-            logger.warning(f"{ticker}: exploratory hypothesis retrieval skipped: {exc}")
+        except Exception:
+            logger.warning("analyst_exploratory_hypothesis_unavailable")
             hypothesis_items = []
         raw_hypothesis_lines = []
         for item in hypothesis_items:
@@ -791,8 +791,8 @@ def build_learning_context(
                             trading_date=trading_date,
                             limit=max(alpha_limit * 2, alpha_limit),
                         )
-            except Exception as exc:
-                logger.warning(f"{ticker}: alpha setup profile retrieval skipped: {exc}")
+            except Exception:
+                logger.warning("analyst_alpha_setup_profile_unavailable")
                 alpha_setup_items = []
             raw_alpha_lines = [f"- {profile_prompt_line(item)}" for item in alpha_setup_items]
             alpha_setup_lines, alpha_setup_dropped = _budget_plain_lines(
@@ -829,8 +829,8 @@ def build_learning_context(
                 max_items=max_items,
                 max_chars=max_chars,
             )
-    except Exception as exc:
-        logger.warning(f"{ticker}: learning context budget logging skipped: {exc}")
+    except Exception:
+        logger.warning("analyst_learning_context_budget_persistence_failed")
 
     if (
         not lines
@@ -1009,8 +1009,8 @@ def apply_config_learning_overlay(
     skipped: List[Dict[str, Any]] = []
     try:
         overlays = db.get_config_learning_overlay(config_id=config_id, trading_date=trading_date)
-    except Exception as exc:
-        logger.warning(f"Config learning overlay load failed: {exc}")
+    except Exception:
+        logger.warning("pm_learning_overlay_unavailable")
         return config
 
     for row in overlays:
@@ -1036,8 +1036,5 @@ def apply_config_learning_overlay(
         runtime["trading_date"] = _date_text(trading_date)
         runtime["applied"] = applied
         runtime["skipped"] = skipped
-        logger.info(
-            f"Applied {len(applied)} research config overlay(s); skipped {len(skipped)}"
-        )
 
     return config

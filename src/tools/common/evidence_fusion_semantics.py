@@ -297,7 +297,6 @@ def build_signal_collection_fusion_summary(
         "evidence_strength_by_analyst": strength_by_analyst,
         "evidence_freshness_by_analyst": freshness_by_analyst,
         "evidence_alignment_state": alignment_state,
-        "direction_alignment": alignment_state,
         "cross_analyst_conflicts": conflicts,
         "dominant_opposing_evidence": dominant_opposing,
         "confirmation_requirements": sorted(set(confirmation_requirements)),

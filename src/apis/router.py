@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from apis.contract_info_cache import FuturesContractInfoCache
 from util.logger import logger
 from util.text_sanitize import sanitize_visible_text
 from util.trading_calendar import get_previous_trading_day
@@ -12,10 +13,8 @@ from tools.agent_tools.analysis.analyst_data_usage import read_finoview_feather_
 
 try:
     import pandas as pd
-    _PANDAS_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - depends on runtime environment
+except Exception:  # pragma: no cover - depends on runtime environment
     pd = None
-    _PANDAS_IMPORT_ERROR = exc
 
 class APISource:
     PANDAAI = "pandaai"
@@ -55,11 +54,8 @@ class Router():
         if pd is not None:
             return
 
-        detail = str(_PANDAS_IMPORT_ERROR) if _PANDAS_IMPORT_ERROR else "pandas is unavailable"
         raise RuntimeError(
-            f"{feature_name} requires pandas/numpy support, but those native dependencies could not be loaded. "
-            f"Original error: {detail}. If you are on Windows, an application-control policy may be blocking the "
-            f"numpy DLLs inside the current environment."
+            f"{feature_name}: pandas_runtime_dependency_unavailable"
         )
     
     def get_market_news(self, topic, trading_date, news_count):
@@ -259,12 +255,45 @@ class Router():
             warning_messages=warning_messages,
         )
         if prev_quote is not None and prev_quote.close_price is not None and prev_quote.close_price > 0:
+            visible_contract_code = str(getattr(prev_quote, "ticker", "") or "").strip().upper()
+            if not visible_contract_code or not any(char.isdigit() for char in visible_contract_code):
+                return self._build_missing_previous_close_basis(
+                    underlying_code=underlying_code,
+                    normalized_date=normalized_date,
+                    open_price=None,
+                    warning_messages=[*warning_messages, "concrete_contract_code_unavailable"],
+                )
+            static_info = FuturesContractInfoCache.get_contract_info(underlying_code)
+            contract_facts = {
+                "contract_code": visible_contract_code,
+                "underlying_code": str(underlying_code).upper(),
+                "as_of_date": previous_trading_day.strftime("%Y-%m-%d"),
+                "source": (
+                    "pandaai_concrete_contract_quote"
+                    if contract_code
+                    else "pandaai_main_contract_quote"
+                ),
+                "exchange": getattr(prev_quote, "exchange_cd", None),
+                "main_contract": bool(getattr(prev_quote, "main_con", 0)) if not contract_code else False,
+            }
+            if isinstance(static_info, dict):
+                for field in (
+                    "contract_multiplier",
+                    "margin_rate_long",
+                    "margin_rate_short",
+                    "minimum_tick",
+                    "contract_type",
+                ):
+                    if static_info.get(field) is not None:
+                        contract_facts[field] = static_info[field]
             return MorningExecutionBasis(
                 base_price=prev_quote.close_price,
                 base_price_source=BasePriceSource.T_MINUS_1_CLOSE_FALLBACK,
                 base_price_date=previous_trading_day.strftime("%Y-%m-%d"),
                 open_price=None,
                 prev_close_price=prev_quote.close_price,
+                contract_code=visible_contract_code,
+                contract_facts=contract_facts,
                 warning_message="; ".join(warning_messages) if warning_messages else None,
             )
 
@@ -315,13 +344,7 @@ class Router():
     def _append_provider_warning(self, underlying_code, trading_date, operation, exc, warning_messages=None):
         normalized_date = self._normalize_trading_date(trading_date) if trading_date is not None else None
         date_text = normalized_date.strftime("%Y-%m-%d") if normalized_date is not None else "unknown"
-        detail = sanitize_visible_text(str(exc))
-        if len(detail) > 280:
-            detail = detail[:280] + "..."
-        message = (
-            f"{underlying_code} {operation} provider unavailable on {date_text}: "
-            f"{type(exc).__name__}: {detail}"
-        )
+        message = f"{underlying_code} {operation} provider unavailable on {date_text}"
         logger.warning(message)
         if warning_messages is not None:
             warning_messages.append(message)
@@ -796,6 +819,8 @@ class Router():
             "excluded_stale_indicators": [],
             "undated_indicator_count": 0,
             "undated_indicators": [],
+            "invalid_schema_count": 0,
+            "source_read_error_count": 0,
             "indicator_role_counts": {},
             "indicator_frequency_counts": {},
         }
@@ -814,14 +839,14 @@ class Router():
             file_path = data_dir / f"{filename}.feather"
 
             if not file_path.exists():
-                logger.warning(f"{ticker} - File not found: {file_path}")
+                logger.warning(f"{ticker}: fundamental_source_file_unavailable")
                 self.last_fundamentals_metadata["missing_file_count"] += 1
                 continue
 
             try:
                 df = read_finoview_feather_cached(file_path)
                 if df.empty:
-                    logger.warning(f"{ticker} - {name_cn}: Empty DataFrame")
+                    logger.warning(f"{ticker}: fundamental_source_empty")
                     self.last_fundamentals_metadata["empty_frame_count"] += 1
                     continue
 
@@ -835,10 +860,7 @@ class Router():
                     df[date_col] = pd.to_datetime(df[date_col])
                     df_filtered = df[df[date_col] < trading_dt].copy()
                 else:
-                    logger.error(
-                        f"{ticker} - {name_cn}: No date column found; skipping indicator to avoid "
-                        "using undated or future fundamental evidence"
-                    )
+                    logger.error(f"{ticker}: fundamental_source_date_column_missing")
                     self.last_fundamentals_metadata["undated_indicator_count"] += 1
                     self.last_fundamentals_metadata["undated_indicators"].append(
                         {
@@ -851,7 +873,7 @@ class Router():
                     continue
 
                 if df_filtered.empty:
-                    logger.warning(f"{ticker} - {name_cn}: No data available before {trading_date}")
+                    logger.warning(f"{ticker}: fundamental_source_cutoff_data_unavailable")
                     self.last_fundamentals_metadata["no_data_before_count"] += 1
                     continue
 
@@ -871,10 +893,20 @@ class Router():
                 elif 'value' in df.columns:
                     value = latest['value']
                 else:
-                    logger.error(
-                        f"{ticker} - {name_cn}: No matching value column. Available columns: {df.columns.tolist()}"
-                    )
-                    value = 0
+                    logger.error(f"{ticker}: fundamental_source_value_column_missing")
+                    self.last_fundamentals_metadata["invalid_schema_count"] += 1
+                    continue
+
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    logger.error(f"{ticker}: fundamental_source_value_invalid")
+                    self.last_fundamentals_metadata["invalid_schema_count"] += 1
+                    continue
+                if not math.isfinite(numeric_value):
+                    logger.error(f"{ticker}: fundamental_source_value_invalid")
+                    self.last_fundamentals_metadata["invalid_schema_count"] += 1
+                    continue
 
                 if len(df_filtered) >= 5:
                     recent_5 = df_filtered.tail(5)
@@ -907,23 +939,17 @@ class Router():
                 if not math.isfinite(trend):
                     trend = 0
 
-                trend_str = f"{trend:.2%}" if math.isfinite(trend) else 'N/A'
-                logger.info(f"{ticker} - {name_cn}: latest={value:.2f}, trend={trend_str}, date={date_str}")
-
                 is_stale = False
                 stale_detail = None
                 if date_str != 'Unknown':
                     try:
                         data_date = pd.to_datetime(str(date_str))
                         if pd.isna(trading_dt):
-                            logger.error(f"{ticker} - {name_cn}: Invalid trading_date={trading_date}")
+                            logger.error(f"{ticker}: fundamental_trading_date_invalid")
                         else:
                             days_diff = (trading_dt - data_date).days
                             if days_diff < 0:
-                                logger.warning(
-                                    f"{ticker} - {name_cn}: Data date {data_date:%Y-%m-%d} is in the future relative to "
-                                    f"trading_date={trading_dt:%Y-%m-%d}"
-                                )
+                                logger.warning(f"{ticker}: fundamental_source_future_date")
                                 days_diff = 0
 
                             max_days = self._get_max_days_for_indicator(
@@ -932,10 +958,7 @@ class Router():
                                 indicator_frequency,
                             )
                             if days_diff > max_days:
-                                logger.warning(
-                                    f"{ticker} - {name_cn}: Data is {days_diff} days old "
-                                    f"(date: {data_date}, max: {max_days} days) - STALE; excluded from directional evidence"
-                                )
+                                logger.warning(f"{ticker}: fundamental_source_stale")
                                 self.last_fundamentals_metadata["stale_indicator_count"] += 1
                                 is_stale = True
                                 stale_detail = {
@@ -951,15 +974,12 @@ class Router():
                                     "evidence_policy": "excluded_from_directional_prompt",
                                 }
                             elif days_diff > max_days * 0.7:
-                                logger.warning(
-                                    f"{ticker} - {name_cn}: Data is {days_diff} days old "
-                                    f"(date: {data_date}, approaching limit: {max_days} days)"
-                                )
+                                logger.warning(f"{ticker}: fundamental_source_near_stale")
                                 self.last_fundamentals_metadata["near_stale_indicator_count"] += 1
-                    except Exception as exc:
-                        logger.error(f"{ticker} - {name_cn}: Error checking data freshness: {exc}")
+                    except Exception:
+                        logger.error(f"{ticker}: fundamental_data_freshness_check_failed")
                 else:
-                    logger.warning(f"{ticker} - {name_cn}: Missing date, skipping freshness check")
+                    logger.warning(f"{ticker}: fundamental_source_date_missing")
 
                 if is_stale:
                     self.last_fundamentals_metadata["excluded_stale_indicator_count"] += 1
@@ -969,7 +989,7 @@ class Router():
 
                 low_confidence_note = low_confidence_indicators.get(filename)
                 fundamental_data[name_cn] = {
-                    'latest': float(value) if pd.notna(value) else 0,
+                    'latest': numeric_value,
                     'date': str(date_str),
                     'trend_5d': float(trend) if pd.notna(trend) else 0,
                     'role': indicator_role,
@@ -985,32 +1005,27 @@ class Router():
                 frequency_counts[indicator_frequency] = frequency_counts.get(indicator_frequency, 0) + 1
                 self.last_fundamentals_metadata["loaded_indicator_count"] += 1
 
-            except Exception as exc:
-                logger.error(f"{ticker} - Error reading {file_path}: {exc}")
-                import traceback
-                logger.error(traceback.format_exc())
+            except Exception:
+                logger.error(f"{ticker}: fundamental_source_read_failed")
+                self.last_fundamentals_metadata["source_read_error_count"] += 1
                 continue
 
-        if not fundamental_data:
-            logger.error(f"{ticker}: No fundamental data loaded after processing all files")
-            self.last_fundamentals_metadata["formatted_indicator_count"] = 0
-            self.last_fundamentals_metadata["coverage_ratio"] = 0.0
-            return None
-
-        logger.info(f"{ticker}: Loaded {len(fundamental_data)} fundamental indicators")
         configured_count = self.last_fundamentals_metadata["configured_indicator_count"]
         loaded_count = self.last_fundamentals_metadata["loaded_indicator_count"]
-        self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
-        self.last_fundamentals_metadata["coverage_ratio"] = (
-            loaded_count / configured_count if configured_count else 0.0
-        )
-        missing_like_count = (
-            int(self.last_fundamentals_metadata.get("missing_file_count") or 0)
-            + int(self.last_fundamentals_metadata.get("empty_frame_count") or 0)
-            + int(self.last_fundamentals_metadata.get("no_data_before_count") or 0)
+        missing_like_count = sum(
+            int(self.last_fundamentals_metadata.get(field) or 0)
+            for field in (
+                "missing_file_count",
+                "empty_frame_count",
+                "no_data_before_count",
+                "undated_indicator_count",
+                "invalid_schema_count",
+                "source_read_error_count",
+            )
         )
         self.last_fundamentals_metadata["missing_like_count"] = missing_like_count
         if configured_count:
+            self.last_fundamentals_metadata["coverage_ratio"] = loaded_count / configured_count
             self.last_fundamentals_metadata["missing_ratio"] = missing_like_count / configured_count
             self.last_fundamentals_metadata["stale_ratio"] = (
                 int(self.last_fundamentals_metadata.get("stale_indicator_count") or 0)
@@ -1020,6 +1035,13 @@ class Router():
                 int(self.last_fundamentals_metadata.get("near_stale_indicator_count") or 0)
                 / configured_count
             )
+
+        if not fundamental_data:
+            logger.error(f"{ticker}: fundamental_data_unavailable")
+            self.last_fundamentals_metadata["formatted_indicator_count"] = 0
+            return None
+
+        self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
 
         try:
             if ticker in indicator_map and 'spot_price' in indicator_map[ticker]:
@@ -1032,11 +1054,8 @@ class Router():
                             trading_date=trading_dt,
                             underlying_code=ticker,
                         )
-                    except Exception as exc:
-                        logger.warning(
-                            f"{ticker}: Unable to resolve pre-open basis futures cutoff before "
-                            f"{trading_dt:%Y-%m-%d}; skipping basis calculation: {exc}"
-                        )
+                    except Exception:
+                        logger.warning(f"{ticker}: basis_reference_date_unavailable")
                         basis_reference_date = None
                     if basis_reference_date is None:
                         futures_quotes = []
@@ -1108,10 +1127,6 @@ class Router():
                             else None,
                         }
                         self.last_fundamentals_metadata["basis"] = dict(fundamental_data["basis"])
-
-                        logger.info(
-                            f"{ticker} - Basis: {basis:.2f} ({basis_pct:.2f}%), {basis_status}, {basis_trend_status}"
-                        )
                         self.last_fundamentals_metadata["basis_available"] = True
                     else:
                         logger.warning(f"{ticker}: No futures data for basis calculation")
@@ -1119,10 +1134,8 @@ class Router():
                     logger.warning(f"{ticker}: No spot price data for basis calculation")
             else:
                 logger.warning(f"{ticker}: Spot price not configured for basis calculation")
-        except Exception as exc:
-            logger.error(f"{ticker}: Error calculating basis: {exc}")
-            import traceback
-            logger.error(traceback.format_exc())
+        except Exception:
+            logger.error(f"{ticker}: basis_calculation_failed")
 
         self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
         try:
@@ -1168,8 +1181,8 @@ class Router():
                         catalog=local_catalog,
                     )
                 )
-        except Exception as exc:
-            logger.warning(f"{ticker}: Finoview factor snapshot build skipped: {exc}")
+        except Exception:
+            logger.warning(f"{ticker}: finoview_factor_snapshot_unavailable")
 
         result = f"=== Fundamental Analysis for {ticker} ===\n\n"
         factor_judgment = self.last_fundamentals_metadata.get("finoview_factor_judgment") or {}
@@ -1214,7 +1227,6 @@ class Router():
                 if data.get('quality_note'):
                     result += f"  Low-confidence note: {data['quality_note']}\n"
 
-        logger.info(f"{ticker}: Formatted fundamental data:\n{result}")
         return result
 
     def get_china_futures_news(self, ticker, trading_date, news_count=10, pre_open_only=True):
@@ -1255,7 +1267,7 @@ class Router():
         }
 
         if not news_file.exists():
-            logger.error(f"{ticker}: News file not found: {news_file}")
+            logger.error(f"{ticker}: news_source_file_unavailable")
             return []
 
         try:
@@ -1331,8 +1343,8 @@ class Router():
                         content=sanitize_visible_text(news_content),
                         url=None
                     ))
-                except (ValueError, IndexError) as exc:
-                    logger.warning(f"{ticker}: Failed to parse news block: {exc}")
+                except (ValueError, IndexError):
+                    logger.warning(f"{ticker}: news_block_parse_failed")
                     continue
 
             self.last_news_metadata["parsed_news_count"] = len(news_items)
@@ -1341,15 +1353,12 @@ class Router():
             self.last_news_metadata["selected_news_count"] = len(news_items)
             if news_items:
                 self.last_news_metadata["latest_news_date"] = str(news_items[0].publish_time)[:10]
-            logger.info(f"{ticker}: Loaded {len(news_items)} news items from {news_file}")
             return news_items
 
-        except Exception as exc:
-            logger.error(f"{ticker}: Error reading news file {news_file}: {exc}")
+        except Exception:
+            logger.error(f"{ticker}: news_source_read_failed")
             if isinstance(getattr(self, "last_news_metadata", None), dict):
-                self.last_news_metadata.setdefault("errors", []).append(str(exc))
-            import traceback
-            logger.error(traceback.format_exc())
+                self.last_news_metadata.setdefault("errors", []).append("news_source_read_failed")
             return []
 
     def _get_indicator_role(self, filename: str, display_name: str = "") -> str:

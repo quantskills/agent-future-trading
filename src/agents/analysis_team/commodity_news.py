@@ -6,18 +6,16 @@ from llm.inference import agent_call
 from apis.router import Router, APISource
 from util.db_helper import get_db
 from util.logger import logger
-from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_quality import (
     format_news_summary_for_prompt,
     llm_path_label,
     summarize_news_events,
-    write_analyst_report,
 )
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
 from tools.agent_tools.analysis.analyst_data_usage import build_news_data_usage
 from tools.agent_tools.analysis.analyst_output_finalization import (
+    build_required_market_data_unavailable_signal,
     finalize_analyst_signal,
-    persist_analyst_signal,
     resolve_analyst_llm_config,
 )
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
@@ -42,6 +40,15 @@ def _build_no_news_signal(
     info_cutoff: str,
 ) -> AnalystSignal:
     trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
+    data_usage_summary = build_news_data_usage(
+        ticker=ticker,
+        trading_date=trading_date,
+        news_metadata=news_metadata,
+        news_context={},
+        pre_open_only=pre_open_only,
+        info_cutoff=info_cutoff,
+    )
+    data_usage_summary["data_available"] = False
     return AnalystSignal(
         agent_name=agent_name,
         signal=Signal.NEUTRAL,
@@ -84,15 +91,7 @@ def _build_no_news_signal(
         neutral_watchlist_priority="none",
         do_not_trade_reason="news_data_unavailable",
         metadata={
-            "data_usage_summary": {
-                "ticker": ticker,
-                "trading_date": trading_date_value,
-                "pre_open_only": pre_open_only,
-                "info_cutoff": info_cutoff,
-                "data_available": False,
-                "data_gap_reason": "local_futures_news_unavailable",
-                "metadata": news_metadata or {},
-            },
+            "data_usage_summary": data_usage_summary,
             "analysis_strategy_trace": {
                 "analyst": "commodity_news",
                 "data_gap_no_trade": True,
@@ -107,14 +106,23 @@ def commodity_news_agent(state: FundState):
     agent_name = AgentKey.COMMODITY_NEWS
     ticker = state["ticker"]
     trading_date = state["trading_date"]
-    llm_config = resolve_analyst_llm_config(state)
-    portfolio_id = state["portfolio"].id
     market_type = state.get("market_type", "china_futures")
     pre_open_only = state.get("pre_open_only", True)
     info_cutoff = state.get("info_cutoff") or ("pre_open" if pre_open_only else "unspecified")
-    save_outputs = bool(state.get("save_analyst_outputs", True))
     cfg = state.get("config", {}) or {}
     full_config = state.get("full_config", cfg) or {}
+
+    if state.get("pre_open_reference_price_unavailable"):
+        signal = build_required_market_data_unavailable_signal(
+            analyst="commodity_news",
+            ticker=ticker,
+            trading_date=trading_date,
+            full_config=full_config,
+            info_cutoff=info_cutoff,
+        )
+        return {"analyst_signals": [signal]}
+
+    llm_config = resolve_analyst_llm_config(state)
 
     if market_type != "china_futures":
         message = (
@@ -127,7 +135,6 @@ def commodity_news_agent(state: FundState):
     product_profile_usage = build_profile_usage_contract(ticker, "commodity_news", product_profile)
 
     db = get_db()
-    logger.log_agent_status(agent_name, ticker, "Fetching commodity news")
 
     router = Router(APISource.PANDAAI, market_type=market_type, config=full_config)
     try:
@@ -137,9 +144,9 @@ def commodity_news_agent(state: FundState):
             news_count=thresholds["news_count"],
             pre_open_only=pre_open_only,
         )
-    except Exception as exc:
-        logger.error(f"Failed to fetch futures news for {ticker}: {exc}")
-        raise RuntimeError(f"Failed to fetch futures news for {ticker}: {exc}") from exc
+    except Exception:
+        logger.error(f"{ticker}: commodity_news_data_fetch_failed")
+        raise RuntimeError(f"{ticker}: commodity_news_data_fetch_failed") from None
 
     if not commodity_news:
         logger.warning(f"{ticker}: No local futures news returned; emitting explicit no_trade signal")
@@ -167,49 +174,8 @@ def commodity_news_agent(state: FundState):
             product_profile=product_profile,
             product_profile_usage=product_profile_usage,
         )
-        prompt = (
-            f"{ticker} local futures news unavailable before {trading_date}; "
-            "deterministic no_trade artifact produced.\n"
-            + format_profile_for_commodity_news(ticker, product_profile)
-        )
-        report_sections = {
-            "Data Usage Summary": signal.metadata.get("data_usage_summary"),
-            "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
-            "Reason": "local_futures_news_unavailable",
-        }
-        if save_outputs:
-            report_path = write_analyst_report(
-                analyst="commodity_news",
-                ticker=ticker,
-                trading_date=trading_date,
-                signal=signal,
-                full_config=full_config,
-                sections=report_sections,
-            )
-            if report_path:
-                signal.metadata["decision_report_path"] = report_path
-            persist_analyst_signal(
-                db,
-                portfolio_id=portfolio_id,
-                analyst=agent_name,
-                ticker=ticker,
-                prompt=prompt,
-                signal=signal,
-            )
         logger.log_signal(agent_name, ticker, signal)
-        return {
-            "analyst_signals": [signal],
-            "analyst_outputs": [
-                {
-                    "analyst": agent_name,
-                    "ticker": ticker,
-                    "trading_date": trading_date,
-                    "prompt": prompt,
-                    "signal": signal,
-                    "report_sections": report_sections,
-                }
-            ],
-        }
+        return {"analyst_signals": [signal]}
 
     news_dict = [item.model_dump_json() for item in commodity_news]
     news_context = summarize_news_events(commodity_news, ticker, trading_date=trading_date)
@@ -236,11 +202,15 @@ def commodity_news_agent(state: FundState):
         learning_context_text=learning_context.get("text", ""),
     )
 
-    signal = agent_call(
-        prompt=prompt,
-        llm_config=llm_config,
-        pydantic_model=AnalystSignal,
-    )
+    try:
+        signal = agent_call(
+            prompt=prompt,
+            llm_config=llm_config,
+            pydantic_model=AnalystSignal,
+        )
+    except Exception:
+        logger.error(f"{ticker}: commodity_news_inference_failed")
+        raise RuntimeError(f"{ticker}: commodity_news_inference_failed") from None
 
     signal.agent_name = agent_name
     signal.horizon_class = signal.horizon_class if signal.horizon_class != "unknown" else "event_short"
@@ -297,62 +267,6 @@ def commodity_news_agent(state: FundState):
         product_profile=product_profile,
         product_profile_usage=product_profile_usage,
     )
-    trading_date_value = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date)
-    signal.justification += (
-        f"\n[Audit: pre_open_only={pre_open_only}; info_cutoff={info_cutoff}; "
-        f"news_cutoff={'<' if pre_open_only else '<='}{trading_date_value}; "
-        f"llm_path={llm_path}; tradeability={news_context.get('tradeability')}; "
-        f"business_quality={signal.business_quality_score:.2f}; setup_type={signal.setup_type}]"
-    )
-    signal.justification = sanitize_visible_text(signal.justification)
-
-    report_sections = {
-        "llm_path": llm_path,
-        "tradeability": news_context.get("tradeability"),
-        "sector": news_context.get("sector"),
-        "Sector Guidance": news_context.get("sector_guidance"),
-        "Events Used": news_context.get("events"),
-        "Event Type Counts": news_context.get("event_type_counts"),
-        "Direction Counts": news_context.get("direction_counts"),
-        "Freshness Score": news_context.get("freshness_score"),
-        "Relevance Score": news_context.get("relevance_score"),
-        "Data Usage Summary": data_usage_summary,
-        "Risk Flags": news_context.get("risk_flags"),
-        "Product Price Behavior Profile": signal.metadata.get("product_profile_evidence"),
-    }
-    if save_outputs:
-        report_path = write_analyst_report(
-            analyst="commodity_news",
-            ticker=ticker,
-            trading_date=trading_date,
-            signal=signal,
-            full_config=full_config,
-            sections=report_sections,
-        )
-        if report_path:
-            signal.metadata["decision_report_path"] = report_path
-
     logger.log_signal(agent_name, ticker, signal)
-    if save_outputs:
-        persist_analyst_signal(
-            db,
-            portfolio_id=portfolio_id,
-            analyst=agent_name,
-            ticker=ticker,
-            prompt=prompt,
-            signal=signal,
-        )
 
-    return {
-        "analyst_signals": [signal],
-        "analyst_outputs": [
-            {
-                "analyst": agent_name,
-                "ticker": ticker,
-                "trading_date": trading_date,
-                "prompt": prompt,
-                "signal": signal,
-                "report_sections": report_sections,
-            }
-        ],
-    }
+    return {"analyst_signals": [signal]}

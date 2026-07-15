@@ -24,6 +24,7 @@
 7. 学习记录必须保留当时使用的数据依据、字段、质量状态和 no-lookahead 状态。
 8. 回测前硬数据覆盖只针对交易必须依赖的 PandaAI 市场数据：交易日窗口、交易宇宙内每个品种的日线行情、开收盘价、官方结算价和主力合约映射必须可取；缺任一项属于非策略 hard error。
 9. Finoview 基本面数据和本地新闻不要求每日齐全。它们按真实更新频率进入数据质量、证据强弱、缺失证据和降级理由；不能因为某品种某日没有基本面或新闻更新而阻断回测。
+10. 智能体之间只传递共享校验通过的正式结构化契约。prompt、原始 response、内部推理、中间工作状态、隐藏上下文和未验证工具结果不得持久化、跨智能体传递或写入日志/异常。分析师signal artifact和报告只保存同一份已校验AEC；`signal.justification`固定为空，metadata在Workflow保存后只允许AEC和真实记录ID。LLM失败允许重试但禁止返回默认结构化对象；耗尽后只抛稳定错误码，不生成AEC或学习事实。
 
 ## 二、模型调用原则
 
@@ -39,7 +40,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | `decision_memory_retrieval` | 否 | 确定性读取结构化研究信息 | 自由文本记忆解释、手数、交易动作 |
 | `pm_ticker_side_selection` | 否 | PM 第 3 步单品种方向选择和候选质量判断 | 全市场 rank、最终手数、最终合约 |
 | `pm_full_market_capital_deployment` | 否 | PM 第 5 步只对实际增加风险的候选做全市场资金 rank 和部署，包括新开仓与同方向扩大绝对手数的 `add/scale` | `wait/hold/reduce/exit`、当前反转退出腿和不增加风险条件监控的伪 rank、最终合约 |
-| `pm_position_sizing` | 否 | PM 第 6 步签约前计算目标手数建议 | 改方向、签合约 |
+| `pm_position_sizing` | 否 | PM 第 5 步资金部署中计算目标手数建议，供第 6 步签约 | 改方向、签合约 |
 | `auditor` 审计员 | 否 | 审计最终合约和硬风险 | 改方向、改手数、新建合约 |
 | `trader` 交易员 | 否 | 执行审计通过的最终合约和合约化触发规则 | 读取研究库/action-value/`strategy_memory`/`adaptive_policy_state` 下单或放宽触发、改方向、改手数 |
 | `accountant` 会计师 | 否 | 按成交和结算事实入账 | LLM 调账、学习改账 |
@@ -61,19 +62,19 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 技术面分析师
 
-读取 PandaAI 盘前可见行情、技术指标、技术学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。可以调用 LLM，但只能输出结构化技术预测证据。
+读取 PandaAI 盘前可见行情、技术指标、技术学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。可以调用 LLM，但只能输出结构化技术预测证据；必需盘前市场事实不可用时不调用LLM，改由正式入口产生共享校验通过的中性 AEC。
 
 ### 基本面分析师
 
-读取 Finoview 基本面数据、PandaAI 衍生因子、基本面学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。可以调用 LLM，但只能输出结构化基本面预测证据。
+读取 Finoview 基本面数据、PandaAI 衍生因子、基本面学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。基本面无当日新增只影响本分析师：使用截止点前最近有效事实并标记时效/质量，或形成合法 `no_opportunity`；不能触发全局失败或补造事实。
 
 ### 期货新闻面分析师
 
-读取本地新闻 txt、事件上下文、新闻学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。可以调用 LLM，但只能输出结构化新闻预测证据。
+读取本地新闻 txt、事件上下文、新闻学习校准。输出 `AnalystSignal` 和 `action_evidence_contract`。新闻无当日新增只影响本分析师：如实表达无当前催化、时效和质量，不能触发全局失败或补造新闻。
 
 ### 信号收集员
 
-不调用 LLM，不读取研究库。只读取三类分析师正式输出的 `action_evidence_contract`，生成 `signal_collection_contract`，并写明 `source_agent="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。它不输出 score/rank、手数、仓位、交易动作或 `final_action_contract`。
+不调用 LLM，不读取研究库。Workflow先保存三份AnalystSignal并取得真实ID；Signal Collector只读取并共享校验三个 `action_evidence_contract`，生成唯一 `signal_collection_contract`，并写明 `source_agent="signal_collector"` 与 `collector_decision_boundary="no_trade_authority"`。它不生成AnalystSignal或ID，不输出 score/rank、手数、仓位、交易动作或 `final_action_contract`。
 
 ### 投资组合经理
 
@@ -89,7 +90,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 审计员
 
-不调用 LLM。只读审计投资组合经理签发的 `final_action_contract`，检查必需字段、基本动作逻辑、账户硬风险、配置硬保证金上限、合约/失效边界和数据质量，输出 `approve`、`approve_with_warning` 或 `block` 及审计 payload。不能改方向、改手数或新建合约，也不复审 PM 学习、融合、rank、预算和 sizing。
+不调用 LLM。Workflow传入完整FAC、账户权益/保证金/保证金比例/`risk_status`、当前持仓、SCC数据质量摘要、具体合约及失效边界事实和主配置硬风控参数。Auditor只检查FAC结构、基本动作/方向/手数逻辑、增量风险硬保证金、清算状态、具体合约、失效边界和硬数据错误；硬保证金检查以账户当前组合比例加上目标品种相对当前品种的正增量形成投影组合比例，不能把单品种目标比例直接与组合上限比较。输出 `approve`、`approve_with_warning` 或 `block` 及完整审计 payload。不能改方向、改手数、FAC或新建合约，也不复审 PM 学习、融合、rank、预算和 sizing。
 
 ### 交易员
 
@@ -105,14 +106,14 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 ### 研究员
 
-可受限调用 LLM。通过 `run/research/researcher_learning.py` 在复盘员 Phase4 验证完成后单独运行，基于复盘事实、完整 episode、未交易机会、未触发条件机会和执行结果，输出并持久化结构化研究信息，包括：
+可受限调用 LLM。通过 `run/research/researcher_learning.py` 在复盘员 Phase4 和结算事实完成后单独运行，并以正式ID验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement。只持久化验证后的结构化研究信息，包括：
 
 - 分析师校准类研究；
 - 交易决策类 `alpha_setup_action_value`；
 - `alpha_setup_profile`；
 - `adaptive_policy_state`。
 
-研究员不能修改当天合约、手数或交易员权限。
+研究员不能保存prompt、原始response、内部推理或未验证工具结果，不能修改当天合约、手数或交易员权限。学习允许为空，不要求每笔交易形成学习，也不要求每次决策使用学习。
 
 ### 协议管理员
 
@@ -187,15 +188,15 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | 信号收集 artifact / `signal_collection_contract` | 统一结构化证据事实 | `trading_date` | 信号收集员 | `source_agent="signal_collector"`、`collector_decision_boundary="no_trade_authority"`、来源引用、逐条证据、方向汇总、触发状态、证据强弱、冲突、缺失、风险、失效边界 | 历史学习结论、score/rank、仓位、手数、交易动作、`final_action_contract`；PM 或其他模块重建证据包 |
 | `futures_recommendation` | PM 策略交易事实；换月/强平等运营推荐事实；独立 Auditor 审计事实载体 | `trading_date` | PM Step6 返回唯一 `FuturesRecommendation`；独立 Auditor 写 `audit_payload` / auditor 摘要；保存层负责物理化；换月/强平运营入口写运营事实 | PM 策略路径只保存完整 `signal_snapshot.final_action_contract`、原始 SCC 和两个最终检查；Auditor 只能保存 `audit_verdict`、hard/soft risk reasons 和只读审计 payload；运营路径只保存运营动作事实 | Step1–5 内存状态进入持久化载体；Phase2、Phase3、Phase4 或研究入口改写 PM 策略合约；Auditor 改方向/改手数/新建合约；运营推荐伪装成 PM 策略评分 |
 | `futures_intraday_decision` / Phase2 `features_json` | 盘中触发和执行判断事实 | `trading_date` | 交易员执行入口 | 触发是否成立、执行摘要、盘中行情、执行原因、成交/未成交依据 | 完整 `final_action_contract` 镜像、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` |
-| `futures_transactions` / transaction `audit_payload` | 交易员执行事实 | `trading_date` | 交易员成交写入入口 | 成交/未成交、动作、手数、品种、执行审计摘要、执行结果 | 完整 PM 合约镜像、PM 学习解释、PM 排名、PM 资金部署理由、研究记录 |
+| `futures_transactions` / transaction `audit_payload` | 交易员真实成交事实 | `trading_date` | 交易员成交写入入口 | 真实成交动作、手数、品种及在完整Auditor payload上追加的执行审计 | 未触发/未成交/失效/市场规则阻断、完整 PM 合约镜像、PM 学习解释、PM 排名、PM 资金部署理由、研究记录、prompt |
 | `daily_settlement` / `ticker_daily_pnl` | 会计师结算事实 | `trading_date` | 会计师结算入口 | PnL、手续费、保证金、权益、持仓快照、分品种盈亏 | 学习字段、LLM 字段、交易授权、研究结论 |
 | `trading_day_phase` | 阶段状态事实 | `trading_date` | 四阶段运行脚本 | Phase1/2/3/4 的 started/completed/failed 状态和消息 | 研究表写入、学习刷新、策略记忆 retention 清理 |
 | 复盘日志 artifact / Phase4 payload | 复盘事实和事实归因 | `trading_date` | 复盘员 Phase4 入口 | 链路验收、交易日志、事实归因、上游事实 ID/path 或必要摘要 | 写 action-value、写策略记忆、改推荐、改成交、改结算 |
 | `alpha_setup_action_value` | 交易决策类和校准类结构化研究成果 | `last_sample_date` | 研究员学习入口 / `research_memory_writers` | action-value、`canonical_action_family`、`action_value_lane/learning_lane`、消费边界、奖励来源、证据作用域、PM 合约作为学习证据 | 修改当天 PM 合约、成交、结算或复盘事实；从裸 `action_name` 私自猜动作家族 |
 | `adaptive_policy_state` | 未来可用的结构化研究状态 | `source_trading_date` | 研究员学习入口 / `research_memory_writers` | 研究状态、策略校准状态、来源交易日、研究 payload | 交易员直接读取下单或放宽触发；Phase4 自动刷新 |
-| `researcher_llm_notes` | 研究员 LLM 研究 notes | `trading_date` | 研究员学习入口 | 研究输入、研究输出、结构化研究 payload、raw prompt/response | 当天交易指令、手数、成交、结算改写 |
+| `researcher_llm_notes` | 研究员验证后结构化研究记录 | `trading_date` | 研究员学习入口 | 经验证的 evidence pack 与结构化结果 payload | prompt、原始response、内部推理、未验证工具结果、当天交易指令、手数、成交、结算改写 |
 
-`execution_contract` 只能作为交易员触发/执行配置摘要使用，不是第二张交易合约。它只能从已审计的 `final_action_contract` 中抽取执行规则字段，例如 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes`、`execution_action_value_preference` 和 `analyst_execution_roles`；不得携带 `target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。交易员执行动作和手数摘要只能来自已审计 `final_action_contract` 的必要执行字段摘要，不能由 `execution_contract` 单独授权。
+`execution_contract` 只能作为交易员触发/执行配置摘要使用，不是第二张交易合约。它只能从已审计的 `final_action_contract` 中抽取执行规则字段，例如 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得携带完整AEC、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。交易员执行动作和手数摘要只能来自已审计 `final_action_contract` 的必要执行字段摘要，不能由 `execution_contract` 单独授权。
 
 Transaction audit payload 可以保存交易员执行事实和执行审计摘要，不能保存完整 PM 合约副本。需要追溯上游来源时，只能记录 `recommendation_id`、上游 artifact path 或必要执行摘要。
 

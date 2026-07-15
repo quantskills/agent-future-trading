@@ -382,10 +382,8 @@ class FuturesDailySettlement:
                 )
 
     def _short_error(self, exc: Exception, limit: int = 280) -> str:
-        text = str(exc).replace("\r", " ").replace("\n", " ")
-        if len(text) > limit:
-            return text[:limit] + "..."
-        return text
+        del exc, limit
+        return "settlement_input_unavailable"
 
     def _finalize_ledgers(
         self,

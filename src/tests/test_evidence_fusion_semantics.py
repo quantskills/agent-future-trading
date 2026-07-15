@@ -18,6 +18,7 @@ from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecy
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tests.contract_test_fixtures import build_test_aec
 
 
 class EvidenceFusionSemanticsTest(unittest.TestCase):
@@ -49,7 +50,28 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             context.update({"fundamental_deployable_confirmed": True})
         if analyst == "commodity_news":
             context.update({"tradable_event": True, "price_reaction_confirmed": True, "impact_window": "event_short"})
-        return apply_trade_research_contract(sig, context, analyst=analyst, trading_date="2025-05-06", ticker="RB")
+        result = apply_trade_research_contract(
+            sig,
+            context,
+            analyst=analyst,
+            trading_date="2025-05-06",
+            ticker="RB",
+        )
+        current_contract = result.metadata["action_evidence_contract"]
+        complete_contract = build_test_aec(
+            analyst,
+            ticker="RB",
+            trading_date="2025-05-06",
+            signal=signal.value,
+            side="long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat",
+            confidence=confidence,
+        )
+        complete_contract.update(current_contract)
+        result.metadata = {
+            "action_evidence_contract": complete_contract,
+            "signal_record_id": f"{analyst}-fixture",
+        }
+        return result
 
     def test_analyst_landing_adds_fusion_evidence_without_trade_authority(self):
         signal = self._analyst_signal(analyst="technical", signal=Signal.BULLISH)
@@ -171,7 +193,19 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             "effective_trade_date": "2025-05-06",
             "signal_snapshot": {"final_action_contract": contract},
         }
-        audit = audit_futures_recommendation(recommendation=recommendation, full_config={"max_total_margin_ratio": 0.20})
+        audit = audit_futures_recommendation(
+            recommendation=recommendation,
+            hard_risk_config={"max_total_margin_ratio": 0.20},
+            account_state={
+                "account_equity": 5_000_000,
+                "margin_used": 0.0,
+                "margin_ratio": 0.0,
+                "risk_status": "NORMAL",
+            },
+            position_state={"current_lots": 0, "contract_code": None},
+            contract_state={},
+            data_quality={"status": "clean", "source": "signal_collection_contract"},
+        )
         self.assertNotIn("pm_fusion_explanation_audit", audit.audit_payload)
         self.assertNotIn("pm_memory_consumption_audit", audit.audit_payload)
 
@@ -196,7 +230,21 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
 
         audit = audit_futures_recommendation(
             recommendation=recommendation,
-            full_config={"max_total_margin_ratio": 0.20},
+            hard_risk_config={"max_total_margin_ratio": 0.20},
+            account_state={
+                "account_equity": 5_000_000,
+                "margin_used": 0.0,
+                "margin_ratio": 0.0,
+                "risk_status": "NORMAL",
+            },
+            position_state={"current_lots": 0, "contract_code": None},
+            contract_state={
+                "contract_code": "RB2510",
+                "underlying_code": "RB",
+                "as_of_date": "2025-05-06",
+                "source": "test_contract_cache",
+            },
+            data_quality={"status": "clean", "source": "signal_collection_contract"},
         )
 
         self.assertNotIn("missing_invalidation_condition", audit.hard_risk_reasons)

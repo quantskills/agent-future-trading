@@ -89,11 +89,6 @@ pm_risk_gate:
     block_weak_combo_new_entries: true
     block_conflict_confirmation_below: 0.60
 
-auditor:
-  # 独立审计员：位于 PM 与 Trader 之间，只审 PM 已签 final_action_contract。
-  # Auditor 不调用 LLM、不读取研究库、不改方向、不改手数、不新建合约。
-  enabled: true
-
 trade_frequency_control:
   # 通用历史样本保护。这里产生的是 reason code / soft risk tag，
   # 业务上先经 reason_effects.py 归类为软风险或学习调整，再由 PM 授权事实入口仲裁。

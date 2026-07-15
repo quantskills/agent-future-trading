@@ -287,7 +287,10 @@ class FuturesExecutionEngine:
                 execution_price=None,
                 warning_message=no_trade_reason or warning_message,
                 signal_snapshot=snapshot,
-                audit_payload=build_audit_payload(snapshot),
+                audit_payload=build_audit_payload(
+                    snapshot,
+                    original_audit_payload=recommendation_dict.get("audit_payload"),
+                ),
             )
             self._log_non_transaction_execution(
                 recommendation=recommendation_dict,
@@ -349,7 +352,10 @@ class FuturesExecutionEngine:
                     RecommendationStatus.SKIPPED.value,
                     warning_message=warning_message,
                     signal_snapshot=snapshot,
-                    audit_payload=build_audit_payload(snapshot),
+                    audit_payload=build_audit_payload(
+                        snapshot,
+                        original_audit_payload=recommendation_dict.get("audit_payload"),
+                    ),
                 )
                 self._log_non_transaction_execution(
                     recommendation=recommendation_dict,
@@ -383,7 +389,10 @@ class FuturesExecutionEngine:
                 RecommendationStatus.SKIPPED.value,
                 warning_message=warning_message,
                 signal_snapshot=snapshot,
-                audit_payload=build_audit_payload(snapshot),
+                audit_payload=build_audit_payload(
+                    snapshot,
+                    original_audit_payload=recommendation_dict.get("audit_payload"),
+                ),
             )
             self._log_non_transaction_execution(
                 recommendation=recommendation_dict,
@@ -429,7 +438,10 @@ class FuturesExecutionEngine:
             RecommendationStatus.EXECUTED.value,
             execution_price=last_execution_price,
             signal_snapshot=snapshot,
-            audit_payload=build_audit_payload(snapshot),
+            audit_payload=build_audit_payload(
+                snapshot,
+                original_audit_payload=recommendation_dict.get("audit_payload"),
+            ),
             base_price=recommendation_dict.get("base_price"),
             base_price_source=recommendation_dict.get("base_price_source"),
             base_price_date=recommendation_dict.get("base_price_date"),
@@ -850,8 +862,8 @@ class FuturesExecutionEngine:
                 time_zone=time_zone,
                 cutoff_datetime=cutoff_datetime,
             )
-        except Exception as exc:
-            logger.warning(f"Forced-risk intraday bars unavailable for {contract_code}: {exc}")
+        except Exception:
+            logger.warning("forced_risk_intraday_bars_unavailable")
             bars = []
         latest_bar = self._latest_price_bar(bars, cutoff_datetime=cutoff_datetime)
         if latest_bar:
@@ -1174,10 +1186,8 @@ class FuturesExecutionEngine:
         if key not in self._execution_quote_cache:
             try:
                 self._execution_quote_cache[key] = self.router.get_futures_contract_quote_on_date(contract_code, trading_date)
-            except Exception as exc:
-                logger.warning(
-                    f"Execution quote unavailable for {contract_code} on {date_value}: {exc}"
-                )
+            except Exception:
+                logger.warning("execution_quote_unavailable")
                 self._execution_quote_cache[key] = None
         return self._execution_quote_cache[key]
 
@@ -1190,10 +1200,8 @@ class FuturesExecutionEngine:
             if api is not None and hasattr(api, "get_futures_contract_detail"):
                 try:
                     detail = api.get_futures_contract_detail(contract_code, reference_date=trading_date)
-                except Exception as exc:
-                    logger.warning(
-                        f"Contract detail unavailable for {contract_code} on {date_value}: {exc}"
-                    )
+                except Exception:
+                    logger.warning("execution_contract_detail_unavailable")
             self._contract_detail_cache[key] = detail if isinstance(detail, dict) else None
         return self._contract_detail_cache[key]
 
@@ -1503,7 +1511,10 @@ class FuturesExecutionEngine:
             RecommendationStatus.SKIPPED.value,
             warning_message=warning_message,
             signal_snapshot=snapshot,
-            audit_payload=build_audit_payload(snapshot),
+            audit_payload=build_audit_payload(
+                snapshot,
+                original_audit_payload=recommendation.get("audit_payload"),
+            ),
         )
         self._log_non_transaction_execution(
             recommendation=recommendation,

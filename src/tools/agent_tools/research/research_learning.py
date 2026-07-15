@@ -23,6 +23,11 @@ from llm.prompt import (
 )
 from tools.common.learning_contract import CONTRACT_KEY, build_next_round_memory_contract
 from tools.common.final_action_semantics import derive_research_fact_state
+from tools.common.contracts import validate_final_action_contract
+from tools.common.signal_evidence_collection import (
+    ANALYST_ORDER,
+    validate_signal_collection_contract,
+)
 from tools.common.alpha_setup import (
     build_scope_key as build_alpha_setup_scope_key,
     infer_setup_type,
@@ -113,13 +118,17 @@ _POSITION_EFFECT_LIMITS = {
 
 def _validate_researcher_input_facts(
     *,
+    cursor: sqlite3.Cursor,
+    config_id: str,
     trading_date: str,
     settlement_row: Optional[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
+    transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> None:
     """Reject incomplete, future-dated, or unsigned facts before any LLM call/write."""
     errors: list[str] = []
     date_text = str(trading_date or "")[:10]
+    transactions_by_recommendation = transactions_by_recommendation or {}
     if not isinstance(settlement_row, dict) or not settlement_row:
         errors.append("settlement_missing")
     else:
@@ -134,6 +143,9 @@ def _validate_researcher_input_facts(
         errors.append("strategy_recommendations_missing")
     for recommendation in strategy_recommendations or []:
         ticker = str(recommendation.get("underlying_code") or "unknown")
+        recommendation_id = str(recommendation.get("id") or "")
+        if str(recommendation.get("config_id") or "") != str(config_id or ""):
+            errors.append(f"recommendation_config_mismatch:{ticker}")
         recommendation_date = str(
             recommendation.get("effective_trade_date")
             or recommendation.get("trading_date")
@@ -149,16 +161,91 @@ def _validate_researcher_input_facts(
         if not isinstance(scc, dict) or not scc:
             errors.append(f"scc_missing:{ticker}")
         else:
+            try:
+                validate_signal_collection_contract(
+                    scc,
+                    ticker=ticker,
+                    trading_date=recommendation_date,
+                    enabled_analysts=ANALYST_ORDER,
+                    require_signal_record_ids=True,
+                )
+            except ValueError:
+                errors.append(f"scc_invalid:{ticker}")
             for source in scc.get("source_contracts") or []:
-                if not isinstance(source, dict) or not source.get("signal_record_id"):
-                    errors.append(f"signal_record_id_missing:{ticker}")
-                    break
+                if not isinstance(source, dict):
+                    continue
+                analyst = str(source.get("analyst") or "")
+                signal_record_id = str(source.get("signal_record_id") or "")
+                if not signal_record_id:
+                    errors.append(f"signal_record_id_missing:{ticker}:{analyst}")
+                    continue
+                cursor.execute(
+                    """
+                    SELECT s.id, s.analyst, s.ticker, p.config_id, substr(p.trading_date, 1, 10) AS trading_date
+                    FROM signal s
+                    JOIN portfolio p ON p.id = s.portfolio_id
+                    WHERE s.id = ?
+                    """,
+                    (signal_record_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    errors.append(f"signal_record_not_found:{ticker}:{analyst}")
+                    continue
+                row_map = dict(row)
+                if str(row_map.get("analyst") or "") != analyst:
+                    errors.append(f"signal_record_analyst_mismatch:{ticker}:{analyst}")
+                if str(row_map.get("ticker") or "").upper() != ticker.upper():
+                    errors.append(f"signal_record_ticker_mismatch:{ticker}:{analyst}")
+                if str(row_map.get("config_id") or "") != str(config_id or ""):
+                    errors.append(f"signal_record_config_mismatch:{ticker}:{analyst}")
+                if str(row_map.get("trading_date") or "") != recommendation_date:
+                    errors.append(f"signal_record_date_mismatch:{ticker}:{analyst}")
         if not isinstance(contract, dict) or not contract:
             errors.append(f"final_action_contract_missing:{ticker}")
-        if not isinstance(snapshot.get("auditor"), dict) and not recommendation.get("audit_payload"):
+        else:
+            for error in validate_final_action_contract(contract):
+                errors.append(f"final_action_contract_invalid:{ticker}:{error}")
+        audit_payload = _review_helpers._json_loads(recommendation.get("audit_payload")) or {}
+        if not isinstance(audit_payload, dict) or not audit_payload:
             errors.append(f"audit_fact_missing:{ticker}")
-        if not isinstance(snapshot.get("execution_result"), dict):
+        else:
+            for field in (
+                "producer",
+                "audit_verdict",
+                "hard_risk_reasons",
+                "soft_risk_reasons",
+                "source",
+                "boundary",
+                "contract_summary",
+                "semantic_state",
+            ):
+                if field not in audit_payload:
+                    errors.append(f"audit_payload_field_missing:{ticker}:{field}")
+            if audit_payload.get("producer") != "auditor":
+                errors.append(f"audit_payload_producer_invalid:{ticker}")
+            if str(audit_payload.get("recommendation_id") or "") != recommendation_id:
+                errors.append(f"audit_payload_recommendation_mismatch:{ticker}")
+        execution_result = snapshot.get("execution_result")
+        if not isinstance(execution_result, dict):
             errors.append(f"execution_result_missing:{ticker}")
+        else:
+            transactions = list(transactions_by_recommendation.get(recommendation_id) or [])
+            try:
+                transaction_count = int(execution_result.get("transaction_count"))
+            except (TypeError, ValueError):
+                transaction_count = -1
+                errors.append(f"execution_result_transaction_count_invalid:{ticker}")
+            if transaction_count != len(transactions):
+                errors.append(f"execution_transaction_count_mismatch:{ticker}")
+            actual_transactions = execution_result.get("actual_transactions")
+            if not isinstance(actual_transactions, list):
+                errors.append(f"execution_result_actual_transactions_invalid:{ticker}")
+            elif len(actual_transactions) != max(0, transaction_count):
+                errors.append(f"execution_result_actual_transactions_mismatch:{ticker}")
+            for transaction in transactions:
+                if str(transaction.get("recommendation_id") or "") != recommendation_id:
+                    errors.append(f"transaction_recommendation_mismatch:{ticker}")
     if errors:
         raise ValueError("researcher_input_fact_validation_failed:" + ",".join(sorted(set(errors))))
 
@@ -1413,15 +1500,19 @@ def run_researcher_causal_review(
     settlement_row: Optional[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
+    transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> int:
     learning_cfg = cfg.get("learning", {}) or {}
     review_cfg = learning_cfg.get("researcher_causal_review") or {}
     if not bool(review_cfg.get("enabled", False)):
         return 0
     _validate_researcher_input_facts(
+        cursor=cursor,
+        config_id=config_id,
         trading_date=trading_date,
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
+        transactions_by_recommendation=transactions_by_recommendation,
     )
     evidence = _build_causal_evidence_pack(
         config_id=config_id,
@@ -1444,8 +1535,8 @@ def run_researcher_causal_review(
             pydantic_model=CausalReviewLLMOutput,
         )
         candidate_payload = _validate_causal_llm_output(output)
-    except Exception as exc:
-        logger.warning(f"Researcher LLM causal review rejected on {trading_date}: {exc}")
+    except Exception:
+        logger.warning(f"Researcher LLM causal review rejected on {trading_date}")
         return 0
 
     note_id = str(uuid.uuid4())
@@ -1559,8 +1650,8 @@ def write_exploratory_hypotheses(
             pydantic_model=ExploratoryHypothesisLLMOutput,
         )
         validated_hypotheses = _validate_exploratory_llm_output(output)
-    except Exception as exc:
-        logger.warning(f"Researcher exploratory research rejected on {trading_date}: {exc}")
+    except Exception:
+        logger.warning(f"Researcher exploratory research rejected on {trading_date}")
         return {"rows": 0, "status": "llm_output_rejected", "episode_count": len(episodes)}
     if not validated_hypotheses:
         return {"rows": 0, "status": "no_validated_hypotheses", "episode_count": len(episodes)}
@@ -1733,9 +1824,12 @@ def apply_researcher_learning(
 ) -> Dict[str, Any]:
     """Persist future-only learning after deterministic settled-fact validation."""
     _validate_researcher_input_facts(
+        cursor=cursor,
+        config_id=config_id,
         trading_date=trading_date,
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
+        transactions_by_recommendation=transactions_by_recommendation,
     )
     cursor.execute("PRAGMA foreign_keys = ON")
     if hasattr(db, "_ensure_reviewer_learning_schema"):
@@ -1920,6 +2014,7 @@ def apply_researcher_learning(
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,
+        transactions_by_recommendation=transactions_by_recommendation,
     )
     causal_rule_validation = research_memory_writers.write_validated_causal_policy_rules(
         cursor,

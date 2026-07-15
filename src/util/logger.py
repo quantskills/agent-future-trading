@@ -180,7 +180,7 @@ class AgentQuantLogger:
     def log_signal(self, agent_name: str, ticker: str, s: AnalystSignal):
         msg = (
             f"Agent: {agent_name} | Ticker: {ticker} | Signal: {s.signal} | "
-            f"Justification: {sanitize_visible_text(s.justification)}"
+            f"Confidence: {float(s.confidence or 0.0):.2f}"
         )
         self.info(msg)
         self.trade_logger.info(f"[SIGNAL] {ticker} | {agent_name}: {s.signal}")
@@ -204,25 +204,6 @@ class AgentQuantLogger:
         )
         self.info(msg)
         self.trade_logger.info(f"[RISK] {ticker}: Position Ratio = {position_risk.optimal_position_ratio:.2f}")
-
-    def format_analyst_signals_for_risk_control(self, analyst_signals: list) -> str:
-        """Format analyst signals into a compact string for risk-control prompts."""
-        if not analyst_signals:
-            return "No analyst signals available"
-
-        formatted_lines = []
-        for signal in analyst_signals:
-            signal_direction = signal.signal.upper()
-            signal_value = {"BULLISH": "+1", "BEARISH": "-1", "NEUTRAL": "0"}.get(signal_direction, "0")
-            justification = sanitize_visible_text(signal.justification)
-            if len(justification) > 150:
-                justification = justification[:150] + "..."
-
-            formatted_lines.append(
-                f"- [{signal.signal}] {signal_value} | Confidence: {signal.confidence:.2f} | Reasoning: {justification}"
-            )
-
-        return "\n".join(formatted_lines)
 
     def log_futures_decision(self, ticker: str, d: FuturesDecision):
         """Log the futures decision of a ticker."""
