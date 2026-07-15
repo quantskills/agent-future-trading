@@ -44,7 +44,7 @@
 | `portfolio_id` | 组合 / 成交 / 结算 | 组合 ID。 |
 | `reference_portfolio_id` | PM 推荐 | PM 决策使用的参考组合 ID。 |
 | `recommendation_id` | 推荐 / 执行 / 研究 | 关联 PM 推荐记录。 |
-| `evidence_pack_id` | 复盘 / artifact | 复盘证据包 ID。 |
+| `evidence_pack_id` | 复盘 / Researcher `researcher_llm_notes` / artifact | 已验证研究证据包 ID。 |
 | `created_at` | 所有持久化记录 | 创建时间。 |
 | `updated_at` | 可变学习 / 组合记录 | 更新时间。 |
 | `last_updated` | 绩效 / 模板记录 | 最后更新时间。 |
@@ -62,8 +62,12 @@
 | `message` | `trading_day_phase` | 阶段说明。 |
 | `incomplete_trading_day_phase` | 验收错误码 | 交易日存在推荐、成交、盘中决策或学习记录，但 phase1-4 未全部 completed；必须删除或重跑当天，不能进入策略结论或学习。 |
 | `protocol_governor_report` | Protocol Governor 回测前入口 / 每日回测后入口 | PG 唯一报告结构；顶层只能包含 `contract_version`、`source_agent`、`status` 和 `checks`，不落交易库、不创建交易权限。 |
-| `contract_coverage_audit` | Protocol Governor 只读版本级闸门 / 回测前验收 | 契约覆盖报告；检查关键契约是否有 producer、consumer、audit、test、字段表、配置/提示词/文档对齐，并要求关键智能体边界存在 producer-to-consumer 保真测试；不读收益、不写 DB、不创建交易权限。 |
+| `contract_coverage_audit` | Protocol Governor 只读版本级闸门 / 回测前验收 | 契约覆盖报告；对关键契约执行 `producer/physical_landing/consumer/role_check/real_path_test/mechanism_doc` 六维证据检查；不读收益、不写 DB、不创建交易权限。pre-backtest readiness 和 daily PG 是独立正式门禁，不是附加 coverage 维度。 |
 | `matrix` | `contract_coverage_audit` | 契约覆盖矩阵列表；每行对应一个核心契约。 |
+| `matrix_chain` | `contract_coverage_audit` | 当前可执行六维 coverage 行列表；每行由 `contract`、`dimensions` 和 `uncovered_risks` 组成。 |
+| `dimensions` | `contract_coverage_audit.matrix_chain[]` | 六维证据映射，只允许 `producer`、`physical_landing`、`consumer`、`role_check`、`real_path_test`、`mechanism_doc`。 |
+| `matrix_chain[].dimensions.producer` / `physical_landing` / `consumer` | `contract_coverage_audit` | 可导入真实生产者、正式 artifact/DB 落点和真实生产消费者证据。 |
+| `matrix_chain[].dimensions.role_check` / `real_path_test` / `mechanism_doc` | `contract_coverage_audit` | 共享或角色自身校验、同库真实生产链行为测试和正式机制文档证据。 |
 | `artifact_phase_boundary` | `contract_coverage_audit.matrix[].contract` / Protocol Governor 只读边界名 | artifact 阶段保存边界；规定 PM、审计员、交易员、会计师、复盘员、研究员 artifact 能保存和禁止保存的字段集合。只用于回测前契约覆盖和系统不变量审计，不是交易字段，不创建合约或交易权限。 |
 | `producers` | `contract_coverage_audit.matrix[]` | 该契约的生产路径证据。 |
 | `consumers` | `contract_coverage_audit.matrix[]` | 该契约的消费路径证据。 |
@@ -525,8 +529,8 @@
 | `previous_account_equity` | 日结算 | 前一日账户权益。 |
 | `current_account_equity` | 日结算 | 当前账户权益。 |
 | `cash_available` | 组合 / 日结算 | 可用现金。 |
-| `positions` | 组合 | 持仓快照对象。 |
-| `positions_snapshot` | 日结算 | 日结算持仓快照。 |
+| `positions` | `portfolio.positions` JSON 物理列 / Portfolio 对象 | 结算后当前持仓的唯一 portfolio 事实；不存在独立 position SQL 表。 |
+| `positions_snapshot` | `daily_settlement.positions_snapshot` | 当日日结算持仓快照；用于与 `portfolio.positions`、成交和逐品种 PnL 对账。 |
 | `margin_used` | 成交 / 组合 | 已用保证金。 |
 | `previous_margin` | 日结算 | 前一日保证金。 |
 | `current_margin` | 日结算 / 资金部署 | 当前保证金。 |
@@ -613,10 +617,15 @@
 
 ## 13. 研究与学习字段
 
-Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必须用现有 `signal_record_id`、`recommendation_id`、transaction recommendation ID、交易日期与 config ID 验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement 链。零成交和无合格学习成果均合法；不要求每笔交易形成学习，也不要求每次决策使用学习。
+Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必须沿真实物理路径验证：AEC 由 `signal_collection_contract.source_contracts[].signal_record_id` 指向 signal SQL；SCC、FAC、Auditor 和 `execution_result` 位于同一 `futures_recommendation`；transaction 通过 `futures_transactions.recommendation_id` 关联 recommendation；settlement 通过 transaction/portfolio 的 `portfolio_id`、配置和 `trading_date` 对应 `daily_settlement`。系统没有学习专用 `settlement_id`，不得为追溯自造该字段。零成交和无合格学习成果均合法；不要求每笔交易形成学习，也不要求每次决策使用学习。
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
+| `researcher_llm_notes.evidence_pack_id` | Researcher 验证后研究记录 | 已通过来源、日期、Phase4 和结算边界检查的 evidence pack 身份。 |
+| `researcher_llm_notes.payload_json` / `payload_artifact_path` / `payload_sha256` / `payload_size` / `payload_summary_json` | Researcher 验证后研究记录 | 保存可解析的结构化 `evidence` 与 `validated_output`；超出内联限制时使用正式 artifact。`raw_prompt/raw_response` 及其 artifact 元数据固定为空。 |
+| `alpha_setup_sample.trading_date` / `recommendation_id` / `source_type` / `evidence_json` / `result_json` / `payload_json` | Researcher 结构化样本 | 学习来源交易日、推荐引用、真实交易/episode/反事实类型、验证证据和结算后结果；未交易机会不得伪造 transaction。 |
+| `trade_episode_memory.payload_json.pair.open_recommendation_id` / `open_transaction_id` / `close_transaction_id` | 成交型 episode 学习 | 已完成交易 episode 对推荐及开平 transaction 的真实引用；只在对应事实存在时写入。 |
+| `learning_event_log.config_id` / `trading_date` / `event_type` / `status` / `created_at` | Researcher completion 事件 | `researcher_learning_completed` 的配置、来源交易日、完成状态和写入时间；必须晚于对应 Phase4，不代表每个交易日必须产生具体学习记录。 |
 | `state_key` | action-value / 学习 | 统一状态 key。 |
 | `scope_type` | 学习记录 | 学习作用范围类型。 |
 | `evidence_signature` | action-value / 学习 | 统一证据组合签名。 |

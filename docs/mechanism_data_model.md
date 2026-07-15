@@ -38,7 +38,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | `signal_collector` 信号收集员 | 否 | 确定性收集和对齐三类分析师证据 | 自由文本判断、研究结论、score/rank、手数 |
 | `portfolio_manager` 投资组合经理 | 否 | 按 PM 六步确定性读取证据、判生命周期、消费学习、只对实际增加风险的候选做全市场 rank/资金部署，并签唯一合约 | LLM 判断、LLM 手数、第二套交易计划、重建 `signal_collection_contract` |
 | `decision_memory_retrieval` | 否 | 确定性读取结构化研究信息 | 自由文本记忆解释、手数、交易动作 |
-| `pm_ticker_side_selection` | 否 | PM 第 3 步单品种方向选择和候选质量判断 | 全市场 rank、最终手数、最终合约 |
+| `pm_ticker_side_selection` | 否 | PM 第 2 步单品种方向选择；候选质量和生命周期分流留在第 3 步 | 全市场 rank、最终手数、最终合约 |
 | `pm_full_market_capital_deployment` | 否 | PM 第 5 步只对实际增加风险的候选做全市场资金 rank 和部署，包括新开仓与同方向扩大绝对手数的 `add/scale` | `wait/hold/reduce/exit`、当前反转退出腿和不增加风险条件监控的伪 rank、最终合约 |
 | `pm_position_sizing` | 否 | PM 第 5 步资金部署中计算目标手数建议，供第 6 步签约 | 改方向、签合约 |
 | `auditor` 审计员 | 否 | 审计最终合约和硬风险 | 改方向、改手数、新建合约 |

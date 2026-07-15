@@ -1,42 +1,50 @@
 from __future__ import annotations
 
-"""Read-only contract for physical SQLite facts used by PG."""
+"""Read-only comparison against the schema produced by formal sqlite_setup."""
 
 import sqlite3
+import tempfile
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Set
+from typing import Iterable, Optional
 
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 
 
-CORE_TABLE_COLUMNS: Mapping[str, Set[str]] = {
-    "config": {"id", "exp_name"},
-    "portfolio": {"id", "config_id", "trading_date", "account_equity", "positions", "margin_used", "is_settled"},
-    "signal": {"id", "portfolio_id", "ticker", "analyst", "artifact_json"},
-    "futures_recommendation": {
-        "id", "config_id", "reference_portfolio_id", "trading_date", "effective_trade_date",
-        "source_type", "underlying_code", "action", "lots", "signal_snapshot", "audit_payload", "status",
-    },
-    "futures_intraday_decision": {
-        "id", "config_id", "trading_date", "recommendation_id", "ticker", "decision", "features_json",
-    },
-    "futures_transactions": {
-        "id", "portfolio_id", "config_id", "recommendation_id", "trading_date", "ticker", "contract_code",
-        "action", "lots", "commission", "source_type", "booked_in_settlement",
-    },
-    "daily_settlement": {
-        "id", "portfolio_id", "trading_date", "previous_balance", "current_balance",
-        "previous_account_equity", "current_account_equity", "previous_margin", "current_margin",
-        "daily_pnl", "commission",
-    },
-    "ticker_daily_pnl": {"id", "portfolio_id", "trading_date", "ticker", "daily_pnl", "commission"},
-    "trading_day_phase": {"id", "config_id", "trading_date", "phase", "status", "started_at", "completed_at"},
-    "learning_event_log": {"id", "config_id", "trading_date", "event_type", "agent", "status"},
-    "alpha_setup_action_value": {
-        "id", "config_id", "action_name", "canonical_action_family", "action_preference",
-        "action_value_lane", "learning_lane", "consumer_scope", "last_sample_date",
-    },
-}
+def _schema(connection: sqlite3.Connection) -> dict[str, set[str]]:
+    tables = [
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    ]
+    return {
+        table: {
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+        }
+        for table in tables
+    }
+
+
+def _formal_reference_schema() -> dict[str, set[str]]:
+    from database import sqlite_setup
+
+    with tempfile.TemporaryDirectory(prefix="agentquant_pg_schema_reference_") as raw_tmp:
+        reference_path = Path(raw_tmp) / "agentquant.db"
+        old_path = sqlite_setup.DB_PATH
+        try:
+            sqlite_setup.DB_PATH = str(reference_path)
+            sqlite_setup.init_database()
+        finally:
+            sqlite_setup.DB_PATH = old_path
+        connection = sqlite3.connect(f"file:{reference_path.resolve()}?mode=ro", uri=True)
+        try:
+            return _schema(connection)
+        finally:
+            connection.close()
 
 
 def audit_db_schema_contract(
@@ -52,24 +60,24 @@ def audit_db_schema_contract(
             ["sqlite_schema_database_missing"],
         )
     try:
+        reference = _formal_reference_schema()
+        requested = set(required_tables or reference)
+        if requested - set(reference):
+            violations.append("sqlite_schema_unknown_required_table")
         connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
         try:
-            tables = list(required_tables or CORE_TABLE_COLUMNS)
-            for table in tables:
-                exists = connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    (table,),
-                ).fetchone()
-                if not exists:
-                    violations.append("sqlite_schema_required_table_missing")
-                    continue
-                columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
-                if not CORE_TABLE_COLUMNS.get(table, set()).issubset(columns):
-                    violations.append("sqlite_schema_required_column_missing")
+            actual = _schema(connection)
         finally:
             connection.close()
+        for table in sorted(requested & set(reference)):
+            if table not in actual:
+                violations.append("sqlite_schema_required_table_missing")
+            elif not reference[table].issubset(actual[table]):
+                violations.append("sqlite_schema_required_column_missing")
     except sqlite3.Error:
         violations.append("sqlite_schema_database_unreadable")
+    except Exception:
+        violations.append("sqlite_schema_reference_unavailable")
     if violations:
         return ProtocolCheckResult.fail_result("formal_temporary_database", violations)
     return ProtocolCheckResult.pass_result("formal_temporary_database")

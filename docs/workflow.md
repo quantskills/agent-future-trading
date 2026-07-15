@@ -78,6 +78,7 @@ workflow 编排层调度 Trader 执行链，
 Trader执行链将执行事实物理化为：
 → intraday decision写入 futures_intraday_decision SQL记录
 → execution_result写入同一条 futures_recommendation记录的signal_snapshot
+→ 以原始完整Auditor audit_payload为基底追加trade_contract_audit、execution_translation、execution_result和phase2_execution
 → 成交结果写入 futures_transaction SQL记录
 → 更新同一条 futures_recommendation记录的状态和执行价格
         ↓
@@ -90,15 +91,15 @@ Accountant从 SQL 读取最近已结算 portfolio及当日未入账的 futures_t
 【物理输出⑤】
 workflow 编排层调度 Accountant 结算链，
 Accountant结算链将结算事实物理化为：
-→ 结算后账户和持仓写入 portfolio及position SQL记录
-→ 日结算结果写入 daily_settlement SQL记录
+→ 结算后账户和当前持仓写入 portfolio SQL记录，其中持仓唯一物理路径为portfolio.positions
+→ 日结算结果写入 daily_settlement SQL记录，其中结算持仓快照为daily_settlement.positions_snapshot
 → 分产品盈亏写入 ticker_daily_pnl SQL记录
 → 回填当日 futures_transaction的结算价并标记为已入账
         ↓
 【内存：Reviewer】
 workflow 编排层在 Phase3 完成后，以交易日期和主配置启动 Reviewer
 Reviewer从 SQL 读取 Phase1–3阶段状态、分析师signal、审计及执行后的 futures_recommendation、
-futures_transaction、daily_settlement及最新portfolio和position，
+futures_transaction、daily_settlement、最新portfolio.positions和对应daily_settlement.positions_snapshot，
 在内存中复盘决策、审计、执行和结算事实，分析交易结果并进行事实归因，
 形成Phase4复盘结果和研究输入材料
         ↓
@@ -144,8 +145,8 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 | PM | state["analyst_signals"]，仅用于核对启用分析师的身份、数量及SCC来源引用；state["signal_collection_contract"]，作为PM唯一正式证据；账户、持仓、Router具体合约事实和主配置；Step4从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果 | FuturesRecommendation；其 signal_snapshot 内含 signal_collection_contract、final_action_contract、pm_six_step_trace |
 | 审计员 | 完整FAC；账户权益、保证金、保证金比例、`risk_status`；当前持仓；SCC数据质量摘要；具体合约及失效边界事实；主配置硬风控参数 | `audit_verdict`、完整 `audit_payload`；不修改 `final_action_contract` |
 | 交易员 | 审计后的 `FuturesRecommendation`、当前账户、持仓和主配置；从 `signal_snapshot["final_action_contract"]` 读取执行合约；通过行情路由读取盘中行情 | `intraday decision`、`execution_result`、`futures_transaction`；更新后的 recommendation状态和执行价格 |
-| 会计师 | 交易日期、主配置；最近已结算 `portfolio`；当日未入账 `futures_transaction`；结算行情和合约信息 | 结算后的 `portfolio`、`position`、`daily_settlement`、`ticker_daily_pnl`；已回填结算价并标记入账的 `futures_transaction` |
-| 复盘员 | Phase1–3阶段状态、分析师signal、审计及执行后的 `futures_recommendation`、`futures_transaction`、`daily_settlement`、最新 `portfolio` 和 `position` | Phase4复盘结果、复盘摘要、每日交易报告和事实归因；不产生第二次合约审计结论 |
+| 会计师 | 交易日期、主配置；最近已结算 `portfolio`；当日未入账 `futures_transaction`；结算行情和合约信息 | 结算后的 `portfolio.positions`、`daily_settlement.positions_snapshot`、`ticker_daily_pnl`；已回填结算价并标记入账的 `futures_transaction`；不存在独立 position SQL 事实路径 |
+| 复盘员 | Phase1–3阶段状态、分析师signal、审计及执行后的 `futures_recommendation`、`futures_transaction`、`daily_settlement`、最新 `portfolio.positions` 和对应 `daily_settlement.positions_snapshot` | Phase4复盘结果、复盘摘要、每日交易报告和事实归因；不产生第二次合约审计结论 |
 | 研究员 | 已完成的Phase4和结算事实；通过正式ID链追溯的AEC、SCC、FAC、Auditor、`execution_result`、transaction、settlement | 经验证的结构化交易episode、未交易机会、action-value、profile、policy/state、历史学习快照和 `researcher_learning_completed` 事件；成果可为空，供下一交易日分析师及PM通过正式检索接口读取 |
 
 ## 三、信息传递核心载体

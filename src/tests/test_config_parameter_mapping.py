@@ -60,6 +60,56 @@ def _lookup(payload: dict[str, Any], dotted: str) -> Any:
     return value
 
 
+def _function_nodes(tree: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _semantic_config_keys(
+    function_name: str,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    *,
+    visited: set[str] | None = None,
+) -> set[str]:
+    visited = set(visited or ())
+    if function_name in visited or function_name not in functions:
+        return set()
+    visited.add(function_name)
+    node = functions[function_name]
+    keys: set[str] = set()
+    local_calls: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            if isinstance(child.func, ast.Name):
+                local_calls.add(child.func.id)
+            if (
+                isinstance(child.func, ast.Attribute)
+                and child.func.attr == "get"
+                and child.args
+                and isinstance(child.args[0], ast.Constant)
+                and isinstance(child.args[0].value, str)
+            ):
+                keys.add(child.args[0].value)
+            elif isinstance(child.func, ast.Attribute) and child.func.attr in {"items", "keys", "values"}:
+                keys.add("<dynamic_mapping>")
+        elif isinstance(child, ast.Subscript):
+            slice_value = child.slice
+            if isinstance(slice_value, ast.Constant) and isinstance(slice_value.value, str):
+                keys.add(slice_value.value)
+        elif (
+            isinstance(child, ast.Attribute)
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "self"
+        ):
+            keys.add(child.attr)
+    for called in local_calls:
+        keys.update(_semantic_config_keys(called, functions, visited=visited))
+    return keys
+
+
 class ConfigParameterMappingContractTest(unittest.TestCase):
     def test_each_fixed_leaf_name_has_a_python_read_or_belongs_to_a_registered_dynamic_map(self):
         matrix = MATRIX_PATH.read_text(encoding="utf-8-sig")
@@ -126,6 +176,53 @@ class ConfigParameterMappingContractTest(unittest.TestCase):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             }
             self.assertIn(function_name, functions, f"registered consumer function missing: {relative}::{function_name}")
+
+    def test_each_matrix_mapping_binds_to_the_registered_consumer_ast(self):
+        matrix_lines = MATRIX_PATH.read_text(encoding="utf-8-sig").splitlines()
+        parsed_modules: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+        missing: list[str] = []
+        for line in matrix_lines:
+            config_tokens = CONFIG_TOKEN.findall(line)
+            python_tokens = PYTHON_TOKEN.findall(line)
+            if not config_tokens or not python_tokens:
+                continue
+            consumer_keys: list[tuple[str, str, set[str]]] = []
+            for consumer_path, function_name in python_tokens:
+                if consumer_path not in parsed_modules:
+                    path = PROJECT_ROOT / consumer_path
+                    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+                    parsed_modules[consumer_path] = _function_nodes(tree)
+                consumer_keys.append(
+                    (
+                        consumer_path,
+                        function_name,
+                        _semantic_config_keys(
+                            function_name,
+                            parsed_modules[consumer_path],
+                        ),
+                    )
+                )
+            for config_file, pattern in config_tokens:
+                fixed_parts = [part for part in pattern.split(".") if part not in {"*", "**"}]
+                expected_key = fixed_parts[-1] if fixed_parts else ""
+                dynamic_subtree = pattern.endswith(".*") or pattern.endswith(".**")
+                bound = (
+                    any(keys for _, _, keys in consumer_keys)
+                    if dynamic_subtree
+                    else any(expected_key in keys for _, _, keys in consumer_keys)
+                )
+                if expected_key and not bound:
+                    consumers = ",".join(
+                        f"{path}::{name}" for path, name, _ in consumer_keys
+                    )
+                    missing.append(
+                        f"{config_file}::{pattern} -> {consumers}"
+                    )
+        self.assertEqual(
+            missing,
+            [],
+            "matrix mapping is not read by its registered Python consumer",
+        )
 
     def test_removed_decorative_parameters_do_not_return(self):
         self.assertFalse((CONFIG_ROOT / "evidence_fusion_policy_catalog.yaml").exists())

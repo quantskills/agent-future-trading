@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-"""Static producer-to-consumer coverage for the finalized business chain."""
+"""Runtime producer-to-consumer coverage for the canonical business chain."""
 
 import argparse
+import ast
+import importlib
 import json
 import sys
 from dataclasses import dataclass, field
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 SRC_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -17,19 +20,28 @@ from tools.agent_tools.control.pg_schemas import ProtocolCheckResult, ProtocolGo
 
 
 @dataclass(frozen=True)
-class ContractEvidenceRule:
+class RuntimeEvidenceRule:
+    module: str
+    qualname: str
+    description: str
+
+
+@dataclass(frozen=True)
+class DocumentEvidenceRule:
     path: str
-    patterns: Sequence[str]
+    token: str
     description: str
 
 
 @dataclass(frozen=True)
 class ContractCoverageSpec:
     contract: str
-    producers: Sequence[ContractEvidenceRule]
-    consumers: Sequence[ContractEvidenceRule]
-    audits: Sequence[ContractEvidenceRule]
-    tests: Sequence[ContractEvidenceRule]
+    producers: Sequence[RuntimeEvidenceRule]
+    physical_landings: Sequence[RuntimeEvidenceRule]
+    consumers: Sequence[RuntimeEvidenceRule]
+    audits: Sequence[RuntimeEvidenceRule]
+    tests: Sequence[RuntimeEvidenceRule]
+    documents: Sequence[DocumentEvidenceRule]
 
 
 MATRIX_CHAIN_DIMENSIONS = (
@@ -45,7 +57,7 @@ MATRIX_CHAIN_DIMENSIONS = (
 @dataclass(frozen=True)
 class MatrixChainCoverageSpec:
     contract: str
-    dimensions: dict[str, Sequence[ContractEvidenceRule]]
+    dimensions: dict[str, Sequence[RuntimeEvidenceRule | DocumentEvidenceRule]]
 
 
 @dataclass
@@ -84,157 +96,337 @@ class ContractCoverageAuditReport:
         return not self.violation_codes
 
 
-def _rule(path: str, patterns: Sequence[str], description: str) -> ContractEvidenceRule:
-    return ContractEvidenceRule(path, tuple(patterns), description)
+def _runtime(module: str, qualname: str, description: str) -> RuntimeEvidenceRule:
+    return RuntimeEvidenceRule(module, qualname, description)
+
+
+def _document(path: str, token: str, description: str) -> DocumentEvidenceRule:
+    return DocumentEvidenceRule(path, token, description)
+
+
+FULL_CHAIN = _runtime(
+    "tools.agent_tools.control.pg_full_chain_dry_run",
+    "run_no_llm_full_chain_dry_run",
+    "formal same-database production-chain dry run",
+)
 
 
 CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
     ContractCoverageSpec(
         "action_evidence_contract",
         producers=(
-            _rule("src/tools/agent_tools/analysis/analyst_quality.py", ("def _build_action_evidence_contract",), "analysts build AEC"),
+            _runtime(
+                "tools.agent_tools.analysis.analyst_output_finalization",
+                "finalize_analyst_signal",
+                "analyst finalizer produces validated AEC",
+            ),
+        ),
+        physical_landings=(
+            _runtime("database.sqlite_helper", "SQLiteDB.save_signal", "formal signal persistence"),
         ),
         consumers=(
-            _rule("src/tools/common/signal_evidence_collection.py", ("def validate_action_evidence_contract", "def build_signal_collection_contract"), "collector validates and consumes AEC"),
+            _runtime(
+                "tools.common.signal_evidence_collection",
+                "build_signal_collection_contract",
+                "SCC builder consumes analyst AEC",
+            ),
         ),
         audits=(
-            _rule("docs/matrix_field_semantics.md", ("action_evidence_contract",), "field matrix fixes AEC semantics"),
+            _runtime(
+                "tools.common.signal_evidence_collection",
+                "validate_action_evidence_contract",
+                "shared AEC validator",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_analyst_output_landing.py", ("action_evidence_contract",), "analyst landing tests AEC"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "action_evidence_contract", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "signal_collection_contract",
         producers=(
-            _rule("src/agents/decision_team/signal_collector.py", ("signal_collection_contract", "build_signal_collection_contract"), "collector publishes SCC"),
+            _runtime(
+                "agents.decision_team.signal_collector",
+                "signal_collector_agent",
+                "Signal Collector produces the SCC",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "database.sqlite_helper",
+                "SQLiteDB.save_futures_recommendation",
+                "SCC lands inside the formal recommendation snapshot",
+            ),
         ),
         consumers=(
-            _rule("src/agents/decision_team/portfolio_manager.py", ("validate_signal_collection_contract", "build_pm_evidence_signals_from_scc"), "PM consumes SCC"),
+            _runtime(
+                "agents.decision_team.portfolio_manager",
+                "portfolio_agent_futures",
+                "PM consumes the SCC",
+            ),
         ),
         audits=(
-            _rule("src/tools/common/signal_evidence_collection.py", ("def validate_signal_collection_contract",), "shared SCC validator"),
+            _runtime(
+                "tools.common.signal_evidence_collection",
+                "validate_signal_collection_contract",
+                "shared SCC validator",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_decision_workflow_tools.py", ("signal_collection_contract",), "collector-to-PM tests"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "signal_collection_contract", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "final_action_contract",
         producers=(
-            _rule("src/agents/decision_team/portfolio_manager.py", ("_build_final_action_contract", 'snapshot["final_action_contract"]'), "PM Step6 signs one contract"),
+            _runtime(
+                "agents.decision_team.portfolio_manager",
+                "finalize_pm_full_market_contracts",
+                "PM Step5 and Step6 sign FAC",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "database.sqlite_helper",
+                "SQLiteDB.save_futures_recommendation",
+                "FAC lands in the recommendation snapshot",
+            ),
         ),
         consumers=(
-            _rule("src/agents/decision_team/auditor.py", ("final_action_contract",), "Auditor reads final contract"),
-            _rule("src/agents/execution_team/trader.py", ("_final_action_contract_from_snapshot",), "Trader reads final contract"),
+            _runtime(
+                "agents.decision_team.auditor",
+                "audit_futures_recommendation",
+                "Auditor consumes FAC",
+            ),
+            _runtime(
+                "agents.execution_team.trader",
+                "_process_strategy_recommendations",
+                "Trader executes against FAC",
+            ),
         ),
         audits=(
-            _rule("src/tools/agent_tools/decision/pm_contract_self_check.py", ("def check_final_action_contract",), "PM validates its signed contract"),
+            _runtime(
+                "tools.agent_tools.decision.pm_contract_self_check",
+                "check_final_action_contract",
+                "PM FAC self-check",
+            ),
+            _runtime(
+                "tools.common.final_action_semantics",
+                "validate_final_action_lot_transition",
+                "shared signed-lot FAC validator",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_pre_backtest_pm_workflow_contracts.py", ("test_three_pm_paths_sign_exactly_one_final_contract",), "real PM Step6 test"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "final_action_contract", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "audit_verdict",
         producers=(
-            _rule("src/agents/decision_team/auditor.py", ("def audit_futures_recommendation", '"audit_verdict"'), "Auditor produces verdict"),
+            _runtime(
+                "agents.decision_team.auditor",
+                "audit_futures_recommendation",
+                "Auditor produces the verdict payload",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "database.sqlite_helper",
+                "SQLiteDB.update_futures_recommendation_status",
+                "Auditor payload lands on the recommendation",
+            ),
         ),
         consumers=(
-            _rule("src/agents/execution_team/trader.py", ("audit_verdict_allows_trader",), "Trader consumes verdict"),
+            _runtime(
+                "agents.execution_team.trader",
+                "_process_strategy_recommendations",
+                "Trader gates strategy execution by verdict",
+            ),
         ),
         audits=(
-            _rule("docs/matrix_field_semantics.md", ("audit_verdict",), "field matrix fixes verdict"),
+            _runtime(
+                "tools.common.contracts",
+                "validate_auditor_artifact_boundary",
+                "shared Auditor boundary validator",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_fact_entry_boundaries.py", ("audit_futures_recommendation",), "fact-entry tests cover verdict"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "audit_verdict", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "execution_result",
         producers=(
-            _rule("src/util/futures_audit.py", ("def set_execution_result",), "Trader execution helper writes result"),
+            _runtime("util.futures_audit", "set_execution_result", "Trader writes execution_result"),
+        ),
+        physical_landings=(
+            _runtime(
+                "database.sqlite_helper",
+                "SQLiteDB.update_futures_recommendation_status",
+                "execution_result lands on the recommendation",
+            ),
         ),
         consumers=(
-            _rule("src/tools/agent_tools/research/reviewer_phase4_review.py", ("execution_result",), "Reviewer reads result"),
-            _rule("src/tools/agent_tools/research/research_learning.py", ("execution_result",), "Researcher reads result"),
+            _runtime(
+                "tools.agent_tools.research.reviewer_phase4_review",
+                "run_phase4_review",
+                "Reviewer reads execution facts",
+            ),
+            _runtime(
+                "agents.research_team.researcher",
+                "researcher_agent",
+                "Researcher traces execution facts",
+            ),
         ),
         audits=(
-            _rule("docs/matrix_field_semantics.md", ("execution_result",), "field matrix fixes execution result"),
+            _runtime(
+                "tools.common.contracts",
+                "validate_execution_artifact_boundary",
+                "shared execution artifact boundary",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_phase_flow_regression.py", ("execution_result",), "phase flow covers execution result"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "execution_result", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "daily_settlement",
         producers=(
-            _rule("src/tools/agent_tools/execution/accountant_futures_settlement.py", ("def daily_settlement", "current_account_equity"), "Accountant produces settlement"),
+            _runtime(
+                "tools.agent_tools.execution.accountant_futures_settlement",
+                "FuturesDailySettlement.run_phase3",
+                "enabled Accountant Phase3 settlement entry",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "database.sqlite_helper",
+                "SQLiteDB.save_daily_settlement",
+                "formal daily settlement persistence",
+            ),
         ),
         consumers=(
-            _rule("src/tools/agent_tools/research/reviewer_phase4_review.py", ("daily_settlement",), "Reviewer reads settlement"),
+            _runtime(
+                "tools.agent_tools.research.reviewer_phase4_review",
+                "run_phase4_review",
+                "Reviewer reads settlement",
+            ),
+            _runtime(
+                "agents.research_team.researcher",
+                "researcher_agent",
+                "Researcher traces settlement",
+            ),
         ),
         audits=(
-            _rule("src/tools/agent_tools/execution/accountant_futures_settlement.py", ("def _assert_accounting_invariants",), "Accountant checks formulas"),
+            _runtime(
+                "tools.agent_tools.execution.accountant_futures_settlement",
+                "FuturesDailySettlement._assert_accounting_invariants",
+                "Accountant accounting invariants",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_accountant_settlement_formulas.py", ("current_account_equity",), "settlement formula tests"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_chain_contract.md", "daily_settlement", "canonical chain matrix"),
         ),
     ),
     ContractCoverageSpec(
         "alpha_setup_action_value",
         producers=(
-            _rule("src/tools/agent_tools/research/research_memory_writers.py", ("alpha_setup_action_value", "researcher_learning_completed"), "Researcher writes future learning"),
+            _runtime(
+                "tools.common.alpha_setup",
+                "_upsert_action_values",
+                "Researcher action-value production",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "tools.agent_tools.research.research_memory_writers",
+                "upsert_alpha_setup_action_value",
+                "formal action-value persistence",
+            ),
         ),
         consumers=(
-            _rule("src/tools/agent_tools/decision/pm_decision_memory_retrieval.py", ("alpha_setup_action_values",), "PM Step4 reads decision learning"),
+            _runtime(
+                "tools.agent_tools.decision.pm_decision_memory_retrieval",
+                "retrieve_pm_memory",
+                "PM reads canonical action-value memory",
+            ),
         ),
         audits=(
-            _rule("docs/matrix_action_canonical.md", ("action_preference", "canonical_action_family"), "action matrix fixes learning semantics"),
+            _runtime(
+                "tools.common.final_action_semantics",
+                "validate_action_value_write_consistency",
+                "shared action-value validator",
+            ),
         ),
-        tests=(
-            _rule("src/tests/test_reviewer_learning.py", ("alpha_setup_action_value",), "research learning tests"),
+        tests=(FULL_CHAIN,),
+        documents=(
+            _document("docs/matrix_action_canonical.md", "canonical_action_family", "canonical action matrix"),
         ),
     ),
     ContractCoverageSpec(
         "protocol_governor_report",
         producers=(
-            _rule("src/tools/agent_tools/control/pg_schemas.py", ("class ProtocolGovernorReport", "violation_codes", "diagnostic_codes"), "PG owns one report schema"),
+            _runtime(
+                "tools.agent_tools.control.pg_schemas",
+                "ProtocolGovernorReport",
+                "single PG report schema",
+            ),
+        ),
+        physical_landings=(
+            _runtime(
+                "tools.agent_tools.control.pg_schemas",
+                "ProtocolGovernorReport.to_dict",
+                "registered report serialization",
+            ),
         ),
         consumers=(
-            _rule("src/run/pre_backtest_test.py", ("ProtocolGovernor", 'report["status"]'), "pre-backtest runner consumes report"),
-            _rule("src/run/backtest_daily_test.py", ("audit_daily_results", 'report["status"]'), "daily runner consumes report"),
+            _runtime("run.pre_backtest_test", "main", "pre-backtest gate consumes report"),
+            _runtime("run.backtest_daily_test", "main", "daily gate consumes report"),
         ),
         audits=(
-            _rule("docs/matrix_field_semantics.md", ("check_name", "violation_codes", "diagnostic_codes"), "PG report fields are registered"),
+            _runtime(
+                "tools.agent_tools.control.pg_schemas",
+                "ProtocolCheckResult.fail_result",
+                "stable violation/diagnostic result schema",
+            ),
         ),
         tests=(
-            _rule("src/tests/test_protocol_governor.py", ("ProtocolGovernor",), "PG entrypoint tests"),
+            _runtime(
+                "tests.test_protocol_governor",
+                "ProtocolGovernorTest.test_report_uses_only_registered_fields",
+                "report field behavior test",
+            ),
+        ),
+        documents=(
+            _document("docs/agent_pg.md", "protocol_governor_report", "PG mechanism definition"),
         ),
     ),
 )
 
 
-def _matrix_dimensions(spec: ContractCoverageSpec) -> dict[str, Sequence[ContractEvidenceRule]]:
-    if spec.contract == "protocol_governor_report":
-        landing_rule = _rule("docs/agent_pg.md", ("回测前报告", "每日检测"), "PG document records report boundary")
-        doc_rule = _rule("docs/agent_pg.md", ("固定字段与动作边界",), "PG mechanism fixes report semantics")
-    else:
-        landing_rule = _rule("docs/workflow.md", (spec.contract,), "workflow records physical or in-memory landing")
-        doc_rule = _rule("docs/matrix_chain_contract.md", (spec.contract,), "chain matrix records contract")
+def _matrix_dimensions(
+    spec: ContractCoverageSpec,
+) -> dict[str, Sequence[RuntimeEvidenceRule | DocumentEvidenceRule]]:
     return {
         "producer": spec.producers,
-        "physical_landing": (landing_rule,),
+        "physical_landing": spec.physical_landings,
         "consumer": spec.consumers,
         "role_check": spec.audits,
         "real_path_test": spec.tests,
-        "mechanism_doc": (doc_rule,),
+        "mechanism_doc": spec.documents,
     }
 
 
 MATRIX_CHAIN_COVERAGE_SPECS: Sequence[MatrixChainCoverageSpec] = tuple(
     MatrixChainCoverageSpec(spec.contract, _matrix_dimensions(spec)) for spec in CONTRACT_SPECS
 )
+
 
 ACTIVE_DOC_PATHS = (
     "docs/workflow.md",
@@ -245,16 +437,41 @@ ACTIVE_DOC_PATHS = (
 )
 
 
-def _read(root: Path, relative: str) -> str:
-    path = root / relative
-    return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+def _is_live_repo(root: Path) -> bool:
+    try:
+        return root.resolve() == PROJECT_ROOT.resolve()
+    except OSError:
+        return False
 
 
-def _match_rules(root: Path, rules: Sequence[ContractEvidenceRule]) -> list[str]:
+def _resolve_runtime_rule(rule: RuntimeEvidenceRule) -> object | None:
+    try:
+        value: object = importlib.import_module(rule.module)
+        for part in rule.qualname.split("."):
+            value = getattr(value, part)
+        return value if callable(value) else None
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
+def _runtime_evidence(root: Path, rules: Sequence[RuntimeEvidenceRule]) -> list[str]:
+    if not _is_live_repo(root):
+        return []
     evidence: list[str] = []
     for rule in rules:
-        text = _read(root, rule.path)
-        if text and all(pattern in text for pattern in rule.patterns):
+        if _resolve_runtime_rule(rule) is not None:
+            evidence.append(f"{rule.module}:{rule.qualname}: {rule.description}")
+    return evidence
+
+
+def _document_evidence(root: Path, rules: Sequence[DocumentEvidenceRule]) -> list[str]:
+    evidence: list[str] = []
+    for rule in rules:
+        path = root / rule.path
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8-sig", errors="strict")
+        if rule.token in text:
             evidence.append(f"{rule.path}: {rule.description}")
     return evidence
 
@@ -262,10 +479,10 @@ def _match_rules(root: Path, rules: Sequence[ContractEvidenceRule]) -> list[str]
 def _row(root: Path, spec: ContractCoverageSpec) -> ContractCoverageRow:
     row = ContractCoverageRow(
         contract=spec.contract,
-        producers=_match_rules(root, spec.producers),
-        consumers=_match_rules(root, spec.consumers),
-        audits=_match_rules(root, spec.audits),
-        tests=_match_rules(root, spec.tests),
+        producers=_runtime_evidence(root, spec.producers),
+        consumers=_runtime_evidence(root, spec.consumers),
+        audits=_runtime_evidence(root, spec.audits),
+        tests=_runtime_evidence(root, spec.tests),
     )
     for name, values in (
         ("producer", row.producers),
@@ -274,14 +491,21 @@ def _row(root: Path, spec: ContractCoverageSpec) -> ContractCoverageRow:
         ("real_path_test", row.tests),
     ):
         if not values:
-            row.uncovered_risks.append(f"{spec.contract}_missing_{name}_coverage")
+            row.uncovered_risks.append(f"{spec.contract}_missing_{name}_runtime_evidence")
     return row
 
 
 def _matrix_row(root: Path, spec: MatrixChainCoverageSpec) -> MatrixChainCoverageRow:
-    dimensions = {name: _match_rules(root, rules) for name, rules in spec.dimensions.items()}
+    dimensions: dict[str, list[str]] = {}
+    for name, rules in spec.dimensions.items():
+        runtime_rules = [rule for rule in rules if isinstance(rule, RuntimeEvidenceRule)]
+        document_rules = [rule for rule in rules if isinstance(rule, DocumentEvidenceRule)]
+        dimensions[name] = [
+            *_runtime_evidence(root, runtime_rules),
+            *_document_evidence(root, document_rules),
+        ]
     risks = [
-        f"{spec.contract}_missing_matrix_{name}_coverage"
+        f"{spec.contract}_missing_matrix_{name}_runtime_evidence"
         for name in MATRIX_CHAIN_DIMENSIONS
         if not dimensions.get(name)
     ]
@@ -289,28 +513,49 @@ def _matrix_row(root: Path, spec: MatrixChainCoverageSpec) -> MatrixChainCoverag
 
 
 def _boundary_errors(root: Path) -> list[str]:
+    path = root / "src/agents/decision_team/portfolio_manager.py"
+    if not path.is_file():
+        return []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    except (OSError, SyntaxError):
+        return ["signal_collection_contract_pm_boundary_unreadable"]
     errors: list[str] = []
-    pm_source = _read(root, "src/agents/decision_team/portfolio_manager.py")
-    if "from tools.common.signal_evidence_collection import build_signal_collection_contract" in pm_source:
-        errors.append("signal_collection_contract_pm_imports_builder")
-    if "signal_collection_contract = build_signal_collection_contract(" in pm_source:
-        errors.append("signal_collection_contract_pm_builds_contract")
-    return errors
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "tools.common.signal_evidence_collection":
+            if any(alias.name == "build_signal_collection_contract" for alias in node.names):
+                errors.append("signal_collection_contract_pm_imports_builder")
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "build_signal_collection_contract":
+                errors.append("signal_collection_contract_pm_builds_contract")
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == "build_signal_collection_contract":
+                errors.append("signal_collection_contract_pm_builds_contract")
+    return sorted(set(errors))
 
 
 def audit_contract_coverage(repo_root: str | Path) -> ContractCoverageAuditReport:
     root = Path(repo_root).resolve()
     matrix = [_row(root, spec) for spec in CONTRACT_SPECS]
     matrix_chain = [_matrix_row(root, spec) for spec in MATRIX_CHAIN_COVERAGE_SPECS]
-    violation_codes = [f"contract_coverage_uncovered:{risk}" for row in matrix for risk in row.uncovered_risks]
-    violation_codes.extend(f"contract_coverage_uncovered:{risk}" for row in matrix_chain for risk in row.uncovered_risks)
+    violation_codes = [
+        f"contract_coverage_uncovered:{risk}"
+        for row in matrix
+        for risk in row.uncovered_risks
+    ]
+    violation_codes.extend(
+        f"contract_coverage_uncovered:{risk}"
+        for row in matrix_chain
+        for risk in row.uncovered_risks
+    )
+    if not _is_live_repo(root):
+        violation_codes.append("contract_coverage_runtime_evidence_unavailable")
     violation_codes.extend(_boundary_errors(root))
-    return ContractCoverageAuditReport(matrix, matrix_chain, violation_codes)
+    return ContractCoverageAuditReport(matrix, matrix_chain, sorted(set(violation_codes)))
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Audit AgentQuant static contract coverage.")
-    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[4]))
+    parser = argparse.ArgumentParser(description="Audit AgentQuant runtime contract coverage.")
+    parser.add_argument("--repo-root", default=str(PROJECT_ROOT))
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
     result = audit_contract_coverage(args.repo_root)

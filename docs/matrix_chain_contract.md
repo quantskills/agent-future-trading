@@ -1,6 +1,6 @@
 # Matrix Chain Contract
 
-更新时间：2026-07-14
+更新时间：2026-07-15
 
 本文是 AgentQuant 全链路契约矩阵。它只回答一件事：每个关键系统事实由谁生产、落在哪里、谁消费、谁审计、什么条件必须 hard fail、什么条件只进入 diagnostics。
 
@@ -14,14 +14,14 @@
 - `docs/mechanism_research.md`：复盘、研究、记忆、学习边界。
 
 本文已经接入可执行闸门：
-- `src/tools/agent_tools/control/pg_contract_coverage_audit.py` 按本文关键契约行分别检查生产端、落点、消费端、角色自身校验、pre-backtest fixture、daily PG 物理结果边界、真实路径测试和机制文档覆盖；daily PG 不复查角色内部机制。
+- `src/tools/agent_tools/control/pg_contract_coverage_audit.py` 按本文关键契约行执行六维 coverage：`producer`、`physical_landing`、`consumer`、`role_check`、`real_path_test`、`mechanism_doc`。pre-backtest readiness 与 daily PG 物理事实审计由各自正式入口独立执行，不是 coverage 的附加维度。
 - 回测前检测通过 `src/tests/test_*.py` 的通用不变量和真实路径测试证明系统就绪；历史问题只能作为测试样本来源，不能成为回测前检测的设计中心。
 - `src/tools/agent_tools/control/pg_system_invariants.py` 按本文第 5 节输出 daily PG hard fail 边界和 diagnostics 边界。
 - `src/run/control/pre_backtest_acceptance.py` 与 `src/run/control/system_invariant_audit.py` 是本文对应的只读控制入口。
 
 ## 1. 使用规则
 
-修改生产端、自检、回测前验收、日终 PG 审计、Research 写入、PM artifact、Trader/Reviewer/Researcher artifact 时，必须先定位本文对应行，再同步修改：
+修改生产端、自检、回测前验收、日终 PG 审计、Research 写入、PM artifact、Trader/Reviewer/Researcher artifact 时，必须先定位本文对应行，再按以下八项开发同步清单处理。该清单是完整开发顺序，不等同于 `pg_contract_coverage_audit.py` 的六个可执行 coverage 维度：
 
 1. 生产端。
 2. artifact / DB 落点。
@@ -31,6 +31,8 @@
 6. daily PG audit。
 7. 真实路径测试。
 8. 机制文档。
+
+六维 coverage 与上述清单的关系固定为：生产端对应 `producer`，物理落点对应 `physical_landing`，消费端对应 `consumer`，角色自身校验对应 `role_check`，真实生产链行为测试对应 `real_path_test`，正式机制文档对应 `mechanism_doc`。pre-backtest fixture/readiness 和 daily PG 分别由回测前十项与每日七项门禁执行，不能用静态 coverage 字符串替代，也不能让 daily PG 复查智能体内部机制。
 
 缺本文矩阵行的系统事实不得进入代码、artifact、DB、prompt 和审计。PG 的输入、判定和输出也不得例外；任何未在 `matrix_field_semantics.md` 登记的字段都不能通过 `metadata`、`payload`、JSON 容器或临时字典键进入旁路报告。
 
@@ -48,7 +50,7 @@
 |---|---|---|---|---|---|---|---|---|
 | `action_evidence_contract` | `technical` / `fundamental` / `commodity_news`，Phase1 | 截止点内行情、基本面、新闻、商品 profile、分析师校准摘要 | 三份经同一共享校验的结构化预测证据；必需市场事实不可用时仍由三个分析师各自产生合法中性 AEC；基本面或新闻无当日新增只影响本分析师 | Workflow 保存三份 signal 表记录；`artifact_json`和分析师报告都只保存同一AEC；内存metadata保存前仅AEC、保存后仅AEC与真实ID | `signal_collector`、Reviewer、Researcher | 共享 AEC 校验；pre-backtest structured IO；daily PG 只核对实际进入策略路径时物理来源记录存在 | 含手数、仓位比例、保证金、`final_action_contract`、`opportunity_rank`、最终交易动作；缺必填字段/类型/数据来源层级；伪造方向、profile、trigger、权限或市场事实；携带自由文本、LLM路由、内部参数、校准过程、学习检索上下文或其他metadata | 证据弱、证据冲突、基本面或新闻无新增、合法中性数据不可用状态 |
 | `product_profile_evidence` | 三类分析师，Phase1 | `product_price_behavior_profiles.yaml`、行情与品种上下文 | profile 使用痕迹、支持证据、冲突证据、缺失确认项 | 仅 `action_evidence_contract.product_profile_evidence`；SCC source/evidence items只做已登记索引 | `signal_collector`、PM 证据上下文、Reviewer、Researcher | contract coverage；pre-backtest artifact boundary | profile 字段含交易授权、手数、rank、PM reason code、最终动作，或在AEC外复制第二份 | profile 不相关、profile 证据不足 |
-| `fusion_evidence` | 分析师质量工具，Phase1 | 分析师结构化证据、profile、数据质量 | 证据强弱、时效、一致性、冲突、确认需求 | 分析师 `metadata.action_evidence_contract`；SCC `source_contracts` | `signal_collector`、PM scorecard、Reviewer、Researcher | contract coverage；Reviewer/Researcher 事实归因 | fusion 字段直接授权交易、替代 PM score/rank、进入 Trader 执行权限 | evidence_fusion 冲突高、确认需求多 |
+| `fusion_evidence` | 分析师质量工具，Phase1 | 分析师结构化证据、profile、数据质量 | 证据强弱、时效、一致性、冲突、确认需求 | 分析师 `metadata.action_evidence_contract.fusion_evidence`；SCC 只在 `source_contracts[].action_evidence_contract.fusion_evidence` 保留同一份，并另行形成顶层跨分析师 `evidence_fusion` 汇总 | `signal_collector`、PM scorecard、Reviewer、Researcher | contract coverage；Reviewer/Researcher 事实归因 | 在 SCC source 同级或 evidence item 复制第二份 fusion；fusion 字段直接授权交易、替代 PM score/rank、进入 Trader 执行权限 | evidence_fusion 冲突高、确认需求多 |
 | `signal_collection_contract` | `signal_collector`，Phase1 | Workflow 已保存并取得真实 `signal_record_id` 的三份 AEC | 唯一统一结构化预测证据包，保留 `source_agent=signal_collector` 与 `collector_decision_boundary=no_trade_authority` | workflow state `signal_collection_contract`；PM final `signal_snapshot.signal_collection_contract` | PM、Reviewer、Researcher | 共享 SCC 校验；pre-backtest SCC contract；daily PG 只核对策略路径物理落地完整性；contract coverage | Collector 生成 AnalystSignal/虚假 ID；缺或重复分析师；缺 SCC；source_agent/boundary 非法；SCC 含 PM 字段、手数、rank、资金部署或交易动作 | 分析师冲突、证据弱、缺确认项 |
 | `signal_snapshot.signal_collection_contract` | PM Step6 返回、保存层物理化，Phase1 | workflow state 原始 SCC | 原始 SCC 快照 | `futures_recommendation.signal_snapshot`；recommendation artifact | Reviewer、Researcher | daily PG 只核对策略路径物理落地完整性 | PM 重建、补造、改写 SCC；只保存 SCC ref；完整 SCC 缺失；source_agent/boundary 错 | SCC 证据弱、冲突多 |
 | `final_action_contract` | PM Step6，Phase1 | SCC、持仓、账户、Router 截止点内具体合约事实、配置、有效学习、PM 工具输出 | 唯一可执行策略合约：`final_action`、`current_lots`、`target_lots`、`lots_delta`、具体合约、执行触发、风险边界、证据摘要 | `futures_recommendation.signal_snapshot.final_action_contract`；recommendation artifact | Auditor、Trader、Reviewer、Researcher | PM self-check；Auditor；daily PG 只核对唯一交易来源及执行成交事实 | 新增风险缺合法具体合约；默认/猜测合约；已有持仓未绑定持仓合约；缺 final contract；PM 自检失败；顶层 action/lots 或 `lots_delta` 不一致；PM 中间态污染；第二套交易计划 | no trade、rank 低、资金预算不足、信号弱 |
@@ -69,15 +71,15 @@
 | `futures_transactions` / transaction payload | Trader，Phase2 | audit passed contract、盘中触发、成交价格、合约信息 | 仅真实成交事实及执行审计 | `futures_transactions`；transaction artifact；audit payload | Accountant、Reviewer、Researcher、PG | daily PG trade source audit | 未成交写入 transaction；成交不来自最终合约；无 open authority 却开仓；缺触发记录；source_type 错；交易手数超合约授权；运营单污染策略单 | 滑点大、部分成交 |
 | `execution_result` | Trader，Phase2 | 审计通过的 final contract、盘中触发、成交/未成交事实 | 执行结果、状态、真实成交列表、未触发/未成交/失效/市场规则阻断原因 | recommendation `signal_snapshot.execution_result`；execution result artifact；Reviewer / Researcher input | Accountant、Reviewer、Researcher、PG | daily PG execution result lineage | execution result 改 PM 合约；缺 recommendation lineage；source_type 错；结果与 transaction 不一致；把未成交伪造成交 | 审计通过但未触发或未成交、部分成交、滑点偏大 |
 | `execution_learning_trace` | Trader / futures audit helper，Phase2 | 执行结果、触发状态、成交质量 | 执行学习 trace，`consumer_scope=trader_execution_learning` | execution result；Reviewer input；Researcher input | Reviewer、Researcher | pre-backtest execution trace contract；daily PG 不复查其内部学习语义 | bare execution trace 缺 consumer_scope；Trader 用 trace 下单；trace 改 PM 合约 | 触发质量弱、成交质量差 |
-| `daily_settlement` / `positions_snapshot` | Accountant，Phase3 | 成交、持仓、结算价、手续费、保证金率、合约乘数 | 结算事实、PnL、权益、保证金、持仓状态 | `daily_settlement`；settlement artifact | Reviewer、Researcher、PG、评估 | Phase4 review；daily PG accounting boundary | 改交易动作；用学习或 LLM 改账；结算与成交不一致；保证金硬上限失真；写 PM rank/learning 字段 | 当天亏损、保证金利用偏低 |
+| `portfolio.positions` / `daily_settlement.positions_snapshot` | Accountant，Phase3 | 成交、持仓、结算价、手续费、保证金率、合约乘数 | 结算后的当前持仓、日结算持仓快照、PnL、权益和保证金事实 | `portfolio.positions`；`daily_settlement.positions_snapshot`；`ticker_daily_pnl`；settlement artifact，不存在独立 position SQL 路径 | Reviewer、Researcher、PG、评估 | Phase4 review；daily PG accounting boundary | 两份持仓事实不一致；成交重复入账；改交易动作；用学习或 LLM 改账；结算与成交不一致；写 PM rank/learning 字段 | 当天亏损、保证金利用偏低、实际敞口偏离 PM 规划预算 |
 | `reviewer_phase4_review` / review facts | Reviewer，Phase4 | recommendation、audit、transaction、settlement、execution result、phase 状态 | Phase4 验收、交易日志、事实归因、研究输入材料 | reviewer artifact；review payload | Researcher | Phase4 gate；daily PG 只核对 Phase4 状态和物理结果可读性，不复查结论 | Reviewer 下单、调仓、写最终 action-value、改交易事实、触发 Researcher LLM 直接改当天 | 预算漂移 warning、执行质量差、归因不利 |
-| `researcher_llm_notes` | Researcher，Phase4 与结算完成后 | 通过正式 ID 链验证的 AEC → SCC → FAC → Auditor → execution_result → transaction → settlement 事实包 | 经结构校验的 evidence pack 与结构化研究结果；禁止保存 prompt、原始 response、内部推理和未验证工具结果 | `researcher_llm_notes.payload`；research artifacts | Research writer；分析师正式校准检索；PM `decision_memory_retrieval` | data time boundary；structured IO；正式 ID lineage | 来源记录/日期/ID 断链；保存原始模型内容；使用未结算或未完成 Phase4 日期；改当天事实；输出当日交易指令 | 合法零成交、无合格学习成果、研究观点弱、样本少 |
+| `researcher_llm_notes` | Researcher，Phase4 与结算完成后 | 通过正式 ID 链验证的 AEC → SCC → FAC → Auditor → execution_result → transaction → settlement 事实包 | 经结构校验的 evidence pack 与 `validated_output`；禁止保存 prompt、原始 response、内部推理和未验证工具结果 | `researcher_llm_notes.evidence_pack_id`、`payload_json` 及 payload artifact 元数据；`raw_prompt/raw_response` 和对应 artifact 元数据固定为空 | Research writer；分析师正式校准检索；PM `decision_memory_retrieval` | data time boundary；structured IO；正式 ID lineage | 来源记录/日期/ID 断链；保存原始模型内容；使用未结算或未完成 Phase4 日期；改当天事实；输出当日交易指令 | 合法零成交、无合格学习成果、研究观点弱、样本少 |
 | `alpha_setup_action_value` | Researcher 写入工具，Phase4 后 | 已结算 episode、复盘事实、未交易机会、执行事实 | canonical action-value：`action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` | `alpha_setup_action_value` DB；payload_json 同值保留 | PM next-day retrieval、Reviewer、Researcher | pre-backtest action matrix contract；daily PG 只检查实际生成记录的来源日期与前视边界 | 缺 canonical family/lane/preference；family/lane/preference 不一致；observe 冒充 positive candidate；future dated；非策略事件污染 strategy action-value | observe 空 preference 合法；样本少；reward 弱 |
 | `alpha_setup_profile` / product learning | Researcher 写入工具，Phase4 后 | episode 聚合、setup、trigger、证据组合、deployment outcome | 产品/setup/trigger 历史表现 | research DB | 分析师校准、PM product learning、Researcher | contract coverage；data time boundary | 直接写手数、交易授权、当日合约修改 | 产品表现差、setup 样本少 |
 | `adaptive_policy_state` / `provisional_policy_state` / `config_learning_overlay` | Researcher / 配置学习写入工具，Phase4 后 | 长窗口研究结果、验证通过的参数证据、回滚值 | 策略参数学习状态、候选参数、回滚信息 | research / config learning DB | 开发验收、PM 配置读取、PG | pre-backtest config consistency；data time boundary | 未验证参数直接生效；缺 rollback；改当天交易事实；绕过 PM 合约权限；未来数据参与参数 | 候选策略待验证、样本不足 |
 | `trade_episode_memory` / `no_trade_opportunity_memory` | Reviewer / Researcher，Phase4 后 | 已结算完整交易对、未交易机会、未触发条件机会 | 可为空的未来学习事实底座 | research DB；artifact | 分析师正式校准检索、PM `decision_memory_retrieval`、Researcher | data time boundary；mechanism audit | 前视；未完成 Phase4/结算进入学习；无代表样本却写结论；要求每笔交易都形成学习 | 无合格样本、学习为空、机会少、错过交易 |
 | `trading_day_phase` | workflow，Phase1-Phase4 | 各阶段运行结果 | 阶段状态与时间戳 | `trading_day_phase` DB | PG、backtest gate、Reviewer | daily PG phase audit | 存在业务记录但 phase 未 completed；阶段顺序断裂；失败残留跨日污染 | 当天无交易但 phase 完整 |
-| `contract_coverage_audit` | PG，回测前 | 代码、配置、文档、测试 | 版本级契约覆盖矩阵 | pre-backtest report | 开发者、回测闸门 | pre-backtest acceptance | producer/consumer/audit/test 覆盖缺口；核心契约缺字段表登记 | 覆盖完整但真实样本少 |
+| `contract_coverage_audit` | PG，回测前 | 可导入生产代码、正式 schema、机制文档和真实路径测试 | 六维版本级契约覆盖矩阵：producer、physical_landing、consumer、role_check、real_path_test、mechanism_doc | pre-backtest report | 开发者、回测闸门 | pre-backtest acceptance | 任一六维 runtime/document evidence 缺失；依赖字符串命中、废弃函数或禁用代码冒充 coverage；核心契约缺字段表登记 | coverage 完整但真实样本少 |
 | `pre_backtest_acceptance` | PG，回测前 | DB schema、代码、配置、fixture、契约覆盖、系统不变量；指定窗口与配置品种的只读市场、合约、Finoview 和新闻数据入口 | 回测前 readiness 结论 | pre-backtest report | 开发者、回测脚本 | 回测前闸门 | 通用系统不变量 fixture 失败；schema 断裂；越权字段；contract coverage 缺口；字段矩阵断裂；交易日、PandaAI 日线开收盘价、官方结算价、主力合约映射、合约乘数、保证金率、具体合约信息或 Trader 分钟行情接口能力等交易必需数据断裂 | LLM 配置或密钥环境变量缺失、某品种某日无新增基本面或新闻；PG 不发起 LLM 鉴权请求 |
 | `system_invariant_audit` | PG，每日回测后 | 当日 DB、artifact、phase、字段矩阵 | 系统不变量报告 | daily gate output | 开发者、回测脚本 | daily gate | 应落地的 final contract 或 SCC 缺失、artifact 污染、越权、交易不来自唯一合法来源、执行/成交/结算事实不一致、阶段断裂 | 无交易、收益差、学习为空或未产生、PM 内部自检/rank/学习作用过程 |
 
@@ -104,17 +106,17 @@
 
 ## 5. Daily PG 审计边界矩阵
 
-| 审计对象 | PG 必审 | PG 禁审 |
+每日 PG 固定输出以下七项。它只读核对当日已经形成的物理事实，不进入智能体内部，不重复 PM 自检、Auditor 审计或 Reviewer 复盘。
+
+| 正式检查名 | PG 必审 | PG 禁审 |
 |---|---|---|
-| SCC | 完整 SCC 存在、source_agent、boundary、越权字段 | 信号强弱是否足够交易 |
-| PM final contract | 对实际进入策略路径的已落库合约检查存在性、顶层投影一致性、唯一交易事实来源和无中间态外泄 | PM 自检结果、方向形成、rank、预算、sizing、学习消费及任何内部转换是否正确 |
-| action-value | 仅对实际生成并落库的研究记录检查来源日期、无前视、字段与动作语义 | PM formal list 纯净性、学习如何影响 PM、学习带来的收益预测是否正确 |
-| 智能体内部机制 | 无 | PM 自检与 Step1–6 内部状态、Auditor 内部判断、Trader 内部触发推理、Reviewer 归因过程、Researcher 研究推理 |
-| Trader | 成交来自审计通过合约、触发记录、source_type 分账、无 PM 学习镜像 | 是否应该追价、是否错过更好成交 |
-| Accountant | 成交与结算一致、保证金硬边界、持仓事实 | 当天亏损是否策略失败 |
-| Reviewer | 只复盘事实、只输出研究输入材料 | 复盘观点是否正确 |
-| Researcher | 只写未来学习、无当天事实改写、无前视 | 研究结论未来是否盈利 |
-| Phase | 阶段顺序、completed 状态、失败残留 | 无交易日策略是否无效 |
+| `daily_phase_completion` | Phase1→Phase4 completed 状态、真实时间顺序，以及实际生成的 Researcher completion 事件晚于 Phase4 | 阶段内推理质量；无交易日是否策略无效 |
+| `physical_result_landing` | 只对实际进入的路径要求对应落点；SCC 通过共享完整校验；三个真实 `signal_record_id` 精确对应三名分析师 SQL AEC、ticker 和日期；artifact/持久化无 prompt、原始 response、隐藏上下文和未登记字段 | 信号强弱是否足够交易；分析师内部工作过程 |
+| `single_trade_fact_source` | 每笔 transaction 显式登记 `strategy`、`rollover` 或 `forced_risk`；三类来源分别绑定唯一 FAC、rollover policy 或 forced-risk boundary | 把运营交易强套 PM 策略合约；评价交易方向和收益 |
+| `audit_release_and_execution_result` | strategy 成交具有完整 Auditor payload、允许执行的 verdict 和 FAC 授权；block/require_review 不得成交；approve 后合法未触发、未成交或部分成交允许 | 重做 Auditor 硬风险判断；把 approve 解释为必须成交 |
+| `execution_and_transaction_fact` | recommendation ID、动作、方向、具体合约和累计成交手数与 FAC 授权一致；execution_result 与 transaction 一致；仅条件 FAC 核对盘中决策 | 复判 Trader 内部推理、追价和择时质量 |
+| `settlement_and_account_fact` | transaction 只入账一次；逐品种手数、`portfolio.positions`、`daily_settlement.positions_snapshot`、ticker PnL、手续费、保证金、现金和权益守恒 | 要求实际成交等于 PM 预算；因实际净敞口偏离规划预算判错；评价当天盈亏 |
+| `learning_record_landing_boundary` | 只检查实际生成的学习记录；核对 Phase4、结算、来源日期、正式 ID 和 canonical action-value；成交型学习追溯真实 transaction/settlement，反事实机会不伪造 transaction | 要求每笔交易产生学习、要求每次决策使用学习、评价学习质量或改写历史事实 |
 
 ## 6. 修改检查清单
 
@@ -125,7 +127,7 @@
 3. action-value 改动同步对照 `docs/matrix_action_canonical.md`。
 4. 生产端与落盘端同轮修改。
 5. 消费端与自检同轮修改。
-6. pre-backtest fixture 覆盖过去失败形态。
+6. 行为回归测试覆盖具体失败形态；pre-backtest 只运行通用不变量与 readiness 验收，不增加按历史错误命名的生产检查分支。
 7. daily PG audit 只审系统契约，不复判策略。
 8. 真实路径测试证明 producer-to-consumer 字段保真。
 9. 修改 `.py/.yaml/.yml` 后更新 `docs/work_log.md`。

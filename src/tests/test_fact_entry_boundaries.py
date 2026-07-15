@@ -868,11 +868,26 @@ class FactEntryBoundaryTest(unittest.TestCase):
 
     def test_control_audits_do_not_write_business_tables(self):
         write_pattern = re.compile(r"\.execute\(\s*(?:f)?[\"']{1,3}\s*(?:INSERT INTO|UPDATE|DELETE FROM)\b", re.I)
+        isolated_temp_db_writer = "tools/agent_tools/control/pg_full_chain_dry_run.py"
         offenders = []
         for path in (SRC_ROOT / "tools" / "agent_tools" / "control").rglob("*.py"):
             rel = path.relative_to(SRC_ROOT).as_posix()
             text = path.read_text(encoding="utf-8-sig")
             tree = ast.parse(text, filename=str(path))
+            if rel == isolated_temp_db_writer:
+                entry = next(
+                    (
+                        node
+                        for node in tree.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "run_no_llm_full_chain_dry_run"
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(entry)
+                self.assertIn("db_path", {arg.arg for arg in entry.args.kwonlyargs})
+                self.assertNotIn("src/assets/agentquant.db", text.replace("\\", "/"))
+                continue
             if write_pattern.search(text):
                 offenders.append(rel)
             for node in ast.walk(tree):

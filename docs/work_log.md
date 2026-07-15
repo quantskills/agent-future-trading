@@ -88,3 +88,21 @@
 （6）[共享字段与配置收口] `signal_evidence_collection.py`、`evidence_fusion_semantics.py`、`analyst_data_usage.py`、`schema.py`、数据库接口、`dev.yaml` 与相关消费者统一 AEC/SCC 数据质量、主方向 trigger、Auditor payload、execution_result 和 action-value 的字段层级与类型；AEC共享校验登记五种正式数据源身份、允许字段和基础类型，新闻/基本面追溯只保留日期、计数、质量和稳定错误数量，拒绝路径、编码、原始错误、内部方向提示及隐藏字段；基本面缺数值列直接不可用，不再写入0。删除 `direction_alignment`、零引用机会审计、分析师并行写库/时序日志开关、可关闭 Auditor 开关、`retry_then_default` 及原始 prompt 持久化入口。原因：字段矩阵、canonical 动作矩阵、共享校验器和真实消费者只保留一套语义，正式中性 AEC 是显式业务状态而不是兜底。
 
 （7）[冻结主线验收] 新增失败优先回归并同步调整现行正式夹具；第一批修复前新增集出现 6 个失败和 6 个错误，组合保证金投影另出现1个失败，第一轮信息隔离出现5个失败和1个错误；后续运行时日志、基本面默认0、AEC内部字段、Router自由文本、PandaAI/模板路径、LLM默认输出和Workflow完整状态日志又逐项形成13个失败证据，均先红后修。最终冻结主线21项、信息隔离与PandaAI组合31项、AEC/SCC/分析师组合87项、Auditor相关44项、核心契约150项、Phase-flow 312项、Reviewer/Researcher 99项、组合主线411项及全量742项全部通过；最终全量耗时69.760秒，`compileall src`通过。正式 `pre_backtest_acceptance --config src/config/dev.yaml --local-db --json` 总状态passed，九项通过，数据就绪因未请求日期窗口按设计跳过；`system_invariant_audit --local-db` 因正式daily database缺失返回 `daily_database_missing`，其余六项按 `daily_database_unavailable` 跳过，未伪造数据库或默认事实消除环境阻断。原因：以真实生产消费者和正式门禁闭环八项主线修改，并保持PG旁路实现及冻结业务算法不变。
+
+==========2026年7月15日==========
+
+（1）[PG 回测前数据与时间实证] `pg_pre_backtest_acceptance.py` 将日期窗口数据就绪扩展到交易日、日线 OHLCV、结算价、主力与具体合约、乘数、保证金率以及 Trader 15 分钟和 1 分钟行情接口，并通过正式 Router 读取、解析和日期过滤入口验收 Finoview 与新闻机制；统一时间项调用盘前截止、夜盘交易日映射和 Trader 行情截止生产逻辑，并验证 Phase3、Phase4 与学习日期消费者接线。原因：回测前 PG 只证明系统具备运行条件，不能把非每日基本面或新闻当作硬缺失，也不能把历史具体缺陷清单写入生产门禁。
+
+（2）[PG 契约、schema、配置与 coverage 实证] `pg_pre_backtest_acceptance.py`、`pg_db_schema_contract.py`、`pg_contract_coverage_audit.py` 将 AEC、SCC、FAC、Auditor artifact、execution result、settlement 和 action-value 绑定现有共享校验与真实消费者；物理字段改由正式 `sqlite_setup` 隔离 schema 生成和比对，配置检查绑定真实 Python 消费，coverage 改验可导入生产者、落点、消费者、职责校验和真实路径。原因：删除 PG 私有硬编码字段表、字符串命中、废弃函数和禁用代码造成的伪 coverage，不新增字段或第二套语义。
+
+（3）[PG 编排与同库无 LLM 预演] `pg_pre_backtest_acceptance.py` 新增实际调用记录式编排验收；新增 `pg_full_chain_dry_run.py`，在同一个正式隔离临时库中，以 canonical 确定性输入和外部依赖替身调用现有生产函数及保存接口，贯通三份 AEC、SCC、PM/FAC、Auditor、Trader、Accountant、Reviewer、Researcher 和次日分析师/PM 学习读取。原因：以真实 SQL ID、artifact、阶段顺序和学习回流证明业务链可以装配运行，同时不调用 LLM、不运行正式回测、不写正式交易库。
+
+（4）[PG 每日 SCC 与信息边界] `pg_system_invariants.py` 对策略分析路径调用 AEC/SCC 共享完整校验，精确核对三个 `signal_record_id` 与三名分析师 SQL AEC 的 ticker、日期和唯一性，并检查正式持久化与 artifact 不含 prompt、原始 response、隐藏上下文或未登记内部状态。原因：每日 PG 只核对主线已经形成的正式证据来源和物理落点，不重建或解释分析师内部工作。
+
+（5）[PG 每日交易授权与执行事实] `pg_system_invariants.py` 要求 transaction 显式登记既有 `strategy`、`rollover` 或 `forced_risk` 来源；strategy 成交必须绑定唯一 FAC、完整 Auditor 放行、recommendation ID、具体合约、方向和授权变化量，并与 execution result 逐笔一致；block/require_review 禁止成交，approve 后合法无成交或部分成交继续允许。原因：所有实际策略交易都必须有正式审计授权，但 PG 不复做 Auditor 审计，也不把审计通过误解为必须成交。
+
+（6）[PG 每日盘中、持仓与结算守恒] `pg_system_invariants.py` 仅在 FAC 明确要求盘中确认时核对盘中决策，并增加 transaction 唯一入账、逐品种手数、两份持仓快照、ticker PnL、手续费、保证金、现金和权益守恒检查。原因：只验证 Trader、Accountant 已落地事实的一致性，不复判 Trader 推理，不比较实际成交与 PM 预算，也不因实际净敞口偏离规划预算判错。
+
+（7）[PG 每日学习事实边界] `pg_system_invariants.py` 只对实际存在的结构化学习记录核对 Phase4、结算、写入顺序、来源日期、正式 ID 和共享 canonical action-value；成交型学习追溯真实 transaction/settlement，反事实机会不伪造 transaction。原因：保留合法无学习和未使用学习，不强迫每笔交易形成学习，也不评价学习质量或改写历史交易事实。
+
+（8）[PG 增量验收] 七项缺口的首轮行为测试共 45 项，旧实现出现 21 个失败和 1 个导入错误，分别证明分钟接口、时间消费者、同库全链路、实际编排、runtime coverage、SCC 精确来源、Auditor/FAC 授权、盘中条件、结算快照和学习追溯会被错误放行；修复后 PG 组合 55 项、冻结主线保护 333 项及全量 763 项全部通过，全量耗时 99.891 秒，`compileall src` 和 `git diff --check` 通过。正式带日期窗口 `pre_backtest_acceptance --start-date 2025-03-10 --end-date 2025-03-10` 十项全部通过，独立 contract coverage 正式入口通过；正式每日入口因本地 daily database 不存在如实返回 `daily_database_missing`，同一每日七项已在正式隔离临时库全链路上通过。主线生产目录无文件修改，字段矩阵、canonical 动作矩阵、PM/智能体机制和三类交易来源均保持原样。

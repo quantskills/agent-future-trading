@@ -218,3 +218,23 @@ strategy 路径中，Auditor 拒绝不得成交；审计通过不等于必须成
 ### 7. 学习记录落地边界
 
 不复查 Reviewer 的复盘结论；不要求每笔交易生成学习记录，也不要求每笔交易使用过学习。只对实际生成的学习记录检查来源日期合法、来自已完成事实、无前视且未改写当日交易事实。
+
+## 四、现行实现取证边界
+
+### 1. 回测前检测
+
+- 指定日期窗口时，数据就绪检查覆盖交易日、日线 OHLCV、结算价、主力映射、具体合约、乘数、保证金率及 Trader 使用的 15 分钟和 1 分钟行情接口；未指定窗口时不推定数据事实。
+- Finoview 与新闻只调用正式读取、解析和日期过滤机制证明接口可运行；合法无新增数据只形成诊断，不阻断回测。
+- 时间边界是一个统一机制验收项，只证明盘前截止、夜盘交易日映射、Trader 行情截止、Phase3/Phase4 顺序和学习日期边界已经接入真实消费者；具体边界案例属于回归测试。
+- 契约验收调用现有 AEC、SCC、FAC、Auditor artifact、execution result 和 action-value 共享校验器；数据库物理字段以正式 `sqlite_setup` 建立的隔离 schema 为准，PG 不维护私有字段表。
+- 配置 coverage 绑定可导入的真实 Python 消费者；编排验收通过实际调用记录证明顺序，不以字符串命中、函数名存在、废弃函数或禁用代码作为通过证据。
+- 无 LLM 全链路预演在同一个正式隔离临时库中运行，确定性替身只替代外部依赖，并调用真实生产函数和保存接口形成 SQL ID、artifact、阶段事实与次日学习读取；预演数据不得进入生产库或成为生产默认事实。
+
+### 2. 每日回测后检测
+
+- SCC 必须通过共享完整校验，并由三个 `signal_record_id` 精确追溯三名分析师的 SQL AEC、ticker 和交易日期；重复、错配或缺失均属于物理断链。
+- 每笔成交必须显式使用已登记的 `strategy`、`rollover` 或 `forced_risk` 来源。strategy 成交绑定唯一 FAC、完整 Auditor 放行和 FAC 授权变化量；另外两类分别绑定既有 rollover policy 和 forced-risk boundary。
+- 只有 FAC 明确要求盘中确认时才要求 `futures_intraday_decision`。approve 后未触发、未成交或部分成交合法，execution result 与实际 transaction 必须一致。
+- 结算检查 transaction 唯一入账、逐品种手数变化、`daily_settlement.positions_snapshot`、`portfolio.positions`、ticker PnL、手续费、保证金、现金和权益守恒，不比较实际成交与 PM 预算。
+- 学习检查只作用于实际生成的结构化记录，并按学习类型追溯 Phase4、结算、来源日期、正式 ID 和 canonical action-value；合法无学习与未使用学习均不构成错误。
+- PG 只读取正式契约与物理事实，不进入 PM、Auditor、Trader、Reviewer 或 Researcher 内部，不输出 prompt、原始 response、隐藏上下文、内部状态或第二套字段解释。

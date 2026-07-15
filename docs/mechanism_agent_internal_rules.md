@@ -297,7 +297,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | 输入内容 | 输出落点 | 规则 |
 |---|---|---|
-| 分析师原始结构化证据 | `source_contracts` | 保留来源分析师、原 `action_evidence_contract`、`product_profile_evidence`、来源记录 ID |
+| 分析师原始结构化证据 | `source_contracts` | 每条只保留来源分析师、真实 `signal_record_id` 和唯一 `action_evidence_contract`；`product_profile_evidence`、`fusion_evidence` 只存在于该 AEC 内，不得在来源记录同级复制 |
 | 每条证据的方向和状态 | `evidence_items` | 保留 `side`、`signal`、`opportunity_state`，不能改写 |
 | 触发信息 | `trigger_status`、`evidence_items.trigger_*` | 汇总触发状态，但不生成执行权限 |
 | setup 信息 | `setup_types`、`evidence_items.setup_*` | 只收集，不判断能否开仓 |
@@ -305,8 +305,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 冲突证据 | `opposing_analysts`、`evidence_conflict_level`、`current_evidence_conflict` | 必须显式保留，不能吞掉 |
 | 缺失和数据质量 | `missing_evidence`、`data_quality_flags` | 必须显式保留，不能当作方向证据 |
 | 证据强弱摘要 | `evidence_strength` | 只能来自分析师置信度和证据质量，不是 PM score/rank |
-| 商品差异化 profile 使用痕迹 | `source_contracts.product_profile_evidence`、`evidence_items.product_profile_id` | 只保真传递，不重新解释、不评分、不生成交易动作 |
-| 多维融合证据 | `source_contracts.fusion_evidence`、`evidence_items.fusion_evidence`、`evidence_fusion` | 只保真汇总证据强弱、时效、一致性、冲突、确认需求和缺失证据，不生成 PM score/rank、不生成交易动作 |
+| 商品差异化 profile 使用痕迹 | `source_contracts[].action_evidence_contract.product_profile_evidence`、`evidence_items[].product_profile_id/product_profile_used/product_profile_analysis_boundary` | 完整 profile 只随唯一 AEC 保真传递；`evidence_items` 只保存已登记索引，不重新解释、不评分、不生成交易动作 |
+| 多维融合证据 | `source_contracts[].action_evidence_contract.fusion_evidence`、SCC 顶层 `evidence_fusion` | 单个分析师完整融合证据只存在于唯一 AEC；Collector 仅生成跨分析师结构化汇总，不在 `source_contracts` 或 `evidence_items` 复制第二份 fusion，不生成 PM score/rank 或交易动作 |
 | 生产者和权限边界 | `source_agent`、`collector_decision_boundary` | 固定为 `signal_collector` 和 `no_trade_authority`，供 PM 入口校验 |
 
 ### 5.2 聚合状态规则
@@ -317,8 +317,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 单个分析师有方向 | `side_consensus=single_analyst_support`，保留该分析师证据 | 多分析师共识 |
 | 两个及以上分析师同向 | `side_consensus=multi_analyst_support`、对应 `supporting_analysts` | PM rank、手数 |
 | 有反向分析师 | `side_consensus=conflicted`、`opposing_analysts`、`evidence_conflict_level` | 抹掉反向证据 |
-| 任一分析师当前触发成立 | `trigger_status=confirmed` | 交易员执行权限 |
-| 有触发条件但未确认 | `trigger_status=valid_unconfirmed` 或 `watch_for_trigger` | 当前可成交判断 |
+| `dominant_side` 对应分析师中至少一份当前触发成立 | `trigger_status=confirmed` | 交易员执行权限；反方向证据不得确认主方向触发 |
+| 主方向证据有合法触发条件但尚未确认 | `trigger_status=valid_unconfirmed` 或 `watch_for_trigger` | 当前可成交判断；主方向为 `flat/mixed` 时固定为 `not_applicable` |
 | 有 `tradeable_candidate` 证据 | 原样保留为 `tradeable_candidate` | 降级成 probe 或直接开仓 |
 | 有 `probe_candidate` 证据 | 原样保留为 `probe_candidate` | 升级成 `tradeable_candidate` |
 | 有 `watch_for_trigger` 证据 | 原样保留触发条件和失效边界 | 转成当前成交候选 |
