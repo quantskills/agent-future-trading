@@ -122,34 +122,34 @@ def _tradeability(payload: Mapping[str, Any]) -> str:
 
 
 def _neutral_contract(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    metadata = _nested_dict(payload, "metadata")
-    contract = _nested_dict(metadata, "neutral_opportunity_contract")
-    if not contract:
-        contract = {}
-    bucket = str(
-        payload.get("neutral_opportunity_bucket")
-        or contract.get("bucket")
-        or "unknown"
-    )
-    trigger = str(
-        payload.get("neutral_trigger_condition")
-        or contract.get("trigger_condition")
-        or payload.get("would_change_view_if")
-        or ""
-    )
-    counterfactual_side = str(payload.get("counterfactual_side") or contract.get("counterfactual_side") or "flat").lower()
+    bucket = str(payload.get("neutral_opportunity_bucket") or "unknown")
+    trigger = str(payload.get("neutral_trigger_condition") or "")
+    counterfactual_side = str(payload.get("counterfactual_side") or "flat").lower()
     if counterfactual_side not in {"long", "short", "flat"}:
         counterfactual_side = "flat"
-    priority = str(payload.get("neutral_watchlist_priority") or contract.get("watchlist_priority") or "none")
+    priority = str(payload.get("neutral_watchlist_priority") or "none")
+    opportunity_state = str(payload.get("opportunity_state") or "no_opportunity").lower()
+    if opportunity_state not in {
+        "no_opportunity",
+        "watch_for_trigger",
+        "probe_candidate",
+        "tradeable_candidate",
+        "risk_reduction_candidate",
+    }:
+        opportunity_state = "no_opportunity"
     return {
         "bucket": bucket,
         "trigger_condition": trigger,
         "counterfactual_side": counterfactual_side,
         "watchlist_priority": priority,
-        "tracking_only": bool(contract.get("tracking_only", True)),
-        "opportunity_state": str(contract.get("opportunity_state") or "watch_for_trigger"),
-        "trigger_valid": bool(contract.get("trigger_valid", False)),
-        "action_preference": str(contract.get("action_preference") or "watch_for_trigger"),
+        "tracking_only": True,
+        "opportunity_state": opportunity_state,
+        "trigger_valid": bool(payload.get("trigger_valid")),
+        "invalidation_present": bool(payload.get("invalidation_present")),
+        "entry_trigger": str(payload.get("entry_trigger") or ""),
+        "invalidation_condition": str(payload.get("invalidation_condition") or ""),
+        "invalidation_level": payload.get("invalidation_level"),
+        "atr_stop_distance": payload.get("atr_stop_distance"),
     }
 
 
@@ -272,7 +272,11 @@ def classify_neutral_signal(
     consensus = _directional_consensus(snapshot, analyst)
     contract = _neutral_contract(payload)
     explicit_conditional_watchlist = (
-        contract["bucket"] in {"watchlist_trigger", "horizon_mismatch", "accountable_observation"}
+        contract["opportunity_state"] == "watch_for_trigger"
+        and contract["trigger_valid"] is False
+        and contract["invalidation_present"] is True
+        and _present(contract["entry_trigger"])
+        and contract["bucket"] in {"watchlist_trigger", "horizon_mismatch", "accountable_observation"}
         and _present(contract["trigger_condition"])
     )
     against_consensus = consensus["signal"] in {"Bullish", "Bearish"} and consensus["support_count"] >= consensus_threshold
@@ -320,7 +324,17 @@ def classify_neutral_signal(
         "conflicting_factors": _as_list(payload.get("conflicting_factors")),
         "would_change_view_if": str(payload.get("would_change_view_if") or ""),
         "opportunity_cost_risk": str(payload.get("opportunity_cost_risk") or ""),
-        "neutral_opportunity_contract": contract,
+        "neutral_opportunity_bucket": contract["bucket"],
+        "neutral_trigger_condition": contract["trigger_condition"],
+        "counterfactual_side": contract["counterfactual_side"],
+        "neutral_watchlist_priority": contract["watchlist_priority"],
+        "opportunity_state": contract["opportunity_state"],
+        "trigger_valid": contract["trigger_valid"],
+        "invalidation_present": contract["invalidation_present"],
+        "entry_trigger": contract["entry_trigger"],
+        "invalidation_condition": contract["invalidation_condition"],
+        "invalidation_level": contract["invalidation_level"],
+        "atr_stop_distance": contract["atr_stop_distance"],
         "business_quality_score": max(
             _safe_float(payload.get("business_quality_score")),
             _safe_float(_business_quality(payload).get("score")),
@@ -365,10 +379,10 @@ def build_neutral_accountability_summary(
             category = item["category"]
             category_counts[category] += 1
             by_analyst[analyst]["category_counts"][category] += 1
-            contract = item.get("neutral_opportunity_contract") if isinstance(item.get("neutral_opportunity_contract"), Mapping) else {}
-            if contract.get("bucket"):
-                by_analyst[analyst].setdefault("opportunity_bucket_counts", Counter())[str(contract.get("bucket"))] += 1
-            if contract.get("watchlist_priority") in {"medium", "high"}:
+            bucket = str(item.get("neutral_opportunity_bucket") or "")
+            if bucket:
+                by_analyst[analyst].setdefault("opportunity_bucket_counts", Counter())[bucket] += 1
+            if item.get("neutral_watchlist_priority") in {"medium", "high"}:
                 by_analyst[analyst].setdefault("conditional_watchlist_count", 0)
                 by_analyst[analyst]["conditional_watchlist_count"] += 1
             blocking_missing_fields = item.get("blocking_missing_fields") or []
@@ -392,7 +406,15 @@ def build_neutral_accountability_summary(
                         "blocking_missing_fields": blocking_missing_fields,
                         "missing_evidence": item["missing_evidence"][:5],
                         "would_change_view_if": item["would_change_view_if"],
-                        "neutral_opportunity_contract": item["neutral_opportunity_contract"],
+                        "neutral_opportunity_bucket": item["neutral_opportunity_bucket"],
+                        "neutral_trigger_condition": item["neutral_trigger_condition"],
+                        "counterfactual_side": item["counterfactual_side"],
+                        "neutral_watchlist_priority": item["neutral_watchlist_priority"],
+                        "opportunity_state": item["opportunity_state"],
+                        "trigger_valid": item["trigger_valid"],
+                        "invalidation_present": item["invalidation_present"],
+                        "entry_trigger": item["entry_trigger"],
+                        "invalidation_condition": item["invalidation_condition"],
                         "directional_consensus": item["directional_consensus"],
                     }
                 )

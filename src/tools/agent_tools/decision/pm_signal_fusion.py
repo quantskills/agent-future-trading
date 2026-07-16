@@ -196,11 +196,10 @@ def _has_invalidation(signal: Any) -> bool:
     invalidation_level = getattr(signal, "invalidation_level", None)
     if invalidation_level is not None:
         return True
-    fields = [
-        getattr(signal, "invalidation_condition", ""),
-        getattr(signal, "would_change_view_if", ""),
-    ]
-    text = " ".join(str(item or "") for item in fields).strip().lower()
+    atr_stop_distance = getattr(signal, "atr_stop_distance", None)
+    if atr_stop_distance is not None:
+        return True
+    text = str(getattr(signal, "invalidation_condition", "") or "").strip().lower()
     if not text:
         return False
     generic_terms = {

@@ -1263,32 +1263,36 @@ def _analyst_payloads(snapshot: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def _neutral_contract_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    contract = metadata.get("neutral_opportunity_contract") if isinstance(metadata.get("neutral_opportunity_contract"), dict) else {}
-    bucket = str(payload.get("neutral_opportunity_bucket") or contract.get("bucket") or "unknown")
-    trigger = str(
-        payload.get("neutral_trigger_condition")
-        or contract.get("trigger_condition")
-        or payload.get("would_change_view_if")
-        or ""
-    )
-    counterfactual_side = str(payload.get("counterfactual_side") or contract.get("counterfactual_side") or "flat").lower()
+    bucket = str(payload.get("neutral_opportunity_bucket") or "unknown")
+    trigger = str(payload.get("neutral_trigger_condition") or "")
+    counterfactual_side = str(payload.get("counterfactual_side") or "flat").lower()
     if counterfactual_side not in {"long", "short", "flat"}:
         counterfactual_side = "flat"
-    priority = str(payload.get("neutral_watchlist_priority") or contract.get("watchlist_priority") or "none")
+    priority = str(payload.get("neutral_watchlist_priority") or "none")
+    opportunity_state = str(payload.get("opportunity_state") or "no_opportunity").lower()
+    if opportunity_state not in {
+        "no_opportunity",
+        "watch_for_trigger",
+        "probe_candidate",
+        "tradeable_candidate",
+        "risk_reduction_candidate",
+    }:
+        opportunity_state = "no_opportunity"
     return {
         "bucket": bucket,
         "trigger_condition": trigger,
         "counterfactual_side": counterfactual_side,
         "watchlist_priority": priority,
-        "observation_window": str(
-            payload.get("recommended_observation_window") or contract.get("observation_window") or ""
-        ),
-        "opportunity_cost_risk": str(payload.get("opportunity_cost_risk") or contract.get("opportunity_cost_risk") or ""),
-        "tracking_only": bool(contract.get("tracking_only", True)),
-        "opportunity_state": str(contract.get("opportunity_state") or "watch_for_trigger"),
-        "trigger_valid": bool(contract.get("trigger_valid", False)),
-        "action_preference": str(contract.get("action_preference") or "watch_for_trigger"),
+        "observation_window": str(payload.get("recommended_observation_window") or ""),
+        "opportunity_cost_risk": str(payload.get("opportunity_cost_risk") or ""),
+        "tracking_only": True,
+        "opportunity_state": opportunity_state,
+        "trigger_valid": bool(payload.get("trigger_valid")),
+        "invalidation_present": bool(payload.get("invalidation_present")),
+        "entry_trigger": str(payload.get("entry_trigger") or ""),
+        "invalidation_condition": str(payload.get("invalidation_condition") or ""),
+        "invalidation_level": payload.get("invalidation_level"),
+        "atr_stop_distance": payload.get("atr_stop_distance"),
     }
 
 
@@ -1313,7 +1317,11 @@ def _neutral_opportunity_observations(snapshot: Dict[str, Any]) -> List[Dict[str
                 "tracking_only": True,
                 "opportunity_state": contract["opportunity_state"],
                 "trigger_valid": contract["trigger_valid"],
-                "action_preference": contract["action_preference"],
+                "invalidation_present": contract["invalidation_present"],
+                "entry_trigger": contract["entry_trigger"],
+                "invalidation_condition": contract["invalidation_condition"],
+                "invalidation_level": contract["invalidation_level"],
+                "atr_stop_distance": contract["atr_stop_distance"],
             }
         )
     return observations
@@ -1429,7 +1437,7 @@ def _primary_opportunity_state(snapshot: Dict[str, Any], side: str = "") -> str:
     for preferred in ("tradeable_candidate", "probe_candidate", "risk_reduction_candidate", "watch_for_trigger", "no_opportunity"):
         if preferred in values:
             return preferred
-    return str(values[0]) if values else "watch_for_trigger"
+    return str(values[0]) if values else "no_opportunity"
 
 
 def _evidence_summary(snapshot: Dict[str, Any]) -> str:

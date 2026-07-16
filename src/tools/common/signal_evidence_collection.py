@@ -414,6 +414,57 @@ def _confidence(contract: Mapping[str, Any]) -> float:
     return max(0.0, min(1.0, parsed))
 
 
+_NON_ENTRY_TRIGGER_VALUES = {
+    "",
+    "unknown",
+    "none",
+    "n/a",
+    "null",
+    "wait",
+    "wait_for_trigger",
+    "technical_price_trigger",
+    "fundamental_anchor",
+    "news_event_trigger",
+    "direction_anchor",
+    "initial_or_rebalance",
+}
+
+
+def _has_concrete_entry_trigger(value: Any) -> bool:
+    text = _text(value).strip().lower()
+    if text in _NON_ENTRY_TRIGGER_VALUES:
+        return False
+    return not (text.endswith("_trigger") or text.endswith("_anchor"))
+
+
+def _optional_contract_number(
+    contract: Mapping[str, Any],
+    field: str,
+    *,
+    positive: bool = False,
+) -> bool:
+    value = contract.get(field)
+    if value is None:
+        return False
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"action_evidence_contract_invalid_number:{field}")
+    if positive and float(value) <= 0.0:
+        raise ValueError(f"action_evidence_contract_invalid_positive_number:{field}")
+    return True
+
+
+def _has_canonical_invalidation_proof(contract: Mapping[str, Any]) -> bool:
+    condition = _text(contract.get("invalidation_condition")).strip().lower()
+    condition_present = condition not in {"", "unknown", "none", "n/a", "null"}
+    level_present = _optional_contract_number(contract, "invalidation_level")
+    atr_present = _optional_contract_number(
+        contract,
+        "atr_stop_distance",
+        positive=True,
+    )
+    return condition_present or level_present or atr_present
+
+
 def validate_action_evidence_contract(
     contract: Any,
     *,
@@ -484,13 +535,34 @@ def validate_action_evidence_contract(
     opportunity_state = _text(contract.get("opportunity_state")).lower()
     if opportunity_state not in ACTION_EVIDENCE_OPPORTUNITY_STATES:
         raise ValueError("action_evidence_contract_invalid_opportunity_state")
+    entry_trigger_present = _has_concrete_entry_trigger(contract.get("entry_trigger"))
+    invalidation_proof = _has_canonical_invalidation_proof(contract)
+    if contract.get("invalidation_present") is True and not invalidation_proof:
+        raise ValueError("action_evidence_contract_invalidation_proof_missing")
+    if contract.get("invalidation_present") is False and invalidation_proof:
+        raise ValueError("action_evidence_contract_invalidation_flag_mismatch")
+    if signal == Signal.NEUTRAL.value and opportunity_state in {
+        "probe_candidate",
+        "tradeable_candidate",
+    }:
+        raise ValueError("action_evidence_contract_neutral_candidate_invalid")
     if opportunity_state in {"probe_candidate", "tradeable_candidate"}:
+        if not entry_trigger_present:
+            raise ValueError("action_evidence_contract_candidate_missing_entry_trigger")
         if contract.get("trigger_valid") is not True:
             raise ValueError("action_evidence_contract_candidate_without_current_trigger")
         if contract.get("invalidation_present") is not True:
             raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
-    if opportunity_state == "watch_for_trigger" and contract.get("invalidation_present") is not True:
-        raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
+    if opportunity_state == "watch_for_trigger":
+        if not entry_trigger_present:
+            raise ValueError("action_evidence_contract_watch_missing_entry_trigger")
+        if contract.get("invalidation_present") is not True:
+            raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
+        if signal == Signal.NEUTRAL.value:
+            if _text(contract.get("counterfactual_side")).lower() not in {"long", "short"}:
+                raise ValueError("action_evidence_contract_neutral_watch_missing_side")
+            if contract.get("trigger_valid") is not False or contract.get("current_trigger_confirmed") is not False:
+                raise ValueError("action_evidence_contract_neutral_watch_trigger_already_confirmed")
     data_usage = contract["data_usage_summary"]
     usage_extras = sorted(set(data_usage) - ACTION_EVIDENCE_DATA_USAGE_FIELDS)
     if usage_extras:

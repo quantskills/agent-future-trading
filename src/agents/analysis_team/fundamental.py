@@ -478,7 +478,6 @@ def fundamental_agent(state: FundState):
     signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(fundamental_context.get("tradeability") or "unknown")
     signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else "fundamental_timing_setup"
-    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_fundamental_data_usage(
         ticker=ticker,
         trading_date=trading_date,

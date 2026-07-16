@@ -2503,10 +2503,10 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         self.assertEqual(enriched.signal, Signal.NEUTRAL)
         self.assertTrue(enriched.neutral_reason)
         self.assertTrue(enriched.missing_evidence)
-        self.assertTrue(enriched.would_change_view_if)
+        self.assertEqual(enriched.would_change_view_if, "")
         self.assertLessEqual(enriched.business_quality_score, 0.56)
         self.assertIn("business_quality", enriched.metadata)
-        self.assertIn("neutral_opportunity_contract", enriched.metadata)
+        self.assertNotIn("neutral_opportunity_contract", enriched.metadata)
         self.assertEqual(enriched.neutral_opportunity_bucket, "conflict_avoidance")
         self.assertEqual(enriched.neutral_watchlist_priority, "low")
 
@@ -2522,18 +2522,11 @@ class StrictCompletionRegressionTest(unittest.TestCase):
                 "neutral_trigger_condition": "price breaks above 3200 with volume",
                 "counterfactual_side": "long",
                 "neutral_watchlist_priority": "medium",
-                "metadata": {
-                    "neutral_opportunity_contract": {
-                        "bucket": "watchlist_trigger",
-                        "trigger_condition": "price breaks above 3200 with volume",
-                        "counterfactual_side": "long",
-                        "watchlist_priority": "medium",
-                        "tracking_only": True,
-                        "opportunity_state": "watch_for_trigger",
-                        "trigger_valid": False,
-                        "action_preference": "watch_for_trigger",
-                    }
-                },
+                "opportunity_state": "watch_for_trigger",
+                "trigger_valid": False,
+                "invalidation_present": True,
+                "entry_trigger": "long entry only after price breaks above 3200 with volume",
+                "invalidation_condition": "long setup invalid if price closes below 3150",
             },
             "fundamental": {"signal": "Neutral", "confidence": 0.5},
             "commodity_news": {"signal": "Neutral", "confidence": 0.5},
@@ -2561,11 +2554,12 @@ class StrictCompletionRegressionTest(unittest.TestCase):
         )
 
         self.assertEqual(item["category"], "conditional_watchlist")
-        contract = item["neutral_opportunity_contract"]
-        self.assertTrue(contract["tracking_only"])
-        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
-        self.assertFalse(contract["trigger_valid"])
-        self.assertEqual(contract["action_preference"], "watch_for_trigger")
+        self.assertEqual(item["opportunity_state"], "watch_for_trigger")
+        self.assertFalse(item["trigger_valid"])
+        self.assertTrue(item["invalidation_present"])
+        self.assertEqual(item["counterfactual_side"], "long")
+        self.assertNotIn("action_preference", item)
+        self.assertNotIn("neutral_opportunity_contract", item)
         self.assertEqual(summary["category_counts"]["conditional_watchlist"], 1)
         self.assertEqual(summary["by_analyst"]["technical"]["conditional_watchlist_count"], 1)
 
@@ -4607,18 +4601,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         "neutral_trigger_condition": "price confirms upside event follow-through",
                         "counterfactual_side": "long",
                         "neutral_watchlist_priority": "medium",
-                        "metadata": {
-                            "neutral_opportunity_contract": {
-                                "bucket": "watchlist_trigger",
-                                "trigger_condition": "price confirms upside event follow-through",
-                                "counterfactual_side": "long",
-                                "watchlist_priority": "medium",
-                                "tracking_only": True,
-                                "opportunity_state": "watch_for_trigger",
-                                "trigger_valid": False,
-                                "action_preference": "watch_for_trigger",
-                            }
-                        },
+                        "opportunity_state": "watch_for_trigger",
+                        "trigger_valid": False,
+                        "invalidation_present": True,
+                        "entry_trigger": "long entry only after price confirms upside event follow-through",
+                        "invalidation_condition": "long event setup invalid if price closes below its event range",
                     },
                 ),
                 "final_action_contract": {

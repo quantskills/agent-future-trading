@@ -3132,8 +3132,6 @@ def _canonical_invalidation_present(signal) -> bool:
     contract = _canonical_action_evidence_contract(signal)
     if "invalidation_present" in contract:
         return bool(contract.get("invalidation_present"))
-    if "has_invalidation" in contract:
-        return bool(contract.get("has_invalidation"))
     return bool(getattr(signal, "invalidation_present", False))
 
 
@@ -3168,8 +3166,6 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
     )
     invalidation_condition = (
         action_contract.get("invalidation_condition")
-        or getattr(signal, "exit_hint", "")
-        or getattr(signal, "would_change_view_if", "")
         or ""
     )
     invalidation_present = _pm_has_invalidation_contract(signal, metadata)

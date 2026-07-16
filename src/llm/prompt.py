@@ -95,6 +95,18 @@ authority_type, final_action, final_action_contract, target_lots, or trade comma
 PM alone converts calibrated evidence into ranking and capital deployment.
 """
 
+
+ORDINARY_NEUTRAL_OUTPUT_BOUNDARY = """
+=== Ordinary Neutral Opportunity Boundary ===
+Ordinary Neutral must use no_opportunity. It must not use watch_for_trigger
+unless counterfactual_side is explicitly long or short, a concrete entry_trigger
+is present, canonical invalidation is present, and the current trigger is not
+confirmed. Neutral tracking fields alone do not create a watch candidate.
+Missing entry or invalidation must not be filled with a placeholder, guessed
+condition, default fact, or model retry. Neutral must never be labeled
+probe_candidate or tradeable_candidate.
+"""
+
 CONTROL_GOVERNANCE_OUTPUT_BOUNDARY = """
 === CONTROL-GOVERNANCE BOUNDARY ===
 
@@ -478,6 +490,7 @@ Output format:
 
 Provide a concise, well-reasoned futures technical view.
 """
+    prompt += ORDINARY_NEUTRAL_OUTPUT_BOUNDARY
     prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 
@@ -523,11 +536,12 @@ def build_futures_fundamental_prompt(
         "When research memories are present, use them only as rebuttable priors. "
         "State whether today's available fundamentals, market state, and short-term trigger evidence "
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
-        "invalidation boundary, keep it as no_opportunity/watch_for_trigger and specify the condition that would "
-        "convert it to probe_candidate or tradeable_candidate. If the short trigger and invalidation boundary are present, mark it "
-        "as tradeable_candidate instead of hiding it behind Neutral. Candidate memories cannot authorize sizing, add-ons, or holding "
+        "invalidation boundary, keep it as no_opportunity and identify the missing evidence without inventing it. "
+        "If a directional signal has a short trigger and invalidation boundary, use watch_for_trigger while confirmation is pending and "
+        "probe_candidate or tradeable_candidate only after current confirmation. Candidate memories cannot authorize sizing, add-ons, or holding "
         "a losing position.\n"
     )
+    prompt += ORDINARY_NEUTRAL_OUTPUT_BOUNDARY
     prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 
@@ -576,6 +590,7 @@ def build_futures_commodity_news_prompt(
         "and an invalidation boundary, mark it as probe_candidate or tradeable_candidate. Candidate memories cannot authorize sizing, "
         "add-ons, or holding a losing position.\n"
     )
+    prompt += ORDINARY_NEUTRAL_OUTPUT_BOUNDARY
     prompt += PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY
     return prompt
 

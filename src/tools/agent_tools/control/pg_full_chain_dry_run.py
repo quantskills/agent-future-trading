@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pandas as pd
+
 from agents.decision_team import portfolio_manager
 from agents.decision_team.auditor import audit_futures_recommendation
 from agents.decision_team.portfolio_manager import (
@@ -23,10 +25,28 @@ from agents.decision_team.signal_collector import signal_collector_agent
 from agents.execution_team.trader import _process_strategy_recommendations
 from agents.research_team.researcher import researcher_agent
 from database.sqlite_helper import SQLiteDB
-from graph.schema import Portfolio, RecommendationSourceType, TradingPhase
+from graph.constants import Signal
+from graph.schema import (
+    AnalystSignal,
+    BasePriceSource,
+    MorningExecutionBasis,
+    Portfolio,
+    RecommendationSourceType,
+    TradingPhase,
+)
+from tools.agent_tools.analysis.analyst_data_usage import (
+    build_fundamental_data_usage,
+    build_news_data_usage,
+    build_technical_data_usage,
+)
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context
 from tools.agent_tools.analysis.analyst_output_finalization import (
     build_required_market_data_unavailable_signal,
+    finalize_analyst_signal,
+)
+from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
+    build_profile_usage_contract,
+    get_product_price_behavior_profile,
 )
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
@@ -49,6 +69,7 @@ from tools.common.final_action_semantics import (
 )
 from tools.common.signal_evidence_collection import (
     build_scc_data_quality_summary,
+    validate_action_evidence_contract,
     validate_signal_collection_contract,
 )
 from util.logger import logger
@@ -88,6 +109,158 @@ def _dry_run_config(cfg: dict[str, Any], artifact_root: Path) -> dict[str, Any]:
     return value
 
 
+def _build_dry_run_data_available_neutral_signal(
+    *,
+    analyst: str,
+    ticker: str,
+    trading_date: Any,
+    full_config: dict[str, Any],
+) -> AnalystSignal:
+    """Exercise the real finalizer with isolated data-available Neutral input."""
+    if analyst == "technical":
+        prices = pd.DataFrame(
+            {
+                "open": [3000.0, 3005.0],
+                "high": [3020.0, 3015.0],
+                "low": [2990.0, 2995.0],
+                "close": [3010.0, 3005.0],
+                "volume": [1000.0, 950.0],
+                "open_interest": [5000.0, 5050.0],
+            },
+            index=pd.to_datetime(["2025-03-06", "2025-03-07"]),
+        )
+        data_usage = build_technical_data_usage(
+            ticker=ticker,
+            trading_date=trading_date,
+            prices_df=prices,
+            indicators_used=["trend", "volume", "open_interest"],
+        )
+        quality_context = {
+            "ticker": ticker,
+            "sector": "energy",
+            "tradeability": "medium",
+            "market_regime": "range",
+            "dominant_direction": "neutral",
+            "indicator_votes": {"details": {}},
+            "risk_flags": [],
+            "setup_quality_ok": False,
+            "features": {},
+        }
+    elif analyst == "fundamental":
+        data_usage = build_fundamental_data_usage(
+            ticker=ticker,
+            trading_date=trading_date,
+            fundamentals_metadata={
+                "configured_indicator_count": 2,
+                "loaded_indicator_count": 2,
+                "coverage_ratio": 1.0,
+                "stale_ratio": 0.0,
+                "factor_freshness_score": 1.0,
+                "no_lookahead_status": "ok",
+                "indicator_role_counts": {"inventory": 1, "basis": 1},
+                "local_finoview_availability_audit": {
+                    "runtime_data_boundary": "local_feather_only",
+                    "coverage_status": "ready",
+                    "supports_fundamental_trade_setup": True,
+                    "no_future_data": True,
+                    "not_product_rule": True,
+                },
+            },
+            pandaai_extra_context={},
+        )
+        quality_context = {
+            "ticker": ticker,
+            "sector": "energy",
+            "tradeability": "medium",
+            "market_regime": "range",
+            "risk_flags": [],
+            "setup_quality_ok": False,
+            "factor_group_counts": {"inventory": 1, "basis": 1},
+            "data_quality": {
+                "coverage_ratio": 1.0,
+                "factor_freshness_score": 1.0,
+                "supports_fundamental_trade_setup": True,
+                "no_lookahead_status": "ok",
+            },
+        }
+    elif analyst == "commodity_news":
+        data_usage = build_news_data_usage(
+            ticker=ticker,
+            trading_date=trading_date,
+            news_metadata={
+                "file_exists": True,
+                "news_cutoff": "before_trading_date",
+                "raw_block_count": 1,
+                "parsed_news_count": 1,
+                "selected_news_count": 1,
+                "latest_news_date": "2025-03-07",
+            },
+            news_context={"freshness_score": 1.0, "relevance_score": 0.6},
+        )
+        quality_context = {
+            "ticker": ticker,
+            "sector": "energy",
+            "tradeability": "medium",
+            "event_regime": "background_news",
+            "tradable_event": False,
+            "price_reaction_required": True,
+            "price_reaction_confirmed": False,
+            "direction_counts": {},
+            "event_type_counts": {"inventory": 1},
+            "risk_flags": [],
+            "setup_quality_ok": False,
+        }
+    else:
+        raise ValueError("pg_dry_run_analyst_invalid")
+    data_usage["data_available"] = True
+    signal = AnalystSignal(
+        agent_name=analyst,
+        signal=Signal.NEUTRAL,
+        confidence=0.4,
+        justification="Available evidence is mixed and defines no complete setup.",
+        data_cutoff="pre_open",
+        no_lookahead_status="ok",
+        horizon_class=(
+            "event_short"
+            if analyst == "commodity_news"
+            else "medium"
+            if analyst == "fundamental"
+            else "short"
+        ),
+        expected_horizon_days=2,
+        market_regime="range",
+        setup_type="unknown",
+        opportunity_type="no_trade",
+        opportunity_state="no_opportunity",
+        entry_trigger="",
+        exit_hint="",
+        trigger_valid=False,
+        invalidation_present=False,
+        neutral_reason="available evidence has no complete setup",
+        missing_evidence=["specific_entry_trigger", "canonical_invalidation"],
+        conflicting_factors=[],
+        would_change_view_if="new evidence changes the current view",
+        neutral_opportunity_bucket="evidence_gap",
+        neutral_trigger_condition="",
+        counterfactual_side="flat",
+        neutral_watchlist_priority="none",
+        metadata={"data_usage_summary": data_usage},
+    )
+    profile = get_product_price_behavior_profile(ticker, full_config)
+    usage = build_profile_usage_contract(ticker, analyst, profile)
+    return finalize_analyst_signal(
+        signal,
+        quality_context=quality_context,
+        full_config=full_config,
+        analyst=analyst,
+        ticker=ticker,
+        trading_date=trading_date,
+        learning_context={},
+        product_profile=profile,
+        product_profile_usage=usage,
+    )
+
+
 def _audit_and_persist(
     *,
     db: SQLiteDB,
@@ -119,7 +292,7 @@ def _audit_and_persist(
             "contract_code": fac.get("contract_code"),
             "underlying_code": "BU",
             "as_of_date": DRY_RUN_DAY,
-            "source": "required_market_data_unavailable",
+            "source": "isolated_canonical_input",
         },
         data_quality=build_scc_data_quality_summary(scc),
     )
@@ -235,6 +408,15 @@ def _verify_physical_chain(
             enabled_analysts=ANALYSTS,
             require_signal_record_ids=True,
         )
+        for source in scc.get("source_contracts") or []:
+            aec = source.get("action_evidence_contract") if isinstance(source, dict) else {}
+            if (
+                not isinstance(aec, dict)
+                or aec.get("signal") != "Neutral"
+                or aec.get("opportunity_state") != "no_opportunity"
+                or (aec.get("data_usage_summary") or {}).get("data_available") is not True
+            ):
+                raise RuntimeError("pg_dry_run_ordinary_neutral_aec_invalid")
         persisted_ids = {
             str(source.get("signal_record_id") or "")
             for source in scc.get("source_contracts") or []
@@ -324,7 +506,24 @@ def run_no_llm_full_chain_dry_run(
         analyst_signals = []
         signal_ids: set[str] = set()
         for analyst in ANALYSTS:
-            signal = build_required_market_data_unavailable_signal(
+            unavailable_signal = build_required_market_data_unavailable_signal(
+                analyst=analyst,
+                ticker="BU",
+                trading_date=dry_cfg["trading_date"],
+                full_config=dry_cfg,
+            )
+            unavailable_aec = validate_action_evidence_contract(
+                unavailable_signal.metadata["action_evidence_contract"],
+                analyst=analyst,
+            )
+            if (
+                unavailable_aec.get("opportunity_state") != "no_opportunity"
+                or (unavailable_aec.get("data_usage_summary") or {}).get("data_available") is not False
+            ):
+                raise RuntimeError("pg_dry_run_data_unavailable_neutral_aec_invalid")
+            trace.append(f"aec_data_unavailable_validation:{analyst}")
+
+            signal = _build_dry_run_data_available_neutral_signal(
                 analyst=analyst,
                 ticker="BU",
                 trading_date=dry_cfg["trading_date"],
@@ -340,13 +539,19 @@ def run_no_llm_full_chain_dry_run(
             trace.append(f"aec:{analyst}")
 
         morning_context = SimpleNamespace(
-            base_price=None,
-            base_price_source=None,
-            base_price_date=None,
+            base_price=3005.0,
+            base_price_source="t_minus_1_close_fallback",
+            base_price_date="2025-03-07",
             open_price=None,
-            prev_close_price=None,
-            warning_message="required_market_data_unavailable",
-            contract_code=None,
+            prev_close_price=3010.0,
+            warning_message=None,
+            contract_code="BU2506",
+            contract_facts={
+                "contract_code": "BU2506",
+                "underlying_code": "BU",
+                "as_of_date": "2025-03-07",
+                "source": "isolated_canonical_input",
+            },
         )
         state = {
             "portfolio": portfolio,
@@ -389,11 +594,23 @@ def run_no_llm_full_chain_dry_run(
             source_type=RecommendationSourceType.STRATEGY,
         )
         execution_engine = FuturesExecutionEngine(dry_cfg, db)
+        execution_basis = MorningExecutionBasis(
+            base_price=3012.0,
+            base_price_source=BasePriceSource.T_OPEN,
+            base_price_date=DRY_RUN_DAY,
+            open_price=3012.0,
+            prev_close_price=3010.0,
+            contract_code="BU2506",
+            contract_facts=morning_context.contract_facts,
+        )
+        execution_router = SimpleNamespace(
+            resolve_morning_execution_base_price=lambda **_kwargs: execution_basis,
+        )
         portfolio, _summary = _process_strategy_recommendations(
             cfg=dry_cfg,
             db=db,
             config_id=config_id,
-            router=SimpleNamespace(),
+            router=execution_router,
             execution_engine=execution_engine,
             portfolio=portfolio,
             strategy_recommendations=persisted_recommendations,
@@ -450,8 +667,11 @@ def run_no_llm_full_chain_dry_run(
 
         _verify_physical_chain(db=db, config_id=config_id, signal_ids=signal_ids)
         expected_trace = [
+            "aec_data_unavailable_validation:technical",
             "aec:technical",
+            "aec_data_unavailable_validation:fundamental",
             "aec:fundamental",
+            "aec_data_unavailable_validation:commodity_news",
             "aec:commodity_news",
             "scc",
             "pm_steps_1_4",

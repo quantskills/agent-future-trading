@@ -218,7 +218,6 @@ def commodity_news_agent(state: FundState):
     signal.market_regime = signal.market_regime if signal.market_regime != "unknown" else str(news_context.get("event_regime") or "event_driven")
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(news_context.get("tradeability") or "event_window")
     signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else "news_event_setup"
-    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_news_data_usage(
         ticker=ticker,
         trading_date=trading_date,

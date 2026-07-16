@@ -339,8 +339,8 @@ def technical_agent(state: FundState):
         "\n\n=== Learning-to-signal requirement ===\n"
         "When research memories are present, use them only as rebuttable priors. "
         "State whether today's market regime and technical evidence confirm or contradict them. "
-        "If the signal is Neutral, specify the concrete technical condition that would convert it "
-        "to probe_candidate or tradeable_candidate and the condition that keeps it on watch_for_trigger. Candidate memories cannot "
+        "Ordinary Neutral remains no_opportunity. Only an explicit long/short counterfactual with a concrete entry trigger, "
+        "canonical invalidation, and an unconfirmed current trigger may remain watch_for_trigger. Candidate memories cannot "
         "authorize sizing, add-ons, or holding a losing position.\n"
     )
 
@@ -375,7 +375,6 @@ def technical_agent(state: FundState):
     signal.trend_stage = signal.trend_stage if signal.trend_stage != "unknown" else str(technical_context.get("market_regime") or technical_context.get("tradeability") or "unknown")
     signal.price_percentile = signal.price_percentile if signal.price_percentile is not None else price_percentile
     signal.setup_type = signal.setup_type if signal.setup_type != "unknown" else str(technical_context.get("setup_type") or "technical_price_setup")
-    signal.entry_trigger = signal.entry_trigger if signal.entry_trigger != "unknown" else "wait_for_trigger"
     data_usage_summary = build_technical_data_usage(
         ticker=ticker,
         trading_date=trading_date,

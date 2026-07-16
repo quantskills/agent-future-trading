@@ -106,3 +106,15 @@
 （7）[PG 每日学习事实边界] `pg_system_invariants.py` 只对实际存在的结构化学习记录核对 Phase4、结算、写入顺序、来源日期、正式 ID 和共享 canonical action-value；成交型学习追溯真实 transaction/settlement，反事实机会不伪造 transaction。原因：保留合法无学习和未使用学习，不强迫每笔交易形成学习，也不评价学习质量或改写历史交易事实。
 
 （8）[PG 增量验收] 七项缺口的首轮行为测试共 45 项，旧实现出现 21 个失败和 1 个导入错误，分别证明分钟接口、时间消费者、同库全链路、实际编排、runtime coverage、SCC 精确来源、Auditor/FAC 授权、盘中条件、结算快照和学习追溯会被错误放行；修复后 PG 组合 55 项、冻结主线保护 333 项及全量 763 项全部通过，全量耗时 99.891 秒，`compileall src` 和 `git diff --check` 通过。正式带日期窗口 `pre_backtest_acceptance --start-date 2025-03-10 --end-date 2025-03-10` 十项全部通过，独立 contract coverage 正式入口通过；正式每日入口因本地 daily database 不存在如实返回 `daily_database_missing`，同一每日七项已在正式隔离临时库全链路上通过。主线生产目录无文件修改，字段矩阵、canonical 动作矩阵、PM/智能体机制和三类交易来源均保持原样。
+
+==========2026年7月16日==========
+
+（1）[普通中性 AEC 唯一收口] `analyst_business_quality.py`、`analyst_quality.py`、`analyst_output_finalization.py`、三个正式分析师入口与 `prompt.py` 将数据可用普通 Neutral 固定收口为 `signal=Neutral/opportunity_state=no_opportunity`；只有明确 long/short 反事实方向、具体 entry trigger、canonical invalidation 和当前未触发同时成立时才允许 `watch_for_trigger`，Neutral 不得升级为 probe/tradeable，`risk_reduction_candidate` 保持原状态。删除三个分析师的 `wait_for_trigger` 自动补写和通用中性触发生成；生产者形成的具体失效条件先写入既有 `invalidation_condition`，不补造方向、触发、失效、权限或市场事实。原因：修复真实回测中普通 Neutral 被强制改成不完整 watch 并在最终 AEC 校验失败的问题，同时保持数据不可用中性路径及非新增风险通道不变。
+
+（2）[AEC 失效语义与学习读取统一] `signal_evidence_collection.py` 要求正式 watch/candidate 具有具体非占位 `entry_trigger`，并只接受 `invalidation_condition`、合法 `invalidation_level` 或正数 `atr_stop_distance` 证明 `invalidation_present`；`pm_signal_fusion.py` 与 `portfolio_manager.py` 仅删除 `would_change_view_if`、`exit_hint` 和旧 `has_invalidation` 的失效边界读取，不改变 PM 六步、方向、rank、预算或 sizing。`research_review_helpers.py` 与 `neutral_accountability.py` 删除旧 `metadata.neutral_opportunity_contract`、默认 watch 和中性 action preference，只读取正式 AEC 机会、触发和 canonical invalidation 字段，继续允许已完成 Phase4 与结算后的 no-opportunity 反事实观察。原因：让生产者、共享校验、PM 正式消费者和学习追溯对触发及失效边界只使用一套字段含义。
+
+（3）[Workflow 安全失败边界] `workflow.py` 与分析师最终出口将非法 AEC 统一暴露为稳定错误码 `analyst_final_output_contract_invalid`，其他分析阶段和 Phase1 编排失败分别收口为稳定边界码；日志和上抛异常不再携带原始校验详情。分析师 fanout 任一失败时在持久化入口前终止，不保存部分 AnalystSignal、SCC、FAC 或 recommendation。原因：既保留可定位的正式失败类型，又避免 prompt、原始响应、内部状态和未验证异常内容跨智能体或进入日志。
+
+（4）[回测前普通中性实链覆盖] `pg_full_chain_dry_run.py` 与 `pg_pre_backtest_acceptance.py` 将三个分析师“数据可用、确定性 Neutral”的真实 finalization 行为测试接入回测前门禁，并在同一正式隔离临时库中持久化三份普通中性 AEC，贯通 SCC、PM/FAC、Auditor、Trader、Accountant、Reviewer、Researcher 和次日分析师/PM 学习读取；数据不可用三份中性 AEC 继续调用同一共享校验器。预演补齐 canonical `t_minus_1_close_fallback` 盘前事实与 `t_open` Trader 确定性 Router 替身，不调用 LLM、不写正式交易库。原因：防止门禁只覆盖特殊数据不可用状态而遗漏真实模型返回普通 Neutral 的生产收口。
+
+（5）[普通中性失败优先回归与验收] 新增 `test_ordinary_neutral_aec_flow.py`，同步调整 `test_agent_contracts.py`、`test_reviewer_learning.py`、`test_phase_flow_regression.py` 与 `test_evidence_fusion_semantics.py` 的正式 fixture；生产修复前新增 19 项出现 10 个失败和 9 个错误，修复后 19 项通过，并证明单个分析师 `no_opportunity` 不否决其他分析师合法同向候选。最终定向测试 240 项、Phase-flow 312 项、全量 782 项全部通过，`compileall src`、`git diff --check` 和 2025-03-26 日期窗口正式回测前十项门禁通过。生产 `--reset-config` 真实重跑尚未执行，正式每日 PG 因尚无本次完整 daily database 返回 `daily_database_missing`，两项均未登记为通过。原因：以先失败后通过的行为证据闭环普通中性生产链，同时如实保留真实外部运行与日后物理事实验收边界。

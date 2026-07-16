@@ -57,6 +57,7 @@ _TEST_GROUPS = {
     "orchestration_state_and_physical_boundary": (
         "src.tests.test_pre_backtest_pm_workflow_contracts",
         "src.tests.test_agent_output_contract_boundary",
+        "src.tests.test_ordinary_neutral_aec_flow",
         "src.tests.test_protocol_preflight_cli",
     ),
     "determination_boundary": (

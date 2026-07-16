@@ -1782,7 +1782,7 @@ class ResearchLearningMechanismRegressionTest(unittest.TestCase):
 
 
 class AnalystStrategyQualityRegressionTest(unittest.TestCase):
-    def test_news_direction_without_strong_catalyst_stays_watch_for_trigger(self):
+    def test_news_direction_without_complete_setup_is_no_opportunity(self):
         news_item = SimpleNamespace(
             title="inventory edges lower",
             content="spot trading remains average and the market is waiting for further confirmation",
@@ -1801,7 +1801,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         signal = apply_trade_research_contract(signal, context, analyst="commodity_news", ticker="BU")
 
         self.assertFalse(context["tradable_event"])
-        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
+        self.assertEqual(signal.opportunity_state, "no_opportunity")
         self.assertIn("news_event_not_tradable_catalyst", signal.current_evidence_conflict)
 
     def test_technical_trend_in_choppy_state_is_not_tradeable_candidate(self):
@@ -1829,10 +1829,10 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         signal = apply_trade_research_contract(signal, context, analyst="technical", ticker="RB")
 
         self.assertIn(context["market_regime"], {"choppy", "range", "weak_trend"})
-        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
+        self.assertEqual(signal.opportunity_state, "no_opportunity")
         self.assertIn("technical_trend_requires_regime_confirmation", signal.current_evidence_conflict)
 
-    def test_medium_fundamental_anchor_without_short_trigger_is_watch_for_trigger(self):
+    def test_medium_fundamental_anchor_without_short_trigger_is_no_opportunity(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BEARISH,
@@ -1845,7 +1845,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
 
         signal = apply_trade_research_contract(signal, context, analyst="fundamental", ticker="J")
 
-        self.assertEqual(signal.opportunity_state, "watch_for_trigger")
+        self.assertEqual(signal.opportunity_state, "no_opportunity")
         self.assertIn(
             "fundamental_anchor_requires_short_trigger_and_invalidation",
             signal.current_evidence_conflict,
@@ -1859,7 +1859,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             horizon_class="medium",
             business_quality_score=0.80,
             opportunity_type="medium_fundamental",
-            entry_trigger="short entry only after intraday breakdown below support with volume confirmation",
+            entry_trigger="intraday breakdown below support with volume confirmation is confirmed",
+            invalidation_level=3200.0,
             would_change_view_if="short invalid if price closes back above the breakdown area",
         )
         context = {
@@ -6332,6 +6333,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 data_coverage_score=0.86,
                 opportunity_type="trend_continuation",
                 setup_type="rb_trend_breakout_setup",
+                entry_trigger="current breakout above prior high is confirmed",
                 price_percentile=0.56,
                 invalidation_level=3300.0,
             ),
@@ -9630,6 +9632,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             setup_quality_score=0.76,
             business_quality_score=0.72,
             entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
+            trigger_valid=True,
+            invalidation_present=True,
+            invalidation_level=21000.0,
             would_change_view_if="long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
             horizon_class="medium",
         )

@@ -26,6 +26,23 @@ from tools.agent_tools.analysis.analyst_learning_context import clear_learning_c
 from agents.decision_team.auditor import audit_futures_recommendation
 from tools.common.signal_evidence_collection import build_scc_data_quality_summary
 
+
+_ANALYST_FINAL_OUTPUT_CONTRACT_ERROR = "analyst_final_output_contract_invalid"
+_SAFE_PHASE1_FAILURE_CODES = {
+    _ANALYST_FINAL_OUTPUT_CONTRACT_ERROR,
+    "analyst_phase1_analysis_failed",
+    "futures_phase1_workflow_failed",
+}
+
+
+def _stable_phase1_failure_code(error: BaseException, *, default: str) -> str:
+    text = str(error or "").strip()
+    for code in _SAFE_PHASE1_FAILURE_CODES:
+        if text == code or text.startswith(code + ":"):
+            return code
+    return default
+
+
 class AgentWorkflow:
     """Trading Decision Workflow."""
 
@@ -486,9 +503,13 @@ class AgentWorkflow:
                 analyst = futures[future]
                 try:
                     result = future.result()
-                except Exception:
-                    logger.error(f"{ticker}: {analyst} phase1_analysis_failed")
-                    raise RuntimeError(f"Failed to run {analyst} analysis for {ticker}") from None
+                except Exception as exc:
+                    code = _stable_phase1_failure_code(
+                        exc,
+                        default="analyst_phase1_analysis_failed",
+                    )
+                    logger.error(f"{ticker}: {analyst} {code}")
+                    raise RuntimeError(code) from None
                 analyst_signals.extend((result or {}).get("analyst_signals", []) or [])
 
         order = {name: idx for idx, name in enumerate(analysts)}
@@ -784,11 +805,13 @@ class AgentWorkflow:
                     analysis_state,
                     portfolio,
                 )
-            except Exception:
-                logger.error(f"{ticker}: futures_phase1_workflow_failed")
-                raise RuntimeError(
-                    f"Failed to generate futures phase1 recommendation for {ticker}"
-                ) from None
+            except Exception as exc:
+                code = _stable_phase1_failure_code(
+                    exc,
+                    default="futures_phase1_workflow_failed",
+                )
+                logger.error(f"{ticker}: {code}")
+                raise RuntimeError(code) from None
 
             pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
             generated_pm_states.append((ticker, pm_state))

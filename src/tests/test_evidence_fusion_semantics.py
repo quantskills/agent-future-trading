@@ -30,6 +30,7 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             business_quality_score=0.74,
             evidence_quality="high",
             entry_trigger="current price/volume confirms directional setup",
+            exit_hint="setup invalid if price closes back through trigger and opposite evidence appears",
             would_change_view_if="setup invalid if price closes back through trigger and opposite evidence appears",
             setup_type="trend_breakout",
             factor_focus=["price", "inventory"],

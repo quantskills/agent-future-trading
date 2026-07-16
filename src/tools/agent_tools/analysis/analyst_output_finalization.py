@@ -237,7 +237,7 @@ def finalize_analyst_signal(
     _preserve_data_unavailable_boundary(signal)
     violations = analyst_output_landing_violations(signal)
     if violations:
-        raise ValueError("analyst_final_output_contract_invalid:" + ",".join(violations))
+        raise ValueError("analyst_final_output_contract_invalid")
     contract = deepcopy((getattr(signal, "metadata", {}) or {})["action_evidence_contract"])
     formal_fields = {
         field: deepcopy(contract[field])

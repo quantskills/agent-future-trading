@@ -234,20 +234,20 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 |---|---|---|
 | 无方向或数据不足 | `opportunity_state=no_opportunity`、`data_usage_summary` | 手数、仓位、交易动作 |
 | 有信息但无明确方向 | `signal=Neutral`、`opportunity_state=no_opportunity`、`confidence` 和冲突说明 | 伪造 Bullish/Bearish |
-| 有长期方向但无开盘后触发条件 | `opportunity_state=watch_for_trigger` 或 `no_opportunity`，并写明缺少短期触发 | `probe_candidate`、`tradeable_candidate` |
+| 有长期方向但无开盘后具体触发条件 | `opportunity_state=no_opportunity`，并保留方向证据与缺少短期触发的说明 | `watch_for_trigger`、`probe_candidate`、`tradeable_candidate` |
 | 有方向但 setup 不完整 | `opportunity_state=no_opportunity` 或弱观察说明，写明缺失项 | `watch_for_trigger` 交易候选 |
 | 有方向和 setup，但无明确 `entry_trigger` | `opportunity_state=no_opportunity` 或弱观察说明，写明缺少入场触发 | `watch_for_trigger`、`probe_candidate` |
 | setup 完整但无失效边界 | 降级为 `no_opportunity` 或弱观察，写明缺少 `invalidation_condition` | `watch_for_trigger`、`probe_candidate`、`tradeable_candidate` |
 | setup 完整、失效边界完整、当前触发未成立 | `opportunity_state=watch_for_trigger`、`trigger_valid=false`、`entry_trigger`、`invalidation_condition` | 直接成交、直接给手数 |
 | setup 完整、失效边界完整、当前触发成立但证据偏弱、单一或仍需试探 | `probe_candidate`，并写明 `trigger_valid=true/current_trigger_confirmed=true`、证据弱点 | 直接给 PM 手数 |
 | setup 完整、失效边界完整、当前触发成立且多维证据强 | `tradeable_candidate`，并写明 `trigger_valid=true/current_trigger_confirmed=true`、`confidence`、`evidence_quality`、主要支持证据 | 直接给 PM 手数、直接限定为小额试探 |
-| 当前触发成立但无失效边界 | 降级为 `watch_for_trigger` 或 `no_opportunity`，写明失效边界缺失 | `probe_candidate`、`tradeable_candidate` |
-| 方向冲突 | `current_evidence_conflict`、`opportunity_state=watch_for_trigger/no_opportunity` | 强行输出单边交易动作 |
+| 当前触发成立但无失效边界 | 降级为 `no_opportunity`，写明失效边界缺失 | `watch_for_trigger`、`probe_candidate`、`tradeable_candidate` |
+| 方向冲突 | `current_evidence_conflict`；缺具体触发或失效边界时为 `no_opportunity`，两者完整且当前未触发时才可为 `watch_for_trigger` | 强行输出单边交易动作 |
 | 多维证据冲突但仍有可监控触发 | `opportunity_state=watch_for_trigger`、`current_evidence_conflict`、`entry_trigger`、`invalidation_condition` | `tradeable_candidate` |
 | 数据过旧或缺口明显 | `data_usage_summary`、`missing_evidence`、降级后的 `opportunity_state` | 伪造强证据 |
 | 本专业研究校准反驳当前 setup | `current_evidence_conflict`、`conflicting_factors`、降级后的 `opportunity_state` | 忽略校准直接给强候选 |
 | 新闻事件已兑现或影响窗口已过 | `evidence_decay_risk`、`news_impact_window` 和降级后的 `opportunity_state` | 继续作为强催化 |
-| 新闻事件方向明确但缺少价格/基本面确认 | `watch_for_trigger`、`entry_trigger`、`impact_window_days`、`confirmation_requirements` | `tradeable_candidate` |
+| 新闻事件方向明确但缺少价格/基本面确认 | 有具体 `entry_trigger` 和 canonical 失效边界时为 `watch_for_trigger`；否则为 `no_opportunity`，并保留 `impact_window_days`、`confirmation_requirements` | `probe_candidate`、`tradeable_candidate` |
 | 技术触发成立但基本面/新闻强反向 | `current_evidence_conflict`、`watch_for_trigger` 或 `probe_candidate`，按冲突强度降级 | 无冲突强开 |
 | 基本面驱动成立但技术入场位置不好 | `watch_for_trigger`、`entry_trigger`、`invalidation_condition` | 当前直接开仓 |
 | 仅有单一弱证据 | `no_opportunity` 或弱观察，写明证据弱点 | 强候选 |
@@ -269,7 +269,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 1. `setup_quality_ok=true` 只表示机会形态完整，不表示当前可成交。
 2. `trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。
-3. `invalidation_present=true` 或明确 `invalidation_condition` 是进入 `watch_for_trigger/probe_candidate/tradeable_candidate` 的必要条件。
+3. 非空 canonical `invalidation_condition`、合法数值 `invalidation_level` 或正数 `atr_stop_distance` 是进入 `watch_for_trigger/probe_candidate/tradeable_candidate` 的失效边界证明；`invalidation_present=true` 不能自证，`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 均不是失效边界别名。
 4. `watch_for_trigger` 是条件触发候选，不是交易动作，不是手数授权。
 5. `tradeable_candidate` 是强可交易候选，不等于 probe；它可以被 PM 转成 `open_real/add/scale`，但分析师不能直接给这些动作。
 6. 分析师不能把“长期方向”“事件方向”“历史校准”直接落成当前可成交候选，必须同时说明触发和失效边界。
@@ -446,7 +446,7 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | 输入状态 | 必要条件 | 输出 |
 |---|---|---|
 | `no_opportunity` | 无有效方向或无 setup | `wait/0` |
-| `watch_for_trigger` | 无 setup、无 `entry_trigger` 或无失效边界 | `wait/0`，并写明缺失项 |
+| 非法 `watch_for_trigger` | 无 setup、无具体 `entry_trigger` 或无 canonical 失效边界 | AEC 共享校验 hard fail，不得进入 SCC 或 PM |
 | `watch_for_trigger` | setup 完整、失效边界完整、方向明确、风险预算可承受、当前触发未确认 | 条件触发合约 |
 | `probe_candidate` | 当前触发确认、失效边界完整、风险预算可承受 | `open_probe` |
 | `tradeable_candidate` | 当前证据强、失效边界完整、资金和风险可承受 | `open_real`；若资金或风险只允许试探，则 `open_probe` |

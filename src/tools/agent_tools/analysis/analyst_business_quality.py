@@ -169,35 +169,6 @@ def _counter_evidence_from_context(quality_context: Dict[str, Any]) -> str:
     return "no explicit counter-evidence flagged by deterministic precheck"
 
 
-def _counterfactual_side_from_context(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> str:
-    text_signal = _signal_value(getattr(signal, "signal", Signal.NEUTRAL))
-    if text_signal == Signal.BULLISH.value:
-        return "long"
-    if text_signal == Signal.BEARISH.value:
-        return "short"
-    if analyst == "technical":
-        direction = str(quality_context.get("dominant_direction") or "").lower()
-        if direction == "bullish":
-            return "long"
-        if direction == "bearish":
-            return "short"
-    if analyst == "commodity_news":
-        counts = quality_context.get("direction_counts") or {}
-        bullish = int(counts.get("bullish", 0) or 0)
-        bearish = int(counts.get("bearish", 0) or 0)
-        if bullish > bearish and bullish >= 1:
-            return "long"
-        if bearish > bullish and bearish >= 1:
-            return "short"
-    if analyst == "fundamental":
-        anchor = str(getattr(signal, "direction_anchor", "") or "").lower()
-        if anchor in {"bullish", "long"}:
-            return "long"
-        if anchor in {"bearish", "short"}:
-            return "short"
-    return "flat"
-
-
 def _neutral_missing_evidence(signal: AnalystSignal, quality_context: Dict[str, Any], analyst: str) -> List[str]:
     missing = _as_text_list(getattr(signal, "missing_evidence", []))
     if missing:
@@ -211,7 +182,7 @@ def _neutral_missing_evidence(signal: AnalystSignal, quality_context: Dict[str, 
     return ["sufficient directional evidence"]
 
 
-def _neutral_opportunity_contract(
+def _neutral_tracking_fields(
     signal: AnalystSignal,
     quality_context: Dict[str, Any],
     analyst: str,
@@ -234,15 +205,14 @@ def _neutral_opportunity_contract(
         bucket = "accountable_observation"
 
     raw_counterfactual_side = str(getattr(signal, "counterfactual_side", "") or "").lower()
-    if raw_counterfactual_side in {"long", "short", "flat"}:
-        counterfactual_side = raw_counterfactual_side
-    else:
-        counterfactual_side = _counterfactual_side_from_context(signal, quality_context, analyst)
-
+    counterfactual_side = (
+        raw_counterfactual_side
+        if raw_counterfactual_side in {"long", "short", "flat"}
+        else "flat"
+    )
     trigger = _first_nonempty(
         getattr(signal, "neutral_trigger_condition", ""),
-        getattr(signal, "would_change_view_if", ""),
-        "primary driver, short timing, and invalidation boundary align",
+        default="",
     )
     priority = "none"
     if bucket in {"evidence_gap", "horizon_mismatch", "accountable_observation"} and counterfactual_side in {"long", "short"}:
@@ -258,9 +228,6 @@ def _neutral_opportunity_contract(
         "counterfactual_side": counterfactual_side,
         "watchlist_priority": priority,
         "tracking_only": True,
-        "opportunity_state": "watch_for_trigger",
-        "trigger_valid": False,
-        "action_preference": "watch_for_trigger",
         "missing_evidence": missing,
         "conflicting_factors": conflicts,
     }
@@ -343,7 +310,7 @@ def apply_business_quality_enrichment(
         signal.direction_anchor = signal.direction_anchor if signal.direction_anchor != "unknown" else str(direction_counts or "neutral")
 
     if _signal_value(signal.signal) == Signal.NEUTRAL.value:
-        neutral_contract = _neutral_opportunity_contract(signal, quality_context, analyst_key)
+        neutral_contract = _neutral_tracking_fields(signal, quality_context, analyst_key)
         signal.neutral_reason = _first_nonempty(
             signal.neutral_reason,
             signal.do_not_trade_reason,
@@ -353,15 +320,15 @@ def apply_business_quality_enrichment(
         signal.conflicting_factors = _as_text_list(signal.conflicting_factors) or _as_text_list(quality_context.get("risk_flags"))
         signal.would_change_view_if = _first_nonempty(
             signal.would_change_view_if,
-            "primary driver and secondary confirmation align with acceptable reward/risk",
+            default="",
         )
         signal.opportunity_cost_risk = _first_nonempty(
             signal.opportunity_cost_risk,
-            "may miss a valid move if the missing evidence appears after the pre-open cutoff",
+            default="",
         )
         signal.recommended_observation_window = _first_nonempty(
             signal.recommended_observation_window,
-            "1-2 trading days" if analyst_key != "fundamental" else "3-5 trading days",
+            default="",
         )
         signal.neutral_opportunity_bucket = _first_nonempty(
             signal.neutral_opportunity_bucket,
@@ -369,11 +336,11 @@ def apply_business_quality_enrichment(
         )
         signal.neutral_trigger_condition = _first_nonempty(
             signal.neutral_trigger_condition,
-            neutral_contract["trigger_condition"],
+            default="",
         )
         signal.counterfactual_side = _first_nonempty(
             signal.counterfactual_side,
-            neutral_contract["counterfactual_side"],
+            default="flat",
         )
         signal.neutral_watchlist_priority = _first_nonempty(
             signal.neutral_watchlist_priority,
@@ -406,16 +373,6 @@ def apply_business_quality_enrichment(
             "validation_horizon": signal.validation_horizon,
         },
     }
-    if neutral_contract:
-        signal.metadata["neutral_opportunity_contract"] = {
-            **neutral_contract,
-            "bucket": signal.neutral_opportunity_bucket,
-            "trigger_condition": signal.neutral_trigger_condition,
-            "counterfactual_side": signal.counterfactual_side,
-            "watchlist_priority": signal.neutral_watchlist_priority,
-            "observation_window": signal.recommended_observation_window,
-            "opportunity_cost_risk": signal.opportunity_cost_risk,
-        }
     return signal
 
 

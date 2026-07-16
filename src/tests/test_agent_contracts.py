@@ -194,7 +194,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             data_coverage_score=0.86,
             setup_type="range_breakout",
             opportunity_state="probe_candidate",
-            trigger_valid=True,
+            trigger_valid=False,
             invalidation_present=True,
         )
 
@@ -237,7 +237,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             data_coverage_score=0.88,
             setup_type="trend_breakout",
             opportunity_state="tradeable_candidate",
-            trigger_valid=True,
+            trigger_valid=False,
             invalidation_present=True,
         )
 
@@ -319,7 +319,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertTrue(result.invalidation_present)
         self.assertTrue(result.metadata["action_evidence_contract"]["current_trigger_confirmed"])
 
-    def test_generic_trigger_does_not_become_tradeable_candidate(self):
+    def test_generic_trigger_becomes_no_opportunity_without_fabrication(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
@@ -342,13 +342,12 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
         self.assertFalse(result.trigger_valid)
-        self.assertNotEqual(result.entry_trigger, "technical_price_trigger")
-        self.assertIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
+        self.assertEqual(result.entry_trigger, "")
+        self.assertNotIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
 
-    def test_neutral_watchlist_signal_keeps_opportunity_state(self):
+    def test_neutral_tracking_fields_do_not_create_watch_without_setup(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.NEUTRAL,
@@ -372,9 +371,9 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="RB",
         )
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
-        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "watch_for_trigger")
-        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertEqual(result.metadata["trade_research_contract"]["opportunity_state"], "no_opportunity")
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "no_opportunity")
 
     def test_trade_research_contract_syncs_learning_impact_opportunity_state(self):
         signal = AnalystSignal(
@@ -441,7 +440,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(signal.factor_calibration_summary, {})
         self.assertEqual(signal.event_calibration_summary, {})
 
-    def test_technical_context_derives_specific_entry_and_invalidation(self):
+    def test_technical_context_does_not_fabricate_missing_setup_fields(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BULLISH,
@@ -469,18 +468,17 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertNotEqual(result.entry_trigger, "technical_price_trigger")
-        self.assertIn("volume_ratio", result.entry_trigger)
-        self.assertIn("trend_breakout", result.entry_trigger)
-        self.assertTrue(_has_structured_invalidation_condition([result]))
-        self.assertIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
+        self.assertEqual(result.entry_trigger, "")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertFalse(_has_structured_invalidation_condition([result]))
+        self.assertNotIn("technical_derived_specific_entry_condition", result.setup_quality_notes)
         contract = result.metadata["action_evidence_contract"]
         self.assertEqual(contract["analyst"], "technical")
         self.assertEqual(contract["learning_scope"]["setup_family"], "trend_breakout")
         self.assertEqual(contract["learning_scope"]["sector_setup_alignment"], "preferred")
         self.assertIn("primary_confirmation", contract["learning_scope"])
 
-    def test_technical_context_derives_range_reversal_setup_fields(self):
+    def test_range_context_does_not_replace_generic_trigger(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BEARISH,
@@ -519,9 +517,9 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="SR",
         )
 
-        self.assertIn("range_reversal", result.entry_trigger)
-        self.assertIn("mean-reversion", result.entry_trigger)
-        self.assertIn("price breaks above resistance", result.exit_hint)
+        self.assertEqual(result.entry_trigger, "")
+        self.assertEqual(result.exit_hint, "")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
 
     def test_fundamental_context_builds_sector_factor_tree_contract(self):
         fundamentals = "\n".join(
@@ -607,7 +605,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertEqual(get_mean_reversion_signal(sold_off, params), Signal.BULLISH)
         self.assertEqual(get_mean_reversion_signal(stretched_up, params), Signal.BEARISH)
 
-    def test_fundamental_anchor_needs_short_trigger_but_can_derive_auditable_condition(self):
+    def test_fundamental_anchor_does_not_derive_missing_short_trigger(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BULLISH,
@@ -630,9 +628,10 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertIn("short-term technical/price confirmation", result.entry_trigger)
-        self.assertTrue(_has_structured_invalidation_condition([result]))
-        self.assertIn("fundamental_derived_specific_entry_condition", result.setup_quality_notes)
+        self.assertEqual(result.entry_trigger, "")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertFalse(_has_structured_invalidation_condition([result]))
+        self.assertNotIn("fundamental_derived_specific_entry_condition", result.setup_quality_notes)
 
     def test_news_catalyst_requires_price_volume_confirmation_not_fake_tradeable(self):
         signal = AnalystSignal(
@@ -659,8 +658,8 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="BU",
         )
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
-        self.assertIn("price/volume", result.entry_trigger)
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertEqual(result.entry_trigger, "")
         self.assertIn("news_event_requires_price_or_intraday_confirmation", result.current_evidence_conflict)
         self.assertFalse(result.trigger_valid)
         self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
@@ -698,6 +697,13 @@ class AgentContractFixtureTest(unittest.TestCase):
         strong = weak.model_copy(
             update={
                 "would_change_view_if": "long setup invalid if price closes below breakout area",
+                "invalidation_present": True,
+                "metadata": {
+                    "action_evidence_contract": {
+                        "invalidation_present": True,
+                        "invalidation_condition": "long setup invalid if price closes below breakout area",
+                    }
+                },
             }
         )
 
@@ -902,6 +908,18 @@ class AgentContractFixtureTest(unittest.TestCase):
             entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
             would_change_view_if="long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
             horizon_class="medium",
+            invalidation_present=True,
+            metadata={
+                "action_evidence_contract": {
+                    "opportunity_state": "tradeable_candidate",
+                    "setup_quality_ok": True,
+                    "trigger_valid": True,
+                    "current_trigger_confirmed": True,
+                    "invalidation_present": True,
+                    "entry_trigger": "enter only if futures hold above support after selloff and basis remains backwardation",
+                    "invalidation_condition": "long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
+                }
+            },
         )
         news = AnalystSignal(
             agent_name="commodity_news",

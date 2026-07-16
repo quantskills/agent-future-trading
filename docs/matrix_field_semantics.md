@@ -191,6 +191,8 @@
 
 三类分析师共用 `validate_action_evidence_contract`。AEC 必填字段固定为：身份与方向 `contract_version/analyst/signal/side/confidence`；机会与触发 `opportunity_type/opportunity_state/setup_type/setup_quality_ok/trigger_valid/current_trigger_confirmed/invalidation_present/entry_trigger/exit_hint`；期限与证据 `horizon_class/expected_horizon_days/market_regime/evidence_quality/evidence_strength/evidence_freshness/confirmation_requirements/missing_evidence/current_evidence_conflict/factor_focus/no_lookahead_status`；结构化来源 `data_usage_summary/learning_scope/product_profile_evidence/fusion_evidence`。文本、布尔、列表、整数和对象类型必须与共享校验器一致；数据不可用中性 AEC 也不例外。
 
+正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备具体触发和 canonical 失效边界，才可按当前触发与既有质量规则进入 watch/probe/tradeable；`risk_reduction_candidate` 不受新增风险机会状态降级规则影响。
+
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
 | `action_evidence_contract` | 分析师 `metadata` / PM 输入 | 分析师给 PM 的唯一证据契约。 |
@@ -218,15 +220,15 @@
 | `setup_quality_score` | 分析师 / 研究样本 | setup 质量评分。 |
 | `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
 | `entry_quality` | 分析师证据 | 入场质量。 |
-| `entry_trigger` | 分析师证据 | 当前触发事实或等待条件。 |
+| `entry_trigger` | 分析师证据 | 当前触发事实或具体等待条件；`unknown`、`wait_for_trigger` 和通用占位文本均不是合法 watch/candidate 触发。 |
 | `entry_timing_signal` | 技术证据 | 技术入场时机分类。 |
 | `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
 | `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
-| `exit_hint` | 分析师证据 | 退出 / 减仓提示。 |
+| `exit_hint` | 分析师证据 | 退出 / 减仓提示；不是失效边界别名。生产者形成明确失效条件时必须先写入 canonical `invalidation_condition`。 |
 | `holding_period_hint` | 分析师证据 | 持仓周期提示。 |
-| `invalidation_present` | 分析师证据 | 是否有明确失效边界。 |
-| `invalidation_condition` | 分析师 / 复盘 | 失效条件。 |
+| `invalidation_present` | 分析师证据 | 是否已有明确失效边界；只能由非空 canonical `invalidation_condition`、合法数值 `invalidation_level` 或正数 `atr_stop_distance` 证明，布尔值本身不能自证。 |
+| `invalidation_condition` | 分析师 / 复盘 | canonical 失效条件；`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 均不得作为其别名。 |
 | `invalidation_level` | 分析师 / 执行风控 | 数值失效价位。 |
 | `atr_stop_distance` | 分析师 / 执行风控 | ATR 止损距离。 |
 | `add_allowed` | 分析师证据 | 证据是否允许加仓讨论；最终仍由 PM 决定。 |
@@ -242,7 +244,7 @@
 | `conflicting_factors` | 分析师证据 | 冲突因子。 |
 | `counter_evidence` | 分析师证据 | 反向证据。 |
 | `opportunity_type` | 分析师 / no-trade 记忆 | 机会类型。 |
-| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`。 |
+| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`；正式 watch 必须同时有具体触发和 canonical 失效边界。单个分析师 `no_opportunity` 不是对其他分析师候选的否决票。 |
 | `learning_impact_summary` | 分析师证据 | 历史学习如何影响本次判断。 |
 | `factor_calibration_summary` | 基本面证据 | 基本面因子校准摘要。 |
 | `event_calibration_summary` | 新闻证据 | 新闻事件校准摘要。 |
@@ -328,9 +330,9 @@
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
 | `neutral_reason` | 中性证据 | 中性原因。 |
-| `neutral_trigger_condition` | 中性证据 | 中性转为可交易所需条件。 |
+| `neutral_trigger_condition` | 中性证据 | 中性观点的观察条件；不能替代正式 `entry_trigger`，也不能单独形成 watch。 |
 | `neutral_opportunity_bucket` | 中性证据 | 中性机会分类。 |
-| `neutral_watchlist_priority` | 中性证据 | 观察优先级。 |
+| `neutral_watchlist_priority` | 中性证据 | 观察优先级；不创建 `watch_for_trigger`、action preference 或交易权限。 |
 | `counterfactual_side` | 反事实记录 | 观察方向。 |
 | `counterfactual_lots` | 反事实记录 | 假设手数。 |
 | `counterfactual_entry_price` | 反事实记录 | 假设入场价。 |
@@ -340,7 +342,7 @@
 | `recommended_observation_window` | 中性证据 | 推荐观察窗口。 |
 | `accountability_tag` | 中性 / 复盘 | 责任标签。 |
 | `similar_past_cases` | 分析师 / 复盘 | 相似历史案例。 |
-| `would_change_view_if` | 分析师证据 | 什么条件会改变观点。 |
+| `would_change_view_if` | 分析师证据 | 什么条件会改变观点；不是 `invalidation_condition`，不得证明 `invalidation_present`。 |
 | `do_not_trade_reason` | 分析师 / 复盘 | 不交易原因。 |
 
 ## 7. PM 唯一策略合约字段：`final_action_contract`
