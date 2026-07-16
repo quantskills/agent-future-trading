@@ -293,15 +293,13 @@ analyst_llm:
   stale_fundamental_freshness_score: 0.45
   cap_stale_fundamental_confidence: 0.30
 
-# 8.5 LLM 主通道与备用通道
-# 当前启用 CodexOpenAI；TQXAI 作为第二 LLM 通道保留但停用，不删除、不自动切换。
+# 8.5 LLM 模型切换
+# 始终只启用一个完整的 llm 配置块；切换模型时，整块注释当前配置，再整块取消注释目标配置。
+
+# LLM GPT（当前启用）
 llm:
-  # 当前主路由：CodexOpenAI / gpt-5.6-sol / medium reasoning；API key 只读 .env。
   provider: "CodexOpenAI"
   model: "gpt-5.6-sol"
-  # provider: "TQXAI"
-  # model: "claude-opus-4-6-1"
-
   temperature: null
   max_concurrent_calls: 4
   structured_output_method: "json_mode"
@@ -313,14 +311,37 @@ llm:
     server_error: "retry_then_raise"
 
   codex_openai:
-    base_url: "http://47.74.0.65"
     reasoning_effort: "medium"
-    api_key_env: "CODEX_OPENAI_API_KEY"
-    api_key_env_fallbacks: []
 
-  # TQXAI 备用接口保留，当前停用。
-  # tqxai:
-  #   base_url: "https://llm.tqx.ai"
-  #   reasoning_effort: null
-  #   api_key_env: "TQX_LLM_API_KEY"
-  #   api_key_env_fallbacks: []
+# LLM Claude（当前停用）
+# llm:
+#   provider: "TQXAI"
+#   model: "claude-opus-4-6-1"
+#   temperature: null
+#   max_concurrent_calls: 4
+#   structured_output_method: "json_mode"
+#   failure_policy:
+#     parse_error: "retry_then_raise"
+#     rate_limit: "retry_with_backoff"
+#     auth_error: "raise"
+#     invalid_request: "raise"
+#     server_error: "retry_then_raise"
+
+# LLM DeepSeek（当前停用）
+# llm:
+#   provider: "DeepSeek"
+#   model: "deepseek-v4-pro"
+#   temperature: null
+#   max_concurrent_calls: 4
+#   structured_output_method: "json_mode"
+#   failure_policy:
+#     parse_error: "retry_then_raise"
+#     rate_limit: "retry_with_backoff"
+#     auth_error: "raise"
+#     invalid_request: "raise"
+#     server_error: "retry_then_raise"
+#
+#   deepseek:
+#     thinking:
+#       enabled: true
+#     reasoning_effort: "high"

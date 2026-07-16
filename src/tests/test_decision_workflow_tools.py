@@ -446,8 +446,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
 
         scorecard = result["opportunity_scorecard"]
-        self.assertEqual(scorecard["long"]["side_priority"], 1)
-        self.assertEqual(scorecard["short"]["side_priority"], 2)
+        self.assertIsNone(scorecard["long"]["side_priority"])
+        self.assertEqual(scorecard["short"]["side_priority"], 1)
         self.assertNotIn("opportunity_rank", scorecard["short"])
         self.assertNotIn("rank_score", scorecard["short"])
         self.assertNotIn("capital_layer", scorecard["short"])
@@ -497,7 +497,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         scorecard = result["opportunity_scorecard"]
         self.assertEqual(scorecard["long"]["side_priority"], 1)
-        self.assertEqual(scorecard["short"]["side_priority"], 2)
+        self.assertIsNone(scorecard["short"]["side_priority"])
         self.assertEqual(scorecard["long"]["candidate_layer_hint"], "watch_for_trigger_candidate")
         self.assertNotIn("rank_score", scorecard["long"])
         self.assertNotIn("capital_layer", scorecard["long"])

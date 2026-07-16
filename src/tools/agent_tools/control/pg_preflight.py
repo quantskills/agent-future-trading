@@ -9,13 +9,11 @@ from typing import Any, Dict, Iterable, Optional
 
 from dotenv import load_dotenv
 
+from llm.inference import llm_audit_metadata
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 
 
-_PROVIDER_BLOCK_KEYS = {
-    "codexopenai": "codex_openai",
-    "tqxai": "tqxai",
-}
+_SUPPORTED_LLM_PROVIDERS = {"codexopenai", "tqxai", "deepseek"}
 
 
 def _llm_config_codes(llm_config: Dict[str, Any]) -> list[str]:
@@ -26,20 +24,22 @@ def _llm_config_codes(llm_config: Dict[str, Any]) -> list[str]:
         codes.append("llm_provider_missing")
     if not model:
         codes.append("llm_model_missing")
-    block_name = _PROVIDER_BLOCK_KEYS.get(provider.lower())
-    block = llm_config.get(block_name) if block_name else None
-    if block_name is None:
+    if provider.lower() not in _SUPPORTED_LLM_PROVIDERS:
         codes.append("llm_provider_not_supported_by_current_config")
         return codes
-    if not isinstance(block, dict):
-        codes.append("llm_selected_provider_block_missing")
+    if not provider or not model:
         return codes
-    env_name = str(block.get("api_key_env") or "").strip()
+    try:
+        route = llm_audit_metadata(llm_config)
+    except (KeyError, TypeError, ValueError):
+        codes.append("llm_provider_config_invalid")
+        return codes
+    env_name = str(route.get("api_key_env") or "").strip()
     if not env_name:
         codes.append("llm_api_key_env_missing")
     elif not os.getenv(env_name):
         codes.append("llm_api_key_missing")
-    if not str(block.get("base_url") or "").strip():
+    if not str(route.get("base_url") or "").strip():
         codes.append("llm_base_url_missing")
     return codes
 

@@ -41,13 +41,12 @@ Output format:
 - entry_timing_signal: technical or event timing classification when applicable
 - price_location: price zone or percentile used for timing
 - trigger_valid: true only when the current trigger is already present in available evidence
-- If entry_trigger is phrased as a pending condition such as "if", "only if",
-  "only after", "wait for", "requires", "should confirm", "becomes actionable",
-  "becomes tradeable", "tradeable only if", "convert to a tradeable",
-  "needs post-open", "require post-open", "must break", "must hold",
-  "确认后", or "等待", then set trigger_valid=false and
-  opportunity_state="watch_for_trigger". Do not label pending future triggers
-  as tradeable_candidate.
+- A pending condition is watch_for_trigger only when it gives a concrete price,
+  volume, or indicator condition that Trader can observe with T-day 15-minute
+  market data and an independent invalidation boundary. Set trigger_valid=false.
+- A statement that no trigger exists, or that only waits for a future weekly or
+  monthly data release, is no_opportunity unless it also defines that concrete
+  T-day market condition. Do not label pending conditions tradeable_candidate.
 - invalidation_present: true only when price, ATR, or structured invalidation boundary is present
 - opportunity_type: trend_continuation / reversal / range_breakout / event_driven / medium_fundamental / short_timing / probe / no_trade / unknown
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate

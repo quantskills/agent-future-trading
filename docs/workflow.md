@@ -169,7 +169,7 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 - workflow 编排层以 `AnalystSignal` 作为类型载体，但分析师最终出口的 metadata 只能含 `action_evidence_contract`，Workflow保存后只追加真实 `signal_record_id`；Signal Collector发现其他metadata立即拒绝。signal SQL的自由文本理由列固定为空，artifact和分析师报告都只保存同一份经过共享校验的AEC。
 - 必需市场事实不可用时，三个分析师仍分别经自己的正式入口生成同一共享校验可接受的中性 AEC；不得调用LLM补数据，也不得伪造方向、profile、trigger、权限或市场事实。
 - 基本面或新闻没有当日新增记录不是全局市场数据不可用；对应分析师使用截止点前最近有效事实并写明时效/质量，或输出本专业合法 `no_opportunity` AEC。
-- 数据可用但模型输出普通 `Neutral` 时保持 `signal=Neutral`；缺具体 `entry_trigger` 或 canonical 失效边界固定收口为 `no_opportunity`。只有明确 long/short 反事实方向、具体触发、canonical 失效边界均存在且当前未触发时，才可形成 `watch_for_trigger`；中性跟踪字段不得自行创建 watch，Neutral 不得升级为 probe/tradeable。
+- 数据可用但模型输出普通 `Neutral` 时保持 `signal=Neutral`；缺 Trader 可用逻辑 T 日15分钟行情观察的具体 `entry_trigger` 或 canonical 失效边界固定收口为 `no_opportunity`。只有明确 long/short 反事实方向、上述具体触发、canonical 失效边界均存在且当前未触发时，才可形成 `watch_for_trigger`；纯方向观点、“当前没有触发”或只等待未来周/月数据不是具体触发，中性跟踪字段不得自行创建 watch，Neutral 不得升级为 probe/tradeable。
 - 正式 watch 的 `entry_trigger` 不得为空、`unknown` 或 `wait_for_trigger`；`invalidation_present` 只能由 canonical `invalidation_condition`、合法 `invalidation_level` 或正数 `atr_stop_distance` 证明。`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 都不是失效边界别名。
 - Signal Collector必须保真消费该契约，不得改写分析师原始证据。Reviewer和Researcher通过已保存的 `FuturesRecommendation.signal_snapshot["signal_collection_contract"]` 追溯分析师证据及其来源。
 - Reviewer和Researcher只读取正式 AEC 的 `opportunity_state/trigger_valid/invalidation_present/entry_trigger` 与 canonical 失效字段；不得从旧 metadata 路径补出默认 watch 或中性 `action_preference`。合法 `no_opportunity` 仍可在 Phase4 与结算完成后形成反事实观察或学习记录。
@@ -607,7 +607,7 @@ state["signal_collection_contract"].evidence_fusion.dominant_opposing_evidence[]
 → conflicts
 ```
 
-Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。`trigger_status` 只使用主方向对应分析师的触发证据；主方向为flat/mixed时固定为 `not_applicable`。`data_quality_flags` 必须由Signal Collector从AEC内真实 `data_usage_summary.sources.*` 的可用性、时效、缺失和可交易支持事实汇总，不得读取不存在的顶层补偿字段。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
+Signal Collector必须输出唯一SCC并完整保留来源、逐条证据、方向汇总、主方向触发、冲突、缺失、确认要求、失效边界和融合事实。`trigger_status` 只使用主方向对应分析师的合法机会状态与触发证据；主方向为flat/mixed或主方向证据全部为 `no_opportunity` 时固定为 `not_applicable`，反方向 watch 不得借给主方向。`missing_evidence/confirmation_requirements` 只作为证据诊断，不得映射成 `data_missing`；`data_quality_flags` 必须由Signal Collector从AEC内真实 `data_usage_summary.sources.*` 汇总，并由共享摘要仅在 `status=hard_fail` 时形成候选硬阻断。禁止遗漏启用分析师、重复来源、用反方向触发确认主方向，或加入交易动作、rank、预算、手数和PM内部状态。
 
 ### 3. `FuturesRecommendation`
 

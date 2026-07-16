@@ -17,6 +17,7 @@ from tools.common.contracts import (
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
 from tools.common.signal_evidence_collection import (
     ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS,
+    has_concrete_entry_trigger,
     validate_action_evidence_contract,
 )
 from tools.agent_tools.analysis.analyst_market_confirmation import score_pandaai_extra_records
@@ -375,56 +376,6 @@ def _has_actionable_text(value: Any) -> bool:
         "exit/reduce if current confirmation fails",
     }
     return text not in generic_markers
-
-
-_GENERIC_ENTRY_MARKERS = {
-    "wait_for_trigger",
-    "technical_price_trigger",
-    "fundamental_anchor",
-    "news_event_trigger",
-    "direction_anchor",
-    "initial_or_rebalance",
-}
-
-
-def _is_generic_entry_text(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return True
-    if text in _GENERIC_ENTRY_MARKERS:
-        return True
-    if text.endswith("_trigger") or text.endswith("_anchor"):
-        return True
-    if text.startswith("requires ") and "before entry" in text:
-        return True
-    return False
-
-
-def _has_specific_entry_text(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not _has_actionable_text(text) or _is_generic_entry_text(text):
-        return False
-    return any(
-        token in text
-        for token in (
-            "break",
-            "breakout",
-            "pullback",
-            "vwap",
-            "volume",
-            "close",
-            "cross",
-            "above",
-            "below",
-            "confirm",
-            "entry",
-            "open",
-            "probe",
-            "momentum",
-            "support",
-            "resistance",
-        )
-    )
 
 
 _PENDING_ENTRY_TRIGGER_MARKERS = (
@@ -858,7 +809,7 @@ def _signal_side(signal: AnalystSignal) -> str:
 
 
 def _has_trade_setup_text(signal: AnalystSignal) -> bool:
-    return _has_specific_entry_text(getattr(signal, "entry_trigger", ""))
+    return has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
 
 
 def _has_numeric_invalidation(value: Any, *, positive: bool = False) -> bool:
@@ -896,7 +847,7 @@ def _land_canonical_invalidation_condition(
 
 
 def _trade_setup_contract_presence(signal: AnalystSignal) -> Dict[str, bool]:
-    entry_present = _has_specific_entry_text(getattr(signal, "entry_trigger", ""))
+    entry_present = has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
     metadata = getattr(signal, "metadata", {}) or {}
     invalidation_present = bool(
         _has_numeric_invalidation(getattr(signal, "invalidation_level", None))
@@ -1199,7 +1150,7 @@ def apply_trade_research_contract(
     signal.metadata = metadata
     signal.entry_trigger = (
         str(getattr(signal, "entry_trigger", "") or "").strip()
-        if _has_specific_entry_text(getattr(signal, "entry_trigger", ""))
+        if has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
         else ""
     )
     derived_notes = _clean_list(derived_setup.get("notes"), max_items=12)

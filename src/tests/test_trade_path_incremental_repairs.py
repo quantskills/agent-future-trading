@@ -17,6 +17,7 @@ from agents.decision_team.portfolio_manager import (
     RiskLevel,
     _build_pm_decision_context,
     _enrich_final_authority_with_analyst_evidence,
+    _scorecard_probe_seed,
     _side_opportunity_state_summary,
 )
 from agents.execution_team.trader import (
@@ -25,11 +26,25 @@ from agents.execution_team.trader import (
 )
 from graph.constants import Signal
 from graph.schema import AnalystSignal, FuturesAction, Portfolio, Position
-from tests.contract_test_fixtures import build_test_aec
-from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
-from tools.agent_tools.decision.pm_full_market_capital_deployment import _capital_rank_eligible
+from tests.contract_test_fixtures import build_test_aec, build_test_signal
+from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
+from tools.agent_tools.decision.pm_signal_fusion import (
+    build_opportunity_scorecard,
+    build_scc_market_confirmation,
+)
+from tools.agent_tools.decision.pm_full_market_capital_deployment import (
+    _capital_rank_eligible,
+    _ensure_final_rank_score_fields,
+)
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
+from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_scc_data_quality_summary,
+    build_signal_collection_contract,
+    validate_action_evidence_contract,
+)
 
 
 def _analyst_signal(
@@ -556,6 +571,401 @@ class RiskReductionIsolationTest(unittest.TestCase):
                 )
                 self.assertEqual(lifecycle["pm_lifecycle_action_port"], expected_port)
                 self.assertFalse(lifecycle["requires_full_market_rank"])
+
+
+class OpportunityPathSemanticRepairTest(unittest.TestCase):
+    _ANALYSTS = ("technical", "fundamental", "commodity_news")
+
+    @staticmethod
+    def _collector_signal(
+        analyst: str,
+        *,
+        signal_record_id: str,
+        signal: str = "Neutral",
+        side: str = "flat",
+        opportunity_state: str = "no_opportunity",
+        trigger_valid: bool = False,
+        current_trigger_confirmed: bool = False,
+        entry_trigger: str = "",
+        invalidation_present: bool = False,
+        confidence: float = 0.45,
+        missing_evidence: list[str] | None = None,
+    ) -> SimpleNamespace:
+        return build_test_signal(
+            analyst,
+            signal_record_id=signal_record_id,
+            trading_date="2025-03-26",
+            signal=signal,
+            side=side,
+            confidence=confidence,
+            opportunity_state=opportunity_state,
+            setup_type="trend_breakout" if side in {"long", "short"} else "no_trade",
+            setup_quality_ok=side in {"long", "short"},
+            trigger_valid=trigger_valid,
+            current_trigger_confirmed=current_trigger_confirmed,
+            invalidation_present=invalidation_present,
+            entry_trigger=entry_trigger,
+            invalidation_condition=(
+                "close beyond the validated invalidation boundary"
+                if invalidation_present
+                else None
+            ),
+            extra={
+                "missing_evidence": list(missing_evidence or []),
+                "business_quality_score": 0.82 if side in {"long", "short"} else 0.0,
+                "setup_quality_score": 0.82 if side in {"long", "short"} else 0.0,
+            },
+        )
+
+    def _scc(self, signals: list[SimpleNamespace]) -> dict:
+        return build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-26",
+            analyst_signals=signals,
+            enabled_analysts=self._ANALYSTS,
+        )
+
+    def test_step2_preferred_side_comes_from_resolved_scc_direction(self):
+        scorecard = {
+            "preferred_side": "flat",
+            "long": {
+                "side": "long",
+                "final_state": "watch_for_trigger",
+                "opportunity_score": 0.32,
+                "direction_evidence_strength": 0.40,
+            },
+            "short": {
+                "side": "short",
+                "final_state": "no_opportunity",
+                "opportunity_score": 0.0,
+                "direction_evidence_strength": 0.0,
+            },
+        }
+
+        result = select_ticker_side(
+            ticker="BU",
+            analyst_signals=[],
+            signal_collection_contract={
+                "dominant_side": "long",
+                "side_consensus": "single_analyst_support",
+                "evidence_fusion": {"evidence_alignment_state": "single_source"},
+            },
+            market_confirmation={},
+            data_quality_summary={},
+            decision_date="2025-03-26",
+            config={},
+            prebuilt_scorecard=scorecard,
+        )
+
+        self.assertEqual(result["opportunity_scorecard"]["preferred_side"], "long")
+        self.assertEqual(result["side_priority"]["long"], 1)
+        self.assertNotIn("opportunity_rank", result["opportunity_scorecard"]["long"])
+
+    def test_step2_keeps_flat_for_mixed_or_conflicted_scc(self):
+        for dominant_side, side_consensus in (("mixed", "conflicted"), ("long", "conflicted")):
+            with self.subTest(dominant_side=dominant_side, side_consensus=side_consensus):
+                result = select_ticker_side(
+                    ticker="BU",
+                    analyst_signals=[],
+                    signal_collection_contract={
+                        "dominant_side": dominant_side,
+                        "side_consensus": side_consensus,
+                        "evidence_fusion": {"evidence_alignment_state": "conflicted"},
+                    },
+                    market_confirmation={},
+                    data_quality_summary={},
+                    decision_date="2025-03-26",
+                    config={},
+                    prebuilt_scorecard={
+                        "preferred_side": "long",
+                        "long": {"final_state": "tradeable_candidate", "opportunity_score": 0.9},
+                        "short": {"final_state": "probe_candidate", "opportunity_score": 0.8},
+                    },
+                )
+                self.assertEqual(result["opportunity_scorecard"]["preferred_side"], "flat")
+
+    def test_missing_evidence_lowers_quality_without_becoming_hard_data_gap(self):
+        signals = [
+            self._collector_signal(
+                "technical",
+                signal_record_id="sig-tech",
+                signal="Bullish",
+                side="long",
+                opportunity_state="watch_for_trigger",
+                entry_trigger="15-minute close above the validated range with volume",
+                invalidation_present=True,
+                missing_evidence=[f"pending_confirmation_{index}" for index in range(8)],
+            ),
+            self._collector_signal("fundamental", signal_record_id="sig-fund"),
+            self._collector_signal("commodity_news", signal_record_id="sig-news"),
+        ]
+        scc = self._scc(signals)
+        confirmation = build_scc_market_confirmation(scc, target_direction="long")
+        scorecard = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=build_pm_evidence_signals_from_scc(scc),
+            market_confirmation=confirmation,
+            data_quality_summary=build_scc_data_quality_summary(scc),
+            signal_collection_contract=scc,
+            config={},
+        )
+
+        self.assertEqual(confirmation["data_missing"], [])
+        self.assertFalse(scorecard["long"]["critical_data_gap"])
+        self.assertNotIn("critical_data_gap", scorecard["long"]["gating_failures"])
+        self.assertEqual(scorecard["long"]["final_state"], "watch_for_trigger")
+
+    def test_only_shared_hard_fail_quality_status_creates_critical_gap(self):
+        signal = _analyst_signal(
+            opportunity_state="tradeable_candidate",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+        )
+        warning = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.50},
+            data_quality_summary={
+                "status": "warning",
+                "flags": ["data_source_stale:fundamental:finoview_fundamental"],
+            },
+            config={},
+        )
+        hard_fail = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.50},
+            data_quality_summary={
+                "status": "hard_fail",
+                "flags": ["required_market_data_unavailable"],
+            },
+            config={},
+        )
+
+        self.assertFalse(warning["long"]["critical_data_gap"])
+        self.assertTrue(hard_fail["long"]["critical_data_gap"])
+        self.assertIn("critical_data_gap", hard_fail["long"]["gating_failures"])
+
+    def test_single_confirmed_source_reaches_rank_seed_with_native_low_score(self):
+        single_signals = [
+            self._collector_signal(
+                "technical",
+                signal_record_id="sig-tech",
+                signal="Bullish",
+                side="long",
+                opportunity_state="tradeable_candidate",
+                trigger_valid=True,
+                current_trigger_confirmed=True,
+                entry_trigger="current 15-minute close confirms above resistance",
+                invalidation_present=True,
+                confidence=0.82,
+            ),
+            self._collector_signal("fundamental", signal_record_id="sig-fund"),
+            self._collector_signal("commodity_news", signal_record_id="sig-news"),
+        ]
+        aligned_signals = [
+            self._collector_signal(
+                analyst,
+                signal_record_id=f"sig-{analyst}",
+                signal="Bullish",
+                side="long",
+                opportunity_state="tradeable_candidate",
+                trigger_valid=True,
+                current_trigger_confirmed=True,
+                entry_trigger="current 15-minute close confirms above resistance",
+                invalidation_present=True,
+                confidence=0.82,
+            )
+            for analyst in self._ANALYSTS
+        ]
+
+        def scorecard_for(signals: list[SimpleNamespace]) -> dict:
+            scc = self._scc(signals)
+            return build_opportunity_scorecard(
+                ticker="BU",
+                analyst_signals=build_pm_evidence_signals_from_scc(scc),
+                market_confirmation=build_scc_market_confirmation(scc, target_direction="long"),
+                data_quality_summary=build_scc_data_quality_summary(scc),
+                signal_collection_contract=scc,
+                config={},
+            )
+
+        single = scorecard_for(single_signals)
+        aligned = scorecard_for(aligned_signals)
+        side, ratio, row = _scorecard_probe_seed(
+            opportunity_scorecard=single,
+            control={
+                "watch_for_trigger_new_entry": {
+                    "allow_probe": True,
+                    "probe_max_ratio": 0.01,
+                    "probe_floor_ratio": 0.005,
+                    "scorecard_probe_min_supporting_signals": 2,
+                    "scorecard_probe_min_score": 0.35,
+                    "allow_single_high_quality_probe": True,
+                    "single_high_quality_probe_min_score": 0.52,
+                    "single_high_quality_probe_min_setup_quality": 0.60,
+                    "single_high_quality_probe_min_business_quality": 0.60,
+                    "single_high_quality_probe_min_confirmation_score": 0.45,
+                    "scorecard_tradeable_candidate_probe_min_confirmation_score": 0.68,
+                }
+            },
+        )
+        single_rank = _ensure_final_rank_score_fields(dict(single["long"]), config={})
+        aligned_rank = _ensure_final_rank_score_fields(dict(aligned["long"]), config={})
+
+        self.assertEqual(single["long"]["supporting_signal_count"], 1)
+        self.assertEqual(
+            single["long"]["final_state"],
+            "probe_candidate",
+            msg=single["long"],
+        )
+        self.assertEqual(side, "long")
+        self.assertGreater(ratio, 0.0)
+        self.assertTrue(row["trigger_valid"])
+        self.assertLess(single_rank["rank_score"], aligned_rank["rank_score"])
+
+    def test_directional_no_opportunity_does_not_become_watch_support(self):
+        signals = [
+            self._collector_signal(
+                "technical",
+                signal_record_id="sig-tech",
+                signal="Bearish",
+                side="short",
+                opportunity_state="no_opportunity",
+                confidence=0.75,
+            ),
+            self._collector_signal(
+                "fundamental",
+                signal_record_id="sig-fund",
+                signal="Bearish",
+                side="short",
+                opportunity_state="no_opportunity",
+                confidence=0.65,
+            ),
+            self._collector_signal(
+                "commodity_news",
+                signal_record_id="sig-news",
+                signal="Bullish",
+                side="long",
+                opportunity_state="watch_for_trigger",
+                entry_trigger="15-minute close above resistance with volume",
+                invalidation_present=True,
+                confidence=0.45,
+            ),
+        ]
+        scc = self._scc(signals)
+        scorecard = build_opportunity_scorecard(
+            ticker="BU",
+            analyst_signals=build_pm_evidence_signals_from_scc(scc),
+            market_confirmation=build_scc_market_confirmation(scc, target_direction="short"),
+            data_quality_summary=build_scc_data_quality_summary(scc),
+            signal_collection_contract=scc,
+            config={},
+        )
+
+        self.assertEqual(scc["dominant_side"], "short")
+        self.assertEqual(scc["trigger_status"], "not_applicable")
+        self.assertEqual(scorecard["short"]["supporting_signal_count"], 0)
+        self.assertEqual(scorecard["short"]["final_state"], "no_opportunity")
+
+    def test_shared_trigger_semantics_rejects_bare_or_future_only_watch(self):
+        for entry_trigger in (
+            "No current entry trigger is established",
+            "Wait for the next weekly inventory report before deciding",
+            "The directional thesis remains constructive",
+        ):
+            with self.subTest(entry_trigger=entry_trigger):
+                contract = build_test_aec(
+                    "technical",
+                    trading_date="2025-03-26",
+                    signal="Bullish",
+                    side="long",
+                    opportunity_state="watch_for_trigger",
+                    trigger_valid=False,
+                    current_trigger_confirmed=False,
+                    invalidation_present=True,
+                    entry_trigger=entry_trigger,
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "action_evidence_contract_watch_missing_entry_trigger",
+                ):
+                    validate_action_evidence_contract(contract, analyst="technical")
+
+        observable = build_test_aec(
+            "technical",
+            trading_date="2025-03-26",
+            signal="Bullish",
+            side="long",
+            opportunity_state="watch_for_trigger",
+            trigger_valid=False,
+            current_trigger_confirmed=False,
+            invalidation_present=True,
+            entry_trigger="After the weekly report, enter only if the 15-minute close breaks above 3200",
+        )
+        validate_action_evidence_contract(observable, analyst="technical")
+
+    def test_candidate_requires_current_confirmation_and_watch_must_be_pending(self):
+        candidate = build_test_aec(
+            "technical",
+            trading_date="2025-03-26",
+            signal="Bullish",
+            side="long",
+            opportunity_state="probe_candidate",
+            trigger_valid=True,
+            current_trigger_confirmed=False,
+            invalidation_present=True,
+            entry_trigger="15-minute close above 3200 with volume",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "action_evidence_contract_candidate_without_current_confirmation",
+        ):
+            validate_action_evidence_contract(candidate, analyst="technical")
+
+        watch = build_test_aec(
+            "technical",
+            trading_date="2025-03-26",
+            signal="Bullish",
+            side="long",
+            opportunity_state="watch_for_trigger",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            invalidation_present=True,
+            entry_trigger="15-minute close above 3200 with volume",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "action_evidence_contract_watch_trigger_already_confirmed",
+        ):
+            validate_action_evidence_contract(watch, analyst="technical")
+
+    def test_finalization_does_not_turn_bare_no_trigger_text_into_watch(self):
+        signal = _analyst_signal(
+            opportunity_state="watch_for_trigger",
+            trigger_valid=False,
+            current_trigger_confirmed=False,
+            entry_trigger="No current entry trigger is established",
+        )
+        signal.metadata = {
+            **signal.metadata,
+            "data_usage_summary": signal.metadata["action_evidence_contract"]["data_usage_summary"],
+        }
+        result = apply_trade_research_contract(
+            signal,
+            {
+                "sector": "energy",
+                "tradeability": "high",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+            },
+            analyst="technical",
+            trading_date="2025-03-26",
+            ticker="BU",
+        )
+
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertEqual(result.entry_trigger, "")
 
 
 if __name__ == "__main__":

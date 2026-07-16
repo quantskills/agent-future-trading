@@ -881,7 +881,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             prebuilt_scorecard=card,
         )
         self.assertEqual(selected["opportunity_scorecard"]["long"]["side_priority"], 1)
-        self.assertEqual(selected["opportunity_scorecard"]["short"]["side_priority"], 2)
+        self.assertIsNone(selected["opportunity_scorecard"]["short"]["side_priority"])
         self.assertTrue(selected["opportunity_scorecard"]["long"]["side_priority_is_not_capital_rank"])
         self.assertGreater(card["long"]["opportunity_score"], card["short"]["opportunity_score"])
         self.assertIn("setup_quality", card["long"]["opportunity_score_components"])

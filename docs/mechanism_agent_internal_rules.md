@@ -64,8 +64,8 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 
 | 状态词 | 状态类型 | 产生者 | 消费者 | 含义 | 是否能直接交易 |
 |---|---|---|---|---|---|
-| `no_opportunity` | 机会状态 | 分析师 | 信号收集员、PM | 无有效方向、无完整 setup、数据不足或证据不足 | 否 |
-| `watch_for_trigger` | 机会状态 | 分析师 | 信号收集员、PM | setup 可以观察，但当前触发未成立；需要 `entry_trigger` 和失效边界 | 否，不能直接交易；只能由 PM 写成条件触发合约 |
+| `no_opportunity` | 机会状态 | 分析师 | 信号收集员、PM | 当前没有完整的逻辑 T 日可观察入场条件与独立失效边界；可保留方向和研究证据 | 否，不计入新增风险支持 |
+| `watch_for_trigger` | 机会状态 | 分析师 | 信号收集员、PM | setup、Trader 可用 T 日15分钟行情观察的具体 `entry_trigger` 和失效边界完整，但当前触发未成立 | 否，不能直接交易；只能由 PM 写成条件触发合约 |
 | `probe_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立，但证据偏弱、单一或仍需小额验证 | 否，不能直接交易；PM 可转成 `open_probe` |
 | `tradeable_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立、setup 和失效边界完整、证据强 | 否，不能直接交易；PM 可转成 `open_real/add/scale` |
 | `risk_reduction_candidate` | 机会状态 | 分析师/PM 诊断 | PM | 只针对已有持仓，当前证据支持 hold、减仓、退出或风险收缩；空仓时仅保留研究证据 | 否；不得进入新增风险证据、rank、预算或交易权限，PM 只能经既有持仓生命周期转成 `hold/reduce/exit` |
@@ -196,7 +196,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 商品差异化分析协议固定为：三类分析师通过 `src/tools/agent_tools/analysis/analyst_product_price_behavior_profile.py` 读取 `src/config/product_price_behavior_profiles.yaml`。静态 profile 提供冷启动品种分析框架并进入提示词，LLM 返回后再由确定性工具核对 profile 的支持、冲突、缺失和确认要求。三类分析师共同使用动态学习完善 LLM 提示词并在 LLM 返回后校对信号；技术面分析师额外使用经过验证的 contextual rule calibration，对当前产品、短周期和初始 market_regime 对应的技术指标参数执行有界校准。该校准只改变技术分析内部参数，不直接生成方向、机会状态或交易权限。学习记录必须早于当前交易日，不在回测中改写 YAML，也不能单独创造交易机会。
 
-三类分析师的 LLM provider、model、base URL、reasoning effort 和 API key 环境变量只服从主配置 `llm`。分析师不得维护私有模型路由、硬编码模型名或第二套 API 配置；切换主配置后，三类分析师必须共同切换。
+三类分析师与 Researcher 的 LLM provider、model、reasoning effort 只服从主配置 `llm`，base URL 和 API key 环境变量名只服从 `src/llm/provider.py` 的 Provider 注册；智能体不得维护私有模型路由、硬编码模型名或第二套 API 配置。切换主配置后，四个 LLM 使用方必须共同切换；实际 provider/model 只写入既有 config 运行元数据和非敏感路由审计，不得进入 AEC、SCC、分析师报告或 Researcher 学习 payload。
 
 基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，使用交易日可见的最近有效记录并显式标注时效；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
 
@@ -319,10 +319,12 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 有反向分析师 | `side_consensus=conflicted`、`opposing_analysts`、`evidence_conflict_level` | 抹掉反向证据 |
 | `dominant_side` 对应分析师中至少一份当前触发成立 | `trigger_status=confirmed` | 交易员执行权限；反方向证据不得确认主方向触发 |
 | 主方向证据有合法触发条件但尚未确认 | `trigger_status=valid_unconfirmed` 或 `watch_for_trigger` | 当前可成交判断；主方向为 `flat/mixed` 时固定为 `not_applicable` |
+| 主方向证据全部为 `no_opportunity` | `trigger_status=not_applicable`；方向和研究证据继续保留 | 借用反方向 watch、把带方向的 no-op 计入 watch/probe/tradeable 支持 |
 | 有 `tradeable_candidate` 证据 | 原样保留为 `tradeable_candidate` | 降级成 probe 或直接开仓 |
 | 有 `probe_candidate` 证据 | 原样保留为 `probe_candidate` | 升级成 `tradeable_candidate` |
 | 有 `watch_for_trigger` 证据 | 原样保留触发条件和失效边界 | 转成当前成交候选 |
-| 有数据缺口或前视风险标记 | 写入 `data_quality_flags` | 忽略缺口或改成方向证据 |
+| 有普通证据缺口或待确认项 | 写入 `missing_evidence` / `confirmation_requirements`，影响证据强度和机会状态 | 转成 `data_missing` 或按数量形成 `critical_data_gap` |
+| 共享数据质量摘要为 `hard_fail` | 保留真实 `data_quality_flags` 并形成硬数据阻断 | 用基本面/新闻无当日新增、T-n 有效数据或 warning 冒充 hard fail |
 
 ### 5.3 权限硬规则
 
@@ -396,7 +398,7 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 顺序 | 阶段 | 对应工具/入口 | 必须做 | 禁止 |
 |---|---|---|---|---|
 | 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据，并写入同一个 PM 内存状态 | 在 PM 内调用证据包 builder；读取上游内部草稿；生成任何独立输出 |
-| 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 只形成 `side_priority`、`ticker_side_priority`，继续更新同一个 PM 内存状态 | 读取学习、比较持仓、生成生命周期、rank、手数和交易权限 |
+| 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 无真实冲突时只把 SCC 唯一 long/short 主方向写成优先级1并同步 `preferred_side`；flat/mixed/conflicted 时保持 flat | 读取学习或机会分重选方向；比较持仓、生成生命周期、rank、手数和交易权限 |
 | 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
 | 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 canonical family/lane 消费学习，把完整候选学习池、临时路由和拒绝原因留在同一个 PM 内存状态 | 把 Step4 临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限；把原始研究对象写入 artifact |
 | 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓，把唯一全市场 rank、预算和 sizing 事实写回同一个 PM 内存状态 | 让非新增风险合约进入 rank，或让实际增加风险的 `add/scale` 绕过 rank；生成独立 rank/budget/sizing artifact；把 Step3/4 候选字段当最终 rank trace |
@@ -477,6 +479,8 @@ watch_for_trigger 候选被压成受控观察/条件触发候选。
 它不能同时表示“候选”和“阻断”。若要阻断，必须由明确硬原因或缺失条件负责，例如无 setup、无失效边界、负向学习、保证金硬风险。
 
 PM 的自由文本说明不具有候选否决权。合法 canonical watch 必须先参加既有资金优先级竞争；只有实际获选并形成非零目标手数时，唯一 FAC 才写入 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`。Step5 仍使用既有新增风险 rank；Step6 最终执行生命周期解释为 `conditional_monitor`，二者不是第二套 rank 或第二张合约。
+
+完整且当前已触发的单分析师候选也不得在 Step5 前清零。它保留真实单来源共识、证据强度和冲突，以较低原生分进入同一 rank；另外两名分析师的 `no_opportunity` 不是支持票，也不是否决票。最终是否获得预算、手数和 FAC 仍完全由既有 rank、预算、sizing 与 Auditor 决定。
 
 `probe_candidate/tradeable_candidate` 只有在 canonical AEC/SCC 同时证明 `trigger_valid=true`、`current_trigger_confirmed=true` 和失效边界完整，并经过 PM 排名、预算、sizing 与 Auditor 放行后，FAC 才写入 `conditional_trigger_authority=false`、`requires_intraday_confirmation=false`、`can_execute_without_intraday_trigger=true`。Trader 对所有合法 execution profile 都不得再用15分钟线复判该触发，只能使用当时可见的合法1分钟线执行；缺行情、合约失效或市场规则阻断时如实写入 `execution_result`。
 

@@ -82,13 +82,15 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 不调用 LLM。读取 `signal_collection_contract`、账户、持仓、资金、风控配置、市场确认和 PM 六步内部确定性工具输出：
 
-- Step2 由 `pm_ticker_side_selection` 形成 `side_priority` 和 `ticker_side_priority`；
+- Step2 由 `pm_ticker_side_selection` 只读取 SCC 方向事实：无真实冲突时把唯一 long/short 主方向写成 `side_priority/ticker_side_priority=1` 并同步 `preferred_side`，flat/mixed/conflicted 时保持 flat；不读取学习或机会分重选方向；
 - Step3 结合持仓形成候选质量和内部生命周期分流；
 - Step4 由 `decision_memory_retrieval` 输出 `effective_memory_summary` 和完整 canonical 候选学习池；
 - Step5 只对实际增加风险的候选调用 `pm_full_market_capital_deployment` 和 `pm_position_sizing`，把 rank、预算和 `position_sizing_result` 写回同一个 PM 内存状态；
 - Step6 原子装配最终合约和两个最终检查。
 
 投资组合经理是唯一策略交易合约签发者。Step1–5 只更新同一个 PM 内存状态；Step6 原子返回唯一 `FuturesRecommendation`，唯一 `final_action_contract` 位于 `signal_snapshot.final_action_contract`。缺少 `signal_collection_contract` 或 source_agent/boundary 不合法时，PM 应 fail-fast，不能自行重建证据包。
+
+机会和数据语义固定为：`no_opportunity` 可保留方向但不计新增风险支持；watch 必须有 T 日15分钟可观察触发、canonical 失效边界且当前未确认；probe/tradeable 必须当前触发已确认。`missing_evidence/confirmation_requirements` 只影响证据强度与机会状态，只有共享 SCC 数据质量摘要 `status=hard_fail` 可形成硬数据阻断。完整单来源已触发候选保留真实低共识分进入 Step5，不补分、不自动交易。
 
 ### 审计员
 

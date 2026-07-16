@@ -16,6 +16,7 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 - Trader 不读取 action-value 改方向、改手数或放宽触发；Trader 只执行 `final_action_contract` 里的合约化执行字段。
 - Accountant 不消费 action-value 语义，只按成交、持仓、结算价、手续费、滑点、保证金和合约乘数入账。
 - 换月、强平、运营风控等非策略动作必须用非策略 `source_type` 分账，不能写成策略 action-value。
+- `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate` 是 AEC/SCC 机会状态，不是 `action_name` 或 action-value family；单来源、证据缺失和数据质量变化只能影响候选分与准入，不能创造新的动作语义或把观察学习当成开仓授权。
 
 ## PM Artifact Boundary
 

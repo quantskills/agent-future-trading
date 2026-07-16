@@ -89,8 +89,8 @@
 | `llm_prompt_sha256` | 历史物理列 | 禁止写入；正式写入口固定为 NULL。 |
 | `llm_prompt_size` | 历史物理列 | 禁止写入；正式写入口固定为 0。 |
 | `llm_prompt_summary_json` | 历史物理列 | 禁止写入；正式写入口固定为 NULL。 |
-| `llm_provider` | config / 智能体内部运行时 | LLM 提供方；不得进入分析师正式输出、signal artifact或分析师报告。 |
-| `llm_model` | config / 智能体内部运行时 | LLM 模型；不得进入分析师正式输出、signal artifact或分析师报告。 |
+| `llm_provider` | 主配置 `llm.provider` / config 运行元数据 / 智能体内部运行时 | 当前实际 LLM 提供方；三类分析师与 Researcher 共用同一选择。不得进入 AEC、SCC、signal artifact、分析师报告或 Researcher 学习 payload。 |
+| `llm_model` | 主配置 `llm.model` / config 运行元数据 / 智能体内部运行时 | 当前实际 LLM 模型；必须随所启用的完整 `llm` 配置块同步更新。不得进入 AEC、SCC、signal artifact、分析师报告或 Researcher 学习 payload。 |
 | `determinism_mode` | 智能体内部运行时 | 生成模式；不属于AEC、SCC或持久化分析师输出。 |
 | `llm_prompt` | signal / transaction 历史物理列 | 禁止持久化或跨智能体传递；不属于 AnalystSignal、FuturesTransaction 或任何正式输出契约，历史非空值不得被消费。 |
 | `raw_prompt` | `researcher_llm_notes` 历史物理列 | 禁止持久化；正式写入口只允许空值且无 artifact 元数据。 |
@@ -191,7 +191,7 @@
 
 三类分析师共用 `validate_action_evidence_contract`。AEC 必填字段固定为：身份与方向 `contract_version/analyst/signal/side/confidence`；机会与触发 `opportunity_type/opportunity_state/setup_type/setup_quality_ok/trigger_valid/current_trigger_confirmed/invalidation_present/entry_trigger/exit_hint`；期限与证据 `horizon_class/expected_horizon_days/market_regime/evidence_quality/evidence_strength/evidence_freshness/confirmation_requirements/missing_evidence/current_evidence_conflict/factor_focus/no_lookahead_status`；结构化来源 `data_usage_summary/learning_scope/product_profile_evidence/fusion_evidence`。文本、布尔、列表、整数和对象类型必须与共享校验器一致；数据不可用中性 AEC 也不例外。
 
-正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备具体触发和 canonical 失效边界，才可按当前触发与既有质量规则进入 watch/probe/tradeable；`risk_reduction_candidate` 只服务已有持仓的 hold/reduce/exit 风险收缩，不进入新增风险证据、rank、预算或交易权限，空仓时只保留为研究证据。
+正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、Trader 可用逻辑 T 日15分钟行情观察的具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备该具体触发和 canonical 失效边界；watch 固定为 `trigger_valid=false/current_trigger_confirmed=false`，probe/tradeable 固定为两者同时为 true。`risk_reduction_candidate` 只服务已有持仓的 hold/reduce/exit 风险收缩，不进入新增风险证据、rank、预算或交易权限，空仓时只保留为研究证据。
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
@@ -220,7 +220,7 @@
 | `setup_quality_score` | 分析师 / 研究样本 | setup 质量评分。 |
 | `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
 | `entry_quality` | 分析师证据 | 入场质量。 |
-| `entry_trigger` | 分析师证据 | 当前触发事实或具体等待条件；`unknown`、`wait_for_trigger` 和通用占位文本均不是合法 watch/candidate 触发。 |
+| `entry_trigger` | 分析师证据 | 当前触发事实或 Trader 可用逻辑 T 日15分钟价格、量能或指标观察的具体等待条件；“当前没有触发”、纯方向观点、仅等待未来周/月数据、`unknown`、`wait_for_trigger` 和通用占位文本均不是合法 watch/candidate 触发。未来数据背景只有同时落成该可观察市场条件时才可形成 watch。 |
 | `entry_timing_signal` | 技术证据 | 技术入场时机分类。 |
 | `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
@@ -240,11 +240,11 @@
 | `target_return` | 未采用的旧读取字段 | 当前分析师、AEC、SCC和PM均无合法生产者，不得作为上游必传事实或由Trader伪造。 |
 | `factor_focus` | 分析师证据 | 主要因子关注点。 |
 | `current_evidence_conflict` | 分析师证据 | 当前冲突证据。 |
-| `missing_evidence` | 分析师证据 | 缺失证据。 |
+| `missing_evidence` | 分析师证据 / SCC 融合诊断 | 当前缺少的证据，只影响证据强度、融合分和机会状态；不得映射为 `data_missing`，不得按数量生成 `critical_data_gap`。 |
 | `conflicting_factors` | 分析师证据 | 冲突因子。 |
 | `counter_evidence` | 分析师证据 | 反向证据。 |
 | `opportunity_type` | 分析师 / no-trade 记忆 | 机会类型。 |
-| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`；正式 watch 必须同时有具体触发和 canonical 失效边界。`risk_reduction_candidate` 只支持已有持仓的 hold/reduce/exit，不构成新开仓证据或全局否决票；单个分析师 `no_opportunity` 也不是对其他分析师候选的否决票。 |
+| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`；`no_opportunity` 可保留方向但不计入新增风险支持；正式 watch 必须同时有可观察具体触发、canonical 失效边界且当前未确认；probe/tradeable 必须是同一完整方案且当前触发已确认。`risk_reduction_candidate` 只支持已有持仓的 hold/reduce/exit，不构成新开仓证据或全局否决票；单个分析师 `no_opportunity` 也不是对其他分析师候选的否决票。 |
 | `learning_impact_summary` | 分析师证据 | 历史学习如何影响本次判断。 |
 | `factor_calibration_summary` | 基本面证据 | 基本面因子校准摘要。 |
 | `event_calibration_summary` | 新闻证据 | 新闻事件校准摘要。 |
@@ -279,7 +279,7 @@
 | `product_profile_analysis_boundary` | `signal_collection_contract.evidence_items` | collector 保真传递的 profile 边界声明；固定为分析证据边界。 |
 | `dominant_side` | `signal_collection_contract` | 盘前结构化预测证据汇总后的主方向，如 long、short、flat、mixed；不是交易授权。 |
 | `side_consensus` | `signal_collection_contract` | 三类分析师在方向上的一致性或分歧状态。 |
-| `trigger_status` | `signal_collection_contract` | 仅由 `dominant_side` 对应分析师的 `trigger_valid/current_trigger_confirmed/entry_trigger` 汇总；主方向为 flat/mixed 时固定为 `not_applicable`，反方向证据不得确认主方向触发；不是交易员执行权限。 |
+| `trigger_status` | `signal_collection_contract` | 仅由 `dominant_side` 对应分析师的合法机会状态与 `trigger_valid/current_trigger_confirmed/entry_trigger` 汇总；主方向为 flat/mixed 或主方向证据全部为 `no_opportunity` 时固定为 `not_applicable`，反方向 watch/已触发证据不得确认或升级主方向；不是交易员执行权限。 |
 | `supporting_analysts` | `signal_collection_contract` | 支持 `dominant_side` 的分析师列表。 |
 | `opposing_analysts` | `signal_collection_contract` | 反对 `dominant_side` 或给出反向证据的分析师列表。 |
 | `neutral_analysts` | `signal_collection_contract` | 无明确方向或只给背景证据的分析师列表。 |
@@ -293,7 +293,7 @@
 | `multi_evidence_consensus_score` | `signal_collection_contract.evidence_fusion` / PM scorecard | 多维证据一致性评分；只作为 PM `opportunity_score_components` 分项，不能替代最终合约。 |
 | `evidence_conflict_level` | `signal_collection_contract` | 盘前预测证据冲突程度汇总，来源于 `current_evidence_conflict`、反向证据和分析师分歧。 |
 | `data_quality_flags` | `signal_collection_contract` | Signal Collector从各AEC的 `data_usage_summary.sources.*` 真实可用性、时效、缺失、前视风险和可交易支持事实生成的唯一顶层摘要；不得从不存在的AEC顶层补偿字段读取。 |
-| `status` / `flags` / `missing_evidence` / `source` | Workflow 投给 Auditor 的 SCC 数据质量摘要 | 由共享 `build_scc_data_quality_summary` 从已校验 SCC 投影；`status` 只允许 `clean/warning/hard_fail`，`source` 固定为 `signal_collection_contract`，不得使用 `quality_status` 等别名。 |
+| `status` / `flags` / `missing_evidence` / `source` | Workflow、PM、Auditor 共用的 SCC 数据质量摘要 | 由共享 `build_scc_data_quality_summary` 从已校验 SCC 投影；`status` 只允许 `clean/warning/hard_fail`，`source` 固定为 `signal_collection_contract`。只有 `status=hard_fail` 可形成候选硬数据阻断；warning、基本面/新闻无当日新增和 `missing_evidence` 不能冒充 hard fail，不得使用 `quality_status` 等别名。 |
 | `setup_types` | `signal_collection_contract` | 从上游分析师证据收集到的 `setup_type` 列表。 |
 | `horizon_scope` | `signal_collection_contract` | 汇总后的证据期限范围，来源于 `horizon_class`、`analyst_horizon` 等字段。 |
 | `invalidation_summary` | `signal_collection_contract` | 从上游证据汇总出的失效边界和失效条件。 |
@@ -409,7 +409,7 @@
 | `recent_tail_loss_signal` | `action_value_learning_summary` / `rank_score_policy.rank_score.open_add_action_value_delta` | canonical 保护偏好、tail-loss 计数和真实亏损阈值形成的近期尾损强度；配置中的同名参数是其进入 `open_add_action_value_delta` 的乘数。 |
 | `positive_count` / `negative_count` / `exact_real_count` / `episode_count` / `strongest_positive` / `strongest_negative` / `used_lanes` / `ignored_lanes` | `action_value_learning_summary` / lifecycle learning trace | action-value 聚合的样本计数、最强记录摘要和 canonical lane 路由事实；只作可解释性与生命周期检查，不单独授权交易。 |
 | `alpha_profile_adjustment` | `opportunity_score_components` / `rank_score_policy.rank_score.product_setup_trigger_history` | 产品/setup/trigger 历史 profile 对候选质量的净修正；配置中的同名参数是其进入 `product_setup_trigger_history` 的乘数。 |
-| `market_conflict_penalty` / `critical_data_gap_penalty` / `fundamental_gap_penalty` | `opportunity_score_components` / `rank_score_policy.rank_score.conflict_risk_invalidation_penalty` | 市场确认冲突、关键数据缺口和基本面缺口的确定性扣分；配置中的同名参数是各扣分进入最终 rank 风险分项的乘数。 |
+| `market_conflict_penalty` / `critical_data_gap_penalty` / `fundamental_gap_penalty` | `opportunity_score_components` / `rank_score_policy.rank_score.conflict_risk_invalidation_penalty` | 市场确认冲突和共享 SCC `hard_fail` 的确定性扣分入口；基本面/新闻无当日新增及普通证据缺口通过 AEC 证据质量、时效和融合分反映，不能触发 `critical_data_gap`，也不得建立第二套基本面硬阻断。配置权重和 rank 公式保持不变。 |
 | `gating_failures` | PM scorecard / `rank_score_policy.rank_score.conflict_risk_invalidation_penalty` | 当前候选未满足条件的固定原因列表；rank 只按 `gating_failure_penalty_per_item` 和 `gating_failure_penalty_cap` 计算有限扣分，不把它改写为 canonical action 或硬风险事实。 |
 | `rank_score` | PM 第 5 步工具 `pm_full_market_capital_deployment` / `rank_score_policy` | 唯一全市场资金 rank 的直接排序分数。它由冷启动证据质量、资金层级资格、open/add action-value 学习修正、产品/setup/trigger 历史表现、trigger/execution 质量、资金效率和冲突/风险/失效边界惩罚共同组成；权重来自 `src/config/rank_score_policy.yaml`，只能由 `pm_full_market_capital_deployment` 在全市场候选池中生成。PM scorecard / `pm_signal_fusion` 只能提供输入组件，不能写最终 `rank_score`。 |
 | `rank_score_input_components` | PM Step4 `pm_signal_fusion` / PM Step5 `pm_full_market_capital_deployment` | Step4 交给 Step5 的 rank 原始输入对象；当前只保存不含学习、profile 和风险重复项的 `cold_start_evidence_quality`。它不是最终 `rank_input_components`，不得包含 `final_rank_score_generated_by` 或预生成 rank。 |
@@ -421,7 +421,7 @@
 | `capital_priority_score` | PM 第 5 步工具 `pm_full_market_capital_deployment` | 全市场 `opportunity_rank` 的排序输入分数，综合当前证据、产品级学习、部署资格、触发质量和风险扣分；它不是第二个 rank，也不是交易权限。PM 第 3 步只能写 `candidate_quality`，不能写该字段。 |
 | `capital_priority_tier` | PM 第 5 步工具 `pm_full_market_capital_deployment` | 候选的资金优先级层级：tradeable_candidate 高于 probe_candidate，高于 watch_for_trigger，高于 no_opportunity；只用于解释全市场资金 rank 的排序依据。PM 第 3 步只能写 `candidate_layer_hint`，不能写该字段。 |
 | `analyst_direction_evidence` / `direction_evidence_strength` | `pm_signal_fusion` | 分析师结构化方向证据和候选质量摘要，用于保留 `signal_collector` 汇总后的方向、证据强弱、setup、trigger、invalidation、冲突和学习校准输入；它不是 PM 内部方向优先级，不得写 `side_priority`，不得进入 Trader/Accountant 权限链。 |
-| `side_priority` / `ticker_side_priority` | `pm_ticker_side_selection` | PM 第 2 步单品种内部 long/short 方向优先级，只用于确定该产品代表候选方向；唯一生成口是 `pm_ticker_side_selection`，不得由 `pm_signal_fusion` 或 `signal_collector` 写入，不得写入最终 `opportunity_rank`。 |
+| `side_priority` / `ticker_side_priority` | `pm_ticker_side_selection` | PM 第 2 步单品种代表方向：无真实冲突时 SCC 唯一 `dominant_side=long/short` 对应方向固定为 1、反方向为 null，并同步成为 `preferred_side`；flat、mixed、真实 conflicted 或两侧无法区分时两侧均为 null、`preferred_side=flat`。唯一生成口是 `pm_ticker_side_selection`；不得读取学习或机会分重选方向，不得由 `pm_signal_fusion`/Collector 写入，也不是最终 `opportunity_rank`。 |
 | `side_priority_semantics_version` | `pm_ticker_side_selection` | 单品种方向优先级语义版本，固定为 `agentquant.ticker_side_priority.v1`。 |
 | `side_priority_is_not_capital_rank` | `pm_ticker_side_selection` | 布尔声明：单品种方向优先级不是全市场资金 rank。 |
 | `opportunity_rank` | PM 全市场资金部署工具 `pm_full_market_capital_deployment` / `final_action_contract.evidence_used` / `capital_deployment` / 复盘评估 | 当日所有实际增加风险的候选进入同一个全市场资金候选池后的唯一资金优先级排序；包括 `current_lots=0` 且 `target_lots!=0` 的新开仓，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale`。`rank=1` 固定表示当天全市场最值得优先占用新增风险资金的产品机会。它可以对应小探、正常真实资金或学习验证后的放大资金，但不生成第二张合约。PM scorecard 的单品种方向排序不得写入该字段；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控不得生成该字段，反转只有在旧方向退出后形成新的反向开仓合约时才重新排名。 |

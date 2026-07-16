@@ -16,6 +16,7 @@ from tools.common.final_action_semantics import (
     PROTECTIVE_ACTION_PREFERENCES,
     validate_action_preference_family_consistency,
 )
+from tools.common.signal_evidence_collection import has_concrete_entry_trigger
 
 
 ANALYST_ORDER = ("technical", "fundamental", "commodity_news")
@@ -61,7 +62,7 @@ def build_scc_market_confirmation(
         "features": evidence_items,
         "confirmations": sorted(set(name for name in confirmations if name)),
         "conflicts": sorted(set(conflicts)),
-        "data_missing": [str(item) for item in (contract.get("missing_evidence") or [])],
+        "data_missing": [],
         "data_unavailable": [],
         "fallback_covered_missing": [],
         "errors": [],
@@ -159,9 +160,8 @@ def _opportunity_state(signal: Any) -> str:
     state = (
         getattr(signal, "opportunity_state", None)
         or _contract_value(signal, "opportunity_state")
-        or "watch_for_trigger"
     )
-    return str(state or "watch_for_trigger").strip().lower() or "watch_for_trigger"
+    return str(state or "unknown").strip().lower() or "unknown"
 
 
 def _signal_bool(signal: Any, attr: str, contract_key: str | None = None) -> bool:
@@ -250,65 +250,7 @@ def _has_invalidation(signal: Any) -> bool:
 
 
 def _has_entry_setup(signal: Any) -> bool:
-    fields = [
-        getattr(signal, "entry_trigger", ""),
-        getattr(signal, "trade_setup", ""),
-        _contract_value(signal, "entry_trigger", ""),
-        _contract_value(signal, "pm_action_condition", ""),
-    ]
-    text = " ".join(str(item or "") for item in fields).lower()
-    if not text.strip():
-        return False
-    weak_terms = {
-        "unknown",
-        "none",
-        "n/a",
-        "wait",
-        "observe only",
-        "tracking only",
-        "wait_for_trigger",
-        "technical_price_trigger",
-        "fundamental_anchor",
-        "news_event_trigger",
-    }
-    stripped = text.strip()
-    if stripped in weak_terms or stripped.endswith("_trigger") or stripped.endswith("_anchor"):
-        return False
-    return any(
-        token in text
-        for token in [
-            "trigger",
-            "break",
-            "confirm",
-            "entry",
-            "enter",
-            "open",
-            "probe",
-            "vwap",
-            "volume",
-            "pullback",
-            "hold above",
-            "holding above",
-            "hold below",
-            "holding below",
-            "stabilization",
-            "stabilize",
-            "support",
-            "resistance",
-            "basis remains",
-            "backwardation",
-            "contango",
-            "反证",
-            "触发",
-            "确认",
-            "入场",
-            "企稳",
-            "站上",
-            "跌破",
-            "支撑",
-            "压力",
-        ]
-    )
+    return has_concrete_entry_trigger(_signal_text(signal, "entry_trigger"))
 
 
 def _setup_quality_ok(signal: Any) -> bool:
@@ -898,10 +840,8 @@ def build_opportunity_scorecard(
     confirmation_features = _as_list(confirmation.get("features"))
     confirmation_conflicts = _as_list(confirmation.get("conflicts"))
     data_missing = _as_list(confirmation.get("data_missing")) + _as_list(confirmation.get("data_unavailable"))
-    critical_gap = bool(data_quality.get("critical_gap") or data_quality.get("has_critical_gap"))
-    fundamental_setup_gap = bool(data_quality.get("fundamental_trade_setup_gap"))
-    if len(data_missing) >= 4:
-        critical_gap = True
+    critical_gap = str(data_quality.get("status") or "").strip().lower() == "hard_fail"
+    fundamental_setup_gap = False
 
     policy_counts: dict[str, int] = {}
     for row in adaptive_policy_state or []:
@@ -935,7 +875,8 @@ def build_opportunity_scorecard(
         supporting = [
             signal
             for signal in directional_signals
-            if _opportunity_state(signal) != "risk_reduction_candidate"
+            if _opportunity_state(signal)
+            in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
         ]
         invalidation_count = 0
         setup_count = 0
@@ -1141,7 +1082,6 @@ def build_opportunity_scorecard(
             and max_setup_quality >= min_tradeable_candidate_setup_quality
             and max_quality >= single_tradeable_candidate_setup_min_business_quality
             and avg_confidence >= single_tradeable_candidate_setup_min_confidence
-            and confirmation_score >= single_tradeable_candidate_setup_confirmation_score
             and not single_tradeable_blocking_failures.intersection(gating_failures)
             and (
                 not block_single_setup_on_technical_opposition
@@ -1150,6 +1090,7 @@ def build_opportunity_scorecard(
         )
         single_tradeable_candidate_setup_promoted = bool(
             single_tradeable_candidate_setup_confirmed
+            and confirmation_score >= single_tradeable_candidate_setup_confirmation_score
             and negative_learning_signal < _safe_float(cfg.get("single_candidate_negative_learning_soft_cap"), 0.45)
             and recent_tail_loss_signal < _safe_float(cfg.get("single_candidate_tail_loss_soft_cap"), 0.35)
             and entry_quality_loss_signal < _safe_float(cfg.get("single_candidate_entry_quality_loss_soft_cap"), 0.35)
@@ -1173,6 +1114,7 @@ def build_opportunity_scorecard(
                 and setup_count > 0
             )
             or single_tradeable_candidate_setup_promoted
+            or single_tradeable_candidate_setup_confirmed
         ):
             final_state = "probe_candidate"
         elif support_count > 0:

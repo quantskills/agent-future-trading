@@ -139,6 +139,19 @@ def _candidate_quality(row: Mapping[str, Any]) -> float:
     return round(_bounded(sum(float(value or 0.0) for value in components.values())), 6)
 
 
+def _resolved_scc_direction(contract: Mapping[str, Any] | None) -> str:
+    scc = contract if isinstance(contract, Mapping) else {}
+    dominant_side = str(scc.get("dominant_side") or "flat").strip().lower()
+    side_consensus = str(scc.get("side_consensus") or "").strip().lower()
+    fusion = scc.get("evidence_fusion") if isinstance(scc.get("evidence_fusion"), Mapping) else {}
+    alignment = str(fusion.get("evidence_alignment_state") or "").strip().lower()
+    if dominant_side not in {"long", "short"}:
+        return "flat"
+    if side_consensus == "conflicted" or alignment == "conflicted":
+        return "flat"
+    return dominant_side
+
+
 def select_ticker_side(
     *,
     ticker: str,
@@ -199,14 +212,11 @@ def select_ticker_side(
             row["side"],
         )
     )
-    priority_by_side: dict[str, int | None] = {}
-    side_priority = 1
-    for candidate in candidates:
-        if candidate["candidate_eligible"]:
-            priority_by_side[candidate["side"]] = side_priority
-            side_priority += 1
-        else:
-            priority_by_side[candidate["side"]] = None
+    preferred_side = _resolved_scc_direction(signal_collection_contract)
+    priority_by_side: dict[str, int | None] = {
+        "long": 1 if preferred_side == "long" else None,
+        "short": 1 if preferred_side == "short" else None,
+    }
     for side, priority in priority_by_side.items():
         row = scorecard.get(side)
         if isinstance(row, dict):
@@ -219,7 +229,7 @@ def select_ticker_side(
             row["candidate_layer_hint"] = _candidate_layer_hint(row)
             row.update(side_priority_semantics_payload())
 
-    preferred_side = str(scorecard.get("preferred_side") or "flat").lower()
+    scorecard["preferred_side"] = preferred_side
     preferred_row = _side_row(scorecard, preferred_side) if preferred_side in {"long", "short"} else {}
     preferred_quality = _candidate_quality(preferred_row) if preferred_row else 0.0
     capital_allocation_reason = {

@@ -23,7 +23,6 @@ from util.text_sanitize import sanitize_visible_text
 from tools.agent_tools.analysis.analyst_dynamic_weights import DynamicWeightCalculator
 from tools.agent_tools.analysis.analyst_learning_context import apply_config_learning_overlay
 from tools.agent_tools.analysis.analyst_business_quality import summarize_business_quality
-from tools.agent_tools.analysis.analyst_data_usage import build_pm_data_quality_summary
 from tools.common.order_semantics import (
     build_lot_intent_consistency,
     recommendation_intent_from_lots,
@@ -89,6 +88,7 @@ from tools.agent_tools.decision.pm_signal_fusion import (
 from tools.common.alpha_setup import compact_profile_for_trace
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
+    build_scc_data_quality_summary,
     validate_signal_collection_contract,
 )
 
@@ -593,6 +593,21 @@ def _scorecard_probe_seed(
             and "same_scope_alpha_setup_capped_or_rejected" not in failures
             and not row.get("technical_opposes_side")
         )
+        structurally_confirmed_probe = bool(
+            state in {"probe_candidate", "tradeable_candidate"}
+            and support_count >= 1
+            and bool(row.get("trigger_valid"))
+            and bool(row.get("current_trigger_confirmed"))
+            and bool(row.get("invalidation_present"))
+            and int(row.get("entry_setup_count") or 0) > 0
+            and bool(row.get("setup_quality_ok"))
+            and "missing_entry_setup" not in failures
+            and "missing_invalidation_boundary" not in failures
+            and "weak_entry_setup_quality" not in failures
+            and "critical_data_gap" not in failures
+            and "same_scope_alpha_setup_capped_or_rejected" not in failures
+            and not row.get("technical_opposes_side")
+        )
         regular_probe = support_count >= min_support and score >= min_score
         single_high_quality_probe = (
             allow_single_high_quality
@@ -609,6 +624,7 @@ def _scorecard_probe_seed(
             regular_probe
             or single_high_quality_probe
             or scorecard_confirmed_tradeable_candidate
+            or structurally_confirmed_probe
             or conditional_monitor_candidate
         ):
             candidates.append((side, row))
@@ -9816,7 +9832,7 @@ def _run_pm_six_step_decision(state: FundState):
     early_horizon = "*"
     early_market_regime = "*"
     early_setup_type = "*"
-    data_quality_summary_for_pm = build_pm_data_quality_summary(analyst_signals, market_confirmation)
+    data_quality_summary_for_pm = build_scc_data_quality_summary(signal_collection_contract)
     opportunity_scorecard_cfg = (
         (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
     )

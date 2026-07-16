@@ -563,8 +563,8 @@ PM 按以下顺序判断方向：
 1. 读取 SCC 的 `dominant_side`，确认其属于 `long`、`short`、`flat`、`mixed`。
 2. 使用 `side_consensus`、`evidence_alignment_state` 和 `multi_evidence_consensus_score` 核对主方向的一致性。
 3. 使用 `supporting_analysts`、`opposing_analysts`、`cross_analyst_conflicts` 和 `dominant_opposing_evidence` 保留主方向的支持与反对事实。
-4. 对 `long`、`short` 形成产品内部 `side_priority` 和 `ticker_side_priority`。
-5. `dominant_side` 为 `flat`、`mixed`、方向证据缺失、两侧无法区分时，方向选择结果保持 `flat`，不新增方向字段。
+4. 当 `dominant_side` 为唯一、无真实冲突的 `long` 或 `short` 时，只把该方向写成 `side_priority=1/ticker_side_priority=1` 并同步为 `preferred_side`；反方向优先级为 null。
+5. `dominant_side` 为 `flat`、`mixed`、`side_consensus/evidence_alignment_state=conflicted`、方向证据缺失或两侧无法区分时，方向选择结果保持 `flat`，两侧优先级均为 null。
 
 冲突、缺失和待确认项不会被删除。它们继续保留在候选状态中，供第 3 步判断交易状态和候选质量。
 
@@ -686,7 +686,7 @@ PM 以有符号 `current_lots` 确认持仓方向：当前手数大于零为 `lo
 
 PM 只读取 `opportunity_state` 的以下分析师证据语义，再形成自己的 `candidate_quality` 和 `candidate_layer_hint`：
 
-- `no_opportunity`：无持仓且产品代表方向为 `flat`。
+- `no_opportunity`：没有完整的“逻辑 T 日出现什么可观察条件就入场、在哪里失效”的方案；可以保留 long/short 方向和研究证据，但不计入新增风险支持或排名候选。
 - `watch_for_trigger`：方向、setup、具体入场触发和 canonical 失效边界完整，当前触发尚未成立，且 Trader 能用当日15分钟行情观察该触发。
 - `probe_candidate`：方向和必要结构化证据已经成立，但当前只具备小规模候选条件。
 - `tradeable_candidate`：方向、触发、证据质量、失效边界和当前风险空间支持进入后续资金决策。
@@ -695,6 +695,8 @@ PM 只读取 `opportunity_state` 的以下分析师证据语义，再形成自�
 代码梳理时把 `classify_pm_decision_state` 的基础判断前移到本步，把输入收窄为只读 `opportunity_state`、`current_lots`、方向比较结果、`trigger_status`、`evidence_quality`、`invalidation_summary` 和账户风险事实，并把 PM 结果收口到 `candidate_quality` 与 `candidate_layer_hint`。目标手数、学习成果、全市场 rank 和最终资金部署不得反向成为本步初始状态的必需输入。
 
 `opportunity_state` 不是交易动作，`candidate_quality` 和 `candidate_layer_hint` 也不是交易权限。第 4 步完成学习修正后，形成 open/add/scale 新增风险、反转后新风险，或获得非零条件目标的合法 `watch_for_trigger` 候选进入第 5 步；wait、hold、reduce、exit、仅有 `risk_reduction_candidate` 的空仓证据和 `target_lots=current_lots` 的零增量监控直接进入第 6 步。
+
+`missing_evidence` 和 `confirmation_requirements` 只降低证据强度、融合分或机会状态，不得转换为 `data_missing`，也不得按数量形成 `critical_data_gap`。PM 对数据质量只消费共享 `build_scc_data_quality_summary`；只有 `status=hard_fail` 可形成硬数据阻断。基本面或新闻没有当日新增、使用截止点内有效 T-n 数据以及普通 freshness warning 都不是全局 hard fail。
 
 #### 3.6 状态更新
 
@@ -973,6 +975,8 @@ PM 在开始排名前，汇集同一 `config_id`、同一 `trading_date` 下已�
 - 已确认不具备新增风险资格或已被输入门拒绝的候选
 
 队列为空是合法状态，表示当日没有需要竞争新增风险预算的候选。候选集合不完整、混入其他交易日或混入非新增风险状态属于 Step5 输入契约错误，不得通过补造 rank 继续运行。
+
+单个分析师形成共享校验通过的完整 setup、具体触发、canonical 失效边界且 `trigger_valid/current_trigger_confirmed=true` 时，即使另外两名分析师为 `no_opportunity`，也不得在 Step5 前清零。该候选必须携带真实 `supporting_signal_count=1`、分析师身份、证据强度、共识分和冲突进入队列；单来源自然获得更低 `cold_start_evidence_quality/rank_score`，不得补分、提高共识或自动授予预算、手数和交易权限。
 
 `workflow` 编排层只负责组织 PM 获得完整的当日输入集合，不计算 rank、不筛选资金候选、不分配预算，也不生成 Step5 结果。
 

@@ -430,11 +430,103 @@ _NON_ENTRY_TRIGGER_VALUES = {
 }
 
 
-def _has_concrete_entry_trigger(value: Any) -> bool:
+_NON_ENTRY_TRIGGER_PHRASES = (
+    "no current entry trigger",
+    "no active entry trigger",
+    "no valid entry trigger",
+    "no specific entry trigger",
+    "no concrete entry trigger",
+    "entry trigger is not established",
+    "entry trigger is not defined",
+    "entry trigger is unavailable",
+    "entry trigger is absent",
+    "entry trigger is missing",
+    "without an entry trigger",
+    "without entry trigger",
+    "尚无入场触发",
+    "没有入场触发",
+    "未形成入场触发",
+)
+
+_FUTURE_DATA_TRIGGER_MARKERS = (
+    "next weekly",
+    "next monthly",
+    "weekly report",
+    "weekly data",
+    "monthly report",
+    "monthly data",
+    "inventory report",
+    "government report",
+    "future release",
+    "future data",
+    "下周数据",
+    "下月数据",
+    "周度报告",
+    "月度报告",
+    "未来发布",
+)
+
+_TRADER_OBSERVABLE_TRIGGER_MARKERS = (
+    "15-minute",
+    "15 minute",
+    "15m",
+    "price",
+    "close",
+    "open",
+    "break",
+    "breakout",
+    "breakdown",
+    "above",
+    "below",
+    "cross",
+    "hold",
+    "pullback",
+    "rebound",
+    "reversal",
+    "stabiliz",
+    "vwap",
+    "volume",
+    "open interest",
+    "support",
+    "resistance",
+    "moving average",
+    "momentum",
+    "macd",
+    "rsi",
+    "adx",
+    "high",
+    "low",
+    "settlement",
+    "价格",
+    "收盘",
+    "开盘",
+    "突破",
+    "跌破",
+    "站上",
+    "企稳",
+    "回踩",
+    "反转",
+    "成交量",
+    "持仓量",
+    "支撑",
+    "阻力",
+    "均线",
+)
+
+
+def has_concrete_entry_trigger(value: Any) -> bool:
+    """Return whether an entry condition is concrete and observable by Trader."""
     text = _text(value).strip().lower()
     if text in _NON_ENTRY_TRIGGER_VALUES:
         return False
-    return not (text.endswith("_trigger") or text.endswith("_anchor"))
+    if text.endswith("_trigger") or text.endswith("_anchor"):
+        return False
+    observable = any(marker in text for marker in _TRADER_OBSERVABLE_TRIGGER_MARKERS)
+    if any(phrase in text for phrase in _NON_ENTRY_TRIGGER_PHRASES) and not observable:
+        return False
+    if any(marker in text for marker in _FUTURE_DATA_TRIGGER_MARKERS) and not observable:
+        return False
+    return observable
 
 
 def _optional_contract_number(
@@ -535,7 +627,7 @@ def validate_action_evidence_contract(
     opportunity_state = _text(contract.get("opportunity_state")).lower()
     if opportunity_state not in ACTION_EVIDENCE_OPPORTUNITY_STATES:
         raise ValueError("action_evidence_contract_invalid_opportunity_state")
-    entry_trigger_present = _has_concrete_entry_trigger(contract.get("entry_trigger"))
+    entry_trigger_present = has_concrete_entry_trigger(contract.get("entry_trigger"))
     invalidation_proof = _has_canonical_invalidation_proof(contract)
     if contract.get("invalidation_present") is True and not invalidation_proof:
         raise ValueError("action_evidence_contract_invalidation_proof_missing")
@@ -551,6 +643,8 @@ def validate_action_evidence_contract(
             raise ValueError("action_evidence_contract_candidate_missing_entry_trigger")
         if contract.get("trigger_valid") is not True:
             raise ValueError("action_evidence_contract_candidate_without_current_trigger")
+        if contract.get("current_trigger_confirmed") is not True:
+            raise ValueError("action_evidence_contract_candidate_without_current_confirmation")
         if contract.get("invalidation_present") is not True:
             raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
     if opportunity_state == "watch_for_trigger":
@@ -558,11 +652,11 @@ def validate_action_evidence_contract(
             raise ValueError("action_evidence_contract_watch_missing_entry_trigger")
         if contract.get("invalidation_present") is not True:
             raise ValueError("action_evidence_contract_trade_setup_missing_invalidation")
+        if contract.get("trigger_valid") is not False or contract.get("current_trigger_confirmed") is not False:
+            raise ValueError("action_evidence_contract_watch_trigger_already_confirmed")
         if signal == Signal.NEUTRAL.value:
             if _text(contract.get("counterfactual_side")).lower() not in {"long", "short"}:
                 raise ValueError("action_evidence_contract_neutral_watch_missing_side")
-            if contract.get("trigger_valid") is not False or contract.get("current_trigger_confirmed") is not False:
-                raise ValueError("action_evidence_contract_neutral_watch_trigger_already_confirmed")
     data_usage = contract["data_usage_summary"]
     usage_extras = sorted(set(data_usage) - ACTION_EVIDENCE_DATA_USAGE_FIELDS)
     if usage_extras:
@@ -738,7 +832,7 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
     opportunity_state = _text(contract.get("opportunity_state"), "unknown")
     trigger_status = (
         "not_applicable"
-        if opportunity_state == "no_opportunity"
+        if opportunity_state in {"no_opportunity", "risk_reduction_candidate"}
         else "confirmed"
         if trigger_valid and trigger_confirmed
         else "valid_unconfirmed"
@@ -892,6 +986,8 @@ def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
         else "valid_unconfirmed"
         if dominant_trigger_states.get("valid_unconfirmed")
         else "watch_for_trigger"
+        if dominant_trigger_states.get("watch_for_trigger")
+        else "not_applicable"
     )
     return {
         "dominant_side": dominant_side,
@@ -1136,14 +1232,6 @@ def build_signal_collection_contract(
     invalidation_summary: list[dict] = []
     setup_types: list[str] = []
     horizons: list[str] = []
-    side_counts: Counter[str] = Counter()
-    side_confidence: Counter[str] = Counter()
-    trigger_states_by_side: dict[str, Counter[str]] = {
-        "long": Counter(),
-        "short": Counter(),
-        "flat": Counter(),
-    }
-
     seen_agents: set[str] = set()
     for signal in analyst_signals or []:
         agent = _agent_name(signal)
@@ -1177,16 +1265,13 @@ def build_signal_collection_contract(
         opportunity_state = _text(contract.get("opportunity_state"), "unknown")
         trigger_status = (
             "not_applicable"
-            if opportunity_state == "no_opportunity"
+            if opportunity_state in {"no_opportunity", "risk_reduction_candidate"}
             else "confirmed"
             if trigger_valid and trigger_confirmed
             else "valid_unconfirmed"
             if trigger_valid
             else "watch_for_trigger"
         )
-        side_counts[side] += 1
-        side_confidence[side] += confidence
-        trigger_states_by_side[side][trigger_status] += 1
 
         setup_type = _text(contract.get("setup_type"), "unknown")
         if setup_type and setup_type != "unknown":
@@ -1251,49 +1336,8 @@ def build_signal_collection_contract(
     missing_agents = [name for name in enabled if name not in seen_agents]
     missing_evidence.extend(f"missing_analyst:{name}" for name in missing_agents)
 
-    long_key = (side_counts.get("long", 0), side_confidence.get("long", 0.0))
-    short_key = (side_counts.get("short", 0), side_confidence.get("short", 0.0))
-    if long_key == short_key and long_key[0] > 0:
-        dominant_side = "mixed"
-    elif long_key > short_key:
-        dominant_side = "long"
-    elif short_key > long_key:
-        dominant_side = "short"
-    else:
-        dominant_side = "flat"
-    supporting = [item["analyst"] for item in evidence_items if item.get("side") == dominant_side and dominant_side != "flat"]
-    opposing_side = "short" if dominant_side == "long" else "long" if dominant_side == "short" else ""
-    opposing = [item["analyst"] for item in evidence_items if item.get("side") == opposing_side]
-    neutral = [item["analyst"] for item in evidence_items if item.get("side") == "flat"]
-
-    if dominant_side == "mixed":
-        consensus = "conflicted"
-    elif dominant_side == "flat":
-        consensus = "no_direction"
-    elif opposing:
-        consensus = "conflicted"
-    elif len(set(supporting)) >= 2:
-        consensus = "multi_analyst_support"
-    else:
-        consensus = "single_analyst_support"
-
-    strength_scores = [
-        float(item.get("confidence") or 0.0) * _evidence_quality_score(item.get("evidence_quality"))
-        for item in evidence_items
-        if item.get("side") == dominant_side and dominant_side != "flat"
-    ]
-    strength = _quality_label(sum(strength_scores) / len(strength_scores)) if strength_scores else "unknown"
-    conflict_level = "high" if len(opposing) >= 2 else "medium" if opposing else "low"
-    dominant_trigger_states = trigger_states_by_side.get(dominant_side, Counter())
-    aggregate_trigger = (
-        "not_applicable"
-        if dominant_side in {"flat", "mixed"}
-        else "confirmed"
-        if dominant_trigger_states.get("confirmed")
-        else "valid_unconfirmed"
-        if dominant_trigger_states.get("valid_unconfirmed")
-        else "watch_for_trigger"
-    )
+    direction_summary = _direction_summary(evidence_items)
+    dominant_side = direction_summary["dominant_side"]
     fusion_summary = build_signal_collection_fusion_summary(
         evidence_items,
         dominant_side=dominant_side,
@@ -1308,13 +1352,13 @@ def build_signal_collection_contract(
         "source_contracts": source_contracts,
         "evidence_items": evidence_items,
         "dominant_side": dominant_side,
-        "side_consensus": consensus,
-        "trigger_status": aggregate_trigger,
-        "supporting_analysts": sorted(set(supporting)),
-        "opposing_analysts": sorted(set(opposing)),
-        "neutral_analysts": sorted(set(neutral)),
-        "evidence_strength": strength,
-        "evidence_conflict_level": conflict_level,
+        "side_consensus": direction_summary["side_consensus"],
+        "trigger_status": direction_summary["trigger_status"],
+        "supporting_analysts": direction_summary["supporting_analysts"],
+        "opposing_analysts": direction_summary["opposing_analysts"],
+        "neutral_analysts": direction_summary["neutral_analysts"],
+        "evidence_strength": direction_summary["evidence_strength"],
+        "evidence_conflict_level": direction_summary["evidence_conflict_level"],
         "confirmation_requirements": fusion_summary.get("confirmation_requirements") or [],
         "missing_evidence": merged_missing_evidence,
         "data_quality_flags": sorted(set(data_quality_flags)),

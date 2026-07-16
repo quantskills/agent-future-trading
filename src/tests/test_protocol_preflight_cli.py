@@ -13,6 +13,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from run import backtest
 from run import pre_backtest_test
+from llm.inference import LLMConfig, _build_provider_kwargs, llm_audit_metadata
+from llm.provider import Provider
 from tools.agent_tools.control.pg_preflight import run_preflight_checks
 
 
@@ -90,6 +92,83 @@ class ProtocolPreflightCliTest(unittest.TestCase):
             result = run_preflight_checks(repo_root=PROJECT_ROOT, llm_config=llm_config)
         self.assertTrue(result.passed, result.to_dict())
         get_model.assert_not_called()
+
+    def test_preflight_accepts_provider_default_url_and_api_key_env(self):
+        cases = (
+            (
+                "CodexOpenAI",
+                "switchable-gpt",
+                "CODEX_OPENAI_API_KEY",
+                {"codex_openai": {"reasoning_effort": "medium"}},
+            ),
+            (
+                "TQXAI",
+                "switchable-claude",
+                "TQX_LLM_API_KEY",
+                {},
+            ),
+            (
+                "DeepSeek",
+                "deepseek-v4-pro",
+                "DEEPSEEK_API_KEY",
+                {
+                    "deepseek": {
+                        "thinking": {"enabled": True},
+                        "reasoning_effort": "high",
+                    }
+                },
+            ),
+        )
+        for provider, model, env_name, provider_overrides in cases:
+            with self.subTest(provider=provider), patch.dict(
+                os.environ,
+                {env_name: "present"},
+                clear=False,
+            ), patch(
+                "llm.inference.get_model",
+                side_effect=AssertionError("preflight must not instantiate an LLM"),
+            ) as get_model:
+                result = run_preflight_checks(
+                    repo_root=PROJECT_ROOT,
+                    llm_config={
+                        "provider": provider,
+                        "model": model,
+                        **provider_overrides,
+                    },
+                )
+            self.assertTrue(result.passed, result.to_dict())
+            get_model.assert_not_called()
+
+    def test_deepseek_v4_pro_high_thinking_route_is_canonical(self):
+        raw_config = {
+            "provider": "DeepSeek",
+            "model": "deepseek-v4-pro",
+            "temperature": None,
+            "structured_output_method": "json_mode",
+            "deepseek": {
+                "thinking": {"enabled": True},
+                "reasoning_effort": "high",
+            },
+        }
+        config = LLMConfig(**raw_config)
+
+        self.assertEqual(
+            _build_provider_kwargs(Provider.DEEPSEEK, config),
+            {
+                "extra_body": {"thinking": {"type": "enabled"}},
+                "reasoning_effort": "high",
+            },
+        )
+        self.assertEqual(
+            llm_audit_metadata(raw_config),
+            {
+                "provider": "DeepSeek",
+                "model": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "reasoning_effort": "high",
+            },
+        )
 
     def test_pre_backtest_runner_has_no_llm_auth_option(self):
         argv = ["pre_backtest_test.py", "--config", "config/dev.yaml", "--local-db"]
