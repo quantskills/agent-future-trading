@@ -1377,6 +1377,13 @@ class PandaAIAPI:
         filtered: list[dict[str, Any]] = []
         for row in rows:
             record = self._coerce_record(row).copy()
+            logical_trading_date = self._parse_trade_date(record.get("trading_date"))
+            if (
+                logical_trading_date is None
+                or logical_trading_date < start_date
+                or logical_trading_date > end_date
+            ):
+                continue
             row_dt = self._parse_minute_datetime(record)
             if row_dt is None:
                 continue

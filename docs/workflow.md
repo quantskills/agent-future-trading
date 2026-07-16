@@ -4,6 +4,10 @@
 
 ## 一、工作流程
 
+本文中的 `T` 始终表示期货逻辑交易日，`Prev(T)` / `Next(T)` 由正式交易日与夜盘映射机制确定，不按自然日加减。对有夜盘的品种，物理 `Prev(T)` 晚间产生的分钟线、订单和成交可以属于逻辑 `T`；`created_at`、分钟 `datetime` 表示物理时间，业务 `trading_date` 仍统一登记逻辑交易日。
+
+Proposal 为逻辑 `T` 生成策略时，`reference_portfolio_id` 必须指向 `portfolio.trading_date=Prev(T)` 的最近已结算账户/持仓快照；PandaAI 日线与新闻不得晚于 `Prev(T)`。Finoview 按 `finoview_factor_catalog.yaml.release_lag_days` 和正式交易日机制选择最新可见 `tradeDate`，Router 格式化输入与 factor snapshot 共用同一选择器；`recordTime` 不作为发布时间或可见边界。三份 AEC、SCC、recommendation 及其 `effective_trade_date` 均属于逻辑 `T`。
+
 ```text
 【物理输入】
 PandaAI行情 / Finoview基本面文件 / 新闻txt
@@ -40,6 +44,7 @@ PM Step4调用 pm_decision_memory_retrieval.retrieve_pm_memory，
 从研究学习SQL读取当前交易日前、与产品、方向和生命周期匹配的PM学习成果，
 并继续更新同一个 pm_state
 PM Step5仅对新增风险候选完成排名、预算分配和手数计算，
+其中合法 `watch_for_trigger` 只有在获得非零条件目标时才作为新增风险候选进入同一排名；未获选或零手条件观察不携带资金 rank，
 并继续更新同一个 pm_state；非新增风险候选跳过Step5
 PM Step6基于最终 pm_state生成 FuturesRecommendation，
 其 signal_snapshot 内含：
@@ -115,6 +120,7 @@ Researcher后续读取已完成的Phase4状态及完整SQL事实链，不单独�
 workflow 编排层在 Phase4 完成后，以交易日期和主配置启动 Researcher
 Researcher从 SQL 读取已完成的Phase4状态、审计及执行后的 futures_recommendation、
 当日 futures_transaction和daily_settlement，
+分别验证参考组合日期为正式 `Prev(T)`，三份持久化 AEC、SCC、recommendation、execution、transaction和settlement属于逻辑 `T`，
 在内存中形成已结算交易episode、未交易机会、结构化研究和未来学习结果
         ↓
 【物理输出⑦】
@@ -126,6 +132,7 @@ Researcher学习链将研究与未来学习结果物理化为：
         ↓
 【下一交易日学习回流】
 workflow 编排层以新的交易日期和主配置启动分析师及PM链路
+逻辑 `T` 的Phase4与Researcher完成后，成果可由物理 `T` 晚间运行、目标为逻辑 `Next(T)` 的Proposal读取；严格日期过滤禁止其反向影响已经完成的逻辑 `T`，
 三个分析师分别从研究学习SQL读取当前交易日前的本专业学习成果，
 用于完善LLM提示词和校对当日信号
 PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
@@ -752,6 +759,8 @@ FuturesRecommendation.signal_snapshot.execution_translation
 该结构必须保留翻译订单、改写原因、参考动作与手数、执行价格基础、PM最终生命周期摘要、执行合约、盘中执行、Phase2订单计划、最终合约来源、Auditor结论、执行阻断、最终执行依据和市场规则阻断。该结构只解释执行翻译，不得从原始AEC再做方向过滤，不得成为第二套交易权限或第二张合约。
 
 Trader必须从已审计 `final_action_contract` 读取最终setup、期限、市场状态、触发、数值失效和ATR止损事实；SCC只供追溯，不得成为Trader重新选择方向或执行边界的第二证据入口。禁止继续依赖旧的 `signal_snapshot.technical/fundamental/commodity_news` 路径补造 `signal_lifecycle`；无法从正式合约取得的生命周期字段不得以空对象冒充完整执行事实。`target_price` 仅在Trader存在合法运行时输入时才允许派生；当前无合法 `target_return` 生产者时不得伪造。
+
+已审计 FAC 若为条件 watch，必须保持 `requires_intraday_confirmation=true`，Trader 用15分钟线判断触发并用下一根合法1分钟线执行。FAC 若以 canonical 当前触发事实写入 `can_execute_without_intraday_trigger=true`，Trader 对 breakout、pullback、vwap_confirmed、event_immediate 等合法 profile 不再复判15分钟触发，只使用当时可见的合法1分钟线；此时执行审计的 `trigger_checked=false`。Trader 对 open/add/scale 的硬保证金安全检查与 PM、Auditor 共用 `current_account_margin-current_ticker_margin+target_ticker_margin` 投影，不能重复计算已有持仓，reduce/exit 不受新增风险保证金检查阻断。
 
 ##### 3.2.8 Trader追加：execution_result完整结构
 

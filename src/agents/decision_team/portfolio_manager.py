@@ -742,63 +742,6 @@ def _position_budget_policy_config(full_config: dict | None) -> dict:
     }
 
 
-def _pm_new_entry_semantic_block_reason(justification: str) -> str | None:
-    """Detect PM prose that explicitly contradicts a new-entry recommendation."""
-    text = re.sub(r"\s+", " ", str(justification or "")).strip().lower()
-    if not text:
-        return None
-    no_position_patterns = (
-        r"\bno\s+(?:new\s+)?position\s+(?:is\s+)?(?:warranted|recommended|justified)",
-        r"\bno\s+(?:trade|entry|new\s+entry)\s+(?:is\s+)?(?:warranted|recommended|justified)",
-        r"\b(?:new\s+)?entry\s+is\s+not\s+(?:warranted|recommended|justified)",
-        r"\b(?:new\s+)?position\s+is\s+not\s+(?:warranted|recommended|justified)",
-        r"\bsizing\s+prior\s+(?:set\s+)?to\s+0\b",
-        r"\b(?:not|is\s+not|isn't)\s+(?:a\s+)?(?:tradeable|tradable|actionable)\s+(?:setup|entry|opportunity)",
-    )
-    no_trigger_patterns = (
-        r"\bwithout\s+(?:an?\s+)?(?:actionable|valid|clear|current)\s+(?:entry\s+)?(?:timing\s+)?triggers?\b",
-        r"\blacks?\s+(?:an?\s+)?(?:actionable|valid|clear|current)\s+(?:entry\s+)?(?:timing\s+)?triggers?\b",
-        r"\bno\s+(?:actionable|valid|clear|current)\s+(?:entry\s+)?(?:timing\s+)?triggers?\b",
-        r"\bno\s+timing\s+triggers?\s+(?:exists?|present|confirmed)\b",
-    )
-    watchlist_patterns = (
-        r"\bwatchlist\s+only\b",
-        r"\bobserve\s+only\b",
-        r"\bobservation\s+only\b",
-        r"\bkept?\s+(?:as|on)\s+(?:the\s+)?watchlist\b",
-    )
-    if any(re.search(pattern, text) for pattern in no_position_patterns):
-        return "pm_text_no_trade_blocks_new_entry"
-    if any(re.search(pattern, text) for pattern in no_trigger_patterns):
-        return "pm_text_no_entry_trigger_blocks_new_entry"
-    if any(re.search(pattern, text) for pattern in watchlist_patterns):
-        return "pm_text_watchlist_only_blocks_new_entry"
-    return None
-
-
-def _semantic_watchlist_authority(final_entry_authority: dict | None, reason: str) -> dict:
-    detail = dict(final_entry_authority or {})
-    reason_codes = sorted(set([str(item) for item in (detail.get("reason_codes") or [])] + [reason]))
-    detail.update({
-        "requires_authority": True,
-        "decision": "watchlist_only",
-        "authority_type": "watchlist_only",
-        "open_action_evidence": False,
-        "strong_current_evidence": False,
-        "max_allowed_margin_ratio": 0.0,
-        "reason_codes": reason_codes,
-        "semantic_consistency_gate": {
-            "passed": False,
-            "block_reason": reason,
-            "business_boundary": (
-                "PM final structured authority cannot deny or fail to prove a new entry "
-                "while final lots send an open order to Trader"
-            ),
-        },
-    })
-    return detail
-
-
 def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> str | None:
     """Reject new-entry recommendations whose final structured authority is not tradeable.
 
@@ -826,9 +769,6 @@ def _structured_new_entry_block_reason(final_entry_authority: dict | None) -> st
         if is_conditional_monitor_contract(final_entry_authority):
             return None
         hard_watchlist_codes = {
-            "pm_text_no_trade_blocks_new_entry",
-            "pm_text_no_entry_trigger_blocks_new_entry",
-            "pm_text_watchlist_only_blocks_new_entry",
             "watch_for_trigger_cannot_open_position",
             "daily_tradeability_watchlist_only",
         }
@@ -873,10 +813,11 @@ def _enrich_final_authority_with_analyst_evidence(
         state = _signal_opportunity_state(signal)
         current_evidence = bool(
             trigger_valid
+            and _canonical_current_trigger_confirmed(signal)
             and invalidation_present
             and side in {"long", "short"}
             and (not target_side or side == target_side)
-            and state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}
+            and state in {"probe_candidate", "tradeable_candidate"}
         )
         if agent == "technical" and current_evidence and evidence_role == "entry_timing":
             has_technical_confirmation = True
@@ -891,6 +832,7 @@ def _enrich_final_authority_with_analyst_evidence(
             "side": side,
             "opportunity_state": state,
             "trigger_valid": trigger_valid,
+            "current_trigger_confirmed": _canonical_current_trigger_confirmed(signal),
             "invalidation_present": invalidation_present,
             "entry_trigger": fields.get("entry_trigger"),
             "entry_timing_signal": fields.get("entry_timing_signal"),
@@ -3128,6 +3070,11 @@ def _canonical_trigger_valid(signal) -> bool:
     return bool(contract.get("trigger_valid")) if "trigger_valid" in contract else False
 
 
+def _canonical_current_trigger_confirmed(signal) -> bool:
+    contract = _canonical_action_evidence_contract(signal)
+    return bool(contract.get("current_trigger_confirmed")) if "current_trigger_confirmed" in contract else False
+
+
 def _canonical_invalidation_present(signal) -> bool:
     contract = _canonical_action_evidence_contract(signal)
     if "invalidation_present" in contract:
@@ -3226,6 +3173,7 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
         "entry_timing_signal": entry_timing_signal,
         "price_location": price_location,
         "trigger_valid": bool(trigger_valid),
+        "current_trigger_confirmed": _canonical_current_trigger_confirmed(signal),
         "invalidation_present": bool(invalidation_present),
     }
 
@@ -3756,6 +3704,7 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
             continue
         contract_fields = _derive_signal_contract_fields(signal, agent_name)
         trigger_valid = _canonical_trigger_valid(signal)
+        current_trigger_confirmed = _canonical_current_trigger_confirmed(signal)
         invalidation_present = _canonical_invalidation_present(signal)
         payload = {
             "agent_name": agent_name,
@@ -3769,9 +3718,10 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
             "entry_timing_signal": contract_fields.get("entry_timing_signal"),
             "price_location": contract_fields.get("price_location"),
             "trigger_valid": trigger_valid,
+            "current_trigger_confirmed": current_trigger_confirmed,
             "invalidation_present": invalidation_present,
+            "opportunity_state": _signal_opportunity_state(signal),
             "opportunity_type": str(getattr(signal, "opportunity_type", "") or ""),
-            "entry_trigger": str(getattr(signal, "entry_trigger", "") or ""),
             "event_type": str(getattr(signal, "event_type", "") or ""),
             "confidence": _safe_float(getattr(signal, "confidence", 0.0), 0.0),
         }
@@ -3863,14 +3813,23 @@ def _build_execution_contract_fields(
         invalidation = technical.get("invalidation") or news.get("invalidation") or ""
 
     date_text = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date or "")
+    aligned_current_trigger = any(
+        payload.get("side") == target_side
+        and payload.get("trigger_valid")
+        and payload.get("current_trigger_confirmed")
+        and payload.get("invalidation_present")
+        and payload.get("opportunity_state") in {"probe_candidate", "tradeable_candidate"}
+        for payload in signal_payloads.values()
+        if isinstance(payload, dict)
+    )
+    direct_entry_authorized = bool(
+        target_lots != current_lots
+        and target_lots != 0
+        and aligned_current_trigger
+        and _semantic_authority_allows_entry(final_entry_authority)
+    )
     can_execute_without_intraday_trigger = bool(
-        profile == "exit_immediate"
-        or (
-            profile == "event_immediate"
-            and authority_type == "real_budget_entry"
-            and final_entry_authority.get("open_action_evidence")
-            and final_entry_authority.get("strong_current_evidence")
-        )
+        profile == "exit_immediate" or direct_entry_authorized
     )
     if final_entry_authority.get("conditional_trigger_authority"):
         can_execute_without_intraday_trigger = False
@@ -7746,7 +7705,7 @@ def _profitable_hold_still_supported(
         fundamental_supports_current
         or technical_supports_current
         or news_supports_current
-        or str(current_state or "").lower() in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}
+        or str(current_state or "").lower() in {"probe_candidate", "tradeable_candidate"}
     )
     anchor_supported = fundamental_supports_current or news_supports_current
     if anchor_supported:
@@ -7824,17 +7783,18 @@ def _side_opportunity_state_summary(analyst_signals: list, side: str) -> dict:
         )
         if not state_targets_side:
             continue
-        supporting += 1
         states.append(state)
         opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
-        if state in {"probe_candidate", "tradeable_candidate", "risk_reduction_candidate"}:
+        if state == "risk_reduction_candidate":
+            risk_reduction_support += 1
+            continue
+        supporting += 1
+        if state in {"probe_candidate", "tradeable_candidate"}:
             tradeable_support += 1
         if state in {"probe_candidate", "tradeable_candidate"}:
             probe_candidate_support += 1
         if state == "watch_for_trigger":
             watch_for_trigger_support += 1
-        if state == "risk_reduction_candidate":
-            risk_reduction_support += 1
     return {
         "side": side,
         "supporting_signal_count": supporting,
@@ -10246,38 +10206,18 @@ def _run_pm_six_step_decision(state: FundState):
         and abs(current_ticker_exposure) <= 1e-12
         and scorecard_probe_side in {"long", "short"}
     ):
-        scorecard_semantic_block_reason = _pm_new_entry_semantic_block_reason(position_risk.justification)
-        if scorecard_semantic_block_reason:
-            scorecard_probe_seed_not_applied = {
-                "side": scorecard_probe_side,
-                "ratio": float(scorecard_probe_ratio),
-                "scorecard": scorecard_probe_row,
-                "status": "candidate_not_applied",
-                "reason": scorecard_semantic_block_reason,
-                "single_source_boundary": (
-                    "scorecard can propose an opportunity candidate, but it cannot write lots "
-                    "when PM's current evidence conclusion denies a new entry"
-                ),
-            }
-            position_risk.justification += (
-                f"\n[Opportunity probe candidate not applied: scorecard {scorecard_probe_side} "
-                f"{scorecard_probe_row.get('final_state')} score={scorecard_probe_row.get('score')} "
-                f"conflicts with PM entry conclusion ({scorecard_semantic_block_reason})]"
-            )
-            pass
+        scorecard_conditional_monitor = _scorecard_conditional_monitor_candidate(scorecard_probe_row)
+        position_risk.optimal_position_ratio = scorecard_probe_ratio
+        if scorecard_conditional_monitor:
+            scorecard_conditional_monitor_seed_applied = True
         else:
-            scorecard_conditional_monitor = _scorecard_conditional_monitor_candidate(scorecard_probe_row)
-            position_risk.optimal_position_ratio = scorecard_probe_ratio
-            if scorecard_conditional_monitor:
-                scorecard_conditional_monitor_seed_applied = True
-            else:
-                scorecard_probe_seed_applied = True
-            position_risk.justification += (
-                f"\n[Opportunity {'conditional monitor' if scorecard_conditional_monitor else 'probe'} seed: scorecard {scorecard_probe_side} "
-                f"{scorecard_probe_row.get('final_state')} score={scorecard_probe_row.get('score')} "
-                f"-> target ratio {scorecard_probe_ratio:.2%}]"
-            )
-            pass
+            scorecard_probe_seed_applied = True
+        position_risk.justification += (
+            f"\n[Opportunity {'conditional monitor' if scorecard_conditional_monitor else 'probe'} seed: scorecard {scorecard_probe_side} "
+            f"{scorecard_probe_row.get('final_state')} score={scorecard_probe_row.get('score')} "
+            f"-> target ratio {scorecard_probe_ratio:.2%}]"
+        )
+        pass
 
     control_reasons: list[str] = []
     control_notes: list[str] = []
@@ -11208,36 +11148,6 @@ def _run_pm_six_step_decision(state: FundState):
             margin_required = float(getattr(current_position, "margin_used", 0.0) or 0.0)
             new_net_exposure = current_net_exposure
             control_block_reason = "final_contract_authority_not_met"
-
-    if contract_requires_full_market_capital_rank(
-        {"current_lots": current_lots, "target_lots": target_lots}
-    ):
-        semantic_block_reason = _pm_new_entry_semantic_block_reason(position_risk.justification)
-        if semantic_block_reason:
-            final_entry_authority = _semantic_watchlist_authority(
-                final_entry_authority,
-                semantic_block_reason,
-            )
-            control_diagnostics["final_action_authority"] = final_entry_authority
-            control_diagnostics["pm_semantic_consistency_gate"] = {
-                "passed": False,
-                "block_reason": semantic_block_reason,
-                "original_target_lots": int(target_lots),
-                "original_target_ratio": float(position_risk.optimal_position_ratio),
-                "text_excerpt": str(position_risk.justification or "")[:300],
-                "business_boundary": "no_trade_or_no_trigger_text_cannot_emit_open_recommendation",
-            }
-            control_reasons.append(semantic_block_reason)
-            control_notes.append(
-                f"{ticker} incremental risk kept at current exposure: PM text conclusion conflicts with added lots "
-                f"({semantic_block_reason})."
-            )
-            position_risk.optimal_position_ratio = current_ticker_exposure
-            target_value = account_equity * current_ticker_exposure
-            target_lots = current_lots
-            margin_required = float(getattr(current_position, "margin_used", 0.0) or 0.0)
-            new_net_exposure = current_net_exposure
-            control_block_reason = semantic_block_reason
 
     if current_lots == 0 and target_lots != 0:
         (

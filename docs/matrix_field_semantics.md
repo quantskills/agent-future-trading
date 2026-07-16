@@ -35,17 +35,17 @@
 | `analyst` | 分析师记录 / 学习预算 | 分析师名称，如 technical、fundamental、commodity_news。 |
 | `config_id` | 所有运行记录 | 本次回测 / 配置实例 ID。 |
 | `exp_name` | config | 实验名称。 |
-| `trading_date` | 所有交易日记录 | 记录所属交易日。 |
-| `effective_trade_date` | 推荐 / 执行 | 推荐实际可执行日期。 |
+| `trading_date` | 所有交易日记录 | 期货逻辑交易日；夜盘物理时间可位于前一日晚上，但不得改用物理日期登记业务事实。 |
+| `effective_trade_date` | 推荐 / 执行 | 推荐实际适用和执行的逻辑交易日。 |
 | `ticker` | 行情 / 信号 / 研究 | 品种代码。 |
 | `sector` | 分析师 / 研究 / 绩效 | 品种所属板块或行业分组。 |
 | `underlying_code` | 合约 / 换月 / 推荐 | 标的品种代码。 |
 | `contract_code` | 合约 / 成交 / 结算 | 具体期货合约。 |
 | `portfolio_id` | 组合 / 成交 / 结算 | 组合 ID。 |
-| `reference_portfolio_id` | PM 推荐 | PM 决策使用的参考组合 ID。 |
+| `reference_portfolio_id` | PM 推荐 | PM 决策使用的最近已结算参考组合 ID；其 `portfolio.trading_date` 必须等于正式 `Prev(T)`，不是 AEC 或 recommendation 的逻辑交易日。 |
 | `recommendation_id` | 推荐 / 执行 / 研究 | 关联 PM 推荐记录。 |
 | `evidence_pack_id` | 复盘 / Researcher `researcher_llm_notes` / artifact | 已验证研究证据包 ID。 |
-| `created_at` | 所有持久化记录 | 创建时间。 |
+| `created_at` | 所有持久化记录 | 真实物理创建时间；不替代逻辑 `trading_date`。 |
 | `updated_at` | 可变学习 / 组合记录 | 更新时间。 |
 | `last_updated` | 绩效 / 模板记录 | 最后更新时间。 |
 | `snapshot_at` | memory history / 快照记录 | 快照生成时间。 |
@@ -191,7 +191,7 @@
 
 三类分析师共用 `validate_action_evidence_contract`。AEC 必填字段固定为：身份与方向 `contract_version/analyst/signal/side/confidence`；机会与触发 `opportunity_type/opportunity_state/setup_type/setup_quality_ok/trigger_valid/current_trigger_confirmed/invalidation_present/entry_trigger/exit_hint`；期限与证据 `horizon_class/expected_horizon_days/market_regime/evidence_quality/evidence_strength/evidence_freshness/confirmation_requirements/missing_evidence/current_evidence_conflict/factor_focus/no_lookahead_status`；结构化来源 `data_usage_summary/learning_scope/product_profile_evidence/fusion_evidence`。文本、布尔、列表、整数和对象类型必须与共享校验器一致；数据不可用中性 AEC 也不例外。
 
-正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备具体触发和 canonical 失效边界，才可按当前触发与既有质量规则进入 watch/probe/tradeable；`risk_reduction_candidate` 不受新增风险机会状态降级规则影响。
+正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备具体触发和 canonical 失效边界，才可按当前触发与既有质量规则进入 watch/probe/tradeable；`risk_reduction_candidate` 只服务已有持仓的 hold/reduce/exit 风险收缩，不进入新增风险证据、rank、预算或交易权限，空仓时只保留为研究证据。
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
@@ -244,7 +244,7 @@
 | `conflicting_factors` | 分析师证据 | 冲突因子。 |
 | `counter_evidence` | 分析师证据 | 反向证据。 |
 | `opportunity_type` | 分析师 / no-trade 记忆 | 机会类型。 |
-| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`；正式 watch 必须同时有具体触发和 canonical 失效边界。单个分析师 `no_opportunity` 不是对其他分析师候选的否决票。 |
+| `opportunity_state` | 分析师证据 | `no_opportunity`、`watch_for_trigger`、`probe_candidate`、`tradeable_candidate`、`risk_reduction_candidate`；正式 watch 必须同时有具体触发和 canonical 失效边界。`risk_reduction_candidate` 只支持已有持仓的 hold/reduce/exit，不构成新开仓证据或全局否决票；单个分析师 `no_opportunity` 也不是对其他分析师候选的否决票。 |
 | `learning_impact_summary` | 分析师证据 | 历史学习如何影响本次判断。 |
 | `factor_calibration_summary` | 基本面证据 | 基本面因子校准摘要。 |
 | `event_calibration_summary` | 新闻证据 | 新闻事件校准摘要。 |
@@ -369,9 +369,9 @@
 | `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。它是 PM 写入合约的执行触发 profile，Trader 只能按该字段和盘中数据执行。 |
 | `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `contract_code`、`setup_type`、`horizon_class`、`expected_horizon_days`、`market_regime`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`atr_stop_distance`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含完整AEC、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
 | `final_contract_execution_fields` | Trader Phase2 执行学习上下文 / 执行摘要 | 从已审计 `final_action_contract` 抽取的执行必要字段摘要，可用于记录执行来源和复盘追溯；不是第二张交易合约，不能携带 PM 学习、排名、资金部署解释。 |
-| `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。已审计通过且仍保留新增风险敞口的条件合约必须先由 Trader 写触发/未触发事实，只有触发后才运行最终下单安全闸。 |
+| `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。合法 watch 有资格进入原 Step5 新增风险排名，但只有实际获选并形成非零条件目标的 FAC 才置为 true；已审计通过后必须先由 Trader 用15分钟线写触发/未触发事实，触发后再用1分钟线执行。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
-| `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许不等盘中触发直接执行；条件 probe 必须为 false，只有合约明确授权的退出或事件立即执行可为 true。 |
+| `can_execute_without_intraday_trigger` | `final_action_contract` / 执行字段 | 是否允许 Trader 不再用15分钟线复判触发而直接使用合法1分钟线执行。条件 watch/probe 必须为 false；退出路径，或具备 `trigger_valid=true`、`current_trigger_confirmed=true`、canonical 失效边界且已获 PM 资金授权和 Auditor 放行的 probe/tradeable FAC 可为 true，适用于 breakout、pullback、vwap_confirmed、event_immediate 等合法 profile。 |
 | `reason_codes` | `final_action_contract` | PM 决策原因代码。 |
 | `holding_period_control` | `final_action_contract.reason_codes` | 合法持仓生命周期解释；表示 PM 因最小持仓期、持仓周期控制或当前持仓保护规则，暂不执行减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
 | `profitable_hold_continuation` | `final_action_contract.reason_codes` | 合法继续持仓解释；表示当前持仓仍处于有利或可继续验证状态，PM 暂不减仓或退出。它只能解释持仓生命周期，不创建交易权限。 |
@@ -468,7 +468,7 @@
 | `conditional_monitor_candidates` | PM 主机会审计 | 满足条件监控候选的方向列表；只供 PM 判断是否生成同一张 `final_action_contract` 的条件 probe 权限。 |
 | `conditional_monitor_candidate_count` | PM 主机会审计 | 条件监控候选数量。 |
 | `has_monitorable_setup` | PM 当前证据诊断 / `alpha_setup_ev_fusion` | 当前方向是否存在干净的条件监控 setup；它允许 PM 生成条件监控合约，但不等于 `has_tradeable_support`，也不代表当前触发成立。 |
-| `watch_for_trigger_semantic_block` | PM 诊断 | `watch_for_trigger` 语义阻止真实开仓。 |
+| `watch_for_trigger_semantic_block` | PM 诊断 | 非法或未获条件权限的 watch 阻止立即、无条件开仓；不得阻止完整 canonical watch 进入资金排名。 |
 | `watch_for_trigger_semantic_release_block` | PM 诊断 | 释放路径被 `watch_for_trigger` 语义阻止。 |
 
 ## 8. Auditor 字段：`audit_verdict`
@@ -813,7 +813,7 @@ Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必
 | `data_usage_summary.sources` | 分析师数据追溯 | 本次分析实际访问的数据源记录集合。 |
 | `data_usage_summary.sources.*.source` / `data_usage_summary.sources.*.dataset` / `data_usage_summary.sources.*.available` / `data_usage_summary.sources.*.used_in_signal` / `data_usage_summary.sources.*.pre_open_only` / `data_usage_summary.sources.*.info_cutoff` | 分析师数据追溯 | 数据来源、数据集、可用性、是否进入信号及盘前信息截止边界。 |
 | `data_usage_summary.sources.pandaai_market.latest_data_date` / `row_count` / `fields_used` / `indicators_used` | technical 数据追溯 | PandaAI 行情最新日期、记录数、使用字段和技术指标。 |
-| `data_usage_summary.sources.finoview_fundamental.configured_indicator_count` / `loaded_indicator_count` / `missing_like_count` / `stale_indicator_count` / `near_stale_indicator_count` | fundamental 数据追溯 | Finoview 配置、加载、缺失、陈旧和临近陈旧指标数量。 |
+| `data_usage_summary.sources.finoview_fundamental.configured_indicator_count` / `loaded_indicator_count` / `missing_like_count` / `stale_indicator_count` / `near_stale_indicator_count` | fundamental 数据追溯 | Finoview 配置、加载、缺失、陈旧和临近陈旧指标数量；Router文本输入与factor snapshot按同一 catalog release-lag选择器形成。原始 `tradeDate` 是事实日期，`recordTime` 不进入正式契约或可见边界。 |
 | `data_usage_summary.sources.finoview_fundamental.coverage_ratio` / `stale_ratio` / `factor_groups` / `freshness_score` / `local_availability_audit` / `coverage_status` / `supports_trade_setup` / `runtime_data_boundary` | fundamental 数据追溯 | 基本面覆盖、时效、因子组、本地可用性、交易 setup 支持状态和运行时边界。`local_availability_audit` 只允许已登记数量、分组、比例、状态、布尔边界和 `index_map_parse_error_count`，禁止路径、样本、原始解析错误及内部说明。 |
 | `data_usage_summary.sources.pandaai_extra.reference_date` / `lookback_days` / `feature_count` / `record_counts` / `feature_status` / `data_missing` / `error_count` | fundamental 扩展数据追溯 | PandaAI 扩展基本面参考日、窗口、特征覆盖、稳定缺失状态和错误数量；不传请求参数、原始错误、内部方向提示或内部可交易性判断。 |
 | `data_usage_summary.sources.finoview_news_txt.news_cutoff` / `raw_block_count` / `parsed_news_count` / `selected_news_count` / `latest_news_date` / `freshness_score` / `relevance_score` | commodity_news 数据追溯 | 新闻截止、解析/筛选数量、最新日期、时效及相关度；不传本机文件路径、编码或内部事件/方向统计。 |
@@ -837,7 +837,7 @@ Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必
 
 | 字段路径 | 生产与消费位置 | 固定含义 |
 |---|---|---|
-| `FuturesRecommendation.id` / `config_id` / `reference_portfolio_id` / `trading_date` / `effective_trade_date` / `created_at` | recommendation 顶层 | 推荐身份、配置、参考组合、生成日、生效日和创建时间。 |
+| `FuturesRecommendation.id` / `config_id` / `reference_portfolio_id` / `trading_date` / `effective_trade_date` / `created_at` | recommendation 顶层 | 推荐身份、配置、`Prev(T)`参考组合、逻辑交易日T、逻辑生效日T和物理创建时间。 |
 | `FuturesRecommendation.source_type` / `underlying_code` / `from_contract` / `to_contract` / `contract_code` | recommendation 顶层 | 推荐来源类型、品种及策略/换约涉及的具体合约。 |
 | `FuturesRecommendation.action` / `lots` / `justification` | recommendation 顶层 | PM Step6 根据唯一最终合约重建的动作、交易手数和可读理由；不能替代 `final_action_contract`。 |
 | `FuturesRecommendation.signal_snapshot` / `audit_payload` / `warning_message` / `status` | recommendation 顶层 | 唯一信号快照、审计载体、警告和运行状态。 |
@@ -1014,7 +1014,7 @@ Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必
 | `execution_contract.execution_action_value_preference` | Trader 执行摘要 | PM 已落地的 execution profile 偏好；Trader 不读取研究库或完整AEC。 |
 | `phase2_execution.translated_decision.action` / `lots` / `contract_code` / `price` | Trader 翻译决策 | 合约翻译后的订单动作、手数、具体合约和价格。 |
 | `phase2_execution.intraday_selection.decision` / `reason` / `base_price` / `base_datetime` / `base_price_source` / `signal_datetime` | Trader 盘中选择 | 盘中执行/等待/跳过结论、原因和价格时间基准。 |
-| `intraday_selection.trigger_checked` / `trigger_passed` / `execution_failure_reason` / `missed_opportunity_flag` / `learning_writeback_contract` | Trader 盘中选择 | 触发检查、执行失败、错过机会及未来学习写回契约。 |
+| `intraday_selection.trigger_checked` / `trigger_passed` / `execution_failure_reason` / `missed_opportunity_flag` / `learning_writeback_contract` | Trader 盘中选择 | 条件 FAC 的15分钟触发检查、执行失败、错过机会及未来学习写回契约；`can_execute_without_intraday_trigger=true` 的直执行路径不得伪记为 Trader 再次检查了触发。 |
 | `intraday_selection.price_chase_check.checked` / `passed` / `reason` / `gap_ratio` / `threshold` | Trader 追价检查 | 是否检查、是否通过、原因、跳空比例和配置阈值。 |
 | `intraday_selection.features.error` / `underlying_code` / `contract_code` / `action` / `execution_mode` / `execution_profile` / `execution_contract` | Trader 盘中特征 | 数据错误、产品合约、动作及执行模式/profile/规则。 |
 | `intraday_selection.features.signal_close` / `vwap` / `opening_range` / `signal_bars` / `eligible_signal_bars` / `execution_bars` | Trader 盘中特征 | 信号收盘、VWAP、开盘区间及信号/可用/执行 bar 数量。 |
@@ -1042,7 +1042,7 @@ Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必
 | `execution_translation.signal_lifecycle.horizon_class` / `expected_horizon_days` / `entry_trigger` / `invalidation_level` / `atr_stop_distance` / `setup_type` / `market_regime` | Trader 信号生命周期 | 仅从已审计 `final_action_contract` 白名单抽取的PM最终期限、触发、失效、止损、setup和市场状态；不得从SCC重新选择或读旧顶层analyst snapshot。 |
 | `execution_translation.signal_lifecycle.target_price` | Trader运行时派生 | 仅在Trader存在合法输入时才允许派生；不是AEC、SCC或PM必传事实。当前无合法 `target_return` 生产者时不得伪造。 |
 | `execution_translation.phase2_order_plan.current_lots` / `target_lots` / `action` / `lots` / `contract_code` / `price` | Trader Phase2 订单计划 | 最终合约翻译出的当前/目标手数和订单。 |
-| `phase2_order_plan.account_equity` / `current_price` / `risk_level` / `cashflow_ratio` / `current_margin_ratio` / `max_total_margin_ratio` / `max_single_margin_ratio` / `remaining_margin` | Trader 下单安全事实 | 下单时账户权益、价格、风险等级和保证金边界。 |
+| `phase2_order_plan.account_equity` / `current_price` / `risk_level` / `cashflow_ratio` / `current_margin_ratio` / `max_total_margin_ratio` / `max_single_margin_ratio` / `remaining_margin` | Trader 下单安全事实 | 下单时账户权益、价格、风险等级和保证金边界。新增风险统一按 `projected_total_margin=current_account_margin-current_ticker_margin+target_ticker_margin`、`incremental_margin=max(0,target_ticker_margin-current_ticker_margin)` 检查；不得用目标品种总保证金重复占用已有持仓，reduce/exit 的新增风险保证金为0。 |
 | `phase2_order_plan.signal_lifecycle` / `execution_contract` / `consistency_diagnostics` | Trader Phase2 订单计划 | 生命周期、执行规则和动作/手数一致性诊断。 |
 | `execution_translation.final_action_contract_source.source` / `contract_type` / `final_action` / `current_lots` / `target_lots` / `lots_delta` | Trader 合约来源 | 明确订单目标只来自唯一最终合约。 |
 | `execution_translation.auditor_verdict.producer` / `audit_status` / `audit_verdict` / `audit_reason_codes` / `audited_by` / `audited_at` | Trader 审计摘要 | Trader 执行前读取的独立审计结果。 |
@@ -1129,7 +1129,7 @@ Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必
 | `src/config/execution_slippage_catalog.yaml::slippage.**` | `src/tools/agent_tools/execution/trader_futures_execution.py::_get_slippage_ticks` | 滑点模型、默认 ticks 和 underlying 动态映射。 |
 | `src/config/execution_exit_policy_catalog.yaml::exit_policy.**` | `src/tools/agent_tools/execution/trader_execution_exit_policy.py::resolve_exit_policy_config` | 默认、sector 和 setup/template 的止损、止盈与时间退出参数。 |
 | `src/config/finoview_factor_catalog.yaml::required_groups`、`src/config/finoview_factor_catalog.yaml::ticker_overrides.**`、`src/config/finoview_factor_catalog.yaml::context_ticker_overrides.*` | `src/tools/agent_tools/analysis/analyst_finoview_factors.py::build_local_finoview_availability_audit` | 可交易快照要求的因子组及辅助字段到交易品种的动态映射。 |
-| `src/config/finoview_factor_catalog.yaml::factor_group_overrides.**`、`src/config/finoview_factor_catalog.yaml::frequency_overrides.*`、`src/config/finoview_factor_catalog.yaml::release_lag_days.*`、`src/config/finoview_factor_catalog.yaml::freshness_threshold_days.*` | `src/tools/agent_tools/analysis/analyst_finoview_factors.py::build_factor_catalog` | 因子名到业务组、频率、发布滞后和新鲜度阈值的动态映射。 |
+| `src/config/finoview_factor_catalog.yaml::factor_group_overrides.**`、`src/config/finoview_factor_catalog.yaml::frequency_overrides.*`、`src/config/finoview_factor_catalog.yaml::release_lag_days.*`、`src/config/finoview_factor_catalog.yaml::freshness_threshold_days.*` | `src/tools/agent_tools/analysis/analyst_finoview_factors.py::build_factor_catalog`、`resolve_finoview_visibility_cutoffs`、Router fundamentals | 因子名到业务组、频率、正式交易日发布滞后和新鲜度阈值的动态映射；Router格式化输入与factor snapshot共用同一选择器。 |
 | `src/config/learning_policy_catalog.yaml::opportunity_ranking_learning_policy.**` | `src/tools/agent_tools/research/research_memory_writers.py::_write_opportunity_ranking_learning_events` | rank 表现学习事件的样本门槛、有效期、输入字段和允许/禁止影响。 |
 | `src/config/learning_policy_catalog.yaml::strategy_memory.**` | `src/database/sqlite_helper.py::_strategy_memory_thresholds` | 策略记忆回看、过期、样本、胜率、净收益和 PM 风险门阈值。 |
 | `src/config/learning_policy_catalog.yaml::learning.**` | `src/tools/agent_tools/research/research_learning.py::apply_researcher_learning`、`src/tools/agent_tools/research/research_memory_writers.py::_write_adaptive_policy_state`、`src/tools/agent_tools/research/research_memory_writers.py::_write_contextual_rule_calibration_state`、`src/tools/agent_tools/research/research_memory_writers.py::_write_provisional_policy_state` | Researcher 的 profile、action-value、overlay、策略晋升、情境校准、哨兵、episode、反事实和因果研究参数；只影响未来学习。 |

@@ -32,7 +32,11 @@ class IntradayExecutionSelection:
     def to_audit_payload(self) -> Dict[str, Any]:
         features = self.features if isinstance(self.features, dict) else {}
         chase_check = features.get("chase_check") if isinstance(features.get("chase_check"), dict) else {}
-        trigger_checked = self.reason not in {"hold_or_zero_lots"}
+        trigger_checked = self.reason not in {
+            "hold_or_zero_lots",
+            "intraday_immediate_execution",
+            "intraday_event_immediate_execution",
+        }
         trigger_passed = self.decision == "execute" and self.reason in {
             "intraday_trigger_confirmed",
             "intraday_immediate_execution",
@@ -165,8 +169,11 @@ def select_intraday_execution(
             features={"execution_bars": 0, "execution_profile": execution_profile},
         )
 
-    immediate_event = execution_profile == "event_immediate" and can_execute_without_intraday_trigger
-    if force_immediate or action_value in _IMMEDIATE_ACTIONS or immediate_event:
+    direct_contract_execution = bool(
+        can_execute_without_intraday_trigger
+        and action_value in _BUY_LIKE_ACTIONS | _SELL_LIKE_ACTIONS
+    )
+    if force_immediate or action_value in _IMMEDIATE_ACTIONS or direct_contract_execution:
         execution_bar = _first_valid_execution_bar(normalized_execution_bars, min_volume=min_volume)
         if execution_bar is None:
             return IntradayExecutionSelection(
@@ -178,7 +185,11 @@ def select_intraday_execution(
                     "execution_profile": execution_profile,
                 },
             )
-        reason = "intraday_event_immediate_execution" if immediate_event else "intraday_immediate_execution"
+        reason = (
+            "intraday_event_immediate_execution"
+            if execution_profile == "event_immediate" and direct_contract_execution
+            else "intraday_immediate_execution"
+        )
         return _execution_selection(
             reason=reason,
             execution_bar=execution_bar,

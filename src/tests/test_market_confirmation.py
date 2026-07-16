@@ -10,7 +10,10 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from tools.agent_tools.analysis.analyst_finoview_factors import _latest_visible_row
+from tools.agent_tools.analysis.analyst_finoview_factors import (
+    resolve_finoview_visibility_cutoffs,
+    select_latest_visible_finoview_row,
+)
 from tools.agent_tools.analysis.analyst_market_confirmation import MarketConfirmationEngine, score_pandaai_extra_records
 
 
@@ -48,27 +51,47 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
             }
         )
 
-        row, data_date, status = _latest_visible_row(
+        _visible, row, data_date, status = select_latest_visible_finoview_row(
             df,
             date_column="date",
-            trade_date="2025-01-10",
-            release_lag_days=1,
+            visible_through_date="2025-01-09",
         )
 
         self.assertEqual(status, "ok")
         self.assertEqual(row["value"], 9)
         self.assertEqual(data_date.strftime("%Y-%m-%d"), "2025-01-09")
 
-        row, data_date, status = _latest_visible_row(
+    def test_finoview_pre_open_uses_formal_previous_trade_day_not_calendar_sunday(self):
+        df = pd.DataFrame(
+            {
+                "tradeDate": ["2025-01-03", "2025-01-05", "2025-01-06"],
+                "value": [3, 5, 6],
+            }
+        )
+
+        _visible, row, data_date, status = select_latest_visible_finoview_row(
             df,
-            date_column="date",
-            trade_date="2025-01-10",
-            release_lag_days=0,
+            date_column="tradeDate",
+            visible_through_date="2025-01-03",
         )
 
         self.assertEqual(status, "ok")
-        self.assertEqual(row["value"], 9)
-        self.assertEqual(data_date.strftime("%Y-%m-%d"), "2025-01-09")
+        self.assertEqual(row["value"], 3)
+        self.assertEqual(data_date.strftime("%Y-%m-%d"), "2025-01-03")
+
+    def test_finoview_release_lag_resolves_each_formal_previous_trade_day(self):
+        with patch(
+            "tools.agent_tools.analysis.analyst_finoview_factors.get_previous_trading_day",
+            side_effect=[datetime(2025, 1, 3), datetime(2025, 1, 2)],
+        ):
+            cutoffs = resolve_finoview_visibility_cutoffs(
+                router=object(),
+                ticker="BU",
+                trade_date="2025-01-06",
+                release_lag_days=[1, 2],
+            )
+
+        self.assertEqual(cutoffs, {1: "2025-01-03", 2: "2025-01-02"})
 
     def test_extended_pandaai_records_are_scored_as_factor_evidence(self):
         records = {

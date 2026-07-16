@@ -5,12 +5,13 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 import yaml
 
 from tools.agent_tools.analysis.analyst_data_usage import read_finoview_feather_cached
+from util.trading_calendar import get_previous_trading_day
 
 
 DATE_COLUMNS = ("tradeDate", "date", "datetime", "publish_date", "report_date")
@@ -364,6 +365,7 @@ def build_factor_catalog(
         date_column = _date_column(columns)
         freq = frequency_overrides.get(stem_key) or infer_frequency(stem)
         threshold = freshness_overrides.get(stem_key) or FRESHNESS_DAYS.get(freq, FRESHNESS_DAYS["unknown"])
+        default_release_lag = int(lag_overrides.get("default", 1) or 1)
         for ticker in sorted(tickers):
             entry = FactorCatalogEntry(
                 file=path.name,
@@ -373,7 +375,7 @@ def build_factor_catalog(
                 freq=freq,
                 date_column=date_column,
                 value_columns=_value_columns(columns, date_column, stem),
-                release_lag_days=lag_overrides.get(stem_key, 1),
+                release_lag_days=lag_overrides.get(stem_key, default_release_lag),
                 freshness_threshold_days=threshold,
             )
             catalog.setdefault(ticker, []).append(entry.to_dict())
@@ -524,33 +526,56 @@ def build_local_finoview_availability_audit(
     }
 
 
-def _latest_visible_row(
+def resolve_finoview_visibility_cutoffs(
+    *,
+    router: Any,
+    ticker: str,
+    trade_date: Any,
+    release_lag_days: Iterable[int],
+) -> Dict[int, str]:
+    """Resolve catalog release lags against the formal futures calendar."""
+    effective_lags = sorted({max(1, int(value or 1)) for value in release_lag_days})
+    if not effective_lags:
+        return {}
+    cursor_date = pd.to_datetime(trade_date).to_pydatetime()
+    cutoff_by_step: Dict[int, str] = {}
+    for step in range(1, max(effective_lags) + 1):
+        cursor_date = get_previous_trading_day(
+            router=router,
+            trading_date=cursor_date,
+            underlying_code=str(ticker or "").upper(),
+        )
+        cutoff_by_step[step] = cursor_date.strftime("%Y-%m-%d")
+    return {lag: cutoff_by_step[lag] for lag in effective_lags}
+
+
+def select_latest_visible_finoview_row(
     df: pd.DataFrame,
     *,
     date_column: Optional[str],
-    trade_date: Any,
-    release_lag_days: int,
-) -> tuple[Optional[pd.Series], Optional[pd.Timestamp], str]:
+    visible_through_date: Any,
+) -> tuple[pd.DataFrame, Optional[pd.Series], Optional[pd.Timestamp], str]:
     if df.empty:
-        return None, None, "empty"
+        return df.iloc[0:0].copy(), None, None, "empty"
     if not date_column or date_column not in df.columns:
-        return df.iloc[-1], None, "no_date_column"
+        return df.iloc[0:0].copy(), None, None, "no_date_column"
     dates = pd.to_datetime(df[date_column], errors="coerce")
-    trade_dt = pd.to_datetime(trade_date)
-    effective_lag_days = max(1, int(release_lag_days or 1))
-    cutoff = trade_dt - pd.Timedelta(days=effective_lag_days)
-    # A pre-open factor dated D becomes visible when D + lag_days <= trade_date.
-    visible = df.loc[dates <= cutoff].copy()
+    cutoff = pd.to_datetime(visible_through_date, errors="coerce")
+    if pd.isna(cutoff):
+        raise ValueError("finoview_visibility_cutoff_invalid")
+    visible_indexes = dates.loc[dates.notna() & (dates <= cutoff)].sort_values().index
+    visible = df.loc[visible_indexes].copy()
     if visible.empty:
-        return None, None, "no_visible_data"
-    latest_idx = visible.index[-1]
-    return df.loc[latest_idx], dates.loc[latest_idx], "ok"
+        return visible, None, None, "no_visible_data"
+    latest_idx = visible_indexes[-1]
+    return visible, df.loc[latest_idx], dates.loc[latest_idx], "ok"
 
 
 def build_factor_snapshot(
     ticker: str,
     trade_date: Any,
     *,
+    visibility_cutoffs_by_release_lag: Mapping[int, Any],
     data_dir: Optional[Path] = None,
     catalog: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     max_factors: int = 80,
@@ -583,11 +608,15 @@ def build_factor_snapshot(
         except Exception:
             snapshot["missing_count"] += 1
             continue
-        row, data_date, status = _latest_visible_row(
+        release_lag = max(1, int(entry.get("release_lag_days") or 1))
+        visible_through_date = visibility_cutoffs_by_release_lag.get(release_lag)
+        if visible_through_date is None:
+            snapshot["missing_count"] += 1
+            continue
+        _visible, row, data_date, status = select_latest_visible_finoview_row(
             df,
             date_column=entry.get("date_column"),
-            trade_date=trade_date,
-            release_lag_days=int(entry.get("release_lag_days") or 0),
+            visible_through_date=visible_through_date,
         )
         if row is None:
             snapshot["missing_count"] += 1

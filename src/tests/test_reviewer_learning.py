@@ -85,7 +85,7 @@ from tools.agent_tools.research.research_memory_writers import (
 )
 from tools.agent_tools.decision.pm_capital_allocator import enriched_policy_evidence
 from tools.common.signal_evidence_collection import build_signal_collection_contract
-from tests.contract_test_fixtures import build_test_signal
+from tests.contract_test_fixtures import build_test_aec, build_test_signal
 
 
 def _scc_from_analyst_payloads(**payloads):
@@ -1494,15 +1494,43 @@ class ReviewerLearningContextTest(unittest.TestCase):
             "CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT, trading_date TEXT)"
         )
         cursor.execute(
-            "CREATE TABLE signal (id TEXT PRIMARY KEY, portfolio_id TEXT, analyst TEXT, ticker TEXT)"
+            """
+            CREATE TABLE signal (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT,
+                analyst TEXT,
+                ticker TEXT,
+                artifact_json TEXT,
+                artifact_json_artifact_path TEXT,
+                artifact_json_sha256 TEXT
+            )
+            """
         )
         cursor.execute(
-            "INSERT INTO portfolio(id, config_id, trading_date) VALUES ('portfolio-1', 'cfg', '2025-03-13')"
+            "INSERT INTO portfolio(id, config_id, trading_date) VALUES ('portfolio-1', 'cfg', '2025-03-12')"
         )
         for analyst in ("technical", "fundamental", "commodity_news"):
+            artifact = json.dumps(
+                {
+                    "metadata": {
+                        "action_evidence_contract": build_test_aec(
+                            analyst,
+                            ticker="BU",
+                            trading_date="2025-03-13",
+                        ),
+                    },
+                    "signal_artifact_metadata": {
+                        "contract_version": "agentquant.signal_artifact.v1",
+                    },
+                }
+            )
             cursor.execute(
-                "INSERT INTO signal(id, portfolio_id, analyst, ticker) VALUES (?, 'portfolio-1', ?, 'BU')",
-                (f"signal-{analyst}", analyst),
+                """
+                INSERT INTO signal(
+                    id, portfolio_id, analyst, ticker, artifact_json
+                ) VALUES (?, 'portfolio-1', ?, 'BU', ?)
+                """,
+                (f"signal-{analyst}", analyst, artifact),
             )
         scc = build_signal_collection_contract(
             ticker="BU",
@@ -1552,6 +1580,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                 },
                 config_id="cfg",
                 trading_date="2025-03-13",
+                previous_trading_dates_by_ticker={"BU": "2025-03-12"},
                 settlement_row={
                     "trading_date": "2025-03-13",
                     "daily_pnl": -1200,
@@ -1562,7 +1591,9 @@ class ReviewerLearningContextTest(unittest.TestCase):
                     {
                         "id": "rec-1",
                         "config_id": "cfg",
+                        "reference_portfolio_id": "portfolio-1",
                         "underlying_code": "BU",
+                        "trading_date": "2025-03-13",
                         "effective_trade_date": "2025-03-13",
                         "action": "open_long",
                         "lots": 1,

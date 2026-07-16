@@ -927,8 +927,16 @@ def build_opportunity_scorecard(
 
     side_rows: dict[str, dict[str, Any]] = {}
     for side in ("long", "short"):
-        supporting = [signal for signal in signals if _signal_side(signal) == side]
+        directional_signals = [signal for signal in signals if _signal_side(signal) == side]
         opportunity_state_counts: dict[str, int] = {}
+        for signal in directional_signals:
+            state = _opportunity_state(signal)
+            opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
+        supporting = [
+            signal
+            for signal in directional_signals
+            if _opportunity_state(signal) != "risk_reduction_candidate"
+        ]
         invalidation_count = 0
         setup_count = 0
         quality_scores: list[float] = []
@@ -946,7 +954,6 @@ def build_opportunity_scorecard(
         for signal in supporting:
             state = _opportunity_state(signal)
             opportunity_states.append(state)
-            opportunity_state_counts[state] = opportunity_state_counts.get(state, 0) + 1
             if _has_invalidation(signal):
                 invalidation_count += 1
             if _has_entry_setup(signal):

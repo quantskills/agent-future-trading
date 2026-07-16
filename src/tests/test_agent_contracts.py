@@ -1027,6 +1027,10 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         router.market_type = "china_futures"
         router.config = {}
         router.api = SimpleNamespace(
+            get_futures_daily_candles_optimized=lambda **_kwargs: [
+                SimpleNamespace(trade_date="2025-03-03"),
+                SimpleNamespace(trade_date="2025-03-04"),
+            ],
             get_trade_dates=lambda start_date, end_date, underlying_code=None: [],
             get_continuous_candles=lambda underlying_code, start_date, end_date: [],
         )
@@ -1094,6 +1098,10 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
             )
 
         router.api = SimpleNamespace(
+            get_futures_daily_candles_optimized=lambda **_kwargs: [
+                SimpleNamespace(trade_date="2025-03-03"),
+                SimpleNamespace(trade_date="2025-03-04"),
+            ],
             get_trade_dates=lambda start_date, end_date, underlying_code=None: [
                 SimpleNamespace(trade_date="2025-03-03"),
                 SimpleNamespace(trade_date="2025-03-04"),
@@ -1163,15 +1171,19 @@ class NewsDataBoundaryTest(unittest.TestCase):
             )
             router = self._build_router(news_dir)
 
-            pre_open_news = router.get_china_futures_news(
-                "BU",
-                "2025-03-05",
-                news_count=10,
-                pre_open_only=True,
-            )
+            with patch(
+                "apis.router.get_previous_trading_day",
+                return_value=pd.Timestamp("2025-03-04"),
+            ):
+                pre_open_news = router.get_china_futures_news(
+                    "BU",
+                    "2025-03-05",
+                    news_count=10,
+                    pre_open_only=True,
+                )
 
             self.assertEqual([item.title for item in pre_open_news], ["T minus one catalyst"])
-            self.assertEqual(router.last_news_metadata["news_cutoff"], "<2025-03-05")
+            self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-03-04")
             self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-04")
 
     def test_news_loader_non_pre_open_includes_t_day_but_excludes_future_news(self):
@@ -1216,6 +1228,43 @@ class NewsDataBoundaryTest(unittest.TestCase):
             )
             self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-03-05")
             self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-05")
+
+    def test_pre_open_news_stops_at_formal_prev_t_not_weekend_calendar_date(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            news_dir = Path(tmpdir)
+            (news_dir / "BU.txt").write_text(
+                "\n".join(
+                    [
+                        "2025-01-03",
+                        "Friday visible news",
+                        "Friday fact remains visible for Monday proposal.",
+                        "inventory",
+                        "local",
+                        "",
+                        "2025-01-05",
+                        "Sunday future-to-cutoff news",
+                        "Sunday publication is after formal Prev(T).",
+                        "policy",
+                        "local",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            router = self._build_router(news_dir)
+
+            with patch(
+                "apis.router.get_previous_trading_day",
+                return_value=pd.Timestamp("2025-01-03"),
+            ):
+                news = router.get_china_futures_news(
+                    "BU",
+                    "2025-01-06",
+                    news_count=10,
+                    pre_open_only=True,
+                )
+
+            self.assertEqual([item.title for item in news], ["Friday visible news"])
+            self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-01-03")
 
 
 if __name__ == "__main__":

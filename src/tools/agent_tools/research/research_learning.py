@@ -26,6 +26,7 @@ from tools.common.final_action_semantics import derive_research_fact_state
 from tools.common.contracts import validate_final_action_contract
 from tools.common.signal_evidence_collection import (
     ANALYST_ORDER,
+    validate_action_evidence_contract,
     validate_signal_collection_contract,
 )
 from tools.common.alpha_setup import (
@@ -121,6 +122,7 @@ def _validate_researcher_input_facts(
     cursor: sqlite3.Cursor,
     config_id: str,
     trading_date: str,
+    previous_trading_dates_by_ticker: Mapping[str, str],
     settlement_row: Optional[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     transactions_by_recommendation: Optional[Dict[str, List[Dict[str, Any]]]] = None,
@@ -129,30 +131,37 @@ def _validate_researcher_input_facts(
     errors: list[str] = []
     date_text = str(trading_date or "")[:10]
     transactions_by_recommendation = transactions_by_recommendation or {}
+    formal_previous_dates = {
+        str(ticker or "").upper(): str(value or "")[:10]
+        for ticker, value in (previous_trading_dates_by_ticker or {}).items()
+        if str(ticker or "").strip()
+    }
     if not isinstance(settlement_row, dict) or not settlement_row:
         errors.append("settlement_missing")
     else:
-        settlement_date = str(
-            settlement_row.get("trading_date")
-            or settlement_row.get("portfolio_trading_date")
-            or date_text
-        )[:10]
-        if settlement_date and settlement_date > date_text:
-            errors.append("future_settlement")
+        settlement_date = str(settlement_row.get("trading_date") or "")[:10]
+        if settlement_date != date_text:
+            errors.append("settlement_date_mismatch")
     if not strategy_recommendations:
         errors.append("strategy_recommendations_missing")
     for recommendation in strategy_recommendations or []:
         ticker = str(recommendation.get("underlying_code") or "unknown")
+        ticker_key = ticker.upper()
         recommendation_id = str(recommendation.get("id") or "")
         if str(recommendation.get("config_id") or "") != str(config_id or ""):
             errors.append(f"recommendation_config_mismatch:{ticker}")
-        recommendation_date = str(
-            recommendation.get("effective_trade_date")
-            or recommendation.get("trading_date")
-            or date_text
-        )[:10]
-        if recommendation_date and recommendation_date > date_text:
-            errors.append(f"future_recommendation:{ticker}")
+        recommendation_trading_date = str(recommendation.get("trading_date") or "")[:10]
+        recommendation_date = str(recommendation.get("effective_trade_date") or "")[:10]
+        if recommendation_trading_date != date_text:
+            errors.append(f"recommendation_date_mismatch:{ticker}")
+        if recommendation_date != date_text:
+            errors.append(f"recommendation_effective_date_mismatch:{ticker}")
+        reference_portfolio_id = str(recommendation.get("reference_portfolio_id") or "")
+        if not reference_portfolio_id:
+            errors.append(f"reference_portfolio_id_missing:{ticker}")
+        formal_previous_date = formal_previous_dates.get(ticker_key, "")
+        if not formal_previous_date:
+            errors.append(f"formal_previous_trading_date_missing:{ticker}")
         snapshot = _review_helpers._json_loads(recommendation.get("signal_snapshot")) or {}
         if not isinstance(snapshot, dict):
             snapshot = {}
@@ -181,7 +190,11 @@ def _validate_researcher_input_facts(
                     continue
                 cursor.execute(
                     """
-                    SELECT s.id, s.analyst, s.ticker, p.config_id, substr(p.trading_date, 1, 10) AS trading_date
+                    SELECT s.id, s.portfolio_id, s.analyst, s.ticker,
+                           s.artifact_json, s.artifact_json_artifact_path,
+                           s.artifact_json_sha256,
+                           p.config_id,
+                           substr(p.trading_date, 1, 10) AS reference_portfolio_date
                     FROM signal s
                     JOIN portfolio p ON p.id = s.portfolio_id
                     WHERE s.id = ?
@@ -199,8 +212,36 @@ def _validate_researcher_input_facts(
                     errors.append(f"signal_record_ticker_mismatch:{ticker}:{analyst}")
                 if str(row_map.get("config_id") or "") != str(config_id or ""):
                     errors.append(f"signal_record_config_mismatch:{ticker}:{analyst}")
-                if str(row_map.get("trading_date") or "") != recommendation_date:
-                    errors.append(f"signal_record_date_mismatch:{ticker}:{analyst}")
+                if str(row_map.get("portfolio_id") or "") != reference_portfolio_id:
+                    errors.append(f"signal_record_reference_portfolio_mismatch:{ticker}:{analyst}")
+                if str(row_map.get("reference_portfolio_date") or "") != formal_previous_date:
+                    errors.append(f"reference_portfolio_date_mismatch:{ticker}:{analyst}")
+                artifact = load_externalized_json(
+                    row_map.get("artifact_json"),
+                    row_map.get("artifact_json_artifact_path"),
+                    row_map.get("artifact_json_sha256"),
+                )
+                persisted_aec = (
+                    (artifact.get("metadata") or {}).get("action_evidence_contract")
+                    if isinstance(artifact, dict)
+                    else None
+                )
+                try:
+                    persisted_aec = validate_action_evidence_contract(
+                        persisted_aec,
+                        analyst=analyst,
+                    )
+                except ValueError:
+                    errors.append(f"signal_record_aec_invalid:{ticker}:{analyst}")
+                    continue
+                data_usage = persisted_aec.get("data_usage_summary") or {}
+                if str(data_usage.get("trading_date") or "")[:10] != recommendation_date:
+                    errors.append(f"signal_record_aec_date_mismatch:{ticker}:{analyst}")
+                if str(data_usage.get("ticker") or "").upper() != ticker_key:
+                    errors.append(f"signal_record_aec_ticker_mismatch:{ticker}:{analyst}")
+                source_aec = source.get("action_evidence_contract")
+                if persisted_aec != source_aec:
+                    errors.append(f"signal_record_aec_lineage_mismatch:{ticker}:{analyst}")
         if not isinstance(contract, dict) or not contract:
             errors.append(f"final_action_contract_missing:{ticker}")
         else:
@@ -246,6 +287,8 @@ def _validate_researcher_input_facts(
             for transaction in transactions:
                 if str(transaction.get("recommendation_id") or "") != recommendation_id:
                     errors.append(f"transaction_recommendation_mismatch:{ticker}")
+                if str(transaction.get("trading_date") or "")[:10] != recommendation_date:
+                    errors.append(f"transaction_date_mismatch:{ticker}")
     if errors:
         raise ValueError("researcher_input_fact_validation_failed:" + ",".join(sorted(set(errors))))
 
@@ -1497,6 +1540,7 @@ def run_researcher_causal_review(
     cfg: Dict[str, Any],
     config_id: str,
     trading_date: str,
+    previous_trading_dates_by_ticker: Mapping[str, str],
     settlement_row: Optional[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
     no_trade_reason_counter: Counter,
@@ -1510,6 +1554,7 @@ def run_researcher_causal_review(
         cursor=cursor,
         config_id=config_id,
         trading_date=trading_date,
+        previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
         transactions_by_recommendation=transactions_by_recommendation,
@@ -1816,6 +1861,7 @@ def apply_researcher_learning(
     cfg: Dict[str, Any],
     config_id: str,
     trading_date: str,
+    previous_trading_dates_by_ticker: Mapping[str, str],
     settlement_row: Optional[Dict[str, Any]],
     recommendations: List[Dict[str, Any]],
     strategy_recommendations: List[Dict[str, Any]],
@@ -1827,6 +1873,7 @@ def apply_researcher_learning(
         cursor=cursor,
         config_id=config_id,
         trading_date=trading_date,
+        previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
         transactions_by_recommendation=transactions_by_recommendation,
@@ -2011,6 +2058,7 @@ def apply_researcher_learning(
         cfg=cfg,
         config_id=config_id,
         trading_date=trading_date,
+        previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
         settlement_row=settlement_row,
         strategy_recommendations=strategy_recommendations,
         no_trade_reason_counter=no_trade_reason_counter,

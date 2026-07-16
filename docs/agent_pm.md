@@ -182,7 +182,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 最终动作和持仓变化：只由 `final_action`、`current_lots`、`target_lots`、`lots_delta` 表达；生命周期由共享 `final_action_semantics` 和 `pm_lifecycle_learning_trace` 解释，不新增顶层生命周期字段。
 
-执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。
+执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。合法 watch 获选后固定为条件执行；canonical 当前触发已确认且失效边界完整的 probe/tradeable 候选，经 Step5 和 Auditor 放行后可对任一合法 profile 形成 `can_execute_without_intraday_trigger=true`，该字段不改变 rank、预算或 sizing。
 
 风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 
@@ -687,14 +687,14 @@ PM 以有符号 `current_lots` 确认持仓方向：当前手数大于零为 `lo
 PM 只读取 `opportunity_state` 的以下分析师证据语义，再形成自己的 `candidate_quality` 和 `candidate_layer_hint`：
 
 - `no_opportunity`：无持仓且产品代表方向为 `flat`。
-- `watch_for_trigger`：存在方向候选，但触发、确认、失效边界、必要证据尚未完整。
+- `watch_for_trigger`：方向、setup、具体入场触发和 canonical 失效边界完整，当前触发尚未成立，且 Trader 能用当日15分钟行情观察该触发。
 - `probe_candidate`：方向和必要结构化证据已经成立，但当前只具备小规模候选条件。
 - `tradeable_candidate`：方向、触发、证据质量、失效边界和当前风险空间支持进入后续资金决策。
-- `risk_reduction_candidate`：当前持仓与优先方向相反，当前风险事实要求进入释放资金判断。
+- `risk_reduction_candidate`：只在已有持仓时进入 hold/reduce/exit 风险收缩判断；空仓时只保留研究证据，不进入新增风险证据、rank、预算或交易权限，也不否决其他分析师的合法新增风险候选。
 
 代码梳理时把 `classify_pm_decision_state` 的基础判断前移到本步，把输入收窄为只读 `opportunity_state`、`current_lots`、方向比较结果、`trigger_status`、`evidence_quality`、`invalidation_summary` 和账户风险事实，并把 PM 结果收口到 `candidate_quality` 与 `candidate_layer_hint`。目标手数、学习成果、全市场 rank 和最终资金部署不得反向成为本步初始状态的必需输入。
 
-`opportunity_state` 不是交易动作，`candidate_quality` 和 `candidate_layer_hint` 也不是交易权限。第 4 步完成学习修正后，只有形成 open/add/scale 新增风险或反转后新风险意图的候选进入第 5 步；wait、hold、reduce、exit 和监控类候选直接进入第 6 步。
+`opportunity_state` 不是交易动作，`candidate_quality` 和 `candidate_layer_hint` 也不是交易权限。第 4 步完成学习修正后，形成 open/add/scale 新增风险、反转后新风险，或获得非零条件目标的合法 `watch_for_trigger` 候选进入第 5 步；wait、hold、reduce、exit、仅有 `risk_reduction_candidate` 的空仓证据和 `target_lots=current_lots` 的零增量监控直接进入第 6 步。
 
 #### 3.6 状态更新
 

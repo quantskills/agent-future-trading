@@ -104,12 +104,14 @@ PG 报告不得输出 `ok`、`errors`、`warnings`、`metadata`、内部计数�
 
 ### 5. 时间边界
 
+- `T` 统一表示逻辑交易日；`Prev(T)` / `Next(T)` 由正式交易日与夜盘映射机制确定，参考组合为 `Prev(T)`，AEC/SCC/recommendation/执行/结算/研究来源为 `T`。
 - 盘前分析不能读取当日收盘后数据。
 - 夜盘时间正确映射交易日。
 - Trader 只使用执行时点已经出现的分钟行情。
 - Accountant 只能在 Phase3 读取结算价。
 - 分析师和 PM 只能读取早于当前交易日的学习成果。
 - Researcher 只能处理 Phase4 完成后的已结算事实。
+- `source_trading_date=T` 的学习只能由目标 `Next(T)` 及以后读取，不能回写已完成的 `T`。
 
 ### 6. 正式临时数据库
 
@@ -147,7 +149,8 @@ AnalystSignal/action_evidence_contract
 - long、short、mixed 及数据不可用。
 - wait、hold、open、open_probe、open_real。
 - add、scale、预算拒绝。
-- reduce、exit、条件监控与触发。
+- reduce、exit、条件监控与触发，以及 canonical 当前触发确认后的各合法 profile 直执行。
+- add/scale 扣除当前品种已有保证金后的组合投影，以及 `risk_reduction_candidate` 不进入新增风险证据和 rank。
 - 反转先退出旧仓。
 - strategy、rollover、forced_risk 分账。
 - 成交、未触发、无成交。
@@ -231,6 +234,7 @@ strategy 路径中，Auditor 拒绝不得成交；审计通过不等于必须成
 - 契约验收调用现有 AEC、SCC、FAC、Auditor artifact、execution result 和 action-value 共享校验器；数据库物理字段以正式 `sqlite_setup` 建立的隔离 schema 为准，PG 不维护私有字段表。
 - 配置 coverage 绑定可导入的真实 Python 消费者；编排验收通过实际调用记录证明顺序，不以字符串命中、函数名存在、废弃函数或禁用代码作为通过证据。
 - 无 LLM 全链路预演在同一个正式隔离临时库中运行，确定性替身只替代外部依赖，并调用三个分析师共用的真实 finalization、AEC/SCC 共享校验、生产函数和保存接口，分别证明数据可用普通中性与数据不可用中性契约可装配，形成 SQL ID、artifact、阶段事实与次日学习读取；预演数据不得进入生产库或成为生产默认事实。
+- 临时库预演的参考组合必须使用确定性正式 `Prev(T)` 夹具，链上契约和阶段事实使用逻辑 `T`，学习读取使用确定性正式 `Next(T)` 夹具；这是通用机制验收，不是历史故障复检。
 
 ### 2. 每日回测后检测
 

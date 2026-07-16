@@ -65,6 +65,7 @@ from tools.common.final_action_semantics import (
     authority_allows_entry,
     contract_increases_risk_position,
     contract_requires_conditional_intraday_result,
+    project_margin_transition,
 )
 from agents.decision_team.auditor import audit_verdict_allows_trader
 from tools.agent_tools.execution.trader_execution_exit_policy import evaluate_exit_policy
@@ -1224,7 +1225,13 @@ def _translate_pre_open_recommendation_to_order(
 
         target_margin_rate = float(contract_info["margin_rate_long"] if target_lots >= 0 else contract_info["margin_rate_short"])
         margin_required = current_price * abs(target_lots) * multiplier * target_margin_rate
-        if margin_required > remaining_margin and abs(target_lots) > 0 and current_price > 0:
+        current_ticker_margin_used = float(getattr(current_position, "margin_used", 0.0) or 0.0)
+        _, projected_total_margin = project_margin_transition(
+            current_account_margin=current_margin_used,
+            current_ticker_margin=current_ticker_margin_used,
+            target_ticker_margin=margin_required,
+        )
+        if projected_total_margin > max_allowed_margin and abs(target_lots) > 0 and current_price > 0:
             if _requires_entry_authority(current_lots, target_lots):
                 target_lots = int(current_lots)
                 add_rewrite_reason(snapshot, "margin_adjustment_to_no_new_entry")

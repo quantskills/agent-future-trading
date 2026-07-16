@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import sys
 import unittest
 from datetime import datetime
@@ -782,22 +783,36 @@ class FrozenMainlineRegressionTest(unittest.TestCase):
                 id TEXT PRIMARY KEY,
                 portfolio_id TEXT NOT NULL,
                 ticker TEXT NOT NULL,
-                analyst TEXT NOT NULL
+                analyst TEXT NOT NULL,
+                artifact_json TEXT,
+                artifact_json_artifact_path TEXT,
+                artifact_json_sha256 TEXT
             );
             """
         )
         cursor.execute(
             "INSERT INTO portfolio(id, config_id, trading_date) VALUES (?, ?, ?)",
-            ("portfolio-1", "cfg", "2025-03-03"),
+            ("portfolio-1", "cfg", "2025-02-28"),
         )
         for index, analyst in enumerate(ANALYSTS, start=1):
+            artifact = json.dumps(
+                {
+                    "metadata": {
+                        "action_evidence_contract": _complete_aec(analyst),
+                    },
+                    "signal_artifact_metadata": {
+                        "contract_version": "agentquant.signal_artifact.v1",
+                    },
+                }
+            )
             cursor.execute(
-                "INSERT INTO signal(id, portfolio_id, ticker, analyst) VALUES (?, ?, ?, ?)",
-                (f"signal-{index}", "portfolio-1", "BU", analyst),
+                "INSERT INTO signal(id, portfolio_id, ticker, analyst, artifact_json) VALUES (?, ?, ?, ?, ?)",
+                (f"signal-{index}", "portfolio-1", "BU", analyst, artifact),
             )
         recommendation = {
             "id": "rec-1",
             "config_id": "cfg",
+            "reference_portfolio_id": "portfolio-1",
             "source_type": "strategy",
             "underlying_code": "BU",
             "trading_date": "2025-03-03",
@@ -822,6 +837,7 @@ class FrozenMainlineRegressionTest(unittest.TestCase):
             cursor=cursor,
             config_id="cfg",
             trading_date="2025-03-03",
+            previous_trading_dates_by_ticker={"BU": "2025-02-28"},
             settlement_row={"trading_date": "2025-03-03", "daily_pnl": 0.0},
             strategy_recommendations=[recommendation],
             transactions_by_recommendation={},
@@ -832,6 +848,186 @@ class FrozenMainlineRegressionTest(unittest.TestCase):
                 cursor=cursor,
                 config_id="cfg",
                 trading_date="2025-03-03",
+                previous_trading_dates_by_ticker={"BU": "2025-02-28"},
+                settlement_row={"trading_date": "2025-03-03", "daily_pnl": 0.0},
+                strategy_recommendations=[recommendation],
+                transactions_by_recommendation={},
+            )
+        connection.close()
+
+    def test_researcher_accepts_prev_reference_portfolio_for_t_signal_contracts(self):
+        from tools.agent_tools.research.research_learning import (
+            _validate_researcher_input_facts,
+        )
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        cursor.executescript(
+            """
+            CREATE TABLE portfolio (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL
+            );
+            CREATE TABLE signal (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analyst TEXT NOT NULL,
+                artifact_json TEXT,
+                artifact_json_artifact_path TEXT,
+                artifact_json_sha256 TEXT
+            );
+            """
+        )
+        cursor.execute(
+            "INSERT INTO portfolio(id, config_id, trading_date) VALUES (?, ?, ?)",
+            ("portfolio-prev", "cfg", "2025-02-28"),
+        )
+        for index, analyst in enumerate(ANALYSTS, start=1):
+            artifact = {
+                "metadata": {
+                    "action_evidence_contract": _complete_aec(analyst),
+                },
+                "signal_artifact_metadata": {
+                    "contract_version": "agentquant.signal_artifact.v1",
+                },
+            }
+            cursor.execute(
+                """
+                INSERT INTO signal(
+                    id, portfolio_id, ticker, analyst, artifact_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    f"signal-{index}",
+                    "portfolio-prev",
+                    "BU",
+                    analyst,
+                    json.dumps(artifact),
+                ),
+            )
+        recommendation = {
+            "id": "rec-t",
+            "config_id": "cfg",
+            "reference_portfolio_id": "portfolio-prev",
+            "source_type": "strategy",
+            "underlying_code": "BU",
+            "trading_date": "2025-03-03",
+            "effective_trade_date": "2025-03-03",
+            "audit_payload": _full_auditor_payload("rec-t"),
+            "signal_snapshot": {
+                "signal_collection_contract": _scc(data_available=True),
+                "final_action_contract": _final_action_contract(
+                    current_lots=0,
+                    target_lots=0,
+                ),
+                "execution_result": {
+                    "outcome": "not_triggered",
+                    "status": "skipped",
+                    "transaction_count": 0,
+                    "actual_transactions": [],
+                    "no_trade_reason": "intraday_trigger_not_met",
+                },
+            },
+        }
+
+        _validate_researcher_input_facts(
+            cursor=cursor,
+            config_id="cfg",
+            trading_date="2025-03-03",
+            previous_trading_dates_by_ticker={"BU": "2025-02-28"},
+            settlement_row={"trading_date": "2025-03-03", "daily_pnl": 0.0},
+            strategy_recommendations=[recommendation],
+            transactions_by_recommendation={},
+        )
+        connection.close()
+
+    def test_researcher_rejects_persisted_aec_with_wrong_logical_t_date(self):
+        from tools.agent_tools.research.research_learning import (
+            _validate_researcher_input_facts,
+        )
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        cursor = connection.cursor()
+        cursor.executescript(
+            """
+            CREATE TABLE portfolio (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL
+            );
+            CREATE TABLE signal (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analyst TEXT NOT NULL,
+                artifact_json TEXT,
+                artifact_json_artifact_path TEXT,
+                artifact_json_sha256 TEXT
+            );
+            """
+        )
+        cursor.execute(
+            "INSERT INTO portfolio(id, config_id, trading_date) VALUES (?, ?, ?)",
+            ("portfolio-prev", "cfg", "2025-02-28"),
+        )
+        for index, analyst in enumerate(ANALYSTS, start=1):
+            aec = _complete_aec(analyst)
+            if analyst == "technical":
+                aec["data_usage_summary"]["trading_date"] = "2025-03-04"
+            artifact = {
+                "metadata": {"action_evidence_contract": aec},
+                "signal_artifact_metadata": {
+                    "contract_version": "agentquant.signal_artifact.v1",
+                },
+            }
+            cursor.execute(
+                "INSERT INTO signal(id, portfolio_id, ticker, analyst, artifact_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"signal-{index}",
+                    "portfolio-prev",
+                    "BU",
+                    analyst,
+                    json.dumps(artifact),
+                ),
+            )
+        recommendation = {
+            "id": "rec-t",
+            "config_id": "cfg",
+            "reference_portfolio_id": "portfolio-prev",
+            "source_type": "strategy",
+            "underlying_code": "BU",
+            "trading_date": "2025-03-03",
+            "effective_trade_date": "2025-03-03",
+            "audit_payload": _full_auditor_payload("rec-t"),
+            "signal_snapshot": {
+                "signal_collection_contract": _scc(data_available=True),
+                "final_action_contract": _final_action_contract(
+                    current_lots=0,
+                    target_lots=0,
+                ),
+                "execution_result": {
+                    "outcome": "not_triggered",
+                    "status": "skipped",
+                    "transaction_count": 0,
+                    "actual_transactions": [],
+                    "no_trade_reason": "intraday_trigger_not_met",
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "signal_record_aec_date_mismatch:BU:technical",
+        ):
+            _validate_researcher_input_facts(
+                cursor=cursor,
+                config_id="cfg",
+                trading_date="2025-03-03",
+                previous_trading_dates_by_ticker={"BU": "2025-02-28"},
                 settlement_row={"trading_date": "2025-03-03", "daily_pnl": 0.0},
                 strategy_recommendations=[recommendation],
                 transactions_by_recommendation={},

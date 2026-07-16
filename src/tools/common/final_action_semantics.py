@@ -57,8 +57,6 @@ GENERIC_NO_CHANGE_EXPLANATION_REASONS = {
 OPEN_TRANSACTION_BLOCKER_REASONS = {
     "daily_tradeability_watchlist_only",
     "final_action_contract_watch_for_trigger_probe_block",
-    "pm_text_no_trade_blocks_new_entry",
-    "pm_text_watchlist_only_blocks_new_entry",
     "pm_watch_for_trigger_probe_cap",
     "watch_for_trigger_cannot_open_position",
 }
@@ -168,9 +166,6 @@ HARD_BLOCK_REASONS = {
     "pm_risk_gate_block",
     "pm_risk_gate_reduce_only",
     "pm_opportunity_scorecard_no_trade",
-    "pm_text_no_trade_blocks_new_entry",
-    "pm_text_no_entry_trigger_blocks_new_entry",
-    "pm_text_watchlist_only_blocks_new_entry",
     "danger_zone_ban",
     "net_exposure_limit",
     "margin_insufficient",
@@ -365,6 +360,21 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def project_margin_transition(
+    *,
+    current_account_margin: Any,
+    current_ticker_margin: Any,
+    target_ticker_margin: Any,
+) -> tuple[float, float]:
+    """Return incremental and projected margin in one shared unit."""
+    account_margin = max(0.0, _float(current_account_margin, 0.0))
+    ticker_margin = max(0.0, _float(current_ticker_margin, 0.0))
+    target_margin = max(0.0, _float(target_ticker_margin, 0.0))
+    incremental_margin = max(0.0, target_margin - ticker_margin)
+    projected_total_margin = max(0.0, account_margin - ticker_margin + target_margin)
+    return incremental_margin, projected_total_margin
 
 
 def _dedupe(values: Iterable[Any] | None) -> list[str]:
@@ -1000,16 +1010,35 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
         decision_trace.get("contract_lifecycle_port")
         or decision_trace.get("rank_lifecycle")
     )
-    if decision_lifecycle != "open_add_new_risk":
+    expected_decision_lifecycle = (
+        "conditional_monitor"
+        if is_conditional_monitor_contract(contract)
+        else "open_add_new_risk"
+    )
+    if decision_lifecycle != expected_decision_lifecycle:
         errors.append(
-            f"final_lifecycle_trace_port_mismatch:{decision_lifecycle or 'missing'}:open_add_new_risk"
+            "final_lifecycle_trace_port_mismatch:"
+            f"{decision_lifecycle or 'missing'}:{expected_decision_lifecycle}"
         )
     decision_rows, row_errors = _lifecycle_trace_learning_rows(decision_trace)
     errors.extend(row_errors)
     decision_lanes = _learning_row_lanes(decision_rows)
-    mixed = sorted(decision_lanes - {"open", "add", "scale", "increase"})
+    allowed_decision_lanes = (
+        {"conditional_monitor"}
+        if expected_decision_lifecycle == "conditional_monitor"
+        else {"open", "add", "scale", "increase"}
+    )
+    mixed = sorted(decision_lanes - allowed_decision_lanes)
     if mixed:
-        errors.append(f"open_rank_mixed_forbidden_learning_lanes:{','.join(mixed)}")
+        error_scope = (
+            "conditional_monitor"
+            if expected_decision_lifecycle == "conditional_monitor"
+            else "open_rank"
+        )
+        errors.append(
+            f"{error_scope}_mixed_forbidden_learning_lanes:"
+            + ",".join(mixed)
+        )
     if bool(decision_trace.get("execution_profile_learning_direct_to_rank")):
         errors.append("execution_learning_direct_to_new_capital_rank")
     if bool(decision_trace.get("trigger_profile_learning_direct_to_rank")):

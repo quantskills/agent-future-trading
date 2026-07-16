@@ -423,6 +423,15 @@ class Router():
         self._require_pandas("Local futures fundamental loading")
 
         import os
+        from tools.agent_tools.analysis.analyst_finoview_factors import (
+            build_factor_attribution_payload,
+            build_factor_catalog,
+            build_factor_snapshot,
+            build_local_finoview_availability_audit,
+            map_factor_snapshot_to_judgment,
+            resolve_finoview_visibility_cutoffs,
+            select_latest_visible_finoview_row,
+        )
 
         # Fundamental inputs are read from local Finoview feather files.
         factor_cfg = (self.config.get("factor_data") or {}) if isinstance(self.config, dict) else {}
@@ -830,6 +839,26 @@ class Router():
 
         trading_dt = pd.to_datetime(trading_date)
         indicators = indicator_map[ticker]
+        local_catalog = build_factor_catalog(
+            data_dir=data_dir,
+            limit_to_tickers=[ticker],
+            catalog_config_path=catalog_path,
+        )
+        catalog_entries = local_catalog.get(ticker, [])
+        catalog_by_stem = {
+            Path(str(entry.get("file") or "")).stem: entry
+            for entry in catalog_entries
+            if str(entry.get("file") or "").strip()
+        }
+        visibility_cutoffs = resolve_finoview_visibility_cutoffs(
+            router=self,
+            ticker=ticker,
+            trade_date=trading_dt,
+            release_lag_days=[
+                int(entry.get("release_lag_days") or 1)
+                for entry in catalog_entries
+            ],
+        )
         fundamental_data = {}
         self.last_fundamentals_metadata["configured_indicator_count"] = len(indicators)
 
@@ -850,16 +879,9 @@ class Router():
                     self.last_fundamentals_metadata["empty_frame_count"] += 1
                     continue
 
-                date_col = None
-                if 'tradeDate' in df.columns:
-                    date_col = 'tradeDate'
-                elif 'date' in df.columns:
-                    date_col = 'date'
-
-                if date_col:
-                    df[date_col] = pd.to_datetime(df[date_col])
-                    df_filtered = df[df[date_col] < trading_dt].copy()
-                else:
+                catalog_entry = catalog_by_stem.get(filename)
+                date_col = catalog_entry.get("date_column") if catalog_entry else None
+                if not catalog_entry or not date_col or date_col not in df.columns:
                     logger.error(f"{ticker}: fundamental_source_date_column_missing")
                     self.last_fundamentals_metadata["undated_indicator_count"] += 1
                     self.last_fundamentals_metadata["undated_indicators"].append(
@@ -872,19 +894,19 @@ class Router():
                     )
                     continue
 
-                if df_filtered.empty:
+                release_lag = max(1, int(catalog_entry.get("release_lag_days") or 1))
+                visible_through_date = visibility_cutoffs.get(release_lag)
+                df_filtered, latest, _data_date, status = select_latest_visible_finoview_row(
+                    df,
+                    date_column=date_col,
+                    visible_through_date=visible_through_date,
+                )
+
+                if latest is None or status != "ok":
                     logger.warning(f"{ticker}: fundamental_source_cutoff_data_unavailable")
                     self.last_fundamentals_metadata["no_data_before_count"] += 1
                     continue
-
-                latest = df_filtered.iloc[-1]
-
-                if 'tradeDate' in df.columns:
-                    date_str = latest['tradeDate']
-                elif 'date' in df.columns:
-                    date_str = latest['date']
-                else:
-                    date_str = 'Unknown'
+                date_str = latest[date_col]
 
                 if filename in df.columns:
                     value = latest[filename]
@@ -1139,23 +1161,11 @@ class Router():
 
         self.last_fundamentals_metadata["formatted_indicator_count"] = len(fundamental_data)
         try:
-            from tools.agent_tools.analysis.analyst_finoview_factors import (
-                build_factor_attribution_payload,
-                build_factor_catalog,
-                build_factor_snapshot,
-                build_local_finoview_availability_audit,
-                map_factor_snapshot_to_judgment,
-            )
-
             if finoview_enabled:
-                local_catalog = build_factor_catalog(
-                    data_dir=data_dir,
-                    limit_to_tickers=[ticker],
-                    catalog_config_path=catalog_path,
-                )
                 factor_snapshot = build_factor_snapshot(
                     ticker,
                     trading_date,
+                    visibility_cutoffs_by_release_lag=visibility_cutoffs,
                     data_dir=data_dir,
                     catalog=local_catalog,
                 )
@@ -1262,7 +1272,7 @@ class Router():
             "parsed_news_count": 0,
             "selected_news_count": 0,
             "latest_news_date": None,
-            "news_cutoff": f"{'<' if pre_open_only else '<='}{str(trading_date)[:10]}",
+            "news_cutoff": None,
             "errors": [],
         }
 
@@ -1308,6 +1318,17 @@ class Router():
                 trading_dt = trading_date
             else:
                 trading_dt = datetime.strptime(trading_date, '%Y-%m-%d')
+            if pre_open_only:
+                visible_news_cutoff = get_previous_trading_day(
+                    router=self,
+                    trading_date=trading_dt,
+                    underlying_code=ticker,
+                )
+            else:
+                visible_news_cutoff = trading_dt
+            self.last_news_metadata["news_cutoff"] = (
+                f"<={visible_news_cutoff.strftime('%Y-%m-%d')}"
+            )
 
             for block in news_blocks:
                 if len(block) < 3:
@@ -1322,10 +1343,7 @@ class Router():
                         raise ValueError(f"no valid date line found in block head: {block[:3]}")
 
                     news_date = datetime.strptime(block[date_idx], '%Y-%m-%d')
-                    if pre_open_only and news_date >= trading_dt:
-                        continue
-
-                    if not pre_open_only and news_date > trading_dt:
+                    if news_date > visible_news_cutoff:
                         continue
 
                     title = block[date_idx + 1].strip() if len(block) > date_idx + 1 else ''

@@ -68,7 +68,7 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 | `watch_for_trigger` | 机会状态 | 分析师 | 信号收集员、PM | setup 可以观察，但当前触发未成立；需要 `entry_trigger` 和失效边界 | 否，不能直接交易；只能由 PM 写成条件触发合约 |
 | `probe_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立，但证据偏弱、单一或仍需小额验证 | 否，不能直接交易；PM 可转成 `open_probe` |
 | `tradeable_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立、setup 和失效边界完整、证据强 | 否，不能直接交易；PM 可转成 `open_real/add/scale` |
-| `risk_reduction_candidate` | 机会状态 | 分析师/PM 诊断 | PM | 当前证据支持减仓、退出或风险收缩 | 否；PM 可转成 `reduce/exit` |
+| `risk_reduction_candidate` | 机会状态 | 分析师/PM 诊断 | PM | 只针对已有持仓，当前证据支持 hold、减仓、退出或风险收缩；空仓时仅保留研究证据 | 否；不得进入新增风险证据、rank、预算或交易权限，PM 只能经既有持仓生命周期转成 `hold/reduce/exit` |
 | `wait` | 最终交易动作 | PM | 审计员、交易员、复盘员、研究员 | 当天不建立新交易动作，目标手数为 0 | 否 |
 | `hold` | 最终交易动作 | PM | 审计员、交易员、会计师、复盘员、研究员 | 继续持有当前仓位，`target_lots == current_lots` | 否，不产生新成交 |
 | `open_probe` | 最终交易动作 | PM | 审计员、交易员、会计师、复盘员、研究员 | 小额试探开仓，必须有触发、失效边界和风险预算 | 是，审计通过后执行 |
@@ -476,6 +476,10 @@ watch_for_trigger 候选被压成受控观察/条件触发候选。
 
 它不能同时表示“候选”和“阻断”。若要阻断，必须由明确硬原因或缺失条件负责，例如无 setup、无失效边界、负向学习、保证金硬风险。
 
+PM 的自由文本说明不具有候选否决权。合法 canonical watch 必须先参加既有资金优先级竞争；只有实际获选并形成非零目标手数时，唯一 FAC 才写入 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`。Step5 仍使用既有新增风险 rank；Step6 最终执行生命周期解释为 `conditional_monitor`，二者不是第二套 rank 或第二张合约。
+
+`probe_candidate/tradeable_candidate` 只有在 canonical AEC/SCC 同时证明 `trigger_valid=true`、`current_trigger_confirmed=true` 和失效边界完整，并经过 PM 排名、预算、sizing 与 Auditor 放行后，FAC 才写入 `conditional_trigger_authority=false`、`requires_intraday_confirmation=false`、`can_execute_without_intraday_trigger=true`。Trader 对所有合法 execution profile 都不得再用15分钟线复判该触发，只能使用当时可见的合法1分钟线执行；缺行情、合约失效或市场规则阻断时如实写入 `execution_result`。
+
 ### 6.5 持仓状态流转
 
 | 输入状态 | 输出 |
@@ -617,10 +621,12 @@ PM 不能：
 |---|---|---|
 | `final_action=wait/hold` 且 `lots_delta=0` | 不下单 | no trade fact |
 | `requires_intraday_confirmation=true` | 只监控触发；触发后按合约执行，未触发不成交 | trigger checked / executed or not triggered |
-| `can_execute_without_intraday_trigger=true` | 按合约允许直接执行 | execution_result |
+| `can_execute_without_intraday_trigger=true` | 不再复判15分钟触发，按合约使用合法1分钟线直接执行 | execution_result；`trigger_checked=false` |
 | `open/open_probe/open_real/add/scale/reduce/exit` 且审计通过 | 按合约方向和 `lots_delta` 执行 | 成交、未成交或部分执行事实 |
 | 行情缺失、价格异常、合约不可交易 | 不成交 | execution_block_reason |
 | 到达日内收尾仍未触发 | 记为未触发，不成交 | intraday_trigger_not_met |
+
+Trader、Auditor 与 PM 的 add/scale 保证金安全口径固定为 `projected_total_margin=current_account_margin-current_ticker_margin+target_ticker_margin`，增量为 `max(0,target_ticker_margin-current_ticker_margin)`。不得把目标品种总保证金直接与剩余保证金比较而重复计算已有持仓；reduce/exit 不得被新增风险保证金检查阻断。
 
 ### 8.2 交易员必须写清
 

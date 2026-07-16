@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 from dotenv import load_dotenv
 
 from agents.research_team.researcher import researcher_agent
+from apis.router import APISource, Router
 from graph.schema import RecommendationSourceType, TradingPhase
 from tools.agent_tools.research.reviewer_phase4_review import (
     _fetchone,
@@ -27,6 +28,7 @@ from tools.agent_tools.research.research_snapshot_reports import _write_historic
 from util.config import ConfigParser
 from util.db_helper import db_initialize, get_db
 from util.logger import logger
+from util.trading_calendar import get_previous_trading_day
 
 
 load_dotenv()
@@ -68,6 +70,15 @@ def main() -> None:
         for row in recommendations
         if row.get("source_type") == RecommendationSourceType.STRATEGY.value
     ]
+    router = Router(APISource.PANDAAI, market_type="china_futures", config=cfg)
+    previous_trading_dates_by_ticker = {
+        str(row.get("underlying_code") or "").upper(): get_previous_trading_day(
+            router=router,
+            trading_date=trading_date,
+            underlying_code=str(row.get("underlying_code") or "").upper(),
+        ).strftime("%Y-%m-%d")
+        for row in strategy_recommendations
+    }
     phase2_transactions = db.get_futures_transactions_by_date(
         config_id,
         trading_date,
@@ -122,6 +133,7 @@ def main() -> None:
             cfg=cfg,
             config_id=config_id,
             trading_date=trading_date,
+            previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
             settlement_row=settlement_row,
             recommendations=recommendations,
             strategy_recommendations=strategy_recommendations,

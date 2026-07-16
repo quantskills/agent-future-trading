@@ -7,7 +7,7 @@ import os
 import sqlite3
 from collections import Counter
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -77,6 +77,8 @@ from util.logger import logger
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
 DRY_RUN_DAY = "2025-03-10"
+DRY_RUN_PREVIOUS_DAY = "2025-03-07"
+DRY_RUN_NEXT_DAY = "2025-03-11"
 
 
 def _date_value(value: Any) -> str:
@@ -360,6 +362,7 @@ def _run_researcher(
                 cfg=cfg,
                 config_id=config_id,
                 trading_date=trading_date,
+                previous_trading_dates_by_ticker={"BU": DRY_RUN_PREVIOUS_DAY},
                 settlement_row=_settlement_row(cursor, config_id, trading_date),
                 recommendations=recommendations,
                 strategy_recommendations=strategy_recommendations,
@@ -496,7 +499,7 @@ def run_no_llm_full_chain_dry_run(
         portfolio_row = db.create_portfolio(
             config_id,
             float(dry_cfg.get("initial_cash") or 1_000_000.0),
-            dry_cfg["trading_date"],
+            datetime.strptime(DRY_RUN_PREVIOUS_DAY, "%Y-%m-%d"),
         )
         if not portfolio_row:
             raise RuntimeError("pg_dry_run_portfolio_persistence_failed")
@@ -643,7 +646,7 @@ def run_no_llm_full_chain_dry_run(
         _run_researcher(db=db, cfg=dry_cfg, config_id=config_id, trading_date=DRY_RUN_DAY)
         trace.append("researcher")
 
-        next_day = _date_value(dry_cfg["trading_date"] + timedelta(days=1))
+        next_day = DRY_RUN_NEXT_DAY
         build_learning_context(
             db=db,
             full_config=dry_cfg,

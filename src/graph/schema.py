@@ -376,9 +376,12 @@ class FuturesRecommendation(BaseModel):
 
     id: Optional[str] = Field(default=None, description="Recommendation id")
     config_id: str = Field(default="", description="Config id")
-    reference_portfolio_id: str = Field(default="", description="Reference settled portfolio id")
-    trading_date: str = Field(default="", description="Recommendation creation date")
-    effective_trade_date: str = Field(default="", description="Recommendation effective trade date")
+    reference_portfolio_id: str = Field(
+        default="",
+        description="Most recent settled portfolio id for formal Prev(T)",
+    )
+    trading_date: str = Field(default="", description="Logical futures trading day T")
+    effective_trade_date: str = Field(default="", description="Logical futures execution day T")
     source_type: RecommendationSourceType = Field(default=RecommendationSourceType.STRATEGY, description="Source type")
     underlying_code: str = Field(default="", description="Underlying code such as RB/M")
     from_contract: Optional[str] = Field(default=None, description="Rollover from-contract")
@@ -410,7 +413,7 @@ class FuturesTransaction(BaseModel):
     portfolio_id: str = Field(default="", description="Reference settled portfolio id")
     config_id: str = Field(default="", description="Config id")
     recommendation_id: Optional[str] = Field(default=None, description="Linked recommendation id")
-    trading_date: str = Field(default="", description="Trade date")
+    trading_date: str = Field(default="", description="Logical futures trading day")
     ticker: str = Field(default="", description="Underlying code")
     contract_code: Optional[str] = Field(default=None, description="Executed contract code")
     action: FuturesAction = Field(default=FuturesAction.HOLD, description="Executed action")

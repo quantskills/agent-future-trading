@@ -432,6 +432,55 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(min_call["symbol_type"], "future")
         self.assertEqual(min_call["frequency"], "15m")
 
+    def test_minute_bars_filter_by_logical_trading_date_not_physical_night_date(self):
+        fake, env_patch, module_patch = self._build_api()
+
+        def get_market_min_data(**kwargs):
+            fake.calls.append({"func": "get_market_min_data", **kwargs})
+            return [
+                {
+                    "date": "20250103",
+                    "minute": "210000",
+                    "datetime": "2025-01-03 21:00:00",
+                    "symbol": "M_DOMINANT.DCE",
+                    "trading_code": "M2505",
+                    "open": 3200.0,
+                    "high": 3210.0,
+                    "low": 3190.0,
+                    "close": 3205.0,
+                    "volume": 10,
+                    "trading_date": "20250104",
+                },
+                {
+                    "date": "20250104",
+                    "minute": "100000",
+                    "datetime": "2025-01-04 10:00:00",
+                    "symbol": "M_DOMINANT.DCE",
+                    "trading_code": "M2505",
+                    "open": 3210.0,
+                    "high": 3220.0,
+                    "low": 3200.0,
+                    "close": 3215.0,
+                    "volume": 10,
+                    "trading_date": "20250103",
+                },
+            ]
+
+        fake.get_market_min_data = get_market_min_data
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            bars = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+            )
+
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0]["datetime"], "2025-01-03 21:00:00")
+        self.assertEqual(bars[0]["trading_date"], "20250104")
+
 
 if __name__ == "__main__":
     unittest.main()

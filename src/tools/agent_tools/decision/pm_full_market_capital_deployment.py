@@ -26,6 +26,7 @@ from tools.common.final_action_semantics import (
     contract_requires_full_market_capital_rank,
     full_market_rank_source_payload,
     is_full_market_rank_source,
+    project_margin_transition,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 
@@ -727,7 +728,14 @@ def _float_field(mapping: Dict[str, Any], field: str, default: float = 0.0) -> f
 
 def _capital_rank_eligible(pm_state: Dict[str, Any], row: Dict[str, Any]) -> bool:
     state = str(row.get("final_state") or row.get("opportunity_state") or "").strip().lower()
-    if state in {"no_opportunity", "wait", "flat_wait", "blocked", "rejected"}:
+    if state in {
+        "no_opportunity",
+        "risk_reduction_candidate",
+        "wait",
+        "flat_wait",
+        "blocked",
+        "rejected",
+    }:
         return False
     if not _capital_layer_from_pm_state(pm_state, row):
         return False
@@ -871,9 +879,10 @@ def apply_full_market_capital_deployment(
         rank_score = _float_field(row, "rank_score", priority_score)
         target_ticker_margin_ratio = _recommended_margin_ratio(pm_state, portfolio)
         current_ticker_margin_ratio = _portfolio_ticker_margin_ratio(portfolio, str(ticker).upper())
-        incremental_margin_ratio = max(
-            0.0,
-            target_ticker_margin_ratio - current_ticker_margin_ratio,
+        incremental_margin_ratio, _ = project_margin_transition(
+            current_account_margin=_portfolio_margin_ratio(portfolio),
+            current_ticker_margin=current_ticker_margin_ratio,
+            target_ticker_margin=target_ticker_margin_ratio,
         )
         rank_score = _apply_capital_efficiency_to_rank_row(
             row,

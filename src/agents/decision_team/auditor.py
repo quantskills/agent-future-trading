@@ -20,6 +20,7 @@ from tools.common.contracts import (
 from tools.common.final_action_semantics import (
     classify_final_action_contract,
     contract_increases_risk_position,
+    project_margin_transition,
     validate_final_action_lot_transition,
 )
 
@@ -226,8 +227,11 @@ class Auditor:
                 if abs(calculated_account_margin_ratio - account_margin_ratio) > 1e-6:
                     hard_reasons.append("account_margin_ratio_mismatch")
                 current_ticker_margin_ratio = position_margin_used / account_equity
-                incremental_margin_ratio = max(0.0, target_margin - current_ticker_margin_ratio)
-                projected_total_margin_ratio = calculated_account_margin_ratio + incremental_margin_ratio
+                incremental_margin_ratio, projected_total_margin_ratio = project_margin_transition(
+                    current_account_margin=calculated_account_margin_ratio,
+                    current_ticker_margin=current_ticker_margin_ratio,
+                    target_ticker_margin=target_margin,
+                )
                 margin_projection = {
                     "account_margin_ratio_before": calculated_account_margin_ratio,
                     "current_ticker_margin_ratio": current_ticker_margin_ratio,

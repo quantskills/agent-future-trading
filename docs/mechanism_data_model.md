@@ -15,7 +15,7 @@
 
 数据规则：
 
-1. Phase1 盘前策略只能读取 T-1 及以前可见信息。
+1. `T` 表示期货逻辑交易日；`Prev(T)` / `Next(T)` 必须由正式交易日与夜盘映射机制确定，不能按自然日加减。Phase1 为逻辑 `T` 生成策略时只能读取 `Prev(T)` 及以前可见信息，参考组合固定为最近已结算的 `Prev(T)` 账户/持仓快照。
 2. Phase2 盘中执行只能读取当时已经发生的 T 日盘中数据。
 3. Phase3 结算后才能读取当日官方结算数据。
 4. Phase4 复盘只能输出交易日志、事实归因和研究输入材料；Phase4 标记 completed 不触发 `strategy_memory` 刷新、学习 retention 清理或研究表写入。
@@ -25,6 +25,8 @@
 8. 回测前硬数据覆盖只针对交易必须依赖的 PandaAI 市场数据：交易日窗口、交易宇宙内每个品种的日线行情、开收盘价、官方结算价和主力合约映射必须可取；缺任一项属于非策略 hard error。
 9. Finoview 基本面数据和本地新闻不要求每日齐全。它们按真实更新频率进入数据质量、证据强弱、缺失证据和降级理由；不能因为某品种某日没有基本面或新闻更新而阻断回测。
 10. 智能体之间只传递共享校验通过的正式结构化契约。prompt、原始 response、内部推理、中间工作状态、隐藏上下文和未验证工具结果不得持久化、跨智能体传递或写入日志/异常。分析师signal artifact和报告只保存同一份已校验AEC；`signal.justification`固定为空，metadata在Workflow保存后只允许AEC和真实记录ID。LLM失败允许重试但禁止返回默认结构化对象；耗尽后只抛稳定错误码，不生成AEC或学习事实。
+11. PandaAI 日线只使用不晚于 `Prev(T)` 的记录，`Prev(T)` 缺失时可继续使用更早的真实 `T-n`；Phase2 分钟线按逻辑 `T` 查询并要求 provider `trading_date=T`，物理 `datetime/date` 可以位于 `Prev(T)` 夜盘，`cutoff_datetime` 继续限制当时可见范围。
+12. Finoview 的 `tradeDate` 是指标事实日期。Router 格式化输入和 factor snapshot 必须共用正式选择器，按 catalog 的 `release_lag_days` 逐个回退正式交易日；`recordTime` 不解释为发布时间、硬可见边界或跨智能体字段。新闻发布日期不得晚于正式 `Prev(T)`；无新增基本面或新闻合法。
 
 ## 二、模型调用原则
 
@@ -115,6 +117,8 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 
 研究员不能保存prompt、原始response、内部推理或未验证工具结果，不能修改当天合约、手数或交易员权限。学习允许为空，不要求每笔交易形成学习，也不要求每次决策使用学习。
 
+Researcher 的来源交易日为逻辑 `T`：`signal.portfolio_id` 只追溯 `reference_portfolio.trading_date=Prev(T)`，不能被解释为信号日期；持久化 AEC 的 `data_usage_summary.trading_date`、SCC、recommendation、execution、transaction、settlement和Phase4必须属于逻辑 `T`。`source_trading_date=T` 的成果仅能被目标逻辑日 `Next(T)` 及以后读取。
+
 ### 协议管理员
 
 不调用 LLM。回测前只运行契约覆盖、字段语义、系统不变量样例和非策略就绪检查；每日只读检查已落地物理结果。不能读取或复查智能体内部机制，不能参与交易动作或收益判断。PG 没有独立字段层：输入、判定和输出只能使用 `matrix_field_semantics.md` 已登记字段，动作只能按 `matrix_action_canonical.md` 解释；通用 JSON 容器不得引入未登记控制字段。
@@ -174,7 +178,7 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 - `can_execute_without_intraday_trigger`；
 - `reason_codes`。
 
-`opportunity_rank` 和 `opportunity_score` 只用于投资组合经理新增风险资金部署解释，不是交易员执行权限。`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控不得伪造 rank 或空 `capital_deployment`；新开仓与同方向扩大绝对手数的 `add/scale` 都必须把 Step5 资金部署事实原子写入同一张 `final_action_contract`。
+`opportunity_rank` 和 `opportunity_score` 只用于投资组合经理新增风险资金部署解释，不是交易员执行权限。`wait/hold/reduce/exit`、当前反转退出腿、只服务已有持仓的 `risk_reduction_candidate` 和不增加风险的条件监控不得伪造 rank 或空 `capital_deployment`；新开仓与同方向扩大绝对手数的 `add/scale` 都必须把 Step5 资金部署事实原子写入同一张 `final_action_contract`。
 
 ## 七、系统事实载体契约
 
@@ -197,6 +201,8 @@ LLM 只用于结构化理解和研究总结，不用于最终交易授权。
 | `researcher_llm_notes` | 研究员验证后结构化研究记录 | `trading_date` | 研究员学习入口 | 经验证的 evidence pack 与结构化结果 payload | prompt、原始response、内部推理、未验证工具结果、当天交易指令、手数、成交、结算改写 |
 
 `execution_contract` 只能作为交易员触发/执行配置摘要使用，不是第二张交易合约。它只能从已审计的 `final_action_contract` 中抽取执行规则字段，例如 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得携带完整AEC、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。交易员执行动作和手数摘要只能来自已审计 `final_action_contract` 的必要执行字段摘要，不能由 `execution_contract` 单独授权。
+
+条件 FAC 的 `requires_intraday_confirmation=true` 表示 Trader 用15分钟线确认并以合法1分钟线执行；当前触发已经 canonical 事实确认且获 PM 与 Auditor 放行时，`can_execute_without_intraday_trigger=true` 表示任何合法 execution profile 均不再由 Trader 复判15分钟触发，只选择合法1分钟线执行。open/add/scale 的执行保证金投影统一为 `current_account_margin-current_ticker_margin+target_ticker_margin`，增量为 `max(0,target_ticker_margin-current_ticker_margin)`；该公式不新增持久化字段。
 
 Transaction audit payload 可以保存交易员执行事实和执行审计摘要，不能保存完整 PM 合约副本。需要追溯上游来源时，只能记录 `recommendation_id`、上游 artifact path 或必要执行摘要。
 

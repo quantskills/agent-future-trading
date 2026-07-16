@@ -61,7 +61,6 @@ from agents.decision_team.portfolio_manager import (
     _canonical_action_evidence_contract,
     _retrieve_lifecycle_pm_memory,
     _validate_required_analyst_signals,
-    _pm_new_entry_semantic_block_reason,
     _current_open_evidence_snapshot,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
@@ -3297,6 +3296,244 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
         def get_futures_transaction_memory(self, *args, **kwargs):
             return []
 
+    def test_canonical_watch_survives_pm_prose_and_reaches_nonzero_conditional_fac(self):
+        portfolio = Portfolio(
+            id="portfolio-prev",
+            cashflow=5_000_000.0,
+            account_equity=5_000_000.0,
+            cash_available=5_000_000.0,
+            margin_available=5_000_000.0,
+            positions={},
+        )
+        signals = []
+        for index, analyst in enumerate(
+            ("technical", "fundamental", "commodity_news"),
+            start=1,
+        ):
+            directional = analyst == "technical"
+            aec = build_test_aec(
+                analyst,
+                ticker="BU",
+                trading_date="2025-03-03",
+                signal="Bearish" if directional else "Neutral",
+                side="short" if directional else "flat",
+                confidence=0.72 if directional else 0.35,
+                opportunity_state="watch_for_trigger" if directional else "no_opportunity",
+                setup_type="breakdown_setup" if directional else "no_trade",
+                setup_quality_ok=directional,
+                trigger_valid=False,
+                current_trigger_confirmed=False,
+                invalidation_present=directional,
+                entry_trigger=(
+                    "15m close below 3480 with volume confirmation"
+                    if directional
+                    else ""
+                ),
+                invalidation_condition=(
+                    "15m close above 3520"
+                    if directional
+                    else None
+                ),
+            )
+            signals.append(
+                AnalystSignal(
+                    agent_name=analyst,
+                    signal=Signal.BEARISH if directional else Signal.NEUTRAL,
+                    confidence=0.72 if directional else 0.35,
+                    opportunity_state=(
+                        "watch_for_trigger" if directional else "no_opportunity"
+                    ),
+                    setup_type="breakdown_setup" if directional else "no_trade",
+                    entry_trigger=aec["entry_trigger"],
+                    trigger_valid=False,
+                    invalidation_present=directional,
+                    metadata={
+                        "signal_record_id": f"signal-{index}",
+                        "action_evidence_contract": aec,
+                    },
+                )
+            )
+        full_config = {
+            "cashflow": 5_000_000.0,
+            "max_total_margin_ratio": 0.20,
+            "max_single_margin_ratio": 0.12,
+            "learning": {"enabled": False},
+            "pm_risk_gate": {"enabled": False},
+            "portfolio_manager": {
+                "holding_rebalance_control": {
+                    "watch_for_trigger_new_entry": {
+                        "enabled": True,
+                        "allow_probe": True,
+                        "probe_max_ratio": 0.01,
+                        "probe_floor_ratio": 0.005,
+                    },
+                },
+            },
+        }
+        state = {
+            "portfolio": portfolio,
+            "ticker": "BU",
+            "trading_date": datetime(2025, 3, 3),
+            "analyst_signals": signals,
+            "num_tickers": 1,
+            "enabled_analysts": [
+                "technical",
+                "fundamental",
+                "commodity_news",
+            ],
+            "config_id": "cfg",
+            "phase": TradingPhase.PHASE1,
+            "morning_price_context": SimpleNamespace(
+                base_price=3500.0,
+                base_price_source="t_minus_1_close_fallback",
+                base_price_date="2025-02-28",
+                open_price=None,
+                prev_close_price=3500.0,
+                warning_message=None,
+                contract_code="BU2506",
+                contract_facts={
+                    "contract_code": "BU2506",
+                    "underlying_code": "BU",
+                    "as_of_date": "2025-02-28",
+                    "source": "test_visible_contract",
+                },
+            ),
+            "config": full_config,
+            "full_config": full_config,
+            "router": None,
+        }
+        state.update(signal_collector_agent(state))
+
+        with patch(
+            "agents.decision_team.portfolio_manager.get_db",
+            return_value=self._PMTestDB(),
+        ), patch(
+            "agents.decision_team.portfolio_manager._sanitize_visible_text",
+            return_value=(
+                "No new position is warranted before the canonical 15m trigger confirms."
+            ),
+        ), patch(
+            "agents.decision_team.portfolio_manager.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.10,
+                "margin_rate_short": 0.10,
+            },
+        ):
+            pm_result = portfolio_agent_futures(state)
+
+        signed = finalize_pm_full_market_contracts(
+            generated=[("BU", pm_result["pm_state"])],
+            config=full_config,
+            portfolio=portfolio,
+        )
+        fac = signed[0][1].signal_snapshot["final_action_contract"]
+
+        self.assertLess(fac["target_lots"], 0, fac)
+        self.assertTrue(fac["conditional_trigger_authority"])
+        self.assertTrue(fac["requires_intraday_confirmation"])
+        self.assertFalse(fac["can_execute_without_intraday_trigger"])
+
+        from agents.decision_team.auditor import audit_futures_recommendation
+        from tools.common.signal_evidence_collection import build_scc_data_quality_summary
+
+        recommendation = signed[0][1]
+        recommendation.id = "rec-watch"
+        audit = audit_futures_recommendation(
+            recommendation=recommendation.model_dump(),
+            hard_risk_config={"max_total_margin_ratio": 0.20},
+            account_state={
+                "account_equity": 5_000_000.0,
+                "margin_used": 0.0,
+                "margin_ratio": 0.0,
+                "risk_status": "NORMAL",
+            },
+            position_state={
+                "ticker": "BU",
+                "current_lots": 0,
+                "contract_code": None,
+                "margin_used": 0.0,
+                "margin_rate": 0.10,
+                "contract_multiplier": 10.0,
+            },
+            contract_state={
+                "contract_code": "BU2506",
+                "underlying_code": "BU",
+                "as_of_date": "2025-02-28",
+                "source": "test_visible_contract",
+            },
+            data_quality=build_scc_data_quality_summary(
+                recommendation.signal_snapshot["signal_collection_contract"]
+            ),
+        )
+        self.assertEqual(audit.audit_verdict, "approve")
+
+        one_minute_bars = [
+            {
+                "datetime": "2025-03-03 09:30:00",
+                "open": 3500.0,
+                "high": 3510.0,
+                "low": 3490.0,
+                "close": 3500.0,
+                "volume": 10,
+            },
+            {
+                "datetime": "2025-03-03 09:31:00",
+                "open": 3500.0,
+                "high": 3505.0,
+                "low": 3490.0,
+                "close": 3495.0,
+                "volume": 10,
+            },
+            {
+                "datetime": "2025-03-03 10:01:00",
+                "open": 3478.0,
+                "high": 3482.0,
+                "low": 3470.0,
+                "close": 3475.0,
+                "volume": 10,
+            },
+        ]
+        untriggered = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-03 10:00:00",
+                    "open": 3500.0,
+                    "high": 3505.0,
+                    "low": 3495.0,
+                    "close": 3500.0,
+                    "volume": 10,
+                }
+            ],
+            execution_bars=one_minute_bars,
+            action="open_short",
+            config={"opening_range_minutes": 2, "min_execution_volume": 1},
+            decision_context={"execution_contract": fac},
+            finalize_untriggered=True,
+        )
+        self.assertFalse(untriggered.should_execute)
+        self.assertEqual(untriggered.reason, "intraday_trigger_not_met")
+
+        triggered = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-03 10:00:00",
+                    "open": 3490.0,
+                    "high": 3492.0,
+                    "low": 3478.0,
+                    "close": 3480.0,
+                    "volume": 10,
+                }
+            ],
+            execution_bars=one_minute_bars,
+            action="open_short",
+            config={"opening_range_minutes": 2, "min_execution_volume": 1},
+            decision_context={"execution_contract": fac},
+            finalize_untriggered=True,
+        )
+        self.assertTrue(triggered.should_execute)
+        self.assertEqual(triggered.base_datetime, "2025-03-03 10:01:00")
+
     def test_existing_short_unchanged_is_hold_not_open_short(self):
         intent = recommendation_intent_from_lots(current_lots=-1, target_lots=-1)
 
@@ -5767,13 +6004,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(rows[0]["adaptive_policy_runtime_decision"]["sample_count"], 0)
         self.assertEqual(trace["allowed_count"], 1)
 
-    def test_pm_no_new_entry_phrase_blocks_scorecard_probe_semantics(self):
-        reason = _pm_new_entry_semantic_block_reason(
-            "New entry is not warranted under current technical confirmation; sizing prior to 0."
-        )
-
-        self.assertEqual(reason, "pm_text_no_trade_blocks_new_entry")
-
     def test_final_action_contract_is_single_structured_trade_truth(self):
         contract = _build_final_action_contract(
             ticker="RB",
@@ -6463,7 +6693,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(execution_contract["execution_profile"], "pullback")
         self.assertEqual(execution_contract["trigger_source"], "execution_action_value_pullback")
         self.assertIn("execution_action_value_preference", execution_contract["reason_codes"])
-        self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
+        self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
+        self.assertFalse(execution_contract["requires_intraday_confirmation"])
         self.assertEqual(execution_contract["business_boundary"], "trader_executes_pm_plan_only_no_strategy_creation")
 
         final_contract = _build_final_action_contract(
@@ -6530,9 +6761,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             decision_context={"execution_contract": execution_contract},
         )
         self.assertTrue(result.should_execute)
-        self.assertEqual(result.reason, "intraday_pullback_confirmed")
+        self.assertEqual(result.reason, "intraday_immediate_execution")
         self.assertEqual(result.features["execution_profile"], "pullback")
-        self.assertEqual(result.features["trigger_rule"], "vwap_pullback_support")
+        self.assertFalse(result.to_audit_payload()["trigger_checked"])
 
     def test_single_exact_positive_open_action_value_becomes_candidate_not_real_budget(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -7253,8 +7484,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     metadata={
                         "action_evidence_contract": {
                             "opportunity_state": "tradeable_candidate",
-                            "opportunity_state": "tradeable_candidate",
                             "trigger_valid": True,
+                            "current_trigger_confirmed": True,
                             "invalidation_present": True,
                             "entry_trigger": "current breakdown below support is confirmed",
                         }
@@ -7792,6 +8023,20 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 trading_date="2025-03-10",
                 limit=10,
             )
+            next_day_overlays = db.get_config_learning_overlay(
+                config_id="cfg",
+                trading_date="2025-03-11",
+            )
+            next_day_profiles = db.get_alpha_setup_profiles(
+                config_id="cfg",
+                ticker="RB",
+                sector="ferrous",
+                side="long",
+                horizon_class="short",
+                market_regime="trend",
+                trading_date="2025-03-11",
+                limit=10,
+            )
 
         self.assertEqual({row["id"] for row in overlays}, {"overlay-past"})
         profile_ids = {row["id"] for row in profiles}
@@ -7799,6 +8044,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("profile-same", profile_ids)
         self.assertNotIn("profile-future", profile_ids)
         self.assertNotIn("profile-legacy", profile_ids)
+        self.assertIn("overlay-same", {row["id"] for row in next_day_overlays})
+        self.assertIn("profile-same", {row["id"] for row in next_day_profiles})
 
     def test_learning_boundary_excludes_same_day_and_future_performance_and_prompt_priors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -8739,9 +8986,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
     def test_reason_effect_summary_covers_known_exit_reason_codes(self):
         known_exit_reason_codes = [
-            "pm_text_no_trade_blocks_new_entry",
-            "pm_text_no_entry_trigger_blocks_new_entry",
-            "pm_text_watchlist_only_blocks_new_entry",
             "final_contract_authority_not_met",
             "final_contract_authority_not_met",
             "missing_final_contract_authority",
@@ -8811,7 +9055,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         ]
         summary = reason_effect_summary(known_exit_reason_codes)
         self.assertFalse(summary["unknown_trade_effects"])
-        self.assertIn("pm_text_no_trade_blocks_new_entry", summary["hard_blocks"])
         self.assertIn("market_confirmation_data_gap", summary["soft_limits"])
         self.assertIn("drawdown_control", summary["learning_adjustments"])
         self.assertIn("mature_alpha_release", summary["release_signals"])
@@ -11674,6 +11917,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     agent_name="commodity_news",
                     signal=Signal.BULLISH,
                     confidence=0.80,
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="news_event_trigger",
                     event_type="supply_disruption",
                     trigger_valid=True,
@@ -11682,8 +11926,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     metadata={
                         "action_evidence_contract": {
                             "opportunity_state": "tradeable_candidate",
-                            "opportunity_state": "tradeable_candidate",
                             "trigger_valid": True,
+                            "current_trigger_confirmed": True,
                             "invalidation_present": True,
                             "entry_trigger": "Fresh supply disruption catalyst",
                         }
