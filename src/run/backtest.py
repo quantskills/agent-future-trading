@@ -43,32 +43,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass --reset-config to proposal.py on the first trading day only",
     )
-    parser.add_argument(
-        "--run-eval",
-        action="store_true",
-        help="Deprecated compatibility flag; evaluation now runs by default after the backtest window finishes",
-    )
-    parser.add_argument(
-        "--skip-eval",
-        action="store_true",
-        help="Skip the default evaluate_config.py --update step after the backtest window finishes",
-    )
-    parser.add_argument(
-        "--plot",
-        action="store_true",
-        help="Run run/plot_config.py after the backtest window finishes",
-    )
-    parser.add_argument(
-        "--plot-no-price",
-        action="store_true",
-        help="When --plot is set, skip PandaAI price loading for ticker charts",
-    )
-    parser.add_argument(
-        "--plot-output-dir",
-        type=str,
-        default=None,
-        help="When --plot is set, directory for generated chart images",
-    )
     return parser.parse_args()
 
 
@@ -152,25 +126,8 @@ def run_command(command: List[str], env: dict) -> int:
     return completed.returncode
 
 
-def run_pre_backtest_test(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
-    command = [
-        sys.executable,
-        str(RUN_DIR / "pre_backtest_test.py"),
-        "--config",
-        config_arg,
-        "--start-date",
-        start_date,
-        "--end-date",
-        end_date,
-    ]
-    if local_db:
-        command.append("--local-db")
-    print("[backtest] Running pre_backtest_test.py")
-    return run_command(command, os.environ.copy())
-
-
 def reset_existing_config_if_requested(config: dict, reset_config: bool, local_db: bool) -> None:
-    """Delete the old config after pre-backtest checks when reset is requested."""
+    """Delete the old config before the first trading day when reset is requested."""
     if not reset_config:
         return
     from util.db_helper import db_initialize, get_db
@@ -181,9 +138,9 @@ def reset_existing_config_if_requested(config: dict, reset_config: bool, local_d
     config_id = db.get_config_id_by_name(exp_name)
     if not config_id:
         return
-    print(f"[backtest] Resetting existing config after pre_backtest_test.py: {config_id[:8]}...")
+    print(f"[backtest] Resetting existing config before the first trading day: {config_id[:8]}...")
     if not db.delete_config_and_portfolios(config_id):
-        raise RuntimeError(f"Failed to reset existing config before pre-backtest checks: {config_id}")
+        raise RuntimeError(f"Failed to reset existing config before backtest: {config_id}")
 
 
 def run_backtest_daily_test(config_arg: str, start_date: str, end_date: str, local_db: bool) -> int:
@@ -223,16 +180,6 @@ def main() -> int:
         raise ValueError("backtest.py currently supports china_futures only.")
     if not args.local_db:
         raise ValueError("backtest.py requires --local-db for china_futures.")
-
-    pre_backtest_return_code = run_pre_backtest_test(
-        config_arg,
-        args.start_date,
-        args.end_date,
-        args.local_db,
-    )
-    if pre_backtest_return_code != 0:
-        print(f"[backtest] pre_backtest_test.py failed with exit code {pre_backtest_return_code}")
-        return pre_backtest_return_code
 
     reset_existing_config_if_requested(config, args.reset_config, args.local_db)
 
@@ -332,41 +279,6 @@ def main() -> int:
                 f"{trading_day}: backtest_daily_test.py failed with exit code {daily_test_return_code}"
             )
             return daily_test_return_code
-
-    if args.run_eval and args.skip_eval:
-        raise ValueError("--run-eval and --skip-eval cannot be used together.")
-
-    if not args.skip_eval:
-        eval_command = [sys.executable, str(RUN_DIR / "evaluate_config.py"), "--config", config_arg]
-        if args.local_db:
-            eval_command.append("--local-db")
-        eval_command.append("--update")
-        print("[backtest] Running evaluate_config.py --update")
-        eval_env = os.environ.copy()
-        eval_env["AGENTQUANT_RUN_ID"] = run_id
-        eval_env["AGENTQUANT_EXP_NAME"] = str(config.get("exp_name") or "")
-        eval_env["AGENTQUANT_LOG_NAMESPACE"] = "evaluate_config"
-        eval_return_code = run_command(eval_command, eval_env)
-        if eval_return_code != 0:
-            print(f"[backtest] evaluate_config.py failed with exit code {eval_return_code}")
-            return eval_return_code
-
-    if args.plot:
-        plot_command = [sys.executable, str(RUN_DIR / "plot_config.py"), "--config", config_arg]
-        if args.plot_no_price:
-            plot_command.append("--no-price")
-        if args.plot_output_dir:
-            plot_command.extend(["--output-dir", args.plot_output_dir])
-
-        print("[backtest] Running plot_config.py")
-        plot_env = os.environ.copy()
-        plot_env["AGENTQUANT_RUN_ID"] = run_id
-        plot_env["AGENTQUANT_EXP_NAME"] = str(config.get("exp_name") or "")
-        plot_env["AGENTQUANT_LOG_NAMESPACE"] = "plot_config"
-        plot_return_code = run_command(plot_command, plot_env)
-        if plot_return_code != 0:
-            print(f"[backtest] plot_config.py failed with exit code {plot_return_code}")
-            return plot_return_code
 
     print("[backtest] Backtest loop completed successfully.")
     return 0

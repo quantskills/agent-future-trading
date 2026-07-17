@@ -4007,7 +4007,6 @@ class PandaAIContractNormalizationRegressionTest(unittest.TestCase):
         api.password = "password"
         api._panda_data = fake
         api._token_initialized = True
-        api._retry_attempts = 1
         api._retry_initial_wait_seconds = 0.0
         api._retry_max_wait_seconds = 0.0
         api._network_retry_initial_wait_seconds = 0.0

@@ -23,6 +23,20 @@ from tools.agent_tools.control.pg_pre_backtest_acceptance import (
 from tools.agent_tools.control.pg_schemas import ProtocolCheckResult
 
 
+def _daily_fact(trading_date: str, contract_code: str = "RB2505") -> SimpleNamespace:
+    return SimpleNamespace(
+        trade_date=trading_date,
+        open_price=3500.0,
+        highest_price=3520.0,
+        lowest_price=3490.0,
+        close_price=3510.0,
+        settle_price=3508.0,
+        turnover_vol=100,
+        open_int=1000,
+        ticker=contract_code,
+    )
+
+
 class PreBacktestAcceptanceTest(unittest.TestCase):
     def _run(self, **overrides):
         kwargs = {
@@ -83,17 +97,8 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             def get_futures_daily_candles_optimized(self, **kwargs):
                 calls.append(("daily", kwargs["underlying_code"]))
                 return [
-                    SimpleNamespace(
-                        trade_date="2025-03-10",
-                        open_price=3500.0,
-                        highest_price=3520.0,
-                        lowest_price=3490.0,
-                        close_price=3510.0,
-                        settle_price=3508.0,
-                        turnover_vol=100,
-                        open_int=1000,
-                        ticker="RB2505",
-                    )
+                    _daily_fact("2025-03-07"),
+                    _daily_fact("2025-03-10"),
                 ]
 
         class FakeRouter:
@@ -118,6 +123,8 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
                         "low": 3499.0,
                         "close": 3500.5,
                         "volume": 10,
+                        "trading_code": "RB2505",
+                        "trading_date": "20250310",
                     }
                 ]
 
@@ -157,19 +164,110 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
         self.assertTrue(result.passed, result.to_dict())
         self.assertIn(("minute", "15m"), calls)
         self.assertIn(("minute", "1m"), calls)
-        self.assertTrue(any(row[0] == "main_contract" for row in calls))
+        self.assertTrue(any(row[0] == "daily" for row in calls))
         self.assertTrue(any(row[0] == "concrete_contract" for row in calls))
         self.assertTrue(any(row[0] == "fundamental" for row in calls))
         self.assertTrue(any(row[0] == "news" for row in calls))
 
-    def test_optional_fundamental_and_news_empty_results_do_not_block_readiness(self):
+    def test_data_readiness_uses_one_canonical_contract_for_two_minute_capabilities(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
 
+        contract_codes = {"CF": "CF505", "RB": "RB2505", "M": "M2505"}
+        minute_calls = []
+
         class FakeAPI:
-            def get_futures_daily_candles_optimized(self, **_kwargs):
+            def get_futures_daily_candles_optimized(self, **kwargs):
+                ticker = kwargs["underlying_code"]
+                return [
+                    _daily_fact("2025-03-07", contract_codes[ticker]),
+                    _daily_fact("2025-03-10", contract_codes[ticker]),
+                ]
+
+        class FakeRouter:
+            def __init__(self, **_kwargs):
+                self.api = FakeAPI()
+
+            def get_futures_main_contract_quote_on_date(self, underlying_code, _trading_date):
+                return SimpleNamespace(ticker=contract_codes[underlying_code], settle_price=3508.0)
+
+            def get_futures_contract_quote_on_date(self, contract_code, _trading_date):
+                return SimpleNamespace(ticker=contract_code, settle_price=3508.0)
+
+            def get_china_futures_minute_bars(self, **kwargs):
+                minute_calls.append(dict(kwargs))
+                return [
+                    {
+                        "datetime": "2025-03-09 21:01:00",
+                        "open": 3500.0,
+                        "high": 3501.0,
+                        "low": 3499.0,
+                        "close": 3500.5,
+                        "volume": 10,
+                        "trading_code": kwargs["contract_id"],
+                        "trading_date": "20250310",
+                    }
+                ]
+
+            def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                return None
+
+            def get_china_futures_news(self, *_args, **_kwargs):
+                return []
+
+        with patch("apis.router.Router", FakeRouter), patch.object(
+            module,
+            "_optional_data_directories_ready",
+            return_value=([], []),
+            create=True,
+        ), patch(
+            "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.1,
+                "margin_rate_short": 0.1,
+            },
+        ):
+            result = _data_readiness_check(
+                {
+                    "market_type": "china_futures",
+                    "tickers": ["CF", "RB", "M"],
+                    "factor_data": {},
+                },
+                start=datetime(2025, 3, 10),
+                end=datetime(2025, 3, 10),
+            )
+
+        self.assertTrue(result.passed, result.to_dict())
+        self.assertEqual(len(minute_calls), 2)
+        self.assertEqual({call["frequency"] for call in minute_calls}, {"15m", "1m"})
+        self.assertEqual({call["contract_id"] for call in minute_calls}, {"CF505"})
+        self.assertEqual({call["underlying_code"] for call in minute_calls}, {"CF"})
+
+    def test_data_readiness_begins_at_formal_previous_start_day(self):
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        contract_codes = {"RB": "RB2505", "CF": "CF505"}
+        fact_days = (
+            "2025-03-21",
+            "2025-03-24",
+            "2025-03-25",
+            "2025-03-26",
+            "2025-03-27",
+            "2025-03-28",
+            "2025-03-31",
+        )
+        daily_calls = []
+        concrete_calls = []
+
+        class FakeAPI:
+            def get_futures_daily_candles_optimized(self, **kwargs):
+                daily_calls.append(dict(kwargs))
+                query_start = kwargs["start_date"].strftime("%Y-%m-%d")
+                query_end = kwargs["end_date"].strftime("%Y-%m-%d")
+                ticker = kwargs["underlying_code"]
                 return [
                     SimpleNamespace(
-                        trade_date="2025-03-10",
+                        trade_date=day,
                         open_price=3500.0,
                         highest_price=3520.0,
                         lowest_price=3490.0,
@@ -177,8 +275,218 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
                         settle_price=3508.0,
                         turnover_vol=100,
                         open_int=1000,
-                        ticker="RB2505",
+                        ticker=contract_codes[ticker],
                     )
+                    for day in fact_days
+                    if query_start <= day <= query_end
+                ]
+
+        class FakeRouter:
+            def __init__(self, **_kwargs):
+                self.api = FakeAPI()
+
+            def get_futures_contract_quote_on_date(self, contract_code, trading_date):
+                concrete_calls.append((contract_code, str(trading_date)[:10]))
+                return SimpleNamespace(ticker=contract_code, settle_price=3508.0)
+
+            def get_china_futures_minute_bars(self, **kwargs):
+                logical_day = kwargs["start_date"].strftime("%Y-%m-%d")
+                return [
+                    {
+                        "datetime": f"{logical_day} 09:01:00",
+                        "open": 3500.0,
+                        "high": 3501.0,
+                        "low": 3499.0,
+                        "close": 3500.5,
+                        "volume": 10,
+                        "trading_code": kwargs["contract_id"],
+                        "trading_date": logical_day,
+                    }
+                ]
+
+            def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                return None
+
+            def get_china_futures_news(self, *_args, **_kwargs):
+                return []
+
+        with patch("apis.router.Router", FakeRouter), patch.object(
+            module,
+            "_optional_data_directories_ready",
+            return_value=([], []),
+            create=True,
+        ), patch(
+            "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.1,
+                "margin_rate_short": 0.1,
+            },
+        ), patch(
+            "util.trading_calendar.get_previous_trading_day",
+            return_value=datetime(2025, 3, 21),
+        ) as previous_day:
+            result = _data_readiness_check(
+                {
+                    "market_type": "china_futures",
+                    "tickers": ["RB", "CF"],
+                    "factor_data": {},
+                },
+                start=datetime(2025, 3, 24),
+                end=datetime(2025, 3, 31),
+            )
+
+        self.assertTrue(result.passed, result.to_dict())
+        previous_day.assert_called_once()
+        self.assertEqual(previous_day.call_args.args[1], datetime(2025, 3, 24))
+        self.assertEqual(previous_day.call_args.args[2], "RB")
+        self.assertEqual(
+            {call["start_date"].strftime("%Y-%m-%d") for call in daily_calls},
+            {"2025-03-21"},
+        )
+        self.assertIn(("RB2505", "2025-03-21"), concrete_calls)
+        self.assertIn(("CF505", "2025-03-21"), concrete_calls)
+
+    def test_minute_readiness_accepts_physical_previous_night_for_logical_trading_day(self):
+        result = self._run_minute_readiness_with_rows(
+            [
+                {
+                    "datetime": "2025-03-09 21:01:00",
+                    "open": 3500.0,
+                    "high": 3501.0,
+                    "low": 3499.0,
+                    "close": 3500.5,
+                    "volume": 10,
+                    "trading_code": "RB2505",
+                    "trading_date": "20250310",
+                }
+            ]
+        )
+        self.assertTrue(result.passed, result.to_dict())
+
+    def test_minute_readiness_rejects_future_logical_trading_date(self):
+        result = self._run_minute_readiness_with_rows(
+            [
+                {
+                    "datetime": "2025-03-10 21:01:00",
+                    "open": 3500.0,
+                    "high": 3501.0,
+                    "low": 3499.0,
+                    "close": 3500.5,
+                    "volume": 10,
+                    "trading_code": "RB2505",
+                    "trading_date": "20250311",
+                }
+            ]
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("trader_minute_data_logical_date_invalid", result.violation_codes)
+
+    def test_minute_readiness_rejects_missing_required_field(self):
+        result = self._run_minute_readiness_with_rows(
+            [
+                {
+                    "datetime": "2025-03-10 09:01:00",
+                    "open": 3500.0,
+                    "high": 3501.0,
+                    "low": 3499.0,
+                    "close": 3500.5,
+                    "trading_code": "RB2505",
+                    "trading_date": "20250310",
+                }
+            ]
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("trader_minute_data_required_field_missing", result.violation_codes)
+
+    def test_minute_readiness_rejects_concrete_contract_mismatch(self):
+        result = self._run_minute_readiness_with_rows(
+            [
+                {
+                    "datetime": "2025-03-10 09:01:00",
+                    "open": 3500.0,
+                    "high": 3501.0,
+                    "low": 3499.0,
+                    "close": 3500.5,
+                    "volume": 10,
+                    "trading_code": "M2505",
+                    "trading_date": "20250310",
+                }
+            ]
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("trader_minute_data_contract_mismatch", result.violation_codes)
+
+    def test_minute_readiness_distinguishes_unavailable_interface_from_runtime_failure(self):
+        unavailable = self._run_minute_readiness_with_rows(
+            NotImplementedError("minute frequency is unavailable")
+        )
+        unreadable = self._run_minute_readiness_with_rows(
+            RuntimeError("provider payload processing failed")
+        )
+
+        self.assertIn("trader_minute_data_interface_unavailable", unavailable.violation_codes)
+        self.assertNotIn("trader_minute_data_interface_unreadable", unavailable.violation_codes)
+        self.assertIn("trader_minute_data_interface_unreadable", unreadable.violation_codes)
+
+    def _run_minute_readiness_with_rows(self, minute_result):
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        class FakeAPI:
+            def get_futures_daily_candles_optimized(self, **_kwargs):
+                return [
+                    _daily_fact("2025-03-07"),
+                    _daily_fact("2025-03-10"),
+                ]
+
+        class FakeRouter:
+            def __init__(self, **_kwargs):
+                self.api = FakeAPI()
+
+            def get_futures_main_contract_quote_on_date(self, *_args, **_kwargs):
+                return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
+
+            def get_futures_contract_quote_on_date(self, *_args, **_kwargs):
+                return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
+
+            def get_china_futures_minute_bars(self, **_kwargs):
+                if isinstance(minute_result, BaseException):
+                    raise minute_result
+                return list(minute_result)
+
+            def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                return None
+
+            def get_china_futures_news(self, *_args, **_kwargs):
+                return []
+
+        with patch("apis.router.Router", FakeRouter), patch.object(
+            module,
+            "_optional_data_directories_ready",
+            return_value=([], []),
+            create=True,
+        ), patch(
+            "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.1,
+                "margin_rate_short": 0.1,
+            },
+        ):
+            return _data_readiness_check(
+                {"market_type": "china_futures", "tickers": ["RB"], "factor_data": {}},
+                start=datetime(2025, 3, 10),
+                end=datetime(2025, 3, 10),
+            )
+
+    def test_optional_fundamental_and_news_empty_results_do_not_block_readiness(self):
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        class FakeAPI:
+            def get_futures_daily_candles_optimized(self, **_kwargs):
+                return [
+                    _daily_fact("2025-03-07"),
+                    _daily_fact("2025-03-10"),
                 ]
 
         class FakeRouter:
@@ -200,6 +508,8 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
                         "low": 3499.0,
                         "close": 3500.5,
                         "volume": 10,
+                        "trading_code": "RB2505",
+                        "trading_date": "20250310",
                     }
                 ]
 
@@ -261,7 +571,6 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             "apis.pandaai.api.time.sleep"
         ):
             adapter = PandaAIAPI()
-            adapter._retry_attempts = 2
             adapter._network_retry_initial_wait_seconds = 0.0
             adapter._network_retry_max_wait_seconds = 0.0
             adapter._wait_for_request_slot = lambda: None
@@ -269,28 +578,16 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             class FakeAPI:
                 def get_futures_daily_candles_optimized(self, **_kwargs):
                     return [
-                        SimpleNamespace(
-                            trade_date="2025-03-10",
-                            open_price=3500.0,
-                            highest_price=3520.0,
-                            lowest_price=3490.0,
-                            close_price=3510.0,
-                            settle_price=3508.0,
-                            turnover_vol=100,
-                            open_int=1000,
-                            ticker="RB2505",
-                        )
+                        _daily_fact("2025-03-07"),
+                        _daily_fact("2025-03-10"),
                     ]
 
             class FakeRouter:
                 def __init__(self, **_kwargs):
                     self.api = FakeAPI()
 
-                def get_futures_main_contract_quote_on_date(self, *_args, **_kwargs):
-                    adapter._call_pandaai("get_market_data", symbol="RB_DOMINANT.SHF")
-                    return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
-
                 def get_futures_contract_quote_on_date(self, *_args, **_kwargs):
+                    adapter._call_pandaai("get_market_data", symbol="RB2505.SHF")
                     return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
 
                 def get_china_futures_minute_bars(self, **_kwargs):
@@ -302,6 +599,8 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
                             "low": 3499.0,
                             "close": 3500.5,
                             "volume": 10,
+                            "trading_code": "RB2505",
+                            "trading_date": "20250310",
                         }
                     ]
 
@@ -333,34 +632,22 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
         self.assertTrue(result.passed, result.to_dict())
         self.assertEqual(len(provider_calls), 2)
 
-    def test_data_readiness_reports_stable_code_after_gateway_retry_exhaustion(self):
+    def test_data_readiness_classifies_escaped_nontransient_contract_failure(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
 
         class FakeAPI:
             def get_futures_daily_candles_optimized(self, **_kwargs):
                 return [
-                    SimpleNamespace(
-                        trade_date="2025-03-10",
-                        open_price=3500.0,
-                        highest_price=3520.0,
-                        lowest_price=3490.0,
-                        close_price=3510.0,
-                        settle_price=3508.0,
-                        turnover_vol=100,
-                        open_int=1000,
-                        ticker="RB2505",
-                    )
+                    _daily_fact("2025-03-07"),
+                    _daily_fact("2025-03-10"),
                 ]
 
         class FakeRouter:
             def __init__(self, **_kwargs):
                 self.api = FakeAPI()
 
-            def get_futures_main_contract_quote_on_date(self, *_args, **_kwargs):
-                raise RuntimeError("HTTP 502: Bad Gateway")
-
             def get_futures_contract_quote_on_date(self, *_args, **_kwargs):
-                raise AssertionError("concrete quote must not run after main quote failure")
+                raise RuntimeError("contract response could not be parsed")
 
             def get_china_futures_minute_bars(self, **_kwargs):
                 return [
@@ -371,6 +658,8 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
                         "low": 3499.0,
                         "close": 3500.5,
                         "volume": 10,
+                        "trading_code": "RB2505",
+                        "trading_date": "20250310",
                     }
                 ]
 
@@ -400,8 +689,9 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             )
 
         self.assertFalse(result.passed)
-        self.assertIn("pandaai_gateway_error_after_retry", result.violation_codes)
-        self.assertNotIn("concrete_contract_fact_interface_unreadable", result.violation_codes)
+        self.assertIn("concrete_contract_fact_interface_unreadable", result.violation_codes)
+        self.assertIn("trader_minute_representative_contract_missing", result.violation_codes)
+        self.assertNotIn("pandaai_gateway_error_after_retry", result.violation_codes)
 
     def test_time_boundary_runs_one_runtime_wiring_acceptance(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
@@ -419,6 +709,56 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             next(check for check in report.checks if check.check_name == "time_boundary").status,
             "passed",
         )
+
+    def test_time_boundary_runtime_uses_formal_previous_trading_day_resolver(self):
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+        from util import trading_calendar
+
+        with patch(
+            "util.trading_calendar.get_previous_trading_day",
+            wraps=trading_calendar.get_previous_trading_day,
+        ) as resolver:
+            result = module._runtime_time_boundary_check(
+                datetime(2025, 3, 25),
+                datetime(2025, 3, 26),
+            )
+
+        self.assertTrue(result.passed, result.to_dict())
+        resolver.assert_called_once()
+
+    def test_formal_calendar_resolves_requested_window_previous_trading_days(self):
+        from util import trading_calendar
+
+        class CalendarAPI:
+            @staticmethod
+            def get_futures_daily_candles_optimized(**kwargs):
+                start_date = kwargs["start_date"].strftime("%Y-%m-%d")
+                end_date = kwargs["end_date"].strftime("%Y-%m-%d")
+                return [
+                    SimpleNamespace(trade_date=value)
+                    for value in ("2025-03-24", "2025-03-25", "2025-03-26")
+                    if start_date <= value <= end_date
+                ]
+
+        router = SimpleNamespace(api=CalendarAPI())
+        with patch.dict(trading_calendar._PREVIOUS_TRADING_DAY_CACHE, {}, clear=True), patch.dict(
+            trading_calendar._MARKET_PREVIOUS_TRADING_DAY_CACHE,
+            {},
+            clear=True,
+        ):
+            previous_t1 = trading_calendar.get_previous_trading_day(
+                router,
+                datetime(2025, 3, 25),
+                "RB",
+            )
+            previous_t2 = trading_calendar.get_previous_trading_day(
+                router,
+                datetime(2025, 3, 26),
+                "RB",
+            )
+
+        self.assertEqual(previous_t1.strftime("%Y-%m-%d"), "2025-03-24")
+        self.assertEqual(previous_t2.strftime("%Y-%m-%d"), "2025-03-25")
 
     def test_same_formal_temporary_database_runs_no_llm_full_chain(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
@@ -457,6 +797,20 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             result = _static_orchestration_check(root)
         self.assertEqual(result.status, "failed")
         self.assertIn("backtest_pg_orchestration_missing", result.violation_codes)
+
+    def test_orchestration_accepts_independent_precheck_and_daily_only_backtest(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            path = root / "src" / "run" / "backtest.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "def main():\n"
+                "    reset_existing_config_if_requested()\n"
+                "    run_backtest_daily_test()\n",
+                encoding="utf-8",
+            )
+            result = _static_orchestration_check(root)
+        self.assertEqual(result.status, "passed", result.to_dict())
 
     def test_precheck_uses_no_formal_database_argument(self):
         with self.assertRaises(TypeError):

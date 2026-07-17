@@ -14,6 +14,13 @@ if str(SRC_ROOT) not in sys.path:
 from apis.pandaai.api import PandaAIAPI
 
 
+class FakeProviderError(RuntimeError):
+    def __init__(self, message, *, code=None, status_code=None):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 class PandaAIAdapterTest(unittest.TestCase):
     def setUp(self):
         PandaAIAPI._shared_history_cache.clear()
@@ -26,6 +33,9 @@ class PandaAIAdapterTest(unittest.TestCase):
         PandaAIAPI._shared_sdk_method_aliases.clear()
         PandaAIAPI._shared_token_initialized = False
         PandaAIAPI._shared_sdk_user_cache_configured = False
+        PandaAIAPI._market_cache_db_initialized = False
+        PandaAIAPI._last_request_at = 0.0
+        PandaAIAPI._rate_limit_cooldown_until = 0.0
 
     def _build_api(self):
         fake = types.ModuleType("panda_data")
@@ -337,7 +347,6 @@ class PandaAIAdapterTest(unittest.TestCase):
         fake.get_market_data = get_market_data
         with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
             api = PandaAIAPI()
-            api._retry_attempts = 3
             api._network_retry_initial_wait_seconds = 0.0
             api._network_retry_max_wait_seconds = 0.0
             api._wait_for_request_slot = lambda: None
@@ -346,25 +355,147 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(result, [{"provider_result": "real"}])
         self.assertEqual(len(calls), 2)
 
-    def test_gateway_502_exhausts_existing_retry_limit_and_raises(self):
+    def test_gateway_502_retries_beyond_previous_attempt_limit_until_success(self):
         fake, env_patch, module_patch = self._build_api()
         calls = []
 
         def get_market_data(**kwargs):
             calls.append(kwargs)
-            raise RuntimeError("HTTP 502: Bad Gateway")
+            if len(calls) <= 6:
+                raise RuntimeError("HTTP 502: Bad Gateway")
+            return [{"provider_result": "real"}]
 
         fake.get_market_data = get_market_data
         with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
             api = PandaAIAPI()
-            api._retry_attempts = 3
             api._network_retry_initial_wait_seconds = 0.0
             api._network_retry_max_wait_seconds = 0.0
             api._wait_for_request_slot = lambda: None
-            with self.assertRaisesRegex(RuntimeError, "Bad Gateway"):
-                api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+            result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
 
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(result, [{"provider_result": "real"}])
+        self.assertEqual(len(calls), 7)
+
+    def test_rate_limit_retries_beyond_previous_attempt_limit_until_success(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_market_data(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= 6:
+                raise RuntimeError("500010 rate limit")
+            return [{"provider_result": "real"}]
+
+        fake.get_market_data = get_market_data
+        with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+            api = PandaAIAPI()
+            api._retry_initial_wait_seconds = 0.0
+            api._retry_max_wait_seconds = 0.0
+            api._wait_for_request_slot = lambda: None
+            result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+        self.assertEqual(result, [{"provider_result": "real"}])
+        self.assertEqual(len(calls), 7)
+
+    def test_documented_pandaai_transient_codes_retry_until_success(self):
+        transient_cases = (
+            (400002, "数据查询超时"),
+            (500001, "请求频率超限"),
+            (500002, "热点参数限流"),
+            (500003, "IP请求频率超限"),
+            (500004, "服务降级中"),
+            (500005, "服务熔断中"),
+            (500006, "并发请求数超限"),
+            (900001, "系统异常，请稍后重试"),
+        )
+        for code, message in transient_cases:
+            with self.subTest(code=code):
+                self.setUp()
+                fake, env_patch, module_patch = self._build_api()
+                calls = []
+
+                def get_market_data(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) <= 6:
+                        raise FakeProviderError(message, code=code)
+                    return [{"provider_result": "real"}]
+
+                fake.get_market_data = get_market_data
+                with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+                    api = PandaAIAPI()
+                    api._retry_initial_wait_seconds = 0.0
+                    api._retry_max_wait_seconds = 0.0
+                    api._network_retry_initial_wait_seconds = 0.0
+                    api._network_retry_max_wait_seconds = 0.0
+                    api._wait_for_request_slot = lambda: None
+                    result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+                self.assertEqual(result, [{"provider_result": "real"}])
+                self.assertEqual(len(calls), 7)
+
+    def test_http_429_status_retries_until_success(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_market_data(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= 6:
+                raise FakeProviderError("provider throttled", status_code=429)
+            return [{"provider_result": "real"}]
+
+        fake.get_market_data = get_market_data
+        with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+            api = PandaAIAPI()
+            api._retry_initial_wait_seconds = 0.0
+            api._retry_max_wait_seconds = 0.0
+            api._wait_for_request_slot = lambda: None
+            result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+        self.assertEqual(result, [{"provider_result": "real"}])
+        self.assertEqual(len(calls), 7)
+
+    def test_wrapped_connection_error_retries_until_success(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_market_data(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= 6:
+                wrapped = RuntimeError("PandaAI SDK request failed")
+                wrapped.__cause__ = ConnectionResetError("connection reset by peer")
+                raise wrapped
+            return [{"provider_result": "real"}]
+
+        fake.get_market_data = get_market_data
+        with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+            api = PandaAIAPI()
+            api._network_retry_initial_wait_seconds = 0.0
+            api._network_retry_max_wait_seconds = 0.0
+            api._wait_for_request_slot = lambda: None
+            result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+        self.assertEqual(result, [{"provider_result": "real"}])
+        self.assertEqual(len(calls), 7)
+
+    def test_documented_non_transient_codes_do_not_retry(self):
+        for code in (100000, 200001, 200101, 600001, 600002):
+            with self.subTest(code=code):
+                self.setUp()
+                fake, env_patch, module_patch = self._build_api()
+                calls = []
+
+                def get_market_data(**kwargs):
+                    calls.append(kwargs)
+                    raise FakeProviderError("non-transient provider error", code=code)
+
+                fake.get_market_data = get_market_data
+                with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+                    api = PandaAIAPI()
+                    api._wait_for_request_slot = lambda: None
+                    with self.assertRaises(FakeProviderError):
+                        api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+                self.assertEqual(len(calls), 1)
 
     def test_gateway_503_and_504_share_existing_transient_retry_path(self):
         for error_text in (
@@ -385,7 +516,6 @@ class PandaAIAdapterTest(unittest.TestCase):
                 fake.get_market_data = get_market_data
                 with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
                     api = PandaAIAPI()
-                    api._retry_attempts = 3
                     api._network_retry_initial_wait_seconds = 0.0
                     api._network_retry_max_wait_seconds = 0.0
                     api._wait_for_request_slot = lambda: None
@@ -413,7 +543,6 @@ class PandaAIAdapterTest(unittest.TestCase):
                 fake.get_market_data = get_market_data
                 with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
                     api = PandaAIAPI()
-                    api._retry_attempts = 3
                     api._network_retry_initial_wait_seconds = 0.0
                     api._network_retry_max_wait_seconds = 0.0
                     api._wait_for_request_slot = lambda: None
@@ -578,6 +707,301 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(len(bars), 1)
         self.assertEqual(bars[0]["datetime"], "2025-01-03 21:00:00")
         self.assertEqual(bars[0]["trading_date"], "20250104")
+
+    def test_exact_minute_cache_key_avoids_duplicate_provider_request(self):
+        fake, env_patch, module_patch = self._build_api()
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            first = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+            )
+            second = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+            )
+            api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="1m",
+            )
+
+        minute_calls = [call for call in fake.calls if call["func"] == "get_market_min_data"]
+        self.assertEqual(first, second)
+        self.assertEqual(len(minute_calls), 2)
+        self.assertEqual({call["frequency"] for call in minute_calls}, {"15m", "1m"})
+
+    def test_live_minute_refresh_reads_new_bars_on_each_cutoff(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def minute_row(timestamp, close):
+            return {
+                "date": "20250104",
+                "minute": timestamp.strftime("%H%M%S"),
+                "datetime": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "symbol": "M_DOMINANT.DCE",
+                "trading_code": "M2505",
+                "underlying_symbol": "M",
+                "exchange": "DCE",
+                "open": close - 1.0,
+                "high": close + 1.0,
+                "low": close - 2.0,
+                "close": close,
+                "volume": 10,
+                "trading_date": "20250104",
+            }
+
+        first_bar = minute_row(datetime(2025, 1, 4, 10, 0), 3200.0)
+        second_bar = minute_row(datetime(2025, 1, 4, 10, 15), 3210.0)
+
+        def get_market_min_data(**kwargs):
+            calls.append(kwargs)
+            return [first_bar] if len(calls) == 1 else [first_bar, second_bar]
+
+        fake.get_market_min_data = get_market_min_data
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            first = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+                cutoff_datetime=datetime(2025, 1, 4, 10, 5),
+            )
+            second = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+                cutoff_datetime=datetime(2025, 1, 4, 10, 20),
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([bar["datetime"] for bar in first], ["2025-01-04 10:00:00"])
+        self.assertEqual(
+            [bar["datetime"] for bar in second],
+            ["2025-01-04 10:00:00", "2025-01-04 10:15:00"],
+        )
+
+    def test_live_empty_refresh_does_not_return_or_replace_cached_bars(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+        cached_bar = {
+            "date": "20250104",
+            "minute": "100000",
+            "datetime": "2025-01-04 10:00:00",
+            "symbol": "M_DOMINANT.DCE",
+            "trading_code": "M2505",
+            "underlying_symbol": "M",
+            "exchange": "DCE",
+            "open": 3199.0,
+            "high": 3201.0,
+            "low": 3198.0,
+            "close": 3200.0,
+            "volume": 10,
+            "trading_date": "20250104",
+        }
+
+        def get_market_min_data(**kwargs):
+            calls.append(kwargs)
+            return [cached_bar] if len(calls) == 1 else []
+
+        fake.get_market_min_data = get_market_min_data
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            first = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+                cutoff_datetime=datetime(2025, 1, 4, 10, 5),
+            )
+            empty_refresh = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+                cutoff_datetime=datetime(2025, 1, 4, 10, 20),
+            )
+            cached_replay = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(empty_refresh, [])
+        self.assertEqual(cached_replay, first)
+
+    def test_live_failed_refresh_does_not_return_or_replace_cached_bars(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+        cached_bar = {
+            "date": "20250104",
+            "minute": "100000",
+            "datetime": "2025-01-04 10:00:00",
+            "symbol": "M_DOMINANT.DCE",
+            "trading_code": "M2505",
+            "underlying_symbol": "M",
+            "exchange": "DCE",
+            "open": 3199.0,
+            "high": 3201.0,
+            "low": 3198.0,
+            "close": 3200.0,
+            "volume": 10,
+            "trading_date": "20250104",
+        }
+
+        def get_market_min_data(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return [cached_bar]
+            raise ValueError("invalid minute request")
+
+        fake.get_market_min_data = get_market_min_data
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            first = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+                cutoff_datetime=datetime(2025, 1, 4, 10, 5),
+            )
+            with self.assertRaisesRegex(ValueError, "invalid minute request"):
+                api.get_futures_minute_bars(
+                    underlying_code="M",
+                    is_main=1,
+                    start_date=datetime(2025, 1, 4),
+                    end_date=datetime(2025, 1, 4),
+                    frequency="15m",
+                    cutoff_datetime=datetime(2025, 1, 4, 10, 20),
+                )
+            cached_replay = api.get_futures_minute_bars(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 4),
+                end_date=datetime(2025, 1, 4),
+                frequency="15m",
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(cached_replay, first)
+
+    def test_persistent_market_cache_exact_hit_avoids_provider_request(self):
+        fake, env_patch, module_patch = self._build_api()
+        market_calls = []
+
+        def get_market_data(**kwargs):
+            market_calls.append(kwargs)
+            return [
+                {
+                    "date": "20250103",
+                    "symbol": kwargs["symbol"],
+                    "trading_code": "M2505",
+                    "underlying_symbol": "M",
+                    "open": 3100.0,
+                    "close": 3140.0,
+                    "settlement": 3130.0,
+                }
+            ]
+
+        fake.get_market_data = get_market_data
+        with tempfile.TemporaryDirectory(
+            prefix="agentquant_pandaai_market_cache_",
+            ignore_cleanup_errors=True,
+        ) as tmpdir:
+            env = {
+                "PANDAAI_PERSISTENT_MARKET_CACHE": "1",
+                "PANDAAI_MARKET_CACHE_DB": str(Path(tmpdir) / "market.db"),
+            }
+            with env_patch, module_patch, patch.dict(os.environ, env, clear=False):
+                api = PandaAIAPI()
+                first = api._query_market_data(
+                    "M_DOMINANT.DCE",
+                    datetime(2025, 1, 3),
+                    datetime(2025, 1, 3),
+                )
+                PandaAIAPI._shared_history_cache.clear()
+                second = PandaAIAPI()._query_market_data(
+                    "M_DOMINANT.DCE",
+                    datetime(2025, 1, 3),
+                    datetime(2025, 1, 3),
+                )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(market_calls), 1)
+
+    def test_invalid_or_empty_persistent_cache_is_not_returned_as_data(self):
+        invalid_cases = (
+            [],
+            [{"date": "20250104", "symbol": "M_DOMINANT.DCE"}],
+            [{"date": "20250103", "symbol": "RB_DOMINANT.SHF"}],
+        )
+        for invalid_records in invalid_cases:
+            with self.subTest(invalid_records=invalid_records):
+                self.setUp()
+                fake, env_patch, module_patch = self._build_api()
+                market_calls = []
+
+                def get_market_data(**kwargs):
+                    market_calls.append(kwargs)
+                    return [
+                        {
+                            "date": "20250103",
+                            "symbol": kwargs["symbol"],
+                            "trading_code": "M2505",
+                            "underlying_symbol": "M",
+                            "open": 3100.0,
+                            "close": 3140.0,
+                            "settlement": 3130.0,
+                        }
+                    ]
+
+                fake.get_market_data = get_market_data
+                with tempfile.TemporaryDirectory(
+                    prefix="agentquant_pandaai_bad_cache_",
+                    ignore_cleanup_errors=True,
+                ) as tmpdir:
+                    env = {
+                        "PANDAAI_PERSISTENT_MARKET_CACHE": "1",
+                        "PANDAAI_MARKET_CACHE_DB": str(Path(tmpdir) / "market.db"),
+                    }
+                    with env_patch, module_patch, patch.dict(os.environ, env, clear=False):
+                        api = PandaAIAPI()
+                        api._write_persistent_market_cache(
+                            "M_DOMINANT.DCE",
+                            "20250103",
+                            "20250103",
+                            invalid_records,
+                        )
+                        PandaAIAPI._shared_history_cache.clear()
+                        rows = api._query_market_data(
+                            "M_DOMINANT.DCE",
+                            datetime(2025, 1, 3),
+                            datetime(2025, 1, 3),
+                        )
+
+                self.assertEqual(len(market_calls), 1)
+                self.assertEqual(rows[0]["symbol"], "M_DOMINANT.DCE")
+                self.assertEqual(rows[0]["date"], "20250103")
 
 
 if __name__ == "__main__":

@@ -242,6 +242,81 @@ def _minute_row(value: Any) -> dict[str, Any]:
     return vars(value) if hasattr(value, "__dict__") else {}
 
 
+def _parse_minute_datetime(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for candidate in (text[:19], text):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y%m%d %H%M%S"):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_logical_trading_date(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for candidate in (text[:10], text):
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(candidate, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    return None
+
+
+def _normalize_contract_code(value: Any) -> str:
+    return str(value or "").strip().upper().split(".", 1)[0]
+
+
+def _minute_interface_failure_code(exc: Exception) -> str:
+    lowered = str(exc).lower()
+    if isinstance(exc, (AttributeError, NotImplementedError)) or any(
+        marker in lowered
+        for marker in (
+            "does not expose futures minute bars",
+            "unsupported pandaai futures minute frequency",
+            "minute frequency is unavailable",
+        )
+    ):
+        return "trader_minute_data_interface_unavailable"
+    return "trader_minute_data_interface_unreadable"
+
+
+def _validate_representative_minute_rows(
+    minute_rows: Iterable[Any],
+    *,
+    contract_code: str,
+    logical_trading_date: str,
+) -> list[str]:
+    violations: list[str] = []
+    required = {"datetime", "open", "high", "low", "close", "volume"}
+    expected_contract = _normalize_contract_code(contract_code)
+    expected_date = _parse_logical_trading_date(logical_trading_date)
+    for value in minute_rows:
+        row = _minute_row(value)
+        if not required.issubset(row) or any(row.get(field) is None for field in required):
+            violations.append("trader_minute_data_required_field_missing")
+            continue
+        row_datetime = _parse_minute_datetime(row.get("datetime"))
+        if row_datetime is None:
+            violations.append("trader_minute_data_datetime_invalid")
+        row_date = _parse_logical_trading_date(row.get("trading_date"))
+        if expected_date is None or row_date != expected_date:
+            violations.append("trader_minute_data_logical_date_invalid")
+        elif row_datetime is not None and row_datetime.strftime("%Y-%m-%d") > expected_date:
+            violations.append("trader_minute_data_logical_date_invalid")
+        row_contract = _normalize_contract_code(
+            row.get("trading_code") or row.get("dominant_id") or row.get("symbol")
+        )
+        if not row_contract or row_contract != expected_contract:
+            violations.append("trader_minute_data_contract_mismatch")
+    return violations
+
+
 def _data_readiness_check(
     cfg: Dict[str, Any],
     *,
@@ -258,8 +333,8 @@ def _data_readiness_check(
     diagnostics: list[str] = []
     try:
         from apis.contract_info_cache import FuturesContractInfoCache
-        from apis.pandaai.api import is_pandaai_gateway_error
         from apis.router import APISource, Router
+        from util.trading_calendar import get_previous_trading_day
 
         router = Router(
             source=APISource.PANDAAI,
@@ -268,6 +343,17 @@ def _data_readiness_check(
         )
         tickers = [str(value).strip().upper() for value in cfg.get("tickers") or [] if str(value).strip()]
         anchor_days: set[str] = set()
+        concrete_contract_facts: list[tuple[str, str, str]] = []
+        seen_contract_codes: set[str] = set()
+        minute_candidate: Optional[tuple[str, str, str]] = None
+        readiness_start = start
+        if tickers:
+            try:
+                readiness_start = get_previous_trading_day(router, start, tickers[0])
+            except Exception:
+                violations.append("pandaai_daily_trading_day_coverage_incomplete")
+                readiness_start = None
+        readiness_start_text = readiness_start.strftime("%Y-%m-%d") if readiness_start else ""
         for index, ticker in enumerate(tickers):
             info = FuturesContractInfoCache.get_contract_info(ticker)
             if not isinstance(info, dict):
@@ -276,19 +362,17 @@ def _data_readiness_check(
                 info.get("margin_rate_long") or info.get("margin_rate_short")
             ):
                 violations.append("contract_multiplier_or_margin_rate_missing")
+            if readiness_start is None:
+                continue
             try:
                 quotes = router.api.get_futures_daily_candles_optimized(
                     underlying_code=ticker,
                     is_main=1,
-                    start_date=start,
+                    start_date=readiness_start,
                     end_date=end + timedelta(days=1),
                 )
-            except Exception as exc:
-                violations.append(
-                    "pandaai_gateway_error_after_retry"
-                    if is_pandaai_gateway_error(exc)
-                    else "pandaai_daily_data_unreadable"
-                )
+            except Exception:
+                violations.append("pandaai_daily_data_unreadable")
                 continue
             if not quotes:
                 violations.append("pandaai_daily_data_missing")
@@ -298,6 +382,8 @@ def _data_readiness_check(
                 for quote in quotes
                 if getattr(quote, "trade_date", None)
             }
+            if readiness_start_text not in quote_days:
+                violations.append("pandaai_daily_trading_day_coverage_incomplete")
             if index == 0:
                 anchor_days = {
                     day
@@ -325,61 +411,28 @@ def _data_readiness_check(
                 ):
                     violations.append("pandaai_daily_required_field_missing")
                     break
-            sample_quote = next(
+            window_quotes = sorted(
                 (
                     quote
                     for quote in quotes
-                    if start.strftime("%Y-%m-%d")
+                    if readiness_start_text
                     <= str(getattr(quote, "trade_date", ""))[:10]
                     <= end.strftime("%Y-%m-%d")
                 ),
-                None,
+                key=lambda quote: str(getattr(quote, "trade_date", ""))[:10],
             )
-            if sample_quote is None:
-                continue
-            sample_date = str(getattr(sample_quote, "trade_date", ""))[:10]
-            contract_code = str(getattr(sample_quote, "ticker", "") or "").strip().upper()
-            if not contract_code:
-                violations.append("main_contract_mapping_missing")
-            else:
-                try:
-                    main_quote = router.get_futures_main_contract_quote_on_date(ticker, sample_date)
-                    concrete_quote = router.get_futures_contract_quote_on_date(contract_code, sample_date)
-                except Exception as exc:
-                    violations.append(
-                        "pandaai_gateway_error_after_retry"
-                        if is_pandaai_gateway_error(exc)
-                        else "concrete_contract_fact_interface_unreadable"
-                    )
-                else:
-                    main_contract_code = str(getattr(main_quote, "ticker", "") or "").strip().upper()
-                    if not main_contract_code or main_contract_code != contract_code:
-                        violations.append("main_contract_mapping_mismatch")
-                    if concrete_quote is None or getattr(concrete_quote, "settle_price", None) is None:
-                        violations.append("concrete_contract_settlement_fact_missing")
-            for frequency in ("15m", "1m"):
-                try:
-                    minute_rows = router.get_china_futures_minute_bars(
-                        contract_id=contract_code or None,
-                        underlying_code=ticker,
-                        is_main=1,
-                        start_date=datetime.strptime(sample_date, "%Y-%m-%d"),
-                        end_date=datetime.strptime(sample_date, "%Y-%m-%d"),
-                        frequency=frequency,
-                    )
-                except Exception as exc:
-                    violations.append(
-                        "pandaai_gateway_error_after_retry"
-                        if is_pandaai_gateway_error(exc)
-                        else "trader_minute_data_interface_unreadable"
-                    )
+            for quote in window_quotes:
+                sample_date = str(getattr(quote, "trade_date", ""))[:10]
+                contract_code = str(getattr(quote, "ticker", "") or "").strip().upper()
+                if not contract_code:
+                    violations.append("main_contract_mapping_missing")
                     continue
-                if not minute_rows:
-                    violations.append("trader_minute_data_missing")
-                    continue
-                required = {"datetime", "open", "high", "low", "close", "volume"}
-                if not required.issubset(_minute_row(minute_rows[0])):
-                    violations.append("trader_minute_data_required_field_missing")
+                normalized_contract = _normalize_contract_code(contract_code)
+                if normalized_contract not in seen_contract_codes:
+                    seen_contract_codes.add(normalized_contract)
+                    concrete_contract_facts.append((ticker, contract_code, sample_date))
+                if minute_candidate is None and sample_date >= start.strftime("%Y-%m-%d"):
+                    minute_candidate = (ticker, contract_code, sample_date)
 
             if index == 0:
                 try:
@@ -404,6 +457,55 @@ def _data_readiness_check(
                 else:
                     if not news:
                         diagnostics.append("news_optional_records_unavailable")
+
+        validated_contract_codes: set[str] = set()
+        for ticker, contract_code, sample_date in concrete_contract_facts:
+            try:
+                concrete_quote = router.get_futures_contract_quote_on_date(contract_code, sample_date)
+            except Exception:
+                violations.append("concrete_contract_fact_interface_unreadable")
+                continue
+            if concrete_quote is None or getattr(concrete_quote, "settle_price", None) is None:
+                violations.append("concrete_contract_settlement_fact_missing")
+                continue
+            validated_contract_codes.add(_normalize_contract_code(contract_code))
+
+        minute_representative = (
+            minute_candidate
+            if minute_candidate is not None
+            and _normalize_contract_code(minute_candidate[1]) in validated_contract_codes
+            else None
+        )
+
+        if minute_representative is None:
+            if tickers:
+                violations.append("trader_minute_representative_contract_missing")
+        else:
+            ticker, contract_code, sample_date = minute_representative
+            sample_datetime = datetime.strptime(sample_date, "%Y-%m-%d")
+            for frequency in ("15m", "1m"):
+                try:
+                    minute_rows = router.get_china_futures_minute_bars(
+                        contract_id=contract_code,
+                        underlying_code=ticker,
+                        is_main=1,
+                        start_date=sample_datetime,
+                        end_date=sample_datetime,
+                        frequency=frequency,
+                    )
+                except Exception as exc:
+                    violations.append(_minute_interface_failure_code(exc))
+                    continue
+                if not minute_rows:
+                    violations.append("trader_minute_data_missing")
+                    continue
+                violations.extend(
+                    _validate_representative_minute_rows(
+                        minute_rows,
+                        contract_code=contract_code,
+                        logical_trading_date=sample_date,
+                    )
+                )
     except Exception:
         violations.append("market_data_router_unavailable")
 
@@ -434,32 +536,52 @@ def _runtime_time_boundary_check(
         from tools.agent_tools.analysis.analyst_learning_context import build_learning_context
         from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
         from tools.agent_tools.execution.trader_intraday_execution import _normalize_bars
-        from util.trading_calendar import map_datetime_to_futures_trading_day
+        from util.trading_calendar import get_previous_trading_day, map_datetime_to_futures_trading_day
 
-        probe_day = start or datetime(2025, 3, 10)
-        previous_day = probe_day - timedelta(days=1)
+        calendar_probe_day = datetime(2025, 3, 10)
+        calendar_fact_days = (
+            datetime(2025, 3, 7),
+            calendar_probe_day,
+            datetime(2025, 3, 11),
+        )
+
+        class CalendarAPI:
+            @staticmethod
+            def get_futures_daily_candles_optimized(**kwargs):
+                query_start = kwargs["start_date"]
+                query_end = kwargs["end_date"]
+                return [
+                    SimpleNamespace(trade_date=value.strftime("%Y-%m-%d"))
+                    for value in calendar_fact_days
+                    if query_start <= value <= query_end
+                ]
+
+        calendar_router = SimpleNamespace(api=CalendarAPI())
+        previous_day = get_previous_trading_day(
+            calendar_router,
+            calendar_probe_day,
+            "PG",
+        )
         prices = pd.DataFrame(
             [{"close": 1.0}],
             index=pd.to_datetime([previous_day.strftime("%Y-%m-%d")]),
         )
-        if _validate_pre_open_price_window("PG", probe_day, prices, True) != previous_day.strftime("%Y-%m-%d"):
+        if (
+            _validate_pre_open_price_window("PG", calendar_probe_day, prices, True)
+            != previous_day.strftime("%Y-%m-%d")
+        ):
             violations.append("time_boundary_mechanism_not_operational")
 
-        class CalendarAPI:
-            @staticmethod
-            def get_futures_daily_candles_optimized(**_kwargs):
-                return [SimpleNamespace(trade_date=(probe_day + timedelta(days=1)).strftime("%Y-%m-%d"))]
-
-        calendar_router = SimpleNamespace(api=CalendarAPI())
-        night_timestamp = probe_day.replace(hour=21)
+        night_timestamp = calendar_probe_day.replace(hour=21)
         mapped = map_datetime_to_futures_trading_day(
             calendar_router,
             night_timestamp,
             "PG",
         )
-        if mapped.strftime("%Y-%m-%d") != (probe_day + timedelta(days=1)).strftime("%Y-%m-%d"):
+        if mapped.strftime("%Y-%m-%d") != "2025-03-11":
             violations.append("time_boundary_mechanism_not_operational")
 
+        probe_day = start or calendar_probe_day
         cutoff = probe_day.replace(hour=9, minute=15)
         normalized = _normalize_bars(
             [
@@ -594,6 +716,16 @@ def _static_orchestration_check(repo_root: Path) -> ProtocolCheckResult:
     )
     if main_node is None:
         return _failed("orchestration_state_and_physical_boundary", ["backtest_pg_orchestration_missing"])
+    function_names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if "run_pre_backtest_test" in function_names:
+        return _failed(
+            "orchestration_state_and_physical_boundary",
+            ["backtest_pg_orchestration_order_invalid"],
+        )
     calls: list[tuple[int, str]] = []
     for node in ast.walk(main_node):
         if not isinstance(node, ast.Call):
@@ -604,12 +736,11 @@ def _static_orchestration_check(repo_root: Path) -> ProtocolCheckResult:
             calls.append((node.lineno, node.func.attr))
     ordered_names = [name for _, name in sorted(calls)]
     try:
-        pre_index = ordered_names.index("run_pre_backtest_test")
         reset_index = ordered_names.index("reset_existing_config_if_requested")
-        ordered_names.index("run_backtest_daily_test")
+        daily_index = ordered_names.index("run_backtest_daily_test")
     except ValueError:
         return _failed("orchestration_state_and_physical_boundary", ["backtest_pg_orchestration_missing"])
-    if pre_index >= reset_index:
+    if "run_pre_backtest_test" in ordered_names or reset_index >= daily_index:
         return _failed("orchestration_state_and_physical_boundary", ["backtest_pg_orchestration_order_invalid"])
 
     if path.resolve() != (Path(__file__).resolve().parents[4] / "src/run/backtest.py").resolve():
@@ -624,11 +755,6 @@ def _static_orchestration_check(repo_root: Path) -> ProtocolCheckResult:
         end_date="2025-03-10",
         local_db=True,
         reset_config=False,
-        run_eval=False,
-        skip_eval=True,
-        plot=False,
-        plot_no_price=False,
-        plot_output_dir=None,
     )
 
     def run_script(command: list[str], _env: dict[str, str]) -> int:
@@ -639,10 +765,6 @@ def _static_orchestration_check(repo_root: Path) -> ProtocolCheckResult:
         backtest,
         "load_yaml_config",
         return_value={"market_type": "china_futures", "exp_name": "pg", "tickers": ["BU"]},
-    ), patch.object(
-        backtest,
-        "run_pre_backtest_test",
-        side_effect=lambda *_args: trace.append("pre_backtest_test") or 0,
     ), patch.object(
         backtest,
         "reset_existing_config_if_requested",
@@ -666,7 +788,6 @@ def _static_orchestration_check(repo_root: Path) -> ProtocolCheckResult:
     ):
         return_code = backtest.main()
     expected = [
-        "pre_backtest_test",
         "reset",
         "proposal.py",
         "order.py",

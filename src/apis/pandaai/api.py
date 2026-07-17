@@ -24,25 +24,47 @@ from apis.pandaai.api_model import FuturesDailyQuote, FuturesDailyQuoteOptimized
 from util.logger import logger
 
 
-_PANDAAI_GATEWAY_STATUS_CODES = frozenset({"502", "503", "504"})
+_PANDAAI_GATEWAY_STATUS_CODES = frozenset({502, 503, 504})
+_PANDAAI_RATE_LIMIT_STATUS_CODES = frozenset({429})
+_PANDAAI_RATE_LIMIT_SERVICE_CODES = frozenset({500001, 500002, 500003, 500006})
+_PANDAAI_TRANSIENT_SERVICE_CODES = frozenset({400002, 500004, 500005, 900001})
 
 
-def is_pandaai_gateway_error(exc: BaseException) -> bool:
-    """Classify retryable PandaAI HTTP gateway failures without exposing details."""
+def _exception_chain(exc: BaseException):
     current: BaseException | None = exc
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        status_values = [
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _exception_numeric_values(exc: BaseException) -> set[int]:
+    values: set[int] = set()
+    for current in _exception_chain(exc):
+        candidates = (
             getattr(current, "status_code", None),
             getattr(current, "status", None),
             getattr(current, "code", None),
             getattr(getattr(current, "response", None), "status_code", None),
-        ]
-        if any(str(value).strip() in _PANDAAI_GATEWAY_STATUS_CODES for value in status_values):
-            return True
+        )
+        for value in candidates:
+            try:
+                values.add(int(str(value).strip()))
+            except (TypeError, ValueError):
+                continue
+    return values
 
-        lowered = str(current).lower()
+
+def _exception_messages(exc: BaseException) -> list[str]:
+    return [str(current).lower() for current in _exception_chain(exc)]
+
+
+def is_pandaai_gateway_error(exc: BaseException) -> bool:
+    """Classify retryable PandaAI HTTP gateway failures without exposing details."""
+    if _exception_numeric_values(exc) & _PANDAAI_GATEWAY_STATUS_CODES:
+        return True
+    for lowered in _exception_messages(exc):
         if any(
             marker in lowered
             for marker in (
@@ -56,8 +78,6 @@ def is_pandaai_gateway_error(exc: BaseException) -> bool:
             return True
         if re.search(r"\bstatus(?:\s+code)?\s*[:=]\s*(?:502|503|504)\b", lowered):
             return True
-
-        current = current.__cause__ or current.__context__
     return False
 
 
@@ -136,7 +156,6 @@ class PandaAIAPI:
         self._unavailable_extra_feature_cache = self.__class__._shared_unavailable_extra_feature_cache
         self._exchange_suffix_cache = self.__class__._shared_exchange_suffix_cache
         self._min_request_interval_seconds = self._env_float("PANDAAI_MIN_REQUEST_INTERVAL_SECONDS", 1.35)
-        self._retry_attempts = self._env_int("PANDAAI_RETRY_ATTEMPTS", 5)
         self._retry_initial_wait_seconds = self._env_float("PANDAAI_RETRY_INITIAL_WAIT_SECONDS", 30.0)
         self._retry_max_wait_seconds = self._env_float("PANDAAI_RETRY_MAX_WAIT_SECONDS", 90.0)
         self._network_retry_initial_wait_seconds = self._env_float("PANDAAI_NETWORK_RETRY_INITIAL_WAIT_SECONDS", 3.0)
@@ -149,12 +168,6 @@ class PandaAIAPI:
     def _env_float(self, name: str, default: float) -> float:
         try:
             return max(0.0, float(os.environ.get(name, default)))
-        except Exception:
-            return default
-
-    def _env_int(self, name: str, default: int) -> int:
-        try:
-            return max(1, int(os.environ.get(name, default)))
         except Exception:
             return default
 
@@ -277,29 +290,61 @@ class PandaAIAPI:
         )
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
-        message = str(exc)
-        lowered = message.lower()
-        return (
-            self.RATE_LIMIT_ERROR_CODE in message
-            or self.RATE_LIMIT_ERROR_TEXT in message
-            or "rate limit" in lowered
-            or "too many requests" in lowered
-        )
+        numeric_values = _exception_numeric_values(exc)
+        if numeric_values & (_PANDAAI_RATE_LIMIT_STATUS_CODES | _PANDAAI_RATE_LIMIT_SERVICE_CODES):
+            return True
+        for lowered in _exception_messages(exc):
+            if (
+                self.RATE_LIMIT_ERROR_CODE in lowered
+                or self.RATE_LIMIT_ERROR_TEXT in lowered
+                or any(str(code) in lowered for code in _PANDAAI_RATE_LIMIT_SERVICE_CODES)
+                or "rate limit" in lowered
+                or "too many requests" in lowered
+                or "请求频率超限" in lowered
+                or "热点参数限流" in lowered
+                or "ip请求频率超限" in lowered
+                or "并发请求数超限" in lowered
+            ):
+                return True
+        return False
 
     def _is_transient_network_error(self, exc: Exception) -> bool:
-        message = str(exc)
-        lowered = message.lower()
-        return (
-            is_pandaai_gateway_error(exc)
-            or "winerror 10048" in lowered
-            or "only one usage of each socket address" in lowered
-            or "socket address" in lowered
-            or "temporarily unavailable" in lowered
-            or "connection reset" in lowered
-            or "connection aborted" in lowered
-            or "timed out" in lowered
-            or "urlopen error" in lowered
+        if is_pandaai_gateway_error(exc):
+            return True
+        if _exception_numeric_values(exc) & _PANDAAI_TRANSIENT_SERVICE_CODES:
+            return True
+        transient_types = (
+            TimeoutError,
+            ConnectionError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
         )
+        markers = (
+            "winerror 10048",
+            "only one usage of each socket address",
+            "socket address",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "remote end closed connection",
+            "temporary failure in name resolution",
+            "getaddrinfo failed",
+            "timed out",
+            "urlopen error",
+            "broken pipe",
+            "数据查询超时",
+            "服务降级中",
+            "服务熔断中",
+            "系统异常，请稍后重试",
+        )
+        for current in _exception_chain(exc):
+            if isinstance(current, transient_types):
+                return True
+            if any(marker in str(current).lower() for marker in markers):
+                return True
+        return False
 
     def _is_token_expired_error(self, exc: Exception) -> bool:
         message = str(exc)
@@ -332,11 +377,10 @@ class PandaAIAPI:
         if method is None:
             raise AttributeError(f"PandaAI SDK method is unavailable: {method_name}")
 
-        attempts = max(1, self._retry_attempts)
         wait_seconds = self._retry_initial_wait_seconds
         network_wait_seconds = self._network_retry_initial_wait_seconds
         token_refreshed = False
-        for attempt in range(1, attempts + 1):
+        while True:
             self._wait_for_request_slot()
             try:
                 return method(**kwargs)
@@ -349,14 +393,10 @@ class PandaAIAPI:
                     if method is None:
                         raise AttributeError(f"PandaAI SDK method is unavailable: {method_name}") from exc
                     token_refreshed = True
-                    self._wait_for_request_slot()
-                    try:
-                        return method(**kwargs)
-                    except Exception as refreshed_exc:
-                        exc = refreshed_exc
+                    continue
                 is_rate_limited = self._is_rate_limit_error(exc)
                 is_transient_network = self._is_transient_network_error(exc)
-                if (not is_rate_limited and not is_transient_network) or attempt >= attempts:
+                if not is_rate_limited and not is_transient_network:
                     raise
                 if is_transient_network:
                     logger.warning("pandaai_transient_request_retry")
@@ -406,6 +446,34 @@ class PandaAIAPI:
                 conn.commit()
             self.__class__._market_cache_db_initialized = True
 
+    def _market_cache_records_match_key(
+        self,
+        records: list[dict[str, Any]],
+        symbol: str,
+        start_key: str,
+        end_key: str,
+    ) -> bool:
+        if not records:
+            return False
+        try:
+            start_date = datetime.strptime(start_key, "%Y%m%d")
+            end_date = datetime.strptime(end_key, "%Y%m%d")
+        except ValueError:
+            return False
+        expected_symbol = str(symbol or "").strip().upper()
+        if not expected_symbol:
+            return False
+        for record in records:
+            if not isinstance(record, dict):
+                return False
+            record_symbol = str(record.get("symbol") or "").strip().upper()
+            record_date = self._parse_trade_date(record.get("date"))
+            if record_symbol != expected_symbol:
+                return False
+            if record_date is None or record_date < start_date or record_date > end_date:
+                return False
+        return True
+
     def _read_persistent_market_cache(self, symbol: str, start_key: str, end_key: str) -> Optional[list[dict[str, Any]]]:
         if not self._persistent_market_cache_enabled:
             return None
@@ -414,7 +482,7 @@ class PandaAIAPI:
             with sqlite3.connect(self._market_cache_db_path, timeout=30.0) as conn:
                 row = conn.execute(
                     """
-                    SELECT records_json
+                    SELECT records_json, row_count
                     FROM pandaai_market_data_cache
                     WHERE symbol = ? AND start_date = ? AND end_date = ?
                     """,
@@ -426,7 +494,15 @@ class PandaAIAPI:
 
             records = json.loads(row[0])
             if isinstance(records, list):
-                return [dict(item) for item in records if isinstance(item, dict)]
+                normalized = [dict(item) for item in records if isinstance(item, dict)]
+                if int(row[1]) == len(normalized) and self._market_cache_records_match_key(
+                    normalized,
+                    symbol,
+                    start_key,
+                    end_key,
+                ):
+                    return normalized
+                logger.warning("pandaai_market_cache_record_invalid")
         except Exception:
             logger.warning("pandaai_market_cache_read_failed")
         return None
@@ -439,6 +515,9 @@ class PandaAIAPI:
         records: list[dict[str, Any]],
     ) -> None:
         if not self._persistent_market_cache_enabled:
+            return
+        if not self._market_cache_records_match_key(records, symbol, start_key, end_key):
+            logger.warning("pandaai_market_cache_record_invalid")
             return
         self._ensure_market_cache_db()
         try:
@@ -523,6 +602,7 @@ class PandaAIAPI:
         end_date: datetime,
         frequency: str = "15m",
         time_zone: Optional[Any] = None,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """Query PandaAI futures minute bars and cache the raw records."""
         frequency = str(frequency or "15m").lower()
@@ -532,7 +612,7 @@ class PandaAIAPI:
         start_key = start_date.strftime("%Y%m%d")
         end_key = end_date.strftime("%Y%m%d")
         cache_key = (self._sdk_cache_namespace(), symbol.upper(), start_key, end_key, frequency, str(time_zone or ""))
-        if cache_key in self._minute_cache:
+        if not refresh and cache_key in self._minute_cache:
             return list(self._minute_cache[cache_key])
 
         response = self._call_pandaai(
@@ -546,7 +626,8 @@ class PandaAIAPI:
             time_zone=time_zone,
         )
         records = self._records_from_response(response)
-        self._minute_cache[cache_key] = records
+        if not refresh:
+            self._minute_cache[cache_key] = records
         return list(records)
 
     def _query_exact_quote(self, symbol: str, trading_date: datetime) -> list[dict[str, Any]]:
@@ -1408,6 +1489,7 @@ class PandaAIAPI:
             end_date=end_date,
             frequency=frequency,
             time_zone=time_zone,
+            refresh=isinstance(cutoff_datetime, datetime),
         )
 
         normalized_contract = self._normalize_internal_contract(contract_id) if contract_id else None
@@ -1437,6 +1519,16 @@ class PandaAIAPI:
             filtered.append(record)
 
         filtered.sort(key=lambda item: self._parse_minute_datetime(item) or datetime.min)
+        if cutoff is not None and filtered:
+            cache_key = (
+                self._sdk_cache_namespace(),
+                symbol.upper(),
+                start_date.strftime("%Y%m%d"),
+                end_date.strftime("%Y%m%d"),
+                str(frequency or "15m").lower(),
+                str(time_zone or ""),
+            )
+            self._minute_cache[cache_key] = [dict(item) for item in filtered]
         return filtered
 
     def get_futures_daily_candles_df(
