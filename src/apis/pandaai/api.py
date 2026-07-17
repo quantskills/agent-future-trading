@@ -24,6 +24,43 @@ from apis.pandaai.api_model import FuturesDailyQuote, FuturesDailyQuoteOptimized
 from util.logger import logger
 
 
+_PANDAAI_GATEWAY_STATUS_CODES = frozenset({"502", "503", "504"})
+
+
+def is_pandaai_gateway_error(exc: BaseException) -> bool:
+    """Classify retryable PandaAI HTTP gateway failures without exposing details."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status_values = [
+            getattr(current, "status_code", None),
+            getattr(current, "status", None),
+            getattr(current, "code", None),
+            getattr(getattr(current, "response", None), "status_code", None),
+        ]
+        if any(str(value).strip() in _PANDAAI_GATEWAY_STATUS_CODES for value in status_values):
+            return True
+
+        lowered = str(current).lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "bad gateway",
+                "service unavailable",
+                "gateway timeout",
+            )
+        ):
+            return True
+        if re.search(r"\bhttp(?:\s+error)?\s*[:=]?\s*(?:502|503|504)\b", lowered):
+            return True
+        if re.search(r"\bstatus(?:\s+code)?\s*[:=]\s*(?:502|503|504)\b", lowered):
+            return True
+
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class PandaAIAPI:
     """PandaAI API wrapper with the futures methods AgentQuant already uses."""
 
@@ -253,7 +290,8 @@ class PandaAIAPI:
         message = str(exc)
         lowered = message.lower()
         return (
-            "winerror 10048" in lowered
+            is_pandaai_gateway_error(exc)
+            or "winerror 10048" in lowered
             or "only one usage of each socket address" in lowered
             or "socket address" in lowered
             or "temporarily unavailable" in lowered

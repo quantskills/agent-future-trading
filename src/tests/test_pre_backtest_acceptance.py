@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -229,6 +230,178 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
         self.assertTrue(result.passed, result.to_dict())
         self.assertIn("finoview_optional_records_unavailable", result.diagnostic_codes)
         self.assertIn("news_optional_records_unavailable", result.diagnostic_codes)
+
+    def test_data_readiness_passes_after_adapter_retries_one_gateway_failure(self):
+        from apis.pandaai.api import PandaAIAPI
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        fake_provider = types.ModuleType("panda_data")
+        provider_calls = []
+
+        def init_token(**_kwargs):
+            return None
+
+        def get_market_data(**kwargs):
+            provider_calls.append(kwargs)
+            if len(provider_calls) == 1:
+                raise RuntimeError("HTTP 502: Bad Gateway")
+            return [{"provider_result": "real"}]
+
+        fake_provider.init_token = init_token
+        fake_provider.get_market_data = get_market_data
+        PandaAIAPI._shared_token_initialized = False
+        PandaAIAPI._shared_sdk_user_cache_configured = False
+
+        env = {
+            "PANDAAI_USERNAME": "user",
+            "PANDAAI_PASSWORD": "pass",
+            "PANDAAI_PERSISTENT_MARKET_CACHE": "0",
+        }
+        with patch.dict(os.environ, env), patch.dict(sys.modules, {"panda_data": fake_provider}), patch(
+            "apis.pandaai.api.time.sleep"
+        ):
+            adapter = PandaAIAPI()
+            adapter._retry_attempts = 2
+            adapter._network_retry_initial_wait_seconds = 0.0
+            adapter._network_retry_max_wait_seconds = 0.0
+            adapter._wait_for_request_slot = lambda: None
+
+            class FakeAPI:
+                def get_futures_daily_candles_optimized(self, **_kwargs):
+                    return [
+                        SimpleNamespace(
+                            trade_date="2025-03-10",
+                            open_price=3500.0,
+                            highest_price=3520.0,
+                            lowest_price=3490.0,
+                            close_price=3510.0,
+                            settle_price=3508.0,
+                            turnover_vol=100,
+                            open_int=1000,
+                            ticker="RB2505",
+                        )
+                    ]
+
+            class FakeRouter:
+                def __init__(self, **_kwargs):
+                    self.api = FakeAPI()
+
+                def get_futures_main_contract_quote_on_date(self, *_args, **_kwargs):
+                    adapter._call_pandaai("get_market_data", symbol="RB_DOMINANT.SHF")
+                    return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
+
+                def get_futures_contract_quote_on_date(self, *_args, **_kwargs):
+                    return SimpleNamespace(ticker="RB2505", settle_price=3508.0)
+
+                def get_china_futures_minute_bars(self, **_kwargs):
+                    return [
+                        {
+                            "datetime": "2025-03-10 09:01:00",
+                            "open": 3500.0,
+                            "high": 3501.0,
+                            "low": 3499.0,
+                            "close": 3500.5,
+                            "volume": 10,
+                        }
+                    ]
+
+                def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                    return None
+
+                def get_china_futures_news(self, *_args, **_kwargs):
+                    return []
+
+            with patch("apis.router.Router", FakeRouter), patch.object(
+                module,
+                "_optional_data_directories_ready",
+                return_value=([], []),
+                create=True,
+            ), patch(
+                "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+                return_value={
+                    "contract_multiplier": 10.0,
+                    "margin_rate_long": 0.1,
+                    "margin_rate_short": 0.1,
+                },
+            ):
+                result = _data_readiness_check(
+                    {"market_type": "china_futures", "tickers": ["RB"], "factor_data": {}},
+                    start=datetime(2025, 3, 10),
+                    end=datetime(2025, 3, 10),
+                )
+
+        self.assertTrue(result.passed, result.to_dict())
+        self.assertEqual(len(provider_calls), 2)
+
+    def test_data_readiness_reports_stable_code_after_gateway_retry_exhaustion(self):
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        class FakeAPI:
+            def get_futures_daily_candles_optimized(self, **_kwargs):
+                return [
+                    SimpleNamespace(
+                        trade_date="2025-03-10",
+                        open_price=3500.0,
+                        highest_price=3520.0,
+                        lowest_price=3490.0,
+                        close_price=3510.0,
+                        settle_price=3508.0,
+                        turnover_vol=100,
+                        open_int=1000,
+                        ticker="RB2505",
+                    )
+                ]
+
+        class FakeRouter:
+            def __init__(self, **_kwargs):
+                self.api = FakeAPI()
+
+            def get_futures_main_contract_quote_on_date(self, *_args, **_kwargs):
+                raise RuntimeError("HTTP 502: Bad Gateway")
+
+            def get_futures_contract_quote_on_date(self, *_args, **_kwargs):
+                raise AssertionError("concrete quote must not run after main quote failure")
+
+            def get_china_futures_minute_bars(self, **_kwargs):
+                return [
+                    {
+                        "datetime": "2025-03-10 09:01:00",
+                        "open": 3500.0,
+                        "high": 3501.0,
+                        "low": 3499.0,
+                        "close": 3500.5,
+                        "volume": 10,
+                    }
+                ]
+
+            def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                return None
+
+            def get_china_futures_news(self, *_args, **_kwargs):
+                return []
+
+        with patch("apis.router.Router", FakeRouter), patch.object(
+            module,
+            "_optional_data_directories_ready",
+            return_value=([], []),
+            create=True,
+        ), patch(
+            "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.1,
+                "margin_rate_short": 0.1,
+            },
+        ):
+            result = _data_readiness_check(
+                {"market_type": "china_futures", "tickers": ["RB"], "factor_data": {}},
+                start=datetime(2025, 3, 10),
+                end=datetime(2025, 3, 10),
+            )
+
+        self.assertFalse(result.passed)
+        self.assertIn("pandaai_gateway_error_after_retry", result.violation_codes)
+        self.assertNotIn("concrete_contract_fact_interface_unreadable", result.violation_codes)
 
     def test_time_boundary_runs_one_runtime_wiring_acceptance(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module

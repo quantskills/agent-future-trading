@@ -95,6 +95,7 @@ PG 报告不得输出 `ok`、`errors`、`warnings`、`metadata`、内部计数�
 - 合约乘数、保证金率和具体合约信息可读取。
 - Trader 使用的分钟行情接口及字段结构存在。
 - 数据日期不得产生前视。
+- PandaAI 的 HTTP 502、503、504 只通过适配器既有次数与退避机制重试；重试耗尽后数据就绪保持硬失败，并在既有 `violation_codes[]` 中登记 `pandaai_gateway_error_after_retry`。鉴权、权限、参数及其他明确非瞬时 4xx 不重试。
 
 基本面与新闻不做每日齐全检查：
 
@@ -233,6 +234,7 @@ strategy 路径中，Auditor 拒绝不得成交；审计通过不等于必须成
 ### 1. 回测前检测
 
 - 指定日期窗口时，数据就绪检查覆盖交易日、日线 OHLCV、结算价、主力映射、具体合约、乘数、保证金率及 Trader 使用的 15 分钟和 1 分钟行情接口；未指定窗口时不推定数据事实。
+- PandaAI 瞬时网关错误由正式适配器按既有重试边界处理；数据就绪只在重试耗尽后记录 `pandaai_gateway_error_after_retry`，不维护第二套重试器、不返回空数据冒充成功。
 - Finoview 与新闻只调用正式读取、解析和日期过滤机制证明接口可运行；合法无新增数据只形成诊断，不阻断回测。
 - 时间边界是一个统一机制验收项，只证明盘前截止、夜盘交易日映射、Trader 行情截止、Phase3/Phase4 顺序和学习日期边界已经接入真实消费者；具体边界案例属于回归测试。
 - 契约验收调用现有 AEC、SCC、FAC、Auditor artifact、execution result 和 action-value 共享校验器；数据库物理字段以正式 `sqlite_setup` 建立的隔离 schema 为准，PG 不维护私有字段表。

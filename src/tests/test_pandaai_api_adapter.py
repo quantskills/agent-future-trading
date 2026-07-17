@@ -324,6 +324,104 @@ class PandaAIAdapterTest(unittest.TestCase):
 
         logger_mock.info.assert_not_called()
 
+    def test_gateway_502_retries_then_returns_real_provider_result(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_market_data(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("HTTP 502: Bad Gateway")
+            return [{"provider_result": "real"}]
+
+        fake.get_market_data = get_market_data
+        with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+            api = PandaAIAPI()
+            api._retry_attempts = 3
+            api._network_retry_initial_wait_seconds = 0.0
+            api._network_retry_max_wait_seconds = 0.0
+            api._wait_for_request_slot = lambda: None
+            result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+        self.assertEqual(result, [{"provider_result": "real"}])
+        self.assertEqual(len(calls), 2)
+
+    def test_gateway_502_exhausts_existing_retry_limit_and_raises(self):
+        fake, env_patch, module_patch = self._build_api()
+        calls = []
+
+        def get_market_data(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("HTTP 502: Bad Gateway")
+
+        fake.get_market_data = get_market_data
+        with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+            api = PandaAIAPI()
+            api._retry_attempts = 3
+            api._network_retry_initial_wait_seconds = 0.0
+            api._network_retry_max_wait_seconds = 0.0
+            api._wait_for_request_slot = lambda: None
+            with self.assertRaisesRegex(RuntimeError, "Bad Gateway"):
+                api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+        self.assertEqual(len(calls), 3)
+
+    def test_gateway_503_and_504_share_existing_transient_retry_path(self):
+        for error_text in (
+            "HTTP 503: Service Unavailable",
+            "HTTP 504: Gateway Timeout",
+        ):
+            with self.subTest(error_text=error_text):
+                self.setUp()
+                fake, env_patch, module_patch = self._build_api()
+                calls = []
+
+                def get_market_data(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == 1:
+                        raise RuntimeError(error_text)
+                    return [{"provider_result": "real"}]
+
+                fake.get_market_data = get_market_data
+                with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+                    api = PandaAIAPI()
+                    api._retry_attempts = 3
+                    api._network_retry_initial_wait_seconds = 0.0
+                    api._network_retry_max_wait_seconds = 0.0
+                    api._wait_for_request_slot = lambda: None
+                    result = api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+                self.assertEqual(result, [{"provider_result": "real"}])
+                self.assertEqual(len(calls), 2)
+
+    def test_non_transient_client_errors_do_not_retry(self):
+        for error_text in (
+            "HTTP 401: authentication failed",
+            "HTTP 403: permission denied",
+            "authentication failed",
+            "HTTP 400: invalid parameter",
+        ):
+            with self.subTest(error_text=error_text):
+                self.setUp()
+                fake, env_patch, module_patch = self._build_api()
+                calls = []
+
+                def get_market_data(**kwargs):
+                    calls.append(kwargs)
+                    raise RuntimeError(error_text)
+
+                fake.get_market_data = get_market_data
+                with env_patch, module_patch, patch("apis.pandaai.api.time.sleep"):
+                    api = PandaAIAPI()
+                    api._retry_attempts = 3
+                    api._network_retry_initial_wait_seconds = 0.0
+                    api._network_retry_max_wait_seconds = 0.0
+                    api._wait_for_request_slot = lambda: None
+                    with self.assertRaises(RuntimeError):
+                        api._call_pandaai("get_market_data", symbol="M_DOMINANT.DCE")
+
+                self.assertEqual(len(calls), 1)
+
     def test_short_zhengzhou_contract_code_expands_at_pandaai_boundary(self):
         fake, env_patch, module_patch = self._build_api()
         with env_patch, module_patch:

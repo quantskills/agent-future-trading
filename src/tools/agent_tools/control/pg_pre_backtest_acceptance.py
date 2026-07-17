@@ -258,6 +258,7 @@ def _data_readiness_check(
     diagnostics: list[str] = []
     try:
         from apis.contract_info_cache import FuturesContractInfoCache
+        from apis.pandaai.api import is_pandaai_gateway_error
         from apis.router import APISource, Router
 
         router = Router(
@@ -282,8 +283,12 @@ def _data_readiness_check(
                     start_date=start,
                     end_date=end + timedelta(days=1),
                 )
-            except Exception:
-                violations.append("pandaai_daily_data_unreadable")
+            except Exception as exc:
+                violations.append(
+                    "pandaai_gateway_error_after_retry"
+                    if is_pandaai_gateway_error(exc)
+                    else "pandaai_daily_data_unreadable"
+                )
                 continue
             if not quotes:
                 violations.append("pandaai_daily_data_missing")
@@ -340,8 +345,12 @@ def _data_readiness_check(
                 try:
                     main_quote = router.get_futures_main_contract_quote_on_date(ticker, sample_date)
                     concrete_quote = router.get_futures_contract_quote_on_date(contract_code, sample_date)
-                except Exception:
-                    violations.append("concrete_contract_fact_interface_unreadable")
+                except Exception as exc:
+                    violations.append(
+                        "pandaai_gateway_error_after_retry"
+                        if is_pandaai_gateway_error(exc)
+                        else "concrete_contract_fact_interface_unreadable"
+                    )
                 else:
                     main_contract_code = str(getattr(main_quote, "ticker", "") or "").strip().upper()
                     if not main_contract_code or main_contract_code != contract_code:
@@ -358,8 +367,12 @@ def _data_readiness_check(
                         end_date=datetime.strptime(sample_date, "%Y-%m-%d"),
                         frequency=frequency,
                     )
-                except Exception:
-                    violations.append("trader_minute_data_interface_unreadable")
+                except Exception as exc:
+                    violations.append(
+                        "pandaai_gateway_error_after_retry"
+                        if is_pandaai_gateway_error(exc)
+                        else "trader_minute_data_interface_unreadable"
+                    )
                     continue
                 if not minute_rows:
                     violations.append("trader_minute_data_missing")
