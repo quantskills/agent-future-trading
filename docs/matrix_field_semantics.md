@@ -443,7 +443,7 @@
 | `learning_impact_delta` | `final_action_contract.evidence_used` / `capital_deployment` | 学习对本次资金 rank 或生命周期决策的净影响拆解。rank 场景记录正向 open/add 学习、负向 open/add 学习、入场质量亏损、触发质量正负反馈等分项；非 rank 场景记录是否改变持仓解释、减仓/退出倾向、条件监控或 execution profile；`execution_profile_learning_direct_to_rank` 必须为 false。 |
 | `rank_cleanup_fields` | PM 全市场资金部署工具 / `final_action_semantics.canonicalize_final_action_contract_for_persistence()` | 非 full-market rank 清理只允许删除 rank 专属字段：`opportunity_rank`、`rank_source`、`rank_scope`、`capital_rank_generated_by`、`rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`alpha_scale_eligible` 及其他 rank 语义布尔字段。`lifecycle_learning_trace`、`learning_impact_delta`、`pm_lifecycle_learning_trace`、`pm_lifecycle_learning_impact_delta` 是生命周期学习解释字段，不能因为合约不走 rank 而被清理。 |
 | `pm_lifecycle_learning_trace` | `final_action_contract.learning_used` | PM 合约构造器写入的最终动作生命周期学习 trace，覆盖 `open_add_new_risk`、`hold`、`reduce_exit`、`conditional_monitor` 和 `wait`。它用于证明 PM 把 action-value 按生命周期路由到正确决策口，不创建第二张交易合约。 |
-| `pm_lifecycle_learning_impact_delta` | `final_action_contract.learning_used` | PM 合约构造器写入的生命周期学习影响拆解，记录学习对 `target_lots/lots_delta`、持仓解释、释放资金动作、条件监控和 execution profile 的影响。它只解释最终合约结果，不授权 Trader 改手数或方向。 |
+| `pm_lifecycle_learning_impact_delta` | `final_action_contract.learning_used`；Researcher `contextual_rule_calibration` evidence | PM 合约构造器写入的生命周期学习影响拆解，记录学习对 `target_lots/lots_delta`、持仓解释、释放资金动作、条件监控和 execution profile 的影响。Researcher 只可从该正式路径读取并原名保存已登记子集，用于未来情境校准；不得回读 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象或借用 `learning_to_position_summary.holding_lifecycle.lifecycle_classification`。它只解释最终合约结果，不授权 Trader 改手数或方向。 |
 | `primary_lifecycle_action_port` | `portfolio_manager.py` 第 3 步 / PM 内部学习与诊断 trace | PM 主链第 3 步生命周期分流口，必须在第 2 步方向选择后、学习路由前由 `pm_lifecycle_action_port.py` 生成。它只服务 PM 内部分流、学习路由和 provenance；不得写入 `final_action_contract.evidence_used`，也不得作为 Step6 最终合约失败依据。Step6 是否需要 Step5 只能按第 4 步最终候选是否实际增加风险判定：从空仓建立非零仓位，或同方向且 `abs(target_lots)>abs(current_lots)`，均为 `requires_full_market_rank=true`；不增加风险为 false。 |
 | `lifecycle_transition_diagnostic` | `pm_lifecycle_action_port.py` / PM 内部学习与诊断 trace | PM 内部用于解释候选生命周期曾经如何从 Step2 路径变化到后续候选形态的 provenance diagnostic。它不是最终合约自检，不是 workflow/PG 保存闸门，不得写入 `final_action_contract.evidence_used`，不得替代 `pm_six_step_trace.step6_contract_generation_check` 或 `pm_contract_self_check`。 |
 | `pm_six_step_trace.step6_contract_generation_check` | `signal_snapshot.pm_six_step_trace` | Step6 签约时生成的最终合约生成合法性检查。它只检查最终 `final_action_contract` 是否由合法 PM 机制生成，包括手数动作自洽、实际增加风险是否具备 Step5 deployment、非新增风险合约不伪造 rank、Step5 未部署是否还原为 `target_lots=current_lots` 且无本次新增风险权限、`capital_deployment` 语义完整、PM 中间态不得进入保存 artifact。它不比较 Step2 与 Step6 是否一致。 |
@@ -621,13 +621,15 @@
 
 Researcher 只在 Phase4 completed 且结算事实形成后运行；写入前必须沿真实物理路径验证：AEC 由 `signal_collection_contract.source_contracts[].signal_record_id` 指向 signal SQL；SCC、FAC、Auditor 和 `execution_result` 位于同一 `futures_recommendation`；transaction 通过 `futures_transactions.recommendation_id` 关联 recommendation；settlement 通过 transaction/portfolio 的 `portfolio_id`、配置和 `trading_date` 对应 `daily_settlement`。系统没有学习专用 `settlement_id`，不得为追溯自造该字段。零成交和无合格学习成果均合法；不要求每笔交易形成学习，也不要求每次决策使用学习。
 
+Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、外置 payload artifact、template prior 和历史学习快照属于同一提交边界。任一环节失败时 SQL 必须回滚、完成事件不得存在、本次新文件必须删除、被本次尝试覆盖的既有合法文件必须恢复；不得以孤立 artifact 代替数据库引用。
+
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
 | `researcher_llm_notes.evidence_pack_id` | Researcher 验证后研究记录 | 已通过来源、日期、Phase4 和结算边界检查的 evidence pack 身份。 |
 | `researcher_llm_notes.payload_json` / `payload_artifact_path` / `payload_sha256` / `payload_size` / `payload_summary_json` | Researcher 验证后研究记录 | 保存可解析的结构化 `evidence` 与 `validated_output`；超出内联限制时使用正式 artifact。`raw_prompt/raw_response` 及其 artifact 元数据固定为空。 |
 | `alpha_setup_sample.trading_date` / `recommendation_id` / `source_type` / `evidence_json` / `result_json` / `payload_json` | Researcher 结构化样本 | 学习来源交易日、推荐引用、真实交易/episode/反事实类型、验证证据和结算后结果；未交易机会不得伪造 transaction。 |
 | `trade_episode_memory.payload_json.pair.open_recommendation_id` / `open_transaction_id` / `close_transaction_id` | 成交型 episode 学习 | 已完成交易 episode 对推荐及开平 transaction 的真实引用；只在对应事实存在时写入。 |
-| `learning_event_log.config_id` / `trading_date` / `event_type` / `status` / `created_at` | Researcher completion 事件 | `researcher_learning_completed` 的配置、来源交易日、完成状态和写入时间；必须晚于对应 Phase4，不代表每个交易日必须产生具体学习记录。 |
+| `learning_event_log.config_id` / `trading_date` / `event_type` / `status` / `created_at` | Researcher completion 事件 | `researcher_learning_completed` 的配置、来源交易日、完成状态和写入时间；必须晚于对应 Phase4，并与本次研究 SQL 及 artifact 成功提交，不得在失败回滚后残留；不代表每个交易日必须产生具体学习记录。 |
 | `state_key` | action-value / 学习 | 统一状态 key。 |
 | `scope_type` | 学习记录 | 学习作用范围类型。 |
 | `evidence_signature` | action-value / 学习 | 统一证据组合签名。 |

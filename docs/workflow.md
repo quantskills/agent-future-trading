@@ -129,6 +129,7 @@ Researcher学习链将研究与未来学习结果物理化为：
 → 交易episode、未交易机会、action-value、profile及policy/state写入相应研究学习SQL表
 → 历史学习快照写入Researcher MD和JSON artifact
 → researcher_learning_completed事件写入 learning_event_log SQL记录
+上述 SQL、完成事件、外置 payload artifact、template prior 和历史学习快照按单次 Researcher 运行原子提交；失败时全部回滚，本次新 artifact 不得残留，已有合法 artifact 不得被覆盖或删除
         ↓
 【下一交易日学习回流】
 workflow 编排层以新的交易日期和主配置启动分析师及PM链路
@@ -154,7 +155,7 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 | 交易员 | 审计后的 `FuturesRecommendation`、当前账户、持仓和主配置；从 `signal_snapshot["final_action_contract"]` 读取执行合约；通过行情路由读取盘中行情 | `intraday decision`、`execution_result`、`futures_transaction`；更新后的 recommendation状态和执行价格 |
 | 会计师 | 交易日期、主配置；最近已结算 `portfolio`；当日未入账 `futures_transaction`；结算行情和合约信息 | 结算后的 `portfolio.positions`、`daily_settlement.positions_snapshot`、`ticker_daily_pnl`；已回填结算价并标记入账的 `futures_transaction`；不存在独立 position SQL 事实路径 |
 | 复盘员 | Phase1–3阶段状态、分析师signal、审计及执行后的 `futures_recommendation`、`futures_transaction`、`daily_settlement`、最新 `portfolio.positions` 和对应 `daily_settlement.positions_snapshot` | Phase4复盘结果、复盘摘要、每日交易报告和事实归因；不产生第二次合约审计结论 |
-| 研究员 | 已完成的Phase4和结算事实；通过正式ID链追溯的AEC、SCC、FAC、Auditor、`execution_result`、transaction、settlement | 经验证的结构化交易episode、未交易机会、action-value、profile、policy/state、历史学习快照和 `researcher_learning_completed` 事件；成果可为空，供下一交易日分析师及PM通过正式检索接口读取 |
+| 研究员 | 已完成的Phase4和结算事实；通过正式ID链追溯的AEC、SCC、FAC、Auditor、`execution_result`、transaction、settlement；PM 生命周期校准只读 `final_action_contract.learning_used.pm_lifecycle_learning_impact_delta` | 经验证的结构化交易episode、未交易机会、action-value、profile、policy/state、template prior、历史学习快照和 `researcher_learning_completed` 事件；同次运行的 SQL 与 artifact 原子提交；成果可为空，供下一交易日分析师及PM通过正式检索接口读取 |
 
 ## 三、信息传递核心载体
 

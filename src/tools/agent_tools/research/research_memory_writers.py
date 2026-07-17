@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apis.contract_info_cache import FuturesContractInfoCache
-from database.artifact_store import externalize_json_for_db
+from database.artifact_store import externalize_json_for_db, write_artifact_text
 from graph.schema import RecommendationSourceType
 from tools.agent_tools.research import research_review_helpers as _review_helpers
 from tools.agent_tools.research import research_snapshot_reports as _research_snapshots
@@ -45,6 +45,27 @@ from tools.common.final_action_semantics import (
     canonical_action_value_lane,
     derive_research_fact_state,
     validate_action_value_write_consistency,
+)
+
+
+PM_LIFECYCLE_CALIBRATION_FIELDS = (
+    "trace_version",
+    "current_lots",
+    "target_lots",
+    "lots_delta",
+    "pre_learning_position_ratio",
+    "final_target_position_ratio",
+    "position_ratio_delta",
+    "open_add_rank_score_delta",
+    "alpha_setup_multiplier",
+    "alpha_setup_expectancy_lane",
+    "hold_decision",
+    "hold_changes_position",
+    "reduce_exit_decision",
+    "reduce_exit_changes_position",
+    "conditional_monitor_decision",
+    "execution_profile_changed",
+    "execution_profile_learning_direct_to_rank",
 )
 
 # Reuse deterministic parsing/report helpers without depending on the Reviewer
@@ -4667,7 +4688,16 @@ def _write_contextual_rule_calibration_state(
         learning_used = final_contract.get("learning_used") if isinstance(final_contract.get("learning_used"), dict) else {}
         impact = learning_used.get("pm_lifecycle_learning_impact_delta")
         impact = impact if isinstance(impact, dict) else {}
-        decision = str(impact.get("hold_decision") or impact.get("reduce_exit_decision") or "")
+        formal_impact = {
+            field: impact.get(field)
+            for field in PM_LIFECYCLE_CALIBRATION_FIELDS
+            if field in impact
+        }
+        decision = str(
+            formal_impact.get("hold_decision")
+            or formal_impact.get("reduce_exit_decision")
+            or ""
+        )
         if decision not in {
             "skip_horizon_mismatch_new_entry",
             "reduce_failed_new_loss_revalidation",
@@ -4687,7 +4717,7 @@ def _write_contextual_rule_calibration_state(
         }
         rules = {}
         reason = "same-scope PM lifecycle/horizon observation keeps strict validation until future evidence improves"
-        if "horizon_mismatch" in decision or "horizon_consistency" in str(holding.get("lifecycle_classification") or ""):
+        if "horizon_mismatch" in decision:
             rules["min_confirmation_score"] = float(calibration_cfg.get("horizon_confirm_score_after_failure", 0.58))
             rules["min_short_timing_confidence"] = float(calibration_cfg.get("short_timing_confidence_after_failure", 0.48))
             rules["losing_hold_reduction_multiplier"] = float(calibration_cfg.get("losing_hold_reduction_after_failure", 0.45))
@@ -4706,10 +4736,10 @@ def _write_contextual_rule_calibration_state(
             rules=rules,
             reason=reason,
             evidence={
-                "source": "pm_holding_rebalance_diagnostics",
+                "source": "final_action_contract.learning_used.pm_lifecycle_learning_impact_delta",
                 "recommendation_id": recommendation.get("id"),
                 "decision": decision,
-                "holding_rebalance_control": holding,
+                "pm_lifecycle_learning_impact_delta": formal_impact,
             },
             confidence_score=float(calibration_cfg.get("pm_observation_confidence", 0.45)),
             sample_count=1,
@@ -5445,7 +5475,6 @@ def _export_template_prior(
     if not path.is_absolute():
         project_root = Path(__file__).resolve().parents[4]
         path = project_root / path
-    path.parent.mkdir(parents=True, exist_ok=True)
     cursor.execute(
         """
         SELECT ticker, side, setup_type, horizon_class, market_regime,
@@ -5476,7 +5505,7 @@ def _export_template_prior(
         "anti_overfit": learning_cfg.get("anti_overfit", {}),
         "templates": rows,
     }
-    path.write_text(_json_dumps(payload), encoding="utf-8")
+    write_artifact_text(path, _json_dumps(payload))
     return str(path)
 
 

@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from agents.research_team.researcher import researcher_agent
 from apis.router import APISource, Router
+from database.artifact_store import artifact_write_transaction
 from graph.schema import RecommendationSourceType, TradingPhase
 from tools.agent_tools.research.reviewer_phase4_review import (
     _fetchone,
@@ -127,33 +128,34 @@ def main() -> None:
             """,
             (config_id, trading_date),
         )
-        learning_summary = researcher_agent(
-            db=db,
-            cursor=cursor,
-            cfg=cfg,
-            config_id=config_id,
-            trading_date=trading_date,
-            previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
-            settlement_row=settlement_row,
-            recommendations=recommendations,
-            strategy_recommendations=strategy_recommendations,
-            no_trade_reason_counter=no_trade_reason_counter,
-            transactions_by_recommendation=transactions_by_recommendation,
-        )
-        researcher_snapshot_paths = _write_historical_learning_snapshot_report(
-            cursor=cursor,
-            cfg=cfg,
-            config_id=config_id,
-            trading_date=trading_date,
-            learning_summary=learning_summary,
-        )
-        learning_summary["historical_learning_snapshot_report"] = researcher_snapshot_paths
-        research_memory_writers.insert_researcher_learning_completion_event(
-            cursor,
-            config_id=config_id,
-            trading_date=trading_date,
-        )
-        conn.commit()
+        with artifact_write_transaction():
+            learning_summary = researcher_agent(
+                db=db,
+                cursor=cursor,
+                cfg=cfg,
+                config_id=config_id,
+                trading_date=trading_date,
+                previous_trading_dates_by_ticker=previous_trading_dates_by_ticker,
+                settlement_row=settlement_row,
+                recommendations=recommendations,
+                strategy_recommendations=strategy_recommendations,
+                no_trade_reason_counter=no_trade_reason_counter,
+                transactions_by_recommendation=transactions_by_recommendation,
+            )
+            researcher_snapshot_paths = _write_historical_learning_snapshot_report(
+                cursor=cursor,
+                cfg=cfg,
+                config_id=config_id,
+                trading_date=trading_date,
+                learning_summary=learning_summary,
+            )
+            learning_summary["historical_learning_snapshot_report"] = researcher_snapshot_paths
+            research_memory_writers.insert_researcher_learning_completion_event(
+                cursor,
+                config_id=config_id,
+                trading_date=trading_date,
+            )
+            conn.commit()
         logger.info(f"Researcher learning persisted: {learning_summary}")
         logger.info(f"Researcher historical learning snapshot written: {researcher_snapshot_paths}")
     except Exception:

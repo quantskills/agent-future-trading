@@ -1,6 +1,6 @@
 # Matrix Chain Contract
 
-更新时间：2026-07-15
+更新时间：2026-07-17
 
 本文是 AgentQuant 全链路契约矩阵。它只回答一件事：每个关键系统事实由谁生产、落在哪里、谁消费、谁审计、什么条件必须 hard fail、什么条件只进入 diagnostics。
 
@@ -48,6 +48,10 @@
 
 日期链固定为：`reference_portfolio.trading_date=Prev(T)` 只表示 Proposal 使用的最近已结算账户/持仓；三份持久化 AEC 的 `data_usage_summary.trading_date`、SCC、recommendation/effective date、execution、transaction、settlement、Phase4 和 Researcher 来源均为逻辑 `T`。Researcher 必须从 signal artifact 校验真实 AEC 日期，不能把 `signal.portfolio_id` 关联日期解释为信号日期；逻辑 `T` 学习只能由目标 `Next(T)` 及以后读取。
 
+PM 持仓生命周期校准的唯一 Researcher 输入是 `final_action_contract.learning_used.pm_lifecycle_learning_impact_delta`。`hold/reduce/exit`、期限不匹配和亏损再验证结果都从该对象读取；已退出的 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象及其他内部诊断不得恢复为兼容来源。
+
+Researcher 单次运行中的学习 SQL、`researcher_learning_completed`、外置 payload artifact、template prior 和历史学习快照必须共同成功或共同回滚。失败不得留下完成事件或无数据库引用的新 artifact，也不得删除或覆盖运行前已经存在的合法 artifact。
+
 机会状态链只使用共享校验语义：`no_opportunity` 可以保留方向和研究证据，但不构成新增风险支持；`watch_for_trigger` 必须有 Trader 可用逻辑 T 日15分钟行情观察的具体条件、canonical 失效边界，并且 `trigger_valid/current_trigger_confirmed=false`；`probe_candidate/tradeable_candidate` 必须同时满足两项当前触发布尔值为 true。SCC 只汇总最终主方向的合法机会状态，主方向全部为 `no_opportunity` 时 `trigger_status=not_applicable`，反方向 watch 不得借给主方向。
 
 `missing_evidence` 与 `confirmation_requirements` 是证据强度和待确认诊断，不进入 `data_missing`，也不按数量形成 `critical_data_gap`。候选硬数据阻断只来自共享 `build_scc_data_quality_summary.status=hard_fail`。单来源完整已触发候选保留真实低共识分进入 Step5 队列，不补分、不提高一致性，也不自动获得预算、手数或交易权限。
@@ -82,7 +86,7 @@
 | `researcher_llm_notes` | Researcher，Phase4 与结算完成后 | 通过正式 ID 链验证的 AEC → SCC → FAC → Auditor → execution_result → transaction → settlement 事实包；参考组合为正式 `Prev(T)`，链上业务事实为逻辑 `T` | 经结构校验的 evidence pack 与 `validated_output`；禁止保存 prompt、原始 response、内部推理和未验证工具结果 | `researcher_llm_notes.evidence_pack_id`、`payload_json` 及 payload artifact 元数据；`raw_prompt/raw_response` 和对应 artifact 元数据固定为空 | Research writer；分析师正式校准检索；PM `decision_memory_retrieval` | data time boundary；structured IO；正式 ID lineage | 参考组合不等于正式 `Prev(T)`；持久化AEC/SCC/recommendation/结算日期不等于逻辑T；来源记录/日期/ID断链；保存原始模型内容；使用未结算或未完成Phase4日期；改当天事实；输出当日交易指令 | 合法零成交、无合格学习成果、研究观点弱、样本少 |
 | `alpha_setup_action_value` | Researcher 写入工具，Phase4 后 | 已结算 episode、复盘事实、未交易机会、执行事实 | canonical action-value：`action_name -> canonical_action_family -> action_value_lane/learning_lane -> action_preference` | `alpha_setup_action_value` DB；payload_json 同值保留 | PM next-day retrieval、Reviewer、Researcher | pre-backtest action matrix contract；daily PG 只检查实际生成记录的来源日期与前视边界 | 缺 canonical family/lane/preference；family/lane/preference 不一致；observe 冒充 positive candidate；future dated；非策略事件污染 strategy action-value | observe 空 preference 合法；样本少；reward 弱 |
 | `alpha_setup_profile` / product learning | Researcher 写入工具，Phase4 后 | episode 聚合、setup、trigger、证据组合、deployment outcome | 产品/setup/trigger 历史表现 | research DB | 分析师校准、PM product learning、Researcher | contract coverage；data time boundary | 直接写手数、交易授权、当日合约修改 | 产品表现差、setup 样本少 |
-| `adaptive_policy_state` / `provisional_policy_state` / `config_learning_overlay` | Researcher / 配置学习写入工具，Phase4 后 | 长窗口研究结果、验证通过的参数证据、回滚值 | 策略参数学习状态、候选参数、回滚信息 | research / config learning DB | 开发验收、PM 配置读取、PG | pre-backtest config consistency；data time boundary | 未验证参数直接生效；缺 rollback；改当天交易事实；绕过 PM 合约权限；未来数据参与参数 | 候选策略待验证、样本不足 |
+| `adaptive_policy_state` / `provisional_policy_state` / `config_learning_overlay` | Researcher / 配置学习写入工具，Phase4 后 | 长窗口研究结果、验证通过的参数证据、回滚值；PM 生命周期校准只读 FAC 中的 `pm_lifecycle_learning_impact_delta` | 策略参数学习状态、候选参数、回滚信息 | research / config learning DB | 开发验收、PM 配置读取、PG | pre-backtest config consistency；PM 生命周期正式契约行为测试；data time boundary | 未验证参数直接生效；从旧 PM 内部对象读取生命周期；缺 rollback；改当天交易事实；绕过 PM 合约权限；未来数据参与参数 | 候选策略待验证、样本不足 |
 | `trade_episode_memory` / `no_trade_opportunity_memory` | Reviewer / Researcher，Phase4 后 | 已结算完整交易对、未交易机会、未触发条件机会 | 可为空的未来学习事实底座 | research DB；artifact | 分析师正式校准检索、PM `decision_memory_retrieval`、Researcher | data time boundary；mechanism audit | 前视；未完成 Phase4/结算进入学习；无代表样本却写结论；要求每笔交易都形成学习 | 无合格样本、学习为空、机会少、错过交易 |
 | `trading_day_phase` | workflow，Phase1-Phase4 | 各阶段运行结果 | 阶段状态与时间戳 | `trading_day_phase` DB | PG、backtest gate、Reviewer | daily PG phase audit | 存在业务记录但 phase 未 completed；阶段顺序断裂；失败残留跨日污染 | 当天无交易但 phase 完整 |
 | `contract_coverage_audit` | PG，回测前 | 可导入生产代码、正式 schema、机制文档和真实路径测试 | 六维版本级契约覆盖矩阵：producer、physical_landing、consumer、role_check、real_path_test、mechanism_doc | pre-backtest report | 开发者、回测闸门 | pre-backtest acceptance | 任一六维 runtime/document evidence 缺失；依赖字符串命中、废弃函数或禁用代码冒充 coverage；核心契约缺字段表登记 | coverage 完整但真实样本少 |

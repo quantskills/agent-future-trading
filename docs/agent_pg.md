@@ -153,6 +153,8 @@ AnalystSignal/action_evidence_contract
 - Step2 唯一代表方向与 Step5 全市场资金 rank 分离；单来源完整已触发候选以真实低分进入既有队列，未获预算或零手仍是合法结果。
 - `missing_evidence/confirmation_requirements` 不冒充硬数据故障；仅共享 SCC 数据质量摘要 `status=hard_fail` 形成硬阻断，基本面或新闻无当日新增合法。
 - add/scale 扣除当前品种已有保证金后的组合投影，以及 `risk_reduction_candidate` 不进入新增风险证据和 rank。
+- PM 持仓生命周期的普通 hold/reduce/exit、期限不匹配和亏损再验证结果，通过 canonical FAC 的 `learning_used.pm_lifecycle_learning_impact_delta` 进入真实 Researcher 校准消费函数；不得读取旧 PM 内部对象或维护第二套生命周期解释。
+- Researcher 注入失败时，临时库 SQL、完成事件、外置 artifact、template prior 和历史学习快照共同回滚，且运行前已有合法 artifact 保持原样；该行为验收不调用 LLM、不评价 PM 生命周期决策质量。
 - 反转先退出旧仓。
 - strategy、rollover、forced_risk 分账。
 - 成交、未触发、无成交。

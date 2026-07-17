@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from database.artifact_store import write_artifact_text
 from graph.schema import RecommendationSourceType
 from tools.common.neutral_accountability import build_neutral_accountability_summary
 from tools.agent_tools.research import research_review_helpers as _review_helpers
@@ -461,7 +462,6 @@ def _write_historical_learning_snapshot_report(
     configured_log_dir = os.getenv("AGENTQUANT_LOG_DIR")
     default_report_root = Path(configured_log_dir) / "reviewer" if configured_log_dir else SRC_ROOT / "logs" / "reviewer"
     report_dir = (output_root or default_report_root) / str(run_key)
-    report_dir.mkdir(parents=True, exist_ok=True)
     md_path = report_dir / f"{trading_date}.md"
     json_path = report_dir / f"{trading_date}.json"
 
@@ -627,7 +627,10 @@ def _write_historical_learning_snapshot_report(
         "learning_events": events,
         "written_at": _review_helpers._utc_now(),
     }
-    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_artifact_text(
+        json_path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+    )
 
     lines = [
         f"# Phase4 Historical Learning Snapshot - {trading_date}",
@@ -783,5 +786,5 @@ def _write_historical_learning_snapshot_report(
         ]
         or ["- none"]
     )
-    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_artifact_text(md_path, "\n".join(lines) + "\n")
     return {"markdown": str(md_path), "json": str(json_path)}

@@ -55,6 +55,10 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 
 研究员可以按配置调用 LLM，但只能在Phase4 completed且结算事实形成后运行。运行前必须以真实 `signal_record_id`、recommendation ID、transaction recommendation ID、交易日期和config ID验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement；零成交是合法链路。研究员只保存验证后的结构化 evidence pack 和研究结果，不保存prompt、原始response、内部推理、隐藏上下文或未验证工具结果。研究信息包括分析师校准类研究、交易决策类 action-value、alpha setup profile、adaptive policy state、执行学习、排序偏好和研究反馈；这些信息供其他智能体按各自权限通过正式检索接口使用。研究员不能下交易指令，不能改账，不能绕过投资组合经理、审计员或交易员。
 
+PM 持仓生命周期进入 Researcher 校准的唯一正式接口是 `final_action_contract.learning_used.pm_lifecycle_learning_impact_delta`。Researcher 可读取其中已登记的 `trace_version`、`hold_decision`、`reduce_exit_decision`、`current_lots`、`target_lots`、`lots_delta` 等字段，但不得恢复 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象或用 `lifecycle_classification` 代替正式决策字段。
+
+Researcher 的数据库写入、`researcher_learning_completed`、外置 payload artifact、template prior 和历史学习快照按一次运行原子提交。任何写入或提交失败都必须回滚数据库、删除本次新 artifact、恢复运行前已有 artifact，且不得留下完成事件；该原子性不改变学习算法和学习结果允许为空的边界。
+
 未完成交易日必须硬拦。若某天推荐、成交、盘中决策或学习记录已存在，但 phase1-4 没有全部 completed，系统应报 `incomplete_trading_day_phase`；该日不能进入收益判断，也不能被研究员当成学习样本。
 
 学习成果允许为空。不是每笔交易都具备形成学习成果的代表性，也不是每次分析或PM决策都必须命中学习记录；空检索是合法冷启动，不能触发默认学习、伪样本或替代策略。

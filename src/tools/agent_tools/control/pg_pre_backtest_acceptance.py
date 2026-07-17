@@ -54,6 +54,7 @@ _TEST_GROUPS = {
         "src.tests.test_pm_state_transition_matrix",
         "src.tests.test_accountant_settlement_formulas",
         "src.tests.test_trade_path_incremental_repairs",
+        "src.tests.test_researcher_lifecycle_contract",
     ),
     "orchestration_state_and_physical_boundary": (
         "src.tests.test_pre_backtest_pm_workflow_contracts",

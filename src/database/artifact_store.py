@@ -4,9 +4,12 @@ import hashlib
 import json
 import os
 import re
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 
 MARKER = "__agentquant_external_artifact__"
@@ -22,6 +25,93 @@ class ExternalizedValue:
     sha256: Optional[str]
     size_bytes: Optional[int]
     summary_json: Optional[str]
+
+
+@dataclass(frozen=True)
+class _OriginalArtifactState:
+    existed: bool
+    data: Optional[bytes]
+
+
+class _ArtifactWriteTransaction:
+    def __init__(self) -> None:
+        self._originals: dict[Path, _OriginalArtifactState] = {}
+        self._created_directories: set[Path] = set()
+
+    def write_bytes(self, path: Path, data: bytes) -> None:
+        resolved = path.resolve()
+        if resolved not in self._originals:
+            self._originals[resolved] = _OriginalArtifactState(
+                existed=resolved.exists(),
+                data=resolved.read_bytes() if resolved.exists() else None,
+            )
+        self._remember_missing_directories(resolved.parent)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        _replace_file_bytes(resolved, data)
+
+    def rollback(self) -> None:
+        for path, original in reversed(tuple(self._originals.items())):
+            if original.existed:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _replace_file_bytes(path, original.data or b"")
+            elif path.exists():
+                path.unlink()
+        for directory in sorted(self._created_directories, key=lambda item: len(item.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except (FileNotFoundError, OSError):
+                pass
+
+    def _remember_missing_directories(self, directory: Path) -> None:
+        current = directory
+        while not current.exists() and current.parent != current:
+            self._created_directories.add(current)
+            current = current.parent
+
+
+_ACTIVE_ARTIFACT_WRITE_TRANSACTION: ContextVar[Optional[_ArtifactWriteTransaction]] = ContextVar(
+    "agentquant_artifact_write_transaction",
+    default=None,
+)
+
+
+def _replace_file_bytes(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def write_artifact_bytes(path: str | Path, data: bytes) -> None:
+    target = Path(path)
+    transaction = _ACTIVE_ARTIFACT_WRITE_TRANSACTION.get()
+    if transaction is not None:
+        transaction.write_bytes(target, data)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _replace_file_bytes(target, data)
+
+
+def write_artifact_text(path: str | Path, value: str, *, encoding: str = "utf-8") -> None:
+    write_artifact_bytes(path, str(value).encode(encoding))
+
+
+@contextmanager
+def artifact_write_transaction() -> Iterator[None]:
+    if _ACTIVE_ARTIFACT_WRITE_TRANSACTION.get() is not None:
+        raise RuntimeError("nested_artifact_write_transaction_not_supported")
+    transaction = _ArtifactWriteTransaction()
+    token = _ACTIVE_ARTIFACT_WRITE_TRANSACTION.set(transaction)
+    try:
+        yield
+    except BaseException:
+        transaction.rollback()
+        raise
+    finally:
+        _ACTIVE_ARTIFACT_WRITE_TRANSACTION.reset(token)
 
 
 def _artifact_root() -> Path:
@@ -167,8 +257,7 @@ def externalize_json_for_db(
         trading_date=trading_date,
         extension=".json",
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    write_artifact_bytes(path, data)
     sha256 = _digest_bytes(data)
     rel_path = _project_relative(path)
     summary = summarize_payload(value)
@@ -208,8 +297,7 @@ def externalize_text_for_db(
         trading_date=trading_date,
         extension=".txt",
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    write_artifact_bytes(path, data)
     sha256 = _digest_bytes(data)
     rel_path = _project_relative(path)
     summary = summarize_payload(text)

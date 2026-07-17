@@ -48,3 +48,4 @@ uv.lock
 # local files
 logs/
 assets/
+.claude/settings.local.json
