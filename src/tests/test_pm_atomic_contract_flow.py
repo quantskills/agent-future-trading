@@ -10,22 +10,29 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.decision_team.portfolio_manager import (
+    RiskLevel,
+    _build_pm_decision_context,
     finalize_pm_full_market_contracts,
     portfolio_agent_futures,
 )
-from graph.schema import Portfolio, Position, RecommendationSourceType, RecommendationStatus
+from graph.schema import AnalystSignal, Portfolio, Position, RecommendationSourceType, RecommendationStatus
 from graph.workflow import AgentWorkflow
 from tests.contract_test_fixtures import build_test_aec
+from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
 from tools.common.final_action_semantics import full_market_rank_source_payload
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_signal_collection_contract,
+)
 
 
-def _signal_collection_contract(ticker: str) -> dict:
+def _signal_collection_contract(ticker: str, side: str = "long") -> dict:
+    signal_value = "Bullish" if side == "long" else "Bearish"
     action_contract = build_test_aec(
         "technical",
         ticker=ticker,
-        signal="Bullish",
-        side="long",
+        signal=signal_value,
+        side=side,
         confidence=0.8,
         invalidation_condition="close_below_trigger",
         extra={"invalidation_level": 2950.0, "atr_stop_distance": 40.0},
@@ -46,13 +53,14 @@ def _signal_collection_contract(ticker: str) -> dict:
 
 
 def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecard: bool) -> dict:
-    collection = _signal_collection_contract(ticker)
+    side = "long" if target_lots > 0 else "short" if target_lots < 0 else "long"
+    collection = _signal_collection_contract(ticker, side=side)
     scorecard = {}
     if with_scorecard:
         scorecard = {
-            "preferred_side": "long",
-            "long": {
-                "side": "long",
+            "preferred_side": side,
+            side: {
+                "side": side,
                 "final_state": "watch_for_trigger",
                 "opportunity_score": 0.8,
                 "score": 0.8,
@@ -90,6 +98,44 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
             },
         }
     ratio = 0.008 if target_lots else 0.0
+    increases_risk = bool(
+        target_lots != 0
+        and (
+            current_lots == 0
+            or (
+                (current_lots > 0) == (target_lots > 0)
+                and abs(target_lots) > abs(current_lots)
+            )
+        )
+    )
+    authority = {
+        "authority_type": "exploration_probe" if target_lots != current_lots else "not_applicable",
+        "authority_decision": "fixture_state",
+        "decision": "fixture_state",
+        "requires_authority": target_lots != current_lots,
+        "open_action_evidence": target_lots != current_lots,
+        "conditional_trigger_authority": increases_risk,
+        "requires_intraday_confirmation": increases_risk,
+        "can_execute_without_intraday_trigger": False,
+        "max_allowed_margin_ratio": abs(ratio),
+        "reason_codes": ["fixture_state"],
+    }
+    execution_fields = _build_pm_decision_context(
+        ticker=ticker,
+        target_lots=target_lots,
+        current_price=3000.0,
+        position_ratio=ratio,
+        risk_level=RiskLevel.SAFE,
+        long_scores={"confidence": 0.8 if side == "long" else 0.0},
+        short_scores={"confidence": 0.8 if side == "short" else 0.0},
+        margin_rate=0.10,
+        current_lots=current_lots,
+        analyst_signals=build_pm_evidence_signals_from_scc(collection),
+        final_entry_authority=authority,
+        trading_date="2025-03-25",
+        recommendation_intent={},
+        control_reasons=["fixture_state"],
+    )
     return {
         "ticker": ticker,
         "current_lots": current_lots,
@@ -104,15 +150,7 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
         "lots_to_trade": abs(target_lots - current_lots),
         "lots_to_trade_reason": "fixture_state",
         "recommendation_intent": {},
-        "final_entry_authority": {
-            "authority_type": "exploration_probe" if target_lots != current_lots else "not_applicable",
-            "authority_decision": "fixture_state",
-            "decision": "fixture_state",
-            "requires_authority": target_lots != current_lots,
-            "open_action_evidence": target_lots != current_lots,
-            "max_allowed_margin_ratio": abs(ratio),
-            "reason_codes": ["fixture_state"],
-        },
+        "final_entry_authority": authority,
         "control_reasons": ["fixture_state"],
         "reason_codes": ["fixture_state"],
         "control_diagnostics": {},
@@ -120,7 +158,7 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
         "market_confirmation": {},
         "alpha_setup_action_values": [],
         "signal_collection_contract": collection,
-        "execution_contract_fields": {"signal_collection_contract": collection},
+        "execution_contract_fields": execution_fields,
         "recommendation_context": {
             "config_id": "cfg",
             "reference_portfolio_id": "p1",
@@ -137,6 +175,132 @@ def _pm_state(ticker: str, current_lots: int, target_lots: int, *, with_scorecar
 
 
 class PMAtomicContractFlowTests(unittest.TestCase):
+    def test_pm_self_check_rejects_incomplete_or_misaligned_execution_facts(self):
+        state = _pm_state("BU", 0, 1, with_scorecard=True)
+        result = finalize_pm_full_market_contracts(
+            generated=[("BU", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        mutations = (
+            ({"execution_profile": "unknown"}, "execution_profile_not_canonical"),
+            ({"trigger_source": ""}, "trigger_source_missing"),
+            ({"trigger_source": "position_lifecycle"}, "execution_profile_trigger_source_mismatch"),
+            ({"entry_trigger": ""}, "new_risk_execution_missing_entry_trigger"),
+            (
+                {
+                    "invalidation": "",
+                    "invalidation_level": None,
+                    "atr_stop_distance": None,
+                },
+                "new_risk_execution_missing_invalidation",
+            ),
+        )
+        for mutation, expected_error in mutations:
+            with self.subTest(mutation=mutation):
+                invalid = {**contract, **mutation}
+                self.assertIn(expected_error, check_final_action_contract(invalid)["errors"])
+
+    def test_fundamental_watch_survives_step5_and_step6_as_one_conditional_contract(self):
+        analyst_signals = []
+        for analyst in ("technical", "fundamental", "commodity_news"):
+            directional = analyst == "fundamental"
+            aec = build_test_aec(
+                analyst,
+                ticker="M",
+                signal="Bullish" if directional else "Neutral",
+                side="long" if directional else "flat",
+                confidence=0.84 if directional else 0.40,
+                opportunity_state="watch_for_trigger" if directional else "no_opportunity",
+                setup_type="trend_breakout" if directional else "no_trade",
+                trigger_valid=False,
+                current_trigger_confirmed=False,
+                invalidation_present=directional,
+                entry_trigger="15m close above 3500" if directional else "",
+                invalidation_condition="15m close below 3420" if directional else None,
+                extra={
+                    "invalidation_level": 3420.0 if directional else None,
+                    "atr_stop_distance": 36.0 if directional else None,
+                },
+            )
+            analyst_signals.append(
+                AnalystSignal(
+                    agent_name=analyst,
+                    metadata={
+                        "action_evidence_contract": aec,
+                        "signal_record_id": f"signal-M-{analyst}",
+                    },
+                )
+            )
+        scc = build_signal_collection_contract(
+            ticker="M",
+            trading_date="2025-03-26",
+            analyst_signals=analyst_signals,
+            enabled_analysts=("technical", "fundamental", "commodity_news"),
+        )
+        state = _pm_state("M", 0, 1, with_scorecard=True)
+        authority = {
+            **state["final_entry_authority"],
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+        }
+        execution_fields = _build_pm_decision_context(
+            ticker="M",
+            target_lots=1,
+            current_price=3480.0,
+            position_ratio=0.008,
+            risk_level=RiskLevel.SAFE,
+            long_scores={"confidence": 0.84},
+            short_scores={"confidence": 0.0},
+            margin_rate=0.10,
+            current_lots=0,
+            analyst_signals=build_pm_evidence_signals_from_scc(scc),
+            final_entry_authority=authority,
+            trading_date="2025-03-26",
+            recommendation_intent={"action": "open_long"},
+            control_reasons=["conditional_trigger_authority"],
+        )
+        state.update(
+            {
+                "signal_collection_contract": scc,
+                "execution_contract_fields": execution_fields,
+                "final_entry_authority": authority,
+                "control_reasons": ["conditional_trigger_authority"],
+            }
+        )
+
+        result = finalize_pm_full_market_contracts(
+            generated=[("M", state)],
+            config={"max_total_margin_ratio": 0.2},
+            portfolio=Portfolio(
+                id="p1",
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+            ),
+        )
+
+        contract = result[0][1].signal_snapshot["final_action_contract"]
+        self.assertEqual(contract["target_lots"], 1)
+        self.assertTrue(contract["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertTrue(contract["conditional_trigger_authority"])
+        self.assertTrue(contract["requires_intraday_confirmation"])
+        self.assertFalse(contract["can_execute_without_intraday_trigger"])
+        self.assertEqual(contract["entry_trigger"], "15m close above 3500")
+        self.assertEqual(contract["invalidation"], "15m close below 3420")
+        self.assertEqual(contract["execution_profile"], "breakout")
+        self.assertEqual(contract["trigger_source"], "fundamental_entry_trigger")
+        self.assertEqual(contract["invalidation_level"], 3420.0)
+        self.assertEqual(contract["atr_stop_distance"], 36.0)
+        self.assertTrue(check_final_action_contract(contract)["ok"])
+
     def test_step6_contract_has_final_execution_scope_without_internal_duplicates(self):
         state = _pm_state("BU", 0, 1, with_scorecard=True)
         result = finalize_pm_full_market_contracts(

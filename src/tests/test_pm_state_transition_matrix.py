@@ -67,7 +67,8 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             "target_lots": 1,
             "lots_delta": 0,
             "reason_codes": ["test_contract"],
-            "execution_profile": "position_management",
+            "execution_profile": "hold",
+            "trigger_source": "none",
             "entry_trigger": "",
             "invalidation": "",
             "learning_used": {},
@@ -150,6 +151,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             current_lots=0,
             target_lots=1,
             lots_delta=1,
+            execution_profile="breakout",
+            trigger_source="technical_breakout",
+            entry_trigger="15m close above the validated range",
+            invalidation="15m close below the invalidation boundary",
             learning_used={
                 "pm_lifecycle_learning_trace": pm_trace,
                 "pm_lifecycle_learning_impact_delta": {"net_lifecycle_learning_delta": 0.04},
@@ -273,7 +278,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             },
             market_confirmation={"confirmation_score": 0.7},
             alpha_setup_action_values=[],
-            execution_contract_fields={"execution_profile": "breakout"},
+            execution_contract_fields={
+                "execution_profile": "hold",
+                "trigger_source": "none",
+            },
         )
         contract["entry_trigger"] = ""
         contract["invalidation"] = ""

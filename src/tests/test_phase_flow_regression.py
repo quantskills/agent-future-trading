@@ -74,7 +74,10 @@ from agents.decision_team.portfolio_manager import (
     portfolio_agent_futures,
 )
 from agents.decision_team.signal_collector import signal_collector_agent
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_signal_collection_contract,
+)
 from tests.contract_test_fixtures import build_test_aec
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
@@ -165,20 +168,30 @@ class _FakeRouter:
         return quotes
 
 
-def _signal_collection_contract_fixture(ticker: str = "BU") -> dict:
+def _signal_collection_contract_fixture(
+    ticker: str = "BU",
+    *,
+    side: str = "long",
+    opportunity_state: str = "watch_for_trigger",
+    trigger_valid: bool = False,
+    current_trigger_confirmed: bool = False,
+    entry_trigger: str = "breakout",
+    invalidation_condition: str = "close_below_trigger",
+) -> dict:
+    signal_value = "Bullish" if side == "long" else "Bearish"
     action_contract = build_test_aec(
         "technical",
         ticker=ticker,
         trading_date="2025-03-25",
-        signal="Bullish",
-        side="long",
+        signal=signal_value,
+        side=side,
         confidence=0.8,
-        opportunity_state="watch_for_trigger",
-        trigger_valid=False,
-        current_trigger_confirmed=False,
+        opportunity_state=opportunity_state,
+        trigger_valid=trigger_valid,
+        current_trigger_confirmed=current_trigger_confirmed,
         invalidation_present=True,
-        entry_trigger="breakout",
-        invalidation_condition="close_below_trigger",
+        entry_trigger=entry_trigger,
+        invalidation_condition=invalidation_condition,
     )
     signal = SimpleNamespace(
         agent_name="technical",
@@ -235,13 +248,82 @@ def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | Non
     account_equity = 1_000_000.0
     execution_fields = dict(execution_fields or {})
     execution_fields.pop("final_action_contract", None)
-    execution_fields.setdefault(
-        "signal_collection_contract",
-        _signal_collection_contract_fixture(ticker or contract.get("ticker") or "BU"),
+    ticker_value = ticker or contract.get("ticker") or "BU"
+    target_side = "long" if target_lots > 0 else "short" if target_lots < 0 else "long"
+    increases_risk = bool(
+        target_lots != 0
+        and (
+            current_lots == 0
+            or (
+                (current_lots > 0) == (target_lots > 0)
+                and abs(target_lots) > abs(current_lots)
+            )
+        )
     )
+    conditional = bool(
+        contract.get("conditional_trigger_authority")
+        or contract.get("requires_intraday_confirmation")
+    )
+    if "signal_collection_contract" not in execution_fields:
+        execution_fields["signal_collection_contract"] = _signal_collection_contract_fixture(
+            ticker_value,
+            side=target_side,
+            opportunity_state=(
+                "watch_for_trigger"
+                if not increases_risk or conditional
+                else "tradeable_candidate"
+            ),
+            trigger_valid=bool(increases_risk and not conditional),
+            current_trigger_confirmed=bool(increases_risk and not conditional),
+            entry_trigger=str(contract.get("entry_trigger") or "breakout"),
+            invalidation_condition=str(
+                contract.get("invalidation")
+                or contract.get("invalidation_condition")
+                or "close_below_trigger"
+            ),
+        )
     execution_fields.setdefault("pm_six_step_stage", "steps_1_4_candidate_generated")
     primary_lifecycle_action_port = classify_lifecycle_action_port(contract)
     collection = execution_fields["signal_collection_contract"]
+    final_entry_authority = {
+        "authority_type": authority_type or "not_applicable",
+        "decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
+        "authority_decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
+        "reason_codes": list(contract.get("reason_codes") or []),
+        "requires_authority": bool(target_lots != current_lots and target_lots != 0),
+        "open_action_evidence": bool(contract.get("open_action_evidence")),
+        "strong_current_evidence": bool(contract.get("strong_current_evidence")),
+        "tradeable_state": bool(contract.get("tradeable_state") or authority_type == "real_budget_entry"),
+        "conditional_trigger_authority": conditional,
+        "requires_intraday_confirmation": conditional,
+        "can_execute_without_intraday_trigger": False if conditional else None,
+        "max_allowed_margin_ratio": float(
+            contract.get("max_allowed_margin_ratio")
+            if contract.get("max_allowed_margin_ratio") is not None
+            else abs(position_ratio)
+        ),
+    }
+    if not all(
+        execution_fields.get(field) not in (None, "")
+        for field in ("execution_profile", "trigger_source")
+    ):
+        generated_execution_fields = _build_pm_decision_context(
+            ticker=ticker_value,
+            target_lots=target_lots,
+            current_price=100.0,
+            position_ratio=position_ratio,
+            risk_level=RiskLevel.SAFE,
+            long_scores={"confidence": 0.8 if target_side == "long" else 0.0},
+            short_scores={"confidence": 0.8 if target_side == "short" else 0.0},
+            margin_rate=0.10,
+            current_lots=current_lots,
+            analyst_signals=build_pm_evidence_signals_from_scc(collection),
+            final_entry_authority=final_entry_authority,
+            trading_date="2025-03-25",
+            recommendation_intent=recommendation_intent_from_lots(current_lots, target_lots),
+            control_reasons=list(contract.get("reason_codes") or []),
+        )
+        execution_fields.update(generated_execution_fields)
     return {
         **contract,
         "ticker": ticker or contract.get("ticker") or "",
@@ -253,21 +335,7 @@ def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | Non
         "lots_to_trade": abs(target_lots - current_lots),
         "lots_to_trade_reason": ",".join(str(item) for item in (contract.get("reason_codes") or []) if item) or "test_pm_state",
         "recommendation_intent": recommendation_intent_from_lots(current_lots, target_lots),
-        "final_entry_authority": {
-            "authority_type": authority_type or "not_applicable",
-            "decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
-            "authority_decision": contract.get("authority_decision") or contract.get("decision") or "test_state",
-            "reason_codes": list(contract.get("reason_codes") or []),
-            "requires_authority": bool(target_lots != current_lots and target_lots != 0),
-            "open_action_evidence": bool(contract.get("open_action_evidence")),
-            "strong_current_evidence": bool(contract.get("strong_current_evidence")),
-            "tradeable_state": bool(contract.get("tradeable_state") or authority_type == "real_budget_entry"),
-            "max_allowed_margin_ratio": float(
-                contract.get("max_allowed_margin_ratio")
-                if contract.get("max_allowed_margin_ratio") is not None
-                else abs(position_ratio)
-            ),
-        },
+        "final_entry_authority": final_entry_authority,
         "control_reasons": list(contract.get("reason_codes") or []),
         "control_diagnostics": {"primary_lifecycle_action_port": primary_lifecycle_action_port},
         "opportunity_scorecard": dict(scorecard or {}),
@@ -11795,18 +11863,18 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
 
 class IntradayExecutionRegressionTest(unittest.TestCase):
     def test_pm_execution_contract_classifies_technical_pullback(self):
-        action_contract = {
-            "contract_version": "agentquant.action_evidence.v1",
-            "analyst": "technical",
-            "learning_scope": {
-                "setup_family": "trend_pullback",
-                "sector_setup_alignment": "preferred",
-            },
-            "execution": {
-                "trigger_source": "technical",
-                "execution_focus": "wait_for_pullback_confirmation",
-            },
-        }
+        action_contract = build_test_aec(
+            "technical",
+            signal="Bullish",
+            side="long",
+            opportunity_state="watch_for_trigger",
+            setup_type="trend_pullback",
+            trigger_valid=False,
+            current_trigger_confirmed=False,
+            invalidation_present=True,
+            entry_trigger="Pullback to VWAP support then stabilize",
+            invalidation_condition="15m close below 96",
+        )
         plan = _build_pm_decision_context(
             target_lots=2,
             current_price=100.0,
@@ -11832,6 +11900,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "authority_type": "exploration_probe",
                 "open_action_evidence": False,
                 "strong_current_evidence": False,
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
                 "max_allowed_margin_ratio": 0.015,
             },
             trading_date="2025-01-06",
@@ -11861,21 +11931,26 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertNotIn("analyst_learning_scopes", learning)
 
     def test_pm_does_not_treat_fundamental_pending_trigger_as_current_trigger(self):
+        action_contract = build_test_aec(
+            "fundamental",
+            signal="Bullish",
+            side="long",
+            opportunity_state="watch_for_trigger",
+            setup_type="trend_breakout",
+            trigger_valid=False,
+            current_trigger_confirmed=False,
+            invalidation_present=True,
+            entry_trigger="15m close above the factor confirmation level",
+            invalidation_condition="15m close below the factor invalidation level",
+        )
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.80,
-            entry_trigger="long entry only after short-term price confirmation aligns with factors",
+            opportunity_state="watch_for_trigger",
+            entry_trigger="15m close above the factor confirmation level",
             invalidation_level=96.0,
-            metadata={
-                "action_evidence_contract": {
-                    "open": {
-                        "role": "context_or_short_trigger",
-                        "can_create_trade_authority_alone": False,
-                        "requires_technical_or_market_confirmation": True,
-                    }
-                }
-            },
+            metadata={"action_evidence_contract": action_contract},
         )
         plan = _build_pm_decision_context(
             target_lots=2,
@@ -11891,6 +11966,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "authority_type": "exploration_probe",
                 "open_action_evidence": False,
                 "strong_current_evidence": False,
+                "conditional_trigger_authority": True,
+                "requires_intraday_confirmation": True,
                 "max_allowed_margin_ratio": 0.015,
             },
             trading_date="2025-01-06",
@@ -11902,6 +11979,19 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertTrue(plan["requires_intraday_confirmation"])
 
     def test_pm_execution_contract_classifies_authorized_event_immediate(self):
+        action_contract = build_test_aec(
+            "commodity_news",
+            signal="Bullish",
+            side="long",
+            opportunity_state="tradeable_candidate",
+            setup_type="event_catalyst",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            invalidation_present=True,
+            entry_trigger="15m price confirms the fresh supply disruption event",
+            invalidation_condition="catalyst expires or 15m price fails to hold",
+            extra={"event_type": "supply_disruption"},
+        )
         plan = _build_pm_decision_context(
             target_lots=3,
             current_price=100.0,
@@ -11917,20 +12007,12 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.80,
                     opportunity_state="tradeable_candidate",
-                    entry_trigger="news_event_trigger",
+                    entry_trigger="15m price confirms the fresh supply disruption event",
                     event_type="supply_disruption",
                     trigger_valid=True,
                     invalidation_present=True,
                     exit_hint="Catalyst expires or price fails to hold",
-                    metadata={
-                        "action_evidence_contract": {
-                            "opportunity_state": "tradeable_candidate",
-                            "trigger_valid": True,
-                            "current_trigger_confirmed": True,
-                            "invalidation_present": True,
-                            "entry_trigger": "Fresh supply disruption catalyst",
-                        }
-                    },
+                    metadata={"action_evidence_contract": action_contract},
                 ),
             ],
             final_entry_authority={
@@ -11950,6 +12032,18 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
 
     def test_execution_action_value_changes_authorized_entry_to_pullback_confirmation(self):
+        action_contract = build_test_aec(
+            "technical",
+            signal="Bearish",
+            side="short",
+            opportunity_state="tradeable_candidate",
+            setup_type="trend_breakout",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            invalidation_present=True,
+            entry_trigger="Opening range breakdown",
+            invalidation_condition="15m close above 104",
+        )
         plan = _build_pm_decision_context(
             ticker="BU",
             target_lots=-3,
@@ -11965,10 +12059,12 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                     agent_name="technical",
                     signal=Signal.BEARISH,
                     confidence=0.72,
+                    opportunity_state="tradeable_candidate",
                     entry_trigger="Opening range breakdown",
                     invalidation_level=104.0,
                     trigger_valid=True,
                     invalidation_present=True,
+                    metadata={"action_evidence_contract": action_contract},
                 ),
             ],
             final_entry_authority={

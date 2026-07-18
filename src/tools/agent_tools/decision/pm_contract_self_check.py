@@ -17,6 +17,7 @@ from tools.common.final_action_semantics import (
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
 )
+from tools.common.signal_evidence_collection import has_concrete_entry_trigger
 
 
 FINAL_ACTION_CONTRACT_REQUIRED_FIELDS = (
@@ -44,6 +45,37 @@ STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
     "no_rank_no_new_exposure",
     "no_rank_or_budget_no_new_exposure",
 )
+CANONICAL_EXECUTION_PROFILES = {
+    "breakout",
+    "pullback",
+    "vwap_confirmed",
+    "event_immediate",
+    "exit_immediate",
+    "hold",
+}
+CANONICAL_TRIGGER_SOURCES_BY_PROFILE = {
+    "breakout": {
+        "technical_breakout",
+        "fundamental_entry_trigger",
+        "commodity_news_event",
+        "execution_action_value_breakout",
+    },
+    "pullback": {
+        "technical_pullback",
+        "fundamental_entry_trigger",
+        "commodity_news_event",
+        "execution_action_value_pullback",
+    },
+    "vwap_confirmed": {
+        "technical_pullback",
+        "fundamental_entry_trigger",
+        "commodity_news_event",
+        "execution_action_value_vwap_confirmed",
+    },
+    "event_immediate": {"commodity_news_event"},
+    "exit_immediate": {"position_lifecycle"},
+    "hold": {"none"},
+}
 
 
 def _as_int(value: Any) -> int:
@@ -268,6 +300,49 @@ def _pm_lifecycle_trace_errors(contract: Mapping[str, Any]) -> List[str]:
     return errors
 
 
+def _execution_contract_errors(contract: Mapping[str, Any]) -> List[str]:
+    errors: List[str] = []
+    profile = str(contract.get("execution_profile") or "").strip().lower()
+    trigger_source = str(contract.get("trigger_source") or "").strip()
+    if profile not in CANONICAL_EXECUTION_PROFILES:
+        errors.append("execution_profile_not_canonical")
+    if not trigger_source:
+        errors.append("trigger_source_missing")
+    elif profile in CANONICAL_TRIGGER_SOURCES_BY_PROFILE and trigger_source not in (
+        CANONICAL_TRIGGER_SOURCES_BY_PROFILE[profile]
+    ):
+        errors.append("execution_profile_trigger_source_mismatch")
+
+    final_action = str(contract.get("final_action") or "").strip().lower()
+    if final_action not in {"open_probe", "open_real", "scale"}:
+        return errors
+    if not has_concrete_entry_trigger(contract.get("entry_trigger")):
+        errors.append("new_risk_execution_missing_entry_trigger")
+    invalidation = str(contract.get("invalidation") or "").strip().lower()
+    invalidation_condition_present = invalidation not in {"", "unknown", "none", "n/a", "null"}
+    invalidation_level = contract.get("invalidation_level")
+    try:
+        invalidation_level_present = (
+            not isinstance(invalidation_level, bool)
+            and invalidation_level not in (None, "")
+            and float(invalidation_level) > 0
+        )
+    except (TypeError, ValueError):
+        invalidation_level_present = False
+    atr_stop_distance = contract.get("atr_stop_distance")
+    try:
+        atr_stop_present = (
+            not isinstance(atr_stop_distance, bool)
+            and atr_stop_distance not in (None, "")
+            and float(atr_stop_distance) > 0
+        )
+    except (TypeError, ValueError):
+        atr_stop_present = False
+    if not (invalidation_condition_present or invalidation_level_present or atr_stop_present):
+        errors.append("new_risk_execution_missing_invalidation")
+    return errors
+
+
 def check_final_action_contract(
     contract: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
@@ -283,6 +358,7 @@ def check_final_action_contract(
     errors.extend(_base_field_errors(contract))
     errors.extend(_semantic_object_errors(contract))
     errors.extend(_alpha_setup_action_value_purity_errors(contract))
+    errors.extend(_execution_contract_errors(contract))
     if lots_delta != target - current:
         errors.append("lots_delta_mismatch")
     expected = _expected_action(current, target, authority_type=authority_type)

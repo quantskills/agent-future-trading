@@ -89,6 +89,7 @@ from tools.common.alpha_setup import compact_profile_for_trace
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_scc_data_quality_summary,
+    has_concrete_entry_trigger,
     validate_signal_collection_contract,
 )
 
@@ -973,8 +974,23 @@ def _final_contract_scope_from_scc(
     current_lots: int,
     target_lots: int,
     final_action: str,
+    execution_contract_fields: dict | None = None,
 ) -> dict:
     """Select final execution-scope facts from direction-aligned formal AECs."""
+    execution_fields = (
+        execution_contract_fields
+        if isinstance(execution_contract_fields, dict)
+        else {}
+    )
+    if final_action in {"open_probe", "open_real", "scale"}:
+        return {
+            "setup_type": execution_fields.get("setup_type"),
+            "horizon_class": execution_fields.get("horizon_class"),
+            "expected_horizon_days": execution_fields.get("expected_horizon_days"),
+            "market_regime": execution_fields.get("market_regime"),
+            "invalidation_level": execution_fields.get("invalidation_level"),
+            "atr_stop_distance": execution_fields.get("atr_stop_distance"),
+        }
     side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
     if not side and final_action in {"reduce", "exit"}:
         side = "long" if current_lots > 0 else "short" if current_lots < 0 else ""
@@ -1437,11 +1453,26 @@ def _sign_pm_memory_state(pm_state: dict) -> FuturesRecommendation:
         target_lots=target_lots,
         final_entry_authority=final_entry_authority,
     )
+    if final_action in {"wait", "hold", "reduce", "exit"}:
+        execution_fields.update(
+            _build_execution_contract_fields(
+                ticker=str(pm_state.get("ticker") or ""),
+                current_lots=current_lots,
+                target_lots=target_lots,
+                analyst_signals=[],
+                final_entry_authority=final_entry_authority,
+                trading_date=recommendation_context.get("trading_date"),
+                recommendation_intent=intent,
+                control_reasons=control_reasons,
+                alpha_setup_action_values=list(pm_state.get("alpha_setup_action_values") or []),
+            )
+        )
     final_contract_scope = _final_contract_scope_from_scc(
         signal_collection_contract=signal_collection_contract,
         current_lots=current_lots,
         target_lots=target_lots,
         final_action=final_action,
+        execution_contract_fields=execution_fields,
     )
     contract_inputs = {
         "ticker": str(pm_state.get("ticker") or ""),
@@ -3677,13 +3708,30 @@ _EXECUTION_PULLBACK_TOKENS = {
     "retest",
     "support",
     "resistance",
-    "vwap",
     "hold above",
     "hold below",
     "stabilize",
     "stabilization",
     "pullback_confirmed",
     "retest_confirmed",
+}
+_EXECUTION_BREAKOUT_TOKENS = {
+    "breakout",
+    "break above",
+    "break below",
+    "close above",
+    "close below",
+    "opening range",
+    "range break",
+    "trend break",
+    "突破",
+    "上破",
+    "下破",
+    "站上",
+    "跌破",
+}
+_EXECUTION_VWAP_TOKENS = {
+    "vwap",
     "vwap_confirmed",
 }
 _EXECUTION_EVENT_TOKENS = {
@@ -3703,43 +3751,36 @@ def _text_has_any_token(text: str, tokens: set[str]) -> bool:
     return any(token in lowered for token in tokens)
 
 
-def _signal_side(signal) -> str:
-    signal_text = _signal_to_text(getattr(signal, "signal", "Neutral")).upper()
-    if signal_text == "BULLISH":
-        return "long"
-    if signal_text == "BEARISH":
-        return "short"
-    return "flat"
-
-
 def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -> dict:
     payloads = {}
     for signal in analyst_signals or []:
         agent_name = _normalize_agent_name(str(getattr(signal, "agent_name", "") or ""))
         if agent_name not in {"technical", "fundamental", "commodity_news"}:
             continue
-        contract_fields = _derive_signal_contract_fields(signal, agent_name)
-        trigger_valid = _canonical_trigger_valid(signal)
-        current_trigger_confirmed = _canonical_current_trigger_confirmed(signal)
-        invalidation_present = _canonical_invalidation_present(signal)
+        action_contract = _canonical_action_evidence_contract(signal)
+        if not action_contract:
+            continue
         payload = {
             "agent_name": agent_name,
-            "side": _signal_side(signal),
-            "signal": _signal_to_text(getattr(signal, "signal", "Neutral")),
-            "evidence_role": contract_fields.get("evidence_role"),
-            "entry_trigger": contract_fields.get("entry_trigger") or getattr(signal, "entry_trigger", ""),
-            "invalidation": contract_fields.get("invalidation") or getattr(signal, "exit_hint", ""),
-            "horizon_class": contract_fields.get("horizon_class"),
-            "trend_direction": contract_fields.get("trend_direction"),
-            "entry_timing_signal": contract_fields.get("entry_timing_signal"),
-            "price_location": contract_fields.get("price_location"),
-            "trigger_valid": trigger_valid,
-            "current_trigger_confirmed": current_trigger_confirmed,
-            "invalidation_present": invalidation_present,
-            "opportunity_state": _signal_opportunity_state(signal),
-            "opportunity_type": str(getattr(signal, "opportunity_type", "") or ""),
-            "event_type": str(getattr(signal, "event_type", "") or ""),
-            "confidence": _safe_float(getattr(signal, "confidence", 0.0), 0.0),
+            "side": str(action_contract.get("side") or "").strip().lower(),
+            "signal": str(action_contract.get("signal") or ""),
+            "evidence_role": action_contract.get("evidence_role"),
+            "entry_trigger": str(action_contract.get("entry_trigger") or "").strip(),
+            "invalidation": str(action_contract.get("invalidation_condition") or "").strip(),
+            "invalidation_level": action_contract.get("invalidation_level"),
+            "atr_stop_distance": action_contract.get("atr_stop_distance"),
+            "setup_type": str(action_contract.get("setup_type") or "").strip(),
+            "horizon_class": action_contract.get("horizon_class"),
+            "expected_horizon_days": action_contract.get("expected_horizon_days"),
+            "market_regime": action_contract.get("market_regime"),
+            "entry_timing_signal": str(action_contract.get("entry_timing_signal") or "").strip(),
+            "trigger_valid": action_contract.get("trigger_valid") is True,
+            "current_trigger_confirmed": action_contract.get("current_trigger_confirmed") is True,
+            "invalidation_present": action_contract.get("invalidation_present") is True,
+            "opportunity_state": str(action_contract.get("opportunity_state") or "").strip().lower(),
+            "opportunity_type": str(action_contract.get("opportunity_type") or "").strip(),
+            "event_type": str(action_contract.get("event_type") or "").strip(),
+            "confidence": _safe_float(action_contract.get("confidence"), 0.0),
         }
         existing = payloads.get(agent_name)
         if existing is None or (payload["side"] == target_side and existing.get("side") != target_side):
@@ -3747,16 +3788,95 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
     return payloads
 
 
-def _first_execution_text(payloads: dict, *keys: str) -> str:
-    parts = []
-    for payload in payloads.values():
-        if not isinstance(payload, dict):
+def _execution_payload_has_invalidation(payload: dict) -> bool:
+    if not payload.get("invalidation_present"):
+        return False
+    condition = str(payload.get("invalidation") or "").strip().lower()
+    if condition not in {"", "unknown", "none", "n/a", "null"}:
+        return True
+    if payload.get("invalidation_level") is not None:
+        return True
+    return payload.get("atr_stop_distance") is not None
+
+
+def _select_execution_evidence_payload(
+    payloads: dict,
+    *,
+    target_side: str,
+    conditional_path: bool,
+) -> dict:
+    order = {name: index for index, name in enumerate(ANALYST_ORDER)}
+    eligible = []
+    for analyst in ANALYST_ORDER:
+        payload = payloads.get(analyst)
+        if not isinstance(payload, dict) or payload.get("side") != target_side:
             continue
-        for key in keys:
-            value = payload.get(key)
-            if value:
-                parts.append(str(value))
-    return " ".join(parts)
+        if not has_concrete_entry_trigger(payload.get("entry_trigger")):
+            continue
+        if not _execution_payload_has_invalidation(payload):
+            continue
+        state = str(payload.get("opportunity_state") or "").strip().lower()
+        if conditional_path:
+            if state != "watch_for_trigger":
+                continue
+            if payload.get("trigger_valid") or payload.get("current_trigger_confirmed"):
+                continue
+        else:
+            if state not in {"probe_candidate", "tradeable_candidate"}:
+                continue
+            if not payload.get("trigger_valid") or not payload.get("current_trigger_confirmed"):
+                continue
+        eligible.append(payload)
+    if not eligible:
+        raise ValueError("pm_execution_evidence_not_found")
+    eligible.sort(
+        key=lambda payload: (
+            -_safe_float(payload.get("confidence"), 0.0),
+            order.get(str(payload.get("agent_name") or ""), len(order)),
+        )
+    )
+    return eligible[0]
+
+
+def _execution_profile_and_source(payload: dict, *, authority_type: str) -> tuple[str, str]:
+    analyst = str(payload.get("agent_name") or "").strip()
+    setup_text = " ".join(
+        str(payload.get(key) or "").strip()
+        for key in ("setup_type", "opportunity_type", "entry_timing_signal")
+    )
+    trigger_text = str(payload.get("entry_trigger") or "").strip()
+    event_text = " ".join(
+        str(payload.get(key) or "").strip()
+        for key in ("setup_type", "opportunity_type", "event_type", "entry_trigger")
+    )
+    combined = f"{setup_text} {trigger_text}".strip()
+    if (
+        analyst == "commodity_news"
+        and payload.get("trigger_valid")
+        and payload.get("current_trigger_confirmed")
+        and authority_type == "real_budget_entry"
+        and _text_has_any_token(event_text, _EXECUTION_EVENT_TOKENS)
+    ):
+        return "event_immediate", "commodity_news_event"
+    if _text_has_any_token(setup_text, {"vwap_confirmed"}):
+        profile = "vwap_confirmed"
+    elif _text_has_any_token(combined, _EXECUTION_PULLBACK_TOKENS):
+        profile = "pullback"
+    elif _text_has_any_token(combined, _EXECUTION_VWAP_TOKENS):
+        profile = "vwap_confirmed"
+    elif _text_has_any_token(combined, _EXECUTION_BREAKOUT_TOKENS):
+        profile = "breakout"
+    else:
+        raise ValueError("pm_execution_profile_unresolved")
+    if analyst == "fundamental":
+        source = "fundamental_entry_trigger"
+    elif analyst == "technical":
+        source = "technical_pullback" if profile in {"pullback", "vwap_confirmed"} else "technical_breakout"
+    elif analyst == "commodity_news":
+        source = "commodity_news_event"
+    else:
+        raise ValueError("pm_execution_trigger_source_unresolved")
+    return profile, source
 
 
 def _build_execution_contract_fields(
@@ -3780,63 +3900,50 @@ def _build_execution_contract_fields(
     lots_delta = int(target_lots - current_lots)
     authority_type = str(final_entry_authority.get("authority_type") or "not_applicable")
     signal_payloads = _execution_signal_payloads(analyst_signals, target_side)
-    technical = signal_payloads.get("technical") or {}
-    news = signal_payloads.get("commodity_news") or {}
-    trigger_text = _first_execution_text(
-        {"technical": technical},
-        "entry_trigger",
-        "entry_timing_signal",
-        "price_location",
-        "opportunity_type",
-    )
-    event_text = _first_execution_text(
-        {"commodity_news": news},
-        "entry_trigger",
-        "entry_trigger",
-        "event_type",
-        "opportunity_type",
-    )
+    selected_execution_evidence = None
 
     if target_lots == current_lots or lots_delta == 0:
         profile = "hold"
         trigger_source = "none"
-    elif target_lots == 0 or (current_lots != 0 and abs(target_lots) < abs(current_lots)):
+    elif target_lots == 0 or (
+        current_lots != 0
+        and (
+            (current_lots > 0) != (target_lots > 0)
+            or abs(target_lots) < abs(current_lots)
+        )
+    ):
         profile = "exit_immediate"
         trigger_source = "position_lifecycle"
-    elif (
-        news.get("side") == target_side
-        and news.get("trigger_valid")
-        and _text_has_any_token(event_text, _EXECUTION_EVENT_TOKENS)
-        and authority_type == "real_budget_entry"
-    ):
-        profile = "event_immediate"
-        trigger_source = "commodity_news_event"
-    elif _text_has_any_token(trigger_text, _EXECUTION_PULLBACK_TOKENS):
-        profile = "pullback"
-        trigger_source = "technical_pullback"
     else:
-        profile = "breakout"
-        trigger_source = "technical_breakout"
+        selected_execution_evidence = _select_execution_evidence_payload(
+            signal_payloads,
+            target_side=target_side,
+            conditional_path=bool(final_entry_authority.get("conditional_trigger_authority")),
+        )
+        profile, trigger_source = _execution_profile_and_source(
+            selected_execution_evidence,
+            authority_type=authority_type,
+        )
 
-    if target_lots and technical.get("side") == target_side and technical.get("trigger_valid"):
-        entry_trigger = technical.get("entry_trigger") or technical.get("entry_timing_signal") or ""
-        invalidation = technical.get("invalidation") or ""
-    elif profile == "event_immediate":
-        entry_trigger = news.get("entry_trigger") or news.get("entry_trigger") or "event_catalyst"
-        invalidation = news.get("invalidation") or ""
-    else:
-        entry_trigger = technical.get("entry_trigger") or news.get("entry_trigger") or ""
-        invalidation = technical.get("invalidation") or news.get("invalidation") or ""
+    entry_trigger = (
+        str(selected_execution_evidence.get("entry_trigger") or "").strip()
+        if selected_execution_evidence
+        else ""
+    )
+    invalidation = (
+        str(selected_execution_evidence.get("invalidation") or "").strip()
+        if selected_execution_evidence
+        else ""
+    )
 
     date_text = trading_date.strftime("%Y-%m-%d") if hasattr(trading_date, "strftime") else str(trading_date or "")
-    aligned_current_trigger = any(
-        payload.get("side") == target_side
-        and payload.get("trigger_valid")
-        and payload.get("current_trigger_confirmed")
-        and payload.get("invalidation_present")
-        and payload.get("opportunity_state") in {"probe_candidate", "tradeable_candidate"}
-        for payload in signal_payloads.values()
-        if isinstance(payload, dict)
+    aligned_current_trigger = bool(
+        selected_execution_evidence
+        and selected_execution_evidence.get("trigger_valid")
+        and selected_execution_evidence.get("current_trigger_confirmed")
+        and selected_execution_evidence.get("invalidation_present")
+        and selected_execution_evidence.get("opportunity_state")
+        in {"probe_candidate", "tradeable_candidate"}
     )
     direct_entry_authorized = bool(
         target_lots != current_lots
@@ -3871,6 +3978,24 @@ def _build_execution_contract_fields(
         "lots_delta": int(lots_delta),
         "entry_trigger": entry_trigger,
         "invalidation": invalidation,
+        "setup_type": selected_execution_evidence.get("setup_type") if selected_execution_evidence else None,
+        "horizon_class": selected_execution_evidence.get("horizon_class") if selected_execution_evidence else None,
+        "expected_horizon_days": (
+            selected_execution_evidence.get("expected_horizon_days")
+            if selected_execution_evidence
+            else None
+        ),
+        "market_regime": selected_execution_evidence.get("market_regime") if selected_execution_evidence else None,
+        "invalidation_level": (
+            selected_execution_evidence.get("invalidation_level")
+            if selected_execution_evidence
+            else None
+        ),
+        "atr_stop_distance": (
+            selected_execution_evidence.get("atr_stop_distance")
+            if selected_execution_evidence
+            else None
+        ),
         "valid_until": f"{date_text} 15:00:00" if date_text else "",
         "requires_intraday_confirmation": not can_execute_without_intraday_trigger and profile != "hold",
         "can_execute_without_intraday_trigger": can_execute_without_intraday_trigger,

@@ -184,6 +184,10 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。合法 watch 获选后固定为条件执行；canonical 当前触发已确认且失效边界完整的 probe/tradeable 候选，经 Step5 和 Auditor 放行后可对任一合法 profile 形成 `can_execute_without_intraday_trigger=true`，该字段不改变 rank、预算或 sizing。
 
+新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 先过滤最终 `target_side` 的合法机会状态、具体 `entry_trigger` 和 canonical 失效边界，再按既有确定性顺序选择唯一执行证据：条件路径只选尚未触发的 `watch_for_trigger`，直接执行路径只选当前触发已确认的 `probe_candidate/tradeable_candidate`；反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
+
+`entry_trigger`、`invalidation`、`execution_profile`、`trigger_source` 以及存在的 `invalidation_level/atr_stop_distance` 必须由同一被选 AEC 原子形成。profile 只按该 AEC 的正式 setup、触发和事件事实显式映射为 `breakout/pullback/vwap_confirmed/event_immediate`；无法映射时契约失败，不得默认 `breakout`。technical 继续使用 `technical_breakout/technical_pullback`，commodity_news 使用 `commodity_news_event`，fundamental 固定使用 `fundamental_entry_trigger`。执行 action-value 只能在已有权限上覆盖既有 profile/source，不能创建触发、失效边界或权限。
+
 风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 
 计划参考价：来自 `morning_price_context`。
@@ -1418,6 +1422,8 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 
 `wait/hold/reduce/exit` 从 Step4 直接进入 Step6，不要求 `opportunity_rank`。同方向实际扩大绝对手数的 `add/scale` 必须经过 Step5；手数不变的 `hold` 不得伪装为 `add/scale`。`conditional_monitor` 只表达监控，不是开仓动作；只有实际增加目标仓位的条件 `open_probe` 合约才必须经过 rank。
 
+Step5 拒绝或其他正式门控使最终 `target_lots=current_lots` 时，Step6 必须按最终手数清除先前条件执行标记并写入 `execution_profile=hold/trigger_source=none`；最终 reduce/exit 写入 `execution_profile=exit_immediate/trigger_source=position_lifecycle`。该收口只反映最终生命周期，不恢复已拒绝的新增风险权限。
+
 `reverse` 只表示 `open_add_new_risk` 学习家族。执行必须先由 `exit` 合约退出旧方向，再由后续已获得 rank 的新风险合约授权反向开仓；不得把反转写成一个自创 final action 或一条同时完成两腿的 recommendation。
 
 合约不得包含 `candidate_contract`、矩阵列明的 PM 内部 draft、builder 输入、scorecard 草稿、rank 草稿、预算草稿和任何可被解释为第二套交易计划的字段。
@@ -1459,8 +1465,8 @@ recommendation 顶层动作、手数、价格、产品和日期必须与 `final_
 - 矩阵规定的必填字段和结构化对象存在、位置正确且类型正确。
 - `lots_delta = target_lots - current_lots`。
 - `final_action`、`current_lots`、`target_lots` 和 `lots_delta` 一致。
-- `authority_type`、`execution_profile`、`entry_trigger`、盘中确认字段和 `reason_codes` 一致。
-- 保留新增风险敞口的条件 `open_probe` 具有明确 `entry_trigger`；`conditional_monitor` 不被解释为开仓授权。
+- `authority_type`、canonical `execution_profile`、非空且与 profile 自洽的 `trigger_source`、盘中确认字段和 `reason_codes` 一致。
+- 保留新增风险敞口的条件 `open_probe` 具有具体 `entry_trigger`；所有新增风险 FAC 具有来自同一执行证据的 canonical 失效边界；`conditional_monitor` 不被解释为开仓授权。
 - 最终实际增加风险的合约具有第 5 步唯一 rank、预算和 sizing；Step5 拒绝结果只保留对应拒绝事实；不增加风险的合约没有 rank。
 - `evidence_used.position_sizing_result` 的 `target_lots`、`lots_delta` 与最终合约一致。
 - `learning_used.alpha_setup_action_values` 纯净且与最终生命周期匹配。

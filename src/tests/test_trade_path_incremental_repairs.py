@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 from agents.decision_team.auditor import audit_futures_recommendation
 from agents.decision_team.portfolio_manager import (
     RiskLevel,
+    _build_execution_contract_fields,
     _build_pm_decision_context,
     _enrich_final_authority_with_analyst_evidence,
     _scorecard_probe_seed,
@@ -283,14 +284,30 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 self.assertFalse(plan["requires_intraday_confirmation"])
 
     def test_pm_requires_current_confirmation_invalidation_and_funds_for_direct_execution(self):
-        cases = (
-            (_analyst_signal(current_trigger_confirmed=False), _entry_authority()),
-            (_analyst_signal(invalidation_present=False), _entry_authority()),
-            (_analyst_signal(), _entry_authority(allowed=False)),
-        )
-        for signal, authority in cases:
-            with self.subTest(signal=signal.opportunity_state, authority=authority["authority_type"]):
-                plan = _build_pm_decision_context(
+        for signal in (
+            _analyst_signal(current_trigger_confirmed=False),
+            _analyst_signal(invalidation_present=False),
+        ):
+            with self.subTest(signal=signal.opportunity_state):
+                with self.assertRaisesRegex(ValueError, "pm_execution_evidence_not_found"):
+                    _build_pm_decision_context(
+                        ticker="BU",
+                        target_lots=2,
+                        current_price=100.0,
+                        position_ratio=0.02,
+                        risk_level=RiskLevel.SAFE,
+                        long_scores={"confidence": 0.82},
+                        short_scores={"confidence": 0.10},
+                        margin_rate=0.10,
+                        current_lots=0,
+                        analyst_signals=[signal],
+                        final_entry_authority=_entry_authority(),
+                        trading_date="2025-03-26",
+                        recommendation_intent={"action": "open_long"},
+                        control_reasons=[],
+                    )
+
+        plan = _build_pm_decision_context(
                     ticker="BU",
                     target_lots=2,
                     current_price=100.0,
@@ -300,13 +317,13 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     short_scores={"confidence": 0.10},
                     margin_rate=0.10,
                     current_lots=0,
-                    analyst_signals=[signal],
-                    final_entry_authority=authority,
+                    analyst_signals=[_analyst_signal()],
+                    final_entry_authority=_entry_authority(allowed=False),
                     trading_date="2025-03-26",
                     recommendation_intent={"action": "open_long"},
                     control_reasons=[],
                 )
-                self.assertFalse(plan["can_execute_without_intraday_trigger"])
+        self.assertFalse(plan["can_execute_without_intraday_trigger"])
 
     def test_trader_honors_direct_execution_for_every_canonical_entry_profile(self):
         for profile in ("breakout", "pullback", "vwap_confirmed", "event_immediate"):
@@ -375,6 +392,240 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 {"audit_payload": {"producer": "auditor", "audit_verdict": "approve"}}
             )
         )
+
+
+class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
+    @staticmethod
+    def _signal(
+        analyst: str,
+        *,
+        side: str = "long",
+        opportunity_state: str = "watch_for_trigger",
+        trigger_valid: bool = False,
+        current_trigger_confirmed: bool = False,
+        setup_type: str = "trend_breakout",
+        entry_trigger: str = "15m close above 100",
+        invalidation: str = "15m close below 96",
+        confidence: float = 0.82,
+        event_type: str = "none",
+        invalidation_level: float = 96.0,
+        atr_stop_distance: float = 2.0,
+    ) -> AnalystSignal:
+        signal = Signal.BULLISH if side == "long" else Signal.BEARISH
+        aec = build_test_aec(
+            analyst,
+            signal=signal.value,
+            side=side,
+            confidence=confidence,
+            opportunity_state=opportunity_state,
+            setup_type=setup_type,
+            setup_quality_ok=True,
+            trigger_valid=trigger_valid,
+            current_trigger_confirmed=current_trigger_confirmed,
+            invalidation_present=True,
+            entry_trigger=entry_trigger,
+            invalidation_condition=invalidation,
+            extra={
+                "invalidation_level": invalidation_level,
+                "atr_stop_distance": atr_stop_distance,
+                "event_type": event_type,
+            },
+        )
+        return AnalystSignal(
+            agent_name=analyst,
+            signal=signal,
+            confidence=confidence,
+            opportunity_state=opportunity_state,
+            setup_type=setup_type,
+            setup_quality_ok=True,
+            entry_trigger=entry_trigger,
+            trigger_valid=trigger_valid,
+            invalidation_present=True,
+            invalidation_level=invalidation_level,
+            event_type=event_type,
+            metadata={"action_evidence_contract": aec},
+        )
+
+    @staticmethod
+    def _fields(
+        signals: list[AnalystSignal],
+        *,
+        conditional: bool,
+        authority_type: str = "exploration_probe",
+        action_values: list[dict] | None = None,
+    ) -> dict:
+        authority = _entry_authority(conditional=conditional)
+        authority["authority_type"] = authority_type
+        return _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=2,
+            analyst_signals=signals,
+            final_entry_authority=authority,
+            trading_date="2025-03-26",
+            recommendation_intent={"action": "open_long"},
+            control_reasons=[],
+            alpha_setup_action_values=action_values,
+        )
+
+    def test_fundamental_only_watch_supplies_all_execution_facts(self):
+        fields = self._fields(
+            [self._signal("fundamental")],
+            conditional=True,
+        )
+
+        self.assertEqual(fields["entry_trigger"], "15m close above 100")
+        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(fields["execution_profile"], "breakout")
+        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
+        self.assertTrue(fields["requires_intraday_confirmation"])
+
+    def test_fundamental_only_confirmed_candidate_is_direct(self):
+        fields = self._fields(
+            [
+                self._signal(
+                    "fundamental",
+                    opportunity_state="tradeable_candidate",
+                    trigger_valid=True,
+                    current_trigger_confirmed=True,
+                )
+            ],
+            conditional=False,
+            authority_type="real_budget_entry",
+        )
+
+        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
+        self.assertTrue(fields["can_execute_without_intraday_trigger"])
+        self.assertFalse(fields["requires_intraday_confirmation"])
+
+    def test_technical_and_news_sources_keep_their_existing_profiles(self):
+        technical = self._fields(
+            [
+                self._signal(
+                    "technical",
+                    setup_type="trend_pullback",
+                    entry_trigger="pullback to VWAP then stabilize",
+                )
+            ],
+            conditional=True,
+        )
+        news = self._fields(
+            [
+                self._signal(
+                    "commodity_news",
+                    opportunity_state="tradeable_candidate",
+                    trigger_valid=True,
+                    current_trigger_confirmed=True,
+                    setup_type="event_catalyst",
+                    entry_trigger="15m price confirms the fresh supply disruption event",
+                    event_type="supply_disruption",
+                )
+            ],
+            conditional=False,
+            authority_type="real_budget_entry",
+        )
+
+        self.assertEqual(
+            (technical["execution_profile"], technical["trigger_source"]),
+            ("pullback", "technical_pullback"),
+        )
+        self.assertEqual(
+            (news["execution_profile"], news["trigger_source"]),
+            ("event_immediate", "commodity_news_event"),
+        )
+
+    def test_opposite_evidence_cannot_supply_execution_fields(self):
+        fields = self._fields(
+            [
+                self._signal(
+                    "technical",
+                    side="short",
+                    entry_trigger="15m close below 90",
+                    invalidation="15m close above 94",
+                    confidence=0.95,
+                ),
+                self._signal("fundamental", confidence=0.70),
+            ],
+            conditional=True,
+        )
+
+        self.assertEqual(fields["entry_trigger"], "15m close above 100")
+        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
+
+    def test_multiple_sources_are_not_cross_combined(self):
+        fields = self._fields(
+            [
+                self._signal(
+                    "technical",
+                    entry_trigger="technical 15m breakout",
+                    invalidation="technical 15m failure",
+                    confidence=0.90,
+                ),
+                self._signal(
+                    "fundamental",
+                    entry_trigger="fundamental price confirmation",
+                    invalidation="fundamental thesis invalidation",
+                    confidence=0.80,
+                ),
+            ],
+            conditional=True,
+        )
+
+        self.assertEqual(fields["entry_trigger"], "technical 15m breakout")
+        self.assertEqual(fields["invalidation"], "technical 15m failure")
+        self.assertEqual(fields["trigger_source"], "technical_breakout")
+
+    def test_unresolved_profile_never_defaults_to_breakout(self):
+        with self.assertRaisesRegex(ValueError, "pm_execution_profile_unresolved"):
+            self._fields(
+                [
+                    self._signal(
+                        "fundamental",
+                        setup_type="inventory_dislocation",
+                        entry_trigger="15m volume exceeds 1000 contracts",
+                    )
+                ],
+                conditional=True,
+            )
+
+    def test_execution_action_value_overlay_cannot_create_source_facts_or_authority(self):
+        fields = self._fields(
+            [
+                self._signal(
+                    "fundamental",
+                    opportunity_state="tradeable_candidate",
+                    trigger_valid=True,
+                    current_trigger_confirmed=True,
+                )
+            ],
+            conditional=False,
+            action_values=[
+                {
+                    "ticker": "BU",
+                    "side": "long",
+                    "action_name": "execution",
+                    "setup_type": "execution_breakout_setup",
+                    "data_combo": "fundamental:inventory|execution:breakout",
+                    "sample_count": 3,
+                    "reward_mean": -100.0,
+                    "reward_sum": -300.0,
+                    "win_rate": 0.0,
+                    "confidence_score": 0.62,
+                    "action_preference": "cap_reduce_or_revalidate",
+                    "payload": {
+                        "source": "alpha_setup_profile_action_value",
+                        "real_trade_reward_count": 3,
+                        "exact_state_real_trade_sample_count": 3,
+                        "amplification_scope_quality": "exact_real_state",
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(fields["entry_trigger"], "15m close above 100")
+        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertTrue(fields["can_execute_without_intraday_trigger"])
 
 
 class IncrementalMarginExecutionPathTest(unittest.TestCase):
