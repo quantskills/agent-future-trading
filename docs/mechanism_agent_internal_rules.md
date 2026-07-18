@@ -161,7 +161,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 落地硬规则：
 
-1. 分析师 LLM 只生成结构化专业分析结果；学习校准、质量门、时效性和商品差异化 profile 评估完成后，由共享确定性收口工具生成唯一 `action_evidence_contract`。缺少方向、机会状态、触发、失效边界或数据说明时必须降级，不能靠自由文本补权。
+1. 分析师 LLM 只生成结构化专业分析结果；学习校准、质量门、时效性和商品差异化 profile 评估完成后，由共享确定性收口工具生成唯一 `action_evidence_contract`。共享收口必须先完成数据质量、setup 完整性和机会质量判断，再原子写入最终 `opportunity_state/trigger_valid/current_trigger_confirmed`；`no_opportunity/watch_for_trigger` 的两项触发布尔值固定为 false，`probe_candidate/tradeable_candidate` 固定为 true，`risk_reduction_candidate` 保持独立持仓收缩语义。缺少方向、机会状态、触发、失效边界或数据说明时必须降级，不能靠自由文本补权。
 2. 研究员 LLM 输出必须能生成结构化研究成果；自由文本结论不能被分析师、PM、审计员或交易员直接消费。
 3. 提示词可以鼓励充分推理，但必须要求模型把结论写入结构化字段。
 4. 解析器不能从自由文本中猜手数、动作、rank、资金理由或交易权限。

@@ -127,3 +127,5 @@
 （4）[Step6 最终生命周期执行摘要] `portfolio_manager.py` 在最终手数不再增加风险时按 wait/hold/reduce/exit 重建 `hold/exit_immediate` 执行字段并清除已失效的条件确认标记；`test_phase_flow_regression.py` 将残缺 AEC 和空执行字段夹具迁移为正式 SCC 与真实执行字段生成函数。原因：Step5 拒绝或其他门控收回目标手数后，Step6 必须按最终生命周期签约，开发回归也不能绕过最终合约不变量。
 
 （5）[PM 执行字段状态矩阵] `test_pm_state_transition_matrix.py` 将 hold、wait、open 和 scale 合约夹具补齐 canonical profile、trigger source、具体触发和失效边界。原因：PM 状态迁移测试必须使用当前可签署 FAC，不能依赖自检曾经放行空执行字段的旧前提。
+
+（6）[分析师机会状态原子收口] `analyst_quality.py` 在数据质量、setup 完整性和机会质量降级全部完成后，统一写入最终 `opportunity_state`、`trigger_valid` 和 `current_trigger_confirmed`；新增风险的 no-opportunity/watch 固定为 false/false，probe/tradeable 固定为 true/true，风险收缩状态保持独立语义。原因：防止 fundamental 已触发证据被质量规则降为 watch 后仍携带已触发布尔值，形成共享 AEC 契约矛盾。

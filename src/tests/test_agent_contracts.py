@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from tests.contract_test_fixtures import build_test_aec
 from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
 from tools.agent_tools.analysis.analyst_quality import build_technical_context
 from tools.agent_tools.analysis.analyst_quality import parse_fundamental_factors
@@ -34,6 +35,7 @@ from tools.agent_tools.decision.pm_ticker_side_selection import (
     select_ticker_side,
 )
 from tools.agent_tools.decision.pm_invalidation_policy import _has_structured_invalidation_condition
+from tools.common.signal_evidence_collection import validate_action_evidence_contract
 from tools.common.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
@@ -988,6 +990,152 @@ class AgentContractFixtureTest(unittest.TestCase):
 
         self.assertFalse(card["long"]["single_tradeable_candidate_setup_confirmed"])
         self.assertTrue(card["long"]["technical_opposes_side"])
+
+
+class FundamentalFinalizationStateAtomicityTest(unittest.TestCase):
+    @staticmethod
+    def _finalize(
+        *,
+        supports_trade_setup: bool,
+        trigger_confirmed: bool,
+        entry_trigger: str = "15-minute close above 3100 with volume expansion",
+        invalidation_condition: str = "setup invalid if price closes below 3050",
+        opportunity_state: str = "tradeable_candidate",
+    ) -> AnalystSignal:
+        seed = build_test_aec(
+            "fundamental",
+            ticker="M",
+            trading_date="2025-03-26",
+            signal="Bullish",
+            side="long",
+            confidence=0.82,
+            opportunity_state=opportunity_state,
+            setup_type="inventory_tightness",
+            setup_quality_ok=True,
+            trigger_valid=trigger_confirmed,
+            current_trigger_confirmed=trigger_confirmed,
+            invalidation_present=bool(invalidation_condition),
+            entry_trigger=entry_trigger,
+            invalidation_condition=invalidation_condition or None,
+        )
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.82,
+            entry_trigger=entry_trigger,
+            exit_hint=invalidation_condition,
+            holding_period_hint="1-3 trading days while the setup remains valid",
+            invalidation_level=3050.0 if invalidation_condition else None,
+            business_quality_score=0.82,
+            factor_alignment_score=0.78,
+            data_coverage_score=0.82,
+            setup_type="inventory_tightness",
+            horizon_class="short",
+            opportunity_state=opportunity_state,
+            trigger_valid=trigger_confirmed,
+            invalidation_present=bool(invalidation_condition),
+            metadata={
+                "data_usage_summary": seed["data_usage_summary"],
+                "invalidation_condition": invalidation_condition,
+                "learning_scope": seed["learning_scope"],
+                "product_profile_evidence": seed["product_profile_evidence"],
+            },
+        )
+        return apply_trade_research_contract(
+            signal,
+            {
+                "sector": "agricultural",
+                "tradeability": "high",
+                "setup_quality_ok": True,
+                "current_trigger_confirmed": trigger_confirmed,
+                "fundamental_deployable_confirmed": True,
+                "data_quality": {
+                    "supports_fundamental_trade_setup": supports_trade_setup,
+                    "coverage_ratio": 0.55 if not supports_trade_setup else 0.82,
+                },
+                "factor_group_counts": {"inventory": {"down": 2}},
+                "risk_flags": [],
+            },
+            analyst="fundamental",
+            trading_date="2025-03-26",
+            ticker="M",
+        )
+
+    def test_quality_downgrade_atomically_clears_confirmed_trigger_state(self):
+        result = self._finalize(
+            supports_trade_setup=False,
+            trigger_confirmed=True,
+        )
+        contract = result.metadata["action_evidence_contract"]
+
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        validate_action_evidence_contract(contract, analyst="fundamental")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(contract["trigger_valid"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+        self.assertEqual(
+            contract["entry_trigger"],
+            "15-minute close above 3100 with volume expansion",
+        )
+        self.assertEqual(
+            contract["invalidation_condition"],
+            "setup invalid if price closes below 3050",
+        )
+
+    def test_quality_approved_confirmed_candidate_remains_confirmed(self):
+        result = self._finalize(
+            supports_trade_setup=True,
+            trigger_confirmed=True,
+        )
+        contract = result.metadata["action_evidence_contract"]
+
+        self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
+        self.assertTrue(result.trigger_valid)
+        self.assertTrue(contract["trigger_valid"])
+        self.assertTrue(contract["current_trigger_confirmed"])
+        validate_action_evidence_contract(contract, analyst="fundamental")
+
+    def test_complete_unconfirmed_setup_remains_pending_watch(self):
+        result = self._finalize(
+            supports_trade_setup=True,
+            trigger_confirmed=False,
+            entry_trigger="enter only if the 15-minute close breaks above 3100 with volume",
+        )
+        contract = result.metadata["action_evidence_contract"]
+
+        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(contract["trigger_valid"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+        validate_action_evidence_contract(contract, analyst="fundamental")
+
+    def test_incomplete_setup_becomes_no_opportunity(self):
+        result = self._finalize(
+            supports_trade_setup=True,
+            trigger_confirmed=False,
+            entry_trigger="",
+            invalidation_condition="",
+        )
+        contract = result.metadata["action_evidence_contract"]
+
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(contract["trigger_valid"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+        validate_action_evidence_contract(contract, analyst="fundamental")
+
+    def test_risk_reduction_state_remains_outside_new_risk_mapping(self):
+        result = self._finalize(
+            supports_trade_setup=False,
+            trigger_confirmed=True,
+            opportunity_state="risk_reduction_candidate",
+        )
+
+        self.assertEqual(result.opportunity_state, "risk_reduction_candidate")
+        self.assertEqual(
+            result.metadata["action_evidence_contract"]["opportunity_state"],
+            "risk_reduction_candidate",
+        )
 
 
 class TechnicalPreOpenDataBoundaryTest(unittest.TestCase):

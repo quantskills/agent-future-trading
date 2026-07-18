@@ -1352,7 +1352,7 @@ def apply_trade_research_contract(
             else "trend_watch_for_trigger"
         )
         signal.price_location = str(getattr(signal, "price_percentile", "") or "")
-        signal.trigger_valid = bool(
+        resolved_trigger_valid = bool(
             current_trigger_confirmed
             and has_invalidation
             and setup_presence.get("entry_trigger_present", False)
@@ -1367,22 +1367,32 @@ def apply_trade_research_contract(
         )
         signal.price_location = str(getattr(signal, "price_percentile", "") or "")
         if str(analyst) == "commodity_news":
-            signal.trigger_valid = bool(
+            resolved_trigger_valid = bool(
                 current_trigger_confirmed
             ) and bool(has_invalidation) and bool(
                 setup_presence.get("entry_trigger_present", False)
             )
         else:
-            signal.trigger_valid = bool(
+            resolved_trigger_valid = bool(
                 current_trigger_confirmed
                 and has_invalidation
                 and setup_presence.get("entry_trigger_present", False)
             )
     signal.invalidation_present = bool(has_invalidation)
     if pending_conditional_trigger or is_neutral:
-        signal.trigger_valid = False
+        resolved_trigger_valid = False
+    if is_risk_reduction:
+        final_trigger_valid = bool(resolved_trigger_valid)
+        final_trigger_confirmed = bool(current_trigger_confirmed)
+    elif opportunity_state in {"probe_candidate", "tradeable_candidate"}:
+        final_trigger_valid = True
+        final_trigger_confirmed = True
+    else:
+        final_trigger_valid = False
+        final_trigger_confirmed = False
+    signal.trigger_valid = final_trigger_valid
     action_evidence_contract["trigger_valid"] = bool(signal.trigger_valid)
-    action_evidence_contract["current_trigger_confirmed"] = bool(current_trigger_confirmed)
+    action_evidence_contract["current_trigger_confirmed"] = final_trigger_confirmed
     action_evidence_contract["invalidation_present"] = bool(signal.invalidation_present)
     action_evidence_contract["setup_quality_ok"] = bool(
         action_evidence_contract.get("setup_quality_ok")

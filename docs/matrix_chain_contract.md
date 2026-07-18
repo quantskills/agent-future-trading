@@ -52,7 +52,7 @@ PM 持仓生命周期校准的唯一 Researcher 输入是 `final_action_contract
 
 Researcher 单次运行中的学习 SQL、`researcher_learning_completed`、外置 payload artifact、template prior 和历史学习快照必须共同成功或共同回滚。失败不得留下完成事件或无数据库引用的新 artifact，也不得删除或覆盖运行前已经存在的合法 artifact。
 
-机会状态链只使用共享校验语义：`no_opportunity` 可以保留方向和研究证据，但不构成新增风险支持；`watch_for_trigger` 必须有 Trader 可用逻辑 T 日15分钟行情观察的具体条件、canonical 失效边界，并且 `trigger_valid/current_trigger_confirmed=false`；`probe_candidate/tradeable_candidate` 必须同时满足两项当前触发布尔值为 true。SCC 只汇总最终主方向的合法机会状态，主方向全部为 `no_opportunity` 时 `trigger_status=not_applicable`，反方向 watch 不得借给主方向。
+机会状态链只使用共享校验语义：`no_opportunity` 可以保留方向和研究证据，但不构成新增风险支持；`watch_for_trigger` 必须有 Trader 可用逻辑 T 日15分钟行情观察的具体条件、canonical 失效边界，并且 `trigger_valid/current_trigger_confirmed=false`；`probe_candidate/tradeable_candidate` 必须同时满足两项当前触发布尔值为 true。分析师 finalization 必须先完成全部质量降级，再原子写入这三个最终字段；不得形成 watch 与已触发布尔值并存的中间契约。SCC 只汇总最终主方向的合法机会状态，主方向全部为 `no_opportunity` 时 `trigger_status=not_applicable`，反方向 watch 不得借给主方向。
 
 `missing_evidence` 与 `confirmation_requirements` 是证据强度和待确认诊断，不进入 `data_missing`，也不按数量形成 `critical_data_gap`。候选硬数据阻断只来自共享 `build_scc_data_quality_summary.status=hard_fail`。单来源完整已触发候选保留真实低共识分进入 Step5 队列，不补分、不提高一致性，也不自动获得预算、手数或交易权限。
 
