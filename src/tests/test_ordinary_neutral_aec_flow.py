@@ -30,6 +30,11 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     build_profile_usage_contract,
     get_product_price_behavior_profile,
 )
+from tools.agent_tools.analysis.analyst_structured_output import (
+    CommodityNewsAnalystOutput,
+    FundamentalAnalystOutput,
+    TechnicalAnalystOutput,
+)
 from tools.agent_tools.control.pg_pre_backtest_acceptance import _TEST_GROUPS
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.research.research_review_helpers import (
@@ -221,8 +226,14 @@ class OrdinaryNeutralAnalystEntryTest(unittest.TestCase):
             technical, "build_technical_data_usage", return_value=_data_usage("technical")
         ), patch.object(
             technical, "agent_call", return_value=_ordinary_neutral("technical")
-        ), patch.object(technical.logger, "log_signal"):
+        ) as agent_call, patch.object(
+            technical.logger, "log_signal"
+        ):
             output = technical.technical_agent(_agent_state())
+        self.assertIs(
+            agent_call.call_args.kwargs["pydantic_model"],
+            TechnicalAnalystOutput,
+        )
         self._assert_formal_neutral(output, "technical")
 
     def test_fundamental_entry_accepts_data_available_ordinary_neutral(self):
@@ -246,8 +257,12 @@ class OrdinaryNeutralAnalystEntryTest(unittest.TestCase):
             return_value=_data_usage("fundamental"),
         ), patch.object(
             fundamental, "agent_call", return_value=_ordinary_neutral("fundamental")
-        ), patch.object(fundamental.logger, "log_signal"):
+        ) as agent_call, patch.object(fundamental.logger, "log_signal"):
             output = fundamental.fundamental_agent(_agent_state())
+        self.assertIs(
+            agent_call.call_args.kwargs["pydantic_model"],
+            FundamentalAnalystOutput,
+        )
         self._assert_formal_neutral(output, "fundamental")
 
     def test_news_entry_accepts_data_available_ordinary_neutral(self):
@@ -275,8 +290,12 @@ class OrdinaryNeutralAnalystEntryTest(unittest.TestCase):
             commodity_news,
             "agent_call",
             return_value=_ordinary_neutral("commodity_news"),
-        ), patch.object(commodity_news.logger, "log_signal"):
+        ) as agent_call, patch.object(commodity_news.logger, "log_signal"):
             output = commodity_news.commodity_news_agent(_agent_state())
+        self.assertIs(
+            agent_call.call_args.kwargs["pydantic_model"],
+            CommodityNewsAnalystOutput,
+        )
         self._assert_formal_neutral(output, "commodity_news")
 
 

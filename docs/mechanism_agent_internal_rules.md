@@ -161,13 +161,14 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 落地硬规则：
 
-1. 分析师 LLM 只生成结构化专业分析结果；共享确定性收口工具先完成数据质量、setup 完整性和机会质量判断，再原子写入最终状态。technical 才能以三种固定15分钟 profile 形成 watch/probe/tradeable；fundamental 的新增风险机会始终收口为保留方向的 `no_opportunity`；commodity_news 只有已满足即时事件边界时才能形成 `event_immediate` probe/tradeable。正式 `entry_trigger` 由共享 canonical 定义按 profile 和方向生成，不从 LLM 自由文字继承；`risk_reduction_candidate` 保持独立持仓收缩语义。
-2. 研究员 LLM 输出必须能生成结构化研究成果；自由文本结论不能被分析师、PM、审计员或交易员直接消费。
-3. 提示词可以鼓励充分推理，但必须要求模型把结论写入结构化字段。
-4. 解析器不能从自由文本中猜手数、动作、rank、资金理由或交易权限。
-5. 新增 LLM 输出字段前，必须先登记字段语义，再补提示词检查和结构测试。
-6. `product_profile_evidence` 是分析层字段。三类分析师必须读取 `analyst_product_price_behavior_profile.py` 生成的商品差异化框架，但只能把它用于证据强调、setup 分类、确认要求、季节窗口和假突破风险识别；不能从 profile 推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
-7. `fusion_evidence` 是分析层预测证据字段。三类分析师必须把证据强弱、时效、冲突、确认需求、缺失证据和本专业风险落入该字段；不能从它推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
+1. 分析师 LLM 只生成结构化专业分析结果；三个入口分别使用 technical、fundamental、commodity_news 角色化输出模型。共享确定性收口工具先完成数据质量、setup 完整性和机会质量判断，再原子写入最终状态。technical 才能以三种固定15分钟 profile 形成 watch/probe/tradeable；fundamental 的新增风险机会始终收口为保留方向的 `no_opportunity`；commodity_news 只有已满足即时事件边界时才能形成 `event_immediate` probe/tradeable。正式 `entry_trigger` 由共享 canonical 定义按 profile 和方向生成，不从 LLM 自由文字继承；`risk_reduction_candidate` 保持独立持仓收缩语义。
+2. 无方向、有方向但无具体 T 日可观察触发、缺 canonical 失效边界或仅有研究价值，都是正常 `no_opportunity`，profile 为空且不得中断其他分析师或品种。只有分析师已声明完整可执行候选且方向、触发、失效边界齐全时，漏填或错填 profile 才是结构化输出错误；现有 parse-error 重试连续耗尽后只透传预登记安全码 `analyst_execution_profile_missing`，不得保存原始模型错误或把候选静默降级。
+3. 研究员 LLM 输出必须能生成结构化研究成果；自由文本结论不能被分析师、PM、审计员或交易员直接消费。
+4. 提示词可以鼓励充分推理，但必须要求模型把结论写入结构化字段。
+5. 解析器不能从自由文本中猜手数、动作、rank、资金理由或交易权限。
+6. 新增 LLM 输出字段前，必须先登记字段语义，再补提示词检查和结构测试。
+7. `product_profile_evidence` 是分析层字段。三类分析师必须读取 `analyst_product_price_behavior_profile.py` 生成的商品差异化框架，但只能把它用于证据强调、setup 分类、确认要求、季节窗口和假突破风险识别；不能从 profile 推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
+8. `fusion_evidence` 是分析层预测证据字段。三类分析师必须把证据强弱、时效、冲突、确认需求、缺失证据和本专业风险落入该字段；不能从它推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
 
 ---
 

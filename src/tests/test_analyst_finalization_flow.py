@@ -26,6 +26,7 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     build_profile_usage_contract,
     get_product_price_behavior_profile,
 )
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 from tests.contract_test_fixtures import build_test_aec
 
@@ -119,6 +120,60 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertEqual(contract["setup_type"], "range_reversal_setup")
         self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+
+    def test_technical_profile_generates_canonical_trigger_before_prose_presence_check(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.62,
+            setup_type="trend_breakout_setup",
+            opportunity_type="short_timing",
+            opportunity_state="watch_for_trigger",
+            evidence_role="entry_timing",
+            entry_timing_signal="breakout",
+            entry_trigger="",
+            exit_hint="15m close above 102 invalidates the setup",
+            invalidation_level=102.0,
+            factor_focus=["trend", "volume"],
+            metadata={
+                "data_usage_summary": self._data_usage("technical", "BU"),
+                "invalidation_condition": "15m close above 102 invalidates the setup",
+            },
+        )
+
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "medium",
+                "setup_type": "trend_breakout_setup",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "risk_flags": [],
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(contract["entry_timing_signal"], "breakout")
+        self.assertEqual(
+            contract["entry_trigger"],
+            canonical_entry_trigger("breakout", "short"),
+        )
+        self.assertTrue(contract["invalidation_present"])
+
+    def test_technical_prompt_exposes_completed_price_levels_and_canonical_profiles(self):
+        price_levels = "- Current price: 3500\n- Nearest support: 3450\n- Nearest resistance: 3560"
+        prompt = build_futures_technical_prompt(
+            ticker="RB",
+            signal_results_compact={"trend": "Bearish"},
+            price_levels=price_levels,
+        )
+
+        self.assertIn(price_levels, prompt)
+        self.assertIn(canonical_entry_trigger("breakout", "long"), prompt)
+        self.assertIn(canonical_entry_trigger("breakout", "short"), prompt)
+        self.assertIn("T-day open-dependent gap analysis is expected to be unavailable", prompt)
 
     def test_fundamental_finalization_keeps_direction_but_removes_execution_claim(self):
         signal = AnalystSignal(
@@ -363,9 +418,13 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             self.assertNotIn("metadata.action_evidence_contract:", prompt)
             self.assertIn("opportunity_state", prompt)
         self.assertIn("breakout / pullback / vwap_confirmed", technical_prompt)
+        self.assertIn("every complete watch_for_trigger", technical_prompt)
+        self.assertIn("Direction alone is not watch_for_trigger", technical_prompt)
         self.assertIn("evidence_role=direction_context", fundamental_prompt)
         self.assertIn("must not output a Trader execution profile", fundamental_prompt)
+        self.assertIn("must be an empty string in every fundamental output", fundamental_prompt)
         self.assertIn("entry_timing_signal=event_immediate", news_prompt)
+        self.assertIn("news must not create watch_for_trigger", news_prompt)
 
     def test_three_analysts_use_shared_finalizer_and_no_news_product_map(self):
         for relative in (

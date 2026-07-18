@@ -10514,7 +10514,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             invalidation_present=True,
             entry_trigger="breakout above opening range with volume confirmation",
             trend_direction="bullish",
-            entry_timing_signal="trend_breakout",
+            entry_timing_signal="breakout",
             business_quality_score=0.80,
             data_coverage_score=0.90,
             holding_period_hint="1-3 trading days while breakout remains valid",

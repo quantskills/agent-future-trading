@@ -21,6 +21,9 @@ from tools.agent_tools.analysis.analyst_output_finalization import (
     finalize_analyst_signal,
     resolve_analyst_llm_config,
 )
+from tools.agent_tools.analysis.analyst_structured_output import (
+    FundamentalAnalystOutput,
+)
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     build_profile_usage_contract,
     format_profile_for_fundamental,
@@ -466,7 +469,7 @@ def fundamental_agent(state: FundState):
         signal = agent_call(
             prompt=prompt,
             llm_config=llm_config,
-            pydantic_model=AnalystSignal,
+            pydantic_model=FundamentalAnalystOutput,
         )
     except Exception:
         logger.error(f"{ticker}: fundamental_inference_failed")

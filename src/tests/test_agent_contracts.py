@@ -391,6 +391,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             confidence=0.62,
             business_quality_score=0.72,
             factor_alignment_score=0.68,
+            entry_timing_signal="breakout",
             entry_trigger="break above opening range with volume",
             exit_hint="exit if price closes back below breakout range",
             invalidation_level=3310.0,

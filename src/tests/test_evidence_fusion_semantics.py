@@ -23,12 +23,17 @@ from tests.contract_test_fixtures import build_test_aec
 
 class EvidenceFusionSemanticsTest(unittest.TestCase):
     def _analyst_signal(self, *, analyst: str, signal: Signal, confidence: float = 0.72) -> AnalystSignal:
+        entry_timing_signal = {
+            "technical": "breakout",
+            "commodity_news": "event_immediate",
+        }.get(analyst, "")
         sig = AnalystSignal(
             agent_name=analyst,
             signal=signal,
             confidence=confidence,
             business_quality_score=0.74,
             evidence_quality="high",
+            entry_timing_signal=entry_timing_signal,
             entry_trigger="current price/volume confirms directional setup",
             exit_hint="setup invalid if price closes back through trigger and opposite evidence appears",
             would_change_view_if="setup invalid if price closes back through trigger and opposite evidence appears",

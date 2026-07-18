@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, field, fields
 from dotenv import load_dotenv
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from llm.provider import Provider
 from util.logger import logger
 
@@ -41,6 +41,24 @@ _LLM_SEMAPHORES: Dict[tuple[str, str, int], threading.BoundedSemaphore] = {}
 _LLM_SEMAPHORES_LOCK = threading.Lock()
 _TRANSIENT_ERROR_TYPES = frozenset({"rate_limit", "server_error"})
 _MAX_RETRY_BACKOFF_SECONDS = 8
+_SAFE_STRUCTURED_OUTPUT_ERROR_CODES = frozenset(
+    {"analyst_execution_profile_missing"}
+)
+
+
+def _safe_structured_output_error_code(exc: Exception) -> str:
+    """Return only a registered Pydantic error code, never raw model content."""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, ValidationError):
+            for item in current.errors():
+                code = str(item.get("type") or "").strip()
+                if code in _SAFE_STRUCTURED_OUTPUT_ERROR_CODES:
+                    return code
+        current = current.__cause__ or current.__context__
+    return ""
 
 
 def _resolve_llm_semaphore(config: LLMConfig) -> Optional[threading.BoundedSemaphore]:
@@ -352,6 +370,8 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
 
     bounded_attempts = 0
     transient_attempts = 0
+    bounded_safe_error_code = ""
+    bounded_safe_error_consistent = True
     while True:
         try:
             if semaphore is not None:
@@ -366,6 +386,7 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
             return result
         except Exception as exc:
             error_type = _classify_llm_error(exc)
+            safe_structured_error_code = _safe_structured_output_error_code(exc)
             action = _resolve_failure_policy(llm_cfg, error_type)
             logger.warning(f"llm_inference_attempt_failed:{error_type}")
             if action in {"raise", "fail_hard", "fail_fast"}:
@@ -382,6 +403,15 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
 
             transient_attempts = 0
             bounded_attempts += 1
+            if bounded_attempts == 1:
+                bounded_safe_error_code = safe_structured_error_code
+            elif safe_structured_error_code != bounded_safe_error_code:
+                bounded_safe_error_consistent = False
             if bounded_attempts >= llm_cfg.max_retries:
-                logger.error(f"llm_inference_failed:{error_type}")
-                raise RuntimeError(f"llm_inference_failed:{error_type}") from None
+                final_code = (
+                    bounded_safe_error_code
+                    if bounded_safe_error_consistent and bounded_safe_error_code
+                    else f"llm_inference_failed:{error_type}"
+                )
+                logger.error(final_code)
+                raise RuntimeError(final_code) from None

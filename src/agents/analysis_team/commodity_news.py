@@ -18,6 +18,10 @@ from tools.agent_tools.analysis.analyst_output_finalization import (
     finalize_analyst_signal,
     resolve_analyst_llm_config,
 )
+from tools.agent_tools.analysis.analyst_structured_output import (
+    ANALYST_EXECUTION_PROFILE_MISSING,
+    CommodityNewsAnalystOutput,
+)
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     build_profile_usage_contract,
     format_profile_for_commodity_news,
@@ -206,9 +210,12 @@ def commodity_news_agent(state: FundState):
         signal = agent_call(
             prompt=prompt,
             llm_config=llm_config,
-            pydantic_model=AnalystSignal,
+            pydantic_model=CommodityNewsAnalystOutput,
         )
-    except Exception:
+    except Exception as exc:
+        if str(exc) == ANALYST_EXECUTION_PROFILE_MISSING:
+            logger.error(f"{ticker}: {ANALYST_EXECUTION_PROFILE_MISSING}")
+            raise RuntimeError(ANALYST_EXECUTION_PROFILE_MISSING) from None
         logger.error(f"{ticker}: commodity_news_inference_failed")
         raise RuntimeError(f"{ticker}: commodity_news_inference_failed") from None
 

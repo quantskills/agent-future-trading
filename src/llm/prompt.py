@@ -38,7 +38,7 @@ Output format:
   risk_context is an evidence role, not a separate agent and not trade authority; PM signs the contract, independent Auditor decides audit_verdict, while Trader only checks intraday trigger and executes the approved final_action_contract. trade_contract_audit is an execution audit mirror, not an approval source.
 - direction_context: directional background, separated from entry timing
 - trend_direction: technical trend direction when applicable
-- entry_timing_signal: fixed execution timing enum when this analyst has execution responsibility; never copy setup_type into this field
+- entry_timing_signal: fixed execution timing enum when this analyst has execution responsibility; a complete executable opportunity must not leave it empty, and setup_type must never be copied into it
 - price_location: price zone or percentile used for timing
 - trigger_valid: true only when the current trigger is already present in available evidence
 - A pending condition is watch_for_trigger only when it gives a concrete price,
@@ -454,7 +454,8 @@ Quality discipline:
 - High confidence requires aligned trend, momentum, volume/open-interest or settlement evidence.
 - For high-caution tickers, require stronger confirmation before issuing directional signals.
 - Use Neutral only when there is no actionable trigger, no invalidation boundary, or the reward/risk is clearly not tradable.
-- If directional evidence exists but timing is incomplete, classify it as watch_for_trigger observation and state the exact current trigger that would make it tradable.
+- Direction alone is not watch_for_trigger. If the exact T-day observable trigger or an independent invalidation boundary is missing, use no_opportunity and preserve the directional research evidence.
+- If direction, exact T-day observable trigger, and invalidation are complete but the trigger is pending, use watch_for_trigger and fill entry_timing_signal with the supported technical execution type.
 
 Learning explanation:
 - Fill learning_impact_summary using only past research-learning context and today's technical evidence.
@@ -474,7 +475,10 @@ Output format:
 - trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
 - price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
 - setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / data_unavailable_no_trade
-- entry_timing_signal: breakout / pullback / vwap_confirmed for an executable technical setup; otherwise an empty string
+- entry_timing_signal: no_opportunity must use an empty string; every complete watch_for_trigger, probe_candidate, or tradeable_candidate must use exactly one of breakout / pullback / vwap_confirmed
+- watch_for_trigger means the canonical condition is pending, so set trigger_valid=false and current_trigger_confirmed=false while still filling entry_timing_signal
+- probe_candidate/tradeable_candidate means the same canonical condition is already confirmed, so fill entry_timing_signal and set trigger_valid=true and current_trigger_confirmed=true
+- a directional view without an exact T-day observable trigger or canonical invalidation is no_opportunity, not a profile-validation error
 - range_reversal, trend_breakout, short_timing, and other analytical shapes belong in setup_type/opportunity_type, never in entry_timing_signal
 - evidence_role: entry_timing for technical evidence
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
@@ -518,10 +522,10 @@ def build_futures_fundamental_prompt(
         "ferrous emphasizes raw material, steel demand, inventory and margins; nonferrous emphasizes inventory, treatment charge, macro and downstream demand; "
         "agricultural contracts emphasize crop progress, weather, import/export, inventory and crush/feed demand.\n"
         "- opportunity_type: medium_fundamental / trend_continuation / event_driven / probe / no_trade\n"
-        "- opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate\n"
+        "- opportunity_state: use no_opportunity for fundamental new-risk evidence; risk_reduction_candidate retains its existing-position meaning\n"
         "- setup_type: fundamental_timing_setup when factors form a setup, otherwise data_unavailable_no_trade or unknown\n"
         "- evidence_role=direction_context; this value is fixed for fundamental output\n"
-        "- entry_timing_signal must be an empty string; fundamental must not output a Trader execution profile\n"
+        "- entry_timing_signal must be an empty string in every fundamental output; fundamental must not output a Trader execution profile\n"
         "- entry_trigger may describe research confirmation in your analysis, but it is not persisted as a Trader trigger\n"
         "- exit_hint: fundamental or price evidence that invalidates or weakens the thesis\n"
         "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
@@ -582,8 +586,8 @@ def build_futures_commodity_news_prompt(
         "Fill learning_impact_summary with historical support/contradiction, today's confirmed event evidence, missing confirmation, and opportunity_state_reason. "
         "Fill event_calibration_summary with effective_catalysts, background_noise, impact_window_assessment, price_volume_confirmation_required, and event_calibration_reason. "
         "Do not include lots, margin, final_action, target_lots, execution instructions, or trade authority in these summaries.\n"
-        "Use evidence_role=event_catalyst. Only when a current event already satisfies the existing immediate-execution boundary may entry_timing_signal=event_immediate. "
-        "Otherwise entry_timing_signal must be empty and the news must not create a normal 15-minute execution profile.\n"
+        "Use evidence_role=event_catalyst. Only a complete probe_candidate/tradeable_candidate whose current event already satisfies the existing immediate-execution boundary may use entry_timing_signal=event_immediate. "
+        "That complete immediate candidate must not leave entry_timing_signal empty. Otherwise use no_opportunity with an empty entry_timing_signal; news must not create watch_for_trigger or a normal 15-minute execution profile.\n"
     )
     prompt += learning_context_text or ""
     prompt += (

@@ -830,6 +830,20 @@ def _has_numeric_invalidation(value: Any, *, positive: bool = False) -> bool:
     return parsed > 0.0 if positive else True
 
 
+def has_analyst_invalidation_boundary(signal: AnalystSignal) -> bool:
+    """Return whether the producer supplied a boundary finalization can canonicalize."""
+    metadata = getattr(signal, "metadata", {}) or {}
+    return bool(
+        _has_numeric_invalidation(getattr(signal, "invalidation_level", None))
+        or _has_numeric_invalidation(
+            getattr(signal, "atr_stop_distance", None),
+            positive=True,
+        )
+        or _has_specific_invalidation_text(metadata.get("invalidation_condition"))
+        or _has_specific_invalidation_text(getattr(signal, "exit_hint", ""))
+    )
+
+
 def _land_canonical_invalidation_condition(
     signal: AnalystSignal,
     metadata: Dict[str, Any],
@@ -917,11 +931,15 @@ def _finalize_analyst_execution_semantics(
     signal: AnalystSignal,
     *,
     analyst: str,
+    declared_opportunity_state: str,
     opportunity_state: str,
     current_trigger_confirmed: bool,
 ) -> tuple[str, str, bool]:
     """Make analyst role, profile and executable trigger one canonical fact."""
     state = str(opportunity_state or "no_opportunity").strip().lower()
+    declared_state = str(
+        declared_opportunity_state or "no_opportunity"
+    ).strip().lower()
     if state == "risk_reduction_candidate":
         return state, str(getattr(signal, "entry_trigger", "") or "").strip(), bool(
             current_trigger_confirmed
@@ -947,6 +965,16 @@ def _finalize_analyst_execution_semantics(
             "probe_candidate",
             "tradeable_candidate",
         }
+        if executable_state and not profile:
+            if declared_state in {
+                "watch_for_trigger",
+                "probe_candidate",
+                "tradeable_candidate",
+            }:
+                raise ValueError("analyst_execution_profile_missing")
+            signal.entry_timing_signal = ""
+            signal.entry_trigger = ""
+            return "no_opportunity", "", False
         trigger = canonical_entry_trigger(profile, side) if executable_state else ""
         if executable_state and trigger:
             signal.entry_timing_signal = profile
@@ -958,8 +986,15 @@ def _finalize_analyst_execution_semantics(
 
     if analyst == "commodity_news":
         signal.evidence_role = "event_catalyst"
+        candidate_state = state in {"probe_candidate", "tradeable_candidate"}
+        if candidate_state and raw_profile != "event_immediate":
+            if declared_state in {"probe_candidate", "tradeable_candidate"}:
+                raise ValueError("analyst_execution_profile_missing")
+            signal.entry_timing_signal = ""
+            signal.entry_trigger = ""
+            return "no_opportunity", "", False
         executable_event = bool(
-            state in {"probe_candidate", "tradeable_candidate"}
+            candidate_state
             and raw_profile == "event_immediate"
             and current_trigger_confirmed
         )
@@ -1382,6 +1417,7 @@ def apply_trade_research_contract(
         _finalize_analyst_execution_semantics(
             signal,
             analyst=analyst,
+            declared_opportunity_state=original_opportunity_state,
             opportunity_state=candidate_state,
             current_trigger_confirmed=current_trigger_confirmed,
         )

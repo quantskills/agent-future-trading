@@ -30,6 +30,7 @@ from tools.common.signal_evidence_collection import build_scc_data_quality_summa
 _ANALYST_FINAL_OUTPUT_CONTRACT_ERROR = "analyst_final_output_contract_invalid"
 _SAFE_PHASE1_FAILURE_CODES = {
     _ANALYST_FINAL_OUTPUT_CONTRACT_ERROR,
+    "analyst_execution_profile_missing",
     "analyst_phase1_analysis_failed",
     "futures_phase1_workflow_failed",
     "pm_execution_profile_contract_invalid",

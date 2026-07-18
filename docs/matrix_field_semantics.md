@@ -129,6 +129,7 @@
 | `no_lookahead_status` | 数据派生 artifact | 未来函数检查状态。 |
 | `source_artifacts` | 所有 artifact | 上游 artifact ID 或来源说明。 |
 | `validation_errors` | 所有合约 / artifact | 结构或语义校验错误。 |
+| `analyst_execution_profile_missing` | 分析师结构化输出 / Phase1 安全错误码 | technical 或 commodity_news 已声明完整可执行候选且方向、具体触发、canonical 失效边界齐全，但 `entry_timing_signal` 为空或非法；现有 parse-error 重试连续耗尽后才允许安全透传。它不是业务字段，不适用于无方向、无具体触发、无失效边界或仅有研究价值的合法 `no_opportunity`。 |
 | `source_artifacts_not_list` | 校验错误码 | `source_artifacts` 类型错误的校验说明，不是业务字段。 |
 | `validation_errors_not_list` | 校验错误码 | `validation_errors` 类型错误的校验说明，不是业务字段。 |
 | `artifact_header_missing` | 校验错误码 | artifact header 缺失说明，不是业务字段。 |
@@ -191,7 +192,7 @@
 
 三类分析师共用 `validate_action_evidence_contract`。AEC 必填字段固定为：身份与方向 `contract_version/analyst/signal/side/confidence`；机会与触发 `opportunity_type/opportunity_state/setup_type/setup_quality_ok/trigger_valid/current_trigger_confirmed/invalidation_present/entry_trigger/exit_hint`；期限与证据 `horizon_class/expected_horizon_days/market_regime/evidence_quality/evidence_strength/evidence_freshness/confirmation_requirements/missing_evidence/current_evidence_conflict/factor_focus/no_lookahead_status`；结构化来源 `data_usage_summary/learning_scope/product_profile_evidence/fusion_evidence`。文本、布尔、列表、整数和对象类型必须与共享校验器一致；数据不可用中性 AEC 也不例外。
 
-正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、Trader 可用逻辑 T 日15分钟行情观察的具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备该具体触发和 canonical 失效边界；数据质量、setup 完整性和机会质量的全部降级完成后，finalization 必须原子写入最终 `opportunity_state/trigger_valid/current_trigger_confirmed`：watch 固定为两项布尔值 false，probe/tradeable 固定为两者同时为 true，`no_opportunity` 固定为两者同时为 false。`risk_reduction_candidate` 只服务已有持仓的 hold/reduce/exit 风险收缩，不进入上述新增风险映射，也不进入新增风险证据、rank、预算或交易权限，空仓时只保留为研究证据。
+正式 finalization 只使用一套机会状态规则：普通 `Neutral` 保持 `signal=Neutral`，缺具体 `entry_trigger` 或 canonical 失效边界时固定为 `no_opportunity`；只有明确 `counterfactual_side=long/short`、Trader 可用逻辑 T 日15分钟行情观察的具体触发、canonical 失效边界同时存在且当前触发未成立时，`Neutral` 才可为 `watch_for_trigger`，且不得成为 `probe_candidate/tradeable_candidate`。Bullish/Bearish 证据同样必须先具备该具体触发和 canonical 失效边界；数据质量、setup 完整性和机会质量的全部降级完成后，finalization 必须原子写入最终 `opportunity_state/trigger_valid/current_trigger_confirmed`：watch 固定为两项布尔值 false，probe/tradeable 固定为两者同时为 true，`no_opportunity` 固定为两者同时为 false。三个 LLM 入口使用角色化结构化输出模型：正常无方向、无具体触发、无 canonical 失效边界或仅有研究价值时允许 profile 为空并继续形成 `no_opportunity`；只有已声明且字段完整的 technical watch/probe/tradeable 或 news 即时候选漏填、错填 profile 时才触发既有有限 parse-error 重试，shared finalization 同时拒绝任何绕过角色模型的静默降级。`risk_reduction_candidate` 只服务已有持仓的 hold/reduce/exit 风险收缩，不进入上述新增风险映射，也不进入新增风险证据、rank、预算或交易权限，空仓时只保留为研究证据。
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
@@ -221,7 +222,7 @@
 | `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
 | `entry_quality` | 分析师证据 | 入场质量。 |
 | `entry_trigger` | 分析师证据 | 可执行 AEC 的机器可读盘中触发说明，由共享 canonical 定义根据 `entry_timing_signal+side` 确定性生成，不持久化 LLM 任意执行文字。technical 的说明必须与 Trader 15分钟算法一致；commodity_news 的 `event_immediate` 必须与即时事件边界一致；fundamental 固定为空。自由分析只能留在现有证据、冲突、确认需求和质量字段。 |
-| `entry_timing_signal` | 分析师证据 | 唯一执行时机枚举。technical 可执行证据只允许 `breakout/pullback/vwap_confirmed`；commodity_news 只在当前事件已满足即时执行边界时允许 `event_immediate`；fundamental 固定为空。`range_reversal/trend_breakout/short_timing` 等分析形态只属于 `setup_type/opportunity_type`。 |
+| `entry_timing_signal` | 分析师证据 | 唯一执行时机枚举。technical 可执行证据只允许 `breakout/pullback/vwap_confirmed`，完整 watch 虽未触发也必须填写；commodity_news 只在当前事件已满足即时执行边界时允许 `event_immediate`；fundamental 固定为空。正常 `no_opportunity` 允许为空；已声明且方向、具体触发、canonical 失效边界完整的候选不得为空或使用非法枚举。`range_reversal/trend_breakout/short_timing` 等分析形态只属于 `setup_type/opportunity_type`。 |
 | `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
 | `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
