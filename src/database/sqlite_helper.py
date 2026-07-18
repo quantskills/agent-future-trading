@@ -2,11 +2,13 @@ import sqlite3
 import json
 import uuid
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from graph.schema import AnalystSignal
 from database.interface import BaseDB
 from database.artifact_store import (
+    artifact_write_transaction,
     externalize_json_for_db,
     externalize_text_for_db,
     load_externalized_json,
@@ -33,6 +35,30 @@ class SQLiteDB(BaseDB):
         self.db_path = DB_PATH
         self._runtime_schema_ready = False
         self._runtime_schema_lock = threading.Lock()
+        self._phase1_write_connection = None
+
+    @contextmanager
+    def phase1_write_scope(self):
+        """Commit Phase1 signal/recommendation writes and artifacts together."""
+        if self._phase1_write_connection is not None:
+            raise RuntimeError("nested_phase1_write_scope_not_supported")
+        conn = self._get_connection()
+        self._phase1_write_connection = conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with artifact_write_transaction():
+                yield
+                conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            self._phase1_write_connection = None
+            conn.close()
+
+    def _phase1_or_new_connection(self):
+        active = self._phase1_write_connection
+        return (active, False) if active is not None else (self._get_connection(), True)
 
     @staticmethod
     def _validate_recommendation_audit_payload(audit_payload: Dict[str, Any]) -> None:
@@ -1419,7 +1445,7 @@ class SQLiteDB(BaseDB):
             analyst_key = getattr(analyst, "value", analyst)
             analyst_key = str(analyst_key)
             ticker_key = str(ticker).upper()
-            conn = self._get_connection()
+            conn, owns_connection = self._phase1_or_new_connection()
             cursor = conn.cursor()
             
             signal_id = str(uuid.uuid4())
@@ -1481,13 +1507,14 @@ class SQLiteDB(BaseDB):
                 artifact_ext.summary_json,
             ))
             
-            conn.commit()
+            if owns_connection:
+                conn.commit()
             return signal_id
         except Exception:
             logger.error("signal_persistence_failed")
             return None
         finally:
-            if conn:
+            if conn and locals().get("owns_connection", True):
                 conn.close()
 
     def get_signal_persistence_counts(
@@ -1499,7 +1526,7 @@ class SQLiteDB(BaseDB):
         """Return signal persistence counts for one Phase1 portfolio snapshot."""
         conn = None
         try:
-            conn = self._get_connection()
+            conn, owns_connection = self._phase1_or_new_connection()
             cursor = conn.cursor()
             params: List[Any] = [portfolio_id]
             filters = ["portfolio_id = ?"]
@@ -1538,7 +1565,7 @@ class SQLiteDB(BaseDB):
             logger.error(f"Error reading signal persistence counts: {exc}")
             return {"rows": [], "distinct_pairs": 0, "row_total": 0, "duplicate_pairs": [], "error": str(exc)}
         finally:
-            if conn:
+            if conn and locals().get("owns_connection", True):
                 conn.close()
 
     # ==================== 鏈熻揣涓撶敤鏂规硶 ====================
@@ -1573,7 +1600,7 @@ class SQLiteDB(BaseDB):
                 trading_date=artifact_date,
             )
 
-            conn = self._get_connection()
+            conn, owns_connection = self._phase1_or_new_connection()
             cursor = conn.cursor()
             cursor.execute(
                 '''
@@ -1628,13 +1655,14 @@ class SQLiteDB(BaseDB):
                     audit_ext.summary_json,
                 ),
             )
-            conn.commit()
+            if owns_connection:
+                conn.commit()
             return recommendation_id
         except Exception as e:
             logger.error(f"Error saving futures recommendation: {e}")
             return None
         finally:
-            if conn:
+            if conn and locals().get("owns_connection", True):
                 conn.close()
 
     def get_futures_recommendations_by_effective_date(
@@ -1703,7 +1731,7 @@ class SQLiteDB(BaseDB):
         """Update futures recommendation execution status."""
         conn = None
         try:
-            conn = self._get_connection()
+            conn, owns_connection = self._phase1_or_new_connection()
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT config_id, trading_date, effective_trade_date FROM futures_recommendation WHERE id = ?",
@@ -1833,13 +1861,14 @@ class SQLiteDB(BaseDB):
                 f"UPDATE futures_recommendation SET {', '.join(fields)} WHERE id = ?",
                 tuple(params),
             )
-            conn.commit()
+            if owns_connection:
+                conn.commit()
             return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Error updating futures recommendation status: {e}")
             return False
         finally:
-            if conn:
+            if conn and locals().get("owns_connection", True):
                 conn.close()
 
     def save_futures_intraday_decision(self, decision: Dict[str, Any]) -> Optional[str]:

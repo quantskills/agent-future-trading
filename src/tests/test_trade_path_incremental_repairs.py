@@ -56,9 +56,29 @@ def _analyst_signal(
     trigger_valid: bool = True,
     current_trigger_confirmed: bool = True,
     invalidation_present: bool = True,
-    entry_trigger: str = "break above the validated range",
+    entry_trigger: str | None = None,
+    entry_timing_signal: str = "breakout",
 ) -> AnalystSignal:
     side = "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat"
+    formal_timing = (
+        entry_timing_signal
+        if analyst == "technical"
+        else "event_immediate"
+        if analyst == "commodity_news"
+        and opportunity_state in {"probe_candidate", "tradeable_candidate"}
+        else ""
+    )
+    canonical_trigger = {
+        ("breakout", "long"): "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+        ("breakout", "short"): "15分钟收盘价向下突破开盘区间下沿且低于VWAP",
+        ("pullback", "long"): "15分钟收盘价不低于VWAP且高于开盘区间下沿",
+        ("pullback", "short"): "15分钟收盘价不高于VWAP且低于开盘区间上沿",
+        ("vwap_confirmed", "long"): "15分钟收盘价不低于VWAP",
+        ("vwap_confirmed", "short"): "15分钟收盘价不高于VWAP",
+        ("event_immediate", "long"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
+        ("event_immediate", "short"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
+    }.get((formal_timing, side), "")
+    resolved_entry_trigger = entry_trigger if entry_trigger is not None else canonical_trigger
     aec = build_test_aec(
         analyst,
         signal=signal.value,
@@ -70,12 +90,24 @@ def _analyst_signal(
         trigger_valid=trigger_valid,
         current_trigger_confirmed=current_trigger_confirmed,
         invalidation_present=invalidation_present,
-        entry_trigger=entry_trigger,
+        entry_trigger=resolved_entry_trigger,
         invalidation_condition=(
             "close beyond the validated invalidation boundary"
             if invalidation_present
             else None
         ),
+        extra={
+            "evidence_role": (
+                "entry_timing"
+                if analyst == "technical"
+                else "direction_context"
+                if analyst == "fundamental"
+                else "event_catalyst"
+            ),
+            "entry_timing_signal": (
+                formal_timing
+            ),
+        },
     )
     return AnalystSignal(
         agent_name=analyst,
@@ -87,7 +119,8 @@ def _analyst_signal(
         business_quality_score=0.82,
         setup_quality_score=0.82,
         evidence_quality="high",
-        entry_trigger=entry_trigger,
+        entry_trigger=resolved_entry_trigger,
+        entry_timing_signal=formal_timing,
         trigger_valid=trigger_valid,
         invalidation_present=invalidation_present,
         invalidation_level=96.0 if invalidation_present else None,
@@ -258,11 +291,8 @@ def _execution_config() -> dict:
 
 class DirectAndConditionalExecutionPathTest(unittest.TestCase):
     def test_pm_marks_currently_confirmed_technical_trigger_as_direct_execution(self):
-        for trigger in (
-            "break above the validated range",
-            "pullback to VWAP support and stabilize",
-        ):
-            with self.subTest(trigger=trigger):
+        for profile in ("breakout", "pullback"):
+            with self.subTest(profile=profile):
                 plan = _build_pm_decision_context(
                     ticker="BU",
                     target_lots=2,
@@ -273,7 +303,9 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     short_scores={"confidence": 0.10},
                     margin_rate=0.10,
                     current_lots=0,
-                    analyst_signals=[_analyst_signal(entry_trigger=trigger)],
+                    analyst_signals=[
+                        _analyst_signal(entry_timing_signal=profile)
+                    ],
                     final_entry_authority=_entry_authority(),
                     trading_date="2025-03-26",
                     recommendation_intent={"action": "open_long"},
@@ -326,6 +358,18 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         self.assertFalse(plan["can_execute_without_intraday_trigger"])
 
     def test_trader_honors_direct_execution_for_every_canonical_entry_profile(self):
+        trigger_by_profile = {
+            "breakout": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+            "pullback": "15分钟收盘价不低于VWAP且高于开盘区间下沿",
+            "vwap_confirmed": "15分钟收盘价不低于VWAP",
+            "event_immediate": "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
+        }
+        source_by_profile = {
+            "breakout": "technical_breakout",
+            "pullback": "technical_pullback",
+            "vwap_confirmed": "technical_pullback",
+            "event_immediate": "commodity_news_event",
+        }
         for profile in ("breakout", "pullback", "vwap_confirmed", "event_immediate"):
             with self.subTest(profile=profile):
                 result = select_intraday_execution(
@@ -336,6 +380,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     decision_context={
                         "execution_contract": {
                             "execution_profile": profile,
+                            "trigger_source": source_by_profile[profile],
+                            "entry_trigger": trigger_by_profile[profile],
                             "can_execute_without_intraday_trigger": True,
                             "requires_intraday_confirmation": False,
                         }
@@ -355,6 +401,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             decision_context={
                 "execution_contract": {
                     "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                     "can_execute_without_intraday_trigger": False,
                     "requires_intraday_confirmation": True,
                 }
@@ -368,6 +416,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             decision_context={
                 "execution_contract": {
                     "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                     "can_execute_without_intraday_trigger": True,
                     "requires_intraday_confirmation": False,
                 }
@@ -379,6 +429,26 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         self.assertTrue(watch.to_audit_payload()["trigger_checked"])
         self.assertFalse(no_bar.should_execute)
         self.assertEqual(no_bar.reason, "intraday_no_valid_bar")
+
+    def test_trader_rejects_missing_or_invalid_profile_instead_of_defaulting_to_breakout(self):
+        for execution_contract in (
+            {},
+            {
+                "execution_profile": "range_reversal",
+                "trigger_source": "technical_breakout",
+                "entry_trigger": "arbitrary trigger prose",
+            },
+        ):
+            with self.subTest(execution_contract=execution_contract):
+                result = select_intraday_execution(
+                    signal_bars=_non_triggering_signal_bars(),
+                    execution_bars=_execution_bars(),
+                    action="open_long",
+                    config={"opening_range_minutes": 1, "min_execution_volume": 1},
+                    decision_context={"execution_contract": execution_contract},
+                )
+                self.assertFalse(result.should_execute)
+                self.assertEqual(result.reason, "execution_profile_contract_invalid")
 
     def test_strategy_execution_still_requires_auditor_approval(self):
         self.assertFalse(_auditor_verdict_allows_strategy_execution({"audit_payload": {}}))
@@ -410,8 +480,24 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         event_type: str = "none",
         invalidation_level: float = 96.0,
         atr_stop_distance: float = 2.0,
+        evidence_role: str | None = None,
+        entry_timing_signal: str | None = None,
     ) -> AnalystSignal:
         signal = Signal.BULLISH if side == "long" else Signal.BEARISH
+        role = evidence_role or (
+            "entry_timing"
+            if analyst == "technical"
+            else "direction_context"
+            if analyst == "fundamental"
+            else "event_catalyst"
+        )
+        timing = entry_timing_signal or (
+            "breakout"
+            if analyst == "technical"
+            else "event_immediate"
+            if analyst == "commodity_news"
+            else ""
+        )
         aec = build_test_aec(
             analyst,
             signal=signal.value,
@@ -429,6 +515,8 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
                 "invalidation_level": invalidation_level,
                 "atr_stop_distance": atr_stop_distance,
                 "event_type": event_type,
+                "evidence_role": role,
+                "entry_timing_signal": timing,
             },
         )
         return AnalystSignal(
@@ -443,6 +531,8 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             invalidation_present=True,
             invalidation_level=invalidation_level,
             event_type=event_type,
+            evidence_role=role,
+            entry_timing_signal=timing,
             metadata={"action_evidence_contract": aec},
         )
 
@@ -468,43 +558,46 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             alpha_setup_action_values=action_values,
         )
 
-    def test_fundamental_only_watch_supplies_all_execution_facts(self):
-        fields = self._fields(
-            [self._signal("fundamental")],
-            conditional=True,
-        )
-
-        self.assertEqual(fields["entry_trigger"], "15m close above 100")
-        self.assertEqual(fields["invalidation"], "15m close below 96")
-        self.assertEqual(fields["execution_profile"], "breakout")
-        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
-        self.assertTrue(fields["requires_intraday_confirmation"])
-
-    def test_fundamental_only_confirmed_candidate_is_direct(self):
+    def test_bu_prefers_technical_execution_role_before_higher_fundamental_confidence(self):
         fields = self._fields(
             [
                 self._signal(
                     "fundamental",
-                    opportunity_state="tradeable_candidate",
-                    trigger_valid=True,
-                    current_trigger_confirmed=True,
-                )
+                    confidence=0.6256,
+                    entry_trigger="fundamental short-horizon narrative",
+                    invalidation="fundamental thesis invalidation",
+                ),
+                self._signal(
+                    "technical",
+                    confidence=0.62,
+                    entry_timing_signal="breakout",
+                    entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    invalidation="15m close below 96",
+                ),
             ],
-            conditional=False,
-            authority_type="real_budget_entry",
+            conditional=True,
         )
 
-        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
-        self.assertTrue(fields["can_execute_without_intraday_trigger"])
-        self.assertFalse(fields["requires_intraday_confirmation"])
+        self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
+        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(fields["execution_profile"], "breakout")
+        self.assertEqual(fields["trigger_source"], "technical_breakout")
+
+    def test_fundamental_direction_context_cannot_supply_execution_fields(self):
+        with self.assertRaisesRegex(ValueError, "pm_execution_evidence_not_found"):
+            self._fields(
+                [self._signal("fundamental", confidence=0.90)],
+                conditional=True,
+            )
 
     def test_technical_and_news_sources_keep_their_existing_profiles(self):
         technical = self._fields(
             [
                 self._signal(
                     "technical",
-                    setup_type="trend_pullback",
-                    entry_trigger="pullback to VWAP then stabilize",
+                    setup_type="range_reversal_setup",
+                    entry_timing_signal="pullback",
+                    entry_trigger="15分钟收盘价不低于VWAP且高于开盘区间下沿",
                 )
             ],
             conditional=True,
@@ -517,7 +610,8 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
                     trigger_valid=True,
                     current_trigger_confirmed=True,
                     setup_type="event_catalyst",
-                    entry_trigger="15m price confirms the fresh supply disruption event",
+                    entry_timing_signal="event_immediate",
+                    entry_trigger="当前事件已满足即时执行边界，使用首根合法1分钟线执行",
                     event_type="supply_disruption",
                 )
             ],
@@ -544,21 +638,26 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
                     invalidation="15m close above 94",
                     confidence=0.95,
                 ),
-                self._signal("fundamental", confidence=0.70),
+                self._signal(
+                    "technical",
+                    confidence=0.70,
+                    entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                ),
             ],
             conditional=True,
         )
 
-        self.assertEqual(fields["entry_trigger"], "15m close above 100")
+        self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
         self.assertEqual(fields["invalidation"], "15m close below 96")
-        self.assertEqual(fields["trigger_source"], "fundamental_entry_trigger")
+        self.assertEqual(fields["trigger_source"], "technical_breakout")
 
     def test_multiple_sources_are_not_cross_combined(self):
         fields = self._fields(
             [
                 self._signal(
                     "technical",
-                    entry_trigger="technical 15m breakout",
+                    entry_timing_signal="breakout",
+                    entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                     invalidation="technical 15m failure",
                     confidence=0.90,
                 ),
@@ -572,17 +671,18 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             conditional=True,
         )
 
-        self.assertEqual(fields["entry_trigger"], "technical 15m breakout")
+        self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
         self.assertEqual(fields["invalidation"], "technical 15m failure")
         self.assertEqual(fields["trigger_source"], "technical_breakout")
 
-    def test_unresolved_profile_never_defaults_to_breakout(self):
-        with self.assertRaisesRegex(ValueError, "pm_execution_profile_unresolved"):
+    def test_invalid_timing_value_never_defaults_to_breakout(self):
+        with self.assertRaisesRegex(ValueError, "pm_execution_evidence_not_found"):
             self._fields(
                 [
                     self._signal(
-                        "fundamental",
+                        "technical",
                         setup_type="inventory_dislocation",
+                        entry_timing_signal="range_reversal",
                         entry_trigger="15m volume exceeds 1000 contracts",
                     )
                 ],
@@ -593,10 +693,12 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         fields = self._fields(
             [
                 self._signal(
-                    "fundamental",
+                    "technical",
                     opportunity_state="tradeable_candidate",
                     trigger_valid=True,
                     current_trigger_confirmed=True,
+                    entry_timing_signal="breakout",
+                    entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                 )
             ],
             conditional=False,
@@ -605,6 +707,8 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
                     "ticker": "BU",
                     "side": "long",
                     "action_name": "execution",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
                     "setup_type": "execution_breakout_setup",
                     "data_combo": "fundamental:inventory|execution:breakout",
                     "sample_count": 3,
@@ -623,9 +727,18 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(fields["entry_trigger"], "15m close above 100")
+        self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
         self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(fields["execution_profile"], "breakout")
+        self.assertEqual(fields["trigger_source"], "technical_breakout")
         self.assertTrue(fields["can_execute_without_intraday_trigger"])
+        self.assertEqual(
+            fields["execution_action_value_preference"]["execution_profile"],
+            "pullback",
+        )
+        self.assertTrue(
+            fields["execution_action_value_preference"]["does_not_create_trade_authority"]
+        )
 
 
 class IncrementalMarginExecutionPathTest(unittest.TestCase):
@@ -778,9 +891,8 @@ class RiskReductionIsolationTest(unittest.TestCase):
     def test_risk_reduction_is_not_a_veto_for_a_separate_tradeable_candidate(self):
         risk_reduction = _analyst_signal(opportunity_state="risk_reduction_candidate")
         tradeable = _analyst_signal(
-            analyst="fundamental",
+            analyst="commodity_news",
             opportunity_state="tradeable_candidate",
-            entry_trigger="current price confirms the fundamental setup",
         )
 
         scorecard = build_opportunity_scorecard(
@@ -842,6 +954,29 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
         confidence: float = 0.45,
         missing_evidence: list[str] | None = None,
     ) -> SimpleNamespace:
+        executable = opportunity_state in {
+            "watch_for_trigger",
+            "probe_candidate",
+            "tradeable_candidate",
+        }
+        timing = (
+            "breakout"
+            if analyst == "technical" and executable
+            else "event_immediate"
+            if analyst == "commodity_news"
+            and opportunity_state in {"probe_candidate", "tradeable_candidate"}
+            else ""
+        )
+        canonical_trigger = (
+            "15分钟收盘价向上突破开盘区间上沿且高于VWAP"
+            if timing == "breakout" and side == "long"
+            else "15分钟收盘价向下突破开盘区间下沿且低于VWAP"
+            if timing == "breakout" and side == "short"
+            else "当前事件已满足即时执行边界，使用首根合法1分钟线执行"
+            if timing == "event_immediate"
+            else ""
+        )
+        resolved_entry_trigger = entry_trigger or canonical_trigger
         return build_test_signal(
             analyst,
             signal_record_id=signal_record_id,
@@ -855,7 +990,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
             trigger_valid=trigger_valid,
             current_trigger_confirmed=current_trigger_confirmed,
             invalidation_present=invalidation_present,
-            entry_trigger=entry_trigger,
+            entry_trigger=resolved_entry_trigger,
             invalidation_condition=(
                 "close beyond the validated invalidation boundary"
                 if invalidation_present
@@ -865,6 +1000,14 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 "missing_evidence": list(missing_evidence or []),
                 "business_quality_score": 0.82 if side in {"long", "short"} else 0.0,
                 "setup_quality_score": 0.82 if side in {"long", "short"} else 0.0,
+                "evidence_role": (
+                    "entry_timing"
+                    if analyst == "technical"
+                    else "direction_context"
+                    if analyst == "fundamental"
+                    else "event_catalyst"
+                ),
+                "entry_timing_signal": timing,
             },
         )
 
@@ -943,7 +1086,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 signal="Bullish",
                 side="long",
                 opportunity_state="watch_for_trigger",
-                entry_trigger="15-minute close above the validated range with volume",
+                entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                 invalidation_present=True,
                 missing_evidence=[f"pending_confirmation_{index}" for index in range(8)],
             ),
@@ -1007,7 +1150,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 opportunity_state="tradeable_candidate",
                 trigger_valid=True,
                 current_trigger_confirmed=True,
-                entry_trigger="current 15-minute close confirms above resistance",
+                entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
                 invalidation_present=True,
                 confidence=0.82,
             ),
@@ -1016,18 +1159,35 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
         ]
         aligned_signals = [
             self._collector_signal(
-                analyst,
-                signal_record_id=f"sig-{analyst}",
+                "technical",
+                signal_record_id="sig-technical",
                 signal="Bullish",
                 side="long",
                 opportunity_state="tradeable_candidate",
                 trigger_valid=True,
                 current_trigger_confirmed=True,
-                entry_trigger="current 15-minute close confirms above resistance",
                 invalidation_present=True,
                 confidence=0.82,
-            )
-            for analyst in self._ANALYSTS
+            ),
+            self._collector_signal(
+                "fundamental",
+                signal_record_id="sig-fundamental",
+                signal="Bullish",
+                side="long",
+                opportunity_state="no_opportunity",
+                confidence=0.82,
+            ),
+            self._collector_signal(
+                "commodity_news",
+                signal_record_id="sig-commodity_news",
+                signal="Bullish",
+                side="long",
+                opportunity_state="tradeable_candidate",
+                trigger_valid=True,
+                current_trigger_confirmed=True,
+                invalidation_present=True,
+                confidence=0.82,
+            ),
         ]
 
         def scorecard_for(signals: list[SimpleNamespace]) -> dict:
@@ -1098,8 +1258,9 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 signal_record_id="sig-news",
                 signal="Bullish",
                 side="long",
-                opportunity_state="watch_for_trigger",
-                entry_trigger="15-minute close above resistance with volume",
+                opportunity_state="tradeable_candidate",
+                trigger_valid=True,
+                current_trigger_confirmed=True,
                 invalidation_present=True,
                 confidence=0.45,
             ),
@@ -1139,7 +1300,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     ValueError,
-                    "action_evidence_contract_watch_missing_entry_trigger",
+                    "action_evidence_contract_entry_trigger_not_canonical",
                 ):
                     validate_action_evidence_contract(contract, analyst="technical")
 
@@ -1152,7 +1313,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
             trigger_valid=False,
             current_trigger_confirmed=False,
             invalidation_present=True,
-            entry_trigger="After the weekly report, enter only if the 15-minute close breaks above 3200",
+            entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
         )
         validate_action_evidence_contract(observable, analyst="technical")
 
@@ -1166,7 +1327,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
             trigger_valid=True,
             current_trigger_confirmed=False,
             invalidation_present=True,
-            entry_trigger="15-minute close above 3200 with volume",
+            entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
         )
         with self.assertRaisesRegex(
             ValueError,
@@ -1183,7 +1344,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
             trigger_valid=True,
             current_trigger_confirmed=True,
             invalidation_present=True,
-            entry_trigger="15-minute close above 3200 with volume",
+            entry_trigger="15分钟收盘价向上突破开盘区间上沿且高于VWAP",
         )
         with self.assertRaisesRegex(
             ValueError,

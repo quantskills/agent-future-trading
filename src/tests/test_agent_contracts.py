@@ -111,6 +111,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
+            entry_timing_signal="breakout",
             entry_trigger="open only after breakout confirmation with volume expansion",
             exit_hint="exit if price closes back below breakout area",
             invalidation_level=3200,
@@ -146,7 +147,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn("high_volatility", result.current_evidence_conflict)
         self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
 
-    def test_tradeable_only_if_trigger_stays_watch_for_trigger(self):
+    def test_fundamental_direction_context_cannot_create_execution_watch(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BEARISH,
@@ -173,17 +174,21 @@ class AgentContractFixtureTest(unittest.TestCase):
             ticker="C",
         )
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.signal, Signal.BEARISH)
+        self.assertEqual(result.opportunity_state, "no_opportunity")
         self.assertFalse(result.trigger_valid)
         self.assertFalse(result.metadata["action_evidence_contract"]["trigger_valid"])
-        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(result.metadata["action_evidence_contract"]["opportunity_state"], "no_opportunity")
+        self.assertEqual(result.metadata["action_evidence_contract"]["evidence_role"], "direction_context")
+        self.assertEqual(result.metadata["action_evidence_contract"]["entry_timing_signal"], "")
+        self.assertEqual(result.metadata["action_evidence_contract"]["entry_trigger"], "")
 
     def test_requires_confirmed_break_after_open_stays_watch_for_trigger(self):
         signal = AnalystSignal(
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.70,
+            entry_timing_signal="breakout",
             entry_trigger=(
                 "In the current range regime, bearish entry timing requires a confirmed break "
                 "below the nearest pre-open support/range floor after the open, with MACD/trend "
@@ -232,6 +237,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BEARISH,
             confidence=0.74,
+            entry_timing_signal="breakout",
             entry_trigger="trend_breakout setup below range floor with volume expansion",
             exit_hint="exit if price closes back above range floor",
             invalidation_level=3520.0,
@@ -273,6 +279,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.68,
+            entry_timing_signal="breakout",
             entry_trigger="current breakout above opening range is confirmed by volume expansion",
             exit_hint="exit if price closes back below opening range",
             invalidation_level=3310.0,
@@ -992,7 +999,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertTrue(card["long"]["technical_opposes_side"])
 
 
-class FundamentalFinalizationStateAtomicityTest(unittest.TestCase):
+class FundamentalDirectionContextFinalizationTest(unittest.TestCase):
     @staticmethod
     def _finalize(
         *,
@@ -1061,41 +1068,44 @@ class FundamentalFinalizationStateAtomicityTest(unittest.TestCase):
             ticker="M",
         )
 
-    def test_quality_downgrade_atomically_clears_confirmed_trigger_state(self):
+    def test_quality_downgrade_remains_non_executable_direction_context(self):
         result = self._finalize(
             supports_trade_setup=False,
             trigger_confirmed=True,
         )
         contract = result.metadata["action_evidence_contract"]
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.opportunity_state, "no_opportunity")
         validate_action_evidence_contract(contract, analyst="fundamental")
         self.assertFalse(result.trigger_valid)
         self.assertFalse(contract["trigger_valid"])
         self.assertFalse(contract["current_trigger_confirmed"])
-        self.assertEqual(
-            contract["entry_trigger"],
-            "15-minute close above 3100 with volume expansion",
-        )
+        self.assertEqual(contract["evidence_role"], "direction_context")
+        self.assertEqual(contract["entry_timing_signal"], "")
+        self.assertEqual(contract["entry_trigger"], "")
         self.assertEqual(
             contract["invalidation_condition"],
             "setup invalid if price closes below 3050",
         )
 
-    def test_quality_approved_confirmed_candidate_remains_confirmed(self):
+    def test_quality_approved_direction_still_cannot_create_execution_candidate(self):
         result = self._finalize(
             supports_trade_setup=True,
             trigger_confirmed=True,
         )
         contract = result.metadata["action_evidence_contract"]
 
-        self.assertIn(result.opportunity_state, {"probe_candidate", "tradeable_candidate"})
-        self.assertTrue(result.trigger_valid)
-        self.assertTrue(contract["trigger_valid"])
-        self.assertTrue(contract["current_trigger_confirmed"])
+        self.assertEqual(result.signal, Signal.BULLISH)
+        self.assertEqual(result.opportunity_state, "no_opportunity")
+        self.assertFalse(result.trigger_valid)
+        self.assertFalse(contract["trigger_valid"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+        self.assertEqual(contract["evidence_role"], "direction_context")
+        self.assertEqual(contract["entry_timing_signal"], "")
+        self.assertEqual(contract["entry_trigger"], "")
         validate_action_evidence_contract(contract, analyst="fundamental")
 
-    def test_complete_unconfirmed_setup_remains_pending_watch(self):
+    def test_complete_unconfirmed_fundamental_setup_remains_direction_context(self):
         result = self._finalize(
             supports_trade_setup=True,
             trigger_confirmed=False,
@@ -1103,10 +1113,14 @@ class FundamentalFinalizationStateAtomicityTest(unittest.TestCase):
         )
         contract = result.metadata["action_evidence_contract"]
 
-        self.assertEqual(result.opportunity_state, "watch_for_trigger")
+        self.assertEqual(result.signal, Signal.BULLISH)
+        self.assertEqual(result.opportunity_state, "no_opportunity")
         self.assertFalse(result.trigger_valid)
         self.assertFalse(contract["trigger_valid"])
         self.assertFalse(contract["current_trigger_confirmed"])
+        self.assertEqual(contract["evidence_role"], "direction_context")
+        self.assertEqual(contract["entry_timing_signal"], "")
+        self.assertEqual(contract["entry_trigger"], "")
         validate_action_evidence_contract(contract, analyst="fundamental")
 
     def test_incomplete_setup_becomes_no_opportunity(self):

@@ -28,7 +28,7 @@ class AnalystOutputLandingTest(unittest.TestCase):
             trigger_valid=False,
             current_trigger_confirmed=False,
             invalidation_present=True,
-            entry_trigger="break above morning range",
+            entry_trigger=None,
             invalidation_condition="close below morning range",
             extra={"factor_focus": []},
         )
@@ -37,7 +37,7 @@ class AnalystOutputLandingTest(unittest.TestCase):
             "signal": Signal.BULLISH,
             "confidence": 0.7,
             "opportunity_state": "watch_for_trigger",
-            "entry_trigger": "break above morning range",
+            "entry_trigger": action_contract["entry_trigger"],
             "invalidation_present": True,
             "trigger_valid": False,
             "metadata": {"action_evidence_contract": action_contract},

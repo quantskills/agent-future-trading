@@ -78,6 +78,10 @@ from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_signal_collection_contract,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_trigger,
+    trigger_source_for_analyst_profile,
+)
 from tests.contract_test_fixtures import build_test_aec
 from agents.execution_team.trader import (
     _execute_pending_forced_risk_before_strategy,
@@ -175,7 +179,7 @@ def _signal_collection_contract_fixture(
     opportunity_state: str = "watch_for_trigger",
     trigger_valid: bool = False,
     current_trigger_confirmed: bool = False,
-    entry_trigger: str = "breakout",
+    entry_trigger: str | None = None,
     invalidation_condition: str = "close_below_trigger",
 ) -> dict:
     signal_value = "Bullish" if side == "long" else "Bearish"
@@ -275,7 +279,7 @@ def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | Non
             ),
             trigger_valid=bool(increases_risk and not conditional),
             current_trigger_confirmed=bool(increases_risk and not conditional),
-            entry_trigger=str(contract.get("entry_trigger") or "breakout"),
+            entry_trigger=None,
             invalidation_condition=str(
                 contract.get("invalidation")
                 or contract.get("invalidation_condition")
@@ -1918,7 +1922,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             signal.current_evidence_conflict,
         )
 
-    def test_medium_fundamental_anchor_with_explicit_short_trigger_can_be_tradeable(self):
+    def test_medium_fundamental_anchor_with_trigger_remains_direction_context(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BEARISH,
@@ -1940,7 +1944,11 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
 
         signal = apply_trade_research_contract(signal, context, analyst="fundamental", ticker="J")
 
-        self.assertEqual(signal.opportunity_state, "probe_candidate")
+        self.assertEqual(signal.signal, Signal.BEARISH)
+        self.assertEqual(signal.opportunity_state, "no_opportunity")
+        self.assertEqual(signal.evidence_role, "direction_context")
+        self.assertEqual(signal.entry_timing_signal, "")
+        self.assertEqual(signal.entry_trigger, "")
         self.assertIn(
             "fundamental_anchor_has_short_trigger_and_invalidation",
             signal.current_evidence_conflict,
@@ -3392,11 +3400,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 trigger_valid=False,
                 current_trigger_confirmed=False,
                 invalidation_present=directional,
-                entry_trigger=(
-                    "15m close below 3480 with volume confirmation"
-                    if directional
-                    else ""
-                ),
+                entry_trigger=None if directional else "",
                 invalidation_condition=(
                     "15m close above 3520"
                     if directional
@@ -3895,11 +3899,11 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                         signal="Bearish",
                         side="short",
                         confidence=0.6,
-                        opportunity_state="watch_for_trigger",
+                        opportunity_state="no_opportunity",
                         trigger_valid=False,
                         current_trigger_confirmed=False,
                         invalidation_present=True,
-                        entry_trigger="wait_for_fundamental_price_confirmation",
+                        entry_trigger="",
                         invalidation_condition="fundamental_setup_invalidated",
                     ),
                 },
@@ -6446,14 +6450,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     entry_trigger="breakout above short-term resistance with volume confirmation",
                     entry_quality="acceptable",
                     metadata={
-                        "action_evidence_contract": {
-                            "setup_family": "trend_breakout",
-                            "opportunity_state": "tradeable_candidate",
-                            "opportunity_state": "tradeable_candidate",
-                            "trigger_valid": True,
-                            "invalidation_present": True,
-                            "evidence_role": "entry_timing",
-                        },
+                        "action_evidence_contract": build_test_aec(
+                            "technical",
+                            ticker="P",
+                            signal="Bullish",
+                            side="long",
+                            confidence=0.62,
+                            opportunity_state="tradeable_candidate",
+                            trigger_valid=True,
+                            current_trigger_confirmed=True,
+                            invalidation_present=True,
+                            invalidation_condition="15m close below 9000",
+                        ),
                         "technical_context": {
                             "dominant_direction": "bullish",
                         }
@@ -6630,6 +6638,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 data_coverage_score=0.86,
                 opportunity_type="trend_continuation",
                 setup_type="rb_trend_breakout_setup",
+                entry_timing_signal="breakout",
                 entry_trigger="current breakout above prior high is confirmed",
                 price_percentile=0.56,
                 invalidation_level=3300.0,
@@ -6641,7 +6650,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         self.assertIn(technical.opportunity_state, {"tradeable_candidate", "tradeable_candidate"})
         self.assertTrue(technical.trigger_valid)
-        self.assertEqual(technical.entry_timing_signal, "trend_breakout")
+        self.assertEqual(technical.entry_timing_signal, "breakout")
         self.assertNotIn("generic_trade_setup", json.dumps(technical.metadata, ensure_ascii=False))
         learning_scope = technical.metadata["action_evidence_contract"]["learning_scope"]
         self.assertEqual(learning_scope["setup_family"], "trend_breakout")
@@ -6757,9 +6766,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             alpha_setup_action_values=[open_action_value, execution_action_value],
         )
         execution_contract = plan
-        self.assertEqual(execution_contract["execution_profile"], "pullback")
-        self.assertEqual(execution_contract["trigger_source"], "execution_action_value_pullback")
-        self.assertIn("execution_action_value_preference", execution_contract["reason_codes"])
+        self.assertEqual(execution_contract["execution_profile"], "breakout")
+        self.assertEqual(execution_contract["trigger_source"], "technical_breakout")
+        self.assertEqual(
+            execution_contract["execution_action_value_preference"]["execution_profile"],
+            "pullback",
+        )
         self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
         self.assertFalse(execution_contract["requires_intraday_confirmation"])
         self.assertEqual(execution_contract["business_boundary"], "trader_executes_pm_plan_only_no_strategy_creation")
@@ -6829,7 +6841,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         self.assertTrue(result.should_execute)
         self.assertEqual(result.reason, "intraday_immediate_execution")
-        self.assertEqual(result.features["execution_profile"], "pullback")
+        self.assertEqual(result.features["execution_profile"], "breakout")
         self.assertFalse(result.to_audit_payload()["trigger_checked"])
 
     def test_single_exact_positive_open_action_value_becomes_candidate_not_real_budget(self):
@@ -7549,13 +7561,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     entry_trigger="current breakdown below support is confirmed",
                     evidence_role="entry_timing",
                     metadata={
-                        "action_evidence_contract": {
-                            "opportunity_state": "tradeable_candidate",
-                            "trigger_valid": True,
-                            "current_trigger_confirmed": True,
-                            "invalidation_present": True,
-                            "entry_trigger": "current breakdown below support is confirmed",
-                        }
+                        "action_evidence_contract": build_test_aec(
+                            "technical",
+                            ticker="TA",
+                            signal="Bearish",
+                            side="short",
+                            confidence=0.55,
+                            opportunity_state="tradeable_candidate",
+                            trigger_valid=True,
+                            current_trigger_confirmed=True,
+                            invalidation_present=True,
+                            invalidation_condition="15m close above 5600",
+                        )
                     },
                 )
             ],
@@ -11862,6 +11879,16 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
 
 
 class IntradayExecutionRegressionTest(unittest.TestCase):
+    @staticmethod
+    def _execution_contract(profile: str, side: str, *, direct: bool = False) -> dict:
+        analyst = "commodity_news" if profile == "event_immediate" else "technical"
+        return {
+            "execution_profile": profile,
+            "trigger_source": trigger_source_for_analyst_profile(analyst, profile),
+            "entry_trigger": canonical_entry_trigger(profile, side),
+            "can_execute_without_intraday_trigger": direct,
+        }
+
     def test_pm_execution_contract_classifies_technical_pullback(self):
         action_contract = build_test_aec(
             "technical",
@@ -11872,8 +11899,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             trigger_valid=False,
             current_trigger_confirmed=False,
             invalidation_present=True,
-            entry_trigger="Pullback to VWAP support then stabilize",
+            entry_trigger=canonical_entry_trigger("pullback", "long"),
             invalidation_condition="15m close below 96",
+            extra={"entry_timing_signal": "pullback"},
         )
         plan = _build_pm_decision_context(
             target_lots=2,
@@ -11930,17 +11958,17 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertNotIn("analyst_action_evidence_contracts", learning)
         self.assertNotIn("analyst_learning_scopes", learning)
 
-    def test_pm_does_not_treat_fundamental_pending_trigger_as_current_trigger(self):
+    def test_pm_does_not_accept_fundamental_as_execution_source(self):
         action_contract = build_test_aec(
             "fundamental",
             signal="Bullish",
             side="long",
-            opportunity_state="watch_for_trigger",
+            opportunity_state="no_opportunity",
             setup_type="trend_breakout",
             trigger_valid=False,
             current_trigger_confirmed=False,
             invalidation_present=True,
-            entry_trigger="15m close above the factor confirmation level",
+            entry_trigger="",
             invalidation_condition="15m close below the factor invalidation level",
         )
         signal = AnalystSignal(
@@ -11952,31 +11980,29 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             invalidation_level=96.0,
             metadata={"action_evidence_contract": action_contract},
         )
-        plan = _build_pm_decision_context(
-            target_lots=2,
-            current_price=100.0,
-            position_ratio=0.02,
-            risk_level=RiskLevel.SAFE,
-            long_scores={"confidence": 0.70},
-            short_scores={"confidence": 0.20},
-            margin_rate=0.10,
-            current_lots=0,
-            analyst_signals=[signal],
-            final_entry_authority={
-                "authority_type": "exploration_probe",
-                "open_action_evidence": False,
-                "strong_current_evidence": False,
-                "conditional_trigger_authority": True,
-                "requires_intraday_confirmation": True,
-                "max_allowed_margin_ratio": 0.015,
-            },
-            trading_date="2025-01-06",
-            recommendation_intent={"action": "open_long"},
-            control_reasons=["controlled_probe"],
-        )
-
-        self.assertNotIn("analyst_execution_roles", plan)
-        self.assertTrue(plan["requires_intraday_confirmation"])
+        with self.assertRaisesRegex(ValueError, "pm_execution_evidence_not_found"):
+            _build_pm_decision_context(
+                target_lots=2,
+                current_price=100.0,
+                position_ratio=0.02,
+                risk_level=RiskLevel.SAFE,
+                long_scores={"confidence": 0.70},
+                short_scores={"confidence": 0.20},
+                margin_rate=0.10,
+                current_lots=0,
+                analyst_signals=[signal],
+                final_entry_authority={
+                    "authority_type": "exploration_probe",
+                    "open_action_evidence": False,
+                    "strong_current_evidence": False,
+                    "conditional_trigger_authority": True,
+                    "requires_intraday_confirmation": True,
+                    "max_allowed_margin_ratio": 0.015,
+                },
+                trading_date="2025-01-06",
+                recommendation_intent={"action": "open_long"},
+                control_reasons=["controlled_probe"],
+            )
 
     def test_pm_execution_contract_classifies_authorized_event_immediate(self):
         action_contract = build_test_aec(
@@ -11988,7 +12014,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             trigger_valid=True,
             current_trigger_confirmed=True,
             invalidation_present=True,
-            entry_trigger="15m price confirms the fresh supply disruption event",
+            entry_trigger=None,
             invalidation_condition="catalyst expires or 15m price fails to hold",
             extra={"event_type": "supply_disruption"},
         )
@@ -12031,7 +12057,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertEqual(execution_contract["trigger_source"], "commodity_news_event")
         self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
 
-    def test_execution_action_value_changes_authorized_entry_to_pullback_confirmation(self):
+    def test_execution_action_value_is_advisory_and_does_not_rewrite_execution_contract(self):
         action_contract = build_test_aec(
             "technical",
             signal="Bearish",
@@ -12041,7 +12067,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             trigger_valid=True,
             current_trigger_confirmed=True,
             invalidation_present=True,
-            entry_trigger="Opening range breakdown",
+            entry_trigger=canonical_entry_trigger("breakout", "short"),
             invalidation_condition="15m close above 104",
         )
         plan = _build_pm_decision_context(
@@ -12102,9 +12128,12 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         )
 
         execution_contract = plan
-        self.assertEqual(execution_contract["execution_profile"], "pullback")
-        self.assertEqual(execution_contract["trigger_source"], "execution_action_value_pullback")
-        self.assertIn("execution_action_value_preference", execution_contract["reason_codes"])
+        self.assertEqual(execution_contract["execution_profile"], "breakout")
+        self.assertEqual(execution_contract["trigger_source"], "technical_breakout")
+        self.assertEqual(
+            execution_contract["execution_action_value_preference"]["execution_profile"],
+            "pullback",
+        )
         self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
 
     def test_vwap_confirmed_profile_requires_vwap_direction_and_chase_check(self):
@@ -12123,11 +12152,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_short",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
-                "execution_contract": {
-                    "execution_profile": "vwap_confirmed",
-                    "entry_trigger": "wait for VWAP directional confirmation",
-                    "can_execute_without_intraday_trigger": False,
-                }
+                "execution_contract": self._execution_contract(
+                    "vwap_confirmed", "short"
+                )
             },
         )
 
@@ -12156,6 +12183,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
                 "min_execution_volume": 1,
                 "max_chase_ratio": 0.02,
             },
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
         )
 
         self.assertTrue(result.should_execute)
@@ -12179,11 +12209,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_long",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
-                "execution_contract": {
-                    "execution_profile": "pullback",
-                    "entry_trigger": "pullback to vwap support",
-                    "can_execute_without_intraday_trigger": False,
-                }
+                "execution_contract": self._execution_contract("pullback", "long")
             },
         )
 
@@ -12206,7 +12232,11 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
-            decision_context={"execution_contract": {"execution_profile": "event_immediate"}},
+            decision_context={
+                "execution_contract": self._execution_contract(
+                    "event_immediate", "long"
+                )
+            },
             finalize_untriggered=True,
         )
         allowed = select_intraday_execution(
@@ -12215,10 +12245,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_long",
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
             decision_context={
-                "execution_contract": {
-                    "execution_profile": "event_immediate",
-                    "can_execute_without_intraday_trigger": True,
-                }
+                "execution_contract": self._execution_contract(
+                    "event_immediate", "long", direct=True
+                )
             },
             finalize_untriggered=True,
         )
@@ -12242,6 +12271,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 30, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
             finalize_untriggered=False,
         )
         finalized = select_intraday_execution(
@@ -12249,6 +12281,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 30, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
             finalize_untriggered=True,
         )
 
@@ -12274,6 +12309,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 30, "min_execution_volume": 1, "max_chase_ratio": 0.02},
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
             finalize_untriggered=True,
         )
 
@@ -12296,6 +12334,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 30, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
             finalize_untriggered=False,
         )
 
@@ -12320,6 +12361,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             execution_bars=execution_bars,
             action="open_long",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
             cutoff_datetime=datetime(2025, 1, 6, 10, 5, 0),
             finalize_untriggered=False,
         )
@@ -12391,7 +12435,7 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             },
             decision_context={
                 "execution_contract": {
-                    "execution_profile": "breakout",
+                    **self._execution_contract("breakout", "long"),
                     "allow_confirmed_memory_vwap_fallback": False,
                 }
             },
@@ -12418,11 +12462,9 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             action="open_long",
             config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
-                "execution_contract": {
-                    "execution_profile": "vwap_confirmed",
-                    "entry_trigger": "wait for VWAP directional confirmation",
-                    "can_execute_without_intraday_trigger": False,
-                }
+                "execution_contract": self._execution_contract(
+                    "vwap_confirmed", "long"
+                )
             },
         )
 

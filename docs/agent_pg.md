@@ -151,6 +151,7 @@ AnalystSignal/action_evidence_contract
 - wait、hold、open、open_probe、open_real。
 - add、scale、预算拒绝。
 - reduce、exit、条件监控与触发，以及 canonical 当前触发确认后的各合法 profile 直执行。
+- 三类分析师角色与执行触发使用同一共享 canonical 校验：technical 只允许三种15分钟 profile，fundamental 不产生执行来源，commodity_news 只允许已确认的 `event_immediate`；PM 和 Trader 不解析自由触发文字、不默认 `breakout`。这是既有契约装配验收，不新增历史故障专用检查。
 - Step2 唯一代表方向与 Step5 全市场资金 rank 分离；单来源完整已触发候选以真实低分进入既有队列，未获预算或零手仍是合法结果。
 - `missing_evidence/confirmation_requirements` 不冒充硬数据故障；仅共享 SCC 数据质量摘要 `status=hard_fail` 形成硬阻断，基本面或新闻无当日新增合法。
 - add/scale 扣除当前品种已有保证金后的组合投影，以及 `risk_reduction_candidate` 不进入新增风险证据和 rank。

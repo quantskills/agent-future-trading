@@ -13,6 +13,12 @@ from typing import Any, Iterable, Mapping
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from tools.common.execution_trigger_semantics import (
+    TECHNICAL_ENTRY_PROFILES,
+    canonical_entry_trigger,
+    is_canonical_entry_trigger,
+    normalize_execution_profile,
+)
 from tools.common.evidence_fusion_semantics import build_signal_collection_fusion_summary
 from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
 
@@ -77,6 +83,8 @@ ACTION_EVIDENCE_REQUIRED_FIELDS = {
     "current_trigger_confirmed",
     "invalidation_present",
     "entry_trigger",
+    "entry_timing_signal",
+    "evidence_role",
     "exit_hint",
     "horizon_class",
     "expected_horizon_days",
@@ -103,6 +111,8 @@ ACTION_EVIDENCE_TEXT_FIELDS = {
     "opportunity_state",
     "setup_type",
     "entry_trigger",
+    "entry_timing_signal",
+    "evidence_role",
     "exit_hint",
     "horizon_class",
     "market_regime",
@@ -516,6 +526,8 @@ _TRADER_OBSERVABLE_TRIGGER_MARKERS = (
 
 def has_concrete_entry_trigger(value: Any) -> bool:
     """Return whether an entry condition is concrete and observable by Trader."""
+    if is_canonical_entry_trigger(value):
+        return True
     text = _text(value).strip().lower()
     if text in _NON_ENTRY_TRIGGER_VALUES:
         return False
@@ -628,6 +640,73 @@ def validate_action_evidence_contract(
     if opportunity_state not in ACTION_EVIDENCE_OPPORTUNITY_STATES:
         raise ValueError("action_evidence_contract_invalid_opportunity_state")
     entry_trigger_present = has_concrete_entry_trigger(contract.get("entry_trigger"))
+    evidence_role = _text(contract.get("evidence_role"))
+    entry_timing_signal = normalize_execution_profile(
+        contract.get("entry_timing_signal")
+    )
+    raw_entry_timing_signal = _text(contract.get("entry_timing_signal")).lower()
+    if raw_entry_timing_signal and not entry_timing_signal:
+        raise ValueError("action_evidence_contract_invalid_entry_timing_signal")
+    if contract_analyst == "technical" and evidence_role != "entry_timing":
+        raise ValueError("action_evidence_contract_technical_role_invalid")
+    if contract_analyst == "fundamental" and evidence_role != "direction_context":
+        raise ValueError("action_evidence_contract_fundamental_role_invalid")
+    if contract_analyst == "commodity_news" and evidence_role != "event_catalyst":
+        raise ValueError("action_evidence_contract_news_role_invalid")
+    if opportunity_state != "risk_reduction_candidate":
+        executable_state = opportunity_state in {
+            "watch_for_trigger",
+            "probe_candidate",
+            "tradeable_candidate",
+        }
+        execution_side = (
+            _text(contract.get("counterfactual_side")).lower()
+            if signal == Signal.NEUTRAL.value
+            else side
+        )
+        if contract_analyst == "fundamental":
+            if executable_state or entry_timing_signal or _text(contract.get("entry_trigger")):
+                raise ValueError(
+                    "action_evidence_contract_fundamental_execution_claim_forbidden"
+                )
+        elif contract_analyst == "technical":
+            if executable_state:
+                if entry_timing_signal not in TECHNICAL_ENTRY_PROFILES:
+                    raise ValueError(
+                        "action_evidence_contract_technical_profile_missing"
+                    )
+                if _text(contract.get("entry_trigger")) != canonical_entry_trigger(
+                    entry_timing_signal,
+                    execution_side,
+                ):
+                    raise ValueError(
+                        "action_evidence_contract_entry_trigger_not_canonical"
+                    )
+            elif entry_timing_signal or _text(contract.get("entry_trigger")):
+                raise ValueError(
+                    "action_evidence_contract_no_opportunity_execution_claim"
+                )
+        elif contract_analyst == "commodity_news":
+            if executable_state:
+                if opportunity_state == "watch_for_trigger":
+                    raise ValueError(
+                        "action_evidence_contract_news_watch_execution_forbidden"
+                    )
+                if entry_timing_signal != "event_immediate":
+                    raise ValueError(
+                        "action_evidence_contract_news_profile_invalid"
+                    )
+                if _text(contract.get("entry_trigger")) != canonical_entry_trigger(
+                    entry_timing_signal,
+                    execution_side,
+                ):
+                    raise ValueError(
+                        "action_evidence_contract_entry_trigger_not_canonical"
+                    )
+            elif entry_timing_signal or _text(contract.get("entry_trigger")):
+                raise ValueError(
+                    "action_evidence_contract_no_opportunity_execution_claim"
+                )
     invalidation_proof = _has_canonical_invalidation_proof(contract)
     if contract.get("invalidation_present") is True and not invalidation_proof:
         raise ValueError("action_evidence_contract_invalidation_proof_missing")

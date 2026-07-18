@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,7 @@ from tools.common.signal_evidence_collection import (
     validate_action_evidence_contract,
     validate_signal_collection_contract,
 )
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
 
 
 ANALYSTS = ("technical", "fundamental", "commodity_news")
@@ -289,7 +291,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 self.assertFalse(contract["trigger_valid"])
                 self.assertFalse(contract["invalidation_present"])
 
-    def test_complete_directional_neutral_can_remain_watch(self):
+    def test_only_technical_directional_neutral_can_form_execution_watch(self):
         for analyst in ANALYSTS:
             with self.subTest(analyst=analyst):
                 signal = _ordinary_neutral(analyst)
@@ -297,6 +299,8 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 signal.neutral_opportunity_bucket = "watchlist_trigger"
                 signal.entry_trigger = "long entry only after price closes above 3050 with volume confirmation"
                 signal.neutral_trigger_condition = signal.entry_trigger
+                if analyst == "technical":
+                    signal.entry_timing_signal = "breakout"
                 finalized = _finalize(
                     analyst,
                     signal,
@@ -304,10 +308,14 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 )
                 contract = finalized.metadata["action_evidence_contract"]
                 self.assertEqual(contract["signal"], "Neutral")
-                self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+                expected_state = "watch_for_trigger" if analyst == "technical" else "no_opportunity"
+                self.assertEqual(contract["opportunity_state"], expected_state)
                 self.assertFalse(contract["trigger_valid"])
                 self.assertFalse(contract["current_trigger_confirmed"])
                 self.assertTrue(contract["invalidation_present"])
+                if analyst != "technical":
+                    self.assertEqual(contract["entry_timing_signal"], "")
+                    self.assertEqual(contract["entry_trigger"], "")
 
     def test_neutral_missing_entry_trigger_is_no_opportunity(self):
         signal = _ordinary_neutral("technical")
@@ -327,6 +335,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
         signal.counterfactual_side = "long"
         signal.neutral_opportunity_bucket = "watchlist_trigger"
         signal.entry_trigger = "long entry only after price closes above 3050 with volume confirmation"
+        signal.entry_timing_signal = "breakout"
         signal.neutral_trigger_condition = signal.entry_trigger
         signal.would_change_view_if = "view changes if price later closes below 2980"
         finalized = _finalize("technical", signal)
@@ -340,6 +349,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
         signal.counterfactual_side = "long"
         signal.neutral_opportunity_bucket = "watchlist_trigger"
         signal.entry_trigger = "long entry only after price closes above 3050 with volume confirmation"
+        signal.entry_timing_signal = "breakout"
         signal.neutral_trigger_condition = signal.entry_trigger
         signal.exit_hint = "long setup invalid if price closes below 2980"
         finalized = _finalize("technical", signal)
@@ -402,9 +412,12 @@ class SharedContractAndDownstreamTest(unittest.TestCase):
             invalidation_present=True,
             entry_trigger="wait_for_trigger",
             invalidation_condition="long setup invalid if price closes below 2980",
-            extra={"counterfactual_side": "long"},
+            extra={
+                "counterfactual_side": "long",
+                "entry_timing_signal": "breakout",
+            },
         )
-        with self.assertRaisesRegex(ValueError, "action_evidence_contract_watch_missing_entry_trigger"):
+        with self.assertRaisesRegex(ValueError, "action_evidence_contract_entry_trigger_not_canonical"):
             validate_action_evidence_contract(contract, analyst="technical")
 
     def test_invalidation_flag_requires_canonical_proof(self):
@@ -417,9 +430,10 @@ class SharedContractAndDownstreamTest(unittest.TestCase):
             opportunity_state="watch_for_trigger",
             trigger_valid=False,
             invalidation_present=True,
-            entry_trigger="long entry only after price closes above 3050 with volume confirmation",
+            entry_trigger=canonical_entry_trigger("breakout", "long"),
             extra={
                 "counterfactual_side": "long",
+                "entry_timing_signal": "breakout",
                 "would_change_view_if": "view changes if price closes below 2980",
             },
         )
@@ -447,10 +461,10 @@ class SharedContractAndDownstreamTest(unittest.TestCase):
                 trading_date=TRADING_DATE,
                 signal="Bullish",
                 side="long",
-                opportunity_state="tradeable_candidate",
-                trigger_valid=True,
-                current_trigger_confirmed=True,
-                entry_trigger="long entry confirmed above 3050 with volume",
+                opportunity_state="no_opportunity",
+                trigger_valid=False,
+                current_trigger_confirmed=False,
+                entry_trigger="",
                 invalidation_condition="long setup invalid below 2980",
             ),
             build_test_signal(
@@ -463,7 +477,7 @@ class SharedContractAndDownstreamTest(unittest.TestCase):
                 opportunity_state="probe_candidate",
                 trigger_valid=True,
                 current_trigger_confirmed=True,
-                entry_trigger="long event entry confirmed above 3050 with volume",
+                entry_trigger=None,
                 invalidation_condition="long event setup invalid below 2980",
             ),
         ]
@@ -548,6 +562,7 @@ class WorkflowAndPreBacktestBoundaryTest(unittest.TestCase):
             return_value={"ticker": "BU", "analyst_signals": []}
         )
         workflow.db = Mock()
+        workflow.db.phase1_write_scope.return_value = nullcontext()
 
         def good_agent(_state):
             return {"analyst_signals": [SimpleNamespace(agent_name="technical")]}
@@ -591,6 +606,7 @@ class WorkflowAndPreBacktestBoundaryTest(unittest.TestCase):
         workflow.current_analysts = None
         workflow.planner_mode = False
         workflow.db = Mock()
+        workflow.db.phase1_write_scope.return_value = nullcontext()
         workflow._apply_virtual_pending_rollovers = Mock(return_value=portfolio)
         workflow._prefetch_local_daily_data = Mock(return_value={})
         workflow._prefetch_pandaai_daily_data = Mock(return_value={})

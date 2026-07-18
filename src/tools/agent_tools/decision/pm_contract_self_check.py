@@ -17,7 +17,10 @@ from tools.common.final_action_semantics import (
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
 )
-from tools.common.signal_evidence_collection import has_concrete_entry_trigger
+from tools.common.execution_trigger_semantics import (
+    CANONICAL_EXECUTION_PROFILES,
+    execution_trigger_contract_error,
+)
 
 
 FINAL_ACTION_CONTRACT_REQUIRED_FIELDS = (
@@ -45,39 +48,6 @@ STEP5_UNDEPLOYED_NO_NEW_EXPOSURE_REASON_PREFIXES = (
     "no_rank_no_new_exposure",
     "no_rank_or_budget_no_new_exposure",
 )
-CANONICAL_EXECUTION_PROFILES = {
-    "breakout",
-    "pullback",
-    "vwap_confirmed",
-    "event_immediate",
-    "exit_immediate",
-    "hold",
-}
-CANONICAL_TRIGGER_SOURCES_BY_PROFILE = {
-    "breakout": {
-        "technical_breakout",
-        "fundamental_entry_trigger",
-        "commodity_news_event",
-        "execution_action_value_breakout",
-    },
-    "pullback": {
-        "technical_pullback",
-        "fundamental_entry_trigger",
-        "commodity_news_event",
-        "execution_action_value_pullback",
-    },
-    "vwap_confirmed": {
-        "technical_pullback",
-        "fundamental_entry_trigger",
-        "commodity_news_event",
-        "execution_action_value_vwap_confirmed",
-    },
-    "event_immediate": {"commodity_news_event"},
-    "exit_immediate": {"position_lifecycle"},
-    "hold": {"none"},
-}
-
-
 def _as_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -308,16 +278,26 @@ def _execution_contract_errors(contract: Mapping[str, Any]) -> List[str]:
         errors.append("execution_profile_not_canonical")
     if not trigger_source:
         errors.append("trigger_source_missing")
-    elif profile in CANONICAL_TRIGGER_SOURCES_BY_PROFILE and trigger_source not in (
-        CANONICAL_TRIGGER_SOURCES_BY_PROFILE[profile]
-    ):
+    elif execution_trigger_contract_error(
+        profile=profile,
+        side=("long" if _as_int(contract.get("target_lots")) > 0 else "short"),
+        entry_trigger=contract.get("entry_trigger"),
+        trigger_source=trigger_source,
+    ) == "execution_trigger_source_contract_invalid":
         errors.append("execution_profile_trigger_source_mismatch")
 
     final_action = str(contract.get("final_action") or "").strip().lower()
     if final_action not in {"open_probe", "open_real", "scale"}:
         return errors
-    if not has_concrete_entry_trigger(contract.get("entry_trigger")):
+    if not str(contract.get("entry_trigger") or "").strip():
         errors.append("new_risk_execution_missing_entry_trigger")
+    elif execution_trigger_contract_error(
+        profile=profile,
+        side=("long" if _as_int(contract.get("target_lots")) > 0 else "short"),
+        entry_trigger=contract.get("entry_trigger"),
+        trigger_source=trigger_source,
+    ) == "execution_entry_trigger_contract_invalid":
+        errors.append("execution_entry_trigger_contract_invalid")
     invalidation = str(contract.get("invalidation") or "").strip().lower()
     invalidation_condition_present = invalidation not in {"", "unknown", "none", "n/a", "null"}
     invalidation_level = contract.get("invalidation_level")

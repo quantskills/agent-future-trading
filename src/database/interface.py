@@ -3,6 +3,10 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 class BaseDB(ABC):
+    def phase1_write_scope(self):
+        """Return the backend write scope for one complete Phase1."""
+        raise NotImplementedError("phase1_write_scope_not_supported")
+
     @abstractmethod
     def get_config(self, config_id: str) -> dict:
         pass

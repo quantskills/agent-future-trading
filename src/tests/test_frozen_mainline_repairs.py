@@ -85,6 +85,12 @@ def _complete_aec(analyst: str, *, data_available: bool = True) -> dict:
         "current_trigger_confirmed": False,
         "invalidation_present": False,
         "entry_trigger": "",
+        "entry_timing_signal": "",
+        "evidence_role": {
+            "technical": "entry_timing",
+            "fundamental": "direction_context",
+            "commodity_news": "event_catalyst",
+        }[analyst],
         "exit_hint": "",
         "horizon_class": "flat",
         "expected_horizon_days": 0,

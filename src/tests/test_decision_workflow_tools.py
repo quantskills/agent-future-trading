@@ -80,6 +80,7 @@ class FakeMemoryDB:
 
 def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overrides) -> AnalystSignal:
     side = "long" if signal == Signal.BULLISH else "short" if signal == Signal.BEARISH else "flat"
+    executable = side != "flat" and agent_name in {"technical", "commodity_news"}
     contract = build_test_aec(
         agent_name,
         ticker="BU",
@@ -87,9 +88,9 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
         signal=signal.value,
         side=side,
         confidence=confidence,
-        opportunity_state="tradeable_candidate" if side != "flat" else "no_opportunity",
-        trigger_valid=side != "flat",
-        current_trigger_confirmed=side != "flat",
+        opportunity_state="tradeable_candidate" if executable else "no_opportunity",
+        trigger_valid=executable,
+        current_trigger_confirmed=executable,
         invalidation_present=side != "flat",
         invalidation_condition="invalid if price closes back into range" if side != "flat" else None,
     )

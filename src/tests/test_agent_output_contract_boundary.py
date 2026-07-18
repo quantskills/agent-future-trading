@@ -65,17 +65,18 @@ def _nested_key_paths(value, forbidden, prefix=""):
     return paths
 
 
-def _analyst_action_contract():
+def _analyst_action_contract(agent_name="technical"):
+    executable = agent_name == "technical"
     return build_test_aec(
-        "technical",
+        agent_name,
         signal="Bullish",
         side="long",
         confidence=0.68,
-        opportunity_state="watch_for_trigger",
+        opportunity_state="watch_for_trigger" if executable else "no_opportunity",
         trigger_valid=False,
         current_trigger_confirmed=False,
         invalidation_present=True,
-        entry_trigger="breakout_above_prior_high",
+        entry_trigger=None if executable else "",
         invalidation_condition="close_below_support",
         extra={
             "setup_type": "trend_breakout",
@@ -96,9 +97,7 @@ def _analyst_action_contract():
 
 
 def _analyst_signal(agent_name="technical"):
-    contract = _analyst_action_contract()
-    contract["analyst"] = agent_name
-    contract["data_usage_summary"]["analyst"] = agent_name
+    contract = _analyst_action_contract(agent_name)
     return SimpleNamespace(
         agent_name=agent_name,
         signal=contract["signal"],

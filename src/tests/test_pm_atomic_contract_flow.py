@@ -35,7 +35,17 @@ def _signal_collection_contract(ticker: str, side: str = "long") -> dict:
         side=side,
         confidence=0.8,
         invalidation_condition="close_below_trigger",
-        extra={"invalidation_level": 2950.0, "atr_stop_distance": 40.0},
+        entry_trigger=(
+            "15分钟收盘价向上突破开盘区间上沿且高于VWAP"
+            if side == "long"
+            else "15分钟收盘价向下突破开盘区间下沿且低于VWAP"
+        ),
+        extra={
+            "invalidation_level": 2950.0,
+            "atr_stop_distance": 40.0,
+            "evidence_role": "entry_timing",
+            "entry_timing_signal": "breakout",
+        },
     )
     signal = SimpleNamespace(
         agent_name="technical",
@@ -207,10 +217,10 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 invalid = {**contract, **mutation}
                 self.assertIn(expected_error, check_final_action_contract(invalid)["errors"])
 
-    def test_fundamental_watch_survives_step5_and_step6_as_one_conditional_contract(self):
+    def test_technical_watch_survives_step5_and_step6_as_one_conditional_contract(self):
         analyst_signals = []
         for analyst in ("technical", "fundamental", "commodity_news"):
-            directional = analyst == "fundamental"
+            directional = analyst == "technical"
             aec = build_test_aec(
                 analyst,
                 ticker="M",
@@ -222,11 +232,23 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 trigger_valid=False,
                 current_trigger_confirmed=False,
                 invalidation_present=directional,
-                entry_trigger="15m close above 3500" if directional else "",
+                entry_trigger=(
+                    "15分钟收盘价向上突破开盘区间上沿且高于VWAP"
+                    if directional
+                    else ""
+                ),
                 invalidation_condition="15m close below 3420" if directional else None,
                 extra={
                     "invalidation_level": 3420.0 if directional else None,
                     "atr_stop_distance": 36.0 if directional else None,
+                    "evidence_role": (
+                        "entry_timing"
+                        if analyst == "technical"
+                        else "direction_context"
+                        if analyst == "fundamental"
+                        else "event_catalyst"
+                    ),
+                    "entry_timing_signal": "breakout" if directional else "",
                 },
             )
             analyst_signals.append(
@@ -293,10 +315,13 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         self.assertTrue(contract["conditional_trigger_authority"])
         self.assertTrue(contract["requires_intraday_confirmation"])
         self.assertFalse(contract["can_execute_without_intraday_trigger"])
-        self.assertEqual(contract["entry_trigger"], "15m close above 3500")
+        self.assertEqual(
+            contract["entry_trigger"],
+            "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+        )
         self.assertEqual(contract["invalidation"], "15m close below 3420")
         self.assertEqual(contract["execution_profile"], "breakout")
-        self.assertEqual(contract["trigger_source"], "fundamental_entry_trigger")
+        self.assertEqual(contract["trigger_source"], "technical_breakout")
         self.assertEqual(contract["invalidation_level"], 3420.0)
         self.assertEqual(contract["atr_stop_distance"], 36.0)
         self.assertTrue(check_final_action_contract(contract)["ok"])

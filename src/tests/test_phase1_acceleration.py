@@ -1,17 +1,26 @@
 ﻿import sys
+import os
 import tempfile
 import unittest
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from graph.constants import Signal
-from graph.schema import AnalystSignal, FuturesAction, FuturesRecommendation, RecommendationAction, RecommendationStatus
+from graph.schema import (
+    AnalystSignal,
+    FuturesAction,
+    FuturesRecommendation,
+    Portfolio,
+    RecommendationAction,
+    RecommendationStatus,
+)
 from graph.workflow import AgentWorkflow
 from database.artifact_store import load_externalized_json
 from database.sqlite_helper import SQLiteDB
@@ -22,6 +31,10 @@ class _FakeDB:
     def __init__(self):
         self.saved_signals = []
         self.saved_recommendations = []
+
+    @contextmanager
+    def phase1_write_scope(self):
+        yield
 
     def get_latest_settled_portfolio(self, config_id):
         return {
@@ -229,6 +242,147 @@ class Phase1AccelerationTest(unittest.TestCase):
             "timing summary",
         ):
             self.assertNotIn(forbidden, logged)
+
+    def test_phase1_step6_failure_rolls_back_signals_and_external_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = SQLiteDB()
+            db.db_path = str(Path(temp_dir) / "agentquant.db")
+            from database.sqlite_setup import init_database
+
+            with patch("database.sqlite_setup.DB_PATH", db.db_path):
+                init_database()
+            portfolio_row = db.create_portfolio("cfg", 1_000_000.0, "2025-03-26")
+            portfolio = Portfolio(
+                id=portfolio_row["id"],
+                cashflow=1_000_000.0,
+                account_equity=1_000_000.0,
+                positions={},
+                risk_status="NORMAL",
+            )
+            signal = AnalystSignal(
+                agent_name="technical",
+                signal=Signal.NEUTRAL,
+                confidence=0.4,
+                justification="fixture",
+                metadata={
+                    "action_evidence_contract": build_test_aec(
+                        "technical",
+                        ticker="BU",
+                        trading_date="2025-03-26",
+                    )
+                },
+            )
+            context = SimpleNamespace(base_price=100.0, contract_facts={})
+            analysis_state = {
+                "ticker": "BU",
+                "portfolio": portfolio,
+                "trading_date": "2025-03-26",
+                "full_config": {},
+                "enabled_analysts": ["technical"],
+                "analyst_signals": [signal],
+            }
+            workflow = AgentWorkflow.__new__(AgentWorkflow)
+            workflow.config = {"max_total_margin_ratio": 0.2}
+            workflow.config_id = "cfg"
+            workflow.exp_name = "atomic-phase1-test"
+            workflow.trading_date = "2025-03-26"
+            workflow.tickers = ["BU"]
+            workflow.workflow_analysts = ["technical"]
+            workflow.current_analysts = ["technical"]
+            workflow.planner_mode = False
+            workflow.phase1_runtime_cfg = {}
+            workflow.db = db
+            workflow.init_portfolio = portfolio
+            workflow.load_analysts = Mock()
+            workflow._apply_virtual_pending_rollovers = Mock(return_value=portfolio)
+            workflow._prefetch_local_daily_data = Mock(return_value={})
+            workflow._prefetch_pandaai_daily_data = Mock(return_value={})
+            workflow._prefetch_pre_open_reference_prices = Mock(return_value={"BU": context})
+            workflow._prefetch_phase1_analysis = Mock(return_value={"BU": analysis_state})
+            workflow._run_phase1_portfolio_only = Mock(return_value={"pm_state": {"ticker": "BU"}})
+            workflow._persist_pm_full_market_contracts = Mock(
+                side_effect=RuntimeError("pm_step6_finalization_failed")
+            )
+            artifact_root = Path(temp_dir) / "artifacts"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTQUANT_ARTIFACT_ROOT": str(artifact_root),
+                    "AGENTQUANT_ARTIFACT_INLINE_MAX_BYTES": "1",
+                },
+            ), patch("graph.workflow.write_analyst_report", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "pm_step6_finalization_failed"):
+                    workflow._run_futures_phase1()
+
+            conn = db._get_connection()
+            try:
+                signal_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM signal WHERE portfolio_id=?",
+                    (portfolio.id,),
+                ).fetchone()["count"]
+                recommendation_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM futures_recommendation WHERE config_id='cfg'"
+                ).fetchone()["count"]
+            finally:
+                conn.close()
+
+            self.assertEqual(signal_count, 0)
+            self.assertEqual(recommendation_count, 0)
+            self.assertFalse(any(path.is_file() for path in artifact_root.rglob("*")))
+
+    def test_sqlite_phase1_scope_keeps_one_connection_for_multiple_recommendations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = SQLiteDB()
+            db.db_path = str(Path(temp_dir) / "agentquant.db")
+            from database.sqlite_setup import init_database
+
+            with patch("database.sqlite_setup.DB_PATH", db.db_path):
+                init_database()
+
+            def recommendation(ticker: str) -> FuturesRecommendation:
+                return FuturesRecommendation(
+                    config_id="cfg",
+                    reference_portfolio_id="portfolio-prev",
+                    trading_date="2025-03-26",
+                    effective_trade_date="2025-03-26",
+                    underlying_code=ticker,
+                    contract_code=f"{ticker}2506",
+                    action=RecommendationAction.HOLD,
+                    lots=0,
+                    base_price=100.0,
+                    justification="phase1 scope fixture",
+                    signal_snapshot={"ticker": ticker},
+                )
+
+            with db.phase1_write_scope():
+                self.assertIsNotNone(db.save_futures_recommendation(recommendation("BU")))
+                self.assertIsNotNone(db.save_futures_recommendation(recommendation("RB")))
+
+            conn = db._get_connection()
+            try:
+                committed = conn.execute(
+                    "SELECT COUNT(*) AS count FROM futures_recommendation WHERE config_id='cfg'"
+                ).fetchone()["count"]
+            finally:
+                conn.close()
+            self.assertEqual(committed, 2)
+
+            with self.assertRaisesRegex(RuntimeError, "injected_phase1_failure"):
+                with db.phase1_write_scope():
+                    self.assertIsNotNone(
+                        db.save_futures_recommendation(recommendation("CF"))
+                    )
+                    raise RuntimeError("injected_phase1_failure")
+
+            conn = db._get_connection()
+            try:
+                after_rollback = conn.execute(
+                    "SELECT COUNT(*) AS count FROM futures_recommendation WHERE config_id='cfg'"
+                ).fetchone()["count"]
+            finally:
+                conn.close()
+            self.assertEqual(after_rollback, 2)
 
     def test_sqlite_signal_save_replaces_same_ticker_analyst_scope(self):
         with tempfile.TemporaryDirectory() as temp_dir:

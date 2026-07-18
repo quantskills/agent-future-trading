@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
+
 
 def build_test_aec(
     analyst: str,
@@ -25,7 +27,11 @@ def build_test_aec(
 ) -> dict[str, Any]:
     directional = side in {"long", "short"}
     state = opportunity_state or (
-        "tradeable_candidate" if directional and trigger_valid else "watch_for_trigger" if directional else "no_opportunity"
+        "tradeable_candidate"
+        if analyst == "technical" and directional and trigger_valid
+        else "watch_for_trigger"
+        if analyst == "technical" and directional
+        else "no_opportunity"
     )
     has_invalidation = directional if invalidation_present is None else invalidation_present
     source_name, source, dataset = {
@@ -37,6 +43,23 @@ def build_test_aec(
         ),
         "commodity_news": ("finoview_news_txt", "Finoview", "local_news_txt"),
     }[analyst]
+    role = {
+        "technical": "entry_timing",
+        "fundamental": "direction_context",
+        "commodity_news": "event_catalyst",
+    }[analyst]
+    timing = (
+        "breakout"
+        if analyst == "technical"
+        and directional
+        and state in {"watch_for_trigger", "probe_candidate", "tradeable_candidate"}
+        else "event_immediate"
+        if analyst == "commodity_news"
+        and directional
+        and state in {"probe_candidate", "tradeable_candidate"}
+        else ""
+    )
+    default_trigger = canonical_entry_trigger(timing, side) if timing else ""
     contract: dict[str, Any] = {
         "contract_version": "agentquant.action_evidence.v1",
         "analyst": analyst,
@@ -50,7 +73,9 @@ def build_test_aec(
         "setup_quality_ok": directional if setup_quality_ok is None else setup_quality_ok,
         "trigger_valid": trigger_valid,
         "current_trigger_confirmed": current_trigger_confirmed,
-        "entry_trigger": entry_trigger if entry_trigger is not None else "breakout" if directional else "",
+        "entry_trigger": entry_trigger if entry_trigger is not None else default_trigger,
+        "entry_timing_signal": timing,
+        "evidence_role": role,
         "exit_hint": "close_beyond_invalidation" if directional else "",
         "invalidation_present": has_invalidation,
         "horizon_class": "short" if directional else "flat",

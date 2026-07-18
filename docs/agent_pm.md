@@ -184,9 +184,9 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。合法 watch 获选后固定为条件执行；canonical 当前触发已确认且失效边界完整的 probe/tradeable 候选，经 Step5 和 Auditor 放行后可对任一合法 profile 形成 `can_execute_without_intraday_trigger=true`，该字段不改变 rank、预算或 sizing。
 
-新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 先过滤最终 `target_side` 的合法机会状态、具体 `entry_trigger` 和 canonical 失效边界，再按既有确定性顺序选择唯一执行证据：条件路径只选尚未触发的 `watch_for_trigger`，直接执行路径只选当前触发已确认的 `probe_candidate/tradeable_candidate`；反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
+新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 必须先按执行职责过滤，再比较同类合法证据的置信度：普通15分钟条件或直执行只选最终 `target_side` 下的 technical `entry_timing`；`event_immediate` 只选当前事件已满足即时边界的 commodity_news `event_catalyst`；fundamental 固定为 `direction_context`，只能支持方向和评分，不能成为 Trader 执行来源。反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
 
-`entry_trigger`、`invalidation`、`execution_profile`、`trigger_source` 以及存在的 `invalidation_level/atr_stop_distance` 必须由同一被选 AEC 原子形成。profile 只按该 AEC 的正式 setup、触发和事件事实显式映射为 `breakout/pullback/vwap_confirmed/event_immediate`；无法映射时契约失败，不得默认 `breakout`。technical 继续使用 `technical_breakout/technical_pullback`，commodity_news 使用 `commodity_news_event`，fundamental 固定使用 `fundamental_entry_trigger`。执行 action-value 只能在已有权限上覆盖既有 profile/source，不能创建触发、失效边界或权限。
+`entry_trigger`、`invalidation`、`execution_profile`、`trigger_source` 以及存在的 `invalidation_level/atr_stop_distance` 必须由同一被选 AEC 原子形成。`execution_profile` 直接复制该 AEC 的 `entry_timing_signal`；PM 不得从 `entry_trigger/setup_type/opportunity_type` 的文字猜测 profile，也不得默认 `breakout`。technical 使用 `technical_breakout/technical_pullback`，commodity_news 使用 `commodity_news_event`。执行 action-value 继续作为已有 `execution_action_value_preference` 建议摘要被消费，但不得改写顶层 profile/source/trigger、创建失效边界或交易权限。
 
 风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 

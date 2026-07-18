@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from database.artifact_store import write_artifact_text
 from tools.common.contracts import (
     build_internal_message_contract,
     build_trade_research_contract,
@@ -15,6 +16,11 @@ from tools.common.contracts import (
     validate_trade_research_contract,
 )
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
+from tools.common.execution_trigger_semantics import (
+    TECHNICAL_ENTRY_PROFILES,
+    canonical_entry_trigger,
+    normalize_execution_profile,
+)
 from tools.common.signal_evidence_collection import (
     ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS,
     has_concrete_entry_trigger,
@@ -722,7 +728,9 @@ def _build_action_evidence_contract(
             "side": side,
             "opportunity_type": opportunity_type,
             "opportunity_state": str(opportunity_state or "watch_for_trigger"),
-            "setup_type": str(opportunity_type or "unknown"),
+            "setup_type": str(
+                getattr(signal, "setup_type", "") or opportunity_type or "unknown"
+            ),
             "setup_quality_ok": bool(quality_context.get("setup_quality_ok")),
             "trigger_valid": bool(getattr(signal, "trigger_valid", False)),
             "entry_trigger": entry_trigger,
@@ -903,6 +911,71 @@ def _derive_analyst_trade_setup_fields(
         "invalidation_condition": metadata.get("invalidation_condition", ""),
         "notes": notes,
     }
+
+
+def _finalize_analyst_execution_semantics(
+    signal: AnalystSignal,
+    *,
+    analyst: str,
+    opportunity_state: str,
+    current_trigger_confirmed: bool,
+) -> tuple[str, str, bool]:
+    """Make analyst role, profile and executable trigger one canonical fact."""
+    state = str(opportunity_state or "no_opportunity").strip().lower()
+    if state == "risk_reduction_candidate":
+        return state, str(getattr(signal, "entry_trigger", "") or "").strip(), bool(
+            current_trigger_confirmed
+        )
+
+    signal_text = signal_value(signal.signal)
+    side = (
+        "long"
+        if signal_text == Signal.BULLISH.value
+        else "short"
+        if signal_text == Signal.BEARISH.value
+        else str(getattr(signal, "counterfactual_side", "") or "").strip().lower()
+    )
+    raw_profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+
+    if analyst == "technical":
+        signal.evidence_role = "entry_timing"
+        profile = raw_profile if raw_profile in TECHNICAL_ENTRY_PROFILES else ""
+        executable_state = state in {
+            "watch_for_trigger",
+            "probe_candidate",
+            "tradeable_candidate",
+        }
+        trigger = canonical_entry_trigger(profile, side) if executable_state else ""
+        if executable_state and trigger:
+            signal.entry_timing_signal = profile
+            signal.entry_trigger = trigger
+            return state, trigger, bool(current_trigger_confirmed)
+        signal.entry_timing_signal = ""
+        signal.entry_trigger = ""
+        return "no_opportunity", "", False
+
+    if analyst == "commodity_news":
+        signal.evidence_role = "event_catalyst"
+        executable_event = bool(
+            state in {"probe_candidate", "tradeable_candidate"}
+            and raw_profile == "event_immediate"
+            and current_trigger_confirmed
+        )
+        trigger = canonical_entry_trigger("event_immediate", side) if executable_event else ""
+        if trigger:
+            signal.entry_timing_signal = "event_immediate"
+            signal.entry_trigger = trigger
+            return state, trigger, True
+        signal.entry_timing_signal = ""
+        signal.entry_trigger = ""
+        return "no_opportunity", "", False
+
+    signal.evidence_role = "direction_context"
+    signal.entry_timing_signal = ""
+    signal.entry_trigger = ""
+    return "no_opportunity", "", False
 
 
 def _price_percentile(value: Any) -> Optional[float]:
@@ -1305,6 +1378,15 @@ def apply_trade_research_contract(
         candidate_state = "no_opportunity"
     elif not current_trigger_confirmed:
         candidate_state = "watch_for_trigger"
+    candidate_state, entry_trigger, current_trigger_confirmed = (
+        _finalize_analyst_execution_semantics(
+            signal,
+            analyst=analyst,
+            opportunity_state=candidate_state,
+            current_trigger_confirmed=current_trigger_confirmed,
+        )
+    )
+    pending_conditional_trigger = candidate_state == "watch_for_trigger"
     action_evidence_contract = _build_action_evidence_contract(
         signal,
         quality_context,
@@ -1327,11 +1409,12 @@ def apply_trade_research_contract(
     signal.entry_trigger = entry_trigger
     signal.exit_hint = exit_hint
     signal.holding_period_hint = holding_hint
-    signal.evidence_role = {
-        "technical": "entry_timing",
-        "fundamental": "direction_context",
-        "commodity_news": "event_catalyst",
-    }.get(str(analyst), "risk_context")
+    if is_risk_reduction:
+        signal.evidence_role = {
+            "technical": "entry_timing",
+            "fundamental": "direction_context",
+            "commodity_news": "event_catalyst",
+        }.get(str(analyst), "risk_context")
     signal.direction_context = (
         "long" if signal_value(signal.signal) == Signal.BULLISH.value
         else "short" if signal_value(signal.signal) == Signal.BEARISH.value
@@ -1345,12 +1428,6 @@ def apply_trade_research_contract(
             or signal.direction_context
             or "unknown"
         )
-        setup_family = str(technical_setup_scope.get("setup_family") or opportunity_type or "unknown")
-        signal.entry_timing_signal = (
-            setup_family
-            if setup_family in {"trend_breakout", "range_reversal", "volatility_breakout"}
-            else "trend_watch_for_trigger"
-        )
         signal.price_location = str(getattr(signal, "price_percentile", "") or "")
         resolved_trigger_valid = bool(
             current_trigger_confirmed
@@ -1360,11 +1437,6 @@ def apply_trade_research_contract(
         )
     else:
         signal.trend_direction = signal.direction_context
-        signal.entry_timing_signal = (
-            "event_requires_market_confirmation"
-            if str(analyst) == "commodity_news"
-            else "requires_technical_or_market_timing"
-        )
         signal.price_location = str(getattr(signal, "price_percentile", "") or "")
         if str(analyst) == "commodity_news":
             resolved_trigger_valid = bool(
@@ -1442,7 +1514,12 @@ def apply_trade_research_contract(
     research_contract = build_trade_research_contract(
         opportunity_type=opportunity_type,
         opportunity_state=opportunity_state,
-        setup_type=str(opportunity_type or action_evidence_contract.get("setup_type") or "unknown"),
+        setup_type=str(
+            getattr(signal, "setup_type", "")
+            or action_evidence_contract.get("setup_type")
+            or opportunity_type
+            or "unknown"
+        ),
         setup_quality_ok=bool(action_evidence_contract.get("setup_quality_ok") or setup_quality.get("score", 0.0) >= 0.42),
         trigger_valid=bool(action_evidence_contract.get("trigger_valid")),
         invalidation_present=bool(has_invalidation),
@@ -1483,7 +1560,9 @@ def apply_trade_research_contract(
         signal,
         metadata,
     )
-    action_evidence_contract["setup_type"] = str(opportunity_type or "unknown")
+    action_evidence_contract["setup_type"] = str(
+        getattr(signal, "setup_type", "") or opportunity_type or "unknown"
+    )
     validation_errors = list(getattr(signal, "validation_errors", []) or [])
     for error in research_errors + message_errors:
         if error not in validation_errors:
@@ -2290,7 +2369,7 @@ def write_analyst_report(
         "```",
     ]
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_artifact_text(path, "\n".join(lines), encoding="utf-8")
     rel_path = os.path.relpath(path, logger.log_dir)
     logger.info(
         f"[ANALYST SUMMARY] {ticker} {analyst} signal={signal_value(signal.signal)} "

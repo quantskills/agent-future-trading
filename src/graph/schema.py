@@ -105,7 +105,10 @@ class AnalystSignal(BaseModel):
     setup_quality_score: float = Field(default=0.0, description="Trade setup quality from 0.0 to 1.0")
     entry_quality: str = Field(default="unknown", description="entry quality: poor / weak / acceptable / strong / unknown")
     setup_quality_notes: List[str] = Field(default_factory=list, description="Machine-readable setup quality notes")
-    entry_trigger: str = Field(default="", description="Structured pre-trade entry or timing trigger")
+    entry_trigger: str = Field(
+        default="",
+        description="Canonical Trader trigger generated from entry_timing_signal and side",
+    )
     exit_hint: str = Field(default="", description="Structured exit, reduction, or invalidation hint")
     holding_period_hint: str = Field(default="", description="Expected holding style/window in plain text")
     evidence_role: str = Field(
@@ -117,7 +120,13 @@ class AnalystSignal(BaseModel):
     )
     direction_context: str = Field(default="", description="Directional background supplied by this analyst")
     trend_direction: str = Field(default="", description="Technical trend direction, separated from entry timing")
-    entry_timing_signal: str = Field(default="", description="Technical entry timing classification")
+    entry_timing_signal: str = Field(
+        default="",
+        description=(
+            "Execution timing enum: technical breakout/pullback/vwap_confirmed, "
+            "commodity-news event_immediate, or empty when not executable"
+        ),
+    )
     price_location: str = Field(default="", description="Price location or zone used for entry timing")
     trigger_valid: bool = Field(default=False, description="Whether current trigger is valid for a real trade candidate")
     invalidation_present: bool = Field(default=False, description="Whether invalidation boundary is present")

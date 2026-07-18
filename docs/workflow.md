@@ -170,11 +170,12 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 - workflow 编排层以 `AnalystSignal` 作为类型载体，但分析师最终出口的 metadata 只能含 `action_evidence_contract`，Workflow保存后只追加真实 `signal_record_id`；Signal Collector发现其他metadata立即拒绝。signal SQL的自由文本理由列固定为空，artifact和分析师报告都只保存同一份经过共享校验的AEC。
 - 必需市场事实不可用时，三个分析师仍分别经自己的正式入口生成同一共享校验可接受的中性 AEC；不得调用LLM补数据，也不得伪造方向、profile、trigger、权限或市场事实。
 - 基本面或新闻没有当日新增记录不是全局市场数据不可用；对应分析师使用截止点前最近有效事实并写明时效/质量，或输出本专业合法 `no_opportunity` AEC。
-- 数据可用但模型输出普通 `Neutral` 时保持 `signal=Neutral`；缺 Trader 可用逻辑 T 日15分钟行情观察的具体 `entry_trigger` 或 canonical 失效边界固定收口为 `no_opportunity`。只有明确 long/short 反事实方向、上述具体触发、canonical 失效边界均存在且当前未触发时，才可形成 `watch_for_trigger`；纯方向观点、“当前没有触发”或只等待未来周/月数据不是具体触发，中性跟踪字段不得自行创建 watch，Neutral 不得升级为 probe/tradeable。
+- 数据可用但模型输出普通 `Neutral` 时保持 `signal=Neutral`。technical 只有在反事实方向、固定 `entry_timing_signal`、canonical 失效边界完整且当前未触发时才可形成 watch；fundamental 固定为 `direction_context` 且新增风险状态为 `no_opportunity`；commodity_news 只有当前事件已满足即时边界时才可形成 `event_immediate` probe/tradeable，不能形成普通15分钟 watch。Neutral 不得升级为 probe/tradeable。
+- 可执行 `entry_trigger` 由共享 canonical 定义按 `entry_timing_signal+side` 生成：technical 只允许 `breakout/pullback/vwap_confirmed`，commodity_news 只允许 `event_immediate`，fundamental 固定为空。LLM 自由分析继续进入现有证据、冲突、确认需求和质量字段，不能成为正式执行触发。
 - 正式 watch 的 `entry_trigger` 不得为空、`unknown` 或 `wait_for_trigger`；`invalidation_present` 只能由 canonical `invalidation_condition`、合法 `invalidation_level` 或正数 `atr_stop_distance` 证明。`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 都不是失效边界别名。
 - Signal Collector必须保真消费该契约，不得改写分析师原始证据。Reviewer和Researcher通过已保存的 `FuturesRecommendation.signal_snapshot["signal_collection_contract"]` 追溯分析师证据及其来源。
 - Reviewer和Researcher只读取正式 AEC 的 `opportunity_state/trigger_valid/invalidation_present/entry_trigger` 与 canonical 失效字段；不得从旧 metadata 路径补出默认 watch 或中性 `action_preference`。合法 `no_opportunity` 仍可在 Phase4 与结算完成后形成反事实观察或学习记录。
-- 任一分析师 finalization 失败时，Workflow 只传播稳定契约错误码并终止该品种原子流程，不保存部分 AnalystSignal、SCC、FAC 或推荐；日志和异常不得携带 prompt、原始 response、内部推理或原始异常内容。
+- 任一分析师或 PM 最终契约失败时，Workflow 只传播稳定契约错误码并终止整个 Phase1 写入；三份 AnalystSignal、唯一 SCC、全部 FAC/recommendation 及本轮新 artifact 使用同一写事务提交或共同回滚，不得留下部分品种事实。日志和异常不得携带 prompt、原始 response、内部推理或原始异常内容。
 - `action_evidence_contract` 只承载分析师预测证据，不具有交易决策权限，禁止包含最终交易动作、手数、rank、资金部署和 `final_action_contract`。
 
 #### 1.2 内容

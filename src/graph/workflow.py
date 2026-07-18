@@ -32,6 +32,10 @@ _SAFE_PHASE1_FAILURE_CODES = {
     _ANALYST_FINAL_OUTPUT_CONTRACT_ERROR,
     "analyst_phase1_analysis_failed",
     "futures_phase1_workflow_failed",
+    "pm_execution_profile_contract_invalid",
+    "pm_execution_trigger_source_contract_invalid",
+    "pm_execution_entry_trigger_contract_invalid",
+    "pm_step6_finalization_failed",
 }
 
 
@@ -224,9 +228,13 @@ class AgentWorkflow:
                     portfolio=self.init_portfolio,
                 )
             )
-        except Exception:
-            logger.error("pm_step6_finalization_failed")
-            raise RuntimeError("pm_step6_finalization_failed") from None
+        except Exception as exc:
+            code = _stable_phase1_failure_code(
+                exc,
+                default="pm_step6_finalization_failed",
+            )
+            logger.error(code)
+            raise RuntimeError(code) from None
         if len(signed) != len(generated):
             raise RuntimeError("PM Step6 did not return one recommendation for every PM state")
         for ticker, recommendation in signed:
@@ -735,6 +743,72 @@ class AgentWorkflow:
         portfolio.margin_ratio = portfolio.margin_used / denominator if denominator > 0 else 0.0
         return portfolio
 
+    def _complete_phase1_write_scope(
+        self,
+        *,
+        portfolio: Portfolio,
+        morning_contexts: Dict[str, Any],
+        prefetched_analysis: Dict[str, Dict[str, Any]],
+        timings: Dict[str, float],
+    ) -> List[Tuple[str, FuturesRecommendation]]:
+        generated_pm_states: List[Tuple[str, Dict[str, Any]]] = []
+        for ticker in self.tickers:
+            ticker_started_at = perf_counter()
+            self._timed_call(timings, "load_analysts", self.load_analysts, ticker)
+            morning_price_context = morning_contexts.get(ticker)
+            try:
+                analysis_state = prefetched_analysis.get(ticker)
+                if analysis_state is None:
+                    analysis_state = self._timed_call(
+                        timings,
+                        "analyst_fanout",
+                        self._run_phase1_analysis_only,
+                        ticker,
+                        portfolio.model_copy(deep=True),
+                        morning_price_context,
+                        self.workflow_analysts.copy(),
+                    )
+                self._timed_call(
+                    timings,
+                    "persist_analyst_signals",
+                    self._persist_prefetched_analyst_signals,
+                    analysis_state,
+                )
+                final_state = self._timed_call(
+                    timings,
+                    "portfolio_manager",
+                    self._run_phase1_portfolio_only,
+                    analysis_state,
+                    portfolio,
+                )
+            except Exception as exc:
+                code = _stable_phase1_failure_code(
+                    exc,
+                    default="futures_phase1_workflow_failed",
+                )
+                logger.error(f"{ticker}: {code}")
+                raise RuntimeError(code) from None
+
+            pm_state = self._require_pm_memory_state(
+                ticker=ticker,
+                final_state=final_state,
+            )
+            generated_pm_states.append((ticker, pm_state))
+            if analysis_state.get("pre_open_reference_price_unavailable"):
+                logger.warning(f"{ticker}: phase1_required_market_data_unavailable")
+            if self.planner_mode:
+                self.current_analysts = None
+            elif prefetched_analysis:
+                self.current_analysts = self.workflow_analysts.copy()
+            timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
+
+        self._validate_phase1_signal_persistence(portfolio, self.tickers)
+        generated_recommendations = self._persist_pm_full_market_contracts(
+            generated_pm_states
+        )
+        self._audit_phase1_strategy_recommendations(generated_recommendations)
+        return generated_recommendations
+
     def _run_futures_phase1(self) -> float:
         start_time = perf_counter()
         timings: Dict[str, float] = {}
@@ -774,60 +848,16 @@ class AgentWorkflow:
             for ticker, context in morning_contexts.items()
         }
         prefetched_analysis = self._prefetch_phase1_analysis(portfolio, morning_contexts, timings)
-        generated_pm_states: List[Tuple[str, Dict[str, Any]]] = []
-
-        for ticker in self.tickers:
-            ticker_started_at = perf_counter()
-            self._timed_call(timings, "load_analysts", self.load_analysts, ticker)
-            morning_price_context = morning_contexts.get(ticker)
-            try:
-                analysis_state = prefetched_analysis.get(ticker)
-                if analysis_state is None:
-                    analysis_state = self._timed_call(
-                        timings,
-                        "analyst_fanout",
-                        self._run_phase1_analysis_only,
-                        ticker,
-                        portfolio.model_copy(deep=True),
-                        morning_price_context,
-                        self.workflow_analysts.copy(),
-                    )
-                self._timed_call(
-                    timings,
-                    "persist_analyst_signals",
-                    self._persist_prefetched_analyst_signals,
-                    analysis_state,
-                )
-                final_state = self._timed_call(
-                    timings,
-                    "portfolio_manager",
-                    self._run_phase1_portfolio_only,
-                    analysis_state,
-                    portfolio,
-                )
-            except Exception as exc:
-                code = _stable_phase1_failure_code(
-                    exc,
-                    default="futures_phase1_workflow_failed",
-                )
-                logger.error(f"{ticker}: {code}")
-                raise RuntimeError(code) from None
-
-            pm_state = self._require_pm_memory_state(ticker=ticker, final_state=final_state)
-            generated_pm_states.append((ticker, pm_state))
-
-            if analysis_state.get("pre_open_reference_price_unavailable"):
-                logger.warning(f"{ticker}: phase1_required_market_data_unavailable")
-
-            if self.planner_mode:
-                self.current_analysts = None
-            elif prefetched_analysis:
-                self.current_analysts = self.workflow_analysts.copy()
-            timings[f"{ticker}.total"] = perf_counter() - ticker_started_at
-
-        self._validate_phase1_signal_persistence(portfolio, self.tickers)
-        generated_recommendations = self._persist_pm_full_market_contracts(generated_pm_states)
-        self._audit_phase1_strategy_recommendations(generated_recommendations)
+        write_scope = getattr(self.db, "phase1_write_scope", None)
+        if not callable(write_scope):
+            raise RuntimeError("phase1_write_scope_not_supported")
+        with write_scope():
+            generated_recommendations = self._complete_phase1_write_scope(
+                portfolio=portfolio,
+                morning_contexts=morning_contexts,
+                prefetched_analysis=prefetched_analysis,
+                timings=timings,
+            )
         portfolio = phase1_planning_portfolio
         for _, recommendation in generated_recommendations:
             if recommendation.status != RecommendationStatus.SKIPPED:

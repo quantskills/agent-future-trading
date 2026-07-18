@@ -14,6 +14,7 @@ from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecyc
 from tools.agent_tools.decision.pm_position_transition import classify_position_transition
 from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
 from tools.common.final_action_semantics import full_market_rank_source_payload
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
 
 
 class PMStateTransitionMatrixTest(unittest.TestCase):
@@ -153,7 +154,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             lots_delta=1,
             execution_profile="breakout",
             trigger_source="technical_breakout",
-            entry_trigger="15m close above the validated range",
+            entry_trigger=canonical_entry_trigger("breakout", "long"),
             invalidation="15m close below the invalidation boundary",
             learning_used={
                 "pm_lifecycle_learning_trace": pm_trace,

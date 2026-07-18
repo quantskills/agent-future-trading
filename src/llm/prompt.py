@@ -38,7 +38,7 @@ Output format:
   risk_context is an evidence role, not a separate agent and not trade authority; PM signs the contract, independent Auditor decides audit_verdict, while Trader only checks intraday trigger and executes the approved final_action_contract. trade_contract_audit is an execution audit mirror, not an approval source.
 - direction_context: directional background, separated from entry timing
 - trend_direction: technical trend direction when applicable
-- entry_timing_signal: technical or event timing classification when applicable
+- entry_timing_signal: fixed execution timing enum when this analyst has execution responsibility; never copy setup_type into this field
 - price_location: price zone or percentile used for timing
 - trigger_valid: true only when the current trigger is already present in available evidence
 - A pending condition is watch_for_trigger only when it gives a concrete price,
@@ -474,11 +474,14 @@ Output format:
 - trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
 - price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
 - setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / data_unavailable_no_trade
+- entry_timing_signal: breakout / pullback / vwap_confirmed for an executable technical setup; otherwise an empty string
+- range_reversal, trend_breakout, short_timing, and other analytical shapes belong in setup_type/opportunity_type, never in entry_timing_signal
+- evidence_role: entry_timing for technical evidence
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - invalidation_level: nearest concrete invalidation price if inferable, otherwise null
 - opportunity_type: trend_continuation / reversal / range_breakout / short_timing / probe / no_trade
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
-- entry_trigger: concrete current technical timing condition required before trading; include regime and confirmation, not just "technical trigger"
+- entry_trigger: explain the technical condition supporting entry_timing_signal; deterministic finalization replaces this prose with the canonical Trader condition
 - exit_hint: concrete current evidence or price condition that would require reduce/exit
 - holding_period_hint: expected short-term holding style/window
 - factor_focus: list of key technical factor groups that matter for this ticker today
@@ -510,20 +513,21 @@ def build_futures_fundamental_prompt(
         prompt += "\n\n" + str(product_profile_context)
     prompt += (
         "\n\nTrade research contract fields to fill when possible:\n"
-        "Your first objective is to turn fundamentals into a tradable setup when current evidence supports it; "
-        "do not stop at a medium-term direction explanation.\n"
+        "Your objective is to produce differentiated fundamental direction evidence; Trader timing remains the technical analyst's responsibility.\n"
         "Respect commodity-specific factor trees in the supplied context: energy/chemicals emphasize cost chain, operating rate, inventory and profit; "
         "ferrous emphasizes raw material, steel demand, inventory and margins; nonferrous emphasizes inventory, treatment charge, macro and downstream demand; "
         "agricultural contracts emphasize crop progress, weather, import/export, inventory and crush/feed demand.\n"
         "- opportunity_type: medium_fundamental / trend_continuation / event_driven / probe / no_trade\n"
         "- opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate\n"
         "- setup_type: fundamental_timing_setup when factors form a setup, otherwise data_unavailable_no_trade or unknown\n"
-        "- entry_trigger: short-timing evidence needed before the medium thesis is tradable\n"
+        "- evidence_role=direction_context; this value is fixed for fundamental output\n"
+        "- entry_timing_signal must be an empty string; fundamental must not output a Trader execution profile\n"
+        "- entry_trigger may describe research confirmation in your analysis, but it is not persisted as a Trader trigger\n"
         "- exit_hint: fundamental or price evidence that invalidates or weakens the thesis\n"
         "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
         "- factor_focus: factor groups most relevant for this ticker now\n"
         "- current_evidence_conflict: current evidence contradicting the direction\n"
-        "- evidence_role: direction_context unless a current short trigger is explicitly present\n"
+        "- evidence_role: direction_context\n"
         "- Do not generate action_evidence_contract or nested contract objects; deterministic code builds them after signal calibration\n"
         "- learning_impact_summary: explain historical support, historical contradiction, today's confirmed evidence, missing confirmation, and opportunity_state_reason\n"
         "- factor_calibration_summary: list effective_factors, stale_or_conflicting_factors, factors_requiring_price_confirmation, and factor_calibration_reason\n"
@@ -536,8 +540,8 @@ def build_futures_fundamental_prompt(
         "State whether today's available fundamentals, market state, and short-term trigger evidence "
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
         "invalidation boundary, keep it as no_opportunity and identify the missing evidence without inventing it. "
-        "If a directional signal has a short trigger and invalidation boundary, use watch_for_trigger while confirmation is pending and "
-        "probe_candidate or tradeable_candidate only after current confirmation. Candidate memories cannot authorize sizing, add-ons, or holding "
+        "A fundamental direction remains direction_context and does not become executable watch/probe/tradeable without technical timing selected downstream. "
+        "Candidate memories cannot authorize sizing, add-ons, or holding "
         "a losing position.\n"
     )
     prompt += ORDINARY_NEUTRAL_OUTPUT_BOUNDARY
@@ -578,6 +582,8 @@ def build_futures_commodity_news_prompt(
         "Fill learning_impact_summary with historical support/contradiction, today's confirmed event evidence, missing confirmation, and opportunity_state_reason. "
         "Fill event_calibration_summary with effective_catalysts, background_noise, impact_window_assessment, price_volume_confirmation_required, and event_calibration_reason. "
         "Do not include lots, margin, final_action, target_lots, execution instructions, or trade authority in these summaries.\n"
+        "Use evidence_role=event_catalyst. Only when a current event already satisfies the existing immediate-execution boundary may entry_timing_signal=event_immediate. "
+        "Otherwise entry_timing_signal must be empty and the news must not create a normal 15-minute execution profile.\n"
     )
     prompt += learning_context_text or ""
     prompt += (
@@ -585,8 +591,8 @@ def build_futures_commodity_news_prompt(
         "When research memories are present, use them only as rebuttable priors. "
         "Classify today's news as catalyst, noise, or no-trade value, and state whether it confirms "
         "or contradicts similar past cases. If Neutral, specify the concrete event/price/volume "
-        "condition that would convert it to probe_candidate or tradeable_candidate. If a catalyst has current price/volume confirmation "
-        "and an invalidation boundary, mark it as probe_candidate or tradeable_candidate. Candidate memories cannot authorize sizing, "
+        "condition that would support later analysis. If a catalyst already satisfies the immediate-event boundary, has current confirmation, "
+        "and has an invalidation boundary, mark it as probe_candidate or tradeable_candidate with entry_timing_signal=event_immediate. Candidate memories cannot authorize sizing, "
         "add-ons, or holding a losing position.\n"
     )
     prompt += ORDINARY_NEUTRAL_OUTPUT_BOUNDARY

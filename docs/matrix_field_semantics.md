@@ -220,8 +220,8 @@
 | `setup_quality_score` | 分析师 / 研究样本 | setup 质量评分。 |
 | `setup_quality_notes` | 分析师证据 | setup 质量说明。 |
 | `entry_quality` | 分析师证据 | 入场质量。 |
-| `entry_trigger` | 分析师证据 | 当前触发事实或 Trader 可用逻辑 T 日15分钟价格、量能或指标观察的具体等待条件；“当前没有触发”、纯方向观点、仅等待未来周/月数据、`unknown`、`wait_for_trigger` 和通用占位文本均不是合法 watch/candidate 触发。未来数据背景只有同时落成该可观察市场条件时才可形成 watch。 |
-| `entry_timing_signal` | 技术证据 | 技术入场时机分类。 |
+| `entry_trigger` | 分析师证据 | 可执行 AEC 的机器可读盘中触发说明，由共享 canonical 定义根据 `entry_timing_signal+side` 确定性生成，不持久化 LLM 任意执行文字。technical 的说明必须与 Trader 15分钟算法一致；commodity_news 的 `event_immediate` 必须与即时事件边界一致；fundamental 固定为空。自由分析只能留在现有证据、冲突、确认需求和质量字段。 |
+| `entry_timing_signal` | 分析师证据 | 唯一执行时机枚举。technical 可执行证据只允许 `breakout/pullback/vwap_confirmed`；commodity_news 只在当前事件已满足即时执行边界时允许 `event_immediate`；fundamental 固定为空。`range_reversal/trend_breakout/short_timing` 等分析形态只属于 `setup_type/opportunity_type`。 |
 | `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
 | `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
@@ -232,7 +232,7 @@
 | `invalidation_level` | 分析师 / 执行风控 | 数值失效价位。 |
 | `atr_stop_distance` | 分析师 / 执行风控 | ATR 止损距离。 |
 | `add_allowed` | 分析师证据 | 证据是否允许加仓讨论；最终仍由 PM 决定。 |
-| `evidence_role` | 分析师证据 | 证据角色，如方向、入场、事件、风险、执行。 |
+| `evidence_role` | 分析师证据 | 分析师职责的固定结构化角色：technical=`entry_timing`、fundamental=`direction_context`、commodity_news=`event_catalyst`。基本面方向证据不能成为 Trader 执行来源。 |
 | `evidence_quality` | 分析师证据 | 证据质量。 |
 | `business_quality_score` | 分析师证据 | 业务质量评分。 |
 | `tradeability_reason` | 分析师证据 | 为什么可交易或不可交易。 |
@@ -366,8 +366,8 @@
 | `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
 | `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / `final_action_contract.learning_used` 摘要 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作；Auditor 不消费或复审该摘要。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
-| `execution_profile` | `final_action_contract` | breakout、pullback、vwap_confirmed、event_immediate、exit_immediate、hold。新增风险时由 PM Step6 根据唯一被选 AEC 的正式 `setup_type`、`opportunity_type`、`entry_timing_signal`、`entry_trigger` 和新闻 `event_type` 显式映射；无法明确映射时契约失败，禁止默认 `breakout`。Trader 只能按该字段和盘中数据执行。 |
-| `trigger_source` | `final_action_contract` / Trader 执行摘要 | 唯一执行触发来源。AEC 同源值只允许 `technical_breakout`、`technical_pullback`、`fundamental_entry_trigger`、`commodity_news_event`；非新增风险使用 `none` 或 `position_lifecycle`；已授权执行 profile 学习覆盖继续使用既有 `execution_action_value_breakout`、`execution_action_value_pullback`、`execution_action_value_vwap_confirmed`，且不得创建触发、失效边界或交易权限。 |
+| `execution_profile` | `final_action_contract` | `breakout/pullback/vwap_confirmed/event_immediate/exit_immediate/hold`。新增风险时 PM 只复制唯一被选执行 AEC 的 `entry_timing_signal`，不得从 `entry_trigger/setup_type/opportunity_type` 自由文本推断，也不得默认 `breakout`。执行 action-value 可保留为现有建议摘要，但不得改写顶层 profile、触发、来源或权限。 |
+| `trigger_source` | `final_action_contract` / Trader 执行摘要 | 唯一顶层执行触发来源：technical 的 `breakout` 使用 `technical_breakout`，`pullback/vwap_confirmed` 使用 `technical_pullback`，commodity_news 的 `event_immediate` 使用 `commodity_news_event`；非新增风险使用 `none` 或 `position_lifecycle`。fundamental 不得成为执行来源；`execution_action_value_*` 只允许存在于既有 `execution_action_value_preference` 建议摘要，不能替代顶层来源。 |
 | `entry_trigger` | `final_action_contract` / Trader 执行摘要 | 新增风险时只复制唯一被选 AEC 的 canonical `entry_trigger`；条件 FAC 必须为 Trader 在逻辑 T 日可观察的具体触发，禁止读取其他分析师或补造默认触发。 |
 | `invalidation` | `final_action_contract` / Trader 执行摘要 | 新增风险时只复制唯一被选 AEC 的 canonical `invalidation_condition`；可与同一 AEC 的 `invalidation_level`、`atr_stop_distance` 共同证明失效边界，禁止使用 `exit_hint`、`would_change_view_if` 或其他别名。 |
 | `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `contract_code`、`setup_type`、`horizon_class`、`expected_horizon_days`、`market_regime`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`atr_stop_distance`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含完整AEC、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |

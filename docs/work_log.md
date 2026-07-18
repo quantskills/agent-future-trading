@@ -131,3 +131,7 @@
 （6）[分析师机会状态原子收口] `analyst_quality.py` 在数据质量、setup 完整性和机会质量降级全部完成后，统一写入最终 `opportunity_state`、`trigger_valid` 和 `current_trigger_confirmed`；新增风险的 no-opportunity/watch 固定为 false/false，probe/tradeable 固定为 true/true，风险收缩状态保持独立语义。原因：防止 fundamental 已触发证据被质量规则降为 watch 后仍携带已触发布尔值，形成共享 AEC 契约矛盾。
 
 （7）[LLM 瞬时故障持续重试] `inference.py` 将 429、全部 5xx、SDK timeout 和连接中断识别为瞬时错误，并在当前调用中按既有上限指数退避持续重试；`dev.yaml` 将当前 GPT 的 `server_error` 切换为 `retry_with_backoff`，结构化输出、未知错误和非瞬时 4xx 继续有限或立即失败。原因：外部网关短暂波动不能在三次外层尝试后终止 Phase1，同时不得改变模型、接口、并发、SDK 重试和业务工作流。
+
+（8）[执行职责与盘中触发唯一语义] `prompt.py`、`analyst_quality.py`、`execution_trigger_semantics.py`、`signal_evidence_collection.py`、`portfolio_manager.py`、PM 自检和 Trader 契约入口统一执行 profile、方向、canonical `entry_trigger` 与 `trigger_source`：普通盘中入场只由 technical 提供，事件即时入场只由 commodity_news 提供，fundamental 固定为方向上下文；PM/Trader 删除自由文本 profile 推断和默认 `breakout`，无合法执行证据的品种只能形成零新增风险合约。原因：执行职责必须先于置信度选择，正式 FAC 的 profile、触发和来源必须来自同一已校验证据，并与 Trader 既有 15 分钟确认及 1 分钟执行算法完全一致；本条取代此前 `fundamental_entry_trigger` 独立执行来源。
+
+（9）[Phase1 数据与 artifact 原子落点] `interface.py`、`sqlite_helper.py`、`schema.py`、`workflow.py` 和分析师报告写入将三份 AnalystSignal、SCC 驱动的 PM/FAC、Auditor 结果及本次新 artifact 纳入同一 SQLite 写入范围；任一真实契约异常同时回滚数据库和本次文件，合法无执行证据则只取消对应品种新增风险。原因：多品种 Phase1 不能因后续品种失败留下部分信号、推荐或无数据库引用 artifact，也不能把单品种合法无候选扩大为全市场失败。

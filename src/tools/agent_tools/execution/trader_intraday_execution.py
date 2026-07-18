@@ -6,6 +6,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from graph.schema import BasePriceSource, MorningExecutionBasis
 from tools.common.contracts import sanitize_execution_contract
+from tools.common.execution_trigger_semantics import (
+    execution_trigger_contract_error,
+    normalize_execution_profile,
+)
 
 
 _BUY_LIKE_ACTIONS = {"open_long", "close_short"}
@@ -161,6 +165,28 @@ def select_intraday_execution(
     )
     execution_profile = _execution_profile_from_context(decision_context)
     can_execute_without_intraday_trigger = bool(execution_contract.get("can_execute_without_intraday_trigger"))
+    execution_side = (
+        "long"
+        if action_value in _BUY_LIKE_ACTIONS
+        else "short"
+        if action_value in _SELL_LIKE_ACTIONS
+        else "flat"
+    )
+    contract_error = execution_trigger_contract_error(
+        profile=execution_profile,
+        side=execution_side,
+        entry_trigger=execution_contract.get("entry_trigger"),
+        trigger_source=execution_contract.get("trigger_source"),
+    )
+    if contract_error:
+        return IntradayExecutionSelection(
+            decision="skip" if finalize_untriggered else "wait",
+            reason=contract_error,
+            features={
+                "execution_profile": execution_profile,
+                "contract_validation": "failed",
+            },
+        )
 
     if not normalized_execution_bars:
         return IntradayExecutionSelection(
@@ -355,9 +381,7 @@ def _execution_profile_from_context(decision_context: Dict[str, Any]) -> str:
         if isinstance(decision_context.get("execution_contract"), dict)
         else {}
     )
-    profile = str(execution_contract.get("execution_profile") or decision_context.get("execution_profile") or "breakout").lower()
-    allowed = {"breakout", "pullback", "vwap_confirmed", "event_immediate", "exit_immediate", "hold"}
-    return profile if profile in allowed else "breakout"
+    return normalize_execution_profile(execution_contract.get("execution_profile"))
 
 
 def _relative_miss(signal_close: float, barrier: Any, *, direction: str) -> float:
