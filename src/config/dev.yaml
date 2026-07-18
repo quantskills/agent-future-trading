@@ -308,7 +308,7 @@ llm:
     rate_limit: "retry_with_backoff"
     auth_error: "raise"
     invalid_request: "raise"
-    server_error: "retry_then_raise"
+    server_error: "retry_with_backoff"
 
   codex_openai:
     reasoning_effort: "medium"

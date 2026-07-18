@@ -1,11 +1,13 @@
 import os
 import json
+import re
 import time
 import threading
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field, fields
 from dotenv import load_dotenv
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from pydantic import BaseModel
 from llm.provider import Provider
 from util.logger import logger
@@ -37,6 +39,8 @@ DEFAULT_FAILURE_POLICY = {
 
 _LLM_SEMAPHORES: Dict[tuple[str, str, int], threading.BoundedSemaphore] = {}
 _LLM_SEMAPHORES_LOCK = threading.Lock()
+_TRANSIENT_ERROR_TYPES = frozenset({"rate_limit", "server_error"})
+_MAX_RETRY_BACKOFF_SECONDS = 8
 
 
 def _resolve_llm_semaphore(config: LLMConfig) -> Optional[threading.BoundedSemaphore]:
@@ -62,13 +66,51 @@ def _classify_llm_error(exc: Exception) -> str:
     text = str(exc).lower()
     if "output_parsing_failure" in text or "failed to parse" in text or "validation error" in text:
         return "parse_error"
-    if "rate limit" in text or "429" in text:
+
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None and isinstance(exc, APIStatusError):
+        status_code = exc.status_code
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+
+    if isinstance(exc, RateLimitError) or status_code == 429 or "rate limit" in text or "429" in text:
         return "rate_limit"
-    if "401" in text or "403" in text or "unauthorized" in text or "forbidden" in text:
+    if status_code in {401, 403} or "401" in text or "403" in text or "unauthorized" in text or "forbidden" in text:
         return "auth_error"
-    if "400" in text or "invalid_request" in text or "tool_choice" in text or "response_format" in text:
+    if (
+        (status_code is not None and 400 <= status_code <= 499)
+        or "400" in text
+        or "invalid_request" in text
+        or "tool_choice" in text
+        or "response_format" in text
+    ):
         return "invalid_request"
-    if "500" in text or "502" in text or "503" in text or "504" in text:
+    if status_code is not None and 500 <= status_code <= 599:
+        return "server_error"
+    if isinstance(
+        exc,
+        (
+            APIConnectionError,
+            APITimeoutError,
+            TimeoutError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            ConnectionError,
+        ),
+    ):
+        return "server_error"
+    if re.search(r"\b5\d\d\b", text) or any(
+        marker in text
+        for marker in (
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+            "connection error",
+        )
+    ):
         return "server_error"
     return "unknown"
 
@@ -304,7 +346,13 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
 
     llm = llm.with_structured_output(pydantic_model, method=structured_method)
 
-    for attempt in range(llm_cfg.max_retries):
+    if llm_cfg.max_retries <= 0:
+        logger.error("llm_inference_failed:no_attempts")
+        raise RuntimeError("llm_inference_failed:no_attempts")
+
+    bounded_attempts = 0
+    transient_attempts = 0
+    while True:
         try:
             if semaphore is not None:
                 with semaphore:
@@ -323,11 +371,17 @@ def agent_call(prompt: str, llm_config: Dict[str, Any], pydantic_model: BaseMode
             if action in {"raise", "fail_hard", "fail_fast"}:
                 logger.error(f"llm_inference_failed:{error_type}")
                 raise RuntimeError(f"llm_inference_failed:{error_type}") from None
-            if attempt == llm_cfg.max_retries - 1:
+            if action == "retry_with_backoff" and error_type in _TRANSIENT_ERROR_TYPES:
+                delay = min(
+                    2 ** min(transient_attempts, 3),
+                    _MAX_RETRY_BACKOFF_SECONDS,
+                )
+                transient_attempts += 1
+                time.sleep(delay)
+                continue
+
+            transient_attempts = 0
+            bounded_attempts += 1
+            if bounded_attempts >= llm_cfg.max_retries:
                 logger.error(f"llm_inference_failed:{error_type}")
                 raise RuntimeError(f"llm_inference_failed:{error_type}") from None
-            if action == "retry_with_backoff":
-                time.sleep(min(2 ** attempt, 8))
-
-    logger.error("llm_inference_failed:no_attempts")
-    raise RuntimeError("llm_inference_failed:no_attempts")
