@@ -18,6 +18,7 @@ from tools.common.signal_evidence_collection import build_signal_collection_cont
 
 
 DAY = "2025-03-10"
+RECOMMENDATION_DAY = "2025-03-07"
 CONFIG_ID = "cfg"
 PORTFOLIO_ID = "pf"
 ANALYSTS = ("technical", "fundamental", "commodity_news")
@@ -218,7 +219,17 @@ class DailySystemInvariantAuditTest(unittest.TestCase):
             },
         }
 
-    def _insert_recommendation(self, conn, *, rec_id="rec", source_type="strategy", verdict="approve", snapshot=None):
+    def _insert_recommendation(
+        self,
+        conn,
+        *,
+        rec_id="rec",
+        source_type="strategy",
+        verdict="approve",
+        snapshot=None,
+        trading_date=DAY,
+        effective_trade_date=DAY,
+    ):
         payload = deepcopy(snapshot or self._snapshot(rec_id=rec_id, verdict=verdict))
         fac = payload.get("final_action_contract") or _final_action_contract()
         audit_payload = _full_auditor_payload(rec_id, fac, verdict=verdict)
@@ -233,7 +244,22 @@ class DailySystemInvariantAuditTest(unittest.TestCase):
         )
         conn.execute(
             "INSERT INTO futures_recommendation(id,config_id,reference_portfolio_id,trading_date,effective_trade_date,source_type,underlying_code,contract_code,action,lots,signal_snapshot,audit_payload,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (rec_id, CONFIG_ID, PORTFOLIO_ID, DAY, DAY, source_type, "RB", "RB2505", "hold", 0, json.dumps(payload), json.dumps(audit_payload), "pending", DAY),
+            (
+                rec_id,
+                CONFIG_ID,
+                PORTFOLIO_ID,
+                trading_date,
+                effective_trade_date,
+                source_type,
+                "RB",
+                "RB2505",
+                "hold",
+                0,
+                json.dumps(payload),
+                json.dumps(audit_payload),
+                "pending",
+                trading_date,
+            ),
         )
 
     def _insert_transaction(
@@ -397,6 +423,82 @@ class DailySystemInvariantAuditTest(unittest.TestCase):
             self._replace_settlement(conn, daily_pnl=4.0, commission=4.0, previous_equity=1000.0, current_equity=1000.0, previous_margin=0.0, current_margin=0.0)
         report = self._audit()
         self.assertEqual(self._check(report, "single_trade_fact_source").status, "passed", report.to_dict())
+
+    def test_next_day_rollover_recommendation_is_loaded_by_effective_trade_date(self):
+        rollover_actual = [
+            {
+                "action": "close_long",
+                "lots": 1,
+                "contract_code": "RB2505",
+                "execution_price": 3500.0,
+                "execution_phase": "phase2",
+            },
+            {
+                "action": "open_long",
+                "lots": 1,
+                "contract_code": "RB2510",
+                "execution_price": 3500.0,
+                "execution_phase": "phase2",
+            },
+        ]
+        with self._connect() as conn:
+            rollover_snapshot = self._snapshot(
+                rec_id="roll-next",
+                actual_transactions=rollover_actual,
+                outcome="executed",
+                transaction_count=2,
+            )
+            rollover_snapshot["rollover_policy"] = {
+                "from_contract": "RB2505",
+                "to_contract": "RB2510",
+            }
+            self._insert_recommendation(
+                conn,
+                rec_id="roll-next",
+                source_type="rollover",
+                snapshot=rollover_snapshot,
+                trading_date=RECOMMENDATION_DAY,
+                effective_trade_date=DAY,
+            )
+            self._insert_transaction(
+                conn,
+                rec_id="roll-next",
+                source_type="rollover",
+                action="close_long",
+                contract_code="RB2505",
+            )
+            self._insert_transaction(
+                conn,
+                rec_id="roll-next",
+                source_type="rollover",
+                action="open_long",
+                contract_code="RB2510",
+            )
+            self._replace_settlement(
+                conn,
+                daily_pnl=4.0,
+                commission=4.0,
+                previous_equity=1000.0,
+                current_equity=1000.0,
+                previous_margin=0.0,
+                current_margin=0.0,
+            )
+
+        report = self._audit()
+        self.assertTrue(report.passed, report.to_dict())
+
+    def test_transaction_with_truly_missing_recommendation_still_fails(self):
+        with self._connect() as conn:
+            self._set_strategy_execution(conn)
+            conn.execute(
+                "UPDATE futures_transactions SET recommendation_id='missing-rec'"
+            )
+
+        report = self._audit()
+        self.assertIn(
+            "transaction_recommendation_missing",
+            self._check(report, "single_trade_fact_source").violation_codes,
+        )
 
     def test_future_dated_learning_is_rejected_but_learning_is_not_required_per_trade(self):
         with self._connect() as conn:

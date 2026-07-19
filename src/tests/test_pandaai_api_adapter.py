@@ -294,7 +294,7 @@ class PandaAIAdapterTest(unittest.TestCase):
             )
 
         self.assertEqual([quote.trade_date for quote in quotes], ["2025-01-02", "2025-01-03"])
-        self.assertEqual(quotes[-1].ticker, "m2505")
+        self.assertEqual(quotes[-1].ticker, "M2505")
         self.assertEqual(quotes[-1].open_price, 3110.0)
         self.assertEqual(quotes[-1].settle_price, 3130.0)
         self.assertEqual(quotes[-1].pre_settle_price, 3090.0)
@@ -340,8 +340,115 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertIsNotNone(quote)
         market_call = next(call for call in fake.calls if call["func"] == "get_market_data")
         self.assertEqual(market_call["symbol"], "M2505.DCE")
-        self.assertEqual(quote.ticker, "m2505")
+        self.assertEqual(quote.ticker, "M2505")
         self.assertFalse(any(call["func"] == "get_future_detail" for call in fake.calls))
+
+    def test_business_contract_code_uses_one_public_format_and_record_date(self):
+        api = PandaAIAPI.__new__(PandaAIAPI)
+        cases = (
+            (
+                {
+                    "date": "2025-03-27",
+                    "symbol": "BU2506.SHF",
+                    "dominant_id": "BU2510",
+                    "trading_code": "bu2512",
+                },
+                "BU2506",
+            ),
+            ({"date": "2025-03-27", "trading_code": "bu2506"}, "BU2506"),
+            (
+                {
+                    "date": "2025-03-27",
+                    "symbol": "SR2505.CZC",
+                    "trading_code": "SR505",
+                },
+                "SR2505",
+            ),
+            (
+                {
+                    "date": "2025-03-27",
+                    "symbol": "SR_DOMINANT.CZC",
+                    "dominant_id": "SR2505",
+                    "trading_code": "SR506",
+                },
+                "SR2505",
+            ),
+            ({"date": "2025-03-27", "trading_code": "sr505"}, "SR2505"),
+            ({"date": "2019-03-27", "trading_code": "SR905"}, "SR1905"),
+        )
+
+        for row, expected in cases:
+            with self.subTest(row=row):
+                reference_date = api._parse_trade_date(row["date"])
+                self.assertEqual(
+                    api._canonical_business_contract_code(row, reference_date),
+                    expected,
+                )
+
+        may_contract = api._canonical_business_contract_code(
+            {"trading_code": "SR505"},
+            datetime(2025, 3, 27),
+        )
+        june_contract = api._canonical_business_contract_code(
+            {"trading_code": "SR506"},
+            datetime(2025, 3, 27),
+        )
+        self.assertNotEqual(may_contract, june_contract)
+        with self.assertRaisesRegex(ValueError, "reference_date"):
+            api._canonical_business_contract_code(
+                {"trading_code": "SR505"},
+                None,
+            )
+        with self.assertRaisesRegex(ValueError, "three-digit"):
+            api._canonical_business_contract_code(
+                {"trading_code": "BU506"},
+                datetime(2025, 3, 27),
+            )
+
+    def test_daily_quote_outputs_use_canonical_business_contract_code(self):
+        api = PandaAIAPI.__new__(PandaAIAPI)
+        daily_quote = api._build_daily_quote_from_row(
+            {
+                "date": "2025-03-27",
+                "symbol": "BU2506.SHF",
+                "trading_code": "bu2506",
+            }
+        )
+        optimized_quote = api._build_optimized_quote_from_row(
+            {
+                "date": "2025-03-27",
+                "symbol": "SR_DOMINANT.CZC",
+                "dominant_id": "SR2505",
+                "trading_code": "SR505",
+                "underlying_symbol": "SR",
+            },
+            query_is_main=True,
+        )
+
+        self.assertEqual(daily_quote.contract_id, "BU2506")
+        self.assertEqual(optimized_quote.ticker, "SR2505")
+
+    def test_public_contract_list_main_code_and_margin_use_canonical_business_code(self):
+        fake, env_patch, module_patch = self._build_api()
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            main_code = api.get_main_contract_code("M", datetime(2025, 1, 4))
+            contracts = api.get_china_futures_contracts(underlying_code="M")
+            with patch.object(
+                api,
+                "get_futures_contract_detail",
+                return_value={
+                    "symbol": "SR2505.CZC",
+                    "trading_code": "SR505",
+                    "margin_rate": 12.0,
+                },
+            ):
+                margin = api.get_futures_margin("sr505")
+
+        self.assertEqual(main_code, "M2505")
+        self.assertEqual(contracts, ["M2505"])
+        self.assertIsNotNone(margin)
+        self.assertEqual(margin.contract_id, "SR2505")
 
     def test_market_data_call_does_not_log_provider_request_or_result_details(self):
         fake, env_patch, module_patch = self._build_api()

@@ -36,11 +36,12 @@
 | `config_id` | 所有运行记录 | 本次回测 / 配置实例 ID。 |
 | `exp_name` | config | 实验名称。 |
 | `trading_date` | 所有交易日记录 | 期货逻辑交易日；夜盘物理时间可位于前一日晚上，但不得改用物理日期登记业务事实。 |
-| `effective_trade_date` | 推荐 / 执行 | 推荐实际适用和执行的逻辑交易日。 |
+| `effective_trade_date` | 推荐 / 执行 | 推荐实际适用和执行的逻辑交易日；daily PG 按该字段加载成交日推荐并核对 transaction lineage。 |
 | `ticker` | 行情 / 信号 / 研究 | 品种代码。 |
 | `sector` | 分析师 / 研究 / 绩效 | 品种所属板块或行业分组。 |
 | `underlying_code` | 合约 / 换月 / 推荐 | 标的品种代码。 |
-| `contract_code` | 合约 / 成交 / 结算 | 具体期货合约。 |
+| `contract_code` | 合约 / 成交 / 结算 | 具体期货合约；AgentQuant 业务层唯一格式为大写品种代码加四位 `YYMM`，不带交易所后缀。 |
+| `FuturesDailyQuote.contract_id` / `FuturesDailyQuoteOptimized.ticker` / `FuturesMargin.contract_id` / `get_main_contract_code()` / `get_china_futures_contracts()` | PandaAI 对外业务出口 | 与 `contract_code` 使用同一具体合约身份。PandaAI 生产端按具体 `symbol`、主连 `dominant_id`、`trading_code` 的固定顺序生成；郑商所三位年月只按行情记录 `trade_date` 展开，禁止使用当前系统日期，禁止输出 `_DOMINANT`。 |
 | `portfolio_id` | 组合 / 成交 / 结算 | 组合 ID。 |
 | `reference_portfolio_id` | PM 推荐 | PM 决策使用的最近已结算参考组合 ID；其 `portfolio.trading_date` 必须等于正式 `Prev(T)`，不是 AEC 或 recommendation 的逻辑交易日。 |
 | `recommendation_id` | 推荐 / 执行 / 研究 | 关联 PM 推荐记录。 |
@@ -843,7 +844,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 
 | 字段路径 | 生产与消费位置 | 固定含义 |
 |---|---|---|
-| `FuturesRecommendation.id` / `config_id` / `reference_portfolio_id` / `trading_date` / `effective_trade_date` / `created_at` | recommendation 顶层 | 推荐身份、配置、`Prev(T)`参考组合、逻辑交易日T、逻辑生效日T和物理创建时间。 |
+| `FuturesRecommendation.id` / `config_id` / `reference_portfolio_id` / `trading_date` / `effective_trade_date` / `created_at` | recommendation 顶层 | 推荐身份、配置、`Prev(T)`参考组合和物理创建时间。策略推荐的 `trading_date/effective_trade_date` 同为逻辑 T；rollover 推荐的 `trading_date` 为结算生成日 T，`effective_trade_date` 为执行日 `Next(T)`。 |
 | `FuturesRecommendation.source_type` / `underlying_code` / `from_contract` / `to_contract` / `contract_code` | recommendation 顶层 | 推荐来源类型、品种及策略/换约涉及的具体合约。 |
 | `FuturesRecommendation.action` / `lots` / `justification` | recommendation 顶层 | PM Step6 根据唯一最终合约重建的动作、交易手数和可读理由；不能替代 `final_action_contract`。 |
 | `FuturesRecommendation.signal_snapshot` / `audit_payload` / `warning_message` / `status` | recommendation 顶层 | 唯一信号快照、审计载体、警告和运行状态。 |

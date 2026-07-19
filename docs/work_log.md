@@ -20,3 +20,7 @@
 （4）[分钟行情错误边界] `trader_intraday_execution.py` 将分钟接口异常改为稳定数据故障，真实无异常空响应继续保留为`intraday_no_valid_bar`；相关确定性测试同步覆盖九项数据链语义。原因：接口故障不能伪装成合法未触发或无行情。
 
 （5）[technical canonical触发顺序] `analyst_quality.py` 在setup完整性判断前，先按合法`entry_timing_signal + side`生成唯一canonical `entry_trigger`；相关测试覆盖三种technical profile的多空路径、缺失效边界、自由文字不创建profile及条件FAC保护。原因：防止合法technical watch仅因LLM执行文字为空就在进入SCC和PM排名前被错误清成`no_opportunity`。
+
+（6）[PandaAI合约代码生产] `api.py` 在对外业务出口统一生产大写品种代码加四位年月的具体合约，主连读取`dominant_id`，郑商所三位年月按记录交易日展开；相关测试覆盖上期所、大商所、郑商所、主连、历史年份和换月比较。原因：消除同一物理合约因大小写、交易所后缀和郑商所年月格式差异触发的虚假换月。
+
+（7）[PG推荐执行日期] `pg_system_invariants.py` 按`effective_trade_date`加载成交日推荐；相关测试覆盖T日生成、`Next(T)`生效成交和真实缺失推荐。原因：防止跨日rollover推荐被单日PG错误报告为`transaction_recommendation_missing`。

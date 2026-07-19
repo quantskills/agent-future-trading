@@ -4104,8 +4104,11 @@ class _FailingSettlementRouter:
 
 
 class _RolloverSettlementRouter:
+    def __init__(self, main_contracts):
+        self.main_contracts = main_contracts
+
     def get_futures_main_contract_quote_on_date(self, ticker, trading_date):
-        return SimpleNamespace(ticker=f"{ticker}2601")
+        return SimpleNamespace(ticker=self.main_contracts[ticker])
 
 
 class _RolloverSettlementDb:
@@ -4144,10 +4147,40 @@ class FuturesSettlementStrictPriceRegressionTest(unittest.TestCase):
             )
 
     @patch("tools.agent_tools.execution.accountant_futures_settlement.get_next_trading_day")
+    def test_same_canonical_contract_does_not_schedule_rollover(self, mock_next_day):
+        mock_next_day.return_value = datetime(2025, 3, 4)
+        for ticker, contract_code in (("BU", "BU2506"), ("SR", "SR2505")):
+            with self.subTest(ticker=ticker):
+                engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
+                engine.router = _RolloverSettlementRouter({ticker: contract_code})
+                engine.db = _RolloverSettlementDb()
+                portfolio = Portfolio(
+                    id="pf",
+                    cashflow=1000000.0,
+                    margin_used=10000.0,
+                    positions={
+                        ticker: Position(
+                            shares=2,
+                            value=50000.0,
+                            contract_code=contract_code,
+                            margin_used=10000.0,
+                        )
+                    },
+                )
+
+                engine._detect_rollover_recommendations(
+                    config_id="cfg",
+                    portfolio=portfolio,
+                    trading_date=datetime(2025, 3, 3),
+                )
+
+                self.assertEqual(engine.db.saved, [])
+
+    @patch("tools.agent_tools.execution.accountant_futures_settlement.get_next_trading_day")
     def test_rollover_detected_after_settlement_is_scheduled_for_next_trading_day(self, mock_next_day):
         mock_next_day.return_value = datetime(2025, 3, 4)
         engine = FuturesDailySettlement.__new__(FuturesDailySettlement)
-        engine.router = _RolloverSettlementRouter()
+        engine.router = _RolloverSettlementRouter({"RB": "RB2601"})
         engine.db = _RolloverSettlementDb()
 
         portfolio = Portfolio(

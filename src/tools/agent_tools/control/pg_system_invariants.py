@@ -257,7 +257,7 @@ def _load_recommendations(
         conn,
         "futures_recommendation",
         config_id=config_id,
-        date_column="trading_date",
+        date_column="effective_trade_date",
         start_date=start_date,
         end_date=end_date,
     )

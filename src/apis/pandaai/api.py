@@ -953,6 +953,63 @@ class PandaAIAPI:
         symbol = str(symbol_or_code).split(".", 1)[0]
         return symbol.replace("_DOMINANT", "").lower()
 
+    def _canonical_business_contract_code(
+        self,
+        row: dict[str, Any],
+        reference_date: Optional[Any],
+    ) -> str:
+        """Return the single concrete contract identity exposed to AgentQuant."""
+        record = self._coerce_record(row)
+        raw_symbol = record.get("symbol")
+        symbol_text = "" if self._is_missing(raw_symbol) else str(raw_symbol).strip()
+        if symbol_text and "_DOMINANT" not in symbol_text.upper():
+            candidate = symbol_text
+        elif not self._is_missing(record.get("dominant_id")):
+            candidate = str(record.get("dominant_id")).strip()
+        elif not self._is_missing(record.get("trading_code")):
+            candidate = str(record.get("trading_code")).strip()
+        else:
+            raise ValueError("PandaAI business contract code is missing")
+
+        raw_code, _, raw_suffix = candidate.partition(".")
+        raw_code = raw_code.strip()
+        if "_DOMINANT" in raw_code.upper():
+            raise ValueError("PandaAI dominant symbol is not a business contract code")
+        match = re.fullmatch(r"([A-Za-z]+)(\d{3,4})", raw_code)
+        if not match:
+            raise ValueError(f"Invalid PandaAI business contract code: {candidate}")
+
+        underlying, contract_number = match.groups()
+        underlying = underlying.upper()
+        if len(contract_number) == 4:
+            return f"{underlying}{contract_number}"
+
+        candidate_exchange = str(raw_suffix or "").upper().strip()
+        candidate_exchange = self.EXCHANGE_SUFFIX_BY_EXCHANGE.get(
+            candidate_exchange,
+            candidate_exchange,
+        )
+        row_exchange = str(record.get("exchange") or "").upper().strip()
+        row_exchange = self.EXCHANGE_SUFFIX_BY_EXCHANGE.get(row_exchange, row_exchange)
+        configured_exchange = self.FALLBACK_SUFFIX_BY_UNDERLYING.get(underlying, "")
+        if "CZC" not in {candidate_exchange, row_exchange, configured_exchange}:
+            raise ValueError(
+                f"PandaAI three-digit contract code is only valid for CZCE: {candidate}"
+            )
+
+        record_date = self._parse_trade_date(reference_date)
+        if record_date is None:
+            raise ValueError(
+                f"reference_date is required for PandaAI CZCE contract code: {candidate}"
+            )
+        expanded_number = self._expand_short_contract_number(
+            contract_number,
+            reference_date=record_date,
+        )
+        if len(expanded_number) != 4:
+            raise ValueError(f"Invalid PandaAI CZCE contract month: {candidate}")
+        return f"{underlying}{expanded_number}"
+
     def _contract_match_keys(
         self,
         symbol_or_code: Any,
@@ -1349,9 +1406,7 @@ class PandaAIAPI:
             open_price = row.get("open")
 
         return FuturesDailyQuote(
-            contract_id=self._normalize_internal_contract(
-                row.get("trading_code") or row.get("dominant_id") or row.get("symbol")
-            ),
+            contract_id=self._canonical_business_contract_code(row, trade_date),
             trade_date=trade_date.strftime("%Y-%m-%d") if trade_date else str(row.get("date", ""))[:10],
             open=self._coerce_float(open_price, 0),
             high=self._coerce_float(row.get("high"), 0),
@@ -1384,7 +1439,7 @@ class PandaAIAPI:
         contract_object = str(row.get("underlying_symbol") or "").upper() or self._extract_underlying_code(str(trading_code))
 
         return FuturesDailyQuoteOptimized(
-            ticker=self._normalize_internal_contract(trading_code),
+            ticker=self._canonical_business_contract_code(row, trade_date),
             trade_date=trade_date.strftime("%Y-%m-%d") if trade_date else str(row.get("date", ""))[:10],
             sec_short_name=None,
             exchange_cd=row.get("exchange"),
@@ -1663,7 +1718,10 @@ class PandaAIAPI:
                 continue
             if exchange and str(row.get("exchange") or "").upper() != str(exchange).upper():
                 continue
-            contract = self._normalize_internal_contract(row.get("trading_code") or row.get("symbol"))
+            contract = self._canonical_business_contract_code(
+                row,
+                self._parse_trade_date(row.get("trade_date") or row.get("date")),
+            )
             if contract:
                 contracts.append(contract)
         return sorted(set(contracts))
@@ -1792,7 +1850,12 @@ class PandaAIAPI:
         if margin_rate > 1:
             margin_rate = margin_rate / 100.0
         return FuturesMargin(
-            contract_id=self._normalize_internal_contract(detail.get("trading_code") or detail.get("symbol") or contract_id),
+            contract_id=self._canonical_business_contract_code(
+                detail,
+                self._parse_trade_date(
+                    detail.get("trade_date") or detail.get("date") or detail.get("update_date")
+                ),
+            ),
             long_margin_rate=margin_rate,
             short_margin_rate=margin_rate,
             update_date=datetime.now().strftime("%Y-%m-%d"),
