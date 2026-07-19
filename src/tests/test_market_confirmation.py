@@ -117,6 +117,29 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
         self.assertEqual(by_name["contract_rank"]["direction"], "long")
         self.assertEqual(by_name["netposi_rank"]["direction"], "long")
 
+    def test_pandaai_percentage_and_ratio_units_use_provider_semantics(self):
+        records = {
+            "basis": [
+                {"date": "2025-03-25", "basis_ratio": -0.687929956},
+            ],
+            "ls_ratio": [
+                {"date": "2025-03-25", "ls_ratio": 46.354297826642565},
+            ],
+            "contract_daily_indicators": [
+                {"date": "2025-03-25", "ratio": -7.883},
+            ],
+        }
+
+        by_name = {
+            item["feature"]: item
+            for item in score_pandaai_extra_records(records)
+        }
+
+        self.assertAlmostEqual(by_name["basis"]["value"], -0.00687929956)
+        self.assertAlmostEqual(by_name["basis"]["score"], -0.171982489)
+        self.assertAlmostEqual(by_name["ls_ratio"]["score"], -0.072914043466)
+        self.assertAlmostEqual(by_name["contract_daily_indicators"]["score"], -0.07883)
+
     def test_net_flow_empty_is_covered_when_replacement_features_exist(self):
         records = {
             "net_flow_long": [],
@@ -161,7 +184,7 @@ class MarketConfirmationDataQualityTest(unittest.TestCase):
 
     def test_market_confirmation_uses_t_minus_one_reference_date(self):
         records = {
-            "basis": [{"date": "2025-01-03", "basis_ratio": 0.03}],
+            "basis": [{"date": "2025-01-03", "basis_ratio": 3.0}],
         }
         snapshot = {
             "records": records,

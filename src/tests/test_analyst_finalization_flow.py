@@ -162,15 +162,107 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertTrue(contract["invalidation_present"])
 
+    def test_all_technical_profiles_generate_canonical_trigger_before_presence_check(self):
+        for side, signal_value in (
+            ("long", Signal.BULLISH),
+            ("short", Signal.BEARISH),
+        ):
+            for execution_profile in ("breakout", "pullback", "vwap_confirmed"):
+                with self.subTest(side=side, execution_profile=execution_profile):
+                    signal = AnalystSignal(
+                        agent_name="technical",
+                        signal=signal_value,
+                        confidence=0.62,
+                        setup_type="technical_setup",
+                        opportunity_type=f"{side}_timing",
+                        opportunity_state="watch_for_trigger",
+                        evidence_role="entry_timing",
+                        entry_timing_signal=execution_profile,
+                        entry_trigger="",
+                        exit_hint="15m close beyond the invalidation boundary",
+                        invalidation_level=102.0,
+                        factor_focus=["trend", "volume"],
+                        metadata={
+                            "data_usage_summary": self._data_usage("technical", "BU"),
+                            "invalidation_condition": (
+                                "15m close beyond the invalidation boundary"
+                            ),
+                        },
+                    )
+
+                    finalized = self._finalize_directional(
+                        signal,
+                        analyst="technical",
+                        ticker="BU",
+                        context={
+                            "tradeability": "medium",
+                            "setup_type": "technical_setup",
+                            "setup_quality_ok": True,
+                            "market_regime": "trend",
+                            "risk_flags": [],
+                        },
+                    )
+                    contract = finalized.metadata["action_evidence_contract"]
+                    self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+                    self.assertEqual(contract["entry_timing_signal"], execution_profile)
+                    self.assertEqual(
+                        contract["entry_trigger"],
+                        canonical_entry_trigger(execution_profile, side),
+                    )
+                    self.assertFalse(contract["trigger_valid"])
+                    self.assertFalse(contract["current_trigger_confirmed"])
+
+    def test_technical_profile_without_invalidation_remains_no_opportunity(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.62,
+            setup_type="trend_breakout_setup",
+            opportunity_type="long_timing",
+            opportunity_state="watch_for_trigger",
+            evidence_role="entry_timing",
+            entry_timing_signal="breakout",
+            entry_trigger="",
+            factor_focus=["trend", "volume"],
+            metadata={
+                "data_usage_summary": self._data_usage("technical", "BU"),
+            },
+        )
+
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "medium",
+                "setup_type": "trend_breakout_setup",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "risk_flags": [],
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertEqual(contract["opportunity_state"], "no_opportunity")
+        self.assertEqual(contract["entry_timing_signal"], "")
+        self.assertEqual(contract["entry_trigger"], "")
+        self.assertFalse(contract["trigger_valid"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+
     def test_technical_prompt_exposes_completed_price_levels_and_canonical_profiles(self):
         price_levels = "- Current price: 3500\n- Nearest support: 3450\n- Nearest resistance: 3560"
         prompt = build_futures_technical_prompt(
             ticker="RB",
-            signal_results_compact={"trend": "Bearish"},
+            signal_results_compact={
+                "trend": "Bearish",
+                "futures_volatility": "Volatility is 18.0%",
+                "turnover_value": "Turnover intensity is elevated",
+            },
             price_levels=price_levels,
         )
 
         self.assertIn(price_levels, prompt)
+        self.assertIn("Volatility is 18.0%", prompt)
+        self.assertIn("Turnover intensity is elevated", prompt)
         self.assertIn(canonical_entry_trigger("breakout", "long"), prompt)
         self.assertIn(canonical_entry_trigger("breakout", "short"), prompt)
         self.assertIn("T-day open-dependent gap analysis is expected to be unavailable", prompt)

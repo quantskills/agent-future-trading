@@ -121,11 +121,7 @@ def resolve_intraday_execution_basis(
             force_immediate=force_immediate,
         )
     except Exception:
-        selection = IntradayExecutionSelection(
-            decision="skip" if finalize_untriggered else "wait",
-            reason="intraday_no_valid_bar",
-            features={"underlying_code": underlying_code, "contract_code": contract_code},
-        )
+        raise RuntimeError("intraday_market_data_fetch_failed") from None
 
     basis = MorningExecutionBasis(
         base_price=selection.base_price,

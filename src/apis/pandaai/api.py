@@ -1315,11 +1315,17 @@ class PandaAIAPI:
         records: list[dict[str, Any]],
         end_date: datetime,
         contract_id: Optional[str] = None,
+        end_date_inclusive: bool = False,
     ) -> list[dict[str, Any]]:
         filtered: list[dict[str, Any]] = []
         for row in records:
             trade_date = self._parse_trade_date(row.get("date"))
-            if trade_date is None or trade_date >= end_date:
+            outside_window = (
+                trade_date > end_date
+                if end_date_inclusive
+                else trade_date >= end_date
+            )
+            if trade_date is None or outside_window:
                 continue
             if contract_id:
                 if not self._row_matches_contract(row, contract_id, reference_date=trade_date):
@@ -1414,6 +1420,7 @@ class PandaAIAPI:
         is_main: int = 0,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        end_date_inclusive: bool = False,
     ) -> List[FuturesDailyQuote]:
         end_date = self._normalize_datetime(end_date, default=datetime.now())
         start_date = self._normalize_datetime(start_date, default=end_date - timedelta(days=365))
@@ -1424,7 +1431,12 @@ class PandaAIAPI:
             reference_date=end_date,
         )
         rows = self._query_market_data(symbol=symbol, start_date=start_date, end_date=end_date)
-        records = self._prepare_historical_records(rows, end_date=end_date, contract_id=contract_id)
+        records = self._prepare_historical_records(
+            rows,
+            end_date=end_date,
+            contract_id=contract_id,
+            end_date_inclusive=end_date_inclusive,
+        )
         return [self._build_daily_quote_from_row(row) for row in records]
 
     def get_futures_quote_on_date(
@@ -1538,6 +1550,7 @@ class PandaAIAPI:
         is_main: int = 0,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        end_date_inclusive: bool = False,
     ):
         self._require_pandas("PandaAI DataFrame candle helpers")
         quotes = self.get_futures_daily_candles(
@@ -1546,6 +1559,7 @@ class PandaAIAPI:
             is_main=is_main,
             start_date=start_date,
             end_date=end_date,
+            end_date_inclusive=end_date_inclusive,
         )
         if not quotes:
             return pd.DataFrame()
@@ -1605,12 +1619,14 @@ class PandaAIAPI:
         underlying_code: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        end_date_inclusive: bool = False,
     ) -> List[FuturesDailyQuote]:
         return self.get_futures_daily_candles(
             underlying_code=underlying_code,
             is_main=1,
             start_date=start_date,
             end_date=end_date,
+            end_date_inclusive=end_date_inclusive,
         )
 
     def get_continuous_candles_df(
@@ -1618,12 +1634,14 @@ class PandaAIAPI:
         underlying_code: str,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        end_date_inclusive: bool = False,
     ):
         return self.get_futures_daily_candles_df(
             underlying_code=underlying_code,
             is_main=1,
             start_date=start_date,
             end_date=end_date,
+            end_date_inclusive=end_date_inclusive,
         )
 
     def get_china_futures_contracts(
@@ -1698,6 +1716,7 @@ class PandaAIAPI:
         contract_mark: str = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        end_date_inclusive: bool = False,
     ) -> List[FuturesDailyQuoteOptimized]:
         end_date = self._normalize_datetime(end_date, default=datetime.now())
         start_date = self._normalize_datetime(start_date, default=end_date - timedelta(days=365))
@@ -1710,7 +1729,12 @@ class PandaAIAPI:
             reference_date=end_date,
         )
         rows = self._query_market_data(symbol=symbol, start_date=start_date, end_date=end_date)
-        records = self._prepare_historical_records(rows, end_date=end_date, contract_id=contract_id)
+        records = self._prepare_historical_records(
+            rows,
+            end_date=end_date,
+            contract_id=contract_id,
+            end_date_inclusive=end_date_inclusive,
+        )
         return [self._build_optimized_quote_from_row(row, query_is_main=query_is_main) for row in records]
 
     def get_main_contract_code(

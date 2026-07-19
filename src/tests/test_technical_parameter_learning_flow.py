@@ -3,6 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
@@ -11,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from agents.analysis_team.technical import (
     _build_technical_signal_results,
     calculate_adaptive_params,
+    get_mean_reversion_signal,
     technical_agent,
     thresholds,
 )
@@ -189,6 +192,28 @@ class TechnicalParameterLearningFlowTest(unittest.TestCase):
         self.assertEqual(adjusted["trend"]["long"], round(params["trend"]["long"] * TECHNICAL_RULE_SPECS["trend_long_multiplier"][3]))
         self.assertEqual(adjusted["rsi"]["bullish"], params["rsi"]["bullish"] + TECHNICAL_RULE_SPECS["rsi_bullish_shift"][2])
         self.assertEqual(adjusted["rsi"]["bearish"], params["rsi"]["bearish"] + TECHNICAL_RULE_SPECS["rsi_bearish_shift"][3])
+
+    def test_bollinger_calibration_changes_mean_reversion_signal(self):
+        closes = [101.0, 99.0] * 9 + [101.0, 98.5]
+        prices = pd.DataFrame({"close": closes})
+        base = {
+            "bollinger_window": 20,
+            "rolling_window": 20,
+            "z_score_extreme": 1.0,
+            "bb_position_threshold": 0.2,
+        }
+
+        narrow = get_mean_reversion_signal(
+            prices,
+            {**base, "bollinger_std": 1.5},
+        )
+        wide = get_mean_reversion_signal(
+            prices,
+            {**base, "bollinger_std": 3.0},
+        )
+
+        self.assertEqual(narrow, Signal.BULLISH)
+        self.assertEqual(wide, Signal.NEUTRAL)
 
     def test_runtime_rebuilds_indicators_and_context_after_calibration(self):
         source = inspect.getsource(technical_agent)

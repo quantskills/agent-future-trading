@@ -111,6 +111,7 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             confidence=0.72,
+            setup_type="range_breakout",
             entry_timing_signal="breakout",
             entry_trigger="open only after breakout confirmation with volume expansion",
             exit_hint="exit if price closes back below breakout area",
@@ -145,7 +146,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertIn("internal_message_contract", result.metadata)
         self.assertIn("trend", result.factor_focus)
         self.assertIn("high_volatility", result.current_evidence_conflict)
-        self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
+        self.assertIn("current_entry_trigger_not_confirmed", result.current_evidence_conflict)
 
     def test_fundamental_direction_context_cannot_create_execution_watch(self):
         signal = AnalystSignal(
@@ -230,7 +231,7 @@ class AgentContractFixtureTest(unittest.TestCase):
         self.assertFalse(research_contract["trigger_valid"])
         self.assertNotIn("action_evidence_contract", research_contract)
         self.assertEqual(action_contract["opportunity_state"], "watch_for_trigger")
-        self.assertIn("conditional_entry_trigger_pending", result.current_evidence_conflict)
+        self.assertIn("current_entry_trigger_not_confirmed", result.current_evidence_conflict)
 
     def test_setup_quality_without_current_confirmation_stays_watch_for_trigger(self):
         signal = AnalystSignal(
@@ -1195,7 +1196,7 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
                 SimpleNamespace(trade_date="2025-03-04"),
             ],
             get_trade_dates=lambda start_date, end_date, underlying_code=None: [],
-            get_continuous_candles=lambda underlying_code, start_date, end_date: [],
+            get_continuous_candles=lambda **_kwargs: [],
         )
         router.last_fundamentals_metadata = None
         router.last_news_metadata = None
@@ -1208,6 +1209,9 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         with patch("apis.router.Path.exists", return_value=True), patch(
             "apis.router.read_finoview_feather_cached",
             return_value=df,
+        ), patch(
+            "tools.agent_tools.analysis.analyst_finoview_factors.get_previous_trading_day",
+            return_value=pd.Timestamp("2025-03-04"),
         ):
             result = router.get_china_futures_fundamentals("BU", "2025-03-05")
 
@@ -1228,6 +1232,9 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
         with patch("apis.router.Path.exists", return_value=True), patch(
             "apis.router.read_finoview_feather_cached",
             return_value=df,
+        ), patch(
+            "tools.agent_tools.analysis.analyst_finoview_factors.get_previous_trading_day",
+            return_value=pd.Timestamp("2025-03-04"),
         ):
             result = router.get_china_futures_fundamentals("BU", "2025-03-05")
 
@@ -1270,7 +1277,7 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
                 SimpleNamespace(trade_date="2025-03-04"),
                 SimpleNamespace(trade_date="2025-03-05"),
             ],
-            get_continuous_candles=lambda underlying_code, start_date, end_date: [
+            get_continuous_candles=lambda **_kwargs: [
                 SimpleNamespace(close=3300.0, trade_date="2025-03-03"),
                 SimpleNamespace(close=3400.0, trade_date="2025-03-04"),
             ],
@@ -1281,6 +1288,9 @@ class FundamentalDataBoundaryTest(unittest.TestCase):
             side_effect=fake_read,
         ), patch(
             "apis.router.get_previous_trading_day",
+            return_value=pd.Timestamp("2025-03-04"),
+        ), patch(
+            "tools.agent_tools.analysis.analyst_finoview_factors.get_previous_trading_day",
             return_value=pd.Timestamp("2025-03-04"),
         ), patch("apis.router.logger.info") as info_log:
             result = router.get_china_futures_fundamentals("BU", "2025-03-05")
@@ -1312,20 +1322,20 @@ class NewsDataBoundaryTest(unittest.TestCase):
                 "\n".join(
                     [
                         "2025-03-04",
-                        "T minus one catalyst",
-                        "库存下降，现货成交改善。",
+                        "沥青 T minus one catalyst",
+                        "沥青库存下降，现货成交改善。",
                         "inventory",
                         "local",
                         "",
                         "2025-03-05",
-                        "T day catalyst",
-                        "盘中新增政策消息。",
+                        "沥青 T day catalyst",
+                        "沥青盘中新增政策消息。",
                         "policy",
                         "local",
                         "",
                         "2025-03-06",
-                        "Future catalyst",
-                        "未来新闻不应进入当前分析。",
+                        "沥青 Future catalyst",
+                        "沥青未来新闻不应进入当前分析。",
                         "policy",
                         "local",
                     ]
@@ -1345,7 +1355,7 @@ class NewsDataBoundaryTest(unittest.TestCase):
                     pre_open_only=True,
                 )
 
-            self.assertEqual([item.title for item in pre_open_news], ["T minus one catalyst"])
+            self.assertEqual([item.title for item in pre_open_news], ["沥青 T minus one catalyst"])
             self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-03-04")
             self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-04")
 
@@ -1356,20 +1366,20 @@ class NewsDataBoundaryTest(unittest.TestCase):
                 "\n".join(
                     [
                         "2025-03-04",
-                        "T minus one catalyst",
-                        "库存下降，现货成交改善。",
+                        "沥青 T minus one catalyst",
+                        "沥青库存下降，现货成交改善。",
                         "inventory",
                         "local",
                         "",
                         "2025-03-05",
-                        "T day catalyst",
-                        "盘中新增政策消息。",
+                        "沥青 T day catalyst",
+                        "沥青盘中新增政策消息。",
                         "policy",
                         "local",
                         "",
                         "2025-03-06",
-                        "Future catalyst",
-                        "未来新闻不应进入当前分析。",
+                        "沥青 Future catalyst",
+                        "沥青未来新闻不应进入当前分析。",
                         "policy",
                         "local",
                     ]
@@ -1387,7 +1397,7 @@ class NewsDataBoundaryTest(unittest.TestCase):
 
             self.assertEqual(
                 [item.title for item in intraday_news],
-                ["T day catalyst", "T minus one catalyst"],
+                ["沥青 T day catalyst", "沥青 T minus one catalyst"],
             )
             self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-03-05")
             self.assertEqual(router.last_news_metadata["latest_news_date"], "2025-03-05")
@@ -1399,14 +1409,14 @@ class NewsDataBoundaryTest(unittest.TestCase):
                 "\n".join(
                     [
                         "2025-01-03",
-                        "Friday visible news",
-                        "Friday fact remains visible for Monday proposal.",
+                        "沥青 Friday visible news",
+                        "Asphalt fact remains visible for Monday proposal.",
                         "inventory",
                         "local",
                         "",
                         "2025-01-05",
-                        "Sunday future-to-cutoff news",
-                        "Sunday publication is after formal Prev(T).",
+                        "沥青 Sunday future-to-cutoff news",
+                        "Asphalt publication is after formal Prev(T).",
                         "policy",
                         "local",
                     ]
@@ -1426,7 +1436,7 @@ class NewsDataBoundaryTest(unittest.TestCase):
                     pre_open_only=True,
                 )
 
-            self.assertEqual([item.title for item in news], ["Friday visible news"])
+            self.assertEqual([item.title for item in news], ["沥青 Friday visible news"])
             self.assertEqual(router.last_news_metadata["news_cutoff"], "<=2025-01-03")
 
 

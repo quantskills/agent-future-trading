@@ -1352,12 +1352,13 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
         ):
             validate_action_evidence_contract(watch, analyst="technical")
 
-    def test_finalization_does_not_turn_bare_no_trigger_text_into_watch(self):
+    def test_finalization_does_not_turn_bare_text_without_profile_into_watch(self):
         signal = _analyst_signal(
             opportunity_state="watch_for_trigger",
             trigger_valid=False,
             current_trigger_confirmed=False,
             entry_trigger="No current entry trigger is established",
+            entry_timing_signal="",
         )
         signal.metadata = {
             **signal.metadata,

@@ -313,16 +313,27 @@ def technical_agent(state: FundState):
     llm_path = llm_path_label(full_config, "technical")
 
     signal_results_compact = {
-        k: format_signal_compact(v)
-        for k, v in signal_results.items()
-        if isinstance(v, Signal)
+        key: format_signal_compact(value)
+        for key, value in signal_results.items()
+        if isinstance(value, Signal)
     }
+    for key in ("futures_volatility", "turnover_value"):
+        value = signal_results.get(key)
+        if isinstance(value, str) and value.strip():
+            signal_results_compact[key] = value.strip()
+    price_levels = str(signal_results.get("price_levels") or "").strip()
+    consumed_indicators = list(signal_results_compact)
+    if signal_results.get("gap_analysis") is not None:
+        consumed_indicators.append("gap_analysis")
+    if price_levels:
+        consumed_indicators.append("price_levels")
     # Build the futures-only technical-analysis prompt from the centralized
     # prompt module. Data preparation and learning retrieval remain here.
     prompt = build_futures_technical_prompt(
         ticker=ticker,
         signal_results_compact=signal_results_compact,
         gap_analysis=signal_results.get("gap_analysis", "N/A"),
+        price_levels=price_levels,
         technical_summary=format_technical_summary_for_prompt(technical_context),
         product_profile_context=format_profile_for_technical(ticker, product_profile),
         features=features,
@@ -386,7 +397,7 @@ def technical_agent(state: FundState):
         ticker=ticker,
         trading_date=trading_date,
         prices_df=prices_df,
-        indicators_used=list(signal_results.keys()),
+        indicators_used=consumed_indicators,
         pre_open_only=pre_open_only,
         info_cutoff=info_cutoff,
     )
@@ -395,7 +406,7 @@ def technical_agent(state: FundState):
         "llm_path": llm_path,
         "technical_context": technical_context,
         "product_profile_evidence": product_profile_usage,
-        "indicators_used": list(signal_results.keys()),
+        "indicators_used": consumed_indicators,
         "adaptive_params": adaptive_params,
         "technical_parameter_calibration": technical_calibration_diag,
         "data_usage_summary": data_usage_summary,
@@ -553,15 +564,23 @@ def get_trend_signal(prices_df, params):
 def get_mean_reversion_signal(prices_df, params):
     """Mean reversion strategy using statistical measures and Bollinger Bands"""
     
-    def _calculate_bollinger_bands(prices_df: pd.DataFrame, window: int) -> tuple[pd.Series, pd.Series]:
+    def _calculate_bollinger_bands(
+        prices_df: pd.DataFrame,
+        window: int,
+        std_multiplier: float,
+    ) -> tuple[pd.Series, pd.Series]:
         sma = prices_df["close"].rolling(window).mean()
         std_dev = prices_df["close"].rolling(window).std()
-        upper_band = sma + (std_dev * 2)
-        lower_band = sma - (std_dev * 2)
+        upper_band = sma + (std_dev * std_multiplier)
+        lower_band = sma - (std_dev * std_multiplier)
         return upper_band, lower_band
 
     # Calculate Bollinger Bands with configured window
-    bb_upper, bb_lower = _calculate_bollinger_bands(prices_df, params["bollinger_window"])
+    bb_upper, bb_lower = _calculate_bollinger_bands(
+        prices_df,
+        params["bollinger_window"],
+        float(params.get("bollinger_std", 2.0)),
+    )
 
     # Calculate z-score with configured rolling window
     ma = prices_df["close"].rolling(window=params["rolling_window"]).mean()

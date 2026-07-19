@@ -303,6 +303,23 @@ class PandaAIAdapterTest(unittest.TestCase):
             "M_DOMINANT.DCE",
         )
 
+    def test_historical_window_can_explicitly_include_end_date(self):
+        fake, env_patch, module_patch = self._build_api()
+        with env_patch, module_patch:
+            api = PandaAIAPI()
+            quotes = api.get_futures_daily_candles_optimized(
+                underlying_code="M",
+                is_main=1,
+                start_date=datetime(2025, 1, 2),
+                end_date=datetime(2025, 1, 4),
+                end_date_inclusive=True,
+            )
+
+        self.assertEqual(
+            [quote.trade_date for quote in quotes],
+            ["2025-01-02", "2025-01-03", "2025-01-04"],
+        )
+
     def test_exact_quote_includes_target_date(self):
         fake, env_patch, module_patch = self._build_api()
         with env_patch, module_patch:

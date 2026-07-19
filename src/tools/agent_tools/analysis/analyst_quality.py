@@ -1256,11 +1256,43 @@ def apply_trade_research_contract(
         metadata = dict(metadata)
         metadata.pop("invalidation_condition", None)
     signal.metadata = metadata
-    signal.entry_trigger = (
-        str(getattr(signal, "entry_trigger", "") or "").strip()
-        if has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
-        else ""
-    )
+    raw_entry_trigger = str(getattr(signal, "entry_trigger", "") or "").strip()
+    if analyst == "technical" and not is_risk_reduction:
+        signal_text = signal_value(signal.signal)
+        technical_side = (
+            "long"
+            if signal_text == Signal.BULLISH.value
+            else "short"
+            if signal_text == Signal.BEARISH.value
+            else str(getattr(signal, "counterfactual_side", "") or "")
+            .strip()
+            .lower()
+        )
+        technical_profile = normalize_execution_profile(
+            getattr(signal, "entry_timing_signal", "")
+        )
+        if (
+            technical_profile in TECHNICAL_ENTRY_PROFILES
+            and technical_side in {"long", "short"}
+        ):
+            signal.entry_timing_signal = technical_profile
+            signal.entry_trigger = canonical_entry_trigger(
+                technical_profile,
+                technical_side,
+            )
+        else:
+            signal.entry_timing_signal = ""
+            # Prose can expose a malformed complete candidate for the existing
+            # profile-missing error, but it never creates an execution profile.
+            signal.entry_trigger = (
+                raw_entry_trigger
+                if has_concrete_entry_trigger(raw_entry_trigger)
+                else ""
+            )
+    else:
+        signal.entry_trigger = (
+            raw_entry_trigger if has_concrete_entry_trigger(raw_entry_trigger) else ""
+        )
     derived_notes = _clean_list(derived_setup.get("notes"), max_items=12)
     if derived_notes:
         existing_notes = _clean_list(getattr(signal, "setup_quality_notes", []), max_items=12)
@@ -2115,6 +2147,37 @@ BULLISH_NEWS_WORDS = ["减产", "去库", "下降", "收紧", "短缺", "上涨"
 BEARISH_NEWS_WORDS = ["增产", "累库", "上升", "宽松", "下跌", "进口增加", "需求疲弱", "库存增加", "供应增加"]
 STRONG_EVENT_WORDS = ["大幅", "显著", "紧张", "短缺", "创", "暴跌", "暴涨", "政策", "限产", "检修"]
 
+NEWS_PRODUCT_TERMS = {
+    "BU": ("沥青", "asphalt", "原油", "crude oil", "炼厂", "refinery"),
+    "C": ("玉米", "corn", "玉米淀粉", "corn starch", "饲料粮"),
+    "CF": ("棉花", "cotton", "棉纱", "cotton yarn", "纺织"),
+    "EB": ("苯乙烯", "styrene", "纯苯", "benzene", "abs", "eps", "ps"),
+    "HC": ("热卷", "热轧", "hot rolled", "hot coil", "板材", "钢材", "钢铁"),
+    "I": ("铁矿", "iron ore", "矿山", "铁水", "钢厂"),
+    "J": ("焦炭", "coke", "焦煤", "coking coal", "炼焦", "钢厂"),
+    "M": ("豆粕", "soybean meal", "大豆", "soybean", "压榨", "饲料"),
+    "MA": ("甲醇", "methanol", "mto", "煤制甲醇"),
+    "P": ("棕榈油", "palm oil", "棕榈", "生物柴油", "biodiesel"),
+    "PB": ("铅", "lead", "铅蓄电池", "废电池", "battery"),
+    "RB": ("螺纹钢", "螺纹", "rebar", "钢材", "钢铁", "建筑钢材"),
+    "SR": ("白糖", "食糖", "sugar", "甘蔗", "sugarcane"),
+    "TA": ("pta", "精对苯二甲酸", "px", "聚酯", "polyester", "涤纶"),
+    "ZN": ("锌", "zinc", "镀锌", "galvanized"),
+}
+
+
+def news_product_relevance_score(ticker: Any, title: Any, content: Any = "") -> float:
+    terms = NEWS_PRODUCT_TERMS.get(str(ticker or "").upper(), ())
+    if not terms:
+        return 0.0
+    title_text = str(title or "").lower()
+    content_text = str(content or "").lower()
+    if any(term.lower() in title_text for term in terms):
+        return 1.0
+    if any(term.lower() in content_text for term in terms):
+        return 0.75
+    return 0.0
+
 
 def _parse_date(value: Any) -> Optional[datetime]:
     if value is None:
@@ -2141,6 +2204,7 @@ def summarize_news_events(news_items: Iterable[Any], ticker: str, trading_date: 
     direction_counts = Counter()
     type_counts = Counter()
     latest_event_dt: Optional[datetime] = None
+    relevance_scores: List[float] = []
     trading_dt = _parse_date(trading_date)
     sector_policy = _news_catalyst_policy(ticker)
     tradable_event_types = set(str(item) for item in sector_policy.get("tradable_catalysts") or [])
@@ -2151,12 +2215,16 @@ def summarize_news_events(news_items: Iterable[Any], ticker: str, trading_date: 
         content = getattr(item, "content", "") or ""
         publish_time = getattr(item, "publish_time", "") or ""
         publish_dt = _parse_date(publish_time)
-        if publish_dt is not None and (latest_event_dt is None or publish_dt > latest_event_dt):
-            latest_event_dt = publish_dt
         normalized_title = re.sub(r"\s+", " ", title).strip()
         if not normalized_title or normalized_title in seen_titles:
             continue
+        relevance_score = news_product_relevance_score(ticker, normalized_title, content)
+        if relevance_score <= 0.0:
+            continue
+        if publish_dt is not None and (latest_event_dt is None or publish_dt > latest_event_dt):
+            latest_event_dt = publish_dt
         seen_titles.add(normalized_title)
+        relevance_scores.append(relevance_score)
         text = f"{title} {content}"
         event_types = [
             event_type
@@ -2269,7 +2337,11 @@ def summarize_news_events(news_items: Iterable[Any], ticker: str, trading_date: 
         "freshness_score": freshness_score,
         "latest_news_date": latest_news_date,
         "news_age_days": age_days,
-        "relevance_score": 0.8 if events else 0.0,
+        "relevance_score": (
+            sum(relevance_scores) / len(relevance_scores)
+            if relevance_scores
+            else 0.0
+        ),
         "strong_event_count": strong_event_count,
         "directional_event_count": directional_event_count,
         "event_regime": event_regime,
@@ -2431,6 +2503,12 @@ def format_technical_summary_for_prompt(context: Dict[str, Any]) -> str:
 
 
 def format_fundamental_summary_for_prompt(context: Dict[str, Any]) -> str:
+    factor_attribution = context.get("finoview_factor_attribution") or {}
+    used_factors = (
+        factor_attribution.get("used_factors")
+        if isinstance(factor_attribution, dict)
+        else []
+    )
     return (
         "\n\n=== Structured Fundamental Precheck ===\n"
         f"Sector: {context.get('sector')}\n"
@@ -2438,6 +2516,7 @@ def format_fundamental_summary_for_prompt(context: Dict[str, Any]) -> str:
         f"Tradeability: {context.get('tradeability')}\n"
         f"Data quality: {_format_json_block(context.get('data_quality'))}\n"
         f"Factor group counts: {_format_json_block(context.get('factor_group_counts'))}\n"
+        f"Finoview factor values used: {_format_json_block(used_factors or [])}\n"
         f"Basis: {_format_json_block(context.get('basis'))}\n"
         f"PandaAI extra factor context: {_format_json_block(context.get('pandaai_extra_factors'))}\n"
         f"Risk flags: {', '.join(context.get('risk_flags') or []) or 'none'}\n"

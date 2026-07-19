@@ -199,7 +199,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 三类分析师与 Researcher 的 LLM provider、model、reasoning effort 只服从主配置 `llm`，base URL 和 API key 环境变量名只服从 `src/llm/provider.py` 的 Provider 注册；智能体不得维护私有模型路由、硬编码模型名或第二套 API 配置。切换主配置后，四个 LLM 使用方必须共同切换；实际 provider/model 只写入既有 config 运行元数据和非敏感路由审计，不得进入 AEC、SCC、分析师报告或 Researcher 学习 payload。
 
-基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，使用交易日可见的最近有效记录并显式标注时效；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
+基本面和新闻数据不要求每个产品每日都有新增记录。存在可用历史记录时，Finoview只按唯一factor catalog登记的频率、freshness和正式交易日发布滞后选择最近可见事实，新闻只使用与当前产品产业链相关的截止点内记录，并显式标注时效和真实相关度；确无可用记录时，生成合法、无交易权限、可追溯的 `no_opportunity` 证据，禁止伪造方向、催化或缺失数据。
 
 只有必需盘前市场事实不可用才进入全局中性状态。此时technical、fundamental、commodity_news仍分别通过自己的正式入口生成共享校验通过的中性AEC，不调用LLM；Workflow保存三份信号并取得真实ID后，Signal Collector才可生成唯一SCC。Collector不得代替分析师、生成信号或自创ID。
 

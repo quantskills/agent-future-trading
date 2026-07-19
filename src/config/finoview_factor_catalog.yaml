@@ -594,9 +594,16 @@ factor_group_overrides:
   macro_usdcny: macro_policy
   macro_vix: macro_policy
 
-# 默认按 T+1 可见，防止当天发布数据在盘前被提前使用。
+# tradeDate 是指标事实日期，不是发布时间。没有正式发布时间字段时，按观测频率
+# 使用保守的正式交易日滞后，防止周频/月频事实在实际发布前进入 Proposal。
 release_lag_days:
   default: 1
+  default_high_frequency: 1
+  default_daily: 1
+  default_weekly: 5
+  default_monthly: 22
+  default_seasonal: 22
+  default_unknown: 22
 
 # 不同频率数据的新鲜度阈值。超过阈值后只能作为背景，不能增强方向锚。
 freshness_threshold_days:

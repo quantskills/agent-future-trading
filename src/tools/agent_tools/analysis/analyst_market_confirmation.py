@@ -117,8 +117,16 @@ def score_pandaai_extra_records(records: Dict[str, List[Dict[str, Any]]]) -> Lis
 
     basis_rows = _latest_rows(records.get("basis", []))
     if basis_rows:
-        ratio = _ratio_value(basis_rows[-1].get("basis_ratio"))
-        features.append(_feature_result("basis", max(-1.0, min(1.0, ratio / 0.04)), ratio, "basis_ratio"))
+        ratio_percent = _coerce_float(basis_rows[-1].get("basis_ratio"))
+        ratio_decimal = ratio_percent / 100.0
+        features.append(
+            _feature_result(
+                "basis",
+                max(-1.0, min(1.0, ratio_decimal / 0.04)),
+                ratio_decimal,
+                "basis_ratio_percent_points",
+            )
+        )
 
     wr_rows = _latest_rows(records.get("warehouse_receipt", []))
     if wr_rows:
@@ -153,9 +161,9 @@ def score_pandaai_extra_records(records: Dict[str, List[Dict[str, Any]]]) -> Lis
 
     ls_rows = _latest_rows(records.get("ls_ratio", []))
     if ls_rows:
-        ratio = _coerce_float(ls_rows[-1].get("ls_ratio"), 1.0)
-        score = max(-1.0, min(1.0, ratio - 1.0))
-        features.append(_feature_result("ls_ratio", score, ratio, "ls_ratio-1"))
+        ratio = _coerce_float(ls_rows[-1].get("ls_ratio"), 50.0)
+        score = max(-1.0, min(1.0, (ratio - 50.0) / 50.0))
+        features.append(_feature_result("ls_ratio", score, ratio, "ls_ratio_centered_at_50"))
 
     margin_change = _sum_field(_latest_rows(records.get("broker_net_margin_change", [])), "margin_change")
     if margin_change:
@@ -182,14 +190,22 @@ def score_pandaai_extra_records(records: Dict[str, List[Dict[str, Any]]]) -> Lis
         features.append(_feature_result("net_cap_change", score, net_cap, "sum_net_cap_value"))
 
     contract_indicator_rows = _latest_rows(records.get("contract_daily_indicators", []))
-    indicator_scores = []
+    indicator_ratios = []
     for row in contract_indicator_rows:
         ratio = _coerce_float(row.get("ratio"))
         if ratio:
-            indicator_scores.append(max(-1.0, min(1.0, _ratio_value(ratio) - 1.0)))
-    if indicator_scores:
-        score = _average(indicator_scores)
-        features.append(_feature_result("contract_daily_indicators", score, score, "avg_ratio_minus_1"))
+            indicator_ratios.append(ratio)
+    if indicator_ratios:
+        average_ratio = _average(indicator_ratios)
+        score = max(-1.0, min(1.0, average_ratio / 100.0))
+        features.append(
+            _feature_result(
+                "contract_daily_indicators",
+                score,
+                average_ratio,
+                "avg_ratio_percent_points_centered_at_0",
+            )
+        )
 
     rank_rows = _latest_rows(records.get("contract_rank", []))
     long_rank = 0.0

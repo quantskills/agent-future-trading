@@ -428,6 +428,7 @@ class Router():
             build_factor_catalog,
             build_factor_snapshot,
             build_local_finoview_availability_audit,
+            factor_group_to_prompt_role,
             map_factor_snapshot_to_judgment,
             resolve_finoview_visibility_cutoffs,
             select_latest_visible_finoview_row,
@@ -589,7 +590,6 @@ class Router():
             },
             "J": {
                 "spot_price": "j_spot_price_rizhao",
-                "spot_price_rizhao": "j_spot_price_rizhao",
                 "spot_price_tianjin": "j_spot_price_tianjin",
                 "profit": "j_profit",
                 "port_inventory": "j_port_stock",
@@ -860,11 +860,17 @@ class Router():
             ],
         )
         fundamental_data = {}
+        fundamental_histories = {}
         self.last_fundamentals_metadata["configured_indicator_count"] = len(indicators)
 
         for name_cn, filename in indicators.items():
-            indicator_role = self._get_indicator_role(filename, name_cn)
-            indicator_frequency = self._get_indicator_frequency(filename, name_cn)
+            catalog_entry = catalog_by_stem.get(filename)
+            indicator_role = factor_group_to_prompt_role(
+                catalog_entry.get("factor_group") if catalog_entry else None
+            )
+            indicator_frequency = str(
+                catalog_entry.get("freq") if catalog_entry else "unknown"
+            )
             file_path = data_dir / f"{filename}.feather"
 
             if not file_path.exists():
@@ -879,7 +885,6 @@ class Router():
                     self.last_fundamentals_metadata["empty_frame_count"] += 1
                     continue
 
-                catalog_entry = catalog_by_stem.get(filename)
                 date_col = catalog_entry.get("date_column") if catalog_entry else None
                 if not catalog_entry or not date_col or date_col not in df.columns:
                     logger.error(f"{ticker}: fundamental_source_date_column_missing")
@@ -909,10 +914,13 @@ class Router():
                 date_str = latest[date_col]
 
                 if filename in df.columns:
+                    value_col = filename
                     value = latest[filename]
                 elif 'price' in df.columns:
+                    value_col = 'price'
                     value = latest['price']
                 elif 'value' in df.columns:
+                    value_col = 'value'
                     value = latest['value']
                 else:
                     logger.error(f"{ticker}: fundamental_source_value_column_missing")
@@ -974,10 +982,10 @@ class Router():
                                 logger.warning(f"{ticker}: fundamental_source_future_date")
                                 days_diff = 0
 
-                            max_days = self._get_max_days_for_indicator(
-                                filename,
-                                ticker,
-                                indicator_frequency,
+                            max_days = int(
+                                catalog_entry.get("freshness_threshold_days")
+                                if catalog_entry
+                                else 14
                             )
                             if days_diff > max_days:
                                 logger.warning(f"{ticker}: fundamental_source_stale")
@@ -1017,6 +1025,19 @@ class Router():
                     'role': indicator_role,
                     'frequency': indicator_frequency,
                 }
+                history_frame = df_filtered[[date_col, value_col]].copy()
+                history_frame[value_col] = pd.to_numeric(
+                    history_frame[value_col],
+                    errors="coerce",
+                )
+                history_frame = history_frame.dropna(subset=[date_col, value_col]).tail(6)
+                fundamental_histories[name_cn] = [
+                    {
+                        "date": pd.to_datetime(row[date_col]).strftime("%Y-%m-%d"),
+                        "value": float(row[value_col]),
+                    }
+                    for _, row in history_frame.iterrows()
+                ]
                 if low_confidence_note:
                     fundamental_data[name_cn]['quality_note'] = low_confidence_note
                     self.last_fundamentals_metadata["low_confidence_indicator_count"] += 1
@@ -1082,24 +1103,65 @@ class Router():
                     if basis_reference_date is None:
                         futures_quotes = []
                     else:
+                        spot_history = list(fundamental_histories.get('spot_price') or [])
+                        history_start = (
+                            pd.to_datetime(spot_history[0]["date"]).to_pydatetime() - timedelta(days=7)
+                            if spot_history
+                            else basis_reference_date - timedelta(days=30)
+                        )
                         futures_quotes = self.api.get_continuous_candles(
                             underlying_code=ticker,
-                            start_date=basis_reference_date - timedelta(days=30),
+                            start_date=history_start,
                             end_date=basis_reference_date,
+                            end_date_inclusive=True,
                         )
 
                     if futures_quotes:
-                        futures_price = futures_quotes[-1].close
-                        futures_date = futures_quotes[-1].trade_date
-                        basis = spot_price - futures_price
-                        basis_pct = (basis / futures_price) * 100 if futures_price > 0 else 0
+                        futures_by_date = {
+                            pd.to_datetime(quote.trade_date).strftime("%Y-%m-%d"): float(quote.close)
+                            for quote in futures_quotes
+                            if float(quote.close or 0.0) > 0
+                        }
+                        aligned_basis = []
+                        for spot_row in fundamental_histories.get('spot_price') or []:
+                            fact_date = str(spot_row.get("date") or "")[:10]
+                            aligned_futures_price = futures_by_date.get(fact_date)
+                            aligned_spot_price = float(spot_row.get("value") or 0.0)
+                            if aligned_futures_price is None or aligned_spot_price <= 0:
+                                continue
+                            aligned_basis.append(
+                                {
+                                    "date": fact_date,
+                                    "spot": aligned_spot_price,
+                                    "futures": aligned_futures_price,
+                                    "basis": aligned_spot_price - aligned_futures_price,
+                                }
+                            )
 
-                        basis_trend_5d = 0
-                        if len(futures_quotes) >= 6:
-                            futures_5d_ago = futures_quotes[-6].close
-                            basis_5d_ago = spot_price - futures_5d_ago
+                        if not aligned_basis:
+                            logger.warning(f"{ticker}: No date-aligned futures data for basis calculation")
+                            continue_basis = False
+                        else:
+                            continue_basis = True
+
+                    else:
+                        continue_basis = False
+
+                    if continue_basis:
+                        current_basis = aligned_basis[-1]
+                        spot_price = current_basis["spot"]
+                        futures_price = current_basis["futures"]
+                        futures_date = current_basis["date"]
+                        basis = current_basis["basis"]
+                        basis_pct = (basis / spot_price) * 100
+
+                        basis_trend_5d = 0.0
+                        if len(aligned_basis) >= 6:
+                            basis_5d_ago = aligned_basis[-6]["basis"]
                             if basis_5d_ago != 0:
-                                basis_trend_5d = ((basis - basis_5d_ago) / abs(basis_5d_ago)) * 100
+                                basis_trend_5d = (
+                                    (basis - basis_5d_ago) / abs(basis_5d_ago)
+                                ) * 100
 
                         if basis > 0:
                             basis_status = 'backwardation'
@@ -1150,7 +1212,7 @@ class Router():
                         }
                         self.last_fundamentals_metadata["basis"] = dict(fundamental_data["basis"])
                         self.last_fundamentals_metadata["basis_available"] = True
-                    else:
+                    elif not futures_quotes:
                         logger.warning(f"{ticker}: No futures data for basis calculation")
                 else:
                     logger.warning(f"{ticker}: No spot price data for basis calculation")
@@ -1245,6 +1307,7 @@ class Router():
         """
         from datetime import datetime
         from pydantic import BaseModel
+        from tools.agent_tools.analysis.analyst_quality import news_product_relevance_score
         from typing import Optional
         import re
 
@@ -1353,6 +1416,8 @@ class Router():
 
                     if not title:
                         raise ValueError('missing news title')
+                    if news_product_relevance_score(ticker, title, news_content) <= 0.0:
+                        continue
 
                     news_items.append(NewsItem(
                         title=sanitize_visible_text(title),
@@ -1378,146 +1443,3 @@ class Router():
             if isinstance(getattr(self, "last_news_metadata", None), dict):
                 self.last_news_metadata.setdefault("errors", []).append("news_source_read_failed")
             return []
-
-    def _get_indicator_role(self, filename: str, display_name: str = "") -> str:
-        """
-        Classify a local fundamental series by how an analyst should use it.
-        """
-        key = f"{filename}_{display_name}".lower()
-
-        if "future" in key or "futures" in key:
-            return "price_anchor"
-        if "spot_price" in key or "basis" in key or "spread" in key or "cash_spot" in key:
-            return "price_basis"
-        if any(token in key for token in ("stock", "inventory", "warehouse", "warrant")):
-            return "inventory"
-        if any(token in key for token in ("profit", "cost", "fee", "tc_", "processing")):
-            return "cost_profit"
-        if any(token in key for token in ("operate_rate", "capacity", "yield", "production", "plant")):
-            return "supply"
-        if any(token in key for token in ("demand", "trade_volume", "shipment", "sales", "arrivals")):
-            return "demand"
-        if any(token in key for token in ("jk_", "import", "export", "ck_")):
-            return "trade_flow"
-        if any(token in key for token in ("pmi", "order_days", "land", "house", "global")):
-            return "macro_downstream"
-
-        return "context"
-
-    def _get_indicator_frequency(self, filename: str, display_name: str = "") -> str:
-        """
-        Infer the release cadence for freshness checks and prompt context.
-        """
-        key = f"{filename}_{display_name}".lower()
-
-        monthly_patterns = (
-            "arrivals",
-            "balance",
-            "battery_operate_rate",
-            "departures",
-            "demand",
-            "domestic_sales_rate",
-            "electric_yield",
-            "global",
-            "is_ratio",
-            "season",
-            "monthly",
-            "import",
-            "export",
-            "jk_volume",
-            "ck_volume",
-            "jk_profit",
-            "pb_yield",
-            "sr_yield",
-            "sr_trade_volume",
-            "usa_stock",
-            "us_stock",
-            "y_usa_stock",
-            "zn_trade_volume",
-            "feed_yield",
-            "oer_malaysia",
-            "pet_downstream_stock",
-            "recycle_yield",
-            "smm_",
-            "stock_days",
-            "stock_indonesia",
-            "stock_malaysia",
-            "yield_indonesia",
-            "yield_malaysia",
-            "pmi",
-            "order_days",
-            "galvanize_operate_rate",
-            "alloy_operate_rate",
-            "oxide_operate_rate",
-            "land_trade_volume",
-            "house_trade_volume",
-        )
-        weekly_patterns = (
-            "stock",
-            "inventory",
-            "operate_rate",
-            "yield",
-            "profit",
-            "demand",
-            "arrivals",
-            "shipment",
-            "sales_progress",
-            "trade_volume",
-            "warehouse",
-        )
-
-        if any(pattern in key for pattern in monthly_patterns):
-            return "monthly"
-        if any(pattern in key for pattern in weekly_patterns):
-            return "weekly"
-
-        return "daily"
-
-    def _get_max_days_for_indicator(self, filename: str, ticker: str, frequency: str | None = None) -> int:
-        """
-        Return the freshness threshold, in calendar days, for a local fundamental series.
-
-        Heuristics:
-        - Explicit inferred frequency wins when available.
-        - Monthly-style files allow a longer lag.
-        - Weekly-style files use a medium lag.
-        - Explicit special cases override the pattern defaults.
-        - All other indicators default to a 7-day freshness window.
-        """
-        # Monthly-style releases can stay valid longer than daily series.
-        monthly_patterns = ['_volume', '_us_', '_cn_', '_reserve']
-        # Weekly inventory and operating-rate series use a medium freshness window.
-        weekly_patterns = ['_stock', '_yield', '_operate_rate', '_profit', '_spread', '_consumption', '_arrivals']
-        # Explicit overrides for indicators with known publication cycles.
-        special_cases = {
-            'au_lease_rate': 7, 'au_comex': 7, 'au_etf': 7, 'au_us_rate': 7,
-            'sc_eia': 14, 'sc_us_rig': 14, 'sc_refinery': 14, 'sc_saudi': 45, 'sc_us_production': 30,
-            'cu_lme': 7, 'cu_comex': 7,
-            'cf_textile_order': 60, 'cf_us_export': 30,
-            'c_feed_output': 60,
-            'c_hog_inventory': 45, 'c_sow_inventory': 45, 'c_import_volume': 45,
-            'y_us_stock': 60,
-            'ta_downstream_stock': 60,
-        }
-
-        for pattern, max_days in special_cases.items():
-            if pattern in filename:
-                return max_days
-
-        if frequency == "monthly":
-            return 45
-
-        if frequency == "weekly":
-            return 14
-
-        if frequency == "daily":
-            return 7
-
-        if any(p in filename for p in monthly_patterns):
-            return 45
-
-        if any(p in filename for p in weekly_patterns):
-            return 14
-
-        return 7
-

@@ -1,6 +1,9 @@
 ﻿from typing import Any, Mapping, Optional
 
 
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
+
+
 ANALYST_OUTPUT_FORMAT = """
 Output format:
 - signal: "Bullish"/"Bearish"/"Neutral"
@@ -398,6 +401,7 @@ def build_futures_technical_prompt(
     ticker: str,
     signal_results_compact: Mapping[str, str],
     gap_analysis: Any = "N/A",
+    price_levels: str = "",
     technical_summary: str = "",
     product_profile_context: str = "",
     features: Optional[Mapping[str, Any]] = None,
@@ -419,6 +423,20 @@ Indicator snapshot (Bullish / Bearish / Neutral):
 [Filters] MR:{signal_results_compact.get('mean_reversion', '?')} RSI:{signal_results_compact.get('rsi', '?')} Stoch:{signal_results_compact.get('stochastic', '?')}
 Open-context signal:
 GAP_DETAIL: {gap_analysis}
+"""
+
+    if price_levels:
+        prompt += f"\n=== Price levels ===\n{price_levels}\n"
+
+    prompt += f"""
+Canonical Trader-observable entry conditions:
+- breakout long: {canonical_entry_trigger('breakout', 'long')}
+- breakout short: {canonical_entry_trigger('breakout', 'short')}
+- pullback long: {canonical_entry_trigger('pullback', 'long')}
+- pullback short: {canonical_entry_trigger('pullback', 'short')}
+- vwap_confirmed long: {canonical_entry_trigger('vwap_confirmed', 'long')}
+- vwap_confirmed short: {canonical_entry_trigger('vwap_confirmed', 'short')}
+T-day open-dependent gap analysis is expected to be unavailable during the pre-open proposal stage.
 """
 
     if technical_summary:

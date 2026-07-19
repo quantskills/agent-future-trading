@@ -6,7 +6,7 @@
 
 本文中的 `T` 始终表示期货逻辑交易日，`Prev(T)` / `Next(T)` 由正式交易日与夜盘映射机制确定，不按自然日加减。对有夜盘的品种，物理 `Prev(T)` 晚间产生的分钟线、订单和成交可以属于逻辑 `T`；`created_at`、分钟 `datetime` 表示物理时间，业务 `trading_date` 仍统一登记逻辑交易日。
 
-Proposal 为逻辑 `T` 生成策略时，`reference_portfolio_id` 必须指向 `portfolio.trading_date=Prev(T)` 的最近已结算账户/持仓快照；PandaAI 日线与新闻不得晚于 `Prev(T)`。Finoview 按 `finoview_factor_catalog.yaml.release_lag_days` 和正式交易日机制选择最新可见 `tradeDate`，Router 格式化输入与 factor snapshot 共用同一选择器；`recordTime` 不作为发布时间或可见边界。三份 AEC、SCC、recommendation 及其 `effective_trade_date` 均属于逻辑 `T`。
+Proposal 为逻辑 `T` 生成策略时，`reference_portfolio_id` 必须指向 `portfolio.trading_date=Prev(T)` 的最近已结算账户/持仓快照；PandaAI 日线与新闻不得晚于 `Prev(T)`。历史日线查询默认不包含结束日，需要精确消费该日时必须显式使用包含结束日语义。Finoview 按同一 factor catalog 中的实际频率、freshness、`release_lag_days` 和正式交易日机制选择最新可见 `tradeDate`，Router 格式化输入与 factor snapshot 共用同一选择器；`recordTime` 不作为发布时间或可见边界。三份 AEC、SCC、recommendation 及其 `effective_trade_date` 均属于逻辑 `T`。
 
 ```text
 【物理输入】
@@ -170,6 +170,7 @@ PM在Step4通过 pm_decision_memory_retrieval.retrieve_pm_memory
 - workflow 编排层以 `AnalystSignal` 作为类型载体，但分析师最终出口的 metadata 只能含 `action_evidence_contract`，Workflow保存后只追加真实 `signal_record_id`；Signal Collector发现其他metadata立即拒绝。signal SQL的自由文本理由列固定为空，artifact和分析师报告都只保存同一份经过共享校验的AEC。
 - 必需市场事实不可用时，三个分析师仍分别经自己的正式入口生成同一共享校验可接受的中性 AEC；不得调用LLM补数据，也不得伪造方向、profile、trigger、权限或市场事实。
 - 基本面或新闻没有当日新增记录不是全局市场数据不可用；对应分析师使用截止点前最近有效事实并写明时效/质量，或输出本专业合法 `no_opportunity` AEC。
+- 技术面必须把已计算并声明使用的波动率、成交强度、价格位置和指标投票实际传入分析师；Finoview只有实际可见且传入分析师的因子才能登记为已使用；新闻先按产品产业链相关性过滤再截取最新记录，非空新闻不自动构成相关证据。
 - 数据可用但模型输出普通 `Neutral` 时保持 `signal=Neutral`。三个 LLM 入口使用角色化结构化输出模型：technical 只有在反事实方向、固定 `entry_timing_signal`、canonical 失效边界完整且当前未触发时才可形成 watch；fundamental 固定为 `direction_context` 且新增风险状态为 `no_opportunity`；commodity_news 只有当前事件已满足即时边界时才可形成 `event_immediate` probe/tradeable，不能形成普通15分钟 watch。Neutral 不得升级为 probe/tradeable。
 - 可执行 `entry_trigger` 由共享 canonical 定义按 `entry_timing_signal+side` 生成：technical 只允许 `breakout/pullback/vwap_confirmed`，commodity_news 只允许 `event_immediate`，fundamental 固定为空。LLM 自由分析继续进入现有证据、冲突、确认需求和质量字段，不能成为正式执行触发。
 - 正式 watch 的 `entry_trigger` 不得为空、`unknown` 或 `wait_for_trigger`；`invalidation_present` 只能由 canonical `invalidation_condition`、合法 `invalidation_level` 或正数 `atr_stop_distance` 证明。`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 都不是失效边界别名。

@@ -275,12 +275,51 @@ def infer_factor_group(name: str) -> str:
     return "unknown_factor"
 
 
-def infer_frequency(name: str) -> str:
+def infer_frequency(name: str, date_values: Optional[Iterable[Any]] = None) -> str:
     lower = name.lower()
     for key, freq in FREQUENCY_HINTS.items():
         if key in lower:
             return freq
+    if any(
+        token in lower
+        for token in (
+            "spot_price",
+            "future_close_price",
+            "price_index",
+            "processing_fee",
+            "freight_fee",
+            "cif_spread",
+        )
+    ):
+        return "daily"
+    if date_values is not None:
+        dates = pd.to_datetime(pd.Series(list(date_values)), errors="coerce").dropna()
+        unique_dates = dates.drop_duplicates().sort_values()
+        if len(unique_dates) >= 2:
+            intervals = unique_dates.diff().dt.days.dropna()
+            positive_intervals = intervals.loc[intervals > 0]
+            if not positive_intervals.empty:
+                median_days = float(positive_intervals.median())
+                if median_days <= 2:
+                    return "daily"
+                if median_days <= 10:
+                    return "weekly"
+                if median_days <= 45:
+                    return "monthly"
+                return "seasonal"
     return "daily"
+
+
+def factor_group_to_prompt_role(value: Any) -> str:
+    return {
+        "price_basis": "price_basis",
+        "inventory": "inventory",
+        "supply": "supply",
+        "demand": "demand",
+        "import_export": "trade_flow",
+        "cost_profit": "cost_profit",
+        "macro_policy": "macro_downstream",
+    }.get(str(value or ""), "context")
 
 
 def _date_column(columns: Iterable[str]) -> Optional[str]:
@@ -363,9 +402,16 @@ def build_factor_catalog(
         except Exception:
             columns = []
         date_column = _date_column(columns)
-        freq = frequency_overrides.get(stem_key) or infer_frequency(stem)
-        threshold = freshness_overrides.get(stem_key) or FRESHNESS_DAYS.get(freq, FRESHNESS_DAYS["unknown"])
-        default_release_lag = int(lag_overrides.get("default", 1) or 1)
+        observed_dates = df[date_column] if date_column and date_column in df.columns else None
+        freq = frequency_overrides.get(stem_key) or infer_frequency(stem, observed_dates)
+        threshold = (
+            freshness_overrides.get(stem_key)
+            or freshness_overrides.get(f"default_{freq}")
+            or FRESHNESS_DAYS.get(freq, FRESHNESS_DAYS["unknown"])
+        )
+        default_release_lag = int(
+            lag_overrides.get(f"default_{freq}", lag_overrides.get("default", 1)) or 1
+        )
         for ticker in sorted(tickers):
             entry = FactorCatalogEntry(
                 file=path.name,
@@ -722,6 +768,7 @@ def build_factor_attribution_payload(
         }
         for item in factors
         if item.get("factor_group") != "unknown_factor"
+        and bool(item.get("usable_for_direction"))
     ]
     return {
         "artifact_type": "FinoviewFactorAttribution",
