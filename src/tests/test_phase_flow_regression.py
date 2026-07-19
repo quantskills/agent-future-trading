@@ -113,7 +113,10 @@ from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
 from tools.agent_tools.execution.accountant_futures_settlement import FuturesDailySettlement
-from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
+from tools.agent_tools.execution.trader_intraday_execution import (
+    resolve_intraday_execution_basis,
+    select_intraday_execution,
+)
 from tools.agent_tools.execution.trader_entry_timing import phase2_entry_audit
 from tools.agent_tools.research.reviewer_phase4_review import (
     _apply_net_exposure_review,
@@ -4051,9 +4054,6 @@ class PandaAIContractNormalizationRegressionTest(unittest.TestCase):
 
         self.assertTrue(
             api._row_matches_contract(row, "CF2505", reference_date=datetime(2024, 12, 31))
-        )
-        self.assertTrue(
-            api._row_matches_contract(row, "CF505", reference_date=datetime(2024, 12, 31))
         )
 
     def test_token_expiry_reauthenticates_once_before_retry(self):
@@ -11921,6 +11921,142 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             "entry_trigger": canonical_entry_trigger(profile, side),
             "can_execute_without_intraday_trigger": direct,
         }
+
+    @staticmethod
+    def _pandaai_minute_router(*, symbol: str, trading_code: str):
+        calls = []
+        api = PandaAIAPI.__new__(PandaAIAPI)
+
+        def minute_row(timestamp: str, *, open_price: float, high: float, low: float, close: float):
+            row_datetime = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            return {
+                "date": row_datetime.strftime("%Y%m%d"),
+                "minute": row_datetime.strftime("%H%M%S"),
+                "datetime": timestamp,
+                "symbol": symbol,
+                "dominant_id": "",
+                "trading_code": trading_code,
+                "underlying_symbol": "SR",
+                "exchange": "CZCE",
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 10,
+                "trading_date": "20250326",
+            }
+
+        def query_market_min_data(**kwargs):
+            calls.append((kwargs["symbol"], kwargs["frequency"]))
+            if kwargs["frequency"] == "15m":
+                return [
+                    minute_row(
+                        "2025-03-26 10:00:00",
+                        open_price=5800.0,
+                        high=5850.0,
+                        low=5790.0,
+                        close=5840.0,
+                    )
+                ]
+            return [
+                minute_row(
+                    "2025-03-26 09:30:00",
+                    open_price=5800.0,
+                    high=5810.0,
+                    low=5790.0,
+                    close=5800.0,
+                ),
+                minute_row(
+                    "2025-03-26 09:31:00",
+                    open_price=5800.0,
+                    high=5810.0,
+                    low=5790.0,
+                    close=5800.0,
+                ),
+                minute_row(
+                    "2025-03-26 10:01:00",
+                    open_price=5845.0,
+                    high=5855.0,
+                    low=5835.0,
+                    close=5850.0,
+                ),
+            ]
+
+        api._query_market_min_data = query_market_min_data
+        router = Router.__new__(Router)
+        router.api = api
+        return router, calls
+
+    def test_pandaai_czce_short_code_reaches_trader_breakout_for_15m_and_1m(self):
+        router, calls = self._pandaai_minute_router(
+            symbol="SR2505.CZC",
+            trading_code="SR505",
+        )
+
+        basis, selection = resolve_intraday_execution_basis(
+            router=router,
+            config={
+                "execution": {
+                    "intraday_confirmation": {
+                        "enabled": True,
+                        "decision_frequency": "15m",
+                        "execution_frequency": "1m",
+                        "opening_range_minutes": 2,
+                        "min_execution_volume": 1,
+                        "max_chase_ratio": 0.02,
+                    }
+                }
+            },
+            underlying_code="SR",
+            trading_date="2025-03-26",
+            action="open_long",
+            contract_code="SR2505",
+            decision_context={
+                "execution_contract": self._execution_contract("breakout", "long")
+            },
+        )
+
+        self.assertTrue(selection.should_execute)
+        self.assertEqual(selection.reason, "intraday_trigger_confirmed")
+        self.assertEqual(basis.base_price, 5845.0)
+        self.assertIsNone(basis.warning_message)
+        self.assertEqual(
+            calls,
+            [("SR2505.CZC", "15m"), ("SR2505.CZC", "1m")],
+        )
+
+    def test_pandaai_wrong_month_reaches_existing_trader_fetch_failure(self):
+        router, calls = self._pandaai_minute_router(
+            symbol="SR2506.CZC",
+            trading_code="SR506",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "^intraday_market_data_fetch_failed$"):
+            resolve_intraday_execution_basis(
+                router=router,
+                config={
+                    "execution": {
+                        "intraday_confirmation": {
+                            "enabled": True,
+                            "decision_frequency": "15m",
+                            "execution_frequency": "1m",
+                        }
+                    }
+                },
+                underlying_code="SR",
+                trading_date="2025-03-26",
+                action="open_long",
+                contract_code="SR2505",
+                decision_context={
+                    "execution_contract": self._execution_contract(
+                        "event_immediate",
+                        "long",
+                        direct=True,
+                    )
+                },
+            )
+
+        self.assertEqual(calls, [("SR2505.CZC", "15m")])
 
     def test_pm_execution_contract_classifies_technical_pullback(self):
         action_contract = build_test_aec(

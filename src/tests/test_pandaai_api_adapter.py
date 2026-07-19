@@ -234,6 +234,47 @@ class PandaAIAdapterTest(unittest.TestCase):
         modules = {"panda_data": fake}
         return fake, patch.dict(os.environ, env), patch.dict(sys.modules, modules)
 
+    @staticmethod
+    def _minute_row(
+        *,
+        timestamp: datetime,
+        trading_date: str,
+        symbol: str,
+        trading_code: str,
+        exchange: str,
+        underlying_code: str,
+        dominant_id: str = "",
+    ) -> dict:
+        return {
+            "date": timestamp.strftime("%Y%m%d"),
+            "minute": timestamp.strftime("%H%M%S"),
+            "datetime": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "dominant_id": dominant_id,
+            "trading_code": trading_code,
+            "underlying_symbol": underlying_code,
+            "exchange": exchange,
+            "open": 100.0,
+            "high": 102.0,
+            "low": 99.0,
+            "close": 101.0,
+            "volume": 10,
+            "amount": 1010.0,
+            "open_interest": 100,
+            "trading_date": trading_date,
+        }
+
+    def _build_api_with_minute_rows(self, rows):
+        fake, env_patch, module_patch = self._build_api()
+        source_rows = list(rows)
+
+        def get_market_min_data(**kwargs):
+            fake.calls.append({"func": "get_market_min_data", **kwargs})
+            return source_rows
+
+        fake.get_market_min_data = get_market_min_data
+        return fake, source_rows, env_patch, module_patch
+
     def test_sdk_user_cache_is_redirected_to_writable_runtime_dir(self):
         fake, env_patch, module_patch = self._build_api()
         common_utils = types.ModuleType("panda_data.utils.common_utils")
@@ -375,6 +416,7 @@ class PandaAIAdapterTest(unittest.TestCase):
             ),
             ({"date": "2025-03-27", "trading_code": "sr505"}, "SR2505"),
             ({"date": "2019-03-27", "trading_code": "SR905"}, "SR1905"),
+            ({"date": "2029-03-27", "trading_code": "SR905"}, "SR2905"),
         )
 
         for row, expected in cases:
@@ -782,6 +824,205 @@ class PandaAIAdapterTest(unittest.TestCase):
         self.assertEqual(min_call["symbol"], ["M_DOMINANT.DCE"])
         self.assertEqual(min_call["symbol_type"], "future")
         self.assertEqual(min_call["frequency"], "15m")
+
+    def test_concrete_minute_bars_canonicalize_provider_codes_for_both_frequencies(self):
+        cases = (
+            ("SR", "SR2505", "SR2505.CZC", "sr505", "CZCE"),
+            ("CF", "CF2505", "CF2505.CZC", "CF505", "CZCE"),
+            ("TA", "TA2505", "TA2505.CZC", "TA505", "CZCE"),
+            ("BU", "BU2506", "BU2506.SHF", "bu2506", "SHFE"),
+            ("C", "C2505", "C2505.DCE", "c2505", "DCE"),
+        )
+        for frequency in ("15m", "1m"):
+            for underlying, contract, provider_symbol, provider_code, exchange in cases:
+                with self.subTest(frequency=frequency, contract=contract):
+                    source_row = self._minute_row(
+                        timestamp=datetime(2025, 3, 27, 10, 0),
+                        trading_date="20250327",
+                        symbol=provider_symbol,
+                        trading_code=provider_code,
+                        exchange=exchange,
+                        underlying_code=underlying,
+                        dominant_id=contract,
+                    )
+                    fake, source_rows, env_patch, module_patch = self._build_api_with_minute_rows(
+                        [source_row]
+                    )
+                    with env_patch, module_patch:
+                        bars = PandaAIAPI().get_futures_minute_bars(
+                            contract_id=contract,
+                            underlying_code=underlying,
+                            is_main=0,
+                            start_date=datetime(2025, 3, 27),
+                            end_date=datetime(2025, 3, 27),
+                            frequency=frequency,
+                        )
+
+                    minute_call = next(
+                        call for call in fake.calls if call["func"] == "get_market_min_data"
+                    )
+                    self.assertEqual(minute_call["symbol"], [provider_symbol])
+                    self.assertEqual(minute_call["frequency"], frequency)
+                    self.assertEqual(len(bars), 1)
+                    self.assertEqual(bars[0]["trading_code"], contract)
+                    self.assertEqual(bars[0]["symbol"], provider_symbol)
+                    self.assertEqual(bars[0]["dominant_id"], contract)
+                    self.assertEqual(bars[0]["exchange"], exchange)
+                    self.assertEqual(source_rows[0]["trading_code"], provider_code)
+
+    def test_main_minute_bars_canonicalize_each_row_from_dominant_id(self):
+        source_rows = [
+            self._minute_row(
+                timestamp=datetime(2025, 3, 27, 10, 0),
+                trading_date="20250327",
+                symbol="SR_DOMINANT.CZC",
+                dominant_id="SR505",
+                trading_code="SR506",
+                exchange="CZCE",
+                underlying_code="SR",
+            ),
+            self._minute_row(
+                timestamp=datetime(2025, 3, 28, 10, 0),
+                trading_date="20250328",
+                symbol="SR_DOMINANT.CZC",
+                dominant_id="SR2509",
+                trading_code="SR509",
+                exchange="CZCE",
+                underlying_code="SR",
+            ),
+        ]
+        fake, raw_rows, env_patch, module_patch = self._build_api_with_minute_rows(source_rows)
+        with env_patch, module_patch:
+            bars = PandaAIAPI().get_futures_minute_bars(
+                underlying_code="SR",
+                is_main=1,
+                start_date=datetime(2025, 3, 27),
+                end_date=datetime(2025, 3, 28),
+                frequency="15m",
+            )
+
+        minute_call = next(call for call in fake.calls if call["func"] == "get_market_min_data")
+        self.assertEqual(minute_call["symbol"], ["SR_DOMINANT.CZC"])
+        self.assertEqual([bar["trading_code"] for bar in bars], ["SR2505", "SR2509"])
+        self.assertEqual([bar["dominant_id"] for bar in bars], ["SR505", "SR2509"])
+        self.assertEqual([bar["symbol"] for bar in bars], ["SR_DOMINANT.CZC"] * 2)
+        self.assertEqual([row["trading_code"] for row in raw_rows], ["SR506", "SR509"])
+
+    def test_czce_night_minute_contract_expansion_uses_logical_trading_date(self):
+        cases = (
+            (datetime(2019, 3, 26, 21, 0), "20190327", "SR1905"),
+            (datetime(2029, 3, 26, 21, 0), "20290327", "SR2905"),
+        )
+        for timestamp, logical_date, expected_contract in cases:
+            with self.subTest(logical_date=logical_date):
+                PandaAIAPI._shared_minute_cache.clear()
+                source_row = self._minute_row(
+                    timestamp=timestamp,
+                    trading_date=logical_date,
+                    symbol="",
+                    dominant_id="",
+                    trading_code="SR905",
+                    exchange="CZCE",
+                    underlying_code="SR",
+                )
+                fake, raw_rows, env_patch, module_patch = self._build_api_with_minute_rows(
+                    [source_row]
+                )
+                logical_datetime = datetime.strptime(logical_date, "%Y%m%d")
+                with env_patch, module_patch:
+                    bars = PandaAIAPI().get_futures_minute_bars(
+                        contract_id=expected_contract,
+                        underlying_code="SR",
+                        is_main=0,
+                        start_date=logical_datetime,
+                        end_date=logical_datetime,
+                        frequency="1m",
+                    )
+
+                minute_call = next(
+                    call for call in fake.calls if call["func"] == "get_market_min_data"
+                )
+                self.assertEqual(minute_call["symbol"], [f"{expected_contract}.CZC"])
+                self.assertEqual(len(bars), 1)
+                self.assertEqual(bars[0]["trading_code"], expected_contract)
+                self.assertEqual(bars[0]["trading_date"], logical_date)
+                self.assertEqual(bars[0]["datetime"], timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                self.assertEqual(raw_rows[0]["trading_code"], "SR905")
+
+    def test_minute_contract_identity_errors_are_not_silently_filtered(self):
+        cases = (
+            (
+                "SR",
+                "SR2505",
+                self._minute_row(
+                    timestamp=datetime(2025, 3, 27, 10, 0),
+                    trading_date="20250327",
+                    symbol="SR2506.CZC",
+                    trading_code="SR506",
+                    exchange="CZCE",
+                    underlying_code="SR",
+                ),
+                "contract mismatch",
+            ),
+            (
+                "BU",
+                "BU2506",
+                self._minute_row(
+                    timestamp=datetime(2025, 3, 27, 10, 0),
+                    trading_date="20250327",
+                    symbol="",
+                    trading_code="BU506",
+                    exchange="SHFE",
+                    underlying_code="BU",
+                ),
+                "three-digit",
+            ),
+            (
+                "M",
+                "M2505",
+                self._minute_row(
+                    timestamp=datetime(2025, 3, 27, 10, 0),
+                    trading_date="20250327",
+                    symbol="",
+                    trading_code="M505",
+                    exchange="DCE",
+                    underlying_code="M",
+                ),
+                "three-digit",
+            ),
+        )
+        for underlying, contract, source_row, error_pattern in cases:
+            with self.subTest(contract=contract, provider_code=source_row["trading_code"]):
+                PandaAIAPI._shared_minute_cache.clear()
+                _fake, _rows, env_patch, module_patch = self._build_api_with_minute_rows(
+                    [source_row]
+                )
+                with env_patch, module_patch:
+                    with self.assertRaisesRegex(ValueError, error_pattern):
+                        PandaAIAPI().get_futures_minute_bars(
+                            contract_id=contract,
+                            underlying_code=underlying,
+                            is_main=0,
+                            start_date=datetime(2025, 3, 27),
+                            end_date=datetime(2025, 3, 27),
+                            frequency="15m",
+                        )
+
+    def test_concrete_minute_true_provider_empty_remains_empty(self):
+        fake, _source_rows, env_patch, module_patch = self._build_api_with_minute_rows([])
+        with env_patch, module_patch:
+            bars = PandaAIAPI().get_futures_minute_bars(
+                contract_id="SR2505",
+                underlying_code="SR",
+                is_main=0,
+                start_date=datetime(2025, 3, 27),
+                end_date=datetime(2025, 3, 27),
+                frequency="15m",
+            )
+
+        minute_call = next(call for call in fake.calls if call["func"] == "get_market_min_data")
+        self.assertEqual(minute_call["symbol"], ["SR2505.CZC"])
+        self.assertEqual(bars, [])
 
     def test_minute_bars_filter_by_logical_trading_date_not_physical_night_date(self):
         fake, env_patch, module_patch = self._build_api()

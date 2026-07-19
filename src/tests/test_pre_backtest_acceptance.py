@@ -50,6 +50,103 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_OPENAI_API_KEY": "test-key"}, clear=False):
             return run_pre_backtest_acceptance(**kwargs)
 
+    def _run_pandaai_minute_readiness(self, *, symbol: str, trading_code: str):
+        from apis.pandaai.api import PandaAIAPI
+        from tools.agent_tools.control import pg_pre_backtest_acceptance as module
+
+        provider = types.ModuleType("panda_data")
+        provider_calls = []
+        source_row = {
+            "date": "20250309",
+            "minute": "210100",
+            "datetime": "2025-03-09 21:01:00",
+            "symbol": symbol,
+            "dominant_id": "",
+            "trading_code": trading_code,
+            "underlying_symbol": "SR",
+            "exchange": "CZCE",
+            "open": 5800.0,
+            "high": 5810.0,
+            "low": 5790.0,
+            "close": 5805.0,
+            "volume": 10,
+            "trading_date": "20250310",
+        }
+
+        def init_token(username, password):
+            return None
+
+        def get_market_min_data(**kwargs):
+            provider_calls.append(dict(kwargs))
+            return [source_row]
+
+        provider.init_token = init_token
+        provider.get_market_min_data = get_market_min_data
+        PandaAIAPI._shared_minute_cache.clear()
+        PandaAIAPI._shared_token_initialized = False
+        PandaAIAPI._shared_sdk_user_cache_configured = False
+        returned_rows = []
+        env = {
+            "PANDAAI_USERNAME": "user",
+            "PANDAAI_PASSWORD": "pass",
+            "PANDAAI_PERSISTENT_MARKET_CACHE": "0",
+        }
+        with patch.dict(os.environ, env), patch.dict(sys.modules, {"panda_data": provider}):
+            adapter = PandaAIAPI()
+
+            class FakeAPI:
+                def get_futures_daily_candles_optimized(self, **_kwargs):
+                    return [
+                        _daily_fact("2025-03-07", "SR2505"),
+                        _daily_fact("2025-03-10", "SR2505"),
+                    ]
+
+            class FakeRouter:
+                def __init__(self, **_kwargs):
+                    self.api = FakeAPI()
+
+                def get_futures_contract_quote_on_date(self, contract_code, _trading_date):
+                    return SimpleNamespace(ticker=contract_code, settle_price=5805.0)
+
+                def get_china_futures_minute_bars(self, **kwargs):
+                    rows = adapter.get_futures_minute_bars(**kwargs)
+                    returned_rows.append([dict(row) for row in rows])
+                    return rows
+
+                def get_china_futures_fundamentals(self, *_args, **_kwargs):
+                    return None
+
+                def get_china_futures_news(self, *_args, **_kwargs):
+                    return []
+
+            with patch("apis.router.Router", FakeRouter), patch.object(
+                module,
+                "_optional_data_directories_ready",
+                return_value=([], []),
+                create=True,
+            ), patch(
+                "apis.contract_info_cache.FuturesContractInfoCache.get_contract_info",
+                return_value={
+                    "contract_multiplier": 10.0,
+                    "margin_rate_long": 0.1,
+                    "margin_rate_short": 0.1,
+                },
+            ), patch(
+                "util.trading_calendar.get_previous_trading_day",
+                return_value=datetime(2025, 3, 7),
+            ):
+                result = _data_readiness_check(
+                    {
+                        "market_type": "china_futures",
+                        "tickers": ["SR"],
+                        "factor_data": {},
+                    },
+                    start=datetime(2025, 3, 10),
+                    end=datetime(2025, 3, 10),
+                )
+
+        return result, provider_calls, returned_rows, source_row
+
     def test_report_has_exactly_ten_pre_backtest_categories(self):
         report = self._run()
         self.assertEqual([check.check_name for check in report.checks], list(PRE_BACKTEST_CHECK_NAMES))
@@ -172,7 +269,7 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
     def test_data_readiness_uses_one_canonical_contract_for_two_minute_capabilities(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
 
-        contract_codes = {"CF": "CF505", "RB": "RB2505", "M": "M2505"}
+        contract_codes = {"CF": "CF2505", "RB": "RB2505", "M": "M2505"}
         minute_calls = []
 
         class FakeAPI:
@@ -240,13 +337,42 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
         self.assertTrue(result.passed, result.to_dict())
         self.assertEqual(len(minute_calls), 2)
         self.assertEqual({call["frequency"] for call in minute_calls}, {"15m", "1m"})
-        self.assertEqual({call["contract_id"] for call in minute_calls}, {"CF505"})
+        self.assertEqual({call["contract_id"] for call in minute_calls}, {"CF2505"})
         self.assertEqual({call["underlying_code"] for call in minute_calls}, {"CF"})
+
+    def test_real_pandaai_adapter_canonicalizes_sr505_before_pg_minute_readiness(self):
+        result, provider_calls, returned_rows, source_row = self._run_pandaai_minute_readiness(
+            symbol="SR2505.CZC",
+            trading_code="SR505",
+        )
+
+        self.assertTrue(result.passed, result.to_dict())
+        self.assertEqual({call["frequency"] for call in provider_calls}, {"15m", "1m"})
+        self.assertEqual({tuple(call["symbol"]) for call in provider_calls}, {("SR2505.CZC",)})
+        self.assertEqual(len(returned_rows), 2)
+        self.assertEqual(
+            {row["trading_code"] for rows in returned_rows for row in rows},
+            {"SR2505"},
+        )
+        self.assertEqual(source_row["trading_code"], "SR505")
+
+    def test_real_pandaai_adapter_wrong_month_is_pg_interface_unreadable(self):
+        result, provider_calls, returned_rows, _source_row = self._run_pandaai_minute_readiness(
+            symbol="SR2506.CZC",
+            trading_code="SR506",
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("trader_minute_data_interface_unreadable", result.violation_codes)
+        self.assertNotIn("trader_minute_data_missing", result.violation_codes)
+        self.assertNotIn("trader_minute_data_contract_mismatch", result.violation_codes)
+        self.assertEqual({call["frequency"] for call in provider_calls}, {"15m", "1m"})
+        self.assertEqual(returned_rows, [])
 
     def test_data_readiness_begins_at_formal_previous_start_day(self):
         from tools.agent_tools.control import pg_pre_backtest_acceptance as module
 
-        contract_codes = {"RB": "RB2505", "CF": "CF505"}
+        contract_codes = {"RB": "RB2505", "CF": "CF2505"}
         fact_days = (
             "2025-03-21",
             "2025-03-24",
@@ -345,7 +471,7 @@ class PreBacktestAcceptanceTest(unittest.TestCase):
             {"2025-03-21"},
         )
         self.assertIn(("RB2505", "2025-03-21"), concrete_calls)
-        self.assertIn(("CF505", "2025-03-21"), concrete_calls)
+        self.assertIn(("CF2505", "2025-03-21"), concrete_calls)
 
     def test_minute_readiness_accepts_physical_previous_night_for_logical_trading_day(self):
         result = self._run_minute_readiness_with_rows(

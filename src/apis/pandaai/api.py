@@ -1541,7 +1541,7 @@ class PandaAIAPI:
         time_zone: Optional[Any] = None,
         cutoff_datetime: Optional[datetime] = None,
     ) -> List[dict[str, Any]]:
-        """Get raw PandaAI futures minute bars sorted by timestamp."""
+        """Get PandaAI futures minute bars with canonical business trading codes."""
         end_date = self._normalize_datetime(end_date, default=datetime.now())
         start_date = self._normalize_datetime(start_date, default=end_date)
         symbol = self._symbol_for_query(
@@ -1550,6 +1550,12 @@ class PandaAIAPI:
             is_main=is_main,
             reference_date=end_date,
         )
+        expected_business_contract = None
+        if "_DOMINANT" not in symbol.upper():
+            expected_business_contract = self._canonical_business_contract_code(
+                {"symbol": symbol},
+                end_date,
+            )
         rows = self._query_market_min_data(
             symbol=symbol,
             start_date=start_date,
@@ -1559,7 +1565,6 @@ class PandaAIAPI:
             refresh=isinstance(cutoff_datetime, datetime),
         )
 
-        normalized_contract = self._normalize_internal_contract(contract_id) if contract_id else None
         cutoff = cutoff_datetime if isinstance(cutoff_datetime, datetime) else None
         filtered: list[dict[str, Any]] = []
         for row in rows:
@@ -1576,12 +1581,19 @@ class PandaAIAPI:
                 continue
             if cutoff is not None and row_dt > cutoff:
                 continue
-            if normalized_contract:
-                row_contract = self._normalize_internal_contract(
-                    record.get("trading_code") or record.get("dominant_id") or record.get("symbol")
+            canonical_business_contract = self._canonical_business_contract_code(
+                record,
+                logical_trading_date,
+            )
+            if (
+                expected_business_contract is not None
+                and canonical_business_contract != expected_business_contract
+            ):
+                raise ValueError(
+                    "PandaAI minute contract mismatch: "
+                    f"expected {expected_business_contract}, got {canonical_business_contract}"
                 )
-                if row_contract and row_contract != normalized_contract:
-                    continue
+            record["trading_code"] = canonical_business_contract
             record["datetime"] = row_dt.strftime("%Y-%m-%d %H:%M:%S")
             filtered.append(record)
 
