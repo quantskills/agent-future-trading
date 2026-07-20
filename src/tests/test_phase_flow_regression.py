@@ -16606,8 +16606,9 @@ class EvaluationRegressionTest(unittest.TestCase):
             conn.close()
 
             metrics = calculate_futures_transaction_win_rate("cfg", db_path, start_date="2025-10-13")
-            self.assertEqual(metrics["total_trades"], 0)
-            self.assertEqual(metrics["unmatched_close_lots"], 2)
+            self.assertEqual(metrics["total_trades"], 1)
+            self.assertEqual(metrics["losing_trades"], 1)
+            self.assertEqual(metrics["unmatched_close_lots"], 0)
             self.assertEqual(metrics["inherited_close_lots"], 2)
         finally:
             os.remove(db_path)
@@ -16759,6 +16760,48 @@ class EvaluationRegressionTest(unittest.TestCase):
                 metrics["commission_drag_ratio"],
                 80.07 / (abs(-50.0) + abs(6660.0)),
             )
+        finally:
+            os.remove(db_path)
+
+    def test_evaluate_config_window_includes_position_opened_before_window(self):
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            conn = self._create_minimal_futures_evaluation_db(db_path)
+            conn.execute(
+                "INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "cfg",
+                    "2025-01-03",
+                    "2025-01-03T10:00:00",
+                    "M",
+                    "m2601",
+                    "close_long",
+                    1,
+                    110.0,
+                    110.0,
+                    10.0,
+                    2.0,
+                    110.0,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            metrics = evaluate_config(
+                "cfg",
+                db_path,
+                start_date="2025-01-03",
+                end_date="2025-01-03",
+            )
+
+            self.assertEqual(metrics["trading_date_start"], "2025-01-03T00:00:00")
+            self.assertEqual(metrics["trading_date_end"], "2025-01-03T00:00:00")
+            self.assertEqual(metrics["total_trades"], 1)
+            self.assertEqual(metrics["winning_trades"], 1)
+            self.assertEqual(metrics["inherited_close_lots"], 1)
+            self.assertEqual(metrics["unmatched_close_lots"], 0)
+            self.assertAlmostEqual(metrics["realized_trade_pnl"], 96.0)
         finally:
             os.remove(db_path)
 

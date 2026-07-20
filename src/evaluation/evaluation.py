@@ -22,7 +22,12 @@ from util.learning_attribution import (
     summarize_pairs_by_learning_effect,
     summarize_pairs_by_learning_mechanism,
 )
-from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
+from util.futures_trade_pairs import (
+    build_completed_trade_pairs,
+    build_strategy_originated_trade_pairs,
+    build_strategy_originated_trade_pairs_with_diagnostics,
+    summarize_trade_pairs,
+)
 from util.logger import logger
 
 
@@ -439,13 +444,17 @@ def calculate_optimization_acceptance_metrics(
                 """,
                 tuple(tx_params),
             )
-            pairs = build_completed_trade_pairs([dict(row) for row in cursor.fetchall()], include_rollover=False)
+            pairs = build_strategy_originated_trade_pairs([dict(row) for row in cursor.fetchall()])
             if start_date:
                 pairs = [pair for pair in pairs if str(pair.get("close_date") or "") >= start_date]
             if end_date:
                 pairs = [pair for pair in pairs if str(pair.get("close_date") or "") <= end_date]
             recommendation_ids = sorted(
-                {str(pair.get("open_recommendation_id") or "") for pair in pairs if pair.get("open_recommendation_id")}
+                {
+                    str(pair.get("origin_recommendation_id") or pair.get("open_recommendation_id") or "")
+                    for pair in pairs
+                    if pair.get("origin_recommendation_id") or pair.get("open_recommendation_id")
+                }
             )
             recommendation_lookup = {}
             if recommendation_ids:
@@ -498,7 +507,9 @@ def calculate_optimization_acceptance_metrics(
             unlearned_pairs = []
             reason_counts = {}
             for pair in pairs:
-                recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
+                recommendation = recommendation_lookup.get(
+                    str(pair.get("origin_recommendation_id") or pair.get("open_recommendation_id") or "")
+                )
                 tags, effects, mechanisms = _learning_attribution(recommendation) if recommendation else ([], [], [])
                 if tags and effects:
                     item = dict(pair)
@@ -833,7 +844,7 @@ def calculate_futures_transaction_win_rate(
     start_date: str = None, end_date: str = None,
 ) -> Dict:
     """
-    Calculate futures strategy win rate from completed strategy transaction pairs.
+    Calculate futures strategy win rate from strategy-originated positions.
 
     The matching logic uses FIFO lots by ticker, contract, and direction:
     - open_long is matched by close_long
@@ -842,9 +853,11 @@ def calculate_futures_transaction_win_rate(
     A matched open/close lot segment is counted as one completed trade. PnL is
     calculated net of the matched open commission and close commission.
 
-    Account equity still includes operational actions, but this strategy
-    win-rate view excludes source_type != strategy and reports those
-    operational transaction counts separately.
+    Operational transactions retain their own source type.  When rollover or
+    forced_risk closes a position opened by strategy, the realized pair still
+    belongs to the strategy-originated position and enters strategy metrics.
+    Date windows replay all history through end_date, then select completed
+    pairs by close date so inherited positions are evaluated correctly.
     """
     conn = None
     empty_result = {
@@ -869,151 +882,94 @@ def calculate_futures_transaction_win_rate(
 
         cursor.execute("PRAGMA table_info(futures_transactions)")
         transaction_columns = {row[1] for row in cursor.fetchall()}
-        source_type_expr = "source_type" if "source_type" in transaction_columns else "'strategy' AS source_type"
-
-        date_filter = ''
+        select_parts = [
+            "id" if "id" in transaction_columns else "NULL AS id",
+            (
+                "recommendation_id"
+                if "recommendation_id" in transaction_columns
+                else "NULL AS recommendation_id"
+            ),
+            "trading_date",
+            "created_at" if "created_at" in transaction_columns else "trading_date AS created_at",
+            "ticker",
+            "contract_code" if "contract_code" in transaction_columns else "ticker AS contract_code",
+            "action",
+            "lots",
+            (
+                "execution_price"
+                if "execution_price" in transaction_columns
+                else "price AS execution_price"
+            ),
+            "price" if "price" in transaction_columns else "execution_price AS price",
+            (
+                "contract_multiplier"
+                if "contract_multiplier" in transaction_columns
+                else "1.0 AS contract_multiplier"
+            ),
+            "commission" if "commission" in transaction_columns else "0.0 AS commission",
+            "source_type" if "source_type" in transaction_columns else "'strategy' AS source_type",
+        ]
         params: list = [config_id]
-        if start_date:
-            date_filter += ' AND trading_date >= ?'
-            params.append(start_date)
+        end_filter = ""
         if end_date:
-            date_filter += ' AND trading_date <= ?'
-            params.append(end_date + 'T23:59:59')
+            end_filter = " AND substr(trading_date, 1, 10) <= ?"
+            params.append(end_date)
 
         cursor.execute(
             f'''
-            SELECT
-                trading_date,
-                created_at,
-                ticker,
-                contract_code,
-                action,
-                lots,
-                execution_price,
-                price,
-                contract_multiplier,
-                commission,
-                {source_type_expr}
+            SELECT {', '.join(select_parts)}
             FROM futures_transactions
             WHERE config_id = ?
               AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
-              {date_filter}
-            ORDER BY trading_date ASC, created_at ASC
+              {end_filter}
+            ORDER BY substr(trading_date, 1, 10) ASC, created_at ASC, id ASC
             ''',
             params,
         )
-        transactions = cursor.fetchall()
+        transactions = [dict(row) for row in cursor.fetchall()]
 
         if not transactions:
             logger.warning("No futures transaction data available for transaction win-rate calculation")
             return empty_result.copy()
 
-        open_positions = {}
-        trade_returns = []
-        winning_trades = 0
-        losing_trades = 0
-        flat_trades = 0
-        realized_trade_pnl = 0.0
-        unmatched_close_lots = 0
-        inherited_close_lots = 0
-        rollover_transaction_count = 0
-        forced_risk_transaction_count = 0
-        operational_transaction_count = 0
+        strategy_pairs, diagnostics = build_strategy_originated_trade_pairs_with_diagnostics(transactions)
 
-        for row in transactions:
-            action = row['action']
-            lots = int(row['lots'] or 0)
-            execution_price = float(row['execution_price'] or row['price'] or 0.0)
-            multiplier = float(row['contract_multiplier'] or 1.0)
-            commission = float(row['commission'] or 0.0)
-            contract_code = row['contract_code'] or row['ticker']
-            source_type = str(row['source_type'] or 'strategy').lower()
-            if source_type == 'rollover':
-                rollover_transaction_count += 1
-            elif source_type == 'forced_risk':
-                forced_risk_transaction_count += 1
-            if source_type != 'strategy':
-                operational_transaction_count += 1
-                continue
+        def in_window(value: object) -> bool:
+            date_text = str(value or "")[:10]
+            if start_date and date_text < start_date:
+                return False
+            if end_date and date_text > end_date:
+                return False
+            return True
 
-            if lots <= 0 or execution_price <= 0:
-                logger.warning(
-                    "Skipping invalid futures transaction for win-rate calculation: "
-                    f"ticker={row['ticker']}, action={action}, lots={lots}, price={execution_price}"
-                )
-                continue
-
-            if action in ('open_long', 'open_short'):
-                side = 'long' if action == 'open_long' else 'short'
-                key = (row['ticker'], contract_code, side)
-                open_positions.setdefault(key, []).append({
-                    'remaining_lots': lots,
-                    'entry_price': execution_price,
-                    'multiplier': multiplier,
-                    'remaining_commission': commission,
-                })
-                continue
-
-            side = 'long' if action == 'close_long' else 'short'
-            key = (row['ticker'], contract_code, side)
-            queue = open_positions.get(key, [])
-            remaining_close_lots = lots
-
-            while remaining_close_lots > 0 and queue:
-                open_lot = queue[0]
-                matched_lots = min(remaining_close_lots, open_lot['remaining_lots'])
-                open_lots_before = open_lot['remaining_lots']
-
-                open_commission = (
-                    open_lot['remaining_commission'] * matched_lots / open_lots_before
-                    if open_lots_before > 0
-                    else 0.0
-                )
-                close_commission = commission * matched_lots / lots
-                trade_multiplier = float(open_lot['multiplier'] or multiplier or 1.0)
-
-                if side == 'long':
-                    gross_pnl = (execution_price - open_lot['entry_price']) * matched_lots * trade_multiplier
-                else:
-                    gross_pnl = (open_lot['entry_price'] - execution_price) * matched_lots * trade_multiplier
-
-                net_pnl = gross_pnl - open_commission - close_commission
-                realized_trade_pnl += net_pnl
-                notional = open_lot['entry_price'] * matched_lots * trade_multiplier
-                if notional > 0:
-                    trade_returns.append(net_pnl / notional)
-
-                if net_pnl > 0:
-                    winning_trades += 1
-                elif net_pnl < 0:
-                    losing_trades += 1
-                else:
-                    flat_trades += 1
-
-                open_lot['remaining_lots'] -= matched_lots
-                open_lot['remaining_commission'] -= open_commission
-                remaining_close_lots -= matched_lots
-
-                if open_lot['remaining_lots'] <= 0:
-                    queue.pop(0)
-
-            if remaining_close_lots > 0:
-                unmatched_close_lots += remaining_close_lots
-                if start_date:
-                    inherited_close_lots += remaining_close_lots
-                    logger.info(
-                        "Inherited futures close lots excluded from sub-window transaction win-rate calculation: "
-                        f"ticker={row['ticker']}, contract={contract_code}, side={side}, lots={remaining_close_lots}, "
-                        f"window_start={start_date}"
-                    )
-                else:
-                    logger.warning(
-                        "Unmatched futures close lots in transaction win-rate calculation: "
-                        f"ticker={row['ticker']}, contract={contract_code}, side={side}, lots={remaining_close_lots}"
-                    )
-
-        total_trades = winning_trades + losing_trades + flat_trades
-        win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
+        strategy_pairs = [pair for pair in strategy_pairs if in_window(pair.get("close_date"))]
+        summary = summarize_trade_pairs(strategy_pairs)
+        trade_returns = [float(pair.get("return_on_notional") or 0.0) for pair in strategy_pairs]
+        window_transactions = [row for row in transactions if in_window(row.get("trading_date"))]
+        source_types = [str(row.get("source_type") or "strategy").lower() for row in window_transactions]
+        rollover_transaction_count = sum(1 for value in source_types if value == "rollover")
+        forced_risk_transaction_count = sum(1 for value in source_types if value == "forced_risk")
+        operational_transaction_count = sum(1 for value in source_types if value != "strategy")
+        unmatched_close_lots = sum(
+            int(row.get("lots") or 0)
+            for row in diagnostics.get("unmatched_closes", [])
+            if in_window(row.get("close_date"))
+        )
+        inherited_close_lots = (
+            sum(
+                int(pair.get("lots") or 0)
+                for pair in strategy_pairs
+                if str(pair.get("origin_open_date") or "") < start_date
+            )
+            if start_date
+            else 0
+        )
+        winning_trades = int(summary["winning_trades"])
+        losing_trades = int(summary["losing_trades"])
+        flat_trades = int(summary["flat_trades"])
+        total_trades = int(summary["total_trades"])
+        win_rate = float(summary["win_rate"])
+        realized_trade_pnl = float(summary["total_pnl"])
         avg_return = float(np.mean(trade_returns)) if trade_returns else 0.0
 
         logger.info("Futures transaction win-rate statistics:")
@@ -1024,7 +980,7 @@ def calculate_futures_transaction_win_rate(
         logger.info(f"  Transaction win rate: {win_rate:.2%}")
         logger.info(f"  Realized transaction PnL: {realized_trade_pnl:+,.2f}")
         logger.info(
-            "  Operational transactions excluded from strategy win rate: "
+            "  Operational transactions retained for position matching and separately counted: "
             f"rollover={rollover_transaction_count}, forced_risk={forced_risk_transaction_count}"
         )
 
@@ -1206,15 +1162,16 @@ def calculate_futures_strategy_quality_metrics(
                   AND action IN ('open_long', 'open_short', 'close_long', 'close_short')
             """
             tx_params: List = [config_id]
-            if start_date:
-                tx_query += " AND trading_date >= ?"
-                tx_params.append(start_date)
             if end_date:
-                tx_query += " AND trading_date <= ?"
-                tx_params.append(end_date + "T23:59:59")
+                tx_query += " AND substr(trading_date, 1, 10) <= ?"
+                tx_params.append(end_date)
             tx_query += " ORDER BY trading_date ASC, created_at ASC"
             cursor.execute(tx_query, tx_params)
-            pairs = build_completed_trade_pairs(cursor.fetchall(), include_rollover=False)
+            pairs = build_strategy_originated_trade_pairs(cursor.fetchall())
+            if start_date:
+                pairs = [pair for pair in pairs if str(pair.get("close_date") or "") >= start_date]
+            if end_date:
+                pairs = [pair for pair in pairs if str(pair.get("close_date") or "") <= end_date]
             if pairs:
                 pairs = sorted(pairs, key=lambda row: (row.get("close_date") or "", row.get("open_date") or ""))
                 pnls = [float(row.get("net_pnl") or 0.0) for row in pairs]

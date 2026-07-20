@@ -675,7 +675,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `no_trade_count` | setup profile | 无交易 / 反事实样本数。 |
 | `win_count` | setup profile | 盈利样本数。 |
 | `loss_count` | setup profile | 亏损样本数。 |
-| `win_rate` | 学习记录 / 评估输出 | 胜率。评估中默认指 `source_type=strategy` 的完成交易对胜率。 |
+| `win_rate` | 学习记录 / 评估输出 | 胜率。评估中默认指由 `source_type=strategy` 开仓发起的持仓完成片段胜率；实际平仓来源保留为 `strategy/rollover/forced_risk`。 |
 | `hit_rate` | analyst performance | 命中率。 |
 | `reward_sum` | action-value | 奖励总和。 |
 | `reward_mean` | action-value | 平均奖励。 |
@@ -740,10 +740,15 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 
 | 字段 | 放置位置 | 含义 |
 |---|---|---|
-| `overall` | 归因报告 | 全账户完成交易对汇总；可包含 `rollover/forced_risk` 等运营成交，只用于账户路径观察。 |
-| `strategy_only_overall` | 归因报告 | 仅 `source_type=strategy` 的完成交易对汇总；策略胜率、策略净 PnL 和策略归因必须使用它。 |
-| `trade_pairs` | 归因报告 | 全账户交易对列表，可带 `contains_non_strategy` 标记。 |
-| `strategy_only_trade_pairs` | 归因报告 | 仅策略交易对列表；分析师、PM、Auditor 归因和弱边建议必须使用它。 |
+| `overall` | 归因报告 | 全账户完成交易对汇总；包含 `rollover/forced_risk` 等运营成交，只用于账户路径观察。指定区间按平仓日纳入完成交易对。 |
+| `strategy_only_overall` | 归因报告 | 策略开仓发起的持仓完成片段汇总；实际平仓来源为 `strategy/rollover/forced_risk` 均按原策略持仓计入，策略胜率、策略净 PnL 和策略归因必须使用它。 |
+| `trade_pairs` | 归因报告 | 全账户交易对列表，保留 `contains_non_strategy` 标记；指定区间按平仓日截取。 |
+| `strategy_only_trade_pairs` | 归因报告 | 策略开仓发起的持仓完成片段列表；保留真实执行来源及运营标记，分析师、PM、Auditor 归因和弱边建议必须使用它。 |
+| `strategy_originated` | 评估交易对 | 该完成片段的持仓源头是否为策略开仓。此字段不改写开平仓流水的 `source_type`。 |
+| `origin_source_type` | 评估交易对 | 持仓最初开仓来源；策略绩效只纳入值为 `strategy` 的完成片段。 |
+| `origin_recommendation_id` | 评估交易对 | 持仓最初策略开仓推荐 ID；完整换月后继续指向换月前的策略推荐，用于读取原始 FAC 和信号证据。 |
+| `origin_open_transaction_id` | 评估交易对 | 持仓最初开仓流水 ID；完整换月后保持原始策略开仓引用。 |
+| `origin_open_date` | 评估交易对 | 持仓最初开仓日期；用于识别指定区间开始前继承的策略持仓。 |
 | `by_ticker_side` | 归因报告 | 按品种和方向统计的策略交易对表现。 |
 | `by_signal_combo` | 归因报告 | 按分析师信号组合统计的策略交易对表现。 |
 | `by_pm_risk_gate_decision` | 归因报告 | 按 PM 内部风险门和最终合约决策统计的策略交易对表现；不是独立 Auditor 裁决，也不表示审计员改写 PM 合约。 |
@@ -752,16 +757,16 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `learning_component` | `by_opportunity_learning_component` | 被统计的 PM 学习评分分项名称。 |
 | `learning_component_bucket` | `by_opportunity_learning_component` | 该学习分项在开仓推荐中的符号 bucket：positive、negative、zero、missing。 |
 | `learning_component_value` | 归因中间字段 / 交易对诊断 | 该学习分项在开仓推荐中的数值；只用于评估，不进入 PM/Trader 交易权限。 |
-| `winning_trades` | 评估输出 | 盈利完成交易对数量；默认只统计策略交易对。 |
-| `losing_trades` | 评估输出 | 亏损完成交易对数量；默认只统计策略交易对。 |
-| `flat_trades` | 评估输出 | 盈亏为零的完成交易对数量；默认只统计策略交易对。 |
-| `total_trades` | 评估输出 | 完成交易对数量；默认只统计策略交易对。 |
-| `avg_return_per_trade` | 评估输出 | 单笔完成交易对平均收益率；默认只统计策略交易对。 |
-| `realized_trade_pnl` | 评估输出 | 已实现完成交易对净盈亏；默认只统计策略交易对。 |
-| `unmatched_close_lots` | 评估输出 | 找不到对应开仓的平仓手数。 |
-| `inherited_close_lots` | 评估输出 | 子窗口内继承自窗口前持仓的平仓手数。 |
-| `rollover_transaction_count` | 评估输出 | 换月运营流水笔数；不能计入策略胜率或 alpha 归因。 |
-| `forced_risk_transaction_count` | 评估输出 | 强平/强减风控运营流水笔数；不能计入策略胜率或 alpha 归因。 |
+| `winning_trades` | 评估输出 | 盈利完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
+| `losing_trades` | 评估输出 | 亏损完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
+| `flat_trades` | 评估输出 | 盈亏为零的完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
+| `total_trades` | 评估输出 | 完成片段数量；默认只统计策略开仓发起并在评估区间内平仓的持仓片段。 |
+| `avg_return_per_trade` | 评估输出 | 单个策略起源完成片段的平均收益率。 |
+| `realized_trade_pnl` | 评估输出 | 策略起源完成片段的已实现净盈亏，包含实际平仓手续费。 |
+| `unmatched_close_lots` | 评估输出 | 重放截至评估结束日的完整成交历史后仍找不到对应开仓的平仓手数。 |
+| `inherited_close_lots` | 评估输出 | 最初策略开仓日在指定区间开始日前、平仓日在区间内的完成片段手数。 |
+| `rollover_transaction_count` | 评估输出 | 评估区间内换月运营流水笔数；流水本身不转成策略动作，其关闭策略起源持仓产生的真实盈亏计入原策略持仓绩效。 |
+| `forced_risk_transaction_count` | 评估输出 | 评估区间内强平/强减风控运营流水笔数；流水本身不转成策略动作，其关闭策略起源持仓产生的真实盈亏计入原策略持仓绩效。 |
 | `operational_transaction_count` | 评估输出 | `source_type != strategy` 的运营流水笔数。 |
 | `rollover_summary` | 归因报告 | 换月运营流水摘要。 |
 | `forced_risk_summary` | 归因报告 | 强平/强减风控运营流水摘要。 |

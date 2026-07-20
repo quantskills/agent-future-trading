@@ -20,7 +20,11 @@ from dotenv import load_dotenv
 from database.artifact_store import load_externalized_json
 from database.sqlite_setup import DB_PATH
 from util.db_helper import db_initialize, get_db
-from util.futures_trade_pairs import build_completed_trade_pairs, summarize_trade_pairs
+from util.futures_trade_pairs import (
+    build_completed_trade_pairs,
+    build_strategy_originated_trade_pairs,
+    summarize_trade_pairs,
+)
 from util.logger import logger
 
 
@@ -268,7 +272,9 @@ def _attach_open_recommendation_context(
     enriched = []
     for pair in pairs:
         item = dict(pair)
-        recommendation = recommendations_by_id.get(str(pair.get("open_recommendation_id") or ""))
+        recommendation = recommendations_by_id.get(
+            str(pair.get("origin_recommendation_id") or pair.get("open_recommendation_id") or "")
+        )
         snapshot = {}
         if recommendation:
             snapshot = _deserialize_json(recommendation.get("signal_snapshot")) or {}
@@ -743,9 +749,9 @@ def _write_markdown_legacy(path: Path, payload: Dict[str, Any]) -> None:
                 ["胜率", f"{payload['overall']['win_rate']:.2%}"],
                 ["净 PnL", f"{payload['overall']['total_pnl']:.2f}"],
                 ["平均每笔收益率", f"{payload['overall']['avg_return']:.2%}"],
-                ["非换约交易对数", payload["strategy_only_overall"]["total_trades"]],
-                ["非换约交易对胜率", f"{payload['strategy_only_overall']['win_rate']:.2%}"],
-                ["非换约交易对净 PnL", f"{payload['strategy_only_overall']['total_pnl']:.2f}"],
+                ["策略起源完成片段数", payload["strategy_only_overall"]["total_trades"]],
+                ["策略起源胜率", f"{payload['strategy_only_overall']['win_rate']:.2%}"],
+                ["策略起源净 PnL", f"{payload['strategy_only_overall']['total_pnl']:.2f}"],
             ],
         ),
         "",
@@ -1125,7 +1131,10 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "",
         "## Performance By Ticker And Side",
         "",
-        "Strategy-only view; rollover and forced_risk operational pairs are excluded.",
+        (
+            "Strategy-originated position view; rollover and forced_risk retain their execution "
+            "source while realized closes remain attributed to the original strategy position."
+        ),
         "",
         _format_table(
             ["Ticker", "Side", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
@@ -1134,7 +1143,10 @@ def _write_markdown_readable(path: Path, payload: Dict[str, Any]) -> None:
         "",
         "## Performance By Signal Combo",
         "",
-        "Strategy-only view; operational actions do not become analyst or PM attribution.",
+        (
+            "Strategy-originated position view; operational actions do not become analyst or PM "
+            "actions, and their realized closes remain attributed to the original strategy position."
+        ),
         "",
         _format_table(
             ["Signal Combo", "Trade Pairs", "Win Rate", "Net PnL", "Avg PnL"],
@@ -1376,6 +1388,10 @@ def build_attribution_report(
     )
     transactions = [
         row for row in transactions
+        if not end_date or _normalize_date(row.get("trading_date")) <= end_date
+    ]
+    window_transactions = [
+        row for row in transactions
         if _date_in_window(row.get("trading_date"), start_date, end_date)
     ]
 
@@ -1399,13 +1415,33 @@ def build_attribution_report(
     )
     recommendations = [
         row for row in recommendations
-        if _date_in_window(row.get("trading_date"), start_date, end_date)
+        if not end_date or _normalize_date(row.get("trading_date")) <= end_date
     ]
     recommendations_by_id = {str(row["id"]): row for row in recommendations}
+    window_recommendations = [
+        row for row in recommendations
+        if _date_in_window(row.get("trading_date"), start_date, end_date)
+    ]
 
     pairs = build_completed_trade_pairs(transactions)
     pairs = _attach_open_recommendation_context(pairs, recommendations_by_id)
-    strategy_only_pairs = [pair for pair in pairs if not pair.get("contains_non_strategy")]
+    strategy_only_pairs = build_strategy_originated_trade_pairs(transactions)
+    strategy_only_pairs = _attach_open_recommendation_context(
+        strategy_only_pairs,
+        recommendations_by_id,
+    )
+    if start_date:
+        pairs = [pair for pair in pairs if str(pair.get("close_date") or "") >= start_date]
+        strategy_only_pairs = [
+            pair for pair in strategy_only_pairs
+            if str(pair.get("close_date") or "") >= start_date
+        ]
+    if end_date:
+        pairs = [pair for pair in pairs if str(pair.get("close_date") or "") <= end_date]
+        strategy_only_pairs = [
+            pair for pair in strategy_only_pairs
+            if str(pair.get("close_date") or "") <= end_date
+        ]
 
     overall = summarize_trade_pairs(pairs)
     strategy_only_overall = summarize_trade_pairs(strategy_only_pairs)
@@ -1420,8 +1456,8 @@ def build_attribution_report(
     by_rebalance_action_type = _group_summary(strategy_only_pairs, ["rebalance_action_type"])
     by_rebalance_reason = _group_summary(strategy_only_pairs, ["rebalance_reason"])
     rebalance_pair_summary = _rebalance_pair_summary(strategy_only_pairs)
-    release_block_summary = _release_block_summary_from_recommendations(recommendations)
-    action_value_summary = _action_value_summary_from_recommendations(recommendations)
+    release_block_summary = _release_block_summary_from_recommendations(window_recommendations)
+    action_value_summary = _action_value_summary_from_recommendations(window_recommendations)
 
     weak_side_suggestions = []
     for row in by_ticker_side:
@@ -1452,7 +1488,11 @@ def build_attribution_report(
             min_trades=1,
         )
 
-    transaction_dates = [_normalize_date(row.get("trading_date")) for row in transactions if row.get("trading_date")]
+    transaction_dates = [
+        _normalize_date(row.get("trading_date"))
+        for row in window_transactions
+        if row.get("trading_date")
+    ]
     close_dates = [_normalize_date(row.get("close_date")) for row in pairs if row.get("close_date")]
     date_start = start_date or (min(transaction_dates) if transaction_dates else (min(close_dates) if close_dates else ""))
     date_end = end_date or (max(transaction_dates) if transaction_dates else (max(close_dates) if close_dates else ""))
@@ -1478,9 +1518,9 @@ def build_attribution_report(
         "release_block_summary": release_block_summary,
         "action_value_summary": action_value_summary,
         "weak_side_suggestions": weak_side_suggestions,
-        "recommendation_diagnostics": _recommendation_diagnostics(recommendations),
-        "rollover_summary": _rollover_summary(transactions),
-        "forced_risk_summary": _forced_risk_summary(transactions),
+        "recommendation_diagnostics": _recommendation_diagnostics(window_recommendations),
+        "rollover_summary": _rollover_summary(window_transactions),
+        "forced_risk_summary": _forced_risk_summary(window_transactions),
         "trade_pairs": pairs,
         "strategy_only_trade_pairs": strategy_only_pairs,
     }
