@@ -64,6 +64,8 @@ from tools.common.contracts import (
 from tools.common.final_action_semantics import (
     authority_allows_entry,
     contract_increases_risk_position,
+    contract_reduces_or_exits_position,
+    contract_requires_full_market_capital_rank,
     contract_requires_conditional_intraday_result,
     project_margin_transition,
 )
@@ -103,6 +105,56 @@ def _sort_recommendations_by_ticker_order(recommendations: List[Dict[str, Any]],
             item.get("created_at") or "",
         ),
     )
+
+
+def _strategy_final_action_contract(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = recommendation.get("signal_snapshot")
+    return _final_action_contract_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
+
+
+def _strategy_rank_budget_sequence(recommendation: Dict[str, Any]) -> Optional[int]:
+    contract = _strategy_final_action_contract(recommendation)
+    if not contract_requires_full_market_capital_rank(contract):
+        return None
+    deployment = contract.get("capital_deployment")
+    if not isinstance(deployment, dict):
+        return None
+    value = deployment.get("rank_budget_sequence")
+    if type(value) is not int or value <= 0:
+        return None
+    return value
+
+
+def _schedule_strategy_recommendations(
+    recommendations: List[Dict[str, Any]],
+    tickers: List[str],
+) -> List[Dict[str, Any]]:
+    baseline = _sort_recommendations_by_ticker_order(recommendations, tickers)
+    reductions = []
+    remainder = []
+    for recommendation in baseline:
+        contract = _strategy_final_action_contract(recommendation)
+        if (
+            contract_reduces_or_exits_position(contract)
+            and not contract_increases_risk_position(contract)
+        ):
+            reductions.append(recommendation)
+        else:
+            remainder.append(recommendation)
+
+    ranked_slots = []
+    ranked_recommendations = []
+    for index, recommendation in enumerate(remainder):
+        rank = _strategy_rank_budget_sequence(recommendation)
+        if rank is None:
+            continue
+        ranked_slots.append(index)
+        ranked_recommendations.append((rank, recommendation))
+
+    ranked_recommendations.sort(key=lambda item: item[0])
+    for slot, (_, recommendation) in zip(ranked_slots, ranked_recommendations):
+        remainder[slot] = recommendation
+    return reductions + remainder
 
 
 def _signed_position_ratio(position, total_portfolio_value: float) -> float:
@@ -1938,9 +1990,27 @@ def _process_strategy_recommendations(
             execution_phase=TradingPhase.PHASE2,
         )
         summary["actions"][action_value] += 1
-        if final_status == "executed_without_transaction":
+        final_snapshot = executable_recommendation.get("signal_snapshot")
+        final_execution_result = (
+            final_snapshot.get("execution_result")
+            if isinstance(final_snapshot, dict) and isinstance(final_snapshot.get("execution_result"), dict)
+            else {}
+        )
+        transaction_count = int(final_execution_result.get("transaction_count", 0) or 0)
+        final_outcome = str(final_execution_result.get("outcome") or "")
+        final_no_trade_reason = normalize_no_trade_reason(final_execution_result.get("no_trade_reason"))
+        if transaction_count > 0:
+            summary["executed"] += 1
+        elif action_value == FuturesAction.HOLD.value or final_outcome == "executed_without_transaction":
             summary["holds"] += 1
-            summary["no_trade_reasons"][infer_no_trade_reason(audit_snapshot) or "hold_or_zero_lots"] += 1
+            summary["no_trade_reasons"][
+                final_no_trade_reason or infer_no_trade_reason(audit_snapshot) or "hold_or_zero_lots"
+            ] += 1
+        elif final_execution_result:
+            summary["skipped"] += 1
+            summary["no_trade_reasons"][
+                final_no_trade_reason or infer_no_trade_reason(final_snapshot) or "no_executable_basis"
+            ] += 1
         else:
             summary["executed"] += 1
         if needs_two_step_reversal:
@@ -2037,7 +2107,10 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
             source_type=RecommendationSourceType.STRATEGY,
             status=RecommendationStatus.PENDING,
         )
-        strategy_recommendations = _sort_recommendations_by_ticker_order(strategy_recommendations, cfg.get("tickers", []))
+        strategy_recommendations = _schedule_strategy_recommendations(
+            strategy_recommendations,
+            cfg.get("tickers", []),
+        )
         strategy_recommendations_by_ticker = {
             recommendation["underlying_code"]: recommendation
             for recommendation in strategy_recommendations
@@ -2091,7 +2164,7 @@ def trader_agent(argv: Optional[List[str]] = None) -> None:
                 source_type=RecommendationSourceType.STRATEGY,
                 status=RecommendationStatus.PENDING,
             )
-            strategy_recommendations = _sort_recommendations_by_ticker_order(
+            strategy_recommendations = _schedule_strategy_recommendations(
                 strategy_recommendations,
                 cfg.get("tickers", []),
             )

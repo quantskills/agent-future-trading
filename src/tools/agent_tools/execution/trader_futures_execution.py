@@ -19,6 +19,8 @@ from tools.common.futures_market_rules import (
     check_limit_lock,
     normalize_margin_rate,
 )
+from tools.common.contracts import final_action_contract_from_snapshot
+from tools.common.final_action_semantics import contract_requires_full_market_capital_rank
 from graph.schema import (
     FuturesAction,
     FuturesRecommendation,
@@ -261,6 +263,7 @@ class FuturesExecutionEngine:
         recommendation_dict = self._to_dict(recommendation)
         recommendation_dict["id"] = recommendation_id
         snapshot = ensure_signal_snapshot(recommendation_dict.get("signal_snapshot"))
+        recommendation_dict["signal_snapshot"] = snapshot
         signal_lifecycle = extract_signal_lifecycle(snapshot)
         if signal_lifecycle:
             ensure_execution_translation(snapshot)["signal_lifecycle"] = signal_lifecycle
@@ -281,6 +284,7 @@ class FuturesExecutionEngine:
                 no_trade_reason=no_trade_reason,
                 warning_message=warning_message,
             )
+            self._sync_phase2_state_from_execution_result(snapshot)
             self.db.update_futures_recommendation_status(
                 recommendation_id,
                 RecommendationStatus.SKIPPED.value,
@@ -347,6 +351,7 @@ class FuturesExecutionEngine:
                     no_trade_reason="pending_rollover_required",
                     warning_message=warning_message,
                 )
+                self._sync_phase2_state_from_execution_result(snapshot)
                 self.db.update_futures_recommendation_status(
                     recommendation_id,
                     RecommendationStatus.SKIPPED.value,
@@ -384,6 +389,7 @@ class FuturesExecutionEngine:
                 no_trade_reason=no_trade_reason,
                 warning_message=warning_message,
             )
+            self._sync_phase2_state_from_execution_result(snapshot)
             self.db.update_futures_recommendation_status(
                 recommendation_id,
                 RecommendationStatus.SKIPPED.value,
@@ -433,6 +439,7 @@ class FuturesExecutionEngine:
             actual_transactions=build_actual_transactions(recommendation_transactions),
             warning_message=warning_message,
         )
+        self._sync_phase2_state_from_execution_result(snapshot)
         self.db.update_futures_recommendation_status(
             recommendation_id,
             RecommendationStatus.EXECUTED.value,
@@ -659,6 +666,38 @@ class FuturesExecutionEngine:
         )
 
         futures_action = self._to_futures_action(action_value)
+        actual_order_margin = execution_price * lots * contract_info["contract_multiplier"] * margin_rate
+        source_type = RecommendationSourceType(
+            self._enum_value(recommendation.get("source_type", RecommendationSourceType.STRATEGY.value))
+        )
+        snapshot = recommendation.get("signal_snapshot") if isinstance(recommendation.get("signal_snapshot"), dict) else {}
+        final_contract = final_action_contract_from_snapshot(snapshot)
+        if (
+            source_type == RecommendationSourceType.STRATEGY
+            and futures_action in {FuturesAction.OPEN_LONG, FuturesAction.OPEN_SHORT}
+            and contract_requires_full_market_capital_rank(final_contract)
+        ):
+            current_actual_total_margin = sum(
+                float(getattr(position, "margin_used", 0.0) or 0.0)
+                for position in portfolio.positions.values()
+            )
+            account_equity = float(getattr(portfolio, "cashflow", 0.0) or 0.0) + current_actual_total_margin
+            projected_total_margin = current_actual_total_margin + actual_order_margin
+            max_total_margin_ratio = float(self.config["max_total_margin_ratio"])
+            if (
+                (account_equity <= 0 and actual_order_margin > 0)
+                or (
+                    account_equity > 0
+                    and projected_total_margin / account_equity > max_total_margin_ratio + 1e-12
+                )
+            ):
+                raise ExecutionBlocked(
+                    reason="margin_insufficient",
+                    message=(
+                        f"Phase2 execution skipped for {underlying_code}: margin_insufficient "
+                        f"(projected account margin exceeds max_total_margin_ratio)"
+                    ),
+                )
         intraday_close = self._is_intraday_close(
             underlying_code=underlying_code,
             action_value=action_value,
@@ -687,10 +726,10 @@ class FuturesExecutionEngine:
             settle_price=None,
             contract_multiplier=contract_info["contract_multiplier"],
             margin_rate=margin_rate,
-            margin_used=execution_price * lots * contract_info["contract_multiplier"] * margin_rate,
+            margin_used=actual_order_margin,
             daily_pnl=0.0,
             commission=commission,
-            source_type=RecommendationSourceType(self._enum_value(recommendation.get("source_type", RecommendationSourceType.STRATEGY.value))),
+            source_type=source_type,
             execution_phase=execution_phase,
             execution_price_basis=f"base_price {'+' if is_buy_like else '-'} slippage",
             base_price=base_price,
@@ -1490,6 +1529,7 @@ class FuturesExecutionEngine:
             no_trade_reason=blocked.reason,
             warning_message=warning_message,
         )
+        self._sync_phase2_state_from_execution_result(snapshot)
         snapshot["execution_result"]["execution_learning_trace"] = build_execution_learning_trace(
             snapshot,
             outcome="skipped",
@@ -1523,6 +1563,32 @@ class FuturesExecutionEngine:
             reason=blocked.reason,
         )
         return portfolio
+
+    @staticmethod
+    def _sync_phase2_state_from_execution_result(snapshot: Dict[str, Any]) -> None:
+        result = snapshot.get("execution_result") if isinstance(snapshot.get("execution_result"), dict) else {}
+        phase2 = snapshot.get("phase2_execution") if isinstance(snapshot.get("phase2_execution"), dict) else None
+        if not result or phase2 is None:
+            return
+        outcome = result.get("outcome") or result.get("status")
+        reason = result.get("no_trade_reason")
+        phase2["status"] = outcome
+        phase2["reason"] = reason
+        setup_learning = (
+            phase2.get("setup_execution_learning")
+            if isinstance(phase2.get("setup_execution_learning"), dict)
+            else None
+        )
+        if setup_learning is not None:
+            setup_learning["phase2_status"] = outcome
+            setup_learning["no_trade_reason"] = reason
+            setup_learning["reason_family"] = (
+                "execution_timing"
+                if reason and "intraday" in str(reason)
+                else "business_execution"
+                if reason
+                else "executed_or_hold"
+            )
 
     def _get_recommendation_transactions(
         self,

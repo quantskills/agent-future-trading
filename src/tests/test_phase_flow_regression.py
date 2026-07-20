@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import inspect
 import sqlite3
 import sys
 import tempfile
@@ -90,6 +91,7 @@ from agents.execution_team.trader import (
     _final_action_contract_from_snapshot,
     _setup_execution_learning_context,
 )
+from agents.execution_team import trader as trader_module
 from tools.agent_tools.analysis.analyst_quality import (
     apply_trade_research_contract,
     build_technical_context,
@@ -111,7 +113,7 @@ from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecyc
 from tools.common.final_action_semantics import full_market_rank_source_payload
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
-from tools.agent_tools.execution.trader_futures_execution import FuturesExecutionEngine
+from tools.agent_tools.execution.trader_futures_execution import ExecutionBlocked, FuturesExecutionEngine
 from tools.agent_tools.execution.accountant_futures_settlement import FuturesDailySettlement
 from tools.agent_tools.execution.trader_intraday_execution import (
     resolve_intraday_execution_basis,
@@ -13656,6 +13658,814 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(margin_rate, 0.12)
         self.assertEqual(audit["status"], "fallback_static_no_provider_margin")
         self.assertTrue(audit["fallback_to_static_contract_cache"])
+
+
+class Phase2RankedDynamicMarginRegressionTest(unittest.TestCase):
+    @staticmethod
+    def _contract(
+        ticker,
+        *,
+        current_lots=0,
+        target_lots=0,
+        final_action=None,
+        rank_budget_sequence=None,
+        opportunity_rank=None,
+        conditional=False,
+        max_allowed_margin_ratio=0.01,
+    ):
+        if final_action is None:
+            if current_lots == target_lots:
+                final_action = "hold" if current_lots else "wait"
+            elif current_lots == 0:
+                final_action = "open_probe"
+            elif target_lots == 0:
+                final_action = "exit"
+            elif (current_lots > 0) == (target_lots > 0):
+                final_action = "scale" if abs(target_lots) > abs(current_lots) else "reduce"
+            else:
+                final_action = "exit"
+        deployment = {}
+        if rank_budget_sequence is not None:
+            deployment["rank_budget_sequence"] = rank_budget_sequence
+        if opportunity_rank is not None:
+            deployment["opportunity_rank"] = opportunity_rank
+        return {
+            "contract_version": "agentquant.final_action.v1",
+            "contract_type": "strategy",
+            "ticker": ticker,
+            "final_action": final_action,
+            "current_lots": int(current_lots),
+            "target_lots": int(target_lots),
+            "lots_delta": int(target_lots - current_lots),
+            "authority_type": "exploration_probe",
+            "authority_decision": "allow_probe",
+            "open_action_evidence": True,
+            "strong_current_evidence": True,
+            "max_allowed_margin_ratio": max_allowed_margin_ratio,
+            "conditional_trigger_authority": bool(conditional),
+            "requires_intraday_confirmation": bool(conditional),
+            "can_execute_without_intraday_trigger": not bool(conditional),
+            "capital_deployment": deployment,
+            "reason_codes": ["test_ranked_phase2_contract"],
+            "single_source_of_trade_truth": True,
+            "candidate_sources_do_not_bypass_contract": True,
+        }
+
+    @classmethod
+    def _recommendation(
+        cls,
+        ticker,
+        *,
+        current_lots=0,
+        target_lots=0,
+        final_action=None,
+        rank_budget_sequence=None,
+        opportunity_rank=None,
+        conditional=False,
+        created_at=None,
+        source_type="strategy",
+        action=None,
+        lots=None,
+        base_price=100.0,
+    ):
+        contract = cls._contract(
+            ticker,
+            current_lots=current_lots,
+            target_lots=target_lots,
+            final_action=final_action,
+            rank_budget_sequence=rank_budget_sequence,
+            opportunity_rank=opportunity_rank,
+            conditional=conditional,
+        )
+        intent = phase2_order_intent_from_lots(current_lots, target_lots)
+        return {
+            "id": f"rec-{ticker}",
+            "config_id": "cfg",
+            "portfolio_id": "pf",
+            "underlying_code": ticker,
+            "contract_code": f"{ticker}2505",
+            "source_type": source_type,
+            "action": action or intent["action"],
+            "lots": int(intent["lots"] if lots is None else lots),
+            "base_price": float(base_price),
+            "created_at": created_at or f"2025-03-26T09:00:{ticker[-1:] or '0'}",
+            "signal_snapshot": {"final_action_contract": contract},
+        }
+
+    @staticmethod
+    def _portfolio(*, positions=None, equity=1000.0):
+        positions = dict(positions or {})
+        margin = sum(float(position.margin_used or 0.0) for position in positions.values())
+        return Portfolio(
+            id="pf",
+            cashflow=float(equity) - margin,
+            account_equity=float(equity),
+            cash_available=float(equity) - margin,
+            margin_used=margin,
+            margin_available=float(equity) - margin,
+            margin_ratio=margin / float(equity) if equity > 0 else 0.0,
+            positions=positions,
+        )
+
+    @staticmethod
+    def _build_transaction(engine, recommendation, portfolio, *, market_rules=None, margin_rate=1.0):
+        contract_info = {
+            "contract_multiplier": 1.0,
+            "margin_rate_long": 0.1,
+            "margin_rate_short": 0.1,
+            "minimum_tick": 0.0,
+        }
+        with (
+            patch(
+                "tools.agent_tools.execution.trader_futures_execution.FuturesContractInfoCache.get_contract_info",
+                return_value=contract_info,
+            ),
+            patch.object(engine, "_get_execution_quote", return_value=None),
+            patch.object(engine, "_get_contract_detail", return_value=None),
+            patch.object(engine, "_build_market_rules_audit", return_value=dict(market_rules or {})),
+            patch.object(
+                engine,
+                "_resolve_dynamic_margin_rate",
+                return_value=(float(margin_rate), {"selected_margin_rate": float(margin_rate), "status": "test"}),
+            ),
+            patch.object(engine, "_calculate_commission", return_value=0.0),
+        ):
+            return engine._build_transaction(
+                recommendation,
+                portfolio,
+                "2025-03-26",
+                TradingPhase.PHASE2,
+            )
+
+    def test_strategy_scheduler_frontloads_reductions_and_only_reorders_ranked_risk_slots(self):
+        recommendations = [
+            self._recommendation(
+                "WAIT",
+                rank_budget_sequence=98,
+                created_at="2025-03-26T09:00:01",
+            ),
+            self._recommendation("R5", target_lots=1, rank_budget_sequence=5, opportunity_rank=1),
+            self._recommendation("EXIT", current_lots=2, target_lots=0),
+            self._recommendation("R4", target_lots=1, rank_budget_sequence=4, opportunity_rank=2),
+            self._recommendation("HOLD", current_lots=2, target_lots=2, rank_budget_sequence=99),
+            self._recommendation("REDUCE", current_lots=-3, target_lots=-1),
+            self._recommendation("R3", target_lots=1, rank_budget_sequence=3, opportunity_rank=3),
+            self._recommendation("R2", target_lots=1, rank_budget_sequence=2, opportunity_rank=4),
+            self._recommendation("R1", target_lots=1, rank_budget_sequence=1, opportunity_rank=5),
+        ]
+        ticker_order = [item["underlying_code"] for item in recommendations]
+        rank_payload_before = {
+            item["id"]: json.dumps(
+                item["signal_snapshot"]["final_action_contract"].get("capital_deployment") or {},
+                sort_keys=True,
+            )
+            for item in recommendations
+        }
+
+        scheduled = trader_module._schedule_strategy_recommendations(recommendations, ticker_order)
+
+        self.assertEqual(
+            [item["underlying_code"] for item in scheduled],
+            ["EXIT", "REDUCE", "WAIT", "R1", "R2", "HOLD", "R3", "R4", "R5"],
+        )
+        self.assertEqual(
+            rank_payload_before,
+            {
+                item["id"]: json.dumps(
+                    item["signal_snapshot"]["final_action_contract"].get("capital_deployment") or {},
+                    sort_keys=True,
+                )
+                for item in recommendations
+            },
+        )
+
+    def test_strategy_scheduler_accepts_only_non_bool_strict_positive_integer_rank(self):
+        recommendations = [
+            self._recommendation("VALID2", target_lots=1, rank_budget_sequence=2),
+            self._recommendation("BOOL", target_lots=1, rank_budget_sequence=True),
+            self._recommendation("VALID1", target_lots=1, rank_budget_sequence=1),
+            self._recommendation("FLOAT", target_lots=1, rank_budget_sequence=1.0),
+            self._recommendation("STRING", target_lots=1, rank_budget_sequence="1"),
+            self._recommendation("ZERO", target_lots=1, rank_budget_sequence=0),
+            self._recommendation("NEG", target_lots=1, rank_budget_sequence=-1),
+        ]
+        ticker_order = [item["underlying_code"] for item in recommendations]
+
+        scheduled = trader_module._schedule_strategy_recommendations(recommendations, ticker_order)
+
+        self.assertEqual(
+            [item["underlying_code"] for item in scheduled],
+            ["VALID1", "BOOL", "VALID2", "FLOAT", "STRING", "ZERO", "NEG"],
+        )
+
+    def test_initial_and_paper_strategy_scheduling_ignore_opportunity_rank_without_budget_sequence(self):
+        recommendations = [
+            self._recommendation("A", target_lots=1, opportunity_rank=3),
+            self._recommendation("B", target_lots=1, opportunity_rank=1),
+            self._recommendation("C", target_lots=1, opportunity_rank=2),
+        ]
+        ticker_order = ["A", "B", "C"]
+
+        initial = trader_module._schedule_strategy_recommendations(list(recommendations), ticker_order)
+        paper_loop = trader_module._schedule_strategy_recommendations(list(recommendations), ticker_order)
+
+        self.assertEqual([item["underlying_code"] for item in initial], ["A", "B", "C"])
+        self.assertEqual(
+            [item["underlying_code"] for item in paper_loop],
+            [item["underlying_code"] for item in initial],
+        )
+        trader_source = inspect.getsource(trader_module.trader_agent)
+        self.assertEqual(trader_source.count("_schedule_strategy_recommendations("), 2)
+        self.assertEqual(trader_source.count("_sort_recommendations_by_ticker_order("), 1)
+
+    def test_legacy_cross_side_reversal_keeps_stable_slot_and_is_not_frontloaded(self):
+        recommendations = [
+            self._recommendation("R2", target_lots=1, rank_budget_sequence=2),
+            self._recommendation(
+                "REVERSAL",
+                current_lots=2,
+                target_lots=-3,
+                final_action="exit",
+            ),
+            self._recommendation("EXIT", current_lots=2, target_lots=0),
+            self._recommendation("R1", target_lots=1, rank_budget_sequence=1),
+        ]
+        ticker_order = [item["underlying_code"] for item in recommendations]
+
+        scheduled = trader_module._schedule_strategy_recommendations(recommendations, ticker_order)
+
+        self.assertEqual(
+            [item["underlying_code"] for item in scheduled],
+            ["EXIT", "R1", "REVERSAL", "R2"],
+        )
+
+    def test_dynamic_actual_margin_hardline_allows_below_and_equal_but_blocks_above(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        existing = Position(
+            shares=1,
+            entry_price=100.0,
+            contract_code="BASE2505",
+            contract_multiplier=1.0,
+            margin_rate=1.0,
+            margin_used=100.0,
+        )
+
+        below_portfolio = self._portfolio(positions={"BASE": existing})
+        below = self._recommendation("LOW", target_lots=1, rank_budget_sequence=1, base_price=50.0)
+        below["signal_snapshot"]["final_action_contract"]["max_allowed_margin_ratio"] = 0.01
+        below_transaction = self._build_transaction(engine, below, below_portfolio)
+        self.assertEqual(below_transaction.lots, 1)
+        self.assertAlmostEqual(below_transaction.margin_used, 50.0)
+
+        equal_portfolio = self._portfolio(positions={"BASE": existing})
+        equal = self._recommendation("EQUAL", target_lots=1, rank_budget_sequence=1, base_price=100.0)
+        equal_transaction = self._build_transaction(engine, equal, equal_portfolio)
+        self.assertAlmostEqual(equal_transaction.margin_used, 100.0)
+
+        above_portfolio = self._portfolio(positions={"BASE": existing})
+        above = self._recommendation("ABOVE", target_lots=1, rank_budget_sequence=1, base_price=100.01)
+        with self.assertRaises(ExecutionBlocked) as raised:
+            self._build_transaction(engine, above, above_portfolio)
+        self.assertEqual(raised.exception.reason, "margin_insufficient")
+        self.assertEqual(set(above_portfolio.positions), {"BASE"})
+        self.assertAlmostEqual(above_portfolio.margin_used, 100.0)
+
+    def test_fractional_actual_margin_mathematically_equal_to_cap_is_allowed(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        portfolio = self._portfolio(equity=1.5)
+        recommendation = self._recommendation(
+            "FRACTIONAL",
+            target_lots=3,
+            rank_budget_sequence=1,
+            base_price=0.1,
+        )
+
+        transaction = self._build_transaction(engine, recommendation, portfolio)
+
+        self.assertEqual(transaction.lots, 3)
+        self.assertAlmostEqual(transaction.margin_used, 0.3)
+
+    def test_ranked_dynamic_margin_skips_only_over_cap_product_and_continues(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        portfolio = self._portfolio()
+        accepted = []
+        blocked = []
+
+        for rank, (ticker, margin) in enumerate(
+            [("R1", 50.0), ("R2", 50.0), ("R3", 50.0), ("R4", 60.0), ("R5", 40.0)],
+            start=1,
+        ):
+            recommendation = self._recommendation(
+                ticker,
+                target_lots=1,
+                rank_budget_sequence=rank,
+                base_price=margin,
+            )
+            try:
+                transaction = self._build_transaction(engine, recommendation, portfolio)
+            except ExecutionBlocked as exc:
+                blocked.append((ticker, exc.reason))
+                continue
+            accepted.append(ticker)
+            portfolio = engine.apply_transaction_to_portfolio(portfolio, transaction)
+
+        self.assertEqual(accepted, ["R1", "R2", "R3", "R5"])
+        self.assertEqual(blocked, [("R4", "margin_insufficient")])
+        self.assertNotIn("R4", portfolio.positions)
+        self.assertAlmostEqual(portfolio.margin_used, 190.0)
+        self.assertAlmostEqual(portfolio.margin_ratio, 0.19)
+
+    def test_execution_engine_persists_margin_block_as_zero_transaction_and_returns_final_snapshot(self):
+        class FakeDB:
+            def __init__(self):
+                self.status_updates = []
+                self.saved_transactions = []
+
+            def update_futures_recommendation_status(self, recommendation_id, status, **kwargs):
+                self.status_updates.append((recommendation_id, status, kwargs))
+                return True
+
+            def save_futures_transaction(self, transaction):
+                self.saved_transactions.append(transaction)
+                return "unexpected"
+
+        db = FakeDB()
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=db,
+        )
+        portfolio = self._portfolio(
+            positions={
+                "BASE": Position(
+                    shares=1,
+                    contract_code="BASE2505",
+                    margin_used=100.0,
+                )
+            }
+        )
+        recommendation = self._recommendation(
+            "BLOCK",
+            target_lots=1,
+            rank_budget_sequence=1,
+            base_price=101.0,
+        )
+        recommendation["signal_snapshot"]["phase2_execution"] = {
+            "status": "executed",
+            "setup_execution_learning": {
+                "phase2_status": "executed",
+                "no_trade_reason": None,
+                "reason_family": "executed_or_hold",
+            },
+        }
+        contract_info = {
+            "contract_multiplier": 1.0,
+            "margin_rate_long": 0.1,
+            "margin_rate_short": 0.1,
+            "minimum_tick": 0.0,
+        }
+
+        with (
+            patch(
+                "tools.agent_tools.execution.trader_futures_execution.FuturesContractInfoCache.get_contract_info",
+                return_value=contract_info,
+            ),
+            patch.object(engine, "_get_execution_quote", return_value=None),
+            patch.object(engine, "_get_contract_detail", return_value=None),
+            patch.object(engine, "_build_market_rules_audit", return_value={}),
+            patch.object(
+                engine,
+                "_resolve_dynamic_margin_rate",
+                return_value=(1.0, {"selected_margin_rate": 1.0, "status": "test"}),
+            ),
+            patch.object(engine, "_calculate_commission", return_value=0.0),
+        ):
+            result = engine.execute_recommendation(
+                recommendation_id=recommendation["id"],
+                recommendation=recommendation,
+                portfolio=portfolio,
+                trading_date="2025-03-26",
+                execution_phase=TradingPhase.PHASE2,
+            )
+
+        self.assertIs(result, portfolio)
+        self.assertEqual(db.saved_transactions, [])
+        self.assertEqual(db.status_updates[-1][1], RecommendationStatus.SKIPPED.value)
+        snapshot = recommendation["signal_snapshot"]
+        self.assertEqual(snapshot["execution_result"]["transaction_count"], 0)
+        self.assertEqual(snapshot["execution_result"]["no_trade_reason"], "margin_insufficient")
+        self.assertEqual(snapshot["phase2_execution"]["status"], "skipped")
+        self.assertEqual(
+            snapshot["phase2_execution"]["setup_execution_learning"]["no_trade_reason"],
+            "margin_insufficient",
+        )
+        self.assertEqual(
+            snapshot["phase2_execution"]["setup_execution_learning"]["reason_family"],
+            "business_execution",
+        )
+        self.assertEqual(set(portfolio.positions), {"BASE"})
+        self.assertAlmostEqual(portfolio.margin_used, 100.0)
+
+    def test_successful_exit_and_reduce_release_actual_margin_before_new_risk_check(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        portfolio = self._portfolio(
+            positions={
+                "EXIT": Position(
+                    shares=1,
+                    entry_price=60.0,
+                    contract_code="EXIT2505",
+                    contract_multiplier=1.0,
+                    margin_rate=1.0,
+                    margin_used=60.0,
+                ),
+                "REDUCE": Position(
+                    shares=2,
+                    entry_price=50.0,
+                    contract_code="REDUCE2505",
+                    contract_multiplier=1.0,
+                    margin_rate=1.0,
+                    margin_used=100.0,
+                ),
+                "OTHER": Position(
+                    shares=1,
+                    entry_price=30.0,
+                    contract_code="OTHER2505",
+                    contract_multiplier=1.0,
+                    margin_rate=1.0,
+                    margin_used=30.0,
+                ),
+            }
+        )
+
+        exit_recommendation = self._recommendation("EXIT", current_lots=1, target_lots=0, base_price=60.0)
+        exit_transaction = self._build_transaction(engine, exit_recommendation, portfolio)
+        portfolio = engine.apply_transaction_to_portfolio(portfolio, exit_transaction)
+        self.assertEqual(portfolio.positions["EXIT"].shares, 0)
+        self.assertAlmostEqual(portfolio.positions["EXIT"].margin_used, 0.0)
+        self.assertAlmostEqual(portfolio.margin_used, 130.0)
+
+        reduce_recommendation = self._recommendation("REDUCE", current_lots=2, target_lots=1, base_price=50.0)
+        reduce_transaction = self._build_transaction(engine, reduce_recommendation, portfolio)
+        portfolio = engine.apply_transaction_to_portfolio(portfolio, reduce_transaction)
+        self.assertEqual(portfolio.positions["REDUCE"].shares, 1)
+        self.assertAlmostEqual(portfolio.margin_used, 80.0)
+
+        equal_after_release = self._recommendation(
+            "NEW",
+            target_lots=1,
+            rank_budget_sequence=1,
+            base_price=120.0,
+        )
+        transaction = self._build_transaction(engine, equal_after_release, portfolio)
+        portfolio = engine.apply_transaction_to_portfolio(portfolio, transaction)
+        self.assertAlmostEqual(portfolio.margin_used, 200.0)
+        self.assertAlmostEqual(portfolio.margin_ratio, 0.20)
+
+    def test_unfilled_limit_locked_exit_does_not_release_margin_before_new_risk_check(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        portfolio = self._portfolio(
+            positions={
+                "EXIT": Position(
+                    shares=1,
+                    entry_price=190.0,
+                    contract_code="EXIT2505",
+                    contract_multiplier=1.0,
+                    margin_rate=1.0,
+                    margin_used=190.0,
+                )
+            }
+        )
+        exit_recommendation = self._recommendation("EXIT", current_lots=1, target_lots=0, base_price=190.0)
+
+        with self.assertRaises(ExecutionBlocked) as close_block:
+            self._build_transaction(
+                engine,
+                exit_recommendation,
+                portfolio,
+                market_rules={
+                    "limit_lock": {
+                        "blocked": True,
+                        "reason": "limit_locked_no_fill",
+                    }
+                },
+            )
+        self.assertEqual(close_block.exception.reason, "limit_locked_no_fill")
+        self.assertAlmostEqual(portfolio.margin_used, 190.0)
+        self.assertEqual(portfolio.positions["EXIT"].shares, 1)
+
+        new_risk = self._recommendation("NEW", target_lots=1, rank_budget_sequence=1, base_price=20.0)
+        with self.assertRaises(ExecutionBlocked) as margin_block:
+            self._build_transaction(engine, new_risk, portfolio)
+        self.assertEqual(margin_block.exception.reason, "margin_insufficient")
+        self.assertEqual(set(portfolio.positions), {"EXIT"})
+
+    def test_nonpositive_equity_blocks_strategy_risk_but_forced_risk_close_still_executes(self):
+        engine = FuturesExecutionEngine(
+            {"max_total_margin_ratio": 0.20, "execution": {"default_slippage_ticks": 0}},
+            db=None,
+        )
+        position = Position(
+            shares=1,
+            entry_price=100.0,
+            contract_code="RISK2505",
+            contract_multiplier=1.0,
+            margin_rate=1.0,
+            margin_used=100.0,
+        )
+        portfolio = Portfolio(
+            id="pf",
+            cashflow=-100.0,
+            account_equity=0.0,
+            cash_available=-100.0,
+            margin_used=100.0,
+            margin_available=-100.0,
+            positions={"RISK": position},
+        )
+        strategy_open = self._recommendation(
+            "NEW",
+            target_lots=1,
+            rank_budget_sequence=1,
+            base_price=1.0,
+        )
+        with self.assertRaises(ExecutionBlocked) as margin_block:
+            self._build_transaction(engine, strategy_open, portfolio)
+        self.assertEqual(margin_block.exception.reason, "margin_insufficient")
+
+        forced_close = self._recommendation(
+            "RISK",
+            current_lots=1,
+            target_lots=0,
+            source_type="forced_risk",
+            action="close_long",
+            lots=1,
+            base_price=100.0,
+        )
+        forced_transaction = self._build_transaction(engine, forced_close, portfolio)
+        self.assertEqual(forced_transaction.action, FuturesAction.CLOSE_LONG)
+        self.assertEqual(forced_transaction.source_type, RecommendationSourceType.FORCED_RISK)
+
+    def test_phase2_summary_uses_final_blocked_execution_result_and_continues_lower_rank(self):
+        recommendations = [
+            self._recommendation(f"R{rank}", target_lots=1, rank_budget_sequence=rank)
+            for rank in (5, 4, 3, 2, 1)
+        ]
+        scheduled = trader_module._schedule_strategy_recommendations(
+            recommendations,
+            [item["underlying_code"] for item in recommendations],
+        )
+        calls = []
+
+        class FakeDB:
+            def update_futures_recommendation_status(self, *args, **kwargs):
+                return True
+
+        class FakeRouter:
+            def resolve_morning_execution_base_price(self, **kwargs):
+                return SimpleNamespace(
+                    base_price=100.0,
+                    base_price_source="open",
+                    base_price_date="2025-03-26",
+                    open_price=100.0,
+                    prev_close_price=99.0,
+                    warning_message=None,
+                    intraday_audit=None,
+                )
+
+        class FakeEngine:
+            def execute_recommendation(self, *, recommendation, portfolio, **kwargs):
+                ticker = recommendation["underlying_code"]
+                calls.append(ticker)
+                blocked = ticker == "R4"
+                snapshot = recommendation["signal_snapshot"]
+                snapshot.setdefault("phase2_execution", {})["status"] = "skipped" if blocked else "executed"
+                snapshot["execution_result"] = {
+                    "outcome": "skipped" if blocked else "executed",
+                    "status": "skipped" if blocked else "executed",
+                    "transaction_count": 0 if blocked else 1,
+                    "no_trade_reason": "margin_insufficient" if blocked else None,
+                    "actual_transactions": [] if blocked else [{"action": "open_long", "lots": 1}],
+                }
+                return portfolio
+
+        def fake_translate(*, recommendation, **kwargs):
+            return FuturesDecision(
+                ticker=recommendation["underlying_code"],
+                action=FuturesAction.OPEN_LONG,
+                lots=1,
+                price=100.0,
+                settle_price=100.0,
+                margin_rate=0.1,
+                contract_multiplier=1.0,
+                contract_code=recommendation["contract_code"],
+                justification="test final execution summary",
+            )
+
+        with (
+            patch.object(trader_module, "_auditor_verdict_allows_strategy_execution", return_value=True),
+            patch.object(trader_module, "intraday_confirmation_enabled", return_value=False),
+            patch.object(trader_module, "_translate_pre_open_recommendation_to_order", side_effect=fake_translate),
+        ):
+            _, summary = trader_module._process_strategy_recommendations(
+                cfg={"trading_date": "2025-03-26"},
+                db=FakeDB(),
+                config_id="cfg",
+                router=FakeRouter(),
+                execution_engine=FakeEngine(),
+                portfolio=self._portfolio(),
+                strategy_recommendations=scheduled,
+                trading_date_value="2025-03-26",
+                runtime_mode="backtest_replay",
+                cutoff_datetime=None,
+                finalize_untriggered=True,
+                loop_iteration=1,
+            )
+
+        self.assertEqual(calls, ["R1", "R2", "R3", "R4", "R5"])
+        self.assertEqual(summary["executed"], 4)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["no_trade_reasons"]["margin_insufficient"], 1)
+
+    def test_mixed_strategy_actions_waiting_conditions_do_not_freeze_later_rank(self):
+        recommendations = [
+            self._recommendation("EXIT", current_lots=1, target_lots=0),
+            self._recommendation("REDUCE", current_lots=2, target_lots=1),
+            self._recommendation("SCALE", current_lots=1, target_lots=2, rank_budget_sequence=2),
+            self._recommendation("WAIT1", target_lots=1, rank_budget_sequence=1, conditional=True),
+            self._recommendation("WAIT2", target_lots=1, rank_budget_sequence=3, conditional=True),
+            self._recommendation("WAIT3", target_lots=1, rank_budget_sequence=4, conditional=True),
+            self._recommendation("TRIGGER", target_lots=1, rank_budget_sequence=5, conditional=True),
+        ]
+        ticker_order = [item["underlying_code"] for item in recommendations]
+        scheduled = trader_module._schedule_strategy_recommendations(recommendations, ticker_order)
+        translated = []
+        executed = []
+        margin_before_execution = []
+
+        portfolio = self._portfolio(
+            positions={
+                "EXIT": Position(shares=1, contract_code="EXIT2505", margin_used=50.0),
+                "REDUCE": Position(shares=2, contract_code="REDUCE2505", margin_used=80.0),
+                "SCALE": Position(shares=1, contract_code="SCALE2505", margin_used=20.0),
+            }
+        )
+
+        class FakeDB:
+            def __init__(self):
+                self.updates = []
+
+            def update_futures_recommendation_status(self, recommendation_id, status, **kwargs):
+                self.updates.append((recommendation_id, status, kwargs))
+                return True
+
+        class FakeRouter:
+            def resolve_morning_execution_base_price(self, **kwargs):
+                return SimpleNamespace(
+                    base_price=100.0,
+                    base_price_source="open",
+                    base_price_date="2025-03-26",
+                    open_price=100.0,
+                    prev_close_price=99.0,
+                    warning_message=None,
+                    intraday_audit=None,
+                )
+
+        class FakeSelection:
+            def __init__(self, should_execute, reason):
+                self.should_execute = should_execute
+                self.reason = reason
+                self.decision = "execute" if should_execute else "wait"
+                self.base_datetime = "2025-03-26 09:31:00"
+                self.signal_datetime = "2025-03-26 09:30:00"
+                self.base_price = 100.0
+
+            def to_audit_payload(self):
+                return {
+                    "decision": self.decision,
+                    "reason": self.reason,
+                    "base_price": self.base_price,
+                    "base_datetime": self.base_datetime,
+                    "signal_datetime": self.signal_datetime,
+                    "trigger_checked": True,
+                    "trigger_passed": self.should_execute,
+                }
+
+        class FakeEngine:
+            def execute_recommendation(self, *, recommendation_id, recommendation, portfolio, **kwargs):
+                ticker = recommendation["underlying_code"]
+                action_value = str(recommendation["action"])
+                action_value = action_value.split(".")[-1].lower()
+                executed.append(ticker)
+                margin_before_execution.append(sum(position.margin_used for position in portfolio.positions.values()))
+                position = portfolio.positions.get(ticker)
+                if action_value in {"close_long", "close_short"} and position is not None:
+                    previous_lots = abs(position.shares)
+                    closed_lots = min(previous_lots, int(recommendation["lots"]))
+                    released = position.margin_used * (closed_lots / previous_lots)
+                    position.margin_used -= released
+                    position.shares += -closed_lots if position.shares > 0 else closed_lots
+                    portfolio.cashflow += released
+                    if position.shares == 0:
+                        portfolio.positions.pop(ticker)
+                elif action_value in {"open_long", "open_short"}:
+                    margin = 10.0
+                    if position is None:
+                        position = Position(shares=0, contract_code=recommendation["contract_code"], margin_used=0.0)
+                        portfolio.positions[ticker] = position
+                    position.shares += 1 if action_value == "open_long" else -1
+                    position.margin_used += margin
+                    portfolio.cashflow -= margin
+                portfolio.margin_used = sum(item.margin_used for item in portfolio.positions.values())
+                portfolio.account_equity = portfolio.cashflow + portfolio.margin_used
+                portfolio.margin_ratio = portfolio.margin_used / portfolio.account_equity
+                snapshot = recommendation["signal_snapshot"]
+                snapshot.setdefault("phase2_execution", {})["status"] = "executed"
+                snapshot["execution_result"] = {
+                    "outcome": "executed",
+                    "status": "executed",
+                    "transaction_count": 1,
+                    "actual_transactions": [{"action": action_value, "lots": recommendation["lots"]}],
+                }
+                return portfolio
+
+        def fake_translate(*, recommendation, portfolio, **kwargs):
+            ticker = recommendation["underlying_code"]
+            translated.append(ticker)
+            contract = recommendation["signal_snapshot"]["final_action_contract"]
+            current_lots = int(getattr(portfolio.positions.get(ticker), "shares", 0) or 0)
+            target_lots = int(contract["target_lots"])
+            intent = phase2_order_intent_from_lots(current_lots, target_lots)
+            return FuturesDecision(
+                ticker=ticker,
+                action=FuturesAction(intent["action"]),
+                lots=int(intent["lots"]),
+                price=100.0,
+                settle_price=100.0,
+                margin_rate=0.1,
+                contract_multiplier=1.0,
+                contract_code=recommendation["contract_code"],
+                justification="test phase2 scheduling",
+            )
+
+        def fake_intraday_basis(*, recommendation, morning_price_context, **kwargs):
+            ticker = recommendation["underlying_code"]
+            should_execute = ticker not in {"WAIT1", "WAIT2", "WAIT3"}
+            return morning_price_context, FakeSelection(
+                should_execute,
+                "trigger_met" if should_execute else "intraday_trigger_not_met",
+            )
+
+        with (
+            patch.object(trader_module, "_auditor_verdict_allows_strategy_execution", return_value=True),
+            patch.object(trader_module, "intraday_confirmation_enabled", return_value=True),
+            patch.object(trader_module, "_translate_pre_open_recommendation_to_order", side_effect=fake_translate),
+            patch.object(trader_module, "_resolve_phase2_execution_basis", side_effect=fake_intraday_basis),
+        ):
+            final_portfolio, summary = trader_module._process_strategy_recommendations(
+                cfg={"trading_date": "2025-03-26"},
+                db=FakeDB(),
+                config_id="cfg",
+                router=FakeRouter(),
+                execution_engine=FakeEngine(),
+                portfolio=portfolio,
+                strategy_recommendations=scheduled,
+                trading_date_value="2025-03-26",
+                runtime_mode="paper_loop",
+                cutoff_datetime=datetime(2025, 3, 26, 10, 0),
+                finalize_untriggered=False,
+                loop_iteration=1,
+            )
+
+        self.assertEqual(
+            [item["underlying_code"] for item in scheduled],
+            ["EXIT", "REDUCE", "WAIT1", "SCALE", "WAIT2", "WAIT3", "TRIGGER"],
+        )
+        translated_order = [
+            ticker
+            for index, ticker in enumerate(translated)
+            if index == 0 or ticker != translated[index - 1]
+        ]
+        self.assertEqual(translated_order, ["EXIT", "REDUCE", "WAIT1", "SCALE", "WAIT2", "WAIT3", "TRIGGER"])
+        self.assertEqual(executed, ["EXIT", "REDUCE", "SCALE", "TRIGGER"])
+        self.assertEqual(margin_before_execution, [150.0, 100.0, 60.0, 70.0])
+        self.assertEqual(summary["checked"], 7)
+        self.assertEqual(summary["executed"], 4)
+        self.assertEqual(summary["waiting"], 3)
+        self.assertEqual(summary["skipped"], 0)
+        self.assertAlmostEqual(final_portfolio.margin_used, 80.0)
 
 
 class CheckDbConsistencyRegressionTest(unittest.TestCase):

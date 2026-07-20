@@ -15,14 +15,14 @@
 7. **业务机制必须可审计**：每笔推荐、盘中触发、成交流水、结算记录、品种日 PnL、完整交易日志和 Phase4 验收结果都要能回查，便于确认是否记错账、算错账或发生未来函数。
 8. **最终交易真相只认结构化出口**：新开仓、条件 probe、放大、减仓、持有和退出必须落到投资组合经理签发的唯一 `final_action_contract` 及其内部权限字段、交易员执行结果和会计结算结果。普通策略单先由投资组合经理生成唯一 `final_action_contract`，经审计员审核后再交给交易员执行。投资组合经理不调用 LLM；自然语言、内部草稿和日志不是成交、审计、评估或学习的兜底事实来源。仅有 `direction_context`、`opportunity_state=no_opportunity` 或普通观察状态的机会，不能被最小手数、旧 probe seed 或软门控释放绕成真实开仓。
 9. **策略单与运营风控单分账**：`source_type=strategy` 只走投资组合经理、审计员、交易员的策略合约链；`source_type=rollover` 和 `source_type=forced_risk` 是非策略运营风控单，由执行/结算链独立处理、独立核算，不写入策略 alpha 学习，也不能塞进策略 `final_action_contract`。
-10. **机会排序只服务新增风险资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对实际增加风险的候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，包括新开仓与同方向扩大绝对手数的 `add/scale`，用于决定资金为什么优先给某些新增风险机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控只写对应生命周期解释和学习 trace，不伪造 rank。这些字段不是第二套交易权限，交易员也不能按排名自行改方向或手数。
+10. **机会排序只服务新增风险资金部署，不服务旁路交易**：投资组合经理可以在 Phase1 对实际增加风险的候选写入 `opportunity_score/opportunity_score_components/opportunity_rank/capital_allocation_reason/learning_adjustment_summary`，包括新开仓与同方向扩大绝对手数的 `add/scale`，用于决定资金为什么优先给某些新增风险机会，并回写同一张 `final_action_contract.target_lots/lots_delta/final_action`。`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控只写对应生命周期解释和学习 trace，不伪造 rank。Phase2 只读取已审 FAC 的 `capital_deployment.rank_budget_sequence` 延续 PM 已签资金消费顺序；它不读取 `opportunity_rank/rank_score/learning` 重新排名，也不据此取得交易权限、修改方向或手数。
 
 ## 二、已经代码落地的实际业务运行机制
 
 ### 1. 四阶段业务流
 
 - **Phase1 盘前策略**：技术面、基本面和期货新闻面分析师生成结构化预测证据；信号收集员汇总三类分析师证据并输出带 `source_agent="signal_collector"` 的 `signal_collection_contract`；投资组合经理按 PM 六步转换同一个内存状态：Step2 判断单品种方向，Step3 结合持仓确定交易状态，Step4 消费学习，实际增加风险的新开仓和同方向 `add/scale` 进入 Step5 全市场 rank、预算和 sizing，不增加风险的候选从 Step4 直接进入 Step6。Step1–5 不输出 artifact、合约草稿和 recommendation；Step6 原子返回唯一 `FuturesRecommendation` 与 `final_action_contract`。普通策略执行依据只能是审计通过的唯一 `final_action_contract`。
-- **Phase2 盘中执行**：交易员读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。交易员不能从投资组合经理文本、旧 probe 标记或最小一手机制自行创造策略方向，只能执行投资组合经理和审计员已授权计划。
+- **Phase2 盘中执行**：交易员读取待执行推荐，先扫描并执行盘中 forced_risk 运营单，再按当日策略目标协调 pending rollover，最后处理策略单。策略单先按配置品种顺序和 `created_at` 形成稳定底序；不增加风险的真实 `reduce/exit` 保持彼此稳定顺序并先处理，只有真实成交后才释放保证金；其余 `wait/hold` 和异号旧兼容反转保留稳定槽位，新增风险只按各自已审 FAC 的严格正整数 `rank_budget_sequence` 在新增风险槽位间升序调度。策略单只按当前持仓和 `final_action_contract.target_lots/lots_delta` 翻译为 `open_long`、`open_short`、`close_long`、`close_short` 或 `hold`。交易员不能从投资组合经理文本、旧 probe 标记、rank 或最小一手机制自行创造策略方向，只能执行投资组合经理和审计员已授权计划。
 - **Phase3 日终结算**：会计师回放当日成交流水，使用同日官方结算价逐日盯市，更新官方组合、日结算、品种日 PnL 和交易流水结算价；结算后发现换月需要时，只能生成下一交易日执行的 rollover 运营单，不能反向影响当天盘前策略。
 - **Phase4 复盘验收**：复盘员检查 Phase1-3 完整性、已落地推荐/审计/执行/成交/结算事实的一致性、交易流水入账、分析师信号落库完整性和完整交易日志，并对交易结果做事实归因；PM 评分、排名和资金部署只作为已签决策事实参与归因，不由复盘员重新裁决。研究员在 Phase4 验证后通过独立入口输出结构化研究信息，供未来交易日使用。未完成交易日会被 `incomplete_trading_day_phase` 硬拦，不能作为策略结论或学习样本。
 - 干净回测后，应重新检查结算交易日、期货成交流水、品种日 PnL、完整交易日志和 data quality 文件是否逐日生成并互相对齐。历史回测曾证明四阶段业务链路可以连续运行；若用户已清库，旧主库数量不再代表当前事实。
@@ -60,6 +60,7 @@
 - 执行层读取 PandaAI 日行情中的当日涨跌停价，只使用开盘前已知的限价字段，不用当日高低收反推成交。
 - 买入类动作若执行价触及涨停、卖出类动作若执行价触及跌停，系统会按“停板无法成交/排队无法保证成交”跳过订单，并写入 `limit_locked_no_fill`。
 - 未成交推荐不会写入真实交易流水，但会保留执行审计、未成交原因和业务规则 payload；这些样本会进入研究机制，用于后续择时和执行价优化。
+- 条件新增风险仍按已签 `rank_budget_sequence` 依次检查；未触发的产品只记录 waiting/skipped 和零 transaction，不冻结后续已触发产品。
 - 盘中触发失败、涨跌停/执行价问题和市场规则跳过会写入 `execution_learning_trace`，只供未来研究择时和执行策略，不回写当日交易流水。
 - 交易员不直接读取同作用域 `execution_action_value`、`strategy_memory` 或 `adaptive_policy_state`。execution 研究偏好必须先由投资组合经理经 `decision_memory_retrieval` 消费，并写入审计后的 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`；交易员只按最终合约和盘中数据选择触发或跳过，不能创造交易策略、改变方向、改变目标手数，也不能绕过投资组合经理、审计员、盘中触发、涨跌停、交割和保证金边界；回测与模拟盘必须保持同一套执行语义。
 
@@ -78,8 +79,10 @@
 - 开多使用多头保证金率，开空使用空头保证金率；若 PandaAI 只返回单一最低保证金率，则多空共用该动态率。
 - 开仓时按 `执行价 * 手数 * 合约乘数 * 保证金率` 占用保证金。
 - 平仓时按平掉手数占当前账上持仓保证金的比例释放保证金。若中间经过日终结算，账上保证金会按最新结算价重算，因此平仓释放的是最近一次账上重算后的保证金占用，不一定等于最初开仓时冻结的保证金。
+- `reduce/exit` 只有真实 transaction 完成并更新组合后才释放账上实际保证金；审计、涨跌停、行情或其他执行阻断形成零 transaction 时，组合和保证金保持原值，后续新增风险按未变化账户检查。
 - 账户拆分为现金余额、占用保证金、账户权益、可用资金和保证金比例。
-- 组合层面存在 20% 总保证金硬门槛；普通机会、强机会和恢复试探都不能突破该硬边界。
+- 组合层面存在由顶层 `max_total_margin_ratio` 提供的总保证金硬门槛，当前为 20%；普通机会、强机会和恢复试探都不能突破该硬边界。策略新增风险在实际执行价和最终动态保证金率确定后、transaction 形成前，按 `actual_order_margin=execution_price*lots*contract_multiplier*dynamic_margin_rate` 和 `projected_margin_ratio=(current_actual_total_margin+actual_order_margin)/(cashflow+current_actual_total_margin)` 复核；小于或等于硬线保持 PM 原手数成交，超过硬线使用既有 `margin_insufficient` 整单不成交，只跳过当前产品并继续后续产品。该检查不比较实际保证金与 FAC 计划比例，不缩手、不部分成交、不替换合约或候选。
+- `reduce/exit`、forced-risk 平仓和 rollover 保持现有独立边界，不进入上述策略新增风险硬线；合法反转仍由 PM 当日签成 exit-first，本轮不增加反向开仓腿或特殊投影。
 - Phase2 执行前和模拟盘循环中会扫描盘中保证金风险。若盘中保证金比例触发 forced_risk 阈值，系统生成 `source_type=forced_risk` 的减仓/强平运营单，只允许平已有仓、降低保证金风险，不能开新仓，也不能进入策略 alpha 学习。
 
 ### 7. 日终逐日盯市与账务

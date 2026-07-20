@@ -26,3 +26,7 @@
 （7）[PG推荐执行日期] `pg_system_invariants.py` 按`effective_trade_date`加载成交日推荐；相关测试覆盖T日生成、`Next(T)`生效成交和真实缺失推荐。原因：防止跨日rollover推荐被单日PG错误报告为`transaction_recommendation_missing`。
 
 （8）[PandaAI郑商所分钟合约代码] `api.py` 在分钟行情返回边界按记录逻辑交易日生产唯一业务合约代码，具体合约严格核对回包月份，主连逐行读取`dominant_id`，只覆盖返回副本的`trading_code`；相关测试覆盖SR、CF、TA、BU、C的15m/1m、历史年份、夜盘、错月和回测前检测。原因：防止郑商所三位分钟代码被过滤成虚假空行情，并让真实合约冲突进入既有数据异常链路。
+
+==========2026年07月20日==========
+
+（1）[Phase2资金顺序与动态保证金硬线] `trader.py` 在策略批次中先稳定处理不增加风险的减仓/退出，再按已审 FAC 的`rank_budget_sequence`调度新增风险，并让汇总服从最终执行事实；`trader_futures_execution.py` 在实际执行价和最终动态保证金率确定后、交易形成前复核账户总保证金硬线，超线使用既有`margin_insufficient`整单不成交；相关测试覆盖wait/hold、open/scale、reduce/exit、条件等待、forced-risk平仓边界、低于/等于/超过硬线、真实保证金释放、靠前阻断后继续和执行汇总。原因：保持PM已签资金优先级，并补齐计划保证金与实际动态保证金偏离后的最终账户硬风控。
