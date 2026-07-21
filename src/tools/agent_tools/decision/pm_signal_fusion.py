@@ -466,6 +466,24 @@ def _action_value_learning_summary(
         if not isinstance(row, Mapping):
             continue
         payload = _row_payload(row)
+        canonical_action_value = (
+            row.get("canonical_action_value")
+            if "canonical_action_value" in row
+            else payload.get("canonical_action_value")
+        )
+        if canonical_action_value is not True:
+            ignored_lanes.add("noncanonical_action_value")
+            continue
+        retrieval_match_level = _clean_key(
+            row.get("retrieval_match_level") or payload.get("retrieval_match_level")
+        )
+        evidence_scope = _clean_key(row.get("evidence_scope") or payload.get("evidence_scope"))
+        if retrieval_match_level in {"similar", "weak_prior"} or evidence_scope in {
+            "similar_sql_prior",
+            "counterfactual_prior",
+        }:
+            ignored_lanes.add(retrieval_match_level or evidence_scope)
+            continue
         semantic_validation = validate_action_preference_family_consistency({**dict(row), "payload": payload})
         if not semantic_validation.get("ok"):
             ignored_lanes.add("semantic_contract_error")
@@ -479,9 +497,10 @@ def _action_value_learning_summary(
         if not isinstance(entry_quality_outcome, Mapping):
             entry_quality_outcome = {}
         consumer_scope = _clean_key(
-            _row_value(row, payload, "consumer_scope", "learning_consumer_scope", default="pm_learning")
+            _row_value(row, payload, "consumer_scope", "learning_consumer_scope", default="")
         )
-        if consumer_scope and consumer_scope != "pm_learning":
+        if consumer_scope != "pm_learning":
+            ignored_lanes.add("non_pm_learning_scope")
             continue
         row_side = _clean_key(_row_value(row, payload, "side", default="*"))
         if row_side not in {side, "*", "both", "any"}:
@@ -491,8 +510,18 @@ def _action_value_learning_summary(
         )
         if not action_preference:
             continue
-        family = _clean_key(_row_value(row, payload, "canonical_action_family", "source_canonical_action_family", default=""))
-        lane = _clean_key(_row_value(row, payload, "learning_lane", "action_value_lane", default=""))
+        family = _clean_key(
+            row.get("canonical_action_family")
+            or payload.get("canonical_action_family")
+            or row.get("source_canonical_action_family")
+            or payload.get("source_canonical_action_family")
+        )
+        action_value_lane = _clean_key(row.get("action_value_lane") or payload.get("action_value_lane"))
+        learning_lane = _clean_key(row.get("learning_lane") or payload.get("learning_lane"))
+        if not action_value_lane or not learning_lane or action_value_lane != learning_lane:
+            ignored_lanes.add("action_value_lane_contract_error")
+            continue
+        lane = learning_lane
         lane_is_execution_profile = lifecycle == "open_add_new_risk" and family == ACTION_FAMILY_EXECUTION
         if lifecycle == "open_add_new_risk" and family != ACTION_FAMILY_OPEN_ADD_NEW_RISK and not lane_is_execution_profile:
             ignored_lanes.add(lane or family or "unknown")
@@ -565,13 +594,6 @@ def _action_value_learning_summary(
                 execution_signal += strength
             elif is_negative:
                 execution_signal -= strength * (1.20 if is_tail_loss else 1.0)
-            if entry_quality_outcome:
-                entry_penalty_weight = _safe_float(entry_quality_outcome.get("penalty_weight"), 0.0)
-                trigger_support_weight = _safe_float(entry_quality_outcome.get("support_weight"), 0.0)
-                if bool(entry_quality_outcome.get("positive_entry_episode")):
-                    trigger_quality_positive_signal += strength * max(0.25, trigger_support_weight)
-                if bool(entry_quality_outcome.get("loss_episode")):
-                    trigger_quality_loss_signal += strength * max(0.35, entry_penalty_weight)
             continue
         used_lanes.add(lane or "unknown")
         if scope == "exact_real_state":

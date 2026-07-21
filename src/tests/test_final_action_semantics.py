@@ -693,9 +693,9 @@ class FinalActionSemanticsTest(unittest.TestCase):
 
         conditional_contract = {
             "current_lots": 0,
-            "target_lots": 1,
-            "lots_delta": 1,
-            "final_action": "open_probe",
+            "target_lots": 0,
+            "lots_delta": 0,
+            "final_action": "wait",
             "conditional_trigger_authority": True,
             "requires_intraday_confirmation": True,
             "can_execute_without_intraday_trigger": False,

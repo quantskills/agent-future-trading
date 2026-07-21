@@ -774,11 +774,29 @@ def contract_increases_risk_position(contract: Mapping[str, Any] | None) -> bool
     return abs(target_lots) > abs(current_lots)
 
 
-def _contract_final_lifecycle_port(contract: Mapping[str, Any] | None) -> str:
+def contract_final_learning_lifecycle(contract: Mapping[str, Any] | None) -> str:
+    """Return the PM decision-learning lifecycle from the final lot transition."""
     contract = contract if isinstance(contract, Mapping) else {}
     action = _clean(contract.get("final_action"))
     current_lots, target_lots, _ = _current_target_delta(contract)
-    if (
+    if current_lots == 0 and target_lots != 0:
+        return "open_add_new_risk"
+    if current_lots != 0 and target_lots != 0 and (
+        (current_lots > 0 and target_lots > current_lots)
+        or (current_lots < 0 and target_lots < current_lots)
+    ):
+        return "open_add_new_risk"
+    if current_lots != 0 and (
+        target_lots == 0
+        or abs(target_lots) < abs(current_lots)
+        or (current_lots > 0 and target_lots < 0)
+        or (current_lots < 0 and target_lots > 0)
+        or action in (DECREASE_ACTIONS | EXIT_ACTIONS)
+    ):
+        return "reduce_exit"
+    if current_lots != 0 and target_lots == current_lots:
+        return "hold"
+    if current_lots == target_lots and (
         action in CONDITIONAL_ACTIONS
         or (
             _bool(contract.get("conditional_trigger_authority"))
@@ -787,25 +805,6 @@ def _contract_final_lifecycle_port(contract: Mapping[str, Any] | None) -> str:
         )
     ):
         return "conditional_monitor"
-    if current_lots == 0 and target_lots != 0:
-        return "open_add_new_risk"
-    if current_lots != 0 and target_lots != 0 and (
-        (current_lots > 0 and target_lots > current_lots)
-        or (current_lots < 0 and target_lots < current_lots)
-        or (current_lots > 0 and target_lots < 0)
-        or (current_lots < 0 and target_lots > 0)
-    ):
-        return "open_add_new_risk"
-    if current_lots != 0 and target_lots == current_lots:
-        return "hold"
-    if current_lots != 0 and (
-        target_lots == 0
-        or abs(target_lots) < abs(current_lots)
-        or action in (DECREASE_ACTIONS | EXIT_ACTIONS)
-    ):
-        return "reduce_exit"
-    if action in (OPEN_ACTIONS | INCREASE_ACTIONS | {"reverse"}):
-        return "open_add_new_risk"
     return "wait"
 
 
@@ -1010,11 +1009,7 @@ def rank_lifecycle_learning_route_errors(contract: Mapping[str, Any] | None) -> 
         decision_trace.get("contract_lifecycle_port")
         or decision_trace.get("rank_lifecycle")
     )
-    expected_decision_lifecycle = (
-        "conditional_monitor"
-        if is_conditional_monitor_contract(contract)
-        else "open_add_new_risk"
-    )
+    expected_decision_lifecycle = contract_final_learning_lifecycle(contract)
     if decision_lifecycle != expected_decision_lifecycle:
         errors.append(
             "final_lifecycle_trace_port_mismatch:"
@@ -1112,7 +1107,7 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
     port = _clean(trace.get("contract_lifecycle_port") or trace.get("rank_lifecycle"))
     if not port:
         errors.append("lifecycle_decision_port_missing")
-    expected_port = _contract_final_lifecycle_port(contract)
+    expected_port = contract_final_learning_lifecycle(contract)
     if port and expected_port and port != expected_port:
         errors.append(f"lifecycle_trace_port_mismatch:{port}:{expected_port}")
     decision_rows, row_errors = _lifecycle_trace_learning_rows(trace)

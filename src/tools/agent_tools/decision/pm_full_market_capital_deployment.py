@@ -290,9 +290,15 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     }
 
 
-def _ensure_final_rank_score_fields(row: Dict[str, Any], *, config: Dict[str, Any]) -> Dict[str, Any]:
+def _ensure_final_rank_score_fields(
+    row: Dict[str, Any],
+    *,
+    config: Dict[str, Any],
+    capital_efficiency_bonus: float = 0.0,
+) -> Dict[str, Any]:
     components = _rank_score_components_for_row(row, config=config)
-    rank_score = round(_bounded(sum(float(value or 0.0) for value in components.values())), 6)
+    components["capital_efficiency"] = round(max(0.0, float(capital_efficiency_bonus or 0.0)), 6)
+    rank_score = round(sum(float(value or 0.0) for value in components.values()), 6)
     row["rank_score_components"] = components
     row["rank_score"] = rank_score
     row["capital_priority_score"] = rank_score
@@ -746,18 +752,26 @@ def _capital_rank_eligible(pm_state: Dict[str, Any], row: Dict[str, Any]) -> boo
     return _float_field(row, "opportunity_score", _float_field(row, "score", 0.0)) > 0.0
 
 
-def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[int, float, float, float]:
+def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[int, float, float, float, float]:
     try:
         tier = int(row.get("capital_priority_tier") or 0)
     except (TypeError, ValueError):
         tier = 0
     rank_score = _float_field(row, "rank_score")
-    priority = _float_field(row, "capital_priority_score")
-    watch_priority = _float_field(row, "watch_priority_score", priority)
-    score = _float_field(row, "opportunity_score", _float_field(row, "score"))
-    if rank_score <= 0:
-        rank_score = priority
-    return tier, rank_score, watch_priority, score
+    rank_score_inputs = (
+        row.get("rank_score_input_components")
+        if isinstance(row.get("rank_score_input_components"), dict)
+        else {}
+    )
+    rank_score_components = (
+        row.get("rank_score_components")
+        if isinstance(row.get("rank_score_components"), dict)
+        else {}
+    )
+    cold_start_evidence = _float_field(rank_score_inputs, "cold_start_evidence_quality")
+    candidate_quality = _float_field(row, "candidate_quality")
+    capital_efficiency = _float_field(rank_score_components, "capital_efficiency")
+    return tier, rank_score, cold_start_evidence, candidate_quality, capital_efficiency
 
 
 def _capital_layer_sort_priority(row: Dict[str, Any]) -> int:
@@ -785,34 +799,6 @@ def _capital_efficiency_rank_bonus(
     return round(float(max_bonus or 0.0) * efficiency, 6)
 
 
-def _apply_capital_efficiency_to_rank_row(
-    row: Dict[str, Any],
-    *,
-    margin_ratio: float,
-    min_probe_ratio: float,
-    max_single_ratio: float,
-    capital_efficiency_rank_enabled: bool = True,
-    capital_efficiency_rank_max_bonus: float = 0.02,
-) -> float:
-    bonus = _capital_efficiency_rank_bonus(
-        margin_ratio,
-        min_probe_ratio=min_probe_ratio,
-        max_single_ratio=max_single_ratio,
-        enabled=capital_efficiency_rank_enabled,
-        max_bonus=capital_efficiency_rank_max_bonus,
-    )
-    components = row.get("rank_score_components")
-    components = dict(components) if isinstance(components, dict) else {}
-    previous_efficiency = _float_field(components, "capital_efficiency")
-    components["capital_efficiency"] = round(previous_efficiency + bonus, 6)
-    base_score = _float_field(row, "rank_score", _float_field(row, "capital_priority_score", _float_field(row, "opportunity_score")))
-    rank_score = round(max(0.0, min(1.0, base_score + bonus)), 6)
-    row["rank_score_components"] = components
-    row["rank_score"] = rank_score
-    row["capital_priority_score"] = rank_score
-    return rank_score
-
-
 def apply_full_market_capital_deployment(
     *,
     generated: List[Tuple[str, Dict[str, Any]]],
@@ -822,7 +808,7 @@ def apply_full_market_capital_deployment(
     """Apply Step5 rank and capital deployment directly to PM memory states."""
     deployment_cfg = _daily_capital_deployment_config(config)
     candidates: List[
-        Tuple[int, int, float, float, float, str, Dict[str, Any], str, float, float, float, float]
+        Tuple[int, int, float, float, float, float, str, Dict[str, Any], str, float, float, float, float, float]
     ] = []
     for ticker, pm_state in generated:
         context = pm_state.get("recommendation_context") if isinstance(pm_state.get("recommendation_context"), dict) else {}
@@ -853,7 +839,6 @@ def apply_full_market_capital_deployment(
             continue
         row["alpha_scale_eligible"] = _alpha_scale_eligible_from_pm_state(pm_state, row)
         row["capital_layer"] = _capital_layer_from_pm_state(pm_state, row)
-        _ensure_final_rank_score_fields(row, config=config)
         if not _capital_rank_eligible(pm_state, row):
             _update_pm_state_with_deployment(
                 pm_state,
@@ -872,11 +857,6 @@ def apply_full_market_capital_deployment(
             score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
         except (TypeError, ValueError):
             score = 0.0
-        try:
-            priority_score = float(row.get("capital_priority_score", score) or score)
-        except (TypeError, ValueError):
-            priority_score = score
-        rank_score = _float_field(row, "rank_score", priority_score)
         target_ticker_margin_ratio = _recommended_margin_ratio(pm_state, portfolio)
         current_ticker_margin_ratio = _portfolio_ticker_margin_ratio(portfolio, str(ticker).upper())
         incremental_margin_ratio, _ = project_margin_transition(
@@ -884,27 +864,33 @@ def apply_full_market_capital_deployment(
             current_ticker_margin=current_ticker_margin_ratio,
             target_ticker_margin=target_ticker_margin_ratio,
         )
-        rank_score = _apply_capital_efficiency_to_rank_row(
-            row,
-            margin_ratio=incremental_margin_ratio,
+        capital_efficiency_bonus = _capital_efficiency_rank_bonus(
+            incremental_margin_ratio,
             min_probe_ratio=deployment_cfg["min_probe_margin_ratio"],
             max_single_ratio=deployment_cfg["max_single_ticker_margin_ratio"],
-            capital_efficiency_rank_enabled=bool(deployment_cfg["capital_efficiency_rank_enabled"]),
-            capital_efficiency_rank_max_bonus=float(deployment_cfg["capital_efficiency_rank_max_bonus"]),
+            enabled=bool(deployment_cfg["capital_efficiency_rank_enabled"]),
+            max_bonus=float(deployment_cfg["capital_efficiency_rank_max_bonus"]),
         )
-        priority_score = rank_score
+        _ensure_final_rank_score_fields(
+            row,
+            config=config,
+            capital_efficiency_bonus=capital_efficiency_bonus,
+        )
+        rank_score = _float_field(row, "rank_score")
         target_position_ratio = _contract_target_position_ratio(pm_state)
         current_ticker_exposure = _portfolio_ticker_exposure(portfolio, str(ticker).upper())
-        tier, sorted_rank_score, _, _ = _capital_rank_sort_tuple(row)
-        if sorted_rank_score > 0:
-            rank_score = sorted_rank_score
+        tier, sorted_rank_score, cold_start_evidence, candidate_quality, capital_efficiency = (
+            _capital_rank_sort_tuple(row)
+        )
+        rank_score = sorted_rank_score
         candidates.append(
             (
                 _capital_layer_sort_priority(row),
                 tier,
                 rank_score,
-                priority_score,
-                score,
+                cold_start_evidence,
+                candidate_quality,
+                capital_efficiency,
                 str(ticker).upper(),
                 pm_state,
                 side,
@@ -912,6 +898,7 @@ def apply_full_market_capital_deployment(
                 incremental_margin_ratio,
                 target_position_ratio,
                 current_ticker_exposure,
+                score,
             )
         )
 
@@ -922,7 +909,8 @@ def apply_full_market_capital_deployment(
             -item[2],
             -item[3],
             -item[4],
-            item[5],
+            -item[5],
+            item[6],
         )
     )
     used_margin_ratio = _portfolio_margin_ratio(portfolio)
@@ -937,8 +925,9 @@ def apply_full_market_capital_deployment(
         _,
         _,
         rank_score,
-        priority_score,
-        score,
+        _,
+        _,
+        _,
         _,
         pm_state,
         side,
@@ -946,7 +935,9 @@ def apply_full_market_capital_deployment(
         incremental_margin_ratio,
         target_position_ratio,
         current_ticker_exposure,
+        score,
     ) in enumerate(candidates, start=1):
+        priority_score = rank_score
         _set_daily_opportunity_rank(pm_state, side, rank)
         current_lots = _contract_current_lots(pm_state)
         target_lots = _contract_target_lots(pm_state)

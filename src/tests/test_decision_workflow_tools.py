@@ -24,6 +24,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     RANK_CAPITAL_ROLE_ALPHA_SCALE,
     RANK_CAPITAL_ROLE_EXPLORATION,
     RANK_CAPITAL_ROLE_REAL_BUDGET,
+    _capital_rank_sort_tuple,
     _clear_non_full_market_rank_fields,
     _ensure_final_rank_score_fields,
     apply_full_market_capital_deployment,
@@ -515,11 +516,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
+                    "canonical_action_value": True,
                     "consumer_scope": "pm_learning",
                     "side": "long",
                     "action_name": "add_or_open",
                     "canonical_action_family": "open_add_new_risk",
                     "action_value_lane": "open",
+                    "learning_lane": "open",
                     "action_preference": "positive_candidate_open",
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
@@ -542,11 +545,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             alpha_setup_profiles=[],
             alpha_setup_action_values=[
                 {
+                    "canonical_action_value": True,
                     "consumer_scope": "pm_learning",
                     "side": "long",
                     "action_name": "add_or_open",
                     "canonical_action_family": "open_add_new_risk",
                     "action_value_lane": "open",
+                    "learning_lane": "open",
                     "action_preference": "negative_revalidate",
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
@@ -556,11 +561,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "last_sample_date": "2025-03-04",
                 },
                 {
+                    "canonical_action_value": True,
                     "consumer_scope": "pm_learning",
                     "side": "long",
                     "action_name": "hold",
                     "canonical_action_family": "hold",
                     "action_value_lane": "hold",
+                    "learning_lane": "hold",
                     "action_preference": "positive_candidate_hold",
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
@@ -570,11 +577,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "last_sample_date": "2025-03-04",
                 },
                 {
+                    "canonical_action_value": True,
                     "consumer_scope": "pm_learning",
                     "side": "long",
                     "action_name": "execution",
                     "canonical_action_family": "execution",
                     "action_value_lane": "execution",
+                    "learning_lane": "execution",
                     "action_preference": "positive_candidate_execution",
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
@@ -644,11 +653,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             **common,
             alpha_setup_action_values=[
                 {
+                    "canonical_action_value": True,
                     "consumer_scope": "pm_learning",
                     "side": "long",
                     "action_name": "execution",
                     "canonical_action_family": "execution",
                     "action_value_lane": "execution",
+                    "learning_lane": "execution",
                     "action_preference": "positive_candidate_execution",
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
@@ -656,6 +667,14 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "reward_mean": 9000,
                     "sample_count": 3,
                     "last_sample_date": "2025-03-04",
+                    "payload": {
+                        "product_learning_performance_key": {
+                            "entry_quality_outcome": {
+                                "positive_entry_episode": True,
+                                "support_weight": 0.80,
+                            }
+                        }
+                    },
                 }
             ],
         )
@@ -678,6 +697,259 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             0.0,
         )
         self.assertEqual(execution_rank["rank_score"], base_rank["rank_score"])
+
+    def test_similar_and_weak_prior_action_values_do_not_change_candidate_or_rank_score(self):
+        base_signal = [_signal("technical", Signal.BULLISH, 0.72)]
+        common = {
+            "ticker": "P",
+            "analyst_signals": base_signal,
+            "signal_collection_contract": {"dominant_side": "long"},
+            "market_confirmation": {"confirmation_score": 0.65},
+            "data_quality_summary": {},
+            "adaptive_policy_state": [],
+            "alpha_setup_profiles": [],
+            "decision_date": "2025-03-05",
+            "config": {},
+        }
+        base_scorecard = build_opportunity_scorecard(**common, alpha_setup_action_values=[])
+        prior_scorecard = build_opportunity_scorecard(
+            **common,
+            alpha_setup_action_values=[
+                {
+                    "canonical_action_value": True,
+                    "consumer_scope": "pm_learning",
+                    "retrieval_match_level": "similar",
+                    "side": "long",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 12000.0,
+                    "reward_mean": 12000.0,
+                    "sample_count": 6,
+                },
+                {
+                    "canonical_action_value": True,
+                    "consumer_scope": "pm_learning",
+                    "side": "long",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "action_preference": "negative_revalidate",
+                    "reward_source": "counterfactual",
+                    "evidence_scope": "counterfactual_prior",
+                    "reward_sum": -12000.0,
+                    "reward_mean": -12000.0,
+                    "sample_count": 6,
+                },
+            ],
+        )
+
+        base_row = base_scorecard["long"]
+        prior_row = prior_scorecard["long"]
+        self.assertEqual(prior_row["opportunity_score"], base_row["opportunity_score"])
+        self.assertEqual(prior_row["candidate_quality"], base_row["candidate_quality"])
+        self.assertEqual(
+            _ensure_final_rank_score_fields(dict(prior_row), config={})["rank_score"],
+            _ensure_final_rank_score_fields(dict(base_row), config={})["rank_score"],
+        )
+        self.assertEqual(prior_row["action_value_learning_summary"]["positive_count"], 0)
+        self.assertEqual(prior_row["action_value_learning_summary"]["negative_count"], 0)
+
+    def test_missing_consumer_scope_never_enters_candidate_quality_or_rank(self):
+        common = {
+            "ticker": "P",
+            "analyst_signals": [_signal("technical", Signal.BULLISH, 0.72)],
+            "signal_collection_contract": {"dominant_side": "long"},
+            "market_confirmation": {"confirmation_score": 0.65},
+            "data_quality_summary": {},
+            "adaptive_policy_state": [],
+            "alpha_setup_profiles": [],
+            "decision_date": "2025-03-05",
+            "config": {},
+        }
+        base = build_opportunity_scorecard(**common, alpha_setup_action_values=[])
+        missing_scope = build_opportunity_scorecard(
+            **common,
+            alpha_setup_action_values=[
+                {
+                    "canonical_action_value": True,
+                    "side": "long",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "real_trade",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 9000.0,
+                    "reward_mean": 9000.0,
+                }
+            ],
+        )
+
+        self.assertEqual(missing_scope["long"]["candidate_quality"], base["long"]["candidate_quality"])
+        self.assertEqual(
+            _ensure_final_rank_score_fields(dict(missing_scope["long"]), config={})["rank_score"],
+            _ensure_final_rank_score_fields(dict(base["long"]), config={})["rank_score"],
+        )
+
+    def test_signed_negative_rank_keeps_probe_eligible_after_single_efficiency_component(self):
+        pm_state = _pm_state("BU", 0, 1, with_scorecard=False)
+        pm_state["opportunity_scorecard"] = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "watch_for_trigger",
+                "opportunity_score": 0.10,
+                "score": 0.10,
+                "candidate_quality": 0.10,
+                "rank_score_input_components": {"cold_start_evidence_quality": 0.10},
+                "opportunity_score_components": {"fusion_score_adjustment": -0.20},
+            },
+        }
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        result = apply_full_market_capital_deployment(
+            generated=[("BU", pm_state)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        row = pm_state["opportunity_scorecard"]["long"]
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertGreater(row["rank_score_components"]["capital_efficiency"], 0.0)
+        self.assertLessEqual(row["rank_score_components"]["capital_efficiency"], 0.02)
+        self.assertEqual(len(row["rank_score_components"]), 7)
+        self.assertLess(sum(row["rank_score_components"].values()), 0.0)
+        self.assertEqual(
+            row["rank_score"],
+            round(sum(row["rank_score_components"].values()), 6),
+        )
+        self.assertLess(row["rank_score"], 0.0)
+        self.assertTrue(pm_state["capital_deployment"]["selected_for_capital_deployment"])
+
+    def test_all_negative_rank_preserves_learning_order_in_budget_sequence(self):
+        stronger = _pm_state("ZN", 0, 1, with_scorecard=False)
+        weaker = _pm_state("AL", 0, 1, with_scorecard=False)
+        for pm_state, ticker, learning_delta in (
+            (stronger, "ZN", -0.02),
+            (weaker, "AL", -0.12),
+        ):
+            pm_state["opportunity_scorecard"] = {
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "final_state": "watch_for_trigger",
+                    "opportunity_score": 0.10,
+                    "score": 0.10,
+                    "candidate_quality": 0.10,
+                    "rank_score_input_components": {"cold_start_evidence_quality": 0.10},
+                    "action_value_learning_summary": {
+                        "positive_learning_signal": 0.0,
+                        "negative_learning_signal": abs(learning_delta),
+                    },
+                    "opportunity_score_components": {"fusion_score_adjustment": -0.20},
+                },
+            }
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        apply_full_market_capital_deployment(
+            generated=[("AL", weaker), ("ZN", stronger)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        stronger_row = stronger["opportunity_scorecard"]["long"]
+        weaker_row = weaker["opportunity_scorecard"]["long"]
+        self.assertLess(stronger_row["rank_score"], 0.0)
+        self.assertLess(weaker_row["rank_score"], 0.0)
+        self.assertGreater(stronger_row["rank_score"], weaker_row["rank_score"])
+        self.assertEqual(stronger["capital_deployment"]["rank_budget_sequence"], 1)
+        self.assertEqual(weaker["capital_deployment"]["rank_budget_sequence"], 2)
+
+    def test_full_market_rank_tie_uses_candidate_quality_before_ticker(self):
+        low = _pm_state("AL", 0, 1, with_scorecard=False)
+        high = _pm_state("ZN", 0, 1, with_scorecard=False)
+        for pm_state, ticker, quality in ((low, "AL", 0.20), (high, "ZN", 0.80)):
+            pm_state["opportunity_scorecard"] = {
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "final_state": "watch_for_trigger",
+                    "opportunity_score": 0.40,
+                    "score": 0.40,
+                    "candidate_quality": quality,
+                    "rank_score_input_components": {"cold_start_evidence_quality": 0.40},
+                    "opportunity_score_components": {},
+                },
+            }
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        apply_full_market_capital_deployment(
+            generated=[("AL", low), ("ZN", high)],
+            config={
+                "max_total_margin_ratio": 0.008,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        self.assertEqual(high["capital_deployment"]["opportunity_rank"], 1)
+        self.assertTrue(high["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(low["capital_deployment"]["opportunity_rank"], 2)
+        self.assertFalse(low["capital_deployment"]["selected_for_capital_deployment"])
+
+    def test_capital_rank_sort_tuple_uses_registered_tie_break_fields(self):
+        row = {
+            "capital_priority_tier": 2,
+            "rank_score": 0.50,
+            "rank_score_input_components": {"cold_start_evidence_quality": 0.40},
+            "candidate_quality": 0.70,
+            "rank_score_components": {"capital_efficiency": 0.01},
+        }
+
+        self.assertEqual(
+            _capital_rank_sort_tuple(row),
+            (2, 0.50, 0.40, 0.70, 0.01),
+        )
 
     def test_rank_policy_catalog_has_no_inactive_execution_or_stale_window_keys(self):
         policy_path = SRC_ROOT / "config" / "rank_score_policy.yaml"
@@ -717,11 +989,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         base_signal = [_signal("technical", Signal.BULLISH, 0.72)]
         action_values = [
             {
+                "canonical_action_value": True,
                 "consumer_scope": "pm_learning",
                 "side": "long",
                 "action_name": "add_or_open",
                 "canonical_action_family": "open_add_new_risk",
                 "action_value_lane": "open",
+                "learning_lane": "open",
                 "action_preference": "positive_candidate_open",
                 "reward_source": "trade_episode",
                 "evidence_scope": "exact_real_state",

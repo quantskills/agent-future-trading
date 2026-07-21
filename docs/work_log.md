@@ -32,3 +32,9 @@
 （1）[Phase2资金顺序与动态保证金硬线] `trader.py` 在策略批次中先稳定处理不增加风险的减仓/退出，再按已审 FAC 的`rank_budget_sequence`调度新增风险，并让汇总服从最终执行事实；`trader_futures_execution.py` 在实际执行价和最终动态保证金率确定后、交易形成前复核账户总保证金硬线，超线使用既有`margin_insufficient`整单不成交；相关测试覆盖wait/hold、open/scale、reduce/exit、条件等待、forced-risk平仓边界、低于/等于/超过硬线、真实保证金释放、靠前阻断后继续和执行汇总。原因：保持PM已签资金优先级，并补齐计划保证金与实际动态保证金偏离后的最终账户硬风控。
 
 （2）[评估持仓血缘与区间边界] `futures_trade_pairs.py` 新增只供评估链使用的策略起源持仓配对，保留 rollover/forced-risk 的真实执行来源并在完整换月后传递原策略开仓血缘；`evaluation.py`、`analyze_strategy_attribution.py` 统一使用该配对口径，并让指定区间先重放截至结束日的成交历史、再按平仓日统计；相关评估测试覆盖运营平仓、完整换月传递、期初继承持仓和区间结束边界。原因：修复策略持仓被运营动作平仓后从胜率、质量指标和策略归因中漏算，以及子窗口无法识别期初持仓的问题。
+
+（3）[PM学习排名资金闭环] `portfolio_manager.py` 在精确检索及弱先验诊断完成后重建同一个Step4机会评分对象并保留Step2方向，显式非canonical及similar/weak prior记录不再进入正式学习；`pm_signal_fusion.py` 只消费完整canonical PM学习并将execution/profile严格隔离在执行画像；`pm_full_market_capital_deployment.py` 将资金效率纳入七项rank分量后统一截断，并按资金层、候选层、rank、当日证据、学习后候选质量、资金效率和ticker顺序消费预算。原因：修复后置精确action-value未进入scorecard、弱先验混入正式score/rank、执行学习借trigger分量污染rank、负原始分被二次加分抬正及同分候选退化为ticker排序的问题。
+
+==========2026年07月21日==========
+
+（1）[PM学习生命周期与有符号rank闭环] `portfolio_manager.py` 在首次正式学习消费前组装并冻结显式`pm_learning`的完整canonical Step4池，隔离similar/weak/incomplete prior且禁止后置追加；`pm_signal_fusion.py` 仅让open/add/scale/increase学习进入新增风险候选质量和rank；`pm_full_market_capital_deployment.py` 将七项分量一次求和并保留有符号rank；`pm_contract_builder.py`、`final_action_semantics.py`、`pm_contract_self_check.py` 按最终手数生命周期先路由完整池，再严格分离正式决策行与execution/profile行。原因：让学习真实影响新增风险投资价值与预算顺序，同时保证条件开仓继续等待盘中触发、非新增风险动作无伪rank，并保持既有资金层、probe预算和20%硬门控不变。

@@ -375,8 +375,11 @@ class PMAtomicContractFlowTests(unittest.TestCase):
 
         self.assertLess(step2_index, step3_index)
         self.assertGreater(main_chain.index("apply_config_learning_overlay("), step3_index)
-        for learning_call in ("retrieve_pm_memory(", "_retrieve_lifecycle_pm_memory("):
-            self.assertGreater(main_chain.index(learning_call), step3_index)
+        self.assertGreater(main_chain.index("retrieve_pm_memory("), step3_index)
+        self.assertNotIn("_retrieve_lifecycle_pm_memory(", main_chain)
+        self.assertIn("_audit_frozen_step4_pm_memory(", main_chain)
+        freeze_index = main_chain.index('"formal_pool_frozen_after_scorecard"')
+        self.assertNotIn("_append_unique_action_values(", main_chain[freeze_index:])
         self.assertNotIn("calibrate_weights_by_signal_history(", main_chain)
 
         side_selection_call = main_chain[step2_index:step3_index]

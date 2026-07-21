@@ -30,12 +30,15 @@
 ```text
 rank_score =
   冷启动证据质量分
++ 资金层级资格分
 + 生命周期 open/add action-value 学习修正分
 + 产品/setup/trigger 历史收益修正分
-+ trigger/execution 质量修正分
++ 当前 trigger 质量修正分
 + 资金效率小修正
 - 冲突/风险/失效边界惩罚
 ```
+
+上述七项只求和一次，不做 `[0,1]` 截断。`rank_score` 可以为负；负分不禁止交易或 probe，只保留候选之间的真实投资价值大小关系。
 
 当前代码映射：
 
@@ -45,7 +48,7 @@ rank_score =
 | 资金层级资格 | `capital_layer_priority` | tradeable_candidate 高于 probe，高于 watch |
 | open/add 学习 | `open_add_action_value_delta` | 正向学习提高 rank，负向/tail/entry loss 降低 rank |
 | 产品/setup/trigger 历史表现 | `product_setup_trigger_history` | alpha profile 对同类机会的加减分 |
-| trigger/execution 质量 | `trigger_execution_quality` | execution 学习只修正触发质量，不直接生成开仓权限 |
+| 当前 trigger 质量 | `trigger_execution_quality` | 只使用新增风险候选自身的当前触发质量；execution/profile 学习不进入该分项 |
 | 资金效率 | `capital_efficiency` | 预留小权重，40 日样本后再评估是否启用 |
 | 冲突/风险/失效边界 | `conflict_risk_invalidation_penalty` | 冲突、数据缺口、风险和失效边界不足的扣分 |
 
@@ -54,7 +57,7 @@ rank_score =
 资金部署规则：
 
 - 从空仓建立非零仓位，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale` 进入 1-N 排名；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控没有 rank。
-- 按 `rank_score` 从高到低排出 1-N。
+- 固定按 `capital_layer -> capital_priority_tier -> rank_score -> cold_start_evidence_quality -> candidate_quality -> capital_efficiency -> ticker` 排出 1-N。
 - `rank=1` 只表示最值得占用资金，不自动升仓。
 - `watch_for_trigger / exploration_probe` 仍使用原 0.008 小探针资金层。
 - `tradeable_candidate` 才能进入 normal 真实资金层。

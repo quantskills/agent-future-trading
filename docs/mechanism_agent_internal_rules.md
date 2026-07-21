@@ -402,8 +402,8 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据，并写入同一个 PM 内存状态 | 在 PM 内调用证据包 builder；读取上游内部草稿；生成任何独立输出 |
 | 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 无真实冲突时只把 SCC 唯一 long/short 主方向写成优先级1并同步 `preferred_side`；flat/mixed/conflicted 时保持 flat | 读取学习或机会分重选方向；比较持仓、生成生命周期、rank、手数和交易权限 |
 | 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
-| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 按 canonical family/lane 消费学习，把完整候选学习池、临时路由和拒绝原因留在同一个 PM 内存状态 | 把 Step4 临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限；把原始研究对象写入 artifact |
-| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓，把唯一全市场 rank、预算和 sizing 事实写回同一个 PM 内存状态 | 让非新增风险合约进入 rank，或让实际增加风险的 `add/scale` 绕过 rank；生成独立 rank/budget/sizing artifact；把 Step3/4 候选字段当最终 rank trace |
+| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 在首次正式学习消费前取得完整 canonical PM 学习池，保留 Step2 方向，随后冻结该池并把拒绝原因留在同一个 PM 内存状态 | Step4 后追加正式学习；把 similar/weak/incomplete prior 当正式记录；把临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限 |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓；七项有符号总和不截断，并按固定排序生成预算顺序 | 让非新增风险合约进入 rank；以负分或零分禁止 probe；让 `add/scale` 绕过 rank；生成第二排名分数或独立 artifact |
 | 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、`FuturesRecommendation` 返回入口 | 从最终 PM 内存状态原子生成唯一 `final_action_contract` 与唯一 `FuturesRecommendation`，按最终动作和手数重新形成学习事实，并检查最终输出自身 | 分散写多个交易合约；读取 Step1–5 早期状态做回溯比较；返回半成品；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
@@ -480,7 +480,7 @@ watch_for_trigger 候选被压成受控观察/条件触发候选。
 
 它不能同时表示“候选”和“阻断”。若要阻断，必须由明确硬原因或缺失条件负责，例如无 setup、无失效边界、负向学习、保证金硬风险。
 
-PM 的自由文本说明不具有候选否决权。合法 canonical watch 必须先参加既有资金优先级竞争；只有实际获选并形成非零目标手数时，唯一 FAC 才写入 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`。Step5 仍使用既有新增风险 rank；Step6 最终执行生命周期解释为 `conditional_monitor`，二者不是第二套 rank 或第二张合约。
+PM 的自由文本说明不具有候选否决权。合法 canonical watch 必须先参加既有资金优先级竞争；只有实际获选并形成非零目标手数时，唯一 FAC 才写入 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`。Step5 仍使用既有新增风险 rank；Step6 对该 `0 -> 非0` 合约使用 `open_add_new_risk` 决策学习，同时 Trader 继续等待盘中触发。只有 `target_lots=current_lots` 且仅保留监控时才使用 `conditional_monitor`。
 
 完整且当前已触发的单分析师候选也不得在 Step5 前清零。它保留真实单来源共识、证据强度和冲突，以较低原生分进入同一 rank；另外两名分析师的 `no_opportunity` 不是支持票，也不是否决票。最终是否获得预算、手数和 FAC 仍完全由既有 rank、预算、sizing 与 Auditor 决定。
 

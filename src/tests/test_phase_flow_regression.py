@@ -60,9 +60,10 @@ from agents.decision_team.portfolio_manager import (
     _build_final_action_contract,
     _build_release_block_diagnostics,
     _canonical_action_evidence_contract,
-    _retrieve_lifecycle_pm_memory,
+    _audit_frozen_step4_pm_memory,
     _validate_required_analyst_signals,
     _current_open_evidence_snapshot,
+    _ExplicitPMLearningScopeDBView,
     _scorecard_probe_seed,
     _side_opportunity_state_summary,
     _append_unique_action_values,
@@ -2613,6 +2614,8 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "market_regime": "trend",
             "setup_type": "trend_breakout_setup",
             "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "learning_lane": "open",
             "sample_count": 3,
             "reward_sum": -3600.0,
             "reward_mean": -1200.0,
@@ -2631,8 +2634,42 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(normalized["reward_source"], "trade_episode")
         self.assertEqual(normalized["evidence_scope"], "exact_real_state")
         self.assertEqual(normalized["action_value_lane"], "open")
-        self.assertEqual(normalized["consumer_scope"], "pm_learning")
-        self.assertTrue(normalized["canonical_action_value"])
+        self.assertNotIn("consumer_scope", normalized)
+        self.assertFalse(normalized["canonical_action_value"])
+
+        scoped_payload = {
+            **payload_only,
+            "consumer_scope": "pm_learning",
+        }
+        normalized_scoped = _normalize_alpha_setup_action_value(scoped_payload)
+        self.assertEqual(normalized_scoped["consumer_scope"], "pm_learning")
+        self.assertTrue(normalized_scoped["canonical_action_value"])
+
+        explicitly_noncanonical = {
+            **payload_only,
+            "canonical_action_value": False,
+            "canonical_action_family": "open_add_new_risk",
+            "learning_lane": "open",
+        }
+        normalized_noncanonical = _normalize_alpha_setup_action_value(explicitly_noncanonical)
+        self.assertFalse(normalized_noncanonical["canonical_action_value"])
+        self.assertEqual(
+            normalized_noncanonical["canonical_action_value_source"],
+            "incomplete_trace_not_for_pm_scoring",
+        )
+
+    def test_pm_memory_scope_view_rejects_missing_consumer_scope_before_retrieval_normalization(self):
+        class FakeDB:
+            def get_alpha_setup_action_values(self, **kwargs):
+                return [
+                    {"id": "missing-scope"},
+                    {"id": "explicit-pm", "consumer_scope": "pm_learning"},
+                    {"id": "trader", "consumer_scope": "trader_execution_learning"},
+                ]
+
+        rows = _ExplicitPMLearningScopeDBView(FakeDB()).get_alpha_setup_action_values()
+
+        self.assertEqual([row["id"] for row in rows], ["explicit-pm"])
 
     def test_pm_action_value_merge_preserves_canonical_researcher_record(self):
         canonical = {
@@ -2932,7 +2969,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertIn("same_ticker_side_horizon", detail["matched_levels"])
         self.assertGreaterEqual(len(attempts), 2)
 
-    def test_pm_lifecycle_memory_filters_to_final_hold_side_and_lane(self):
+    def test_pm_lifecycle_audit_preserves_frozen_step4_pool_without_late_append(self):
         class FakeDB:
             def get_alpha_setup_action_values(self, **kwargs):
                 return [
@@ -2989,6 +3026,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
                 ]
 
         existing_rows = [
+            FakeDB().get_alpha_setup_action_values()[0],
             {
                 "id": "c-old-long-open",
                 "ticker": "C",
@@ -3036,23 +3074,21 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "final_action": "hold",
         }
 
-        rows, audit = _retrieve_lifecycle_pm_memory(
-            db=FakeDB(),
-            config_id="cfg",
-            ticker="C",
-            trading_date="2025-03-14",
+        rows, audit = _audit_frozen_step4_pm_memory(
             contract=contract,
-            analyst_signals=[],
-            signal_combo=[],
-            fusion_context={},
             alpha_setup_action_values=existing_rows,
         )
 
-        self.assertEqual([row["id"] for row in rows], ["c-short-hold"])
+        self.assertEqual(
+            [row["id"] for row in rows],
+            ["c-short-hold", "c-old-long-open", "c-old-execution"],
+        )
+        self.assertFalse(audit["late_retrieval_performed"])
+        self.assertEqual(audit["late_action_value_append_count"], 0)
+        self.assertEqual(audit["lifecycle_matching_row_count"], 1)
         rejected_ids = {row["id"] for row in audit["rejected_action_values"]}
         self.assertIn("c-old-long-open", rejected_ids)
         self.assertIn("c-old-execution", rejected_ids)
-        self.assertIn("c-long-open", rejected_ids)
 
     def test_pm_action_value_retrieval_real_history_not_blocked_by_empty_lane(self):
         class FakeDB:
@@ -3268,6 +3304,19 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             decision_date="2025-03-15",
             config=self._scorecard_config(),
         )
+        explicitly_noncanonical = {
+            **canonical_tail_loss,
+            "canonical_action_value": False,
+        }
+        noncanonical_scorecard = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[explicitly_noncanonical],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )
 
         self.assertEqual(
             compressed_scorecard["short"]["opportunity_score_components"]["negative_learning"],
@@ -3280,6 +3329,10 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertLess(
             canonical_scorecard["short"]["opportunity_score"],
             compressed_scorecard["short"]["opportunity_score"],
+        )
+        self.assertEqual(
+            noncanonical_scorecard["short"]["opportunity_score_components"]["negative_learning"],
+            0.0,
         )
 
     def test_execution_profile_learning_is_a_score_component_not_trader_authority(self):
@@ -3376,6 +3429,58 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
 
         def get_futures_transaction_memory(self, *args, **kwargs):
             return []
+
+        def get_alpha_setup_action_values(self, **kwargs):
+            if str(kwargs.get("setup_type") or "") != "watch_for_trigger":
+                return []
+            return [
+                {
+                    "id": "bu-short-exact-open",
+                    "ticker": "BU",
+                    "side": "short",
+                    "horizon_class": kwargs.get("horizon_class") or "short",
+                    "market_regime": kwargs.get("market_regime") or "trend",
+                    "setup_type": "watch_for_trigger",
+                    "action_name": "open",
+                    "canonical_action_value": True,
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "consumer_scope": "pm_learning",
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 5200.0,
+                    "reward_mean": 5200.0,
+                    "sample_count": 3,
+                    "last_sample_date": "2025-02-28",
+                }
+            ]
+
+        def get_similar_alpha_setup_action_values(self, **kwargs):
+            return [
+                {
+                    "id": "bu-short-similar-negative",
+                    "ticker": "BU",
+                    "side": "short",
+                    "horizon_class": kwargs.get("horizon_class") or "short",
+                    "market_regime": kwargs.get("market_regime") or "trend",
+                    "setup_type": "similar_breakdown_setup",
+                    "action_name": "open",
+                    "canonical_action_value": True,
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "consumer_scope": "pm_learning",
+                    "action_preference": "negative_revalidate",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": -15000.0,
+                    "reward_mean": -15000.0,
+                    "sample_count": 6,
+                    "last_sample_date": "2025-02-28",
+                }
+            ]
 
     def test_canonical_watch_survives_pm_prose_and_reaches_nonzero_conditional_fac(self):
         portfolio = Portfolio(
@@ -3506,10 +3611,31 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
         )
         fac = signed[0][1].signal_snapshot["final_action_contract"]
 
+        scorecard = pm_result["pm_state"]["opportunity_scorecard"]
+        short_row = scorecard["short"]
+        self.assertEqual(scorecard["preferred_side"], "short")
+        self.assertEqual(short_row["side_priority"], 1)
+        self.assertGreater(short_row["action_value_learning_summary"]["positive_count"], 0)
+        self.assertEqual(short_row["action_value_learning_summary"]["negative_count"], 0)
+        self.assertGreater(short_row["rank_score_components"]["open_add_action_value_delta"], 0.0)
+
         self.assertLess(fac["target_lots"], 0, fac)
         self.assertTrue(fac["conditional_trigger_authority"])
         self.assertTrue(fac["requires_intraday_confirmation"])
         self.assertFalse(fac["can_execute_without_intraday_trigger"])
+        self.assertNotIn(
+            "bu-short-similar-negative",
+            {row.get("id") for row in fac["learning_used"]["alpha_setup_action_values"]},
+        )
+        self.assertIn(
+            "bu-short-similar-negative",
+            {
+                row.get("id")
+                for row in fac["learning_used"]["memory_retrieval"].get(
+                    "rejected_or_downgraded", []
+                )
+            },
+        )
 
         from agents.decision_team.auditor import audit_futures_recommendation
         from tools.common.signal_evidence_collection import build_scc_data_quality_summary
@@ -6232,7 +6358,72 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
         self.assertTrue(contract["single_source_of_trade_truth"])
 
-    def test_final_action_contract_separates_conditional_monitor_from_scorecard_probe_seed(self):
+    def test_final_contract_strictly_separates_decision_and_execution_learning_rows(self):
+        common = {
+            "ticker": "RB",
+            "side": "long",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+            "reward_source": "real_trade",
+            "evidence_scope": "exact_real_state",
+            "reward_mean": 800.0,
+            "reward_sum": 800.0,
+        }
+        contract = _build_final_action_contract(
+            ticker="RB",
+            current_lots=0,
+            target_lots=2,
+            position_ratio=0.01,
+            margin_required=12000.0,
+            account_equity=5000000.0,
+            lots_to_trade=2,
+            lots_to_trade_reason="tradable",
+            recommendation_intent={"action": "open_long", "lots": 2, "action_type": "open"},
+            final_entry_authority={"authority_type": "real_budget_entry"},
+            control_reasons=[],
+            control_diagnostics={},
+            opportunity_scorecard={"preferred_side": "long", "long": {"final_state": "tradeable_candidate"}},
+            market_confirmation={"confirmation_score": 0.70},
+            alpha_setup_action_values=[
+                {
+                    **common,
+                    "id": "rb-open",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                },
+                {
+                    **common,
+                    "id": "rb-execution",
+                    "action_name": "execution",
+                    "canonical_action_family": "execution",
+                    "action_value_lane": "execution",
+                    "learning_lane": "execution",
+                    "action_preference": "positive_candidate_execution",
+                },
+            ],
+        )
+
+        learning_used = contract["learning_used"]
+        trace = learning_used["pm_lifecycle_learning_trace"]
+        self.assertEqual(
+            [row["id"] for row in learning_used["alpha_setup_action_values"]],
+            ["rb-open"],
+        )
+        self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["rb-open"])
+        self.assertEqual(
+            [row["id"] for row in trace["trigger_profile_learning_rows"]],
+            ["rb-execution"],
+        )
+        self.assertTrue(
+            trace["pm_lifecycle_learning_router"][
+                "complete_step4_pool_routed_before_formal_selection"
+            ]
+        )
+
+    def test_conditional_zero_to_nonzero_open_uses_open_learning_and_keeps_trigger_wait(self):
         contract = _build_final_action_contract(
             ticker="HC",
             current_lots=0,
@@ -6285,15 +6476,39 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 },
             },
             market_confirmation={"confirmation_score": 0.52, "conflicts": []},
-            alpha_setup_action_values=[],
+            alpha_setup_action_values=[
+                {
+                    "id": "hc-short-open",
+                    "ticker": "HC",
+                    "side": "short",
+                    "action_name": "open",
+                    "canonical_action_value": True,
+                    "canonical_action_family": "open_add_new_risk",
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": "open",
+                    "action_value_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                    "canonical_action_value_source": "canonical_action_value",
+                    "reward_mean": 335.46,
+                    "reward_sum": 335.46,
+                    "reward_source": "real_trade",
+                    "evidence_scope": "exact_real_state",
+                }
+            ],
         )
 
         self.assertEqual(contract["final_action"], "open_probe")
         self.assertNotIn("action_candidates", contract)
         self.assertEqual(
             contract["learning_used"]["pm_lifecycle_learning_trace"]["contract_lifecycle_port"],
-            "conditional_monitor",
+            "open_add_new_risk",
         )
+        self.assertEqual(
+            [row["id"] for row in contract["learning_used"]["alpha_setup_action_values"]],
+            ["hc-short-open"],
+        )
+        self.assertTrue(contract["requires_intraday_confirmation"])
+        self.assertFalse(contract["can_execute_without_intraday_trigger"])
         self.assertEqual(
             contract["learning_used"]["pm_lifecycle_learning_impact_delta"]["conditional_monitor_decision"],
             "allow_conditional_monitor_probe",
@@ -8503,7 +8718,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(detail["decision"], "protective_reduce_no_continuation")
         self.assertTrue(detail["prevents_position_matched_profit_giveback"])
 
-    def test_lifecycle_memory_retrieval_does_not_land_open_for_exit(self):
+    def test_frozen_step4_pool_does_not_retrieve_or_append_for_exit(self):
         open_row = {
             "scope_key": "RB|long|open",
             "ticker": "RB",
@@ -8516,6 +8731,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "canonical_action_family": "open_add_new_risk",
             "action_value_lane": "open",
             "learning_lane": "open",
+            "consumer_scope": "pm_learning",
             "memory_side_role": "target_side",
             "action_preference": "positive_candidate_open",
             "reward_source": "real_trade",
@@ -8529,27 +8745,17 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "lots_delta": -2,
             "final_action": "exit",
         }
-        with patch(
-            "agents.decision_team.portfolio_manager.retrieve_pm_memory",
-            return_value={"action_values": [open_row]},
-        ):
-            rows, audit = _retrieve_lifecycle_pm_memory(
-                db=object(),
-                config_id="cfg",
-                ticker="RB",
-                trading_date="2025-03-04",
-                contract=contract,
-                analyst_signals=[],
-                signal_combo=[],
-                fusion_context={},
-                alpha_setup_action_values=[],
-            )
+        rows, audit = _audit_frozen_step4_pm_memory(
+            contract=contract,
+            alpha_setup_action_values=[open_row],
+        )
 
-        self.assertEqual(rows, [])
-        self.assertTrue(audit["requirement_details"])
-        self.assertTrue(all(detail["row_count"] == 0 for detail in audit["requirement_details"]))
+        self.assertEqual([row["scope_key"] for row in rows], ["RB|long|open"])
+        self.assertEqual(audit["lifecycle_matching_row_count"], 0)
+        self.assertFalse(audit["late_retrieval_performed"])
+        self.assertEqual(audit["late_action_value_append_count"], 0)
 
-    def test_lifecycle_memory_retrieval_allows_open_for_add(self):
+    def test_frozen_step4_pool_routes_open_and_hold_for_add_without_append(self):
         open_row = {
             "scope_key": "RB|long|open",
             "ticker": "RB",
@@ -8559,6 +8765,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "canonical_action_family": "open_add_new_risk",
             "action_value_lane": "open",
             "learning_lane": "open",
+            "consumer_scope": "pm_learning",
             "memory_side_role": "target_side",
             "action_preference": "positive_candidate_open",
             "reward_source": "real_trade",
@@ -8574,6 +8781,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "canonical_action_family": "hold",
             "action_value_lane": "hold",
             "learning_lane": "hold",
+            "consumer_scope": "pm_learning",
             "memory_side_role": "current_position_side",
             "action_preference": "positive_candidate_hold",
             "reward_source": "real_trade",
@@ -8587,32 +8795,16 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "lots_delta": 2,
             "final_action": "add",
         }
-        with patch(
-            "agents.decision_team.portfolio_manager.retrieve_pm_memory",
-            return_value={"action_values": [open_row, hold_row]},
-        ):
-            rows, audit = _retrieve_lifecycle_pm_memory(
-                db=object(),
-                config_id="cfg",
-                ticker="RB",
-                trading_date="2025-03-04",
-                contract=contract,
-                analyst_signals=[],
-                signal_combo=[],
-                fusion_context={},
-                alpha_setup_action_values=[],
-            )
+        rows, audit = _audit_frozen_step4_pm_memory(
+            contract=contract,
+            alpha_setup_action_values=[open_row, hold_row],
+        )
 
         landed_lanes = {row.get("learning_lane") for row in rows}
-        counts = {
-            (detail["lane"], detail["memory_side_role"]): detail["row_count"]
-            for detail in audit["requirement_details"]
-        }
         self.assertIn("open", landed_lanes)
         self.assertIn("hold", landed_lanes)
-        self.assertEqual(counts.get(("add", "target_side")), 1)
-        self.assertEqual(counts.get(("open", "target_side")), 1)
-        self.assertEqual(counts.get(("hold", "current_position_side")), 1)
+        self.assertEqual(audit["lifecycle_matching_row_count"], 2)
+        self.assertFalse(audit["late_retrieval_performed"])
 
     def test_profit_protective_reduce_is_not_overridden_by_min_hold_lifecycle(self):
         current_position = SimpleNamespace(

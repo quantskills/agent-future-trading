@@ -802,7 +802,7 @@ action-value 语义完整性复用现有共享校验：
 1. 当前产品、方向、期限、市场状态和 setup 完全匹配的 `exact_state`。
 2. 当前产品、方向和期限匹配的 `same_ticker_side_horizon`。
 3. 当前产品和方向匹配的 `same_ticker_side`。
-4. 相似 setup 和同板块检索结果保留 `retrieval_match_level` 与来源范围，继续接受 canonical 完整性和语义校验；其中完整 canonical 记录可以进入 Step4 候选学习池，弱先验和不完整 prior 只进入诊断材料。
+4. 相似 setup 和同板块检索结果保留 `retrieval_match_level` 与来源范围，但只作为诊断材料；similar、weak 和 incomplete prior 均不得进入 Step4 正式候选学习池。
 
 真实完整历史优先于空壳历史。缺少 canonical 语义、奖励事实和动作偏好的空壳记录不得占用有效历史名额，也不得压住真实完整样本。
 
@@ -831,7 +831,9 @@ action-value 语义完整性复用现有共享校验：
 - 产品和方向符合本次检索范围；当前生命周期只用于第 4 步临时候选质量路由，不作为完整 canonical 候选学习池的准入条件。
 - 不是 empty shell、incomplete prior、weak prior 和纯诊断记录。
 
-Step4 在此只形成完整 canonical action-value 候选学习池，不直接形成最终 `learning_used.alpha_setup_action_values`。
+缺失 `consumer_scope` 不得由 PM 默认补成 `pm_learning`。缺失 `canonical_action_value` 时，只有上述字段完整且共享语义校验通过的现有正式记录才可推导为 `true`；显式 `canonical_action_value=false` 永不提升。
+
+Step4 必须在首次消费正式 action-value 前完成本次决策所需的完整 canonical 候选学习池，并覆盖新增风险、持仓、减仓/退出、条件监控和 execution/profile lane。随后唯一 scorecard、候选控制和 Step5 都读取该池；Step4 完成后不得再检索或追加正式 action-value。Step4 不直接形成最终 `learning_used.alpha_setup_action_values`，也不新增冻结 ID 字段或第二套候选对象。
 
 `final_action_contract.learning_used.alpha_setup_action_values` 是 PM 最终正式 canonical action-value 主证据列表。第 6 步必须按最终 `final_action`、最终持仓变化和最终生命周期重新路由 Step4 候选学习池；只有最终路由实际接收的完整 canonical 记录，才允许进入该正式列表。禁止直接复制第 4 步初始生命周期路由结果。
 
@@ -1035,20 +1037,17 @@ position sizing 结果沿用现有确定性工具：
 
 #### 5.5 排名积分制度
 
-排名使用唯一 `rank_score`，取值限制在 `[0, 1]`。现行积分结构为：
+排名使用唯一 `rank_score`。它是七项分量的有符号总和，不做 `[0,1]` 截断：
 
 ```text
-rank_score = clamp(
+rank_score =
     当日证据质量积分
   + 候选资金层级积分
   + open/add/scale action-value 积分
   + 产品/setup/trigger 已验证历史积分
   + 当前 trigger 质量积分
   + 资金效率积分
-  - 冲突、风险、失效和缺失证据扣分,
-  0,
-  1
-)
+  - 冲突、风险、失效和缺失证据扣分
 ```
 
 具体积分由 `src/config/rank_score_policy.yaml` 配置，并由 `src/config/dev.yaml` 的 `config_catalogs.rank_score_policy` 载入。当前基线参数如下：
@@ -1097,13 +1096,13 @@ rank_score = clamp(
 
 交易属性必须在进入 rank 前由既有 `final_entry_authority.authority_type` 确定。`exploration_probe` 固定映射到 `capital_layer=exploration_probe`，`real_budget_entry` 固定映射到 `capital_layer=real_budget_entry`；只有既有资金利用控制已经确认高质量学习和 alpha release 时，`real_budget_entry` 才映射到 `alpha_scale_entry`。rank 不生成、修改或升级 `final_entry_authority`。
 
-PM 先按资金层级，再按 `rank_score` 对新增风险候选排序：
+PM 只对实际增加风险的候选排序，固定顺序为 `capital_layer -> capital_priority_tier -> rank_score -> cold_start_evidence_quality -> candidate_quality -> capital_efficiency -> ticker`：
 
 1. `alpha_scale_entry`：当前证据成立，且有重复正向真实经验支持的已验证候选。
 2. `real_budget_entry`：当前证据完整的 `tradeable_candidate`。
 3. `exploration_probe`：尚需以小资金验证的 `probe_candidate` 或合法条件候选。
 
-同层候选依次比较 `rank_score`、当日证据分、学习后候选质量和资金效率。所有比较项完全相同时，使用标准化 `ticker` 作为固定最终排序键，保证长期回测在相同输入下得到相同 rank。
+`rank_score` 可以为负；负分仍保留真实大小关系并正常参加排序、probe 资格和预算流程，不构成交易禁入规则。它只表达相对投资价值和资金优先级，不是未来盈利概率或盈利金额。所有比较项完全相同时，使用标准化 `ticker` 作为固定最终排序键。
 
 每个进入队列的候选只能获得一个连续、唯一的全市场 `opportunity_rank`。产品内部 `side_priority`、`ticker_side_priority` 不能替代全市场 rank。
 
@@ -1361,17 +1360,19 @@ PM 只从最终 `current_lots`、最终 `target_lots` 和最终权限状态调�
 
 #### 6.6 形成最终生命周期
 
-PM 根据最终动作、最终 `current_lots`、最终 `target_lots` 和最终条件权限调用 `classify_lifecycle_action_port`，形成 `pm_lifecycle_learning_trace.contract_lifecycle_port`：
+PM 根据最终动作、最终 `current_lots`、最终 `target_lots` 和最终条件权限使用共享最终学习生命周期语义，形成 `pm_lifecycle_learning_trace.contract_lifecycle_port`：
 
 | 最终合约事实 | `pm_lifecycle_learning_trace.contract_lifecycle_port` |
 |---|---|
-| 新开、加仓、扩大或反向新增风险 | `open_add_new_risk` |
+| `0 -> 非0` 新开，或同方向扩大绝对手数 | `open_add_new_risk` |
 | 减仓或退出 | `reduce_exit` |
 | 只保留触发监控、当前不增加敞口 | `conditional_monitor` |
 | 非零持仓手数不变且不是条件监控 | `hold` |
 | 空仓等待且不是条件监控 | `wait` |
 
 最终生命周期只由最终合约事实决定。第 3 步的 `primary_lifecycle_action_port`、第 4 步临时学习路由和第 5 步约束前风险意图都不进入最终生命周期判定。
+
+条件 `open_probe` 只要最终为 `0 -> 非0`，决策学习生命周期仍是 `open_add_new_risk`；`requires_intraday_confirmation=true` 继续约束 Trader 等待盘中触发，不把该开仓改写成 `conditional_monitor`。`conditional_monitor` 仅用于 `target_lots=current_lots` 且只保留监控的合约。
 
 本步不调用 `build_lifecycle_transition_diagnostic`，不生成初始/最终生命周期对照表，不检查生命周期是否与早期状态保持不变。
 
@@ -1392,7 +1393,7 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 
 只有最终 `decision_learning_rows` 中实际被最终动作消费的完整 canonical 记录，才进入 `learning_used.alpha_setup_action_values`。不得先截取 Step4 列表再路由，不得复制 Step4 临时 `decision_learning_rows`，不得让未匹配最终生命周期的记录进入正式主证据列表。
 
-`trigger_profile_learning_rows` 只进入 `evidence_used.lifecycle_learning_trace`，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、rank、预算和手数。
+`trigger_profile_learning_rows` 只进入 `learning_used.pm_lifecycle_learning_trace` 及执行画像摘要，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、candidate quality、rank、预算和手数。
 
 `learning_used.memory_retrieval.rejected_or_downgraded` 和最终生命周期未接受的完整学习只保留必要 provenance 与拒绝原因，不进入正式决策列表。
 

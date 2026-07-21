@@ -16,6 +16,7 @@ from tools.common.final_action_semantics import (
     lifecycle_learning_decision_contract_errors,
     rank_capital_layer_contract_errors,
     rank_lifecycle_learning_route_errors,
+    validate_action_preference_family_consistency,
 )
 from tools.common.execution_trigger_semantics import (
     CANONICAL_EXECUTION_PROFILES,
@@ -231,6 +232,8 @@ def _alpha_setup_action_value_purity_errors(contract: Mapping[str, Any]) -> List
             continue
         if _row_value(row, "canonical_action_value") is not True:
             errors.append(f"alpha_setup_action_value_not_canonical:{index}")
+        if str(_row_value(row, "consumer_scope") or "").strip().lower() != "pm_learning":
+            errors.append(f"alpha_setup_action_value_consumer_scope_invalid:{index}")
         for field in (
             "canonical_action_family",
             "action_preference",
@@ -239,12 +242,74 @@ def _alpha_setup_action_value_purity_errors(contract: Mapping[str, Any]) -> List
         ):
             if not _present(_row_value(row, field)):
                 errors.append(f"alpha_setup_action_value_missing_{field}:{index}")
+        action_value_lane = str(_row_value(row, "action_value_lane") or "").strip().lower()
+        learning_lane = str(_row_value(row, "learning_lane") or "").strip().lower()
+        if action_value_lane and learning_lane and action_value_lane != learning_lane:
+            errors.append(f"alpha_setup_action_value_lane_mismatch:{index}")
+        semantic_validation = validate_action_preference_family_consistency(row)
+        for semantic_error in semantic_validation.get("errors") or []:
+            errors.append(f"alpha_setup_action_value_semantics:{index}:{semantic_error}")
+        if str(_row_value(row, "canonical_action_family") or "").strip().lower() == "execution":
+            errors.append(f"execution_profile_in_decision_learning:{index}")
         evidence_scope = str(_row_value(row, "evidence_scope") or "").strip().lower()
         canonical_source = str(_row_value(row, "canonical_action_value_source") or "").strip().lower()
         if evidence_scope == "similar_sql_prior" and _row_value(row, "canonical_action_value") is not True:
             errors.append(f"alpha_setup_action_value_incomplete_similar_sql_prior:{index}")
         if canonical_source == "incomplete_trace_not_for_pm_scoring":
             errors.append(f"alpha_setup_action_value_incomplete_trace_not_for_pm_scoring:{index}")
+    return errors
+
+
+def _learning_row_identity(row: Mapping[str, Any]) -> tuple[str, ...]:
+    row_id = str(_row_value(row, "id") or _row_value(row, "action_value_id") or "").strip()
+    if row_id:
+        return ("id", row_id)
+    return (
+        "semantic",
+        str(_row_value(row, "ticker") or ""),
+        str(_row_value(row, "side") or ""),
+        str(_row_value(row, "canonical_action_family") or ""),
+        str(_row_value(row, "learning_lane") or _row_value(row, "lane") or ""),
+        str(_row_value(row, "action_preference") or ""),
+    )
+
+
+def _final_learning_row_alignment_errors(contract: Mapping[str, Any]) -> List[str]:
+    learning_used = _mapping(contract.get("learning_used"))
+    formal_rows = learning_used.get("alpha_setup_action_values")
+    formal_rows = formal_rows if isinstance(formal_rows, list) else []
+    trace = _mapping(learning_used.get("pm_lifecycle_learning_trace"))
+    decision_rows = trace.get("decision_learning_rows")
+    decision_rows = decision_rows if isinstance(decision_rows, list) else []
+    trigger_rows = trace.get("trigger_profile_learning_rows")
+    trigger_rows = trigger_rows if isinstance(trigger_rows, list) else []
+    errors: List[str] = []
+
+    formal_identities = [
+        _learning_row_identity(row) for row in formal_rows if isinstance(row, Mapping)
+    ]
+    decision_identities = [
+        _learning_row_identity(row) for row in decision_rows if isinstance(row, Mapping)
+    ]
+    if formal_identities != decision_identities:
+        errors.append("alpha_setup_action_values_not_from_final_decision_learning_rows")
+
+    formal_identity_set = set(formal_identities)
+    for index, row in enumerate(trigger_rows):
+        if not isinstance(row, Mapping):
+            errors.append(f"trigger_profile_learning_row_invalid:{index}")
+            continue
+        family = str(_row_value(row, "canonical_action_family") or "").strip().lower()
+        lane = str(
+            _row_value(row, "learning_lane")
+            or _row_value(row, "action_value_lane")
+            or _row_value(row, "lane")
+            or ""
+        ).strip().lower()
+        if family != "execution" or lane != "execution":
+            errors.append(f"trigger_profile_learning_not_execution:{index}")
+        if _learning_row_identity(row) in formal_identity_set:
+            errors.append(f"trigger_profile_learning_leaked_into_decision_rows:{index}")
     return errors
 
 
@@ -338,6 +403,7 @@ def check_final_action_contract(
     errors.extend(_base_field_errors(contract))
     errors.extend(_semantic_object_errors(contract))
     errors.extend(_alpha_setup_action_value_purity_errors(contract))
+    errors.extend(_final_learning_row_alignment_errors(contract))
     errors.extend(_execution_contract_errors(contract))
     if lots_delta != target - current:
         errors.append("lots_delta_mismatch")

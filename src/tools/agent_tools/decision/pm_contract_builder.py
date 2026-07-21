@@ -10,7 +10,10 @@ from typing import Any, Callable, Dict, List
 
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_position_transition import final_action_from_lots
-from tools.common.final_action_semantics import canonical_action_value_lane
+from tools.common.final_action_semantics import (
+    canonical_action_value_lane,
+    contract_final_learning_lifecycle,
+)
 from tools.common.order_semantics import build_lot_intent_consistency
 
 
@@ -39,6 +42,17 @@ def _compact_learning_trace_row(row: Any) -> dict:
         "canonical_action_family": row.get("canonical_action_family") or payload.get("canonical_action_family"),
         "learning_lane": row.get("learning_lane") or payload.get("learning_lane"),
         "action_value_lane": row.get("action_value_lane") or payload.get("action_value_lane"),
+        "canonical_action_value": (
+            row.get("canonical_action_value")
+            if "canonical_action_value" in row
+            else payload.get("canonical_action_value")
+        ),
+        "consumer_scope": row.get("consumer_scope") or payload.get("consumer_scope"),
+        "canonical_action_value_source": (
+            row.get("canonical_action_value_source")
+            or payload.get("canonical_action_value_source")
+        ),
+        "evidence_scope": row.get("evidence_scope") or payload.get("evidence_scope"),
         "action_preference": row.get("action_preference") or payload.get("action_preference"),
         "memory_side_role": row.get("memory_side_role") or payload.get("memory_side_role"),
         "reward_mean": row.get("reward_mean") or payload.get("reward_mean"),
@@ -175,28 +189,19 @@ def _contract_lifecycle_port(
     current_lots: int,
     target_lots: int,
     authority: dict,
+    reason_codes: list[str] | None = None,
 ) -> str:
-    action = _clean_text(final_action)
-    current = int(current_lots or 0)
-    target = int(target_lots or 0)
-    if bool(authority.get("conditional_trigger_authority")) or bool(authority.get("requires_intraday_confirmation")):
-        return "conditional_monitor"
-    if current == 0 and target != 0:
-        return "open_add_new_risk"
-    if current != 0 and target != 0 and (
-        (current > 0 and target > current)
-        or (current < 0 and target < current)
-        or (current > 0 and target < 0)
-        or (current < 0 and target > 0)
-    ):
-        return "open_add_new_risk"
-    if current != 0 and target == current:
-        return "hold"
-    if current != 0 and (target == 0 or abs(target) < abs(current) or action in {"reduce", "exit", "close"}):
-        return "reduce_exit"
-    if action in {"open", "open_probe", "open_real", "scale", "add", "increase", "reverse"}:
-        return "open_add_new_risk"
-    return "wait"
+    return contract_final_learning_lifecycle({
+        "final_action": final_action,
+        "current_lots": int(current_lots or 0),
+        "target_lots": int(target_lots or 0),
+        "conditional_trigger_authority": bool(authority.get("conditional_trigger_authority")),
+        "requires_intraday_confirmation": bool(authority.get("requires_intraday_confirmation")),
+        "can_execute_without_intraday_trigger": bool(
+            authority.get("can_execute_without_intraday_trigger")
+        ),
+        "reason_codes": list(reason_codes or []),
+    })
 
 
 def _pm_lifecycle_learning_trace(
@@ -206,23 +211,74 @@ def _pm_lifecycle_learning_trace(
     target_lots: int,
     authority: dict,
     diagnostics: dict,
-    selected_action_values: list,
     final_route_action_values: list | None,
+    select_learning_trace_action_values: Callable[[list | None, int], List[dict]],
     execution_contract_payload: dict,
     control_reasons: list[str],
-) -> dict:
+) -> tuple[dict, list[dict]]:
     lifecycle_port = _contract_lifecycle_port(
         final_action=final_action,
         current_lots=current_lots,
         target_lots=target_lots,
         authority=authority,
+        reason_codes=control_reasons,
     )
-    used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values or []) if lane})
-    final_route_values = final_route_action_values if isinstance(final_route_action_values, list) else selected_action_values
-    lifecycle_router = route_lifecycle_learning(
+    final_route_values = final_route_action_values if isinstance(final_route_action_values, list) else []
+    complete_pool_router = route_lifecycle_learning(
         lifecycle_port=lifecycle_port,
         action_values=final_route_values,
     )
+    decision_source_indices = {
+        int(index)
+        for index in (
+            complete_pool_router.get("decision_learning_indices")
+            or complete_pool_router.get("accepted_indices")
+            or []
+        )
+        if isinstance(index, int)
+    }
+    decision_source_rows = [
+        row for index, row in enumerate(final_route_values)
+        if index in decision_source_indices
+    ]
+    selected_action_values = select_learning_trace_action_values(decision_source_rows, 10)
+    selected_router = route_lifecycle_learning(
+        lifecycle_port=lifecycle_port,
+        action_values=selected_action_values,
+    )
+    lifecycle_router = dict(selected_router)
+    for key in (
+        "trigger_profile_learning_rows",
+        "trigger_profile_learning",
+        "trigger_profile_indices",
+        "execution_profile_learning",
+        "execution_profile_indices",
+        "rejected_learning_rows",
+        "rejected_learning",
+        "rejected_indices",
+    ):
+        lifecycle_router[key] = complete_pool_router.get(key) or []
+    for key in (
+        "decision_learning_rows",
+        "accepted_learning",
+        "trigger_profile_learning_rows",
+        "trigger_profile_learning",
+        "execution_profile_learning",
+    ):
+        enriched_rows: list[dict] = []
+        for row in lifecycle_router.get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            enriched = dict(row)
+            lane = _clean_text(enriched.get("lane"))
+            if lane:
+                enriched["learning_lane"] = lane
+                enriched["action_value_lane"] = lane
+            enriched_rows.append(enriched)
+        lifecycle_router[key] = enriched_rows
+    lifecycle_router["complete_step4_pool_routed_before_formal_selection"] = True
+    lifecycle_router["complete_step4_pool_count"] = len(final_route_values)
+    used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values) if lane})
     memory_retrieval = diagnostics.get("final_action_memory_retrieval")
     memory_retrieval = memory_retrieval if isinstance(memory_retrieval, dict) else {}
     decision_learning_rows = (
@@ -317,7 +373,7 @@ def _pm_lifecycle_learning_trace(
             "requires_intraday_confirmation",
         ],
     }
-    return trace
+    return trace, selected_action_values
 
 
 def _pm_lifecycle_learning_impact_delta(
@@ -412,7 +468,6 @@ def build_final_action_contract(
         target_lots=target_lots,
         final_entry_authority=authority,
     )
-    selected_action_values = select_learning_trace(alpha_setup_action_values, 10)
     memory_requirements = (
         diagnostics.get("final_action_memory_requirements")
         if isinstance(diagnostics.get("final_action_memory_requirements"), dict)
@@ -442,20 +497,26 @@ def build_final_action_contract(
         )
         if key in execution_contract_payload
     }
+    for key in (
+        "requires_intraday_confirmation",
+        "can_execute_without_intraday_trigger",
+    ):
+        if key not in execution_fields and key in authority:
+            execution_fields[key] = bool(authority.get(key))
     action_value = recommendation_intent.get("action") if isinstance(recommendation_intent, dict) else "hold"
     if futures_action_cls is not None:
         try:
             action_value = futures_action_cls(str(action_value))
         except Exception:
             pass
-    pm_lifecycle_trace = _pm_lifecycle_learning_trace(
+    pm_lifecycle_trace, selected_action_values = _pm_lifecycle_learning_trace(
         final_action=final_action,
         current_lots=current_lots,
         target_lots=target_lots,
         authority=authority,
         diagnostics=diagnostics,
-        selected_action_values=selected_action_values,
         final_route_action_values=alpha_setup_action_values,
+        select_learning_trace_action_values=select_learning_trace,
         execution_contract_payload=execution_contract_payload,
         control_reasons=sorted(reason_codes),
     )

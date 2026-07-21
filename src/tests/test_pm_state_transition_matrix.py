@@ -157,6 +157,18 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             entry_trigger=canonical_entry_trigger("breakout", "long"),
             invalidation="15m close below the invalidation boundary",
             learning_used={
+                "alpha_setup_action_values": [
+                    {
+                        "id": "open-1",
+                        "canonical_action_value": True,
+                        "consumer_scope": "pm_learning",
+                        "canonical_action_family": "open_add_new_risk",
+                        "action_name": "open",
+                        "action_value_lane": "open",
+                        "learning_lane": "open",
+                        "action_preference": "positive_candidate_open",
+                    }
+                ],
                 "pm_lifecycle_learning_trace": pm_trace,
                 "pm_lifecycle_learning_impact_delta": {"net_lifecycle_learning_delta": 0.04},
             },
@@ -406,6 +418,35 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
 
         self.assertTrue(result["ok"], result["errors"])
 
+    def test_pm_contract_self_check_rejects_decision_source_drift_and_execution_pollution(self):
+        drifted = self._ranked_new_risk_contract()
+        drifted["learning_used"]["alpha_setup_action_values"][0]["id"] = "different-open"
+        drift_errors = check_final_action_contract(drifted)["errors"]
+        self.assertIn(
+            "alpha_setup_action_values_not_from_final_decision_learning_rows",
+            drift_errors,
+        )
+
+        polluted = self._ranked_new_risk_contract()
+        execution_row = {
+            "id": "execution-1",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+            "canonical_action_family": "execution",
+            "action_name": "execution",
+            "action_value_lane": "execution",
+            "learning_lane": "execution",
+            "action_preference": "positive_candidate_execution",
+        }
+        polluted["learning_used"]["alpha_setup_action_values"] = [execution_row]
+        polluted["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"] = [
+            {"id": "execution-1", "canonical_action_family": "execution", "learning_lane": "execution"}
+        ]
+        pollution_errors = check_final_action_contract(polluted)["errors"]
+        self.assertTrue(
+            any(error.startswith("execution_profile_in_decision_learning") for error in pollution_errors)
+        )
+
     def test_pm_contract_self_check_rejects_add_without_rank(self):
         contract = self._complete_contract(
             final_action="scale",
@@ -427,6 +468,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
                     {
                         "id": "hold-av-1",
                         "canonical_action_value": True,
+                        "consumer_scope": "pm_learning",
                         "canonical_action_family": "hold",
                         "learning_lane": "hold",
                         "action_value_lane": "hold",
@@ -449,7 +491,7 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
         contract["learning_used"]["pm_lifecycle_learning_trace"] = {
             "contract_lifecycle_port": "hold",
             "used_lanes": ["hold"],
-            "decision_learning_rows": [{"id": "hold-1", "learning_lane": "hold", "action_name": "hold"}],
+            "decision_learning_rows": [{"id": "hold-av-1", "learning_lane": "hold", "action_name": "hold"}],
             "trigger_profile_learning_rows": [],
             "execution_profile_learning_direct_to_rank": False,
             "trigger_profile_learning_direct_to_rank": False,

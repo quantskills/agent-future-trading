@@ -36,7 +36,7 @@ from tools.common.final_action_semantics import (
     filter_action_values_for_contract_learning,
     has_valid_hold_exit_no_change_explanation,
     is_conditional_monitor_contract,
-    lane_matches_memory_requirement,
+    validate_action_preference_family_consistency,
 )
 from tools.agent_tools.decision.pm_capital_allocator import (
     conflicting_weak_memory_record as _capital_conflicting_weak_memory_record,
@@ -4103,6 +4103,17 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
         return {}
     normalized = dict(row)
     payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+    canonical_flag_present = (
+        "canonical_action_value" in normalized
+        or "canonical_action_value" in payload
+    )
+    explicit_canonical = (
+        normalized.get("canonical_action_value")
+        if "canonical_action_value" in normalized
+        else payload.get("canonical_action_value")
+        if "canonical_action_value" in payload
+        else None
+    )
     if payload:
         normalized["payload"] = dict(payload)
     if not normalized.get("id") and payload.get("id"):
@@ -4136,11 +4147,19 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
     ).strip().lower()
     if action_value_lane:
         normalized["action_value_lane"] = action_value_lane
-    consumer_scope = str(
-        pick("consumer_scope", "learning_consumer_scope", default="pm_learning")
-        or "pm_learning"
+    canonical_action_family = str(
+        pick("canonical_action_family", "source_canonical_action_family", default="") or ""
     ).strip().lower()
-    normalized["consumer_scope"] = consumer_scope
+    if canonical_action_family:
+        normalized["canonical_action_family"] = canonical_action_family
+    action_name = str(pick("action_name", default="") or "").strip().lower()
+    if action_name:
+        normalized["action_name"] = action_name
+    consumer_scope = str(
+        pick("consumer_scope", "learning_consumer_scope", default="") or ""
+    ).strip().lower()
+    if consumer_scope:
+        normalized["consumer_scope"] = consumer_scope
     learning_lane = str(
         pick("learning_lane", "action_value_lane", "source_action_value_lane", "action_name", default="")
         or ""
@@ -4185,41 +4204,80 @@ def _normalize_alpha_setup_action_value(row: dict) -> dict:
         value = pick(key)
         if value not in (None, ""):
             normalized[key] = value
-    normalized["canonical_action_value"] = bool(
+    derived_canonical = bool(
         normalized.get("action_preference")
+        and normalized.get("canonical_action_family")
         and normalized.get("reward_source")
         and normalized.get("evidence_scope")
         and normalized.get("action_value_lane")
+        and normalized.get("learning_lane")
+        and normalized.get("consumer_scope") == "pm_learning"
         and (
             normalized.get("reward_sum") not in (None, "")
             or normalized.get("reward_mean") not in (None, "")
             or normalized.get("win_rate") not in (None, "")
         )
     )
-    normalized["canonical_action_value_source"] = (
-        "top_level_first_payload_compatible"
-        if normalized["canonical_action_value"]
-        else "incomplete_trace_not_for_pm_scoring"
+    semantic_validation = validate_action_preference_family_consistency(normalized)
+    derived_canonical = derived_canonical and bool(semantic_validation.get("ok"))
+    explicit_canonical_false = canonical_flag_present and (
+        explicit_canonical is False
+        or explicit_canonical == 0
+        or str(explicit_canonical).strip().lower() in {"false", "no", "off"}
     )
+    if explicit_canonical_false:
+        normalized["canonical_action_value"] = False
+        normalized["canonical_action_value_source"] = "incomplete_trace_not_for_pm_scoring"
+    else:
+        normalized["canonical_action_value"] = derived_canonical
+        normalized["canonical_action_value_source"] = (
+            "top_level_first_payload_compatible"
+            if derived_canonical
+            else "incomplete_trace_not_for_pm_scoring"
+        )
     return normalized
+
+
+class _ExplicitPMLearningScopeDBView:
+    """Expose PM memory rows only when their stored consumer scope is explicit."""
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def get_alpha_setup_action_values(self, **kwargs):
+        rows = self._db.get_alpha_setup_action_values(**kwargs)
+        scoped_rows: list[dict] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            consumer_scope = str(
+                row.get("consumer_scope")
+                or payload.get("consumer_scope")
+                or ""
+            ).strip().lower()
+            if consumer_scope == "pm_learning":
+                scoped_rows.append(row)
+        return scoped_rows
 
 
 def _is_pm_learning_action_value(row: dict) -> bool:
     if not isinstance(row, dict):
         return False
     normalized = _normalize_alpha_setup_action_value(row)
-    return str(normalized.get("consumer_scope") or "pm_learning").lower() == "pm_learning"
+    return str(normalized.get("consumer_scope") or "").lower() == "pm_learning"
 
 
 def _annotate_pm_action_value_retrieval(row: dict, *, match_level: str, match_reason: str) -> dict:
     normalized = _normalize_alpha_setup_action_value(row)
-    normalized["consumer_scope"] = "pm_learning"
     normalized["retrieval_match_level"] = match_level
     normalized["retrieval_match_reason"] = match_reason
     payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
     if payload:
         payload = dict(payload)
-        payload["consumer_scope"] = "pm_learning"
         payload["retrieval_match_level"] = match_level
         payload["retrieval_match_reason"] = match_reason
         normalized["payload"] = payload
@@ -4265,12 +4323,17 @@ def _is_complete_pm_scoring_action_value(row: dict) -> bool:
     normalized = _normalize_alpha_setup_action_value(row)
     if not normalized:
         return False
+    semantic_validation = validate_action_preference_family_consistency(normalized)
+    action_value_lane = str(normalized.get("action_value_lane") or "").strip().lower()
+    learning_lane = str(normalized.get("learning_lane") or "").strip().lower()
     return (
         normalized.get("canonical_action_value") is True
+        and str(normalized.get("consumer_scope") or "").strip().lower() == "pm_learning"
         and bool(str(normalized.get("canonical_action_family") or "").strip())
         and bool(str(normalized.get("action_preference") or "").strip())
-        and bool(str(normalized.get("action_value_lane") or "").strip())
-        and bool(str(normalized.get("learning_lane") or "").strip())
+        and bool(action_value_lane)
+        and action_value_lane == learning_lane
+        and bool(semantic_validation.get("ok"))
         and str(normalized.get("canonical_action_value_source") or "").strip().lower()
         != "incomplete_trace_not_for_pm_scoring"
     )
@@ -4394,6 +4457,30 @@ def _normalize_alpha_setup_action_values(rows: list | None) -> list[dict]:
     ]
 
 
+def _formal_pm_learning_action_values(rows: list | None) -> list[dict]:
+    formal: list[dict] = []
+    for normalized in _normalize_alpha_setup_action_values(rows):
+        payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
+        retrieval_match_level = str(
+            normalized.get("retrieval_match_level")
+            or payload.get("retrieval_match_level")
+            or ""
+        ).strip().lower()
+        evidence_scope = str(
+            normalized.get("evidence_scope")
+            or payload.get("evidence_scope")
+            or ""
+        ).strip().lower()
+        if not _is_complete_pm_scoring_action_value(normalized):
+            continue
+        if retrieval_match_level in {"similar", "weak_prior"}:
+            continue
+        if evidence_scope in {"similar_sql_prior", "counterfactual_prior"}:
+            continue
+        formal.append(normalized)
+    return formal
+
+
 def _append_unique_action_values(base_rows: list | None, extra_rows: list | None) -> list[dict]:
     rows: list[dict] = _normalize_alpha_setup_action_values(base_rows)
     index = {_action_value_key(row): pos for pos, row in enumerate(rows)}
@@ -4412,174 +4499,30 @@ def _append_unique_action_values(base_rows: list | None, extra_rows: list | None
     return rows
 
 
-def _annotate_memory_requirement_row(row: dict, requirement: dict) -> dict:
-    normalized = _normalize_alpha_setup_action_value(row)
-    memory_side_role = str(requirement.get("memory_side_role") or "").strip().lower()
-    requirement_reason = str(requirement.get("reason") or "").strip().lower()
-    required_lane = str(requirement.get("lane") or requirement.get("learning_lane") or "").strip().lower()
-    if memory_side_role:
-        normalized["memory_side_role"] = memory_side_role
-    if requirement_reason:
-        normalized["memory_requirement_reason"] = requirement_reason
-    if required_lane and not normalized.get("learning_lane"):
-        normalized["learning_lane"] = required_lane
-    payload = normalized.get("payload") if isinstance(normalized.get("payload"), dict) else {}
-    if payload:
-        payload = dict(payload)
-        if memory_side_role:
-            payload["memory_side_role"] = memory_side_role
-        if requirement_reason:
-            payload["memory_requirement_reason"] = requirement_reason
-        if required_lane and not payload.get("learning_lane"):
-            payload["learning_lane"] = required_lane
-        normalized["payload"] = payload
-    return normalized
-
-
-def _pm_memory_lane_matches(row_lane: str, required_lane: str) -> bool:
-    return lane_matches_memory_requirement(required_lane, row_lane)
-
-
-def _retrieve_lifecycle_pm_memory(
+def _audit_frozen_step4_pm_memory(
     *,
-    db,
-    config_id: str,
-    ticker: str,
-    trading_date,
     contract: dict,
-    analyst_signals: list,
-    signal_combo: list,
-    fusion_context: dict,
     alpha_setup_action_values: list | None,
 ) -> tuple[list[dict], dict]:
+    """Audit final-lifecycle routing without extending the frozen Step4 pool."""
     requirements = derive_memory_requirements(contract)
-    if not db or not config_id:
-        unavailable_filter = filter_action_values_for_contract_learning(
-            contract,
-            _normalize_alpha_setup_action_values(alpha_setup_action_values),
-        )
-        return _normalize_alpha_setup_action_values(unavailable_filter.get("rows") or []), {
-            "tool": "decision_memory_retrieval",
-            "memory_requirements": requirements,
-            "status": "unavailable",
-            "reason": "db_or_config_missing",
-            "rejected_action_values": unavailable_filter.get("rejected_action_values") or [],
-        }
-    initial_filter = filter_action_values_for_contract_learning(
+    frozen_rows = _formal_pm_learning_action_values(alpha_setup_action_values)
+    lifecycle_filter = filter_action_values_for_contract_learning(
         contract,
-        _normalize_alpha_setup_action_values(alpha_setup_action_values),
+        frozen_rows,
     )
-    rows = _normalize_alpha_setup_action_values(initial_filter.get("rows") or [])
-    rejected_action_values: list[dict] = list(initial_filter.get("rejected_action_values") or [])
-    details: list[dict] = []
-    for requirement in requirements.get("required_pm_memory") or []:
-        if not isinstance(requirement, dict) or not requirement.get("must_land_in_pm_contract"):
-            continue
-        side = str(requirement.get("side") or "").lower()
-        lane = str(requirement.get("lane") or requirement.get("learning_lane") or "").lower()
-        if side not in {"long", "short"}:
-            continue
-        horizon = _resolve_decision_horizon(
-            analyst_signals,
-            1 if side == "long" else -1,
-        )
-        market_regime = _market_regime_from_signals(analyst_signals, side)
-        setup_type = _setup_type_from_signals(side, analyst_signals, signal_combo) or None
-        try:
-            memory_result = retrieve_pm_memory(
-                db=db,
-                config_id=config_id,
-                ticker=ticker,
-                side=side,
-                horizon_class=horizon,
-                market_regime=market_regime,
-                setup_type=setup_type,
-                sector=fusion_context.get("sector") if isinstance(fusion_context, dict) else None,
-                signal_combo=list(signal_combo or []),
-                trading_date=trading_date,
-                limit=12,
-            )
-        except Exception:
-            details.append({
-                "side": side,
-                "lane": lane,
-                "memory_side_role": requirement.get("memory_side_role"),
-                "row_count": 0,
-                "error": "pm_memory_retrieval_failed",
-            })
-            continue
-        action_values = memory_result.get("action_values") or []
-        lane_matched: list[dict] = []
-        for row in action_values:
-            normalized = _normalize_alpha_setup_action_value(row)
-            row_side = str(normalized.get("side") or "").strip().lower()
-            if side and row_side and row_side not in {side, "*"}:
-                rejected_action_values.append({
-                    "id": normalized.get("id"),
-                    "scope_key": normalized.get("scope_key"),
-                    "ticker": normalized.get("ticker"),
-                    "side": row_side,
-                    "action_name": normalized.get("action_name"),
-                    "learning_lane": normalized.get("learning_lane") or normalized.get("action_value_lane"),
-                    "memory_side_role": normalized.get("memory_side_role"),
-                    "reason": "retrieved_memory_side_mismatch",
-                })
-                continue
-            row_role = str(normalized.get("memory_side_role") or "").strip().lower()
-            required_role = str(requirement.get("memory_side_role") or "").strip().lower()
-            if required_role and row_role != required_role:
-                rejected_action_values.append({
-                    "id": normalized.get("id"),
-                    "scope_key": normalized.get("scope_key"),
-                    "ticker": normalized.get("ticker"),
-                    "side": row_side,
-                    "action_name": normalized.get("action_name"),
-                    "learning_lane": normalized.get("learning_lane") or normalized.get("action_value_lane"),
-                    "memory_side_role": row_role,
-                    "reason": "retrieved_memory_side_role_mismatch",
-                })
-                continue
-            row_lane = str(
-                normalized.get("learning_lane")
-                or normalized.get("action_value_lane")
-                or normalized.get("action_name")
-                or ""
-            ).lower()
-            if not _pm_memory_lane_matches(row_lane, lane):
-                rejected_action_values.append({
-                    "id": normalized.get("id"),
-                    "scope_key": normalized.get("scope_key"),
-                    "ticker": normalized.get("ticker"),
-                    "side": row_side,
-                    "action_name": normalized.get("action_name"),
-                    "learning_lane": row_lane,
-                    "memory_side_role": row_role,
-                    "reason": "retrieved_memory_lane_mismatch",
-                })
-                continue
-            lane_matched.append(_annotate_memory_requirement_row(normalized, requirement))
-        rows = _append_unique_action_values(rows, lane_matched)
-        details.append({
-            "side": side,
-            "lane": lane,
-            "memory_side_role": requirement.get("memory_side_role"),
-            "row_count": len(lane_matched),
-            "effective_memory_summary": memory_result.get("effective_memory_summary") or {},
-            "retrieval_attempts": memory_result.get("retrieval_attempts") or [],
-            "rejected_or_downgraded": memory_result.get("rejected_or_downgraded") or [],
-        })
-    final_filter = filter_action_values_for_contract_learning(contract, rows)
-    rows = _normalize_alpha_setup_action_values(final_filter.get("rows") or [])
-    rejected_action_values.extend(final_filter.get("rejected_action_values") or [])
     audit = {
         "tool": "decision_memory_retrieval",
-        "boundary": "final_action_semantics_memory_requirements",
+        "boundary": "frozen_step4_complete_canonical_pool_routed_without_late_retrieval",
+        "status": "frozen_step4_pool",
         "memory_requirements": requirements,
-        "requirement_details": details,
-        "alpha_setup_action_value_count_after_lifecycle": len(rows),
-        "rejected_action_values": rejected_action_values,
+        "alpha_setup_action_value_count_after_lifecycle": len(frozen_rows),
+        "lifecycle_matching_row_count": len(lifecycle_filter.get("rows") or []),
+        "rejected_action_values": lifecycle_filter.get("rejected_action_values") or [],
+        "late_retrieval_performed": False,
+        "late_action_value_append_count": 0,
     }
-    return rows, audit
+    return frozen_rows, audit
 
 
 _OPEN_OR_ADD_ACTION_NAMES = {
@@ -9657,6 +9600,8 @@ def _run_pm_six_step_decision(state: FundState):
     }
     alpha_setup_profiles: list[dict] = []
     alpha_setup_action_values: list[dict] = []
+    step4_rejected_or_downgraded: list[dict] = []
+    pm_memory_db = _ExplicitPMLearningScopeDBView(db) if db else db
     pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
     pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
     pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
@@ -9833,7 +9778,7 @@ def _run_pm_six_step_decision(state: FundState):
     opportunity_scorecard_cfg = (
         (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
     )
-    scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    scorecard_alpha_setup_action_values = []
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
         analyst_signals=analyst_signals,
@@ -9918,7 +9863,7 @@ def _run_pm_six_step_decision(state: FundState):
     if db and config_id and step4_memory_side:
         try:
             early_memory_result = retrieve_pm_memory(
-                db=db,
+                db=pm_memory_db,
                 config_id=config_id,
                 ticker=ticker,
                 side=step4_memory_side,
@@ -9950,6 +9895,10 @@ def _run_pm_six_step_decision(state: FundState):
                 "retrieval_attempts": early_memory_result.get("retrieval_attempts") or [],
                 "rejected_or_downgraded": early_memory_result.get("rejected_or_downgraded") or [],
             }
+            step4_rejected_or_downgraded = _merge_rejected_or_downgraded(
+                step4_rejected_or_downgraded,
+                early_memory_result.get("rejected_or_downgraded") or [],
+            )
             pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
             pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
             pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
@@ -9965,7 +9914,9 @@ def _run_pm_six_step_decision(state: FundState):
     opportunity_scorecard_cfg = (
         (_get_portfolio_manager_config(full_config).get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {}
     )
-    scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
+    # Resolve the exact setup from current evidence only. Formal action values
+    # are consumed once, after the complete Step4 pool has been assembled.
+    scorecard_alpha_setup_action_values = []
     opportunity_scorecard = build_opportunity_scorecard(
         ticker=ticker,
         analyst_signals=analyst_signals,
@@ -10000,9 +9951,15 @@ def _run_pm_six_step_decision(state: FundState):
     if db and config_id:
         try:
             candidate_sides_for_exact: list[str] = []
+            current_position_side_for_learning = (
+                "long" if current_lots_for_control > 0
+                else "short" if current_lots_for_control < 0
+                else ""
+            )
             for side_name in (
                 target_side_for_confirmation,
                 str(opportunity_scorecard.get("preferred_side") or ""),
+                current_position_side_for_learning,
                 "long",
                 "short",
             ):
@@ -10019,6 +9976,7 @@ def _run_pm_six_step_decision(state: FundState):
                 candidate_like = (
                     side_name == target_side_for_confirmation
                     or side_name == str(opportunity_scorecard.get("preferred_side") or "").lower()
+                    or side_name == current_position_side_for_learning
                     or score > 0.01
                     or bool(side_card.get("setup_quality_ok"))
                     or opportunity_state in {"tradeable_candidate", "probe_candidate", "watch_for_trigger"}
@@ -10051,7 +10009,7 @@ def _run_pm_six_step_decision(state: FundState):
                     or ""
                 )
                 side_memory_result = retrieve_pm_memory(
-                    db=db,
+                    db=pm_memory_db,
                     config_id=config_id,
                     ticker=ticker,
                     side=exact_side,
@@ -10068,6 +10026,10 @@ def _run_pm_six_step_decision(state: FundState):
                     "retrieval_attempts": side_memory_result.get("retrieval_attempts") or [],
                     "rejected_or_downgraded": side_memory_result.get("rejected_or_downgraded") or [],
                 }
+                step4_rejected_or_downgraded = _merge_rejected_or_downgraded(
+                    step4_rejected_or_downgraded,
+                    side_memory_result.get("rejected_or_downgraded") or [],
+                )
                 if side_action_values:
                     exact_alpha_action_values.extend(side_action_values)
                 exact_side_details.append({
@@ -10114,9 +10076,7 @@ def _run_pm_six_step_decision(state: FundState):
                 pm_learning_audit["pm_exact_alpha_setup_boundary"] = (
                     "pm_reads_pm_learning_canonical_action_value_by_exact_then_fallback_layers_after_setup_resolution"
                 )
-                scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
-                initial_lifecycle_learning_router["scorecard_consumed_count"] = len(scorecard_alpha_setup_action_values)
-                initial_lifecycle_learning_router["post_step3_exact_rows_routed_to_step4_only"] = True
+                initial_lifecycle_learning_router["post_step3_exact_rows_added_before_step4_consumption"] = True
                 pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
         except Exception as exc:
             pass
@@ -10136,7 +10096,7 @@ def _run_pm_six_step_decision(state: FundState):
             best_profile = preferred_card.get("best_alpha_setup_profile") if isinstance(preferred_card.get("best_alpha_setup_profile"), dict) else {}
             similar_setup_type = str(best_profile.get("setup_type") or preferred_card.get("final_state") or "*")
             similar_memory_result = retrieve_pm_memory(
-                db=db,
+                db=pm_memory_db,
                 config_id=config_id,
                 ticker=ticker,
                 side=(preferred_side_for_setup if preferred_side_for_setup in {"long", "short"} else target_side_for_confirmation),
@@ -10150,9 +10110,17 @@ def _run_pm_six_step_decision(state: FundState):
             )
             similar_alpha_action_values = similar_memory_result.get("action_values") or []
             if similar_alpha_action_values:
-                alpha_setup_action_values = _append_unique_action_values(
-                    alpha_setup_action_values,
-                    similar_alpha_action_values,
+                similar_diagnostics: list[dict] = []
+                for similar_row in similar_alpha_action_values:
+                    compact = _compact_alpha_setup_action_value(similar_row)
+                    if compact:
+                        compact["reason"] = "similar_or_weak_prior_diagnostic_only"
+                        compact["diagnostic_only"] = True
+                        similar_diagnostics.append(compact)
+                step4_rejected_or_downgraded = _merge_rejected_or_downgraded(
+                    step4_rejected_or_downgraded,
+                    list(similar_memory_result.get("rejected_or_downgraded") or [])
+                    + similar_diagnostics,
                 )
                 similar_summary = similar_memory_result.get("effective_memory_summary") or {}
                 effective_memory_summary = {
@@ -10175,12 +10143,51 @@ def _run_pm_six_step_decision(state: FundState):
                 pm_learning_audit["similar_alpha_setup_boundary"] = (
                     "strict_history_only_prior_not_trade_authority"
                 )
-                scorecard_alpha_setup_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
-                initial_lifecycle_learning_router["scorecard_consumed_count"] = len(scorecard_alpha_setup_action_values)
-                initial_lifecycle_learning_router["post_step3_similar_rows_routed_to_step4_only"] = True
+                initial_lifecycle_learning_router["post_step3_similar_rows_diagnostic_only"] = True
                 pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
         except Exception as exc:
             pass
+    step4_rejected_or_downgraded = _merge_rejected_or_downgraded(
+        step4_rejected_or_downgraded,
+        _select_rejected_pm_prior_action_values(alpha_setup_action_values),
+    )
+    scorecard_alpha_setup_action_values = _formal_pm_learning_action_values(alpha_setup_action_values)
+    opportunity_scorecard = build_opportunity_scorecard(
+        ticker=ticker,
+        analyst_signals=analyst_signals,
+        market_confirmation=market_confirmation,
+        data_quality_summary=data_quality_summary_for_pm,
+        adaptive_policy_state=early_adaptive_policy_state,
+        alpha_setup_profiles=alpha_setup_profiles,
+        alpha_setup_action_values=scorecard_alpha_setup_action_values,
+        signal_collection_contract=signal_collection_contract,
+        decision_date=trading_date,
+        config=opportunity_scorecard_cfg,
+    )
+    opportunity_scorecard["preferred_side"] = preferred_side
+    for side in ("long", "short"):
+        step2_row = (
+            step2_opportunity_scorecard.get(side)
+            if isinstance(step2_opportunity_scorecard.get(side), dict)
+            else {}
+        )
+        step4_row = opportunity_scorecard.get(side) if isinstance(opportunity_scorecard.get(side), dict) else {}
+        for field in (
+            "side_priority",
+            "ticker_side_priority",
+            "side_priority_semantics_version",
+            "side_priority_meaning",
+            "side_priority_is_not_capital_rank",
+            "side_priority_is_not_trade_authority",
+        ):
+            if field in step2_row:
+                step4_row[field] = step2_row[field]
+    fusion_context["opportunity_scorecard"] = opportunity_scorecard
+    initial_lifecycle_learning_router["scorecard_consumed_count"] = len(scorecard_alpha_setup_action_values)
+    initial_lifecycle_learning_router["formal_pool_complete_before_first_consumption"] = True
+    initial_lifecycle_learning_router["formal_pool_frozen_after_scorecard"] = True
+    pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
+    alpha_setup_action_values = scorecard_alpha_setup_action_values
     holding_control_cfg = _get_holding_rebalance_config(full_config)
     learned_open_seed = {}
     learned_open_seed_applied = False
@@ -10355,7 +10362,7 @@ def _run_pm_six_step_decision(state: FundState):
                     include_rollover=False,
                 )
             pm_risk_gate_memory_result = retrieve_pm_memory(
-                db=db,
+                db=pm_memory_db,
                 config_id=config_id,
                 ticker=ticker,
                 side=pm_risk_gate_side,
@@ -11283,22 +11290,15 @@ def _run_pm_six_step_decision(state: FundState):
     }
     lifecycle_memory_state["primary_lifecycle_action_port"] = primary_lifecycle_action_port.get("pm_lifecycle_action_port")
     lifecycle_memory_state["requires_full_market_rank"] = primary_lifecycle_action_port.get("requires_full_market_rank")
-    pre_final_lifecycle_route_action_values = _normalize_alpha_setup_action_values(alpha_setup_action_values)
-    alpha_setup_action_values, lifecycle_memory_audit = _retrieve_lifecycle_pm_memory(
-        db=db,
-        config_id=config_id,
-        ticker=ticker,
-        trading_date=trading_date,
+    alpha_setup_action_values, lifecycle_memory_audit = _audit_frozen_step4_pm_memory(
         contract=lifecycle_memory_state,
-        analyst_signals=analyst_signals,
-        signal_combo=list(signal_combo),
-        fusion_context=fusion_context if isinstance(fusion_context, dict) else {},
         alpha_setup_action_values=alpha_setup_action_values,
     )
-    final_lifecycle_route_action_values = _append_unique_action_values(
-        pre_final_lifecycle_route_action_values,
-        alpha_setup_action_values,
+    lifecycle_memory_audit["rejected_or_downgraded"] = _merge_rejected_or_downgraded(
+        lifecycle_memory_audit.get("rejected_or_downgraded"),
+        step4_rejected_or_downgraded,
     )
+    final_lifecycle_route_action_values = alpha_setup_action_values
     lifecycle_learning_router = route_lifecycle_learning(
         lifecycle_port=str(primary_lifecycle_action_port.get("pm_lifecycle_action_port") or ""),
         action_values=final_lifecycle_route_action_values,
