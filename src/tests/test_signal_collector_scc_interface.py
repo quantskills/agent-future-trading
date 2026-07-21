@@ -39,6 +39,8 @@ def _formal_signal(
     trigger_confirmed: bool = False,
     signal_record_id: str | None = None,
     raw_signal: str = "Neutral",
+    freshness_score: float = 0.82,
+    strength_score: float = 0.72,
 ):
     signal_text = "Bullish" if side == "long" else "Bearish" if side == "short" else "Neutral"
     contract = build_test_aec(
@@ -54,6 +56,14 @@ def _formal_signal(
             "product_profile_used": True,
             "profile_analysis_boundary": "analyst_evidence_calibration_only",
     }
+    contract["fusion_evidence"].update(
+        {
+            "evidence_strength": "strong" if strength_score >= 0.78 else "medium" if strength_score >= 0.58 else "weak",
+            "evidence_strength_score": strength_score,
+            "evidence_freshness": "fresh" if freshness_score >= 0.78 else "usable" if freshness_score >= 0.50 else "stale",
+            "evidence_freshness_score": freshness_score,
+        }
+    )
     return SimpleNamespace(
         agent_name=analyst,
         signal=raw_signal,
@@ -132,6 +142,15 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         self.assertTrue(nested_only.issubset(contract["evidence_fusion"]))
         self.assertNotIn("direction_alignment", contract["evidence_fusion"])
         self.assertFalse(nested_only.intersection(contract))
+        self.assertEqual(
+            contract["evidence_fusion"]["evidence_freshness_by_analyst"],
+            {
+                "commodity_news": "fresh",
+                "fundamental": "fresh",
+                "technical": "fresh",
+            },
+        )
+        self.assertGreater(contract["evidence_fusion"]["multi_evidence_consensus_score"], 0.0)
 
     def test_scc_preserves_each_aec_once_without_profile_or_fusion_copies(self):
         contract = build_signal_collection_contract(

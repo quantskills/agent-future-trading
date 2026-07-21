@@ -89,6 +89,7 @@ from tools.common.alpha_setup import compact_profile_for_trace
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_scc_data_quality_summary,
+    scc_news_quality_scores_from_metadata,
     validate_signal_collection_contract,
 )
 from tools.common.execution_trigger_semantics import (
@@ -7539,10 +7540,8 @@ def _news_high_quality_override(payload, side: str, control: dict) -> bool:
     if str(payload.get("tradeability", "unknown")).lower() != required_tradeability:
         return False
 
-    context = payload.get("context") or {}
     metadata = payload.get("metadata") or {}
-    freshness = _safe_float(context.get("freshness_score", metadata.get("freshness_score")), 0.0)
-    relevance = _safe_float(context.get("relevance_score", metadata.get("relevance_score")), 0.0)
+    freshness, relevance = scc_news_quality_scores_from_metadata(metadata)
     return (
         freshness >= float(control.get("news_override_min_freshness", 0.70))
         and relevance >= float(control.get("news_override_min_relevance", 0.70))

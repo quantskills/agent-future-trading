@@ -107,6 +107,50 @@ def _value(signal: Any, contract: Mapping[str, Any], key: str, default: Any = No
     return default
 
 
+def _formal_freshness_score(
+    signal: Any,
+    contract: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> float:
+    data_usage = contract.get("data_usage_summary") if isinstance(contract.get("data_usage_summary"), Mapping) else {}
+    metadata = getattr(signal, "metadata", None)
+    if not data_usage and isinstance(metadata, Mapping) and isinstance(metadata.get("data_usage_summary"), Mapping):
+        data_usage = metadata.get("data_usage_summary") or {}
+    data_quality = context.get("data_quality") if isinstance(context.get("data_quality"), Mapping) else {}
+
+    candidates: list[float] = []
+    for container, key in (
+        (context, "freshness_score"),
+        (data_usage, "freshness_score"),
+        (data_quality, "freshness_score"),
+        (data_quality, "factor_freshness_score"),
+    ):
+        if key in container and container.get(key) is not None:
+            candidates.append(_clip(_safe_float(container.get(key), 0.0)))
+    sources = data_usage.get("sources") if isinstance(data_usage.get("sources"), Mapping) else {}
+    for source in sources.values():
+        if isinstance(source, Mapping) and "freshness_score" in source and source.get("freshness_score") is not None:
+            candidates.append(_clip(_safe_float(source.get("freshness_score"), 0.0)))
+    if candidates:
+        return max(candidates)
+
+    explicit_statuses = {
+        _lower(_value(signal, contract, "data_freshness", "")),
+        _lower(context.get("data_freshness")),
+        _lower(data_quality.get("data_freshness")),
+    }
+    if "missing" in explicit_statuses:
+        return 0.0
+    stale_facts = (
+        _as_list(data_usage.get("stale_data"))
+        + _as_list(context.get("stale_data"))
+        + _as_list(data_quality.get("stale_data"))
+    )
+    if "stale" in explicit_statuses or stale_facts:
+        return 0.35
+    return 0.68
+
+
 def build_analyst_fusion_evidence(
     signal: Any,
     quality_context: Mapping[str, Any] | None,
@@ -124,23 +168,7 @@ def build_analyst_fusion_evidence(
     business_quality = _clip(_safe_float(getattr(signal, "business_quality_score", 0.0), 0.0))
     setup_quality = _clip(_safe_float(getattr(signal, "setup_quality_score", 0.0), 0.0))
     evidence_quality = _quality_score(_value(signal, contract, "evidence_quality", "unknown"))
-    data_usage = contract.get("data_usage_summary") if isinstance(contract.get("data_usage_summary"), Mapping) else {}
-    metadata = getattr(signal, "metadata", None)
-    if not data_usage and isinstance(metadata, Mapping) and isinstance(metadata.get("data_usage_summary"), Mapping):
-        data_usage = metadata.get("data_usage_summary") or {}
-    data_quality = context.get("data_quality") if isinstance(context.get("data_quality"), Mapping) else {}
-    freshness_score = max(
-        _safe_float(context.get("freshness_score"), 0.0),
-        _safe_float(data_usage.get("freshness_score"), 0.0) if isinstance(data_usage, Mapping) else 0.0,
-        _safe_float(data_quality.get("freshness_score"), 0.0) if isinstance(data_quality, Mapping) else 0.0,
-    )
-    if freshness_score <= 0:
-        stale_flags = (
-            _as_list(data_usage.get("stale_data") if isinstance(data_usage, Mapping) else [])
-            + _as_list(context.get("stale_data"))
-            + _as_list(context.get("risk_flags"))
-        )
-        freshness_score = 0.35 if stale_flags else 0.68
+    freshness_score = _formal_freshness_score(signal, contract, context)
 
     conflicts = [
         str(item)

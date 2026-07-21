@@ -18,6 +18,7 @@ from tools.agent_tools.decision.audit_explainer import build_audit_payload, buil
 from tools.agent_tools.decision.pm_hard_risk_rules import has_hard_block_reason
 from tools.agent_tools.decision.pm_reason_effects import reason_effect_summary
 from tools.agent_tools.decision.pm_soft_risk_rules import fallback_business_quality_score
+from tools.common.signal_evidence_collection import scc_news_quality_scores_from_metadata
 
 
 class PMRiskGateInput(BaseModel):
@@ -786,6 +787,7 @@ class PMRiskGate:
                 if raw_business_quality is not None
                 else _fallback_business_quality_score(tradeability, confidence)
             )
+            news_freshness, news_relevance = scc_news_quality_scores_from_metadata(metadata)
             analyst_quality[agent_name] = {
                 "signal": signal,
                 "tradeability": tradeability,
@@ -794,8 +796,8 @@ class PMRiskGate:
                 "business_quality_score": business_quality,
                 "setup_type": item.get("setup_type") or metadata.get("setup_type") or "unknown",
                 "primary_business_driver": item.get("primary_business_driver") or (metadata.get("business_quality") or {}).get("primary_business_driver"),
-                "freshness_score": _safe_float(metadata.get("freshness_score") or context.get("freshness_score"), 0.0),
-                "relevance_score": _safe_float(metadata.get("relevance_score") or context.get("relevance_score"), 0.0),
+                "freshness_score": news_freshness,
+                "relevance_score": news_relevance,
             }
 
             if tradeability == "low":

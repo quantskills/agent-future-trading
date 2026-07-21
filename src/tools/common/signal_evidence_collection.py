@@ -959,6 +959,30 @@ def _evidence_item_from_source(source: Mapping[str, Any]) -> dict:
     }
 
 
+def _fusion_summary_inputs(
+    evidence_items: Iterable[Mapping[str, Any]],
+    source_contracts: Iterable[Mapping[str, Any]],
+) -> list[dict]:
+    fusion_by_analyst: dict[str, dict] = {}
+    for source in source_contracts:
+        if not isinstance(source, Mapping):
+            continue
+        analyst = _text(source.get("analyst"))
+        action_contract = source.get("action_evidence_contract")
+        action_contract = action_contract if isinstance(action_contract, Mapping) else {}
+        fusion = action_contract.get("fusion_evidence")
+        fusion_by_analyst[analyst] = dict(fusion) if isinstance(fusion, Mapping) else {}
+
+    inputs: list[dict] = []
+    for item in evidence_items:
+        if not isinstance(item, Mapping):
+            continue
+        merged = dict(item)
+        merged["fusion_evidence"] = dict(fusion_by_analyst.get(_text(item.get("analyst"))) or {})
+        inputs.append(merged)
+    return inputs
+
+
 def _data_quality_flags_from_usage(analyst: str, data_usage: Any) -> list[str]:
     """Summarize registered nested source facts without copying source payloads."""
     if not isinstance(data_usage, Mapping):
@@ -1185,7 +1209,7 @@ def validate_signal_collection_contract(
         if contract.get(field) != expected_value:
             raise ValueError(f"signal_collection_{field}_mismatch")
     expected_fusion = build_signal_collection_fusion_summary(
-        expected_items,
+        _fusion_summary_inputs(expected_items, source_contracts),
         dominant_side=expected_direction["dominant_side"],
     )
     if fusion != expected_fusion:
@@ -1285,6 +1309,27 @@ def build_pm_evidence_signals_from_scc(contract: Mapping[str, Any]) -> list[Any]
         }
         evidence_signals.append(_SCCEvidenceSignal(**payload))
     return evidence_signals
+
+
+def scc_news_quality_scores_from_metadata(metadata: Mapping[str, Any] | None) -> tuple[float, float]:
+    """Read registered news quality scores from a PM view rebuilt from SCC."""
+    values = metadata if isinstance(metadata, Mapping) else {}
+    action_contract = values.get("action_evidence_contract")
+    action_contract = action_contract if isinstance(action_contract, Mapping) else {}
+    if _text(action_contract.get("analyst")) != "commodity_news":
+        return 0.0, 0.0
+    fusion = action_contract.get("fusion_evidence")
+    fusion = fusion if isinstance(fusion, Mapping) else {}
+    data_usage = action_contract.get("data_usage_summary")
+    data_usage = data_usage if isinstance(data_usage, Mapping) else {}
+    sources = data_usage.get("sources")
+    sources = sources if isinstance(sources, Mapping) else {}
+    news_source = sources.get("finoview_news_txt")
+    news_source = news_source if isinstance(news_source, Mapping) else {}
+    return (
+        _confidence({"confidence": fusion.get("evidence_freshness_score")}),
+        _confidence({"confidence": news_source.get("relevance_score")}),
+    )
 
 
 def build_signal_collection_contract(
@@ -1418,7 +1463,7 @@ def build_signal_collection_contract(
     direction_summary = _direction_summary(evidence_items)
     dominant_side = direction_summary["dominant_side"]
     fusion_summary = build_signal_collection_fusion_summary(
-        evidence_items,
+        _fusion_summary_inputs(evidence_items, source_contracts),
         dominant_side=dominant_side,
     )
     merged_missing_evidence = sorted(set(missing_evidence) | set(fusion_summary.get("missing_evidence") or []))

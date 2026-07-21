@@ -46,6 +46,7 @@ from agents.decision_team.portfolio_manager import (
     _finalize_hold_exit_learning_explanation,
     _is_lifecycle_exit_required_reason,
     _minimum_real_probe_candidate_ratio,
+    _news_high_quality_override,
     _positive_open_action_value_seed,
     _qualified_analyst_tradeable_probe_candidate,
     _qualified_real_probe_release,
@@ -4488,6 +4489,52 @@ class PMRiskGateRegressionTest(unittest.TestCase):
             }
         )
 
+    def _scc_news_payload(
+        self,
+        *,
+        confidence: float,
+        freshness_score: float,
+        relevance_score: float,
+        legacy_freshness_score: float | None = None,
+    ) -> dict:
+        contract = build_test_aec(
+            "commodity_news",
+            ticker="M",
+            signal="Bullish",
+            side="long",
+            confidence=confidence,
+            opportunity_state="probe_candidate",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            invalidation_present=True,
+        )
+        contract["fusion_evidence"].update(
+            {
+                "evidence_freshness": "fresh" if freshness_score >= 0.78 else "stale",
+                "evidence_freshness_score": freshness_score,
+            }
+        )
+        contract["data_usage_summary"]["sources"]["finoview_news_txt"].update(
+            {
+                "freshness_score": freshness_score,
+                "relevance_score": relevance_score,
+            }
+        )
+        metadata = {"action_evidence_contract": contract}
+        if legacy_freshness_score is not None:
+            metadata.update(
+                {
+                    "freshness_score": legacy_freshness_score,
+                    "relevance_score": legacy_freshness_score,
+                }
+            )
+        return {
+            "agent_name": "commodity_news",
+            "signal": "Bullish",
+            "confidence": confidence,
+            "metadata": metadata,
+        }
+
     def test_cold_start_reduces_without_blocking(self):
         output = self._auditor().plan(
             PMRiskGateInput(
@@ -4667,16 +4714,11 @@ class PMRiskGateRegressionTest(unittest.TestCase):
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bearish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
                     {"agent_name": "fundamental", "signal": "Neutral", "confidence": 0.35, "metadata": {"tradeability": "medium"}},
-                    {
-                        "agent_name": "commodity_news",
-                        "signal": "Bullish",
-                        "confidence": 0.70,
-                        "metadata": {
-                            "tradeability": "high",
-                            "freshness_score": 0.90,
-                            "relevance_score": 0.90,
-                        },
-                    },
+                    self._scc_news_payload(
+                        confidence=0.70,
+                        freshness_score=0.90,
+                        relevance_score=0.90,
+                    ),
                 ],
                 signal_combo=["Bearish", "Neutral", "Bullish"],
                 raw_position_ratio=0.05,
@@ -4704,16 +4746,11 @@ class PMRiskGateRegressionTest(unittest.TestCase):
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Bearish", "confidence": 0.58, "metadata": {"tradeability": "medium"}},
                     {"agent_name": "fundamental", "signal": "Neutral", "confidence": 0.40, "metadata": {"tradeability": "medium"}},
-                    {
-                        "agent_name": "commodity_news",
-                        "signal": "Bullish",
-                        "confidence": 0.75,
-                        "metadata": {
-                            "tradeability": "high",
-                            "freshness_score": 0.90,
-                            "relevance_score": 0.90,
-                        },
-                    },
+                    self._scc_news_payload(
+                        confidence=0.75,
+                        freshness_score=0.90,
+                        relevance_score=0.90,
+                    ),
                 ],
                 signal_combo=["Bearish", "Neutral", "Bullish"],
                 raw_position_ratio=0.05,
@@ -4732,6 +4769,62 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         self.assertEqual(output.decision, "probe_only")
         self.assertIn("news_only_directional_trade", output.reasons)
         self.assertGreater(output.position_ratio_multiplier, 0.0)
+
+    def test_news_driver_reads_formal_scc_evidence_not_legacy_metadata(self):
+        output = self._auditor().plan(
+            PMRiskGateInput(
+                ticker="M",
+                analyst_signals=[
+                    {"agent_name": "technical", "signal": "Neutral", "confidence": 0.40},
+                    {"agent_name": "fundamental", "signal": "Neutral", "confidence": 0.40},
+                    self._scc_news_payload(
+                        confidence=0.75,
+                        freshness_score=0.40,
+                        relevance_score=0.45,
+                        legacy_freshness_score=0.99,
+                    ),
+                ],
+                signal_combo=["Neutral", "Neutral", "Bullish"],
+                raw_position_ratio=0.05,
+                current_position_ratio=0.0,
+                signal_strength=0.35,
+                market_confirmation={"enabled": True, "confirmation_score": 0.75},
+            )
+        )
+
+        diagnostics = output.diagnostics["news_driver_control"]
+        self.assertEqual(diagnostics["freshness_score"], 0.40)
+        self.assertEqual(diagnostics["relevance_score"], 0.45)
+
+    def test_pm_news_override_reads_formal_scc_evidence(self):
+        control = {
+            "news_override_tradeability": "high",
+            "news_override_min_confidence": 0.60,
+            "news_override_min_freshness": 0.70,
+            "news_override_min_relevance": 0.70,
+        }
+        fresh = self._scc_news_payload(
+            confidence=0.75,
+            freshness_score=0.90,
+            relevance_score=0.90,
+            legacy_freshness_score=0.10,
+        )
+        stale = self._scc_news_payload(
+            confidence=0.75,
+            freshness_score=0.40,
+            relevance_score=0.45,
+            legacy_freshness_score=0.99,
+        )
+        for payload in (fresh, stale):
+            payload.update(
+                {
+                    "side": "long",
+                    "effective_confidence": 0.75,
+                    "tradeability": "high",
+                }
+            )
+        self.assertTrue(_news_high_quality_override(fresh, "long", control))
+        self.assertFalse(_news_high_quality_override(stale, "long", control))
 
     def test_strategy_memory_weak_block_limits_new_exposure_to_probe(self):
         output = self._auditor().plan(
@@ -5093,16 +5186,11 @@ class PMRiskGateRegressionTest(unittest.TestCase):
                 analyst_signals=[
                     {"agent_name": "technical", "signal": "Neutral", "confidence": 0.45, "metadata": {"tradeability": "medium"}},
                     {"agent_name": "fundamental", "signal": "Neutral", "confidence": 0.42, "metadata": {"tradeability": "medium"}},
-                    {
-                        "agent_name": "commodity_news",
-                        "signal": "Bullish",
-                        "confidence": 0.52,
-                        "metadata": {
-                            "tradeability": "medium",
-                            "freshness_score": 0.60,
-                            "relevance_score": 0.65,
-                        },
-                    },
+                    self._scc_news_payload(
+                        confidence=0.52,
+                        freshness_score=0.60,
+                        relevance_score=0.65,
+                    ),
                 ],
                 signal_combo=["Neutral", "Neutral", "Bullish"],
                 raw_position_ratio=0.04,

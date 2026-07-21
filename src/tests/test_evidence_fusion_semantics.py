@@ -16,7 +16,10 @@ from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_si
 from tools.agent_tools.decision.pm_contract_builder import build_final_action_contract
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
-from tools.common.evidence_fusion_semantics import build_reviewer_fusion_attribution
+from tools.common.evidence_fusion_semantics import (
+    build_analyst_fusion_evidence,
+    build_reviewer_fusion_attribution,
+)
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 from tests.contract_test_fixtures import build_test_aec
 
@@ -89,6 +92,70 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         forbidden = {"target_lots", "lots_delta", "final_action", "final_action_contract", "authority_type"}
         self.assertFalse(forbidden.intersection(fusion))
 
+    def test_formal_freshness_sources_are_used_without_risk_flag_pollution(self):
+        technical = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.66,
+            business_quality_score=0.62,
+            setup_quality_score=0.64,
+            evidence_quality="medium",
+        )
+        technical_fusion = build_analyst_fusion_evidence(
+            technical,
+            {"risk_flags": ["choppy", "conflicting_indicators", "false_breakout"]},
+            analyst="technical",
+            ticker="BU",
+        )
+        self.assertEqual(technical_fusion["evidence_freshness_score"], 0.68)
+        self.assertEqual(technical_fusion["evidence_freshness"], "usable")
+
+        fundamental = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.NEUTRAL,
+            confidence=0.45,
+            business_quality_score=0.50,
+            evidence_quality="medium",
+            metadata={
+                "data_usage_summary": {
+                    "sources": {
+                        "finoview_fundamental": {"freshness_score": 0.41},
+                    }
+                }
+            },
+        )
+        fundamental_fusion = build_analyst_fusion_evidence(
+            fundamental,
+            {"data_quality": {"factor_freshness_score": 0.41}},
+            analyst="fundamental",
+            ticker="BU",
+        )
+        self.assertEqual(fundamental_fusion["evidence_freshness_score"], 0.41)
+        self.assertEqual(fundamental_fusion["evidence_freshness"], "stale")
+
+        news = AnalystSignal(
+            agent_name="commodity_news",
+            signal=Signal.BULLISH,
+            confidence=0.70,
+            business_quality_score=0.70,
+            evidence_quality="high",
+            metadata={
+                "data_usage_summary": {
+                    "sources": {
+                        "finoview_news_txt": {"freshness_score": 0.88},
+                    }
+                }
+            },
+        )
+        news_fusion = build_analyst_fusion_evidence(
+            news,
+            {},
+            analyst="commodity_news",
+            ticker="BU",
+        )
+        self.assertEqual(news_fusion["evidence_freshness_score"], 0.88)
+        self.assertEqual(news_fusion["evidence_freshness"], "fresh")
+
     def test_signal_collector_outputs_fusion_without_trade_authority(self):
         signals = [
             self._analyst_signal(analyst="technical", signal=Signal.BULLISH),
@@ -105,6 +172,18 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         self.assertIn("evidence_fusion", contract)
         self.assertIn("cross_analyst_conflicts", contract["evidence_fusion"])
         self.assertIn("evidence_strength_by_analyst", contract["evidence_fusion"])
+        for signal in signals:
+            analyst = signal.agent_name
+            source_fusion = signal.metadata["action_evidence_contract"]["fusion_evidence"]
+            self.assertEqual(
+                contract["evidence_fusion"]["evidence_strength_by_analyst"][analyst],
+                source_fusion["evidence_strength"],
+            )
+            self.assertEqual(
+                contract["evidence_fusion"]["evidence_freshness_by_analyst"][analyst],
+                source_fusion["evidence_freshness"],
+            )
+        self.assertGreater(contract["evidence_fusion"]["multi_evidence_consensus_score"], 0.0)
         forbidden = {"opportunity_score", "opportunity_rank", "target_lots", "lots_delta", "final_action_contract"}
         self.assertFalse(forbidden.intersection(contract))
 

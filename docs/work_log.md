@@ -38,3 +38,5 @@
 ==========2026年07月21日==========
 
 （1）[PM学习生命周期与有符号rank闭环] `portfolio_manager.py` 在首次正式学习消费前组装并冻结显式`pm_learning`的完整canonical Step4池，隔离similar/weak/incomplete prior且禁止后置追加；`pm_signal_fusion.py` 仅让open/add/scale/increase学习进入新增风险候选质量和rank；`pm_full_market_capital_deployment.py` 将七项分量一次求和并保留有符号rank；`pm_contract_builder.py`、`final_action_semantics.py`、`pm_contract_self_check.py` 按最终手数生命周期先路由完整池，再严格分离正式决策行与execution/profile行。原因：让学习真实影响新增风险投资价值与预算顺序，同时保证条件开仓继续等待盘中触发、非新增风险动作无伪rank，并保持既有资金层、probe预算和20%硬门控不变。
+
+（2）[证据新鲜度到资金落地闭环] `evidence_fusion_semantics.py` 只从正式时效字段和数据源事实解析新鲜度，不再让普通风险标签污染时效；`signal_evidence_collection.py` 由SCC来源AEC的唯一`fusion_evidence`生成并校验跨分析师融合；`pm_risk_gate.py`、`portfolio_manager.py` 的既有新闻规则只消费SCC重建证据中的正式新鲜度和相关性。原因：修复真实AEC时效在SCC中退化为unknown、共识分失真以及PM新闻规则固定读到零的问题，使新鲜度经候选质量、rank和仓位手数真实落地，同时不改变rank公式、参数和交易权限。
