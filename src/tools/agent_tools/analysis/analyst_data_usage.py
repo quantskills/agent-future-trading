@@ -191,6 +191,25 @@ def _as_date_text(value: Any) -> Optional[str]:
         return text[:10] if text else None
 
 
+def resolve_technical_data_freshness(
+    *,
+    latest_data_date: Any,
+    base_price_date: Any,
+) -> tuple[float, str]:
+    """Compare technical data with the Router-confirmed pre-open reference date."""
+    latest = pd.to_datetime(latest_data_date, errors="coerce")
+    reference = pd.to_datetime(base_price_date, errors="coerce")
+    if pd.isna(latest) or pd.isna(reference):
+        return 0.0, "unknown"
+    latest_day = latest.normalize()
+    reference_day = reference.normalize()
+    if latest_day == reference_day:
+        return 1.0, "fresh"
+    if latest_day < reference_day:
+        return 0.35, "stale"
+    return 0.0, "unknown"
+
+
 def _columns_used(df: Any, preferred: Optional[List[str]] = None, limit: int = 20) -> List[str]:
     if df is None or not hasattr(df, "columns"):
         return []

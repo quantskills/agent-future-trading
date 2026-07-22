@@ -5,13 +5,16 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pandas as pd
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from agents.analysis_team import technical
 from agents.decision_team import portfolio_manager
 from agents.decision_team.signal_collector import signal_collector_agent
 from agents.decision_team.portfolio_manager import (
@@ -26,6 +29,7 @@ from tests.contract_test_fixtures import build_test_aec
 from tests.test_pm_atomic_contract_flow import _pm_state, _signal_collection_contract
 from tools.agent_tools.decision.pm_contract_self_check import check_final_action_contract
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
+from tools.agent_tools.analysis.analyst_structured_output import TechnicalAnalystOutput
 
 
 def _portfolio() -> Portfolio:
@@ -51,10 +55,125 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
         def get_similar_alpha_setup_action_values(self, **kwargs):
             return []
 
-    def _freshness_signals(self, ticker: str, freshness_score: float) -> list[AnalystSignal]:
-        signals = []
-        for index, analyst in enumerate(("technical", "fundamental", "commodity_news"), start=1):
-            technical = analyst == "technical"
+    def _technical_freshness_signal(
+        self,
+        ticker: str,
+        *,
+        latest_data_date: str,
+        base_price_date: str,
+    ) -> AnalystSignal:
+        frame = pd.DataFrame(
+            {
+                "open": [3470.0, 3480.0, 3490.0, 3500.0, 3510.0],
+                "high": [3500.0, 3510.0, 3520.0, 3530.0, 3540.0],
+                "low": [3450.0, 3460.0, 3470.0, 3480.0, 3490.0],
+                "close": [3480.0, 3490.0, 3500.0, 3510.0, 3520.0],
+                "volume": [1000, 1100, 1200, 1300, 1400],
+            },
+            index=pd.bdate_range(end=latest_data_date, periods=5),
+        )
+        router = Mock()
+        router.get_daily_candles_df.return_value = frame
+        technical_context = {
+            "ticker": ticker,
+            "sector": "energy_chemical",
+            "tradeability": "high",
+            "setup_type": "trend_breakout_setup",
+            "setup_quality_ok": True,
+            "market_regime": "trend",
+            "dominant_direction": "bullish",
+            "risk_flags": [],
+            "indicator_votes": {"details": {"trend": "Bullish"}},
+            "features": {"volatility": 0.10, "trend_strength": 35.0},
+        }
+        llm_output = TechnicalAnalystOutput(
+            signal=Signal.BULLISH,
+            confidence=0.78,
+            justification="Current trend, momentum and volume evidence are aligned.",
+            horizon_class="short",
+            expected_horizon_days=2,
+            market_regime="trend",
+            trend_stage="early_trend",
+            setup_type="trend_breakout_setup",
+            opportunity_type="trend_continuation",
+            opportunity_state="tradeable_candidate",
+            entry_timing_signal="breakout",
+            entry_trigger="current breakout is confirmed",
+            trigger_valid=True,
+            current_trigger_confirmed=True,
+            invalidation_present=True,
+            invalidation_level=3400.0,
+            exit_hint="close below 3400 invalidates the setup",
+            evidence_quality="high",
+            business_quality_score=0.76,
+            setup_quality_score=0.76,
+        )
+        full_config = {
+            "llm": {"provider": "test", "model": "deterministic-freshness"},
+            "learning": {"contextual_rule_calibration": {"enabled": False}},
+        }
+        state = {
+            "ticker": ticker,
+            "trading_date": datetime(2025, 3, 25),
+            "market_type": "china_futures",
+            "pre_open_only": True,
+            "info_cutoff": "pre_open",
+            "config_id": "cfg-freshness-chain",
+            "llm_config": {"provider": "test", "model": "deterministic-freshness"},
+            "config": full_config,
+            "full_config": full_config,
+            "morning_price_context": SimpleNamespace(
+                base_price=3500.0,
+                base_price_source="t_minus_1_close_fallback",
+                base_price_date=base_price_date,
+                open_price=None,
+                prev_close_price=3500.0,
+            ),
+        }
+        with patch.object(technical, "Router", return_value=router), patch.object(
+            technical, "get_db", return_value=Mock()
+        ), patch.object(
+            technical, "calculate_market_features", return_value={"volatility": 0.10, "trend_strength": 35.0}
+        ), patch.object(
+            technical, "calculate_adaptive_params", return_value={}
+        ), patch.object(
+            technical,
+            "_build_technical_signal_results",
+            return_value={"trend": Signal.BULLISH, "gap_analysis": "pre_open"},
+        ), patch.object(
+            technical, "build_technical_context", return_value=technical_context
+        ), patch.object(
+            technical, "resolve_config_id", return_value="cfg-freshness-chain"
+        ), patch.object(
+            technical,
+            "build_learning_context",
+            return_value={"text": "", "selected_ids": [], "memory_trace": {}},
+        ), patch.object(
+            technical, "agent_call", return_value=llm_output
+        ), patch.object(technical.logger, "log_signal"):
+            signal = technical.technical_agent(state)["analyst_signals"][0]
+        contract = signal.metadata["action_evidence_contract"]
+        source = contract["data_usage_summary"]["sources"]["pandaai_market"]
+        self.assertEqual(source["latest_data_date"], latest_data_date)
+        self.assertNotIn("freshness_score", source)
+        signal.metadata["signal_record_id"] = f"technical-{ticker}-{latest_data_date}"
+        return signal
+
+    def _freshness_signals(
+        self,
+        ticker: str,
+        *,
+        latest_data_date: str,
+        base_price_date: str,
+    ) -> list[AnalystSignal]:
+        signals = [
+            self._technical_freshness_signal(
+                ticker,
+                latest_data_date=latest_data_date,
+                base_price_date=base_price_date,
+            )
+        ]
+        for index, analyst in enumerate(("fundamental", "commodity_news"), start=2):
             contract = build_test_aec(
                 analyst,
                 ticker=ticker,
@@ -62,23 +181,22 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                 signal="Bullish",
                 side="long",
                 confidence=0.78,
-                opportunity_state="tradeable_candidate" if technical else "no_opportunity",
-                setup_type="trend_breakout_setup" if technical else "direction_context",
-                setup_quality_ok=technical,
-                trigger_valid=technical,
-                current_trigger_confirmed=technical,
+                opportunity_state="no_opportunity",
+                setup_type="direction_context",
+                setup_quality_ok=False,
+                trigger_valid=False,
+                current_trigger_confirmed=False,
                 invalidation_present=True,
-                entry_trigger=None if technical else "",
+                entry_trigger="",
                 invalidation_condition="close_below_current_setup_boundary",
                 extra={
                     "business_quality_score": 0.76,
-                    "setup_quality_score": 0.76 if technical else 0.0,
-                    "entry_timing_signal": "breakout" if technical else "",
+                    "setup_quality_score": 0.0,
+                    "entry_timing_signal": "",
                 },
             )
             source = next(iter(contract["data_usage_summary"]["sources"].values()))
-            if analyst in {"fundamental", "commodity_news"}:
-                source["freshness_score"] = freshness_score
+            source["freshness_score"] = 1.0
             if analyst == "commodity_news":
                 source["relevance_score"] = 0.90
             source_signal = AnalystSignal(
@@ -86,13 +204,13 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                 signal=Signal.BULLISH,
                 confidence=0.78,
                 business_quality_score=0.76,
-                setup_quality_score=0.76 if technical else 0.0,
+                setup_quality_score=0.0,
                 evidence_quality="high",
                 metadata={"action_evidence_contract": contract},
             )
             fusion = build_analyst_fusion_evidence(
                 source_signal,
-                {"freshness_score": freshness_score},
+                {},
                 analyst=analyst,
                 ticker=ticker,
             )
@@ -106,7 +224,7 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.78,
                     metadata={
-                        "signal_record_id": f"signal-{index}-{freshness_score}",
+                        "signal_record_id": f"signal-{index}-{ticker}",
                         "action_evidence_contract": contract,
                     },
                 )
@@ -116,18 +234,23 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
     def _freshness_pm_state(
         self,
         ticker: str,
-        freshness_score: float,
+        latest_data_date: str,
+        base_price_date: str,
         confirmation_floor: float,
     ) -> tuple[Portfolio, dict]:
         portfolio = Portfolio(
-            id=f"portfolio-{freshness_score}",
+            id=f"portfolio-{ticker}-{latest_data_date}",
             cashflow=5_000_000.0,
             account_equity=5_000_000.0,
             cash_available=5_000_000.0,
             margin_available=5_000_000.0,
             positions={},
         )
-        signals = self._freshness_signals(ticker, freshness_score)
+        signals = self._freshness_signals(
+            ticker,
+            latest_data_date=latest_data_date,
+            base_price_date=base_price_date,
+        )
         full_config = {
             "cashflow": 5_000_000.0,
             "max_total_margin_ratio": 0.20,
@@ -205,13 +328,21 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
             )
 
     def test_freshness_reaches_scc_rank_and_final_target_lots(self):
-        portfolio, fresh_state = self._freshness_pm_state("BU", 0.90, 0.0)
-        _, stale_state = self._freshness_pm_state("C", 0.30, 0.0)
+        portfolio, fresh_state = self._freshness_pm_state(
+            "BU", "2025-03-24", "2025-03-24", 0.0
+        )
+        _, same_ticker_stale_state = self._freshness_pm_state(
+            "BU", "2025-03-21", "2025-03-24", 0.0
+        )
+        _, stale_state = self._freshness_pm_state(
+            "C", "2025-03-21", "2025-03-24", 0.0
+        )
         fresh_consensus = fresh_state["signal_collection_contract"]["evidence_fusion"]["multi_evidence_consensus_score"]
-        stale_consensus = stale_state["signal_collection_contract"]["evidence_fusion"]["multi_evidence_consensus_score"]
+        stale_consensus = same_ticker_stale_state["signal_collection_contract"]["evidence_fusion"]["multi_evidence_consensus_score"]
         self.assertGreater(fresh_consensus, stale_consensus)
         confirmation_floor = (fresh_consensus + stale_consensus) / 2.0
         fresh_state["full_config"]["market_confirmation"]["min_confirmation_score_for_new_entry"] = confirmation_floor
+        same_ticker_stale_state["full_config"]["market_confirmation"]["min_confirmation_score_for_new_entry"] = confirmation_floor
         stale_state["full_config"]["market_confirmation"]["min_confirmation_score_for_new_entry"] = confirmation_floor
 
         def run_pm(state):
@@ -232,9 +363,20 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                 return portfolio_agent_futures(state)["pm_state"]
 
         fresh_pm = run_pm(fresh_state)
+        same_ticker_stale_pm = run_pm(same_ticker_stale_state)
         stale_pm = run_pm(stale_state)
+        same_ticker_fresh_contract = finalize_pm_full_market_contracts(
+            generated=[("BU", deepcopy(fresh_pm))],
+            config=fresh_state["full_config"],
+            portfolio=portfolio,
+        )[0][1].signal_snapshot["final_action_contract"]
+        same_ticker_stale_contract = finalize_pm_full_market_contracts(
+            generated=[("BU", deepcopy(same_ticker_stale_pm))],
+            config=same_ticker_stale_state["full_config"],
+            portfolio=same_ticker_stale_state["portfolio"],
+        )[0][1].signal_snapshot["final_action_contract"]
         signed = finalize_pm_full_market_contracts(
-            generated=[("BU", fresh_pm), ("C", stale_pm)],
+            generated=[("BU", deepcopy(fresh_pm)), ("C", deepcopy(stale_pm))],
             config=fresh_state["full_config"],
             portfolio=portfolio,
         )
@@ -245,13 +387,36 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
         fresh_contract = contracts["BU"]
         stale_contract = contracts["C"]
         fresh_row = fresh_pm["opportunity_scorecard"]["long"]
+        same_ticker_stale_row = same_ticker_stale_pm["opportunity_scorecard"]["long"]
         stale_row = stale_pm["opportunity_scorecard"]["long"]
-        self.assertGreater(fresh_row["market_confirmation_score"], stale_row["market_confirmation_score"])
+        fresh_technical = fresh_state["analyst_signals"][0].metadata["action_evidence_contract"]
+        stale_technical = same_ticker_stale_state["analyst_signals"][0].metadata["action_evidence_contract"]
+        self.assertEqual(fresh_technical["data_freshness"], "fresh")
+        self.assertEqual(stale_technical["data_freshness"], "stale")
+        self.assertEqual(fresh_technical["fusion_evidence"]["evidence_freshness_score"], 1.0)
+        self.assertEqual(stale_technical["fusion_evidence"]["evidence_freshness_score"], 0.35)
+        self.assertGreater(
+            fresh_technical["fusion_evidence"]["evidence_strength_score"],
+            stale_technical["fusion_evidence"]["evidence_strength_score"],
+        )
+        self.assertGreater(fresh_row["market_confirmation_score"], same_ticker_stale_row["market_confirmation_score"])
+        self.assertGreater(
+            fresh_row["candidate_quality_components"]["opportunity_score"],
+            same_ticker_stale_row["candidate_quality_components"]["opportunity_score"],
+        )
         self.assertGreater(
             fresh_row["rank_score_input_components"]["cold_start_evidence_quality"],
-            stale_row["rank_score_input_components"]["cold_start_evidence_quality"],
+            same_ticker_stale_row["rank_score_input_components"]["cold_start_evidence_quality"],
         )
-        self.assertGreater(fresh_row["rank_score"], stale_row["rank_score"])
+        self.assertGreaterEqual(fresh_row["candidate_quality"], same_ticker_stale_row["candidate_quality"])
+        self.assertGreater(
+            same_ticker_fresh_contract["capital_deployment"]["rank_input_components"]["rank_score"],
+            same_ticker_stale_contract["capital_deployment"]["rank_input_components"]["rank_score"],
+        )
+        self.assertLess(
+            same_ticker_stale_contract["target_lots"],
+            same_ticker_fresh_contract["target_lots"],
+        )
         self.assertEqual(fresh_contract["capital_deployment"]["rank_budget_sequence"], 1)
         self.assertEqual(stale_contract["capital_deployment"]["rank_budget_sequence"], 2)
         self.assertLess(stale_contract["target_lots"], fresh_contract["target_lots"])

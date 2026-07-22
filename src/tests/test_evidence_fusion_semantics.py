@@ -107,8 +107,27 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             analyst="technical",
             ticker="BU",
         )
-        self.assertEqual(technical_fusion["evidence_freshness_score"], 0.68)
-        self.assertEqual(technical_fusion["evidence_freshness"], "usable")
+        self.assertEqual(technical_fusion["evidence_freshness_score"], 0.0)
+        self.assertEqual(technical_fusion["evidence_freshness"], "unknown")
+
+        technical.data_freshness = "fresh"
+        untrusted_text_fusion = build_analyst_fusion_evidence(
+            technical,
+            {},
+            analyst="technical",
+            ticker="BU",
+        )
+        self.assertEqual(untrusted_text_fusion["evidence_freshness_score"], 0.0)
+        self.assertEqual(untrusted_text_fusion["evidence_freshness"], "unknown")
+
+        stale_technical_fusion = build_analyst_fusion_evidence(
+            technical,
+            {"freshness_score": 0.35},
+            analyst="technical",
+            ticker="BU",
+        )
+        self.assertEqual(stale_technical_fusion["evidence_freshness_score"], 0.35)
+        self.assertEqual(stale_technical_fusion["evidence_freshness"], "stale")
 
         fundamental = AnalystSignal(
             agent_name="fundamental",

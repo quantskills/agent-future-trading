@@ -107,16 +107,24 @@ def _value(signal: Any, contract: Mapping[str, Any], key: str, default: Any = No
     return default
 
 
-def _formal_freshness_score(
+def resolve_deterministic_freshness_score(
     signal: Any,
-    contract: Mapping[str, Any],
-    context: Mapping[str, Any],
+    quality_context: Mapping[str, Any] | None,
 ) -> float:
+    """Resolve freshness only from deterministic numeric or availability facts."""
+    context = quality_context if isinstance(quality_context, Mapping) else {}
+    contract = _contract_from_signal(signal)
+    context_contract = context.get("action_evidence_contract")
+    if isinstance(context_contract, Mapping):
+        contract = {**dict(context_contract), **contract}
     data_usage = contract.get("data_usage_summary") if isinstance(contract.get("data_usage_summary"), Mapping) else {}
     metadata = getattr(signal, "metadata", None)
     if not data_usage and isinstance(metadata, Mapping) and isinstance(metadata.get("data_usage_summary"), Mapping):
         data_usage = metadata.get("data_usage_summary") or {}
     data_quality = context.get("data_quality") if isinstance(context.get("data_quality"), Mapping) else {}
+
+    if data_usage.get("data_available") is False:
+        return 0.0
 
     candidates: list[float] = []
     for container, key in (
@@ -134,21 +142,14 @@ def _formal_freshness_score(
     if candidates:
         return max(candidates)
 
-    explicit_statuses = {
-        _lower(_value(signal, contract, "data_freshness", "")),
-        _lower(context.get("data_freshness")),
-        _lower(data_quality.get("data_freshness")),
-    }
-    if "missing" in explicit_statuses:
-        return 0.0
     stale_facts = (
         _as_list(data_usage.get("stale_data"))
         + _as_list(context.get("stale_data"))
         + _as_list(data_quality.get("stale_data"))
     )
-    if "stale" in explicit_statuses or stale_facts:
+    if stale_facts:
         return 0.35
-    return 0.68
+    return 0.0
 
 
 def build_analyst_fusion_evidence(
@@ -168,7 +169,10 @@ def build_analyst_fusion_evidence(
     business_quality = _clip(_safe_float(getattr(signal, "business_quality_score", 0.0), 0.0))
     setup_quality = _clip(_safe_float(getattr(signal, "setup_quality_score", 0.0), 0.0))
     evidence_quality = _quality_score(_value(signal, contract, "evidence_quality", "unknown"))
-    freshness_score = _formal_freshness_score(signal, contract, context)
+    freshness_score = resolve_deterministic_freshness_score(
+        signal,
+        {**dict(context), "action_evidence_contract": contract},
+    )
 
     conflicts = [
         str(item)

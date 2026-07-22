@@ -94,6 +94,22 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             product_profile_usage=usage,
         )
 
+    def test_llm_role_schemas_exclude_deterministic_freshness_and_system_unavailable_setup(self):
+        self.assertIn("data_freshness", AnalystSignal.model_json_schema()["properties"])
+        for output_model in (
+            TechnicalAnalystOutput,
+            FundamentalAnalystOutput,
+            CommodityNewsAnalystOutput,
+        ):
+            with self.subTest(output_model=output_model.__name__):
+                schema = output_model.model_json_schema()
+                self.assertNotIn("data_freshness", schema["properties"])
+                setup_schema = schema["properties"]["setup_type"]
+                self.assertNotIn(
+                    "data_unavailable_no_trade",
+                    setup_schema.get("enum", []),
+                )
+
     def _technical_signal(self, *, timing: str, trigger: str, invalidation_level=95.0) -> AnalystSignal:
         return AnalystSignal(
             agent_name="technical",

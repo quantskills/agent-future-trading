@@ -17,6 +17,7 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     get_product_price_behavior_profile,
 )
 from tools.agent_tools.analysis.analyst_quality import apply_signal_quality_gate, apply_trade_research_contract
+from tools.common.evidence_fusion_semantics import resolve_deterministic_freshness_score
 from tools.common.signal_evidence_collection import ACTION_EVIDENCE_EXCLUDED_SIGNAL_FIELDS
 
 
@@ -94,6 +95,31 @@ def _preserve_data_unavailable_boundary(signal: Any) -> None:
         contract.pop("invalidation_condition", None)
         metadata["action_evidence_contract"] = contract
         signal.metadata = metadata
+
+
+def _land_deterministic_data_freshness(
+    signal: Any,
+    quality_context: Mapping[str, Any],
+    analyst: str,
+) -> None:
+    """Land system-owned freshness on the shared analyst signal before AEC build."""
+    metadata = dict(getattr(signal, "metadata", {}) or {})
+    data_usage = metadata.get("data_usage_summary")
+    if isinstance(data_usage, Mapping) and data_usage.get("data_available") is False:
+        signal.data_freshness = "missing"
+        return
+    if str(analyst or "").strip().lower() == "fundamental":
+        # Fundamental enrichment already owns its deterministic factor-freshness label.
+        return
+    score = resolve_deterministic_freshness_score(signal, quality_context)
+    if score >= 0.78:
+        signal.data_freshness = "fresh"
+    elif score >= 0.50:
+        signal.data_freshness = "near_stale"
+    elif score > 0:
+        signal.data_freshness = "stale"
+    else:
+        signal.data_freshness = "unknown"
 
 
 def build_required_market_data_unavailable_signal(
@@ -219,6 +245,7 @@ def finalize_analyst_signal(
     )
     signal = apply_signal_quality_gate(signal, context, config, analyst)
     signal = apply_business_quality_enrichment(signal, context, config, analyst)
+    _land_deterministic_data_freshness(signal, context, analyst)
     _preserve_data_unavailable_boundary(signal)
     evaluated_profile = evaluate_profile_usage_contract(
         signal,

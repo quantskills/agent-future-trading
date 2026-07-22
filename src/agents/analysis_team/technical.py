@@ -22,7 +22,10 @@ from tools.agent_tools.analysis.analyst_quality import (
 )
 from tools.agent_tools.analysis.analyst_learning_calibration import retrieve_analyst_policy_calibration
 from tools.agent_tools.analysis.analyst_learning_context import build_learning_context, resolve_config_id
-from tools.agent_tools.analysis.analyst_data_usage import build_technical_data_usage
+from tools.agent_tools.analysis.analyst_data_usage import (
+    build_technical_data_usage,
+    resolve_technical_data_freshness,
+)
 from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
 from tools.agent_tools.analysis.analyst_output_finalization import (
     build_required_market_data_unavailable_signal,
@@ -229,11 +232,15 @@ def technical_agent(state: FundState):
         logger.error(f"{ticker}: technical_price_data_fetch_failed")
         raise RuntimeError(f"Failed to fetch price data for {ticker}") from None
 
-    _validate_pre_open_price_window(
+    latest_data_date = _validate_pre_open_price_window(
         ticker=ticker,
         trading_date=trading_date,
         prices_df=prices_df,
         pre_open_only=pre_open_only,
+    )
+    freshness_score, freshness_label = resolve_technical_data_freshness(
+        latest_data_date=latest_data_date,
+        base_price_date=getattr(morning_price_context, "base_price_date", None),
     )
     # Compute adaptive market features before building indicator signals.
     features = calculate_market_features(prices_df)
@@ -306,6 +313,8 @@ def technical_agent(state: FundState):
 
     signal_results = _build_technical_signal_results(prices_df, adaptive_params, gap_analysis)
     technical_context = build_technical_context(ticker, signal_results, features)
+    technical_context["freshness_score"] = freshness_score
+    technical_context["data_freshness"] = freshness_label
     product_profile = get_product_price_behavior_profile(ticker, full_config)
     product_profile_usage = build_profile_usage_contract(ticker, "technical", product_profile)
     technical_context["product_profile_evidence"] = product_profile_usage
@@ -338,6 +347,8 @@ def technical_agent(state: FundState):
         product_profile_context=format_profile_for_technical(ticker, product_profile),
         features=features,
         llm_path=llm_path,
+        data_recency_score=freshness_score,
+        data_recency_label=freshness_label,
     )
     learning_context = build_learning_context(
         db=db,

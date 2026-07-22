@@ -13,7 +13,7 @@ Output format:
 - expected_horizon_days: integer trading-day horizon
 - market_regime: concise regime label
 - trend_stage: concise trend or event-stage label
-- setup_type: one of trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / fundamental_timing_setup / news_event_setup / data_unavailable_no_trade / unknown
+- setup_type: one of trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / fundamental_timing_setup / news_event_setup / unknown
 - price_percentile: 0.0-1.0 when inferable, otherwise null
 - entry_trigger: concrete current trigger fact or pending trigger condition
 - do not output action_name; action_name is reserved for Researcher action-value records, not analyst evidence
@@ -22,7 +22,6 @@ Output format:
 - add_allowed: true only when this is a verified add-on signal
 - direction_anchor: short phrase describing the direction anchor, especially for fundamental signals
 - supply_demand_state, basis_state, inventory_state, warehouse_receipt_state, position_flow_state: concise state labels or "unknown"
-- data_freshness: fresh / near_stale / stale / missing / unknown
 - event_type: event class for news, otherwise "none"
 - impact_window_days: integer event window, 0 when not applicable
 - requires_fundamental_confirmation: boolean
@@ -358,7 +357,7 @@ Return these explicit fields in addition to signal/confidence/justification:
 - market_regime: supply_demand_tight / supply_demand_loose / mixed / unknown
 - trend_stage: improving_fundamental_anchor / weakening_fundamental_anchor / mixed / unknown
 - price_percentile: null unless the supplied data can support it
-- setup_type: fundamental_timing_setup / data_unavailable_no_trade / unknown
+- setup_type: fundamental_timing_setup / unknown
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - entry_trigger: short-timing condition needed to make the fundamental thesis tradable
 - invalidation_level: null unless an explicit price invalidation level is inferable
@@ -406,6 +405,8 @@ def build_futures_technical_prompt(
     product_profile_context: str = "",
     features: Optional[Mapping[str, Any]] = None,
     llm_path: str = "cloud_only",
+    data_recency_score: Optional[float] = None,
+    data_recency_label: str = "unknown",
 ) -> str:
     """Build the runtime China-futures technical analyst prompt.
 
@@ -439,6 +440,15 @@ Canonical Trader-observable entry conditions:
 T-day open-dependent gap analysis is expected to be unavailable during the pre-open proposal stage.
 """
 
+    if data_recency_score is not None:
+        prompt += (
+            "\nSystem-computed market-data recency (read-only fact): "
+            f"status={str(data_recency_label or 'unknown')}, "
+            f"score={float(data_recency_score):.2f}. "
+            "Use this fact when judging evidence quality and confirmation needs; "
+            "do not reproduce or modify it as an output field.\n"
+        )
+
     if technical_summary:
         prompt += "\n" + str(technical_summary)
 
@@ -454,7 +464,7 @@ T-day open-dependent gap analysis is expected to be unavailable during the pre-o
 - Volume ratio: {_fmt_optional_float(features.get('volume_ratio'))}
 
 === Decision guidance ===
-- First classify setup_type using the commodity/sector context supplied in the summary: trend_breakout_setup, trend_pullback_setup, range_reversal_setup, volatility_breakout_setup, failed_rebound_setup, or data_unavailable_no_trade.
+- First classify setup_type using the commodity/sector context supplied in the summary: trend_breakout_setup, trend_pullback_setup, range_reversal_setup, volatility_breakout_setup, failed_rebound_setup, or unknown.
 - Do not apply the same indicator interpretation to every futures category. Energy/chemicals often need volatility and cost-chain confirmation; ferrous needs trend plus inventory/demand chain confirmation; nonferrous needs trend plus macro/stock confirmation; agricultural contracts need season/weather/event awareness.
 - In trending markets, trend_breakout or trend_pullback requires ADX strength, directional trend/MACD alignment, and volume/open-interest or settlement confirmation.
 - In ranging/choppy/weak-trend markets, do not label ordinary trend continuation as tradable. Use range_reversal only when RSI/Stochastic/mean-reversion and support/resistance location align.
@@ -492,7 +502,7 @@ Output format:
 - market_regime: current technical regime
 - trend_stage: early_trend / mid_trend / late_trend / range_bound / reversal / unknown
 - price_percentile: current price percentile in the lookback window, 0.0-1.0 when inferable
-- setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / data_unavailable_no_trade
+- setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / unknown
 - entry_timing_signal: no_opportunity must use an empty string; every complete watch_for_trigger, probe_candidate, or tradeable_candidate must use exactly one of breakout / pullback / vwap_confirmed
 - watch_for_trigger means the canonical condition is pending, so set trigger_valid=false and current_trigger_confirmed=false while still filling entry_timing_signal
 - probe_candidate/tradeable_candidate means the same canonical condition is already confirmed, so fill entry_timing_signal and set trigger_valid=true and current_trigger_confirmed=true
@@ -541,7 +551,7 @@ def build_futures_fundamental_prompt(
         "agricultural contracts emphasize crop progress, weather, import/export, inventory and crush/feed demand.\n"
         "- opportunity_type: medium_fundamental / trend_continuation / event_driven / probe / no_trade\n"
         "- opportunity_state: use no_opportunity for fundamental new-risk evidence; risk_reduction_candidate retains its existing-position meaning\n"
-        "- setup_type: fundamental_timing_setup when factors form a setup, otherwise data_unavailable_no_trade or unknown\n"
+        "- setup_type: fundamental_timing_setup when factors form a setup, otherwise unknown\n"
         "- evidence_role=direction_context; this value is fixed for fundamental output\n"
         "- entry_timing_signal must be an empty string in every fundamental output; fundamental must not output a Trader execution profile\n"
         "- entry_trigger may describe research confirmation in your analysis, but it is not persisted as a Trader trigger\n"

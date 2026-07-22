@@ -154,8 +154,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | LLM 智能体 | 输出契约 | 必须覆盖的结构化字段 | 自由文本允许范围 | 禁止 |
 |---|---|---|---|---|
-| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 `entry_timing_signal` 只允许 `breakout/pullback/vwap_confirmed`；正式 `entry_trigger` 由共享 canonical 定义生成；其余方向、setup、触发确认、失效、质量与数据字段保持完整 | 解释价格形态、分析 setup、失效位、品种趋势惯性、波动纪律、假突破风险和不确定性 | 输出手数、仓位、PM rank、资金理由、`final_action_contract`；自创执行 profile 或正式触发文字 |
-| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`；保留方向、供需、库存、利润、基差、freshness、失效和研究证据 | 解释商品驱动优先级、持续性、反向压制和需要技术面确认的原因 | 输出 Trader profile、执行触发、手数、仓位、交易动作或资金部署 |
+| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 `entry_timing_signal` 只允许 `breakout/pullback/vwap_confirmed`；正式 `entry_trigger` 由共享 canonical 定义生成；其余方向、setup、触发确认、失效和质量字段保持完整；确定性时效由收口工具写入 AEC | 解释价格形态、分析 setup、失效位、品种趋势惯性、波动纪律、假突破风险和只读时效事实的影响 | 输出手数、仓位、PM rank、资金理由、`data_freshness`、`data_unavailable_no_trade`、`final_action_contract`；自创执行 profile 或正式触发文字 |
+| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`；保留方向、供需、库存、利润、基差、失效和研究证据；确定性时效由收口工具写入 AEC | 解释商品驱动优先级、持续性、反向压制、只读时效事实和需要技术面确认的原因 | 输出 Trader profile、执行触发、`data_freshness`、`data_unavailable_no_trade`、手数、仓位、交易动作或资金部署 |
 | 期货新闻面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=event_catalyst`；只有当前事件已满足即时执行边界时允许 `entry_timing_signal=event_immediate` 并由共享 canonical 定义生成正式触发；其他新闻证据不创建普通15分钟 profile | 解释新闻事件、政策冲击、影响窗口、是否已兑现、事件催化价值和一次性冲击风险 | 把普通新闻方向写成 watch/profile，或直接写交易动作和手数 |
 | 研究员 | 结构化研究成果 | `research_domain`、`sample_scope`、`source_trading_date/trading_date`、`setup_type/profile`、`action_value` 或 `policy_state`、`confidence`、`validity_window`、`evidence_scope`、`excluded_reason` | 解释因果、冲突、反事实、不确定性和未来适用条件 | 修改当天合约、成交、结算、PnL；直接给 Trader 执行规则 |
 
@@ -169,6 +169,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 6. 新增 LLM 输出字段前，必须先登记字段语义，再补提示词检查和结构测试。
 7. `product_profile_evidence` 是分析层字段。三类分析师必须读取 `analyst_product_price_behavior_profile.py` 生成的商品差异化框架，但只能把它用于证据强调、setup 分类、确认要求、季节窗口和假突破风险识别；不能从 profile 推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
 8. `fusion_evidence` 是分析层预测证据字段。三类分析师必须把证据强弱、时效、冲突、确认需求、缺失证据和本专业风险落入该字段；不能从它推导手数、保证金、reason code、PM rank 或 `final_action_contract`。
+9. `data_freshness` 与 `data_unavailable_no_trade` 是系统确定性状态，不属于三个分析师的 LLM 输出 Schema。LLM 只能读取已经计算好的时效事实并分析其对预测证据的影响；正常路径由确定性收口工具把时效写入共享 AEC，必需盘前事实不可用时由现有确定性不可用构建路径生成中性 AEC。
 
 ---
 
@@ -184,6 +185,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 ```text
 盘前可见数据
+-> Router 生成 morning_price_context.base_price_date；技术面以 latest_data_date 对比该参考日生成确定性时效事实
 -> 技术面分析师以当前可见价格计算市场特征、初始自适应参数和初始 market_regime
 -> 技术面分析师读取过去有效的同产品/周期/market_regime contextual rule calibration，有界校准参数并重算最终指标与 technical_context
 -> 仅限历史交易日的本专业学习上下文进入提示词
@@ -203,7 +205,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 只有必需盘前市场事实不可用才进入全局中性状态。此时technical、fundamental、commodity_news仍分别通过自己的正式入口生成共享校验通过的中性AEC，不调用LLM；Workflow保存三份信号并取得真实ID后，Signal Collector才可生成唯一SCC。Collector不得代替分析师、生成信号或自创ID。
 
-分析师可以调用 LLM 做多维信息理解、冲突分析、反事实推理、不确定性判断和价格走势预测解释；但正式输出只能是结构化预测证据，不能是手数、仓位、保证金、排名或最终交易动作。最终收口必须重建只含AEC字段的 `AnalystSignal`：metadata保存前仅AEC、Workflow追加ID后仅AEC和真实ID；自由文本justification、LLM路由、内部参数、校准过程、学习检索上下文及report_sections不得跨智能体、持久化或写日志。数据工具请求参数、原始结果、原始异常、本机路径、文件编码、动态权重调整和学习覆盖过程也不得进入AEC或日志；运行失败只记录稳定边界码。LLM结构化调用可以按配置重试，但不得以默认Pydantic对象、默认信号或默认事实结束；重试耗尽必须抛出稳定 `llm_inference_failed:*` 并终止该正式分析入口。分析师报告只能呈现同一份已校验AEC。
+分析师可以调用 LLM 做多维信息理解、冲突分析、反事实推理、不确定性判断和价格走势预测解释；但正式输出只能是结构化预测证据，不能生产或改写数据可用性、新鲜度，也不能是手数、仓位、保证金、排名或最终交易动作。最终收口必须重建只含AEC字段的 `AnalystSignal`：metadata保存前仅AEC、Workflow追加ID后仅AEC和真实ID；自由文本justification、LLM路由、内部参数、校准过程、学习检索上下文及report_sections不得跨智能体、持久化或写日志。数据工具请求参数、原始结果、原始异常、本机路径、文件编码、动态权重调整和学习覆盖过程也不得进入AEC或日志；运行失败只记录稳定边界码。LLM结构化调用可以按配置重试，但不得以默认Pydantic对象、默认信号或默认事实结束；重试耗尽必须抛出稳定 `llm_inference_failed:*` 并终止该正式分析入口。分析师报告只能呈现同一份已校验AEC。
 
 | LLM 推理内容 | 必须落地字段 | 不能落地为 |
 |---|---|---|
@@ -214,7 +216,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 新闻即时事件 | `opportunity_state=probe_candidate/tradeable_candidate`、`entry_timing_signal=event_immediate`、当前触发确认 | 普通15分钟 watch |
 | 失效边界 | `invalidation_present`、`invalidation_condition` | 无边界开仓 |
 | 证据冲突 | `current_evidence_conflict`、`conflicting_factors` | 强行给方向 |
-| 证据强弱和时效 | `fusion_evidence.evidence_strength`、`fusion_evidence.evidence_freshness`、`fusion_evidence.evidence_decay_risk` | PM score、rank、手数 |
+| 证据强弱 | `fusion_evidence.evidence_strength`及方向、质量、冲突字段 | PM score、rank、手数 |
+| 确定性数据时效 | LLM只读；收口工具写入 `data_freshness`、`fusion_evidence.evidence_freshness`、`fusion_evidence.evidence_decay_risk` | LLM输出或改写时效、PM score、rank、手数 |
 | 跨专业确认需求 | `fusion_evidence.confirmation_requirements` | Trader 触发权限 |
 | 本专业特殊风险 | `technical_false_breakout_risk` / `fundamental_opposition_strength` / `news_impact_window` / `one_off_event_risk` | 审计阻断或交易动作 |
 | 数据缺口 | `data_usage_summary`、`missing_evidence` | 伪造证据 |
@@ -225,7 +228,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 分析师 | 内部推理重点 | 输出侧重点 |
 |---|---|---|
 | 技术面分析师 | 价格形态、趋势、位置、波动、支撑阻力、入场触发、失效位 | `evidence_role=entry_timing`、三种固定 `entry_timing_signal`、canonical `entry_trigger`、触发与失效事实 |
-| 基本面分析师 | 供需、库存、利润、基差、产量、进口、季节性、驱动持续性 | `evidence_role=direction_context`、方向、`primary_business_driver`、`data_freshness`、研究证据；不输出执行 profile |
+| 基本面分析师 | 供需、库存、利润、基差、产量、进口、季节性、驱动持续性 | `evidence_role=direction_context`、方向、`primary_business_driver`、研究证据；确定性 `data_freshness` 由 AEC 承载，不由 LLM 输出；不输出执行 profile |
 | 期货新闻面分析师 | 新闻事件、政策冲击、突发催化、影响方向、影响窗口、是否已兑现 | `evidence_role=event_catalyst`；只有当前即时事件允许 `event_immediate`，其他新闻只保留事件证据 |
 
 三类分析师都不能输出 `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`、手数、仓位或 `final_action_contract`。

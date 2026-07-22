@@ -18,8 +18,12 @@ from llm.prompt import (
     build_futures_technical_prompt,
 )
 from tools.agent_tools.analysis.analyst_output_finalization import (
+    build_required_market_data_unavailable_signal,
     finalize_analyst_signal,
     resolve_analyst_llm_config,
+)
+from tools.agent_tools.analysis.analyst_data_usage import (
+    resolve_technical_data_freshness,
 )
 from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     apply_profile_usage_to_signal,
@@ -79,6 +83,78 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             product_profile=profile,
             product_profile_usage=usage,
         )
+
+    def test_technical_freshness_uses_registered_reference_date_without_calendar_guessing(self):
+        self.assertEqual(
+            resolve_technical_data_freshness(
+                latest_data_date="2025-03-21",
+                base_price_date="2025-03-21",
+            ),
+            (1.0, "fresh"),
+        )
+        self.assertEqual(
+            resolve_technical_data_freshness(
+                latest_data_date="2025-03-20",
+                base_price_date="2025-03-21",
+            ),
+            (0.35, "stale"),
+        )
+        self.assertEqual(
+            resolve_technical_data_freshness(
+                latest_data_date="2025-03-24",
+                base_price_date=None,
+            ),
+            (0.0, "unknown"),
+        )
+        self.assertNotIn(
+            "get_previous_trading_day",
+            inspect.getsource(resolve_technical_data_freshness),
+        )
+
+    def test_finalization_writes_deterministic_technical_freshness_to_aec(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.NEUTRAL,
+            confidence=0.55,
+            data_freshness="fresh",
+            opportunity_type="no_trade",
+            opportunity_state="no_opportunity",
+            setup_type="unknown",
+            metadata={"data_usage_summary": self._data_usage("technical", "BU")},
+        )
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "low",
+                "setup_type": "no_trade",
+                "setup_quality_ok": False,
+                "market_regime": "range",
+                "risk_flags": [],
+                "freshness_score": 0.35,
+                "data_freshness": "stale",
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertEqual(contract["data_freshness"], "stale")
+        self.assertEqual(
+            contract["fusion_evidence"]["evidence_freshness_score"],
+            0.35,
+        )
+
+    def test_formal_unavailable_builder_remains_only_system_unavailable_producer(self):
+        signal = build_required_market_data_unavailable_signal(
+            analyst="technical",
+            ticker="BU",
+            trading_date="2025-03-26",
+            full_config={"llm": {"provider": "test", "model": "test-model"}},
+        )
+        contract = signal.metadata["action_evidence_contract"]
+        self.assertEqual(contract["setup_type"], "data_unavailable_no_trade")
+        self.assertEqual(contract["data_freshness"], "missing")
+        self.assertEqual(contract["fusion_evidence"]["evidence_freshness_score"], 0.0)
+        self.assertEqual(contract["opportunity_state"], "no_opportunity")
 
     def test_technical_finalization_replaces_llm_trigger_prose_with_canonical_profile_trigger(self):
         signal = AnalystSignal(
@@ -494,7 +570,10 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
 
     def test_runtime_prompts_request_evidence_not_formal_contract_or_trade_actions(self):
         technical_prompt = build_futures_technical_prompt(
-            ticker="RB", signal_results_compact={"trend": "UP"}
+            ticker="RB",
+            signal_results_compact={"trend": "UP"},
+            data_recency_score=0.35,
+            data_recency_label="stale",
         )
         fundamental_prompt = build_futures_fundamental_prompt(
             ticker="RB", fundamentals="inventory: usable"
@@ -504,12 +583,15 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         prompts = (technical_prompt, fundamental_prompt, news_prompt)
         for prompt in prompts:
+            self.assertNotIn("data_freshness", prompt)
+            self.assertNotIn("data_unavailable_no_trade", prompt)
             self.assertNotIn("position_ratio", prompt)
             self.assertNotIn("action_evidence_contract.open", prompt)
             self.assertNotIn("probe/open", prompt)
             self.assertNotIn("metadata.action_evidence_contract:", prompt)
             self.assertIn("opportunity_state", prompt)
         self.assertIn("breakout / pullback / vwap_confirmed", technical_prompt)
+        self.assertIn("System-computed market-data recency (read-only fact)", technical_prompt)
         self.assertIn("every complete watch_for_trigger", technical_prompt)
         self.assertIn("Direction alone is not watch_for_trigger", technical_prompt)
         self.assertIn("evidence_role=direction_context", fundamental_prompt)

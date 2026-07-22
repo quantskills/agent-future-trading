@@ -117,6 +117,7 @@
 | `profile_analysis_boundary` | `product_profile_evidence` | 固定为分析证据边界，声明该 profile 不创建交易权限。 |
 | `rank_score_policy` | config catalog / `src/config/rank_score_policy.yaml` / runtime config | 唯一全市场资金 rank 的评分配置。`rank_score` 下的参数组固定与七个 `rank_score_components` 同名：`cold_start_evidence_quality`、`capital_layer_priority`、`open_add_action_value_delta`、`product_setup_trigger_history`、`trigger_execution_quality`、`capital_efficiency`、`conflict_risk_invalidation_penalty`；嵌套权重键与 Python 实际消费的输入字段同名。它不创建交易权限、不改变仓位参数、不覆盖 0.008 probe、20% 总保证金或 0.5 净敞口红线。40 个干净交易日后才允许依据 rank 分层平均收益微调。 |
 | `evidence_fusion_semantics` | 公共工具 / 审计摘要 / 复盘摘要 / 研究输入摘要 | 由 `src/tools/common/evidence_fusion_semantics.py` 生成的只读融合语义解释；不签合约、不下单、不入账、不写当天交易事实。 |
+| `data_freshness` | `AnalystSignal` / `action_evidence_contract` | 三类分析师共用的正式数据时效标签；只能由确定性数据事实生成并由 AEC 承载，LLM 可读取确定性时效上下文分析其影响，但其输出 Schema 不生产或改写该字段。技术行情以 `latest_data_date` 对比 Router 已确认的 `morning_price_context.base_price_date`，不在 `pandaai_market` 来源下复制派生分数。 |
 | `fusion_evidence` | 分析师 `metadata.action_evidence_contract` / `signal_collection_contract.source_contracts[].action_evidence_contract` | 单个分析师的多维证据融合字段包；SCC 来源记录同级不得复制；说明证据强弱、时效、冲突、缺失和确认需求，不是交易合约。 |
 | `evidence_strength_score` | `fusion_evidence` / `evidence_fusion` | 预测证据强度的 0-1 确定性评分；可被 PM 用于排序分项，不能直接授权交易。 |
 | `evidence_freshness` | `fusion_evidence` / `evidence_fusion` | 预测证据时效标签，如 fresh、usable、stale、unknown。 |
@@ -312,7 +313,7 @@
 | `inventory_state` | 基本面证据 | 库存状态。 |
 | `warehouse_receipt_state` | 基本面证据 | 仓单状态。 |
 | `position_flow_state` | 基本面证据 | 持仓 / 资金流状态。 |
-| `data_freshness` | 基本面证据 | 数据新鲜度。 |
+| `data_freshness` | 基本面证据 | 由现有基本面因子时效算法确定并写入共享 AEC 的数据新鲜度；不是 LLM 输出。 |
 | `factor_alignment_score` | 基本面证据 | 因子一致性评分。 |
 | `data_coverage_score` | 基本面证据 | 数据覆盖度评分。 |
 | `requires_fundamental_confirmation` | 跨分析师证据 | 是否需要基本面确认。 |
@@ -820,16 +821,17 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `event_calibration_summary.supporting_learning_scopes` / `event_calibration_summary.contradicting_learning_scopes` / `event_calibration_summary.event_calibration_reason` | commodity_news 事件校准 | 支持/反对学习范围及事件校准原因。 |
 | `product_profile_evidence.profile_analysis_boundary` / `product_profile_evidence.profile_fields_used` / `product_profile_evidence.profile_supported_evidence` / `product_profile_evidence.profile_conflicting_evidence` / `product_profile_evidence.profile_missing_evidence` | 分析师商品 profile 证据 | profile 使用边界、字段及支持/冲突/缺失证据。 |
 | `product_profile_evidence.profile_assumption_status` / `product_profile_evidence.profile_relevance_score` / `product_profile_evidence.profile_learning_interaction` / `product_profile_evidence.profile_invalid_use_flags` | 分析师商品 profile 证据 | profile 假设状态、相关度、学习交互和违规使用标记。 |
-| `fusion_evidence.evidence_strength_score` / `fusion_evidence.evidence_freshness_score` | 分析师融合证据 | 单分析师证据强度和时效的标准化数值。 |
+| `fusion_evidence.evidence_strength_score` / `fusion_evidence.evidence_freshness_score` | 分析师融合证据 | 单分析师证据强度和时效的标准化数值；时效只从确定性分数、正式不可用或明确陈旧事实生成，无确定性事实时为 `0/unknown`，普通风险标签不得改变时效。 |
 | `fusion_evidence.fusion_boundary` | 分析师融合证据 | 固定声明该融合对象仍是分析证据，不是 PM rank 或交易授权。 |
 | `data_usage_summary.sources` | 分析师数据追溯 | 本次分析实际访问的数据源记录集合。 |
 | `data_usage_summary.sources.*.source` / `data_usage_summary.sources.*.dataset` / `data_usage_summary.sources.*.available` / `data_usage_summary.sources.*.used_in_signal` / `data_usage_summary.sources.*.pre_open_only` / `data_usage_summary.sources.*.info_cutoff` | 分析师数据追溯 | 数据来源、数据集、可用性、是否进入信号及盘前信息截止边界。 |
-| `data_usage_summary.sources.pandaai_market.latest_data_date` / `row_count` / `fields_used` / `indicators_used` | technical 数据追溯 | PandaAI 行情最新日期、记录数、使用字段和实际进入提示词的技术指标；波动率、成交强度和价格位置必须真实传入后才能登记，布林带使用当次学习校准后的 `bollinger_std`。 |
+| `data_usage_summary.sources.pandaai_market.latest_data_date` / `row_count` / `fields_used` / `indicators_used` | technical 数据追溯 | PandaAI 行情最新日期、记录数、使用字段和实际进入提示词的技术指标；技术分析内部用 `latest_data_date` 对比 Router 已确认的 `morning_price_context.base_price_date` 生成确定性时效，不在此来源增加 `freshness_score`；波动率、成交强度和价格位置必须真实传入后才能登记，布林带使用当次学习校准后的 `bollinger_std`。 |
 | `data_usage_summary.sources.finoview_fundamental.configured_indicator_count` / `loaded_indicator_count` / `missing_like_count` / `stale_indicator_count` / `near_stale_indicator_count` | fundamental 数据追溯 | Finoview 配置、加载、缺失、陈旧和临近陈旧指标数量；Router文本输入与factor snapshot共用同一 catalog 频率、freshness、正式交易日 release-lag 和可见行选择器。频率优先使用显式配置及文件实际日期节奏；原始 `tradeDate` 是事实日期，`recordTime` 不进入正式契约或可见边界。只有实际传给分析师的非陈旧因子可登记为 `used_factors`。 |
 | `data_usage_summary.sources.finoview_fundamental.coverage_ratio` / `stale_ratio` / `factor_groups` / `freshness_score` / `local_availability_audit` / `coverage_status` / `supports_trade_setup` / `runtime_data_boundary` | fundamental 数据追溯 | 基本面覆盖、时效、因子组、本地可用性、交易 setup 支持状态和运行时边界。`local_availability_audit` 只允许已登记数量、分组、比例、状态、布尔边界和 `index_map_parse_error_count`，禁止路径、样本、原始解析错误及内部说明。 |
 | `data_usage_summary.sources.pandaai_extra.reference_date` / `lookback_days` / `feature_count` / `record_counts` / `feature_status` / `data_missing` / `error_count` | fundamental 扩展数据追溯 | PandaAI 扩展基本面参考日、窗口、特征覆盖、稳定缺失状态和错误数量；`basis_ratio` 是百分数、`ls_ratio` 以 50 为中性、合约日指标 `ratio` 以 0 为中性，不得使用同一通用比例猜测；不传请求参数、原始错误、内部方向提示或内部可交易性判断。 |
 | `data_usage_summary.sources.finoview_news_txt.news_cutoff` / `raw_block_count` / `parsed_news_count` / `selected_news_count` / `latest_news_date` / `freshness_score` / `relevance_score` | commodity_news 数据追溯 | 新闻截止、解析/筛选数量、最新日期、时效及按品种产业链确定性计算的相关度；新闻必须在截取最新条目之前过滤产品无关内容，非空不能自动获得固定相关度；不传本机文件路径、编码或内部事件/方向统计。 |
 | `data_usage_summary.sources.pandaai_pre_open_reference.missing_data` / `data_quality_flags` / `reason` | 三个分析师全局数据不可用状态 | 必需盘前市场事实缺失时的唯一正式来源；固定指向前交易日具体主力合约报价，`reason` 固定为 `pre_open_reference_price_unavailable`，不得复制 Router 或 provider 自由文本。 |
+| `setup_type=data_unavailable_no_trade` | 确定性数据不可用 AEC | 仅由现有确定性不可用构建路径生成；不在三个分析师 LLM 的可选 `setup_type` 中。它不新增停机规则，三个分析师仍各自产生中性 AEC 后进入唯一 SCC。 |
 | `data_usage_summary` / `data_usage_summary.sources.*` | AEC 共享校验 | 顶层、来源身份、字段集合及基础类型必须由共享校验器登记；禁止 prompt/response、内部状态、隐藏上下文、未验证工具结果、本机路径、编码和内部说明。 |
 
 ### 16.2 Signal Collector `signal_collection_contract`

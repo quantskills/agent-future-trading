@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import Field, model_validator
-from pydantic_core import PydanticCustomError
+from typing import Literal
+
+from pydantic import Field, GetJsonSchemaHandler, model_validator
+from pydantic_core import CoreSchema, PydanticCustomError
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
@@ -53,9 +55,36 @@ def _declares_complete_executable_setup(
     )
 
 
-class TechnicalAnalystOutput(AnalystSignal):
+class _LLMAnalystOutput(AnalystSignal):
+    """LLM-facing analyst output; system-owned freshness is not producible."""
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> dict:
+        schema = handler.resolve_ref_schema(handler(core_schema))
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("data_freshness", None)
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [name for name in required if name != "data_freshness"]
+        return schema
+
+
+class TechnicalAnalystOutput(_LLMAnalystOutput):
     """Technical output: empty for no-opportunity, otherwise one Trader profile."""
 
+    setup_type: Literal[
+        "trend_breakout_setup",
+        "trend_pullback_setup",
+        "range_reversal_setup",
+        "volatility_breakout_setup",
+        "failed_rebound_setup",
+        "unknown",
+    ] = "unknown"
     entry_timing_signal: str = Field(
         default="",
         description=(
@@ -84,9 +113,10 @@ class TechnicalAnalystOutput(AnalystSignal):
         return self
 
 
-class FundamentalAnalystOutput(AnalystSignal):
+class FundamentalAnalystOutput(_LLMAnalystOutput):
     """Fundamental output supplies direction context and no Trader profile."""
 
+    setup_type: Literal["fundamental_timing_setup", "unknown"] = "unknown"
     entry_timing_signal: str = Field(
         default="",
         description="Fundamental has no Trader execution profile and must return an empty string",
@@ -101,9 +131,10 @@ class FundamentalAnalystOutput(AnalystSignal):
         return self
 
 
-class CommodityNewsAnalystOutput(AnalystSignal):
+class CommodityNewsAnalystOutput(_LLMAnalystOutput):
     """News output may execute only an already-confirmed immediate event."""
 
+    setup_type: Literal["news_event_setup", "unknown"] = "unknown"
     entry_timing_signal: str = Field(
         default="",
         description=(
