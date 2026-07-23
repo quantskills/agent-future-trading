@@ -27,7 +27,6 @@ from tools.agent_tools.research.research_memory_writers import (
 
 
 LIFECYCLE_CALIBRATION_DECISIONS = (
-    "skip_horizon_mismatch_new_entry",
     "reduce_failed_new_loss_revalidation",
     "exit_failed_new_loss_revalidation",
     "reduce_horizon_mismatch_losing_hold",
@@ -71,8 +70,24 @@ def _lots_for_decision(decision: str) -> tuple[int, int]:
     return 2, 1
 
 
-def _canonical_recommendation(decision: str) -> dict:
-    current_lots, target_lots = _lots_for_decision(decision)
+def _canonical_recommendation(
+    decision: str,
+    *,
+    current_lots: int | None = None,
+    target_lots: int | None = None,
+    control_diagnostics: dict | None = None,
+) -> dict:
+    default_current, default_target = _lots_for_decision(decision)
+    current_lots = default_current if current_lots is None else current_lots
+    target_lots = default_target if target_lots is None else target_lots
+    if control_diagnostics is None:
+        control_diagnostics = {
+            "holding_rebalance_control": {
+                "decision": decision,
+                "raw_target_ratio": 0.04 if current_lots else 0.0,
+                "final_target_ratio": 0.02 if target_lots else 0.0,
+            }
+        }
     final_contract = build_final_action_contract(
         ticker="BU",
         current_lots=current_lots,
@@ -85,13 +100,7 @@ def _canonical_recommendation(decision: str) -> dict:
         recommendation_intent={"action": "hold", "lots": abs(target_lots - current_lots)},
         final_entry_authority={},
         control_reasons=[decision],
-        control_diagnostics={
-            "holding_rebalance_control": {
-                "decision": decision,
-                "pre_control_ratio": 0.04 if current_lots else 0.0,
-                "final_ratio": 0.02 if target_lots else 0.0,
-            }
-        },
+        control_diagnostics=control_diagnostics,
         opportunity_scorecard={},
         market_confirmation={},
         alpha_setup_action_values=[],
@@ -142,7 +151,9 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
                     impact = recommendation["signal_snapshot"]["final_action_contract"]["learning_used"][
                         "pm_lifecycle_learning_impact_delta"
                     ]
-                    self.assertEqual(impact["hold_decision"], decision)
+                    self.assertIsNone(impact["hold_decision"])
+                    self.assertEqual(impact["reduce_exit_decision"], decision)
+                    self.assertIsNone(impact["conditional_monitor_decision"])
 
                     conn, rows = self._write(recommendation)
 
@@ -158,7 +169,8 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
                         "final_action_contract.learning_used.pm_lifecycle_learning_impact_delta",
                     )
                     persisted = evidence["pm_lifecycle_learning_impact_delta"]
-                    self.assertEqual(persisted["hold_decision"], decision)
+                    self.assertIsNone(persisted["hold_decision"])
+                    self.assertEqual(persisted["reduce_exit_decision"], decision)
                     self.assertTrue(set(persisted).issubset(FORMAL_LIFECYCLE_FIELDS))
                     self.assertNotIn("holding_rebalance_control", evidence)
                     self.assertNotIn("action_candidates", evidence)
@@ -166,8 +178,9 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
                     if conn is not None:
                         conn.close()
 
-    def test_ordinary_hold_reduce_exit_and_unrelated_decisions_do_not_calibrate(self):
+    def test_wait_and_unrelated_lifecycle_decisions_do_not_calibrate(self):
         cases = (
+            ("skip_horizon_mismatch_new_entry", 0, 0),
             ("continue_hold", 2, 2),
             ("reduce_exposure", 2, 1),
             ("exit_position", 1, 0),
@@ -175,16 +188,11 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
         )
         for decision, current_lots, target_lots in cases:
             with self.subTest(decision=decision):
-                recommendation = _canonical_recommendation("skip_horizon_mismatch_new_entry")
-                contract = recommendation["signal_snapshot"]["final_action_contract"]
-                impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
-                impact["hold_decision"] = decision
-                impact["current_lots"] = current_lots
-                impact["target_lots"] = target_lots
-                impact["lots_delta"] = target_lots - current_lots
-                contract["current_lots"] = current_lots
-                contract["target_lots"] = target_lots
-                contract["lots_delta"] = target_lots - current_lots
+                recommendation = _canonical_recommendation(
+                    decision,
+                    current_lots=current_lots,
+                    target_lots=target_lots,
+                )
                 conn = None
                 try:
                     conn, rows = self._write(recommendation)
@@ -199,6 +207,63 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
                 finally:
                     if conn is not None:
                         conn.close()
+
+    def test_reduce_exit_uses_the_control_that_actually_changed_final_ratio(self):
+        cases = (
+            (
+                {
+                    "winning_template_continuation": {
+                        "decision": "protective_reduce_no_continuation",
+                        "pre_control_ratio": 0.06,
+                        "final_ratio": 0.03,
+                    },
+                    "holding_rebalance_control": {
+                        "decision": "allow_same_side_rebalance",
+                        "raw_target_ratio": 0.03,
+                        "final_target_ratio": 0.03,
+                    },
+                },
+                "protective_reduce_no_continuation",
+            ),
+            (
+                {
+                    "winning_template_continuation": {
+                        "decision": "protective_reduce_no_continuation",
+                        "pre_control_ratio": 0.06,
+                        "final_ratio": 0.04,
+                    },
+                    "holding_rebalance_control": {
+                        "decision": "cap_same_side_reduction",
+                        "raw_target_ratio": 0.04,
+                        "final_target_ratio": 0.03,
+                    },
+                },
+                "cap_same_side_reduction",
+            ),
+        )
+        for diagnostics, expected_decision in cases:
+            with self.subTest(expected_decision=expected_decision):
+                recommendation = _canonical_recommendation(
+                    expected_decision,
+                    current_lots=8,
+                    target_lots=3,
+                    control_diagnostics=diagnostics,
+                )
+                contract = recommendation["signal_snapshot"]["final_action_contract"]
+                trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+                impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
+
+                self.assertEqual(trace["contract_lifecycle_port"], "reduce_exit")
+                self.assertEqual(
+                    trace["reduce_exit_learning_decision"]["decision"],
+                    expected_decision,
+                )
+                self.assertEqual(trace["hold_learning_decision"], {})
+                self.assertEqual(trace["open_add_learning_decision"], {})
+                self.assertEqual(trace["conditional_monitor_learning_decision"], {})
+                self.assertEqual(impact["reduce_exit_decision"], expected_decision)
+                self.assertIsNone(impact["hold_decision"])
+                self.assertIsNone(impact["conditional_monitor_decision"])
 
 
 class _ResearcherEntryDB:

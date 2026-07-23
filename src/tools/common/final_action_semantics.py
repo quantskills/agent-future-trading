@@ -794,8 +794,6 @@ def contract_final_learning_lifecycle(contract: Mapping[str, Any] | None) -> str
         or action in (DECREASE_ACTIONS | EXIT_ACTIONS)
     ):
         return "reduce_exit"
-    if current_lots != 0 and target_lots == current_lots:
-        return "hold"
     if current_lots == target_lots and (
         action in CONDITIONAL_ACTIONS
         or (
@@ -805,6 +803,8 @@ def contract_final_learning_lifecycle(contract: Mapping[str, Any] | None) -> str
         )
     ):
         return "conditional_monitor"
+    if current_lots != 0 and target_lots == current_lots:
+        return "hold"
     return "wait"
 
 
@@ -1262,38 +1262,24 @@ def classify_final_action_contract(contract: Mapping[str, Any] | None) -> dict[s
 
 
 def _infer_memory_lifecycle(contract: Mapping[str, Any], semantics: Mapping[str, Any]) -> str:
-    action = _clean(semantics.get("action") or contract.get("final_action"))
     current_lots = _int(semantics.get("current_lots"), 0)
     target_lots = _int(semantics.get("target_lots"), current_lots)
-    lots_delta = _int(semantics.get("lots_delta"), target_lots - current_lots)
-    if is_conditional_monitor_contract(contract):
-        return "conditional_monitor"
-    if action in OPEN_ACTIONS:
-        return "open"
-    if action in INCREASE_ACTIONS:
-        return "increase"
-    if action in DECREASE_ACTIONS:
-        return "decrease"
-    if action in EXIT_ACTIONS:
-        return "exit"
-    if action in NO_TRADE_ACTIONS:
-        if current_lots and target_lots == current_lots:
-            return "ordinary_hold"
-        if current_lots and target_lots == 0:
-            return "exit"
-        return "ordinary_hold"
-    if lots_delta:
+    learning_lifecycle = contract_final_learning_lifecycle(contract)
+    if learning_lifecycle == "open_add_new_risk":
         current_side = _side_from_lots(current_lots)
         target_side = _side_from_lots(target_lots)
-        if current_lots and target_lots == 0:
-            return "exit"
-        if current_side and target_side == current_side and abs(target_lots) < abs(current_lots):
-            return "decrease"
         if current_side and target_side == current_side and abs(target_lots) > abs(current_lots):
             return "increase"
-        if target_side:
-            return "open"
-    return _clean(semantics.get("lifecycle_state") or "ordinary_hold")
+        return "open"
+    if learning_lifecycle == "reduce_exit":
+        if target_lots == 0 or current_lots * target_lots < 0:
+            return "exit"
+        return "decrease"
+    if learning_lifecycle == "hold":
+        return "ordinary_hold"
+    if learning_lifecycle == "conditional_monitor":
+        return "conditional_monitor"
+    return "ordinary_hold"
 
 
 def derive_memory_requirements(contract: Mapping[str, Any] | None) -> dict[str, Any]:

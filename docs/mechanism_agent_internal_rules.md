@@ -87,16 +87,18 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 5. `tradeable_candidate` 不是小额试探；它是强候选，PM 可按资金和风险规则转成 `open_real/add/scale`。
 6. 审计员、交易员、会计师、复盘员、研究员都不能把机会状态改成最终交易动作。
 
-交易生命周期记忆读取固定规则：
+交易生命周期记忆匹配规则（检索为空是合法冷启动，不表示必须命中）：
 
-| 最终合约生命周期 | PM 必须读取的记忆 | `side` 的含义 |
+| 最终合约生命周期 | PM 匹配时可消费的记忆 | `side` 的含义 |
 |---|---|---|
 | 新开仓 `open/open_probe/open_real` | open lane | `target_side` |
 | 加仓/扩大 `add/scale/increase` | add/scale/increase/open 与 hold lane | `target_side` 与 `current_position_side` |
 | 持仓 `hold` | hold lane，必要时 exit/reduce 作为审计背景 | `current_position_side` |
 | 减仓 `reduce/trim` | reduce/exit/hold lane | `current_position_side` |
 | 退出 `exit/close/risk_exit` | exit/reduce/hold lane | `current_position_side` |
-| 条件监控 `conditional_probe/watch_trigger` | conditional_monitor lane | `trigger_side` |
+| 手数不变且仅保留监控的 `conditional_probe/watch_trigger` | conditional_monitor lane | `trigger_side` |
+
+条件执行和决策学习不是同一生命周期。条件候选一旦由 Step5 获得非零目标手数，`0 -> 非0` 在 PM 中仍按 open、同方向扩大仍按 add 匹配 `target_side` 学习；Trader 仍按合约的 `requires_intraday_confirmation` 等待盘中触发。学习命中不产生交易权限，学习为空也不阻止当日证据合格的候选按既有 rank、资金、审计和 Trader 规则运行。
 
 ### 2.2 reason code 语义表
 
@@ -758,7 +760,7 @@ Trader、Auditor 与 PM 的 add/scale 保证金安全口径固定为 `projected_
 
 ## 十一、研究员内部机制
 
-研究员可以按配置调用 LLM，但只能在 Phase4 completed 且结算事实形成后的事实底座上运行。运行前必须通过正式ID链验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement。研究员只输出验证后的结构化研究信息，供未来交易日由分析师或 PM 通过正式检索接口直接/间接使用。
+研究员可以按配置调用 LLM，但只能在 Phase4 completed 且结算事实形成后的事实底座上运行。运行前必须通过正式ID链验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement。研究员只输出验证后的结构化研究信息；只有已经登记正式消费端和作用域的成果，才可在未来交易日由分析师或 PM 通过正式检索接口直接/间接使用。
 
 固定转换：
 
@@ -782,6 +784,8 @@ Phase4 后事实
 
 LLM 推理可以充分展开，但必须落成结构化研究成果。自由文本只能解释原因，不能成为下游直接消费的研究结论。
 
+学习事实按三层区分：完整且合法的策略 `trade_episode_memory` 是已结算 episode 事实；episode 可以生成 setup 样本和 profile，但不保证生成带正式 preference 的 canonical action-value；只有 PM 最终 `learning_used.alpha_setup_action_values` 与同一 FAC 的 `pm_lifecycle_learning_trace.decision_learning_rows` 按 ID、canonical、scope、family 和 lane 一致匹配，才算该次决策实际消费。裸 transaction、未完成 episode、rollover 和 forced_risk 不能生成策略 open/add 学习。open/add 绩效按完整 episode 计数和计奖，日记录只继续服务对应 hold/reduce/exit/execution 生命周期，不能把同一笔交易按持仓天数重复计数。
+
 ### 11.2 研究输出分域
 
 | 输出域 | 未来消费者 | 用途 | 边界 |
@@ -793,8 +797,9 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | neutral 观察研究 | 分析师 | 区分合理中性、证据缺口、错过机会风险、观察触发条件 | 不能把 neutral 直接变成交易动作 |
 | 执行学习 | PM 写入未来执行字段后由 Trader 执行 | 改善触发、成交方式、追价、未成交处理和执行 profile | Trader 不能直接读研究库 |
 | 持仓/退出学习 | PM 经 `decision_memory_retrieval` | 改善 hold、reduce、exit、保护盈利、止损和反手判断 | 历史 hold/exit 不能直接证明新开仓可行 |
-| 排序偏好研究 | PM 经 `decision_memory_retrieval` 与 Step5 全市场资金部署机制 | 改善高低 rank、资金优先级、候选入选顺序 | rank 不是交易权限，不能替代 `target_lots` |
-| 资金部署反馈 | PM 和机制审计 | 判断资金是否放到更强机会、是否长期停留 probe、是否该放大 alpha | 不能越过保证金硬上限或审计员 |
+| 排序偏好研究 `opportunity_ranking_preference` | 目前仅供 Researcher 与开发评估诊断；没有正式 PM 消费端 | 观察高低 rank、资金优先级与后续结果 | 不能声称已改变 PM rank；本次不新增消费链 |
+| 资金部署 / `research_position_feedback` | Researcher 与开发评估诊断 | 只在正式学习被 PM 实际消费后，记录其合约、执行和结算后果 | 未消费学习不强制反馈；反馈不能成为 rank、手数或交易输入 |
+| 融合归因研究 `evidence_fusion_attribution` | 目前仅供 Researcher 与开发评估诊断；没有正式分析师或 PM 消费端 | 记录融合处理的事后归因 | 不能把当日 AEC→SCC→PM 融合链写成该研究记录的消费闭环；本次不新增消费链 |
 | adaptive policy state | PM 经 `decision_memory_retrieval`；分析师只读安全校准摘要 | 记录 protect/cap/probe/watchlist 等未来策略状态 | 必须被当日证据、失效边界、资金和审计再验证 |
 | 运营/风控事件研究 | PM、会计师、复盘员、机制审计按职责读取 | 记录换月、强平、保证金风险、合约切换成本 | 不能写成策略 alpha 正负样本 |
 | 研究反馈 / 机制反馈 | 开发者和机制审计 | 判断学习机制是否接通、是否进入 PM、是否改善排序和资金部署 | 不能创建交易权限，不能评价当天合约合法性 |

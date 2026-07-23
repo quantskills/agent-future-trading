@@ -110,6 +110,12 @@ FULL_CHAIN = _runtime(
     "formal same-database production-chain dry run",
 )
 
+ALPHA_SETUP_ACTION_VALUE_REAL_PATH = _runtime(
+    "tests.test_reviewer_learning",
+    "ReviewerLearningPersistenceRegressionTest.test_real_path_externalized_cross_day_episodes_reach_next_day_pm_retrieval",
+    "ordinary settled episode to sample/profile/action-value and next-day PM retrieval regression",
+)
+
 
 CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
     ContractCoverageSpec(
@@ -364,7 +370,7 @@ CONTRACT_SPECS: Sequence[ContractCoverageSpec] = (
                 "shared action-value validator",
             ),
         ),
-        tests=(FULL_CHAIN,),
+        tests=(ALPHA_SETUP_ACTION_VALUE_REAL_PATH,),
         documents=(
             _document("docs/matrix_action_canonical.md", "canonical_action_family", "canonical action matrix"),
         ),

@@ -29,6 +29,10 @@ from tools.common.contracts import (
 )
 from util.logger import logger
 from tools.common.learning_contract import attach_or_upgrade_next_round_memory_contract
+from tools.common.final_action_semantics import (
+    canonical_action_family,
+    canonical_action_value_lane,
+)
 
 class SQLiteDB(BaseDB):
     def __init__(self):
@@ -2976,12 +2980,8 @@ class SQLiteDB(BaseDB):
                 or payload.get("source_canonical_action_family")
                 or ""
             )
-        if not item.get("consumer_scope"):
-            item["consumer_scope"] = (
-                payload.get("consumer_scope")
-                or payload.get("learning_consumer_scope")
-                or "pm_learning"
-            )
+        if not item.get("consumer_scope") and payload.get("consumer_scope"):
+            item["consumer_scope"] = payload.get("consumer_scope")
         if not item.get("learning_lane"):
             item["learning_lane"] = (
                 payload.get("learning_lane")
@@ -3430,7 +3430,12 @@ class SQLiteDB(BaseDB):
                 ''',
                 tuple(params + [ticker_value or "*", setup_value or "*", regime_value or "*", max(int(limit) * 8, int(limit))]),
             )
-            rows = [dict(row) for row in cursor.fetchall()]
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                payload = self._deserialize_json(item.get("payload_json"))
+                item["payload"] = payload if isinstance(payload, dict) else {}
+                rows.append(item)
             if not rows:
                 return []
 
@@ -3450,20 +3455,58 @@ class SQLiteDB(BaseDB):
                 except Exception:
                     return default
 
-            def _classify_action(row: Dict[str, Any]) -> str:
+            def _classify_action(row: Dict[str, Any]) -> tuple[str, str]:
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                deployment = (
+                    payload.get("deployment_outcome")
+                    if isinstance(payload.get("deployment_outcome"), dict)
+                    else {}
+                )
                 text = str(row.get("action_taken") or row.get("pm_action") or "").lower()
-                target_lots = _safe_int(row.get("target_lots"))
-                if "execution" in text or "trigger" in text or "fill" in text:
-                    return "execution"
-                if text in {"open_long", "open_short"}:
-                    return "open"
-                if text in {"close_long", "close_short"}:
-                    return "exit"
-                if text == "hold":
-                    return "hold_position" if target_lots else "observe"
-                if target_lots:
-                    return "open" if _safe_int(row.get("executed_lots")) else "observe"
-                return "observe"
+                current_lots = _safe_int(
+                    payload.get("current_lots"),
+                    _safe_int(deployment.get("current_lots")),
+                )
+                target_lots = _safe_int(
+                    row.get("target_lots"),
+                    _safe_int(payload.get("target_lots"), _safe_int(deployment.get("target_lots"))),
+                )
+                if "execution" in text or "fill" in text:
+                    transition_action = "execution"
+                elif current_lots == 0 and target_lots != 0:
+                    transition_action = "open"
+                elif current_lots != 0 and target_lots == 0:
+                    transition_action = "exit"
+                elif current_lots and target_lots and current_lots * target_lots < 0:
+                    transition_action = "exit"
+                elif current_lots and target_lots and abs(target_lots) > abs(current_lots):
+                    transition_action = "add"
+                elif current_lots and target_lots and abs(target_lots) < abs(current_lots):
+                    transition_action = "reduce"
+                elif current_lots == target_lots:
+                    transition_action = (
+                        "conditional_monitor"
+                        if (
+                            "conditional" in text
+                            or "monitor" in text
+                            or "watch" in text
+                            or "trigger" in text
+                        )
+                        else "hold" if current_lots else text or "hold"
+                    )
+                else:
+                    transition_action = text or "hold"
+                family = canonical_action_family(
+                    transition_action,
+                    current_lots=current_lots,
+                    target_lots=target_lots,
+                )
+                lane = canonical_action_value_lane(
+                    transition_action,
+                    current_lots=current_lots,
+                    target_lots=target_lots,
+                )
+                return family, lane
 
             def _reward_signal_for_row(row: Dict[str, Any]) -> tuple[Optional[float], str]:
                 reward = _safe_float(row.get("net_pnl")) - _safe_float(row.get("commission"))
@@ -3492,12 +3535,12 @@ class SQLiteDB(BaseDB):
                     return False
                 return True
 
-            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
             for row in rows:
                 grouped.setdefault(_classify_action(row), []).append(row)
 
             result: List[Dict[str, Any]] = []
-            for action_name, action_rows in grouped.items():
+            for (action_family, action_name), action_rows in grouped.items():
                 reward_values: List[float] = []
                 real_trade_reward_count = 0
                 counterfactual_reward_count = 0
@@ -3615,13 +3658,17 @@ class SQLiteDB(BaseDB):
                     "setup_type": setup_value or "*",
                     "data_combo": "similar_alpha_setup_sql",
                     "action_name": action_name,
+                    "canonical_action_family": action_family,
                     "sample_count": sample_count,
                     "reward_sum": reward_sum,
                     "reward_mean": reward_mean,
                     "win_rate": win_rate,
                     "confidence_score": confidence_score,
                     "action_preference": action_preference,
+                    "canonical_action_value": False,
+                    "canonical_action_value_source": "incomplete_trace_not_for_pm_scoring",
                     "consumer_scope": "pm_learning",
+                    "action_value_lane": action_name,
                     "learning_lane": action_name,
                     "retrieval_key": (
                         f"{ticker_value or '*'}|{side_value or '*'}|{horizon_value or '*'}|"
@@ -3637,6 +3684,9 @@ class SQLiteDB(BaseDB):
                         "research_output_contract_version": "agentquant.research_action_value.v1",
                         "source": "similar_alpha_setup_sql",
                         "action_value_lane": action_name,
+                        "canonical_action_family": action_family,
+                        "canonical_action_value": False,
+                        "canonical_action_value_source": "incomplete_trace_not_for_pm_scoring",
                         "consumer_scope": "pm_learning",
                         "learning_lane": action_name,
                         "strict_no_lookahead": True,

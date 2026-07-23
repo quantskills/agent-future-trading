@@ -44,6 +44,7 @@ from tools.common.final_action_semantics import (
     canonical_action_preference_for_action_value,
     canonical_action_value_lane,
     derive_research_fact_state,
+    validate_action_preference_family_consistency,
     validate_action_value_write_consistency,
 )
 
@@ -1746,6 +1747,270 @@ def _write_trade_episode_memory(
     setattr(_write_trade_episode_memory, "last_payloads", episode_payloads)
     return inserted
 
+def _feedback_memory_ids(rows: Any) -> tuple[str, ...]:
+    if not isinstance(rows, list):
+        return ()
+    identities = {
+        str(
+            row.get("id")
+            or row.get("action_value_id")
+            or ""
+        ).strip()
+        for row in rows
+        if isinstance(row, dict)
+    }
+    identities.discard("")
+    return tuple(sorted(identities))
+
+
+def _strict_fac_feedback_learning_id_sets(
+    learning_used: Dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    formal_rows = (
+        learning_used.get("alpha_setup_action_values")
+        if isinstance(learning_used.get("alpha_setup_action_values"), list)
+        else []
+    )
+    lifecycle_trace = (
+        learning_used.get("pm_lifecycle_learning_trace")
+        if isinstance(learning_used.get("pm_lifecycle_learning_trace"), dict)
+        else {}
+    )
+    decision_rows = (
+        lifecycle_trace.get("decision_learning_rows")
+        if isinstance(lifecycle_trace.get("decision_learning_rows"), list)
+        else []
+    )
+    legal_family_lanes = {
+        "open_add_new_risk": {"open", "add", "scale", "increase"},
+        "hold": {"hold"},
+        "reduce_exit": {"reduce", "exit"},
+        "conditional_monitor": {"conditional_monitor"},
+    }
+
+    def value(row: Dict[str, Any], key: str) -> Any:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        return row.get(key) if row.get(key) not in (None, "") else payload.get(key)
+
+    def identity(row: Dict[str, Any]) -> str:
+        return str(value(row, "id") or value(row, "action_value_id") or "").strip()
+
+    def family_and_lane(row: Dict[str, Any]) -> tuple[str, str]:
+        family = str(value(row, "canonical_action_family") or "").strip().lower()
+        lane = str(
+            value(row, "learning_lane")
+            or value(row, "action_value_lane")
+            or value(row, "lane")
+            or ""
+        ).strip().lower()
+        return family, lane
+
+    def common_legal(row: Any) -> bool:
+        if not isinstance(row, dict) or not identity(row):
+            return False
+        family, lane = family_and_lane(row)
+        return bool(
+            value(row, "canonical_action_value") is True
+            and str(value(row, "consumer_scope") or "").strip().lower() == "pm_learning"
+            and lane in legal_family_lanes.get(family, set())
+        )
+
+    if (
+        not formal_rows
+        or not decision_rows
+        or not all(
+            common_legal(row)
+            and validate_action_preference_family_consistency(row).get("ok")
+            for row in formal_rows
+        )
+        or not all(common_legal(row) for row in decision_rows)
+    ):
+        return (), ()
+    formal_id_list = [identity(row) for row in formal_rows]
+    decision_id_list = [identity(row) for row in decision_rows]
+    if (
+        len(set(formal_id_list)) != len(formal_id_list)
+        or len(set(decision_id_list)) != len(decision_id_list)
+    ):
+        return (), ()
+    return tuple(sorted(formal_id_list)), tuple(sorted(decision_id_list))
+
+
+def _backfill_research_position_feedback_from_completed_episodes(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+    completed_episode_payloads: Optional[List[Dict[str, Any]]],
+) -> int:
+    """Backfill the opening feedback row from its settled episode facts.
+
+    The feedback row remains the sole attribution record.  Completed pairs are
+    deduplicated by their physical open/close transaction IDs and recomputed as
+    a full set so reruns cannot add the same realised result twice.
+    """
+    grouped_pairs: Dict[Tuple[str, str, str], Dict[Tuple[str, str], Dict[str, Any]]] = defaultdict(dict)
+    invalid_groups: set[Tuple[str, str, str]] = set()
+    formal_ids_by_group: Dict[Tuple[str, str, str], tuple[str, ...]] = {}
+    for episode in completed_episode_payloads or []:
+        if not isinstance(episode, dict):
+            continue
+        pair = episode.get("pair") if isinstance(episode.get("pair"), dict) else {}
+        recommendation_id = str(
+            episode.get("open_recommendation_id")
+            or pair.get("open_recommendation_id")
+            or ""
+        ).strip()
+        ticker = str(pair.get("ticker") or episode.get("ticker") or "").strip().upper()
+        open_date = str(pair.get("open_date") or "").strip()[:10]
+        close_date = str(pair.get("close_date") or "").strip()[:10]
+        open_transaction_id = str(pair.get("open_transaction_id") or "").strip()
+        close_transaction_id = str(pair.get("close_transaction_id") or "").strip()
+        if (
+            not recommendation_id
+            or not ticker
+            or not open_date
+            or not close_date
+            or close_date > str(trading_date)[:10]
+            or not open_transaction_id
+            or not close_transaction_id
+        ):
+            continue
+
+        final_contract = (
+            episode.get("final_action_contract")
+            if isinstance(episode.get("final_action_contract"), dict)
+            else {}
+        )
+        learning_used = (
+            final_contract.get("learning_used")
+            if isinstance(final_contract.get("learning_used"), dict)
+            else {}
+        )
+        formal_alpha_ids, decision_ids = _strict_fac_feedback_learning_id_sets(learning_used)
+        if not formal_alpha_ids or formal_alpha_ids != decision_ids:
+            continue
+        formal_refs, _ = _feedback_learning_refs({"learning_used": learning_used})
+        formal_ids = _feedback_memory_ids(formal_refs)
+        if formal_ids != formal_alpha_ids:
+            continue
+
+        gross_pnl = _safe_float(pair.get("gross_pnl"))
+        commission = _safe_float(pair.get("commission"))
+        net_pnl = _safe_float(pair.get("net_pnl"))
+        tolerance = max(1e-6, 1e-9 * max(abs(gross_pnl), abs(commission), abs(net_pnl), 1.0))
+        if abs((gross_pnl - commission) - net_pnl) > tolerance:
+            continue
+
+        group_key = (recommendation_id, ticker, open_date)
+        prior_formal_ids = formal_ids_by_group.get(group_key)
+        if prior_formal_ids is not None and prior_formal_ids != formal_ids:
+            invalid_groups.add(group_key)
+            continue
+        formal_ids_by_group[group_key] = formal_ids
+        pair_key = (open_transaction_id, close_transaction_id)
+        pair_result = {
+            "gross_pnl": gross_pnl,
+            "commission": commission,
+            "net_pnl": net_pnl,
+        }
+        prior_pair = grouped_pairs[group_key].get(pair_key)
+        if prior_pair is not None and prior_pair != pair_result:
+            invalid_groups.add(group_key)
+            continue
+        grouped_pairs[group_key][pair_key] = pair_result
+
+    updated = 0
+    for group_key in sorted(grouped_pairs):
+        if group_key in invalid_groups:
+            continue
+        recommendation_id, ticker, open_date = group_key
+        cursor.execute(
+            '''
+            SELECT *
+            FROM research_position_feedback
+            WHERE config_id = ?
+              AND trading_date = ?
+              AND ticker = ?
+              AND recommendation_id = ?
+            LIMIT 1
+            ''',
+            (config_id, open_date, ticker, recommendation_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            continue
+        feedback = dict(row)
+        memory_refs = _review_helpers._json_loads(feedback.get("memory_refs_json")) or []
+        expected_ids = formal_ids_by_group.get(group_key, ())
+        if not expected_ids or _feedback_memory_ids(memory_refs) != expected_ids:
+            continue
+        payload = _review_helpers._json_loads(feedback.get("payload_json")) or {}
+        if not isinstance(payload, dict):
+            continue
+        payload_memory_refs = payload.get("memory_refs")
+        if not isinstance(payload_memory_refs, list) or _feedback_memory_ids(payload_memory_refs) != expected_ids:
+            continue
+        outcome = _review_helpers._json_loads(feedback.get("outcome_json")) or {}
+        payload_outcome = payload.get("outcome")
+        required_outcome_fields = {
+            "transaction_pnl",
+            "transaction_commission",
+            "daily_settlement_pnl",
+            "feedback_label",
+        }
+        if (
+            not isinstance(outcome, dict)
+            or not isinstance(payload_outcome, dict)
+            or not required_outcome_fields.issubset(outcome)
+            or not required_outcome_fields.issubset(payload_outcome)
+        ):
+            continue
+
+        ordered_results = [
+            grouped_pairs[group_key][pair_key]
+            for pair_key in sorted(grouped_pairs[group_key])
+        ]
+        gross_pnl = sum(item["gross_pnl"] for item in ordered_results)
+        commission = sum(item["commission"] for item in ordered_results)
+        net_pnl = sum(item["net_pnl"] for item in ordered_results)
+        policy_refs = _review_helpers._json_loads(feedback.get("policy_refs_json")) or []
+        trader_effect = _review_helpers._json_loads(feedback.get("trader_effect_json")) or {}
+        no_trade_reason = (
+            str(trader_effect.get("no_trade_reason") or "")
+            if isinstance(trader_effect, dict)
+            else ""
+        )
+        label = _feedback_label(
+            memory_refs=memory_refs,
+            policy_refs=policy_refs if isinstance(policy_refs, list) else [],
+            target_lots=_safe_int(feedback.get("target_lots")),
+            executed_lots=_safe_int(feedback.get("executed_lots")),
+            pnl=net_pnl,
+            no_trade_reason=no_trade_reason,
+        )
+        for target in (outcome, payload_outcome):
+            target["transaction_pnl"] = gross_pnl
+            target["transaction_commission"] = commission
+            target["feedback_label"] = label
+        payload["outcome"] = payload_outcome
+        cursor.execute(
+            '''
+            UPDATE research_position_feedback
+            SET outcome_json = ?, feedback_label = ?, payload_json = ?
+            WHERE id = ?
+            ''',
+            (
+                _json_dumps(outcome),
+                label,
+                _json_dumps(payload),
+                feedback.get("id"),
+            ),
+        )
+        updated += int(cursor.rowcount > 0)
+    return updated
+
+
 def _write_research_position_feedback(
     cursor: sqlite3.Cursor,
     *,
@@ -1755,6 +2020,7 @@ def _write_research_position_feedback(
     strategy_recommendations: List[Dict[str, Any]],
     transactions_by_recommendation: Dict[str, List[Dict[str, Any]]],
     settlement_row: Optional[Dict[str, Any]],
+    completed_episode_payloads: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, int]:
     learning_cfg = cfg.get("learning", {}) or {}
     feedback_cfg = learning_cfg.get("position_feedback_loop", {}) or {}
@@ -1791,7 +2057,9 @@ def _write_research_position_feedback(
         rec_id = str(recommendation.get("id") or "")
         txs = transactions_by_recommendation.get(rec_id, [])
         executed_lots = sum(abs(_safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
-        tx_pnl = sum(_safe_float(tx.get("realized_pnl")) for tx in txs if isinstance(tx, dict))
+        # Phase2 rows establish execution facts only.  Final realised outcome is
+        # written later from deterministic, fully settled episode pairs.
+        tx_pnl = 0.0
         tx_commission = sum(_safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
         execution_result = _execution_result_from_snapshot(snapshot)
         semantic_state = derive_research_fact_state(final_contract, execution_result)
@@ -2037,6 +2305,12 @@ def _write_research_position_feedback(
                 ),
             )
             digest_rows += 1
+    _backfill_research_position_feedback_from_completed_episodes(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+        completed_episode_payloads=completed_episode_payloads,
+    )
     return {"feedback_rows": feedback_rows, "digest_rows": digest_rows}
 
 def _write_loss_template_observation_research(

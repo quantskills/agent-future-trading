@@ -286,7 +286,7 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     "requires_intraday_confirmation": True,
                     "can_execute_without_intraday_trigger": False,
                 },
-                {("conditional_monitor", "short", "trigger_side")},
+                {("open", "short", "target_side")},
             ),
         ]
         for label, contract, expected in cases:
@@ -297,6 +297,89 @@ class FinalActionSemanticsTest(unittest.TestCase):
                     for row in result["must_land_in_pm_contract"]
                 }
                 self.assertTrue(expected.issubset(got), result)
+
+    def test_conditional_open_uses_open_memory_without_changing_trader_trigger_semantics(self):
+        contract = self._conditional_contract()
+
+        memory = derive_memory_requirements(contract)
+        execution = classify_final_action_contract(contract)
+
+        self.assertEqual(memory["action_lifecycle"], "open")
+        self.assertEqual(
+            {
+                (row["lane"], row["side"], row["memory_side_role"])
+                for row in memory["must_land_in_pm_contract"]
+            },
+            {("open", "long", "target_side")},
+        )
+        self.assertEqual(execution["lifecycle_state"], "conditional_monitor")
+        self.assertEqual(execution["execution_permission"], "monitor_intraday")
+        self.assertTrue(contract_requires_conditional_intraday_result(contract))
+
+        routed = filter_action_values_for_contract_learning(contract, [{
+            "id": "open-long-1",
+            "action_name": "open",
+            "canonical_action_value": True,
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "consumer_scope": "pm_learning",
+            "side": "long",
+            "memory_side_role": "target_side",
+            "action_preference": "positive_candidate_open",
+            "reward_sum": 100.0,
+            "reward_mean": 100.0,
+        }])
+        self.assertEqual([row["id"] for row in routed["rows"]], ["open-long-1"])
+        self.assertEqual(routed["rejected_action_values"], [])
+
+    def test_flat_undeployed_conditional_candidate_keeps_monitor_memory_only(self):
+        contract = {
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "final_action": "wait",
+            "side": "short",
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "reason_codes": ["no_rank_or_budget_no_new_exposure"],
+        }
+
+        memory = derive_memory_requirements(contract)
+
+        self.assertEqual(memory["action_lifecycle"], "conditional_monitor")
+        self.assertEqual(
+            {
+                (row["lane"], row["side"], row["memory_side_role"])
+                for row in memory["must_land_in_pm_contract"]
+            },
+            {("conditional_monitor", "short", "trigger_side")},
+        )
+        self.assertFalse(contract_requires_conditional_intraday_result(contract))
+
+    def test_unchanged_existing_position_uses_monitor_memory_only_when_contract_is_pure_monitor(self):
+        contract = {
+            "current_lots": 2,
+            "target_lots": 2,
+            "lots_delta": 0,
+            "final_action": "hold",
+            "side": "long",
+            "conditional_trigger_authority": True,
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+        }
+
+        memory = derive_memory_requirements(contract)
+
+        self.assertEqual(memory["action_lifecycle"], "conditional_monitor")
+        self.assertEqual(
+            {
+                (row["lane"], row["side"], row["memory_side_role"])
+                for row in memory["must_land_in_pm_contract"]
+            },
+            {("conditional_monitor", "long", "trigger_side")},
+        )
 
     def test_accountant_reviewer_researcher_pg_read_same_lifecycle(self):
         contract = self._conditional_contract()

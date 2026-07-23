@@ -13,8 +13,13 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from tools.agent_tools.decision.pm_risk_gate import PMRiskGate, PMRiskGateInput
+from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_full_market_capital_deployment import (
+    _ensure_final_rank_score_fields,
+)
 from agents.decision_team.portfolio_manager import (
     _apply_capital_utilization_control,
+    _normalize_alpha_setup_action_values,
     _quality_aware_fusion_context,
     _resolve_net_exposure_control,
     get_hard_allocation_margin_ratio,
@@ -23,7 +28,12 @@ from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_stra
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
-from database.artifact_store import load_externalized_json, load_externalized_text
+from database.artifact_store import (
+    externalize_json_for_db,
+    load_externalized_json,
+    load_externalized_text,
+)
+from database.sqlite_helper import SQLiteDB
 from tools.common.template_prior import _project_path, classify_template_prior_item, load_template_prior_if_enabled
 from tools.agent_tools.analysis.analyst_dynamic_weights import calibrate_weights_by_signal_history
 from tools.agent_tools.analysis.analyst_learning_context import (
@@ -42,6 +52,7 @@ from tools.agent_tools.research.research_learning import (
     CausalReviewLLMOutput,
     ExploratoryHypothesisItem,
     ExploratoryHypothesisLLMOutput,
+    _episode_alpha_setup_samples,
     _execution_learning_from_snapshot,
     _write_alpha_setup_policy_state,
     run_researcher_causal_review,
@@ -54,11 +65,13 @@ from tools.common.alpha_setup import (
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
+from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.research.reviewer_phase4_review import (
     _final_action_semantic_summary,
     _horizon_class,
     _validate_phase1_signal_persistence,
 )
+from tools.agent_tools.research.research_review_helpers import _feedback_learning_refs
 from tools.agent_tools.research.research_snapshot_reports import (
     _write_historical_learning_snapshot_report,
     learned_vs_unlearned_trade_performance,
@@ -3981,21 +3994,36 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "reason_codes": "target_plan",
                     "reason_codes": ["learning_mechanism:alpha_promotion"],
                     "learning_used": {
-                        "learning_context": {
-                            "enabled": True,
-                            "memory_trace": {
-                                "selected_memory_refs": [
-                                    {
-                                        "memory_type": "trade_episode_memory",
-                                        "id": "episode-1",
-                                        "ticker": "BU",
-                                        "side": "long",
-                                        "horizon_class": "short",
-                                        "market_regime": "trend",
-                                        "setup_type": "long_breakout_short",
-                                    }
-                                ]
-                            },
+                        "alpha_setup_action_values": [
+                            {
+                                "id": "action-value-1",
+                                "ticker": "BU",
+                                "side": "long",
+                                "setup_type": "long_breakout_short",
+                                "action_name": "open",
+                                "canonical_action_family": "open_add_new_risk",
+                                "action_value_lane": "open",
+                                "learning_lane": "open",
+                                "action_preference": "positive_candidate_open",
+                                "canonical_action_value": True,
+                                "consumer_scope": "pm_learning",
+                                "reward_source": "trade_episode",
+                                "evidence_scope": "exact_real_state",
+                                "reward_mean": 1200.0,
+                                "sample_count": 1,
+                            }
+                        ],
+                        "pm_lifecycle_learning_trace": {
+                            "decision_learning_rows": [
+                                {
+                                    "id": "action-value-1",
+                                    "canonical_action_family": "open_add_new_risk",
+                                    "action_value_lane": "open",
+                                    "learning_lane": "open",
+                                    "canonical_action_value": True,
+                                    "consumer_scope": "pm_learning",
+                                }
+                            ]
                         },
                         "adaptive_policy_state": {
                             "policies": [
@@ -4069,7 +4097,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 ],
                 transactions_by_recommendation={
                     "rec-feedback": [
-                        {"lots": 2, "realized_pnl": 1200.0, "commission": 12.0}
+                        {"lots": 2, "commission": 12.0}
                     ]
                 },
                 settlement_row={"daily_pnl": 1200.0},
@@ -4080,9 +4108,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             row = cursor.execute("SELECT * FROM research_position_feedback").fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["ticker"], "BU")
-            self.assertEqual(row["feedback_label"], "learning_position_executed_profit")
+            self.assertEqual(row["feedback_label"], "learning_position_executed_flat")
             payload = json.loads(row["payload_json"])
-            self.assertEqual(payload["memory_refs"][0]["id"], "episode-1")
+            self.assertEqual(payload["memory_refs"][0]["id"], "action-value-1")
+            self.assertEqual(payload["outcome"]["transaction_pnl"], 0.0)
             self.assertEqual(payload["policy_refs"][0]["policy_type"], "learning_mechanism:alpha_promotion")
             digest = cursor.execute(
                 "SELECT * FROM analyst_learning_digest WHERE analyst='portfolio_manager'"
@@ -4092,7 +4121,242 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_research_position_feedback_uses_final_contract_not_legacy_recommendation_fields(self):
+    def test_research_position_feedback_backfills_complete_episodes_idempotently(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._create_feedback_recommendation_table(cursor)
+            action_value = {
+                "id": "action-value-episode",
+                "ticker": "BU",
+                "side": "long",
+                "setup_type": "trend_breakout_setup",
+                "action_name": "open",
+                "canonical_action_family": "open_add_new_risk",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "action_preference": "positive_candidate_open",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+                "reward_source": "trade_episode",
+                "evidence_scope": "exact_real_state",
+            }
+            decision_row = {
+                "id": "action-value-episode",
+                "canonical_action_family": "open_add_new_risk",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+            }
+            final_contract = {
+                "contract_version": "agentquant.final_action.v1",
+                "ticker": "BU",
+                "final_action": "open_real",
+                "current_lots": 0,
+                "target_lots": 2,
+                "lots_delta": 2,
+                "target_position_ratio": 0.08,
+                "reason_codes": ["learning_mechanism:alpha_promotion"],
+                "learning_used": {
+                    "alpha_setup_action_values": [action_value],
+                    "pm_lifecycle_learning_trace": {
+                        "decision_learning_rows": [decision_row],
+                    },
+                },
+            }
+            snapshot = {
+                "final_action_contract": final_contract,
+                "execution_result": {"no_trade_reason": ""},
+            }
+            recommendation = {
+                "id": "rec-episode-feedback",
+                "config_id": "cfg",
+                "underlying_code": "BU",
+                "ticker": "BU",
+                "action": "open_long",
+                "lots": 2,
+                "status": "executed",
+                "source_type": "strategy",
+                "target_position_ratio": 0.08,
+                "signal_snapshot": json.dumps(snapshot),
+            }
+            cursor.execute(
+                """
+                INSERT INTO futures_recommendation
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    recommendation["id"],
+                    "cfg",
+                    "BU",
+                    "BU",
+                    "open_long",
+                    2,
+                    "executed",
+                    "strategy",
+                    0.08,
+                    recommendation["signal_snapshot"],
+                ),
+            )
+            cfg = {
+                "learning": {
+                    "position_feedback_loop": {
+                        "enabled": True,
+                        "valid_days": 30,
+                        "max_digest_rows_per_day": 4,
+                    }
+                }
+            }
+            _write_research_position_feedback(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-02-28",
+                strategy_recommendations=[recommendation],
+                transactions_by_recommendation={
+                    recommendation["id"]: [{"lots": 2, "commission": 12.0}],
+                },
+                settlement_row={"daily_pnl": 900.0},
+            )
+
+            def episode(
+                *,
+                close_transaction_id,
+                gross_pnl,
+                commission,
+                net_pnl,
+                recommendation_id="rec-episode-feedback",
+                contract=final_contract,
+            ):
+                return {
+                    "open_recommendation_id": recommendation_id,
+                    "final_action_contract": contract,
+                    "pair": {
+                        "ticker": "BU",
+                        "side": "long",
+                        "open_recommendation_id": recommendation_id,
+                        "open_transaction_id": "tx-open",
+                        "close_transaction_id": close_transaction_id,
+                        "open_date": "2025-02-28",
+                        "close_date": "2025-03-05",
+                        "gross_pnl": gross_pnl,
+                        "commission": commission,
+                        "net_pnl": net_pnl,
+                    },
+                }
+
+            first = episode(
+                close_transaction_id="tx-close-1",
+                gross_pnl=600.0,
+                commission=30.0,
+                net_pnl=570.0,
+            )
+            second = episode(
+                close_transaction_id="tx-close-2",
+                gross_pnl=-250.0,
+                commission=20.0,
+                net_pnl=-270.0,
+            )
+            _write_research_position_feedback(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-05",
+                strategy_recommendations=[],
+                transactions_by_recommendation={},
+                settlement_row={"daily_pnl": 0.0},
+                completed_episode_payloads=[first, second, dict(first)],
+            )
+            row = cursor.execute(
+                "SELECT * FROM research_position_feedback WHERE recommendation_id=?",
+                (recommendation["id"],),
+            ).fetchone()
+            outcome = json.loads(row["outcome_json"])
+            payload = json.loads(row["payload_json"])
+            self.assertEqual(outcome["transaction_pnl"], 350.0)
+            self.assertEqual(outcome["transaction_commission"], 50.0)
+            self.assertEqual(outcome["feedback_label"], "learning_position_executed_profit")
+            self.assertEqual(payload["outcome"], outcome)
+            baseline = (row["outcome_json"], row["payload_json"], row["feedback_label"])
+            event_count = cursor.execute("SELECT COUNT(*) FROM learning_event_log").fetchone()[0]
+            digest_count = cursor.execute("SELECT COUNT(*) FROM analyst_learning_digest").fetchone()[0]
+
+            _write_research_position_feedback(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-05",
+                strategy_recommendations=[],
+                transactions_by_recommendation={},
+                settlement_row={"daily_pnl": 0.0},
+                completed_episode_payloads=[second, first, first],
+            )
+            rerun = cursor.execute(
+                "SELECT * FROM research_position_feedback WHERE recommendation_id=?",
+                (recommendation["id"],),
+            ).fetchone()
+            self.assertEqual(
+                (rerun["outcome_json"], rerun["payload_json"], rerun["feedback_label"]),
+                baseline,
+            )
+            self.assertEqual(cursor.execute("SELECT COUNT(*) FROM learning_event_log").fetchone()[0], event_count)
+            self.assertEqual(cursor.execute("SELECT COUNT(*) FROM analyst_learning_digest").fetchone()[0], digest_count)
+
+            mismatched_contract = json.loads(json.dumps(final_contract))
+            mismatched_contract["learning_used"]["pm_lifecycle_learning_trace"]["decision_learning_rows"].append({
+                **decision_row,
+                "id": "unexpected-decision-row",
+            })
+            rejected_payloads = [
+                episode(
+                    close_transaction_id="tx-close-mismatch",
+                    gross_pnl=100.0,
+                    commission=10.0,
+                    net_pnl=90.0,
+                    contract=mismatched_contract,
+                ),
+                episode(
+                    close_transaction_id="tx-close-no-learning",
+                    gross_pnl=100.0,
+                    commission=10.0,
+                    net_pnl=90.0,
+                    contract={**final_contract, "learning_used": {}},
+                ),
+                episode(
+                    close_transaction_id="tx-close-no-feedback",
+                    gross_pnl=100.0,
+                    commission=10.0,
+                    net_pnl=90.0,
+                    recommendation_id="rec-without-feedback",
+                ),
+            ]
+            _write_research_position_feedback(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-05",
+                strategy_recommendations=[],
+                transactions_by_recommendation={},
+                settlement_row={"daily_pnl": 0.0},
+                completed_episode_payloads=rejected_payloads,
+            )
+            rejected = cursor.execute(
+                "SELECT * FROM research_position_feedback WHERE recommendation_id=?",
+                (recommendation["id"],),
+            ).fetchone()
+            self.assertEqual(
+                (rejected["outcome_json"], rejected["payload_json"], rejected["feedback_label"]),
+                baseline,
+            )
+            self.assertEqual(
+                cursor.execute("SELECT COUNT(*) FROM research_position_feedback").fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+    def test_research_position_feedback_ignores_unconsumed_legacy_memory_refs(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -4151,19 +4415,69 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 settlement_row={"daily_pnl": 0.0},
             )
 
-            self.assertEqual(result["feedback_rows"], 1)
+            self.assertEqual(result["feedback_rows"], 0)
             row = cursor.execute("SELECT * FROM research_position_feedback").fetchone()
-            self.assertIsNotNone(row)
-            self.assertEqual(row["side"], "flat")
-            self.assertEqual(row["target_lots"], 0)
-            self.assertEqual(row["position_delta_lots"], 0)
-            self.assertEqual(row["target_position_ratio"], 0.0)
-            payload = json.loads(row["payload_json"])
-            self.assertEqual(payload["pm_effect"]["target_lots"], 0)
-            self.assertEqual(payload["recommendation"]["target_position_ratio"], 0.0)
-            self.assertEqual(payload["outcome"]["feedback_label"], "learning_observed_no_position")
+            self.assertIsNone(row)
         finally:
             conn.close()
+
+    def test_research_position_feedback_requires_matching_formal_decision_row(self):
+        formal = {
+            "id": "action-value-formal",
+            "ticker": "BU",
+            "side": "long",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "action_preference": "positive_candidate_open",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+        }
+
+        def refs_for(decision_rows):
+            memory_refs, _ = _feedback_learning_refs(
+                {
+                    "learning_used": {
+                        "alpha_setup_action_values": [formal],
+                        "pm_lifecycle_learning_trace": {
+                            "decision_learning_rows": decision_rows,
+                        },
+                    }
+                }
+            )
+            return memory_refs
+
+        matching = {
+            "id": "action-value-formal",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+        }
+        self.assertEqual(len(refs_for([matching])), 1)
+        self.assertEqual(refs_for([]), [])
+        self.assertEqual(
+            refs_for([{**matching, "canonical_action_value": False}]),
+            [],
+        )
+        self.assertEqual(
+            refs_for([{**matching, "consumer_scope": "analyst_calibration"}]),
+            [],
+        )
+        self.assertEqual(
+            refs_for([{
+                **matching,
+                "canonical_action_family": "reduce_exit",
+                "action_value_lane": "exit",
+                "learning_lane": "exit",
+            }]),
+            [],
+        )
 
     def test_learned_underperformance_writes_scoped_risk_suppression_demote_policy(self):
         conn = self._connection()
@@ -5126,9 +5440,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 """
             ).fetchall()
             by_action = {row["action_name"]: row for row in action_values}
-            self.assertIn("add_or_open", by_action)
             self.assertIn("execution", by_action)
-            self.assertEqual(by_action["add_or_open"]["canonical_action_family"], "open_add_new_risk")
+            self.assertNotIn("open", by_action)
             self.assertIn("execution_breakout_setup", by_action["execution"]["scope_key"])
             self.assertLess(by_action["execution"]["reward_sum"], 0)
             self.assertEqual(by_action["execution"]["sample_count"], 1)
@@ -5318,7 +5631,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertGreaterEqual(summary["rows"], 1)
             sample = cursor.execute(
                 """
-                SELECT action_taken, target_lots, payload_json
+                SELECT source_type, action_taken, target_lots, executed_lots,
+                       net_pnl, commission, payload_json
                 FROM alpha_setup_sample
                 WHERE config_id='cfg'
                   AND recommendation_id='rec-bu-hold'
@@ -5327,6 +5641,10 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             ).fetchone()
             self.assertEqual(sample["action_taken"], "hold")
             self.assertEqual(sample["target_lots"], -1)
+            self.assertEqual(sample["source_type"], "trade")
+            self.assertEqual(sample["executed_lots"], 0)
+            self.assertEqual(sample["net_pnl"], 800.0)
+            self.assertEqual(sample["commission"], 0.0)
             payload = load_externalized_json(sample["payload_json"])
             self.assertEqual(payload["pm_action"], "hold")
             action_values = cursor.execute(
@@ -5341,11 +5659,261 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 {row["action_name"] for row in action_values},
             )
             self.assertIn(
-                "observe",
+                "hold",
                 {row["action_name"] for row in action_values},
             )
         finally:
             conn.close()
+
+    def test_reduce_exit_learning_uses_real_fills_not_remaining_position_lots(self):
+        cases = (
+            {
+                "label": "unfilled_reduce",
+                "final_action": "reduce",
+                "target_lots": 3,
+                "transactions": [],
+                "remaining_lots": 5,
+                "holding_pnl": 900.0,
+                "close_pnl": 0.0,
+                "commission": 0.0,
+                "expected_source_type": "no_trade",
+                "expected_action": "hold",
+                "expected_target_lots": 5,
+                "expected_executed_lots": 0,
+                "expected_net_pnl": 0.0,
+                "expected_action_name": "hold",
+                "expected_reward_sum": None,
+            },
+            {
+                "label": "unfilled_exit",
+                "final_action": "exit",
+                "target_lots": 0,
+                "transactions": [],
+                "remaining_lots": 5,
+                "holding_pnl": -700.0,
+                "close_pnl": 0.0,
+                "commission": 0.0,
+                "expected_source_type": "no_trade",
+                "expected_action": "hold",
+                "expected_target_lots": 5,
+                "expected_executed_lots": 0,
+                "expected_net_pnl": 0.0,
+                "expected_action_name": "hold",
+                "expected_reward_sum": None,
+            },
+            {
+                "label": "partial_exit_becomes_reduce",
+                "final_action": "exit",
+                "target_lots": 0,
+                "transactions": [
+                    {
+                        "action": "close_long",
+                        "lots": 2,
+                        "daily_pnl": -300.0,
+                        "commission": 7.0,
+                    }
+                ],
+                "remaining_lots": 3,
+                "holding_pnl": 600.0,
+                "close_pnl": -300.0,
+                "commission": 7.0,
+                "expected_source_type": "trade",
+                "expected_action": "close_long",
+                "expected_target_lots": 3,
+                "expected_executed_lots": 2,
+                "expected_net_pnl": -300.0,
+                "expected_action_name": "reduce",
+                "expected_reward_sum": -307.0,
+            },
+            {
+                "label": "partial_reduce_uses_actual_close_lots",
+                "final_action": "reduce",
+                "target_lots": 3,
+                "transactions": [
+                    {
+                        "action": "close_long",
+                        "lots": 1,
+                        "daily_pnl": 200.0,
+                        "commission": 5.0,
+                    }
+                ],
+                "remaining_lots": 4,
+                "holding_pnl": 400.0,
+                "close_pnl": 200.0,
+                "commission": 5.0,
+                "expected_source_type": "trade",
+                "expected_action": "close_long",
+                "expected_target_lots": 4,
+                "expected_executed_lots": 1,
+                "expected_net_pnl": 200.0,
+                "expected_action_name": "reduce",
+                "expected_reward_sum": 195.0,
+            },
+            {
+                "label": "full_exit_stays_exit",
+                "final_action": "exit",
+                "target_lots": 0,
+                "transactions": [
+                    {
+                        "action": "close_long",
+                        "lots": 5,
+                        "daily_pnl": 500.0,
+                        "commission": 9.0,
+                    }
+                ],
+                "remaining_lots": 0,
+                "holding_pnl": 0.0,
+                "close_pnl": 500.0,
+                "commission": 9.0,
+                "expected_source_type": "trade",
+                "expected_action": "close_long",
+                "expected_target_lots": 0,
+                "expected_executed_lots": 5,
+                "expected_net_pnl": 500.0,
+                "expected_action_name": "exit",
+                "expected_reward_sum": 491.0,
+            },
+        )
+
+        for index, case in enumerate(cases):
+            with self.subTest(case=case["label"]):
+                conn = self._connection()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+                    cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+                    cursor.execute(
+                        """
+                        CREATE TABLE portfolio (
+                            id TEXT PRIMARY KEY,
+                            config_id TEXT
+                        )
+                        """
+                    )
+                    cursor.execute("INSERT INTO portfolio(id, config_id) VALUES ('pf1', 'cfg')")
+                    cursor.execute(
+                        """
+                        CREATE TABLE ticker_daily_pnl (
+                            portfolio_id TEXT,
+                            trading_date TEXT,
+                            ticker TEXT,
+                            daily_pnl REAL,
+                            commission REAL,
+                            holding_pnl REAL,
+                            new_position_pnl REAL,
+                            close_pnl REAL,
+                            lots INTEGER
+                        )
+                        """
+                    )
+                    daily_pnl = case["holding_pnl"] + case["close_pnl"]
+                    cursor.execute(
+                        """
+                        INSERT INTO ticker_daily_pnl (
+                            portfolio_id, trading_date, ticker, daily_pnl, commission,
+                            holding_pnl, new_position_pnl, close_pnl, lots
+                        ) VALUES (?, '2025-03-24', 'RB', ?, ?, ?, 0, ?, ?)
+                        """,
+                        (
+                            "pf1",
+                            daily_pnl,
+                            case["commission"],
+                            case["holding_pnl"],
+                            case["close_pnl"],
+                            case["remaining_lots"],
+                        ),
+                    )
+                    rec_id = f"rec-rb-lifecycle-{index}"
+                    snapshot = {
+                        "final_action_contract": {
+                            "contract_version": "agentquant.final_action.v1",
+                            "ticker": "RB",
+                            "contract_type": "strategy",
+                            "final_action": case["final_action"],
+                            "current_lots": 5,
+                            "target_lots": case["target_lots"],
+                            "lots_delta": case["target_lots"] - 5,
+                            "side": "long",
+                            "horizon_class": "short",
+                            "market_regime": "trend",
+                            "setup_type": "trend_breakout_setup",
+                            "opportunity_state": "tradeable_candidate",
+                        },
+                        "execution_result": {
+                            "status": "executed" if case["transactions"] else "skipped",
+                            "outcome": "filled" if case["transactions"] else "not_filled",
+                            "transaction_count": len(case["transactions"]),
+                            "actual_transactions": case["transactions"],
+                            "no_trade_reason": None if case["transactions"] else "intraday_trigger_not_met",
+                        },
+                    }
+
+                    write_alpha_setup_profiles(
+                        cursor,
+                        cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                        config_id="cfg",
+                        trading_date="2025-03-24",
+                        strategy_recommendations=[
+                            {
+                                "id": rec_id,
+                                "underlying_code": "RB",
+                                "action": "close_long",
+                                "lots": abs(5 - case["target_lots"]),
+                                "status": snapshot["execution_result"]["status"],
+                                "signal_snapshot": json.dumps(snapshot),
+                            }
+                        ],
+                        transactions_by_recommendation={rec_id: case["transactions"]},
+                    )
+
+                    sample = cursor.execute(
+                        """
+                        SELECT source_type, action_taken, target_lots, executed_lots,
+                               net_pnl, commission, payload_json
+                        FROM alpha_setup_sample
+                        WHERE config_id='cfg'
+                          AND recommendation_id=?
+                          AND source_type != 'execution'
+                        """,
+                        (rec_id,),
+                    ).fetchone()
+                    self.assertIsNotNone(sample)
+                    self.assertEqual(sample["source_type"], case["expected_source_type"])
+                    self.assertEqual(sample["action_taken"], case["expected_action"])
+                    self.assertEqual(sample["target_lots"], case["expected_target_lots"])
+                    self.assertEqual(sample["executed_lots"], case["expected_executed_lots"])
+                    self.assertAlmostEqual(sample["net_pnl"], case["expected_net_pnl"])
+                    self.assertAlmostEqual(
+                        sample["commission"],
+                        case["commission"] if case["transactions"] else 0.0,
+                    )
+                    self.assertEqual(
+                        load_externalized_json(sample["payload_json"])["action_name"],
+                        case["expected_action_name"],
+                    )
+
+                    real_rewards = cursor.execute(
+                        """
+                        SELECT action_name, reward_sum
+                        FROM alpha_setup_action_value
+                        WHERE config_id='cfg' AND reward_source='real_trade'
+                        ORDER BY action_name
+                        """
+                    ).fetchall()
+                    if case["expected_reward_sum"] is None:
+                        self.assertEqual(real_rewards, [])
+                    else:
+                        reward_by_action = {
+                            row["action_name"]: row["reward_sum"]
+                            for row in real_rewards
+                        }
+                        self.assertIn(case["expected_action_name"], reward_by_action)
+                        self.assertAlmostEqual(
+                            reward_by_action[case["expected_action_name"]],
+                            case["expected_reward_sum"],
+                        )
+                finally:
+                    conn.close()
 
     def test_researcher_execution_learning_does_not_use_pm_internal_draft_execution_profile(self):
         snapshot = {
@@ -5536,7 +6104,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_alpha_setup_action_value_writes_candidate_preferences_from_real_rewards(self):
+    def test_alpha_setup_daily_open_pnl_does_not_create_open_action_value(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -5662,16 +6230,22 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 WHERE config_id='cfg' AND canonical_action_family='open_add_new_risk'
                 """
             ).fetchone()
-            self.assertEqual(row["action_name"], "add_or_open")
-            self.assertEqual(row["canonical_action_family"], "open_add_new_risk")
-            self.assertEqual(row["action_preference"], "positive_candidate_open")
-            payload = load_externalized_json(row["payload_json"])
-            self.assertEqual(payload["action_preference"], "positive_candidate_open")
-            self.assertEqual(payload["canonical_action_family"], "open_add_new_risk")
-            self.assertEqual(payload["amplification_scope_quality"], "exact_real_state")
-            self.assertEqual(payload["reward_source"], "real_trade")
-            self.assertEqual(payload["sample_source"], "real_trade")
-            self.assertEqual(payload["exact_state_real_trade_sample_count"], 1)
+            self.assertIsNone(row)
+            daily_sample = cursor.execute(
+                """
+                SELECT source_type, net_pnl, payload_json
+                FROM alpha_setup_sample
+                WHERE config_id='cfg'
+                  AND recommendation_id='rec-p-1'
+                  AND source_type='trade'
+                """
+            ).fetchone()
+            self.assertEqual(daily_sample["source_type"], "trade")
+            self.assertEqual(daily_sample["net_pnl"], 2200.0)
+            self.assertEqual(
+                load_externalized_json(daily_sample["payload_json"])["action_name"],
+                "open",
+            )
         finally:
             conn.close()
 
@@ -5697,7 +6271,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "executed_lots": 2,
                 "net_pnl": 3200.0,
                 "commission": 20.0,
-                "source_type": "trade",
+                "source_type": "trade_episode",
                 "opportunity_state": "tradeable_candidate",
                 "outcome_label": "profit",
                 "evidence": {
@@ -5724,7 +6298,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         },
                     },
                 },
-                "result": {"pnl_source": "ticker_daily_pnl"},
+                "result": {
+                    "pnl_source": "trade_episode_memory",
+                    "episode_net_pnl": 3180.0,
+                    "episode_reward_source": "trade_episode_memory",
+                },
             }
 
             result = upsert_alpha_setup_sample_and_profile(
@@ -5793,7 +6371,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 "executed_lots": 2,
                 "net_pnl": -2600.0,
                 "commission": 20.0,
-                "source_type": "trade",
+                "source_type": "trade_episode",
                 "opportunity_state": "tradeable_candidate",
                 "outcome_label": "loss",
                 "evidence": {
@@ -5820,7 +6398,11 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         },
                     },
                 },
-                "result": {"pnl_source": "ticker_daily_pnl"},
+                "result": {
+                    "pnl_source": "trade_episode_memory",
+                    "episode_net_pnl": -2620.0,
+                    "episode_reward_source": "trade_episode_memory",
+                },
             }
 
             result = upsert_alpha_setup_sample_and_profile(
@@ -5979,13 +6561,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 payload = load_externalized_json(row["payload_json"])
                 observed[row["action_name"]] = (row["action_preference"], payload)
 
-            exit_hint, exit_payload = observed["exit"]
+            exit_hint, exit_payload = observed["reduce"]
             self.assertEqual(exit_hint, "positive_candidate_exit")
             self.assertEqual(exit_payload["action_preference"], "positive_candidate_exit")
             self.assertEqual(exit_payload["amplification_scope_quality"], "partial_real_state")
             self.assertEqual(exit_payload["real_trade_reward_count"], 1)
             self.assertEqual(exit_payload["reward_source"], "real_trade")
-            self.assertEqual(exit_payload["action_value_lane"], "exit")
+            self.assertEqual(exit_payload["action_value_lane"], "reduce")
             self.assertIn("portfolio_manager", exit_payload["usable_by"])
             self.assertIn("protect_profit", exit_payload["allowed_effects"])
             self.assertIn("open_amplification", exit_payload["forbidden_effects"])
@@ -6057,6 +6639,554 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(row["action_preference"], payload["action_preference"])
             self.assertEqual(payload["amplification_scope_quality"], "partial_real_state")
             self.assertEqual(payload["real_trade_reward_count"], 1)
+        finally:
+            conn.close()
+
+    def test_real_path_externalized_cross_day_episodes_reach_next_day_pm_retrieval(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "episode_learning.db"
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            _ensure_reviewer_learning_schema(cursor)
+            open_snapshot = {
+                "technical": {
+                    "signal": "Bullish",
+                    "metadata": {
+                        "technical_context": {"market_regime": "trend"},
+                        "action_evidence_contract": {
+                            "learning_scope": {"setup_family": "trend_breakout"}
+                        },
+                    },
+                },
+                "pm_internal_draft": {
+                    "decision_horizon": "short",
+                    "market_regime": "trend",
+                    "opportunity_state": "tradeable_candidate",
+                },
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "BU",
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 2,
+                    "lots_delta": 2,
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout_setup",
+                    "opportunity_state": "tradeable_candidate",
+                },
+            }
+
+            def insert_episode(
+                *,
+                episode_id: str,
+                close_date: str,
+                close_recommendation_id: str,
+                close_transaction_id: str,
+                net_pnl: float,
+                externalized: bool,
+            ) -> None:
+                payload = {
+                    "open_recommendation_id": "rec-open-bu",
+                    "pair": {
+                        "ticker": "BU",
+                        "side": "long",
+                        "lots": 1,
+                        "open_recommendation_id": "rec-open-bu",
+                        "close_recommendation_id": close_recommendation_id,
+                        "open_transaction_id": "tx-open-bu",
+                        "close_transaction_id": close_transaction_id,
+                        "open_source_type": "strategy",
+                        "close_source_type": "strategy",
+                        "contains_rollover": False,
+                        "contains_forced_risk": False,
+                        "contains_non_strategy": False,
+                        "open_date": "2025-03-06",
+                        "close_date": close_date,
+                        "net_pnl": net_pnl,
+                    },
+                    "signal_snapshot": open_snapshot,
+                    "final_action_contract": open_snapshot["final_action_contract"],
+                    "opportunity_type": "trend_continuation",
+                    "opportunity_state": "tradeable_candidate",
+                    "data_usage_summary": {"pandaai": {"freshness": "fresh"}},
+                }
+                if externalized:
+                    with patch.dict(
+                        "os.environ",
+                        {"AGENTQUANT_ARTIFACT_ROOT": str(Path(temp_dir) / "artifacts")},
+                    ):
+                        stored = externalize_json_for_db(
+                            payload,
+                            category="trade_episode_memory",
+                            record_id=episode_id,
+                            field_name="payload",
+                            config_id="cfg",
+                            trading_date=close_date,
+                            inline_max_bytes=1,
+                        )
+                    payload_json = stored.inline_value
+                    artifact_path = stored.artifact_path
+                    payload_sha256 = stored.sha256
+                    payload_size = stored.size_bytes
+                    payload_summary_json = stored.summary_json
+                else:
+                    payload_json = json.dumps(payload)
+                    artifact_path = None
+                    payload_sha256 = None
+                    payload_size = None
+                    payload_summary_json = None
+                cursor.execute(
+                    """
+                    INSERT INTO trade_episode_memory (
+                        id, config_id, trading_date, ticker, side, sector, setup_type,
+                        signal_combo, horizon_class, market_regime, episode_date,
+                        first_seen_at, last_reviewed_at, open_date, close_date,
+                        holding_days, net_pnl, return_on_notional, outcome_label,
+                        lesson_text, payload_json, payload_artifact_path, payload_sha256,
+                        payload_size, payload_summary_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        episode_id,
+                        "cfg",
+                        close_date,
+                        "BU",
+                        "long",
+                        "energy",
+                        "trend_breakout_setup",
+                        "[]",
+                        "short",
+                        "trend",
+                        close_date,
+                        "now",
+                        "now",
+                        "2025-03-06",
+                        close_date,
+                        3,
+                        net_pnl,
+                        0.01,
+                        "winner" if net_pnl > 0 else "loser",
+                        "settled partial-close episode",
+                        payload_json,
+                        artifact_path,
+                        payload_sha256,
+                        payload_size,
+                        payload_summary_json,
+                        "now",
+                    ),
+                )
+
+            insert_episode(
+                episode_id="episode-bu-1",
+                close_date="2025-03-11",
+                close_recommendation_id="rec-close-bu-1",
+                close_transaction_id="tx-close-bu-1",
+                net_pnl=700.0,
+                externalized=True,
+            )
+            insert_episode(
+                episode_id="episode-bu-2",
+                close_date="2025-03-12",
+                close_recommendation_id="rec-close-bu-2",
+                close_transaction_id="tx-close-bu-2",
+                net_pnl=-200.0,
+                externalized=False,
+            )
+            cfg = {"learning": {"alpha_setup_profile": {"enabled": True}}}
+
+            first_loaded = _episode_alpha_setup_samples(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-11",
+            )
+            self.assertEqual(len(first_loaded), 1)
+            self.assertEqual(first_loaded[0]["result"]["episode_memory_id"], "episode-bu-1")
+            self.assertEqual(first_loaded[0]["current_lots"], 0)
+            self.assertEqual(first_loaded[0]["target_lots"], 2)
+
+            for close_date in ("2025-03-11", "2025-03-12", "2025-03-12"):
+                write_alpha_setup_profiles(
+                    cursor,
+                    cfg=cfg,
+                    config_id="cfg",
+                    trading_date=close_date,
+                    strategy_recommendations=[],
+                    transactions_by_recommendation={},
+                )
+
+            samples = cursor.execute(
+                """
+                SELECT trading_date, recommendation_id, action_taken, net_pnl,
+                       outcome_label, payload_json
+                FROM alpha_setup_sample
+                WHERE config_id='cfg' AND source_type='trade_episode'
+                ORDER BY trading_date
+                """
+            ).fetchall()
+            self.assertEqual(len(samples), 2)
+            self.assertEqual(
+                [row["trading_date"] for row in samples],
+                ["2025-03-11", "2025-03-12"],
+            )
+            self.assertTrue(all(row["recommendation_id"] == "rec-open-bu" for row in samples))
+            self.assertTrue(all(row["action_taken"] == "open_probe" for row in samples))
+            self.assertEqual([row["outcome_label"] for row in samples], ["profit", "loss"])
+            self.assertEqual(
+                [load_externalized_json(row["payload_json"])["action_name"] for row in samples],
+                ["open", "open"],
+            )
+
+            profile = cursor.execute(
+                """
+                SELECT sample_count, trade_count, no_trade_count, win_count,
+                       loss_count, net_pnl
+                FROM alpha_setup_profile
+                WHERE config_id='cfg' AND ticker='BU'
+                """
+            ).fetchone()
+            self.assertEqual(profile["sample_count"], 2)
+            self.assertEqual(profile["trade_count"], 2)
+            self.assertEqual(profile["no_trade_count"], 0)
+            self.assertEqual(profile["win_count"], 1)
+            self.assertEqual(profile["loss_count"], 1)
+            self.assertEqual(profile["net_pnl"], 500.0)
+
+            action_value = cursor.execute(
+                """
+                SELECT action_name, action_value_lane, memory_side_role,
+                       sample_count, reward_sum, last_sample_date,
+                       confidence_score, max_position_impact, payload_json
+                FROM alpha_setup_action_value
+                WHERE config_id='cfg' AND ticker='BU'
+                """
+            ).fetchone()
+            self.assertEqual(action_value["action_name"], "open")
+            self.assertEqual(action_value["action_value_lane"], "open")
+            self.assertEqual(action_value["memory_side_role"], "target_side")
+            self.assertEqual(action_value["sample_count"], 2)
+            self.assertEqual(action_value["reward_sum"], 500.0)
+            self.assertEqual(action_value["last_sample_date"], "2025-03-12")
+            initial_action_payload = load_externalized_json(action_value["payload_json"])
+
+            latest_episode_payload = load_externalized_json(samples[-1]["payload_json"])
+            daily_open_fragment = {
+                **latest_episode_payload,
+                "source_type": "trade",
+                "recommendation_id": "rec-open-fragment-bu",
+                "action_taken": "open_probe",
+                "pm_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": 2,
+                "executed_lots": 2,
+                "net_pnl": 9000.0,
+                "commission": 20.0,
+                "holding_days": 0,
+                "outcome_label": "profit",
+                "result": {"pnl_source": "daily_open_fragment"},
+            }
+            upsert_alpha_setup_sample_and_profile(
+                cursor,
+                cfg=cfg,
+                config_id="cfg",
+                trading_date="2025-03-13",
+                sample=daily_open_fragment,
+            )
+            action_value_after_daily_open = cursor.execute(
+                """
+                SELECT sample_count, reward_sum, last_sample_date,
+                       confidence_score, max_position_impact, payload_json
+                FROM alpha_setup_action_value
+                WHERE config_id='cfg' AND ticker='BU'
+                """
+            ).fetchone()
+            self.assertEqual(action_value_after_daily_open["sample_count"], 2)
+            self.assertEqual(action_value_after_daily_open["reward_sum"], 500.0)
+            self.assertEqual(action_value_after_daily_open["last_sample_date"], "2025-03-12")
+            self.assertEqual(
+                action_value_after_daily_open["confidence_score"],
+                action_value["confidence_score"],
+            )
+            self.assertEqual(
+                action_value_after_daily_open["max_position_impact"],
+                action_value["max_position_impact"],
+            )
+            action_payload = load_externalized_json(action_value_after_daily_open["payload_json"])
+            self.assertEqual(
+                action_payload["profile_lifecycle"],
+                initial_action_payload["profile_lifecycle"],
+            )
+            self.assertEqual(
+                action_payload["entry_quality_outcome"]["net_pnl"],
+                -200.0,
+            )
+            conn.commit()
+
+            db = SQLiteDB()
+            db.db_path = str(db_path)
+            retrieved = retrieve_pm_memory(
+                db=db,
+                config_id="cfg",
+                ticker="BU",
+                side="long",
+                trading_date="2025-03-13",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="trend_breakout_setup",
+            )
+            self.assertEqual(len(retrieved["action_values"]), 1)
+            self.assertEqual(retrieved["action_values"][0]["reward_sum"], 500.0)
+            self.assertEqual(
+                retrieved["action_values"][0]["canonical_action_family"],
+                "open_add_new_risk",
+            )
+            formal_action_values = _normalize_alpha_setup_action_values(
+                retrieved["action_values"]
+            )
+            self.assertTrue(formal_action_values[0]["canonical_action_value"])
+            current_signal = AnalystSignal(
+                agent_name="technical",
+                signal=Signal.BULLISH,
+                confidence=0.40,
+                business_quality_score=0.40,
+                setup_quality_score=0.56,
+                opportunity_state="tradeable_candidate",
+                entry_trigger="current breakout confirmed",
+                invalidation_level=3200.0,
+                trigger_valid=True,
+                invalidation_present=True,
+            )
+            scorecard_kwargs = {
+                "ticker": "BU",
+                "analyst_signals": [current_signal],
+                "market_confirmation": {"confirmation_score": 0.30},
+                "data_quality_summary": {},
+                "decision_date": "2025-03-13",
+                "config": {
+                    "tradeable_threshold": 0.10,
+                    "deployable_threshold": 0.75,
+                    "min_tradeable_candidate_setup_quality": 0.55,
+                },
+            }
+            cold_start_scorecard = build_opportunity_scorecard(**scorecard_kwargs)
+            learned_scorecard = build_opportunity_scorecard(
+                **scorecard_kwargs,
+                alpha_setup_action_values=formal_action_values,
+            )
+            cold_start_row = cold_start_scorecard["long"]
+            learned_row = learned_scorecard["long"]
+            self.assertIn(
+                cold_start_row["final_state"],
+                {"probe_candidate", "tradeable_candidate"},
+            )
+            self.assertGreater(
+                learned_row["candidate_quality"],
+                cold_start_row["candidate_quality"],
+            )
+            cold_start_rank = _ensure_final_rank_score_fields(
+                dict(cold_start_row),
+                config={},
+            )
+            learned_rank = _ensure_final_rank_score_fields(
+                dict(learned_row),
+                config={},
+            )
+            self.assertGreater(
+                learned_rank["rank_score"],
+                cold_start_rank["rank_score"],
+            )
+
+            no_current_opportunity = AnalystSignal(
+                agent_name="technical",
+                signal=Signal.BULLISH,
+                confidence=0.58,
+                business_quality_score=0.58,
+                setup_quality_score=0.0,
+                opportunity_state="no_opportunity",
+                entry_trigger="",
+                invalidation_level=None,
+                trigger_valid=False,
+                invalidation_present=False,
+            )
+            learning_without_current_entry = build_opportunity_scorecard(
+                ticker="BU",
+                analyst_signals=[no_current_opportunity],
+                market_confirmation={"confirmation_score": 0.58},
+                data_quality_summary={},
+                alpha_setup_action_values=formal_action_values,
+                decision_date="2025-03-13",
+                config={},
+            )
+            self.assertNotIn(
+                learning_without_current_entry["long"]["final_state"],
+                {"probe_candidate", "tradeable_candidate"},
+            )
+            conn.close()
+
+    def test_episode_learning_rejects_incomplete_and_operational_pairs(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            close_date = "2025-03-14"
+
+            def insert_case(
+                *,
+                episode_id: str,
+                ticker: str,
+                pair_overrides: dict,
+                setup_type: str = "trend_breakout_setup",
+                payload_open_recommendation_id: str | None = None,
+                contract_overrides: dict | None = None,
+            ) -> None:
+                market_regime = "unknown" if setup_type == "generic_trade_setup" else "trend"
+                opportunity_state = "unknown" if setup_type == "generic_trade_setup" else "tradeable_candidate"
+                pair = {
+                    "ticker": ticker,
+                    "side": "long",
+                    "lots": 1,
+                    "open_recommendation_id": f"rec-open-{ticker}",
+                    "close_recommendation_id": f"rec-close-{ticker}",
+                    "open_transaction_id": f"tx-open-{ticker}",
+                    "close_transaction_id": f"tx-close-{ticker}",
+                    "open_source_type": "strategy",
+                    "close_source_type": "strategy",
+                    "contains_rollover": False,
+                    "contains_forced_risk": False,
+                    "contains_non_strategy": False,
+                    "open_date": "2025-03-10",
+                    "close_date": close_date,
+                    "net_pnl": 300.0,
+                }
+                pair.update(pair_overrides)
+                final_contract = {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": ticker,
+                    "final_action": "open_probe",
+                    "current_lots": 0,
+                    "target_lots": 1,
+                    "lots_delta": 1,
+                    "setup_type": setup_type,
+                    "horizon_class": "short",
+                    "market_regime": market_regime,
+                }
+                final_contract.update(contract_overrides or {})
+                payload = {
+                    "open_recommendation_id": (
+                        payload_open_recommendation_id
+                        if payload_open_recommendation_id is not None
+                        else pair.get("open_recommendation_id")
+                    ),
+                    "pair": pair,
+                    "signal_snapshot": {
+                        "final_action_contract": final_contract,
+                    },
+                    "opportunity_state": opportunity_state,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO trade_episode_memory (
+                        id, config_id, trading_date, ticker, side, sector, setup_type,
+                        signal_combo, horizon_class, market_regime, episode_date,
+                        open_date, close_date, holding_days, net_pnl,
+                        return_on_notional, outcome_label, lesson_text,
+                        payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        episode_id,
+                        "cfg",
+                        close_date,
+                        ticker,
+                        "long",
+                        "test",
+                        setup_type,
+                        "[]",
+                        "short",
+                        market_regime,
+                        close_date,
+                        "2025-03-10",
+                        close_date,
+                        4,
+                        300.0,
+                        0.01,
+                        "winner",
+                        "episode validation case",
+                        json.dumps(payload),
+                        "now",
+                    ),
+                )
+
+            insert_case(
+                episode_id="episode-valid-incomplete-state",
+                ticker="TA",
+                pair_overrides={},
+                setup_type="generic_trade_setup",
+            )
+            insert_case(
+                episode_id="episode-missing-close-tx",
+                ticker="MA",
+                pair_overrides={"close_transaction_id": ""},
+            )
+            insert_case(
+                episode_id="episode-nonstrategy",
+                ticker="NS",
+                pair_overrides={"open_source_type": "counterfactual_replay"},
+            )
+            insert_case(
+                episode_id="episode-rollover",
+                ticker="RO",
+                pair_overrides={"contains_rollover": True},
+            )
+            insert_case(
+                episode_id="episode-forced-risk",
+                ticker="FR",
+                pair_overrides={"contains_forced_risk": True},
+            )
+            insert_case(
+                episode_id="episode-top-id-mismatch",
+                ticker="ID",
+                pair_overrides={},
+                payload_open_recommendation_id="rec-wrong-ID",
+            )
+            insert_case(
+                episode_id="episode-invalid-fac-lots",
+                ticker="IV",
+                pair_overrides={},
+                contract_overrides={"target_lots": "not-a-number"},
+            )
+            insert_case(
+                episode_id="episode-pair-row-mismatch",
+                ticker="MM",
+                pair_overrides={"ticker": "OTHER"},
+            )
+
+            loaded = _episode_alpha_setup_samples(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date=close_date,
+            )
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0]["ticker"], "TA")
+
+            write_alpha_setup_profiles(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date=close_date,
+                strategy_recommendations=[],
+                transactions_by_recommendation={},
+            )
+            samples = cursor.execute(
+                "SELECT ticker FROM alpha_setup_sample WHERE source_type='trade_episode'"
+            ).fetchall()
+            self.assertEqual([row["ticker"] for row in samples], ["TA"])
+            action_value = cursor.execute(
+                "SELECT * FROM alpha_setup_action_value WHERE ticker='TA'"
+            ).fetchone()
+            self.assertIsNone(action_value)
         finally:
             conn.close()
 
@@ -6175,6 +7305,23 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     json.dumps(
                         {
                             "open_recommendation_id": "rec-p-episode",
+                            "pair": {
+                                "ticker": "P",
+                                "side": "long",
+                                "lots": 1,
+                                "open_recommendation_id": "rec-p-episode",
+                                "close_recommendation_id": "rec-p-close",
+                                "open_transaction_id": "tx-p-open",
+                                "close_transaction_id": "tx-p-close",
+                                "open_source_type": "strategy",
+                                "close_source_type": "strategy",
+                                "contains_rollover": False,
+                                "contains_forced_risk": False,
+                                "contains_non_strategy": False,
+                                "open_date": "2025-03-06",
+                                "close_date": "2025-03-11",
+                                "net_pnl": 14640.0,
+                            },
                             "signal_snapshot": snapshot,
                             "opportunity_type": "trend_continuation",
                             "opportunity_state": "tradeable_candidate",
@@ -6190,19 +7337,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
                 config_id="cfg",
                 trading_date="2025-03-11",
-                strategy_recommendations=[
-                    {
-                        "id": "rec-p-episode",
-                        "underlying_code": "P",
-                        "action": "open_long",
-                        "lots": 1,
-                        "status": "executed",
-                        "signal_snapshot": json.dumps(snapshot),
-                    }
-                ],
-                transactions_by_recommendation={
-                    "rec-p-episode": [{"lots": 1, "daily_pnl": -840, "commission": 26.59}]
-                },
+                strategy_recommendations=[],
+                transactions_by_recommendation={},
             )
 
             sample = cursor.execute(
@@ -6219,8 +7355,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertEqual(sample["commission"], 0.0)
             self.assertEqual(sample["holding_days"], 3)
             sample_payload = load_externalized_json(sample["payload_json"])
-            self.assertEqual(sample_payload["result"]["single_day_net_pnl"], -866.59)
-            self.assertTrue(sample_payload["result"]["episode_overrides_single_day_reward"])
+            self.assertEqual(sample_payload["result"]["episode_net_pnl"], 14640.0)
+            self.assertEqual(sample_payload["result"]["episode_reward_source"], "trade_episode_memory")
 
             row = cursor.execute(
                 """
@@ -6229,7 +7365,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 WHERE config_id='cfg' AND canonical_action_family='open_add_new_risk'
                 """
             ).fetchone()
-            self.assertEqual(row["action_name"], "add_or_open")
+            self.assertEqual(row["action_name"], "open")
             self.assertEqual(row["canonical_action_family"], "open_add_new_risk")
             self.assertEqual(row["action_preference"], "positive_candidate_open")
             self.assertEqual(row["reward_sum"], 14640.0)

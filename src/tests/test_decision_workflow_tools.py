@@ -175,6 +175,71 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             {item["reason"] for item in result["rejected_or_downgraded"]},
         )
 
+    def test_memory_retrieval_requires_explicit_pm_learning_scope(self):
+        class ScopeMemoryDB:
+            def get_alpha_setup_action_values(self, **kwargs):
+                common = {
+                    "ticker": kwargs["ticker"],
+                    "side": kwargs["side"],
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "setup_type": "trend_breakout",
+                    "action_name": "open",
+                    "canonical_action_family": "open_add_new_risk",
+                    "action_value_lane": "open",
+                    "learning_lane": "open",
+                    "action_preference": "positive_candidate_open",
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                    "reward_sum": 500.0,
+                    "reward_mean": 500.0,
+                    "sample_count": 1,
+                    "last_sample_date": "2025-03-04",
+                    "canonical_action_value": True,
+                }
+                return [
+                    {**common, "id": "scope-missing"},
+                    {**common, "id": "scope-empty", "consumer_scope": ""},
+                    {
+                        **common,
+                        "id": "scope-payload-pm",
+                        "payload": {"consumer_scope": "pm_learning"},
+                    },
+                    {**common, "id": "scope-top-pm", "consumer_scope": "pm_learning"},
+                ]
+
+        result = retrieve_pm_memory(
+            db=ScopeMemoryDB(),
+            config_id="cfg",
+            ticker="BU",
+            side="short",
+            trading_date="2025-03-05",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="trend_breakout",
+            limit=10,
+        )
+
+        self.assertEqual(
+            {row["id"] for row in result["action_values"]},
+            {"scope-payload-pm", "scope-top-pm"},
+        )
+        self.assertTrue(
+            all(row["consumer_scope"] == "pm_learning" for row in result["action_values"])
+        )
+        rejected = {
+            row["id"]: row["reason"]
+            for row in result["rejected_or_downgraded"]
+            if row.get("id") in {"scope-missing", "scope-empty"}
+        }
+        self.assertEqual(
+            rejected,
+            {
+                "scope-missing": "non_pm_learning_scope",
+                "scope-empty": "non_pm_learning_scope",
+            },
+        )
+
     def test_pm_main_chain_selects_direction_before_lifecycle_and_learning(self):
         source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(encoding="utf-8-sig")
         lifecycle_pos = source.index("primary_lifecycle_action_port = classify_lifecycle_action_port")

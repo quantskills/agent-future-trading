@@ -731,7 +731,7 @@ def write_alpha_setup_profiles(
     rows = 0
     lifecycle_counts: Counter = Counter()
     samples = []
-    episode_samples_by_recommendation = _episode_alpha_setup_samples(
+    episode_samples = _episode_alpha_setup_samples(
         cursor,
         cfg=cfg,
         config_id=config_id,
@@ -798,15 +798,36 @@ def write_alpha_setup_profiles(
             opportunity_state=opportunity_state,
         )
         sector = _review_helpers._sector_for_ticker(cfg, ticker)
-        target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
+        planned_target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"))
         current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
         contract_intent = recommendation_intent_from_lots(
             current_lots=current_lots,
-            target_lots=target_lots,
+            target_lots=planned_target_lots,
         )
         contract_action_taken = str(semantic_state.get("action") or contract_intent.get("action") or "hold")
-        executed_lots = sum(abs(_review_helpers._safe_int(tx.get("lots"))) for tx in txs if isinstance(tx, dict))
-        tx_daily_pnl = sum(_review_helpers._safe_float(tx.get("daily_pnl")) for tx in txs if isinstance(tx, dict))
+        executed_lots = 0
+        actual_lots_delta = 0
+        for tx in txs:
+            if not isinstance(tx, dict):
+                continue
+            tx_lots = abs(_review_helpers._safe_int(tx.get("lots")))
+            executed_lots += tx_lots
+            raw_tx_action = tx.get("action")
+            tx_action = str(
+                getattr(raw_tx_action, "value", raw_tx_action)
+                or contract_intent.get("action")
+                or ""
+            ).strip().lower()
+            if tx_action in {"open_long", "close_short"}:
+                actual_lots_delta += tx_lots
+            elif tx_action in {"open_short", "close_long"}:
+                actual_lots_delta -= tx_lots
+        actual_target_lots = current_lots + actual_lots_delta
+        actual_intent = recommendation_intent_from_lots(
+            current_lots=current_lots,
+            target_lots=actual_target_lots,
+        )
+        actual_action_taken = str(actual_intent.get("action") or "hold")
         tx_commission = sum(_review_helpers._safe_float(tx.get("commission")) for tx in txs if isinstance(tx, dict))
         ticker_outcome = _ticker_daily_outcome(
             cursor,
@@ -815,19 +836,37 @@ def write_alpha_setup_profiles(
             ticker=ticker,
         )
         outcome_lots = _review_helpers._safe_int(ticker_outcome.get("abs_lots"))
-        realized_pnl = (
-            _review_helpers._safe_float(ticker_outcome.get("daily_pnl"))
-            if ticker_outcome.get("row_count")
-            else tx_daily_pnl
+        settled_position_matches = bool(
+            ticker_outcome.get("row_count")
+            and outcome_lots == abs(actual_target_lots)
         )
-        commission = (
-            _review_helpers._safe_float(ticker_outcome.get("commission"))
-            if ticker_outcome.get("row_count")
-            else tx_commission
+        planned_hold = bool(
+            str(semantic_state.get("canonical_action_family") or "") == "hold"
+            and current_lots == planned_target_lots
+            and current_lots != 0
         )
-        executed_lots = max(executed_lots, outcome_lots)
         execution_result = _review_helpers._execution_result_from_snapshot(snapshot)
-        source_type = "trade" if executed_lots > 0 or ticker_outcome.get("row_count") else "no_trade"
+        source_type = (
+            "trade"
+            if settled_position_matches
+            and (
+                (executed_lots > 0 and actual_target_lots != current_lots)
+                or (planned_hold and executed_lots == 0)
+            )
+            else "no_trade"
+        )
+        if source_type != "trade":
+            realized_pnl = 0.0
+            commission = 0.0
+        elif str(actual_intent.get("action_type") or "") == "keep":
+            realized_pnl = _review_helpers._safe_float(ticker_outcome.get("holding_pnl"))
+            commission = 0.0
+        elif str(actual_intent.get("action_type") or "") in {"reduce", "exit", "reverse"}:
+            realized_pnl = _review_helpers._safe_float(ticker_outcome.get("close_pnl"))
+            commission = tx_commission
+        else:
+            realized_pnl = _review_helpers._safe_float(ticker_outcome.get("daily_pnl"))
+            commission = tx_commission
         outcome_label = "profit" if realized_pnl - commission > 0 else "loss" if realized_pnl - commission < 0 else "flat_or_no_trade"
         scorecard: Dict[str, Any] = {}
         side_scorecard: Dict[str, Any] = {}
@@ -839,13 +878,6 @@ def write_alpha_setup_profiles(
             setup_type=setup_type,
             data_combo=data_combo,
         )
-        episode_sample = episode_samples_by_recommendation.get(rec_id)
-        episode_result = (
-            dict(episode_sample.get("result") or {})
-            if isinstance(episode_sample, dict) and isinstance(episode_sample.get("result"), dict)
-            else {}
-        )
-        episode_net_pnl = episode_result.get("episode_net_pnl")
         sample = {
             "ticker": ticker,
             "side": side,
@@ -856,29 +888,21 @@ def write_alpha_setup_profiles(
             "setup_type": setup_type,
             "data_combo": data_combo,
             "scope_key": scope_key,
-            "source_type": "trade_episode" if episode_sample and source_type == "trade" else source_type,
+            "source_type": source_type,
             "recommendation_id": rec_id,
-            "action_taken": contract_action_taken,
+            "action_taken": actual_action_taken,
             "pm_action": semantic_state.get("action") or contract_action_taken,
             "final_action_semantics": semantic_state,
             "auditor_decision": (
                 str(final_contract.get("audit_verdict") or final_contract.get("auditor_decision") or "")
             ),
             "trader_status": execution_result.get("outcome") or execution_result.get("status") or recommendation.get("status"),
-            "target_lots": target_lots,
+            "target_lots": actual_target_lots,
             "current_lots": current_lots,
             "executed_lots": executed_lots,
-            "net_pnl": (
-                _review_helpers._safe_float(episode_net_pnl)
-                if episode_net_pnl is not None and source_type == "trade"
-                else realized_pnl
-            ),
-            "commission": 0.0 if episode_net_pnl is not None and source_type == "trade" else commission,
-            "holding_days": (
-                _review_helpers._safe_int(episode_sample.get("holding_days"))
-                if episode_sample and source_type == "trade"
-                else 0
-            ),
+            "net_pnl": realized_pnl,
+            "commission": commission,
+            "holding_days": 0,
             "outcome_label": outcome_label,
             "setup_quality_score": _review_helpers._safe_float(side_scorecard.get("max_setup_quality")),
             "opportunity_state": opportunity_state,
@@ -907,12 +931,6 @@ def write_alpha_setup_profiles(
                 "no_future_leakage": True,
             },
         }
-        if episode_sample and source_type == "trade":
-            sample["result"].update(episode_result)
-            sample["result"]["reward_source"] = "complete_trade_episode"
-            sample["result"]["single_day_net_pnl"] = realized_pnl - commission
-            sample["result"]["episode_overrides_single_day_reward"] = True
-            sample["evidence"]["episode_action_ledger"] = episode_sample.get("evidence", {})
         result = upsert_alpha_setup_sample_and_profile(
             cursor,
             cfg=cfg,
@@ -1022,6 +1040,35 @@ def write_alpha_setup_profiles(
                     "lifecycle_state": execution_result.get("lifecycle_state"),
                     "profile_state_hint": execution_result.get("profile_state_hint"),
                 })
+    for episode_sample in episode_samples:
+        episode_close_date = str(
+            ((episode_sample.get("result") or {}) if isinstance(episode_sample.get("result"), dict) else {}).get("close_date")
+            or trading_date
+        )[:10]
+        result = upsert_alpha_setup_sample_and_profile(
+            cursor,
+            cfg=cfg,
+            config_id=config_id,
+            trading_date=episode_close_date,
+            sample=episode_sample,
+        )
+        if result.get("rows"):
+            rows += 1
+            lifecycle_counts[str(result.get("lifecycle_state") or "unknown")] += 1
+            samples.append({
+                "ticker": episode_sample.get("ticker"),
+                "side": episode_sample.get("side"),
+                "setup_type": episode_sample.get("setup_type"),
+                "scope_key": episode_sample.get("scope_key"),
+                "source_type": "trade_episode",
+                "trade_episode_memory_id": (
+                    (episode_sample.get("result") or {}).get("episode_memory_id")
+                    if isinstance(episode_sample.get("result"), dict)
+                    else None
+                ),
+                "lifecycle_state": result.get("lifecycle_state"),
+                "profile_state_hint": result.get("profile_state_hint"),
+            })
     counterfactual_summary = _write_counterfactual_no_trade_alpha_setup_samples(
         cursor,
         cfg=cfg,
@@ -1042,29 +1089,25 @@ def write_alpha_setup_profiles(
     }
 
 
-def _json_loads_safe(value: Any) -> Any:
-    if isinstance(value, (dict, list)):
-        return value
-    if not value:
-        return None
-    try:
-        return json.loads(str(value))
-    except Exception:
-        return None
-
-
 def _load_episode_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
-    inline = _json_loads_safe(row.get("payload_json"))
-    if isinstance(inline, dict):
-        return inline
-    artifact_path = row.get("payload_artifact_path")
-    if artifact_path:
-        try:
-            payload = load_externalized_json(None, artifact_path=str(artifact_path))
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            return {}
+    try:
+        payload = load_externalized_json(
+            row.get("payload_json"),
+            artifact_path=(
+                str(row.get("payload_artifact_path"))
+                if row.get("payload_artifact_path")
+                else None
+            ),
+            expected_sha256=(
+                str(row.get("payload_sha256"))
+                if row.get("payload_sha256")
+                else None
+            ),
+        )
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
     return {}
 
 
@@ -1074,34 +1117,102 @@ def _episode_alpha_setup_samples(
     cfg: Dict[str, Any],
     config_id: str,
     trading_date: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     try:
         cursor.execute(
             """
             SELECT *
             FROM trade_episode_memory
             WHERE config_id = ?
-              AND COALESCE(close_date, episode_date, trading_date) <= ?
-            ORDER BY COALESCE(close_date, episode_date, trading_date), last_reviewed_at
+              AND COALESCE(close_date, episode_date, trading_date) = ?
+            ORDER BY COALESCE(close_date, episode_date, trading_date), last_reviewed_at, id
             """,
             (config_id, str(trading_date)[:10]),
         )
         rows = [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error:
-        return {}
-    samples: Dict[str, Dict[str, Any]] = {}
+        return []
+    samples: List[Dict[str, Any]] = []
     for row in rows:
         payload = _load_episode_payload(row)
-        rec_id = str(payload.get("open_recommendation_id") or "")
-        if not rec_id:
-            rec_id = str(((payload.get("pair") or {}) if isinstance(payload.get("pair"), dict) else {}).get("open_recommendation_id") or "")
-        if not rec_id:
+        pair = payload.get("pair") if isinstance(payload.get("pair"), dict) else {}
+        required_pair_facts = (
+            pair.get("open_recommendation_id"),
+            pair.get("open_transaction_id"),
+            pair.get("close_transaction_id"),
+            pair.get("open_date"),
+            pair.get("close_date"),
+        )
+        if not pair or any(value in (None, "") for value in required_pair_facts):
+            continue
+        if _review_helpers._safe_int(pair.get("lots"), 0) <= 0:
+            continue
+        row_open_date = str(row.get("open_date") or "")[:10]
+        row_close_date = str(row.get("close_date") or row.get("episode_date") or "")[:10]
+        if (
+            not row_open_date
+            or not row_close_date
+            or str(pair.get("open_date") or "")[:10] != row_open_date
+            or str(pair.get("close_date") or "")[:10] != row_close_date
+        ):
+            continue
+        rec_id = str(pair.get("open_recommendation_id") or "").strip()
+        payload_rec_id = str(payload.get("open_recommendation_id") or "").strip()
+        if payload_rec_id and payload_rec_id != rec_id:
+            continue
+        if (
+            str(pair.get("open_source_type") or "").strip().lower() != "strategy"
+            or str(pair.get("close_source_type") or "").strip().lower() != "strategy"
+            or bool(pair.get("contains_rollover"))
+            or bool(pair.get("contains_forced_risk"))
+            or bool(pair.get("contains_non_strategy"))
+        ):
             continue
         ticker = str(row.get("ticker") or "").upper()
         side = str(row.get("side") or "").lower()
         if not ticker or side not in {"long", "short"}:
             continue
+        if (
+            str(pair.get("ticker") or "").strip().upper() != ticker
+            or str(pair.get("side") or "").strip().lower() != side
+        ):
+            continue
         signal_snapshot = payload.get("signal_snapshot") if isinstance(payload.get("signal_snapshot"), dict) else {}
+        final_contract = (
+            payload.get("final_action_contract")
+            if isinstance(payload.get("final_action_contract"), dict)
+            else signal_snapshot.get("final_action_contract")
+            if isinstance(signal_snapshot.get("final_action_contract"), dict)
+            else {}
+        )
+        if (
+            not final_contract
+            or not str(final_contract.get("final_action") or "").strip()
+            or "current_lots" not in final_contract
+            or "target_lots" not in final_contract
+        ):
+            continue
+        try:
+            int(float(final_contract.get("current_lots")))
+            int(float(final_contract.get("target_lots")))
+        except (TypeError, ValueError):
+            continue
+        semantic_state = derive_research_fact_state(final_contract, {})
+        current_lots = _review_helpers._safe_int(semantic_state.get("current_lots"), 0)
+        target_lots = _review_helpers._safe_int(semantic_state.get("target_lots"), current_lots)
+        if str(semantic_state.get("canonical_action_family") or "") != "open_add_new_risk":
+            continue
+        if (side == "long" and target_lots <= 0) or (side == "short" and target_lots >= 0):
+            continue
+        action_taken = str(
+            semantic_state.get("action")
+            or final_contract.get("final_action")
+            or recommendation_intent_from_lots(
+                current_lots=current_lots,
+                target_lots=target_lots,
+            ).get("action")
+            or "hold"
+        )
         opportunity_type = str(payload.get("opportunity_type") or "")
         opportunity_state = str(payload.get("opportunity_state") or "")
         setup_type = infer_setup_type(
@@ -1121,7 +1232,8 @@ def _episode_alpha_setup_samples(
             data_combo=data_combo,
         )
         net_pnl = float(row.get("net_pnl") or 0.0)
-        samples[rec_id] = {
+        close_date = str(row.get("close_date") or row.get("episode_date") or trading_date)[:10]
+        samples.append({
             "ticker": ticker,
             "side": side,
             "sector": row.get("sector") or "unknown",
@@ -1133,10 +1245,12 @@ def _episode_alpha_setup_samples(
             "scope_key": scope_key,
             "source_type": "trade_episode",
             "recommendation_id": rec_id,
-            "action_taken": "open_long" if side == "long" else "open_short",
-            "target_lots": 0,
-            "current_lots": 0,
-            "executed_lots": 1,
+            "action_taken": action_taken,
+            "pm_action": action_taken,
+            "final_action_semantics": semantic_state,
+            "target_lots": target_lots,
+            "current_lots": current_lots,
+            "executed_lots": abs(_review_helpers._safe_int(pair.get("lots"), 1)),
             "net_pnl": net_pnl,
             "commission": 0.0,
             "holding_days": int(float(row.get("holding_days") or 0)),
@@ -1144,24 +1258,36 @@ def _episode_alpha_setup_samples(
             "opportunity_state": opportunity_state or "watch_for_trigger",
             "evidence": {
                 "trade_episode_memory_id": row.get("id"),
+                "open_recommendation_id": rec_id,
+                "close_recommendation_id": pair.get("close_recommendation_id"),
+                "open_transaction_id": pair.get("open_transaction_id"),
+                "close_transaction_id": pair.get("close_transaction_id"),
                 "open_date": row.get("open_date"),
-                "close_date": row.get("close_date"),
+                "close_date": close_date,
                 "episode_date": row.get("episode_date"),
                 "lesson_text": row.get("lesson_text"),
                 "opportunity_type": opportunity_type,
                 "opportunity_state": opportunity_state,
+                "analyst_payloads": payload.get("analyst_payloads") or {},
+                "data_usage_summary": data_usage,
+                "final_action_contract": final_contract,
+                "learning_boundary": {
+                    "learning_source": "trade_episode_memory",
+                    "strategy_episode_only": True,
+                    "episode_bound_to_open_final_action_contract": True,
+                },
             },
             "result": {
                 "episode_net_pnl": net_pnl,
                 "episode_reward_source": "trade_episode_memory",
                 "episode_memory_id": row.get("id"),
                 "open_date": row.get("open_date"),
-                "close_date": row.get("close_date"),
+                "close_date": close_date,
                 "holding_days": int(float(row.get("holding_days") or 0)),
                 "return_on_notional": float(row.get("return_on_notional") or 0.0),
                 "no_future_leakage": True,
             },
-        }
+        })
     return samples
 
 
@@ -1944,6 +2070,9 @@ def apply_researcher_learning(
         strategy_recommendations=strategy_recommendations,
         transactions_by_recommendation=transactions_by_recommendation or {},
         settlement_row=settlement_row,
+        completed_episode_payloads=(
+            getattr(research_memory_writers.write_trade_episode_memory, "last_payloads", []) or []
+        ),
     )
     adaptive_rows = research_memory_writers.write_adaptive_policy_state(
         cursor,

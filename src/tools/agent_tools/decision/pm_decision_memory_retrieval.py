@@ -48,7 +48,7 @@ def _payload(row: Mapping[str, Any]) -> dict:
 
 def _consumer_scope(row: Mapping[str, Any]) -> str:
     payload = _payload(row)
-    return _text(row.get("consumer_scope") or payload.get("consumer_scope") or "pm_learning", "pm_learning").lower()
+    return _text(row.get("consumer_scope") or payload.get("consumer_scope")).lower()
 
 
 def _canonical(row: Mapping[str, Any]) -> bool:
@@ -104,12 +104,13 @@ def _quality_rank(row: Mapping[str, Any]) -> tuple:
 
 def _normalize(row: Mapping[str, Any], *, match_level: str, match_reason: str) -> dict:
     normalized = dict(row)
-    normalized["consumer_scope"] = "pm_learning"
+    consumer_scope = _consumer_scope(normalized)
+    if consumer_scope:
+        normalized["consumer_scope"] = consumer_scope
     normalized["retrieval_match_level"] = match_level
     normalized["retrieval_match_reason"] = match_reason
     payload = _payload(normalized)
     if payload:
-        payload["consumer_scope"] = "pm_learning"
         payload["retrieval_match_level"] = match_level
         payload["retrieval_match_reason"] = match_reason
         normalized["payload"] = payload
@@ -302,11 +303,16 @@ def retrieve_pm_memory(
             trading_date=trading_date,
             limit=max(1, min(int(limit), 8)),
         )
-        similar_values = [
-            _normalize(row, match_level="similar", match_reason="similar_setup_samples")
-            for row in (similar_raw or [])
-            if isinstance(row, Mapping)
-        ] if isinstance(similar_raw, list) else []
+        similar_values = []
+        for row in (similar_raw or []) if isinstance(similar_raw, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            if _consumer_scope(row) != "pm_learning":
+                rejected.append({"id": row.get("id"), "reason": "non_pm_learning_scope"})
+                continue
+            similar_values.append(
+                _normalize(row, match_level="similar", match_reason="similar_setup_samples")
+            )
         if similar_values:
             selected = _merge_quality_first(list(selected) + similar_values)[: int(limit)]
 

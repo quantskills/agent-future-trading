@@ -21,6 +21,7 @@ from tools.common.learning_contract import (
 from tools.common.final_action_semantics import (
     canonical_action_family,
     canonical_action_value_lane,
+    contract_final_learning_lifecycle,
     validate_action_preference_family_consistency,
 )
 from tools.agent_tools.research import research_memory_writers
@@ -381,21 +382,42 @@ def infer_setup_type(
 
 
 def classify_action(action: Any, *, target_lots: int = 0, current_lots: int = 0) -> str:
-    text = str(action or "").lower()
-    if "execution" in text or "intraday" in text or "trigger" in text or "fill" in text:
+    text = _clean_token(action, "")
+    explicit_family = canonical_action_family(text)
+    if explicit_family == "execution":
         return "execution"
-    if text in {"open_long", "open_short"}:
+    current = _safe_int(current_lots)
+    target = _safe_int(target_lots)
+    lifecycle = contract_final_learning_lifecycle(
+        {
+            "final_action": text,
+            "current_lots": current,
+            "target_lots": target,
+            "lots_delta": target - current,
+        }
+    )
+    if lifecycle == "open_add_new_risk":
+        if current and target and current * target > 0 and abs(target) > abs(current):
+            return "add"
         return "open"
-    if text in {"close_long", "close_short"}:
-        return "exit"
-    if text == "hold":
-        if target_lots and target_lots == current_lots:
-            return "hold_position"
+    if lifecycle == "reduce_exit":
+        if target == 0 or (current and target and current * target < 0):
+            return "exit"
+        return "reduce"
+    if lifecycle == "hold":
+        return "hold"
+    if lifecycle == "conditional_monitor":
+        return "conditional_monitor"
+    if current == 0 and target == 0 and explicit_family in {"hold", "no_trade"}:
         return "observe"
-    if abs(int(target_lots or 0)) > abs(int(current_lots or 0)):
-        return "add_or_open"
-    if abs(int(target_lots or 0)) < abs(int(current_lots or 0)):
-        return "reduce_or_exit"
+    if explicit_family == "reduce_exit":
+        return "reduce" if canonical_action_value_lane(text, current, target) == "reduce" else "exit"
+    if explicit_family == "open_add_new_risk":
+        return "add" if canonical_action_value_lane(text, current, target) == "add" else "open"
+    if explicit_family == "hold":
+        return "hold"
+    if explicit_family == "conditional_monitor":
+        return "conditional_monitor"
     return "observe"
 
 
@@ -422,10 +444,12 @@ def _action_value_lane(action_name: Any) -> str:
 
 def _memory_side_role_for_action(action_name: Any) -> str:
     lane = _action_value_lane(action_name)
-    if lane == "open":
+    if lane in {"open", "add", "scale", "increase"}:
         return "target_side"
-    if lane in {"hold", "exit"}:
+    if lane in {"hold", "reduce", "exit"}:
         return "current_position_side"
+    if lane == "conditional_monitor":
+        return "trigger_side"
     if lane == "execution":
         return "historical_sample_side"
     return "historical_sample_side"
@@ -711,7 +735,32 @@ def _reward_signal_for_row(row: Mapping[str, Any]) -> tuple[float | None, str]:
     source_type = str(row.get("source_type") or "").strip().lower()
     if source_type in {"trade_episode", "episode_trade"}:
         return reward, "episode_trade"
-    if _safe_int(row.get("executed_lots")) > 0 or source_type == "trade":
+    action_name = classify_action(
+        _sample_row_value(row, "action_taken"),
+        target_lots=_safe_int(_sample_row_value(row, "target_lots")),
+        current_lots=_safe_int(_sample_row_value(row, "current_lots")),
+    )
+    action_family = canonical_action_family(action_name)
+    current_lots = _safe_int(_sample_row_value(row, "current_lots"))
+    target_lots = _safe_int(_sample_row_value(row, "target_lots"))
+    executed_lots = _safe_int(row.get("executed_lots"))
+    if (
+        source_type == "trade"
+        and action_family == "open_add_new_risk"
+        and episode_reward is None
+    ):
+        return None, "open_add_waiting_for_complete_episode"
+    if (
+        action_family == "hold"
+        and source_type == "trade"
+        and executed_lots == 0
+        and current_lots != 0
+        and current_lots == target_lots
+    ):
+        return reward, "real_trade"
+    if action_family == "reduce_exit" and source_type == "trade" and executed_lots > 0:
+        return reward, "real_trade"
+    if action_family == "execution" and source_type in {"execution", "trade"} and executed_lots > 0:
         return reward, "real_trade"
     if _is_counterfactual_source(source_type):
         return reward * COUNTERFACTUAL_REWARD_WEIGHT, "counterfactual_prior"
@@ -735,6 +784,30 @@ def _prefer_episode_reward_rows(rows: List[Mapping[str, Any]]) -> List[Mapping[s
             continue
         filtered.append(row)
     return filtered
+
+
+def _sample_row_payload(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = row.get("payload")
+    if isinstance(payload, Mapping):
+        return payload
+    raw = row.get("payload_json")
+    if isinstance(raw, Mapping):
+        return raw
+    if raw:
+        try:
+            parsed = json.loads(str(raw))
+            if isinstance(parsed, Mapping):
+                return parsed
+        except Exception:
+            pass
+    return {}
+
+
+def _sample_row_value(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    value = row.get(key)
+    if value is not None and value != "":
+        return value
+    return _sample_row_payload(row).get(key, default)
 
 
 def _profile_thresholds(cfg: Mapping[str, Any]) -> Dict[str, Any]:
@@ -768,7 +841,18 @@ def _profile_thresholds(cfg: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _stats_from_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     row_list = [row for row in rows if isinstance(row, Mapping)]
-    trade_rows = [row for row in row_list if _safe_int(row.get("executed_lots")) > 0 or str(row.get("source_type")) == "trade"]
+    trade_rows = [
+        row
+        for row in row_list
+        if str(row.get("source_type") or "").strip().lower()
+        in {"trade_episode", "episode_trade"}
+    ]
+    no_trade_rows = [
+        row
+        for row in row_list
+        if str(row.get("source_type") or "").strip().lower() == "no_trade"
+        or _is_counterfactual_source(row.get("source_type"))
+    ]
     pnl_values = [_safe_float(row.get("net_pnl")) - _safe_float(row.get("commission")) for row in trade_rows]
     gross_profit = sum(value for value in pnl_values if value > 0)
     gross_loss = sum(value for value in pnl_values if value < 0)
@@ -782,7 +866,7 @@ def _stats_from_rows(rows: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     return {
         "sample_count": sample_count,
         "trade_count": trade_count,
-        "no_trade_count": sample_count - trade_count,
+        "no_trade_count": len(no_trade_rows),
         "win_count": win_count,
         "loss_count": loss_count,
         "gross_profit": gross_profit,
@@ -1101,7 +1185,6 @@ def upsert_alpha_setup_sample_and_profile(
         rows=rows,
         profile_lifecycle=lifecycle,
         product_learning_performance_key=product_learning_performance_key,
-        valid_until=valid_until,
         now=now,
     )
     return {
@@ -1126,20 +1209,20 @@ def _upsert_action_values(
     rows: List[Mapping[str, Any]],
     profile_lifecycle: Mapping[str, Any],
     product_learning_performance_key: Mapping[str, Any],
-    valid_until: str,
     now: str,
 ) -> None:
     grouped: Dict[str, List[Mapping[str, Any]]] = {}
     for row in rows:
         action_name = classify_action(
-            row.get("action_taken"),
-            target_lots=_safe_int(row.get("target_lots")),
-            current_lots=0,
+            _sample_row_value(row, "action_taken"),
+            target_lots=_safe_int(_sample_row_value(row, "target_lots")),
+            current_lots=_safe_int(_sample_row_value(row, "current_lots")),
         )
         grouped.setdefault(action_name, []).append(row)
     for action_name, raw_action_rows in grouped.items():
         action_rows = _prefer_episode_reward_rows(raw_action_rows)
         reward_values: List[float] = []
+        reward_rows: List[Mapping[str, Any]] = []
         real_trade_reward_count = 0
         episode_trade_reward_count = 0
         counterfactual_reward_count = 0
@@ -1149,6 +1232,7 @@ def _upsert_action_values(
             if reward is None:
                 continue
             reward_values.append(reward)
+            reward_rows.append(row)
             if reward_source == "episode_trade":
                 real_trade_reward_count += 1
                 episode_trade_reward_count += 1
@@ -1157,14 +1241,48 @@ def _upsert_action_values(
             elif reward_source == "counterfactual_prior":
                 counterfactual_reward_count += 1
                 counterfactual_source_types.add(str(row.get("source_type") or "counterfactual"))
+        if canonical_action_family(action_name) == "open_add_new_risk" and not reward_values:
+            continue
         reward_sum = sum(reward_values)
-        sample_count = len(action_rows)
+        sample_count = len(reward_values)
         reward_mean = reward_sum / len(reward_values) if reward_values else 0.0
         win_rate = (sum(1 for value in reward_values if value > 0) / len(reward_values)) if reward_values else 0.0
         loss_reward_count = sum(1 for value in reward_values if value < 0)
         tail_loss_count = sum(1 for value in reward_values if value <= -1000.0)
         worst_reward = min(reward_values) if reward_values else 0.0
         state_completeness = _alpha_state_completeness(profile_scope, action_name)
+        if episode_trade_reward_count > 0 and not bool(state_completeness.get("complete")):
+            continue
+        action_profile_lifecycle = profile_lifecycle
+        if canonical_action_family(action_name) == "open_add_new_risk":
+            action_profile_lifecycle = classify_lifecycle(_stats_from_rows(reward_rows), cfg)
+        latest_reward_row = max(
+            reward_rows,
+            key=lambda item: (
+                str(item.get("trading_date") or "")[:10],
+                str(item.get("created_at") or ""),
+            ),
+            default=None,
+        )
+        latest_reward_payload = (
+            _sample_row_payload(latest_reward_row)
+            if isinstance(latest_reward_row, Mapping)
+            else {}
+        )
+        action_product_learning_performance_key = (
+            latest_reward_payload.get("product_learning_performance_key")
+            if isinstance(latest_reward_payload.get("product_learning_performance_key"), Mapping)
+            else product_learning_performance_key
+        )
+        action_last_sample_date = (
+            str(latest_reward_row.get("trading_date") or trading_date)[:10]
+            if isinstance(latest_reward_row, Mapping)
+            else str(trading_date)[:10]
+        )
+        action_valid_until = _valid_until(
+            action_last_sample_date,
+            _profile_thresholds(cfg)["valid_days"],
+        )
         if real_trade_reward_count > 0 and bool(state_completeness.get("complete")):
             amplification_scope_quality = "exact_real_state"
             exact_state_real_trade_sample_count = real_trade_reward_count
@@ -1191,10 +1309,9 @@ def _upsert_action_values(
             reward_source = "unqualified"
         confidence = min(
             0.95,
-            _safe_float(profile_lifecycle.get("confidence_score"))
+            _safe_float(action_profile_lifecycle.get("confidence_score"))
             * min(1.0, max(0.25, sample_count / max(1, _profile_thresholds(cfg)["min_samples_deployable"]))),
         )
-        state = str(profile_lifecycle.get("lifecycle_state") or "candidate")
         action_preference = _action_preference_from_stats(
             action_name=action_name,
             reward_mean=reward_mean,
@@ -1237,14 +1354,14 @@ def _upsert_action_values(
             "learning_lane": action_value_lane,
             "memory_side_role": memory_side_role,
             **retrieval_keys,
-            "last_sample_date": str(trading_date)[:10],
+            "last_sample_date": action_last_sample_date,
             "sample_count": sample_count,
             "reward_sum": reward_sum,
             "reward_mean": reward_mean,
             "win_rate": win_rate,
-            "profile_lifecycle": dict(profile_lifecycle),
+            "profile_lifecycle": dict(action_profile_lifecycle),
             "source": "alpha_setup_profile_action_value",
-            "product_learning_performance_key": product_learning_performance_key,
+            "product_learning_performance_key": action_product_learning_performance_key,
             "action_preference": action_preference,
             "canonical_action_preference_source": "payload.action_preference",
             "prior_role": "" if action_preference else "weak_prior_not_action_preference",
@@ -1267,8 +1384,8 @@ def _upsert_action_values(
             "sample_source": reward_source,
             "state_completeness": state_completeness,
             "entry_quality_outcome": (
-                product_learning_performance_key.get("entry_quality_outcome")
-                if isinstance(product_learning_performance_key.get("entry_quality_outcome"), Mapping)
+                action_product_learning_performance_key.get("entry_quality_outcome")
+                if isinstance(action_product_learning_performance_key.get("entry_quality_outcome"), Mapping)
                 else {}
             ),
             "counterfactual_reward_count": counterfactual_reward_count,
@@ -1326,11 +1443,11 @@ def _upsert_action_values(
                 "retrieval_key": retrieval_keys["retrieval_key"],
                 "fallback_retrieval_key": retrieval_keys["fallback_retrieval_key"],
                 "execution_retrieval_key": retrieval_keys["execution_retrieval_key"],
-                "max_position_impact": _safe_float(profile_lifecycle.get("max_position_impact")),
-                "last_sample_date": str(trading_date)[:10],
+                "max_position_impact": _safe_float(action_profile_lifecycle.get("max_position_impact")),
+                "last_sample_date": action_last_sample_date,
                 "created_at": now,
                 "updated_at": now,
-                "valid_until": valid_until,
+                "valid_until": action_valid_until,
                 "payload_json": _json_dumps(payload),
             },
         )

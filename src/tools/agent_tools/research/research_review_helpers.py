@@ -34,6 +34,7 @@ from tools.common.final_action_semantics import (
     classify_final_action_contract,
     derive_memory_requirements,
     derive_review_expectation,
+    validate_action_preference_family_consistency,
 )
 from tools.common.learning_contract import CONTRACT_KEY
 
@@ -1766,19 +1767,118 @@ def _policy_ref(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _feedback_learning_refs(trace: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     source = trace.get("learning_used") if isinstance(trace.get("learning_used"), dict) else trace
-    context = source.get("learning_context") if isinstance(source.get("learning_context"), dict) else {}
-    memory_trace = context.get("memory_trace") if isinstance(context.get("memory_trace"), dict) else {}
-    memory_refs = memory_trace.get("selected_memory_refs")
-    if not isinstance(memory_refs, list):
-        memory_refs = []
-    policies = ((source.get("adaptive_policy_state") or {}).get("policies") or [])
+    formal_rows = (
+        source.get("alpha_setup_action_values")
+        if isinstance(source.get("alpha_setup_action_values"), list)
+        else []
+    )
+    lifecycle_trace = (
+        source.get("pm_lifecycle_learning_trace")
+        if isinstance(source.get("pm_lifecycle_learning_trace"), dict)
+        else {}
+    )
+    decision_rows = (
+        lifecycle_trace.get("decision_learning_rows")
+        if isinstance(lifecycle_trace.get("decision_learning_rows"), list)
+        else []
+    )
+
+    def _value(row: Dict[str, Any], key: str) -> Any:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        return row.get(key) if row.get(key) not in (None, "") else payload.get(key)
+
+    def _identity(row: Dict[str, Any]) -> str:
+        return str(_value(row, "id") or _value(row, "action_value_id") or "").strip()
+
+    def _lane(row: Dict[str, Any]) -> str:
+        return str(
+            _value(row, "learning_lane")
+            or _value(row, "action_value_lane")
+            or _value(row, "lane")
+            or ""
+        ).strip().lower()
+
+    decision_by_id = {
+        _identity(row): row
+        for row in decision_rows
+        if isinstance(row, dict) and _identity(row)
+    }
+    memory_refs: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    legal_family_lanes = {
+        "open_add_new_risk": {"open", "add", "scale", "increase"},
+        "hold": {"hold"},
+        "reduce_exit": {"reduce", "exit"},
+        "conditional_monitor": {"conditional_monitor"},
+    }
+    for row in formal_rows:
+        if not isinstance(row, dict):
+            continue
+        row_id = _identity(row)
+        decision_row = decision_by_id.get(row_id)
+        if not row_id or row_id in seen_ids or not isinstance(decision_row, dict):
+            continue
+        canonical = _value(row, "canonical_action_value")
+        consumer_scope = str(_value(row, "consumer_scope") or "").strip().lower()
+        family = str(_value(row, "canonical_action_family") or "").strip().lower()
+        lane = _lane(row)
+        decision_family = str(
+            _value(decision_row, "canonical_action_family") or ""
+        ).strip().lower()
+        decision_lane = _lane(decision_row)
+        decision_canonical = _value(decision_row, "canonical_action_value")
+        decision_consumer_scope = str(
+            _value(decision_row, "consumer_scope") or ""
+        ).strip().lower()
+        if canonical is not True or consumer_scope != "pm_learning":
+            continue
+        if decision_canonical is not True or decision_consumer_scope != "pm_learning":
+            continue
+        if lane not in legal_family_lanes.get(family, set()):
+            continue
+        if family != decision_family or lane != decision_lane:
+            continue
+        if not validate_action_preference_family_consistency(row).get("ok"):
+            continue
+        seen_ids.add(row_id)
+        memory_refs.append({
+            "id": row_id,
+            "action_value_id": row_id,
+            "ticker": _value(row, "ticker"),
+            "side": _value(row, "side"),
+            "setup_type": _value(row, "setup_type"),
+            "canonical_action_family": family,
+            "action_value_lane": lane,
+            "learning_lane": lane,
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+            "action_preference": _value(row, "action_preference"),
+            "reward_source": _value(row, "reward_source"),
+            "evidence_scope": _value(row, "evidence_scope"),
+            "reward_mean": _value(row, "reward_mean"),
+            "sample_count": _value(row, "sample_count"),
+        })
+
+    adaptive_policy = source.get("adaptive_policy_state")
+    policies = (
+        adaptive_policy.get("policies")
+        if isinstance(adaptive_policy, dict) and isinstance(adaptive_policy.get("policies"), list)
+        else []
+    )
     if not policies and isinstance(source.get("adaptive_policy_applied"), list):
         policies = source.get("adaptive_policy_applied")
-    if not isinstance(policies, list):
-        policies = []
+    policy_refs = [
+        _policy_ref(item)
+        for item in policies
+        if isinstance(item, dict)
+        and str(item.get("policy_type") or "").strip()
+        and str(item.get("policy_action") or "").strip()
+    ]
+    if not memory_refs:
+        policy_refs = []
     return (
-        [item for item in memory_refs if isinstance(item, dict)],
-        [_policy_ref(item) for item in policies if isinstance(item, dict)],
+        memory_refs,
+        policy_refs,
     )
 
 

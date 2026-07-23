@@ -870,10 +870,9 @@ def build_opportunity_scorecard(
         if not isinstance(row, Mapping):
             continue
         action = str(row.get("policy_action") or "").lower()
-        ptype = str(row.get("policy_type") or "unknown")
-        if action in {"protect", "allow", "probe"} or ptype in {"alpha_promotion", "fast_candidate_alpha"} or ptype.startswith("learning_mechanism:"):
+        if action in {"protect", "allow", "probe"}:
             policy_counts["positive"] = policy_counts.get("positive", 0) + 1
-        if action in {"cap", "demote", "block"} or ptype in {"fast_loss_sentinel", "tail_loss_sentinel", "loss_template_policy"}:
+        elif action in {"cap", "demote", "block"}:
             policy_counts["negative"] = policy_counts.get("negative", 0) + 1
 
     alpha_profiles_by_side: dict[str, list[Mapping[str, Any]]] = {"long": [], "short": []}

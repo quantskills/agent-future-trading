@@ -859,7 +859,48 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             },
         )
 
-        signed = _persist_pm_state_fixtures(workflow, [("A", rec_low), ("B", rec_high)])
+        low_state = _pm_state_from_recommendation_fixture(rec_low)
+        open_action_value = {
+            "id": "a-short-open",
+            "ticker": "A",
+            "side": "short",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "breakout_setup",
+            "action_name": "open",
+            "canonical_action_value": True,
+            "canonical_action_family": "open_add_new_risk",
+            "consumer_scope": "pm_learning",
+            "learning_lane": "open",
+            "action_value_lane": "open",
+            "memory_side_role": "target_side",
+            "action_preference": "positive_candidate_open",
+            "canonical_action_value_source": "canonical_action_value",
+            "reward_mean": 100.0,
+            "reward_sum": 100.0,
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+            "sample_count": 1,
+        }
+        frozen_rows, step4_retrieval = _audit_frozen_step4_pm_memory(
+            contract=low_state,
+            alpha_setup_action_values=[open_action_value],
+        )
+        step4_retrieval["rejected_or_downgraded"] = [{
+            "id": "a-weak-prior",
+            "reason": "incomplete_prior_not_pm_scoring_evidence",
+            "diagnostic_only": True,
+        }]
+        low_state["control_diagnostics"].update({
+            "final_action_memory_requirements": step4_retrieval["memory_requirements"],
+            "final_action_memory_retrieval": step4_retrieval,
+        })
+        low_state["alpha_setup_action_values"] = frozen_rows
+        high_state = _pm_state_from_recommendation_fixture(rec_high)
+        signed = dict(workflow._persist_pm_full_market_contracts([
+            ("A", low_state),
+            ("B", high_state),
+        ]))
         rec_low = signed["A"]
         rec_high = signed["B"]
 
@@ -901,6 +942,14 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
         self.assertEqual(rec_low.lots, 0)
         self.assertFalse(rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["selected_for_capital_deployment"])
         self.assertEqual(
+            rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["opportunity_rank"],
+            2,
+        )
+        self.assertEqual(
+            rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["lifecycle_learning_trace"]["rank_lifecycle"],
+            "open_add_new_risk",
+        )
+        self.assertEqual(
             rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["rank_capital_role"],
             RANK_CAPITAL_ROLE_EXPLORATION,
         )
@@ -912,6 +961,40 @@ class Phase1SignalCompletenessRegressionTest(unittest.TestCase):
             "not_selected_by_full_market_pm_capital_queue",
             rec_low.signal_snapshot["final_action_contract"]["capital_deployment"]["capital_allocation_reason"],
         )
+        low_learning = rec_low.signal_snapshot["final_action_contract"]["learning_used"]
+        low_requirements = low_learning["memory_requirements"]
+        low_retrieval = low_learning["memory_retrieval"]
+        low_trace = low_learning["pm_lifecycle_learning_trace"]
+        self.assertEqual(low_trace["contract_lifecycle_port"], "wait")
+        self.assertEqual(low_requirements["action_lifecycle"], "ordinary_hold")
+        self.assertEqual(low_requirements["required_memory_lanes"], [])
+        self.assertEqual(low_requirements["must_land_in_pm_contract"], [])
+        self.assertEqual(low_trace["memory_requirements"], low_requirements)
+        self.assertEqual(low_retrieval, step4_retrieval)
+        self.assertEqual(low_retrieval["memory_requirements"]["action_lifecycle"], "open")
+        self.assertEqual(low_retrieval["status"], "frozen_step4_pool")
+        self.assertFalse(low_retrieval["late_retrieval_performed"])
+        self.assertEqual(low_retrieval["late_action_value_append_count"], 0)
+        self.assertEqual(low_retrieval["lifecycle_matching_row_count"], 1)
+        self.assertEqual(low_retrieval["alpha_setup_action_value_count_after_lifecycle"], 1)
+        self.assertEqual(low_learning["alpha_setup_action_values"], [])
+        self.assertEqual(low_trace["decision_learning_rows"], [])
+        self.assertEqual(
+            low_learning["pm_lifecycle_learning_impact_delta"]["open_add_rank_score_delta"],
+            0.0,
+        )
+        self.assertEqual(
+            [row["id"] for row in low_trace["rejected_learning"]],
+            ["a-short-open"],
+        )
+        self.assertEqual(low_retrieval["rejected_action_values"], [])
+        self.assertEqual(
+            [row["id"] for row in low_retrieval["rejected_or_downgraded"]],
+            ["a-weak-prior"],
+        )
+        high_learning = rec_high.signal_snapshot["final_action_contract"]["learning_used"]
+        self.assertEqual(high_learning["memory_requirements"]["action_lifecycle"], "open")
+        self.assertEqual(high_learning["memory_requirements"]["required_memory_lanes"], ["open"])
         self.assertEqual(len(updates), 2)
 
     def test_pm_step6_signer_requires_single_pm_state_inputs(self):
@@ -2457,6 +2540,40 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertGreater(positive["short"]["opportunity_score"], negative["short"]["opportunity_score"])
         self.assertNotIn("product_blacklist", json.dumps(negative["short"], ensure_ascii=False))
 
+    def test_adaptive_policy_action_is_the_only_positive_or_negative_score_direction(self):
+        signal = self._tradeable_signal()
+        common = {
+            "ticker": "TA",
+            "analyst_signals": [signal],
+            "market_confirmation": {"confirmation_score": 0.70},
+            "data_quality_summary": {},
+            "decision_date": "2025-03-15",
+            "config": self._scorecard_config(),
+        }
+        capped = build_opportunity_scorecard(
+            **common,
+            adaptive_policy_state=[{
+                "policy_type": "learning_mechanism:alpha_setup_ev",
+                "policy_action": "cap",
+            }],
+        )["short"]
+        protected = build_opportunity_scorecard(
+            **common,
+            adaptive_policy_state=[{
+                "policy_type": "learning_mechanism:alpha_setup_ev",
+                "policy_action": "protect",
+            }],
+        )["short"]
+
+        self.assertEqual(capped["learning_positive_count"], 0)
+        self.assertEqual(capped["learning_negative_count"], 1)
+        self.assertEqual(capped["opportunity_score_components"]["positive_learning"], 0.0)
+        self.assertLess(capped["opportunity_score_components"]["negative_learning"], 0.0)
+        self.assertEqual(protected["learning_positive_count"], 1)
+        self.assertEqual(protected["learning_negative_count"], 0)
+        self.assertGreater(protected["opportunity_score_components"]["positive_learning"], 0.0)
+        self.assertEqual(protected["opportunity_score_components"]["negative_learning"], 0.0)
+
     def test_entry_loss_episode_penalizes_entry_quality_and_capital_priority(self):
         signal = self._tradeable_signal()
         clean = build_opportunity_scorecard(
@@ -3483,6 +3600,13 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                 }
             ]
 
+    class _PMNoLearningDB(_PMTestDB):
+        def get_alpha_setup_action_values(self, **kwargs):
+            return []
+
+        def get_similar_alpha_setup_action_values(self, **kwargs):
+            return []
+
     def test_canonical_watch_survives_pm_prose_and_reaches_nonzero_conditional_fac(self):
         portfolio = Portfolio(
             id="portfolio-prev",
@@ -3605,12 +3729,36 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
         ):
             pm_result = portfolio_agent_futures(state)
 
+        with patch(
+            "agents.decision_team.portfolio_manager.get_db",
+            return_value=self._PMNoLearningDB(),
+        ), patch(
+            "agents.decision_team.portfolio_manager._sanitize_visible_text",
+            return_value=(
+                "No new position is warranted before the canonical 15m trigger confirms."
+            ),
+        ), patch(
+            "agents.decision_team.portfolio_manager.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.10,
+                "margin_rate_short": 0.10,
+            },
+        ):
+            no_learning_pm_result = portfolio_agent_futures(state)
+
         signed = finalize_pm_full_market_contracts(
             generated=[("BU", pm_result["pm_state"])],
             config=full_config,
             portfolio=portfolio,
         )
+        no_learning_signed = finalize_pm_full_market_contracts(
+            generated=[("BU", no_learning_pm_result["pm_state"])],
+            config=full_config,
+            portfolio=portfolio,
+        )
         fac = signed[0][1].signal_snapshot["final_action_contract"]
+        no_learning_fac = no_learning_signed[0][1].signal_snapshot["final_action_contract"]
 
         scorecard = pm_result["pm_state"]["opportunity_scorecard"]
         short_row = scorecard["short"]
@@ -3619,8 +3767,15 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
         self.assertGreater(short_row["action_value_learning_summary"]["positive_count"], 0)
         self.assertEqual(short_row["action_value_learning_summary"]["negative_count"], 0)
         self.assertGreater(short_row["rank_score_components"]["open_add_action_value_delta"], 0.0)
+        no_learning_short_row = no_learning_pm_result["pm_state"]["opportunity_scorecard"]["short"]
+        self.assertEqual(no_learning_short_row["action_value_learning_summary"]["positive_count"], 0)
+        self.assertEqual(no_learning_short_row["action_value_learning_summary"]["negative_count"], 0)
+        self.assertGreater(short_row["candidate_quality"], no_learning_short_row["candidate_quality"])
+        self.assertGreater(short_row["rank_score"], no_learning_short_row["rank_score"])
 
         self.assertLess(fac["target_lots"], 0, fac)
+        self.assertLess(no_learning_fac["target_lots"], 0, no_learning_fac)
+        self.assertEqual(no_learning_fac["learning_used"]["alpha_setup_action_values"], [])
         self.assertTrue(fac["conditional_trigger_authority"])
         self.assertTrue(fac["requires_intraday_confirmation"])
         self.assertFalse(fac["can_execute_without_intraday_trigger"])
@@ -6135,6 +6290,18 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
 
 
 class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
+    def test_alpha_setup_flat_hold_stays_observe_while_existing_position_hold_stays_hold(self):
+        from tools.common.alpha_setup import classify_action
+
+        self.assertEqual(
+            classify_action("hold", current_lots=0, target_lots=0),
+            "observe",
+        )
+        self.assertEqual(
+            classify_action("hold", current_lots=2, target_lots=2),
+            "hold",
+        )
+
     def _base_scorecard(self, layer="tradeable_candidate"):
         return {
             "long": {
@@ -6375,6 +6542,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "consumer_scope": "pm_learning",
                     "action_value_lane": "open",
                     "learning_lane": "open",
+                    "memory_side_role": "target_side",
                     "action_preference": "positive_candidate_open",
                     "canonical_action_value_source": "canonical_action_value",
                     "reward_mean": 1800.0,
@@ -6480,6 +6648,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "canonical_action_family": "open_add_new_risk",
                     "action_value_lane": "open",
                     "learning_lane": "open",
+                    "memory_side_role": "target_side",
                     "action_preference": "positive_candidate_open",
                 },
                 {
@@ -6489,6 +6658,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "canonical_action_family": "execution",
                     "action_value_lane": "execution",
                     "learning_lane": "execution",
+                    "memory_side_role": "historical_sample_side",
                     "action_preference": "positive_candidate_execution",
                 },
             ],
@@ -6575,6 +6745,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "consumer_scope": "pm_learning",
                     "learning_lane": "open",
                     "action_value_lane": "open",
+                    "memory_side_role": "target_side",
                     "action_preference": "positive_candidate_open",
                     "canonical_action_value_source": "canonical_action_value",
                     "reward_mean": 335.46,
@@ -6597,9 +6768,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         self.assertTrue(contract["requires_intraday_confirmation"])
         self.assertFalse(contract["can_execute_without_intraday_trigger"])
-        self.assertEqual(
-            contract["learning_used"]["pm_lifecycle_learning_impact_delta"]["conditional_monitor_decision"],
-            "allow_conditional_monitor_probe",
+        self.assertIsNone(
+            contract["learning_used"]["pm_lifecycle_learning_impact_delta"]["conditional_monitor_decision"]
         )
         self.assertNotIn("scorecard_current_tradeable_probe_seed", contract["reason_codes"])
 
@@ -6636,7 +6806,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "consumer_scope": "pm_learning",
                     "learning_lane": "hold",
                     "action_value_lane": "hold",
-                    "action_preference": "profitable_hold_continuation",
+                    "memory_side_role": "current_position_side",
+                    "action_preference": "positive_candidate_hold",
                     "canonical_action_value_source": "canonical_action_value",
                     "reward_mean": 1000.0,
                     "reward_source": "trade_episode",
@@ -6685,6 +6856,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "consumer_scope": "pm_learning",
                     "learning_lane": "exit",
                     "action_value_lane": "exit",
+                    "memory_side_role": "current_position_side",
                     "action_preference": "positive_candidate_exit",
                     "canonical_action_value_source": "canonical_action_value",
                     "reward_mean": 1000.0,
@@ -8002,9 +8174,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             cursor.execute("INSERT INTO config (id) VALUES ('cfg')")
             db._ensure_reviewer_learning_schema(cursor)
             rows = [
-                ("past-win", "2025-03-05", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 10, 10, 1200.0, 20.0),
-                ("past-win-2", "2025-03-07", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 8, 8, 800.0, 15.0),
-                ("future-loss", "2025-03-20", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 8, 8, -9000.0, 10.0),
+                ("past-win", "2025-03-05", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 10, 10, 1200.0, 20.0, 0),
+                ("past-reduce", "2025-03-06", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "reduce", 2, 1, 400.0, 5.0, 3),
+                ("past-win-2", "2025-03-07", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 8, 8, 800.0, 15.0, 0),
+                ("past-exit", "2025-03-08", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "exit", 0, 3, 600.0, 5.0, 3),
+                ("future-loss", "2025-03-20", "RB", "long", "ferrous", "short", "trend", "breakout_setup", "combo", "open_long", 8, 8, -9000.0, 10.0, 0),
             ]
             for row in rows:
                 cursor.execute(
@@ -8017,7 +8191,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         holding_days, outcome_label, setup_quality_score, opportunity_state,
                         evidence_json, result_json, created_at, payload_json
                     ) VALUES (?, 'cfg', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trade', ?, ?, ?, 'pass',
-                        'executed', ?, ?, ?, ?, 1, 'observed', 0.7, 'tradeable_candidate', '{}', '{}', ?, '{}')
+                        'executed', ?, ?, ?, ?, 1, 'observed', 0.7, 'tradeable_candidate', '{}', '{}', ?, ?)
                     """,
                     (
                         row[0],
@@ -8038,6 +8212,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                         row[12],
                         row[13],
                         row[1],
+                        json.dumps({"current_lots": row[14]}),
                     ),
                 )
             conn.commit()
@@ -8067,6 +8242,71 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(open_value["payload"]["prior_role"], "weak_prior_not_action_preference")
         self.assertEqual(open_value["payload"]["canonical_action_preference_source"], "none_for_similar_sql_prior")
         self.assertEqual(open_value["payload"]["action_preference"], "")
+        by_action = {row["action_name"]: row for row in values}
+        self.assertEqual(set(by_action), {"open", "reduce", "exit"})
+        for action_name, expected_family in {
+            "open": "open_add_new_risk",
+            "reduce": "reduce_exit",
+            "exit": "reduce_exit",
+        }.items():
+            with self.subTest(action_name=action_name):
+                row = by_action[action_name]
+                self.assertEqual(row["canonical_action_family"], expected_family)
+                self.assertEqual(row["action_value_lane"], action_name)
+                self.assertEqual(row["learning_lane"], action_name)
+                self.assertIs(row["canonical_action_value"], False)
+                self.assertEqual(row["action_preference"], "")
+
+        self.assertEqual(_select_learning_trace_action_values(values, limit=10), [])
+        diagnostic_state = _attach_incomplete_prior_diagnostics_to_contract_state({
+            "alpha_setup_action_values": values,
+            "control_diagnostics": {
+                "final_action_memory_retrieval": {
+                    "tool": "decision_memory_retrieval",
+                    "rejected_or_downgraded": [],
+                }
+            },
+        })
+        rejected = diagnostic_state["control_diagnostics"]["final_action_memory_retrieval"]["rejected_or_downgraded"]
+        self.assertEqual({row["action_name"] for row in rejected}, {"open", "reduce", "exit"})
+        self.assertTrue(all(row["diagnostic_only"] for row in rejected))
+
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.72,
+            business_quality_score=0.70,
+            setup_quality_score=0.76,
+            opportunity_state="tradeable_candidate",
+            entry_trigger="current breakout confirmed above resistance",
+            invalidation_level=3500.0,
+            trigger_valid=True,
+            invalidation_present=True,
+        )
+        scorecard_kwargs = {
+            "ticker": "RB",
+            "analyst_signals": [signal],
+            "market_confirmation": {"confirmation_score": 0.70},
+            "data_quality_summary": {},
+            "decision_date": "2025-03-10",
+            "config": {},
+        }
+        clean_scorecard = build_opportunity_scorecard(**scorecard_kwargs)
+        similar_scorecard = build_opportunity_scorecard(
+            **scorecard_kwargs,
+            alpha_setup_action_values=values,
+        )
+        self.assertEqual(
+            similar_scorecard["long"]["opportunity_score_components"]["positive_learning"],
+            0.0,
+        )
+        self.assertEqual(
+            similar_scorecard["long"]["opportunity_score_components"]["negative_learning"],
+            0.0,
+        )
+        clean_rank = _ensure_final_rank_score_fields(dict(clean_scorecard["long"]), config={})
+        similar_rank = _ensure_final_rank_score_fields(dict(similar_scorecard["long"]), config={})
+        self.assertEqual(similar_rank["rank_score"], clean_rank["rank_score"])
 
     def test_sql_similar_setup_retrieval_counts_counterfactual_as_prior_not_exact_trade(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -8170,6 +8410,71 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertNotIn("future-open", ids)
         self.assertNotIn("legacy-open", ids)
 
+    def test_sqlite_null_or_empty_consumer_scope_is_rejected_by_pm_memory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SQLiteDB()
+            db.db_path = str(Path(tmpdir) / "agentquant_test.db")
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+            cursor.execute("INSERT INTO config (id) VALUES ('cfg')")
+            db._ensure_reviewer_learning_schema(cursor)
+            rows = [
+                ("scope-null", None, {}),
+                ("scope-empty", "", {}),
+                ("scope-payload-pm", None, {"consumer_scope": "pm_learning"}),
+                ("scope-top-pm", "pm_learning", {}),
+            ]
+            for row_id, consumer_scope, payload in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO alpha_setup_action_value (
+                        id, config_id, scope_key, ticker, side, horizon_class, market_regime,
+                        setup_type, data_combo, action_name, canonical_action_family,
+                        sample_count, reward_sum, reward_mean, win_rate, confidence_score,
+                        action_preference, reward_source, evidence_scope, action_value_lane,
+                        consumer_scope, learning_lane, memory_side_role, last_sample_date,
+                        created_at, updated_at, valid_until, active, payload_json
+                    ) VALUES (?, 'cfg', ?, 'BU', 'short', 'short', 'trend',
+                        'trend_breakout', 'combo', 'open', 'open_add_new_risk',
+                        1, 500.0, 500.0, 1.0, 0.7, 'positive_candidate_open',
+                        'trade_episode', 'exact_real_state', 'open', ?, 'open',
+                        'target_side', '2025-03-04', '2025-03-04', '2025-03-04',
+                        '2025-04-04', 1, ?)
+                    """,
+                    (
+                        row_id,
+                        f"BU|short|short|trend|trend_breakout|open|{row_id}",
+                        consumer_scope,
+                        json.dumps({**payload, "canonical_action_value": True}),
+                    ),
+                )
+            conn.commit()
+            conn.close()
+
+            result = retrieve_pm_memory(
+                db=db,
+                config_id="cfg",
+                ticker="BU",
+                side="short",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="trend_breakout",
+                trading_date="2025-03-05",
+                limit=10,
+            )
+
+        self.assertEqual(
+            {row["id"] for row in result["action_values"]},
+            {"scope-payload-pm", "scope-top-pm"},
+        )
+        rejected_ids = {
+            row.get("id")
+            for row in result["rejected_or_downgraded"]
+            if row.get("reason") == "non_pm_learning_scope"
+        }
+        self.assertEqual(rejected_ids, {"scope-null", "scope-empty"})
+
     def test_direct_alpha_setup_action_value_prioritizes_real_action_preference(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = SQLiteDB()
@@ -8239,7 +8544,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(values[0]["evidence_scope"], "exact_real_state")
         self.assertEqual(values[0]["action_value_lane"], "open")
 
-    def test_direct_alpha_setup_action_value_requires_complete_state_for_exact_quality(self):
+    def test_direct_open_daily_fragments_do_not_create_open_action_value(self):
         from tools.common.alpha_setup import upsert_alpha_setup_sample_and_profile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -8288,30 +8593,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             rows = [dict(row) for row in cursor.fetchall()]
             conn.close()
 
-        payload_by_setup = {
-            row["setup_type"]: json.loads(row["payload_json"] or "{}")
-            for row in rows
-        }
-        self.assertEqual(
-            payload_by_setup["generic_trade_setup"]["amplification_scope_quality"],
-            "partial_real_state",
-        )
-        self.assertEqual(
-            payload_by_setup["generic_trade_setup"]["exact_state_real_trade_sample_count"],
-            0,
-        )
-        self.assertEqual(
-            payload_by_setup["generic_trade_setup"]["partial_state_real_trade_sample_count"],
-            1,
-        )
-        self.assertEqual(
-            payload_by_setup["trend_breakout_setup"]["amplification_scope_quality"],
-            "exact_real_state",
-        )
-        self.assertEqual(
-            payload_by_setup["trend_breakout_setup"]["exact_state_real_trade_sample_count"],
-            1,
-        )
+        self.assertEqual(rows, [])
 
     def test_adaptive_policy_state_uses_only_past_learning_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -45,7 +45,7 @@ Phase1 投资组合经理 final_action_contract
 
 `product_price_behavior_profiles.yaml` 是三类分析师的商品差异化冷启动分析框架，不是研究库，不随回测自动改写。研究结论用于更新分析师差异化的方式只有一条：Researcher 写结构化分析师校准类研究；下一交易日同一批合格的 `learning_context` 和 `analyst_learning_calibration` 先进入 `technical`、`fundamental`、`commodity_news` 的提示词，再在 LLM 返回后确定性校对信号。静态 profile 继续提供品种基础框架，动态学习作为可反驳校准叠加其上。Auditor、Trader、Accountant 不读取 profile，也不读取分析师校准来改变交易权限、触发或入账。
 
-多维证据融合协议由 `tools/common/evidence_fusion_semantics.py` 的确定性函数固定实现，不设置无人读取的 YAML 参数。研究结论进入融合协议的方式只有一条：Reviewer 先只读标注 `fusion_attribution_label`，Researcher 再写入未来可用的 `evidence_fusion_attribution` 学习事件；下一交易日三类分析师通过 `learning_context` 校准证据，PM 通过 `decision_memory_retrieval`、生命周期学习路由和必要的新增风险 Step5 资金部署消费结构化学习摘要。融合学习不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
+多维证据融合协议由 `tools/common/evidence_fusion_semantics.py` 的确定性函数固定实现，不设置无人读取的 YAML 参数。Reviewer 可以只读标注 `fusion_attribution_label`，Researcher 可以写入 `evidence_fusion_attribution` 研究记录；但该记录目前没有正式下游消费端，不能写成已经进入分析师或 PM 的学习闭环。本次也不新增该消费链。研究记录不能回写当天 `final_action_contract`、`execution_result`、`daily_settlement` 或审计结果。
 
 ## 二、Phase4 与研究学习分工
 
@@ -61,22 +61,22 @@ Researcher 的数据库写入、`researcher_learning_completed`、外置 payload
 
 未完成交易日必须硬拦。若某天推荐、成交、盘中决策或学习记录已存在，但 phase1-4 没有全部 completed，系统应报 `incomplete_trading_day_phase`；该日不能进入收益判断，也不能被研究员当成学习样本。
 
-学习成果允许为空。不是每笔交易都具备形成学习成果的代表性，也不是每次分析或PM决策都必须命中学习记录；空检索是合法冷启动，不能触发默认学习、伪样本或替代策略。
+学习成果允许为空。不是每笔交易都具备形成学习成果的代表性，也不是每次分析或PM决策都必须命中学习记录；空检索是合法冷启动，不能触发默认学习、伪样本或替代策略。交易成交不等于形成 episode，episode 落地不等于形成 canonical action-value，action-value 存在不等于本次 PM 实际消费，PM 消费学习也不等于当天必须成交；反过来，没有历史学习也不阻止当日证据合格的候选进入既有 PM、审计和 Trader 链路。
 
 ## 三、研究对象与消费边界
 
 | 研究对象 | 记录什么 | 合法消费者 | 边界 |
 |---|---|---|---|
-| `trade_episode_memory` | 已成交策略 episode、证据、合约、执行、结算、PnL | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 只来自 Phase4 后已验证事实 |
+| `trade_episode_memory` | 已成交策略 episode、证据、合约、执行、结算、PnL | 研究员生成样本、profile 和候选 action-value；分析师与 PM 不直接读取 episode 表 | 只来自 Phase4 后已验证且完整配对的策略 episode；裸 transaction、未完成持仓、rollover、forced_risk 不得冒充策略 episode 学习 |
 | `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
 | `alpha_setup_action_value` | 按 `canonical_action_family` 与 open/add/hold/reduce/exit/execution/conditional_monitor lane 分账的动作学习结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action family/lane 使用 |
 | `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
-| `opportunity_ranking_preference` | 投资组合经理新增风险排序、资金分配理由、排名与后续收益的关系 | 投资组合经理经 `decision_memory_retrieval` 和 PM Step5 新增风险资金部署机制消费；研究员复核 | 只影响未来新增风险机会评分和资金部署优先级，不生成交易权限 |
-| `research_position_feedback` | 研究是否进入投资组合经理、是否改变合约、是否成交和结算 | 投资组合经理 / 研究员 / 协议治理审计 | 用于检查学习是否真的进入仓位链路 |
+| `opportunity_ranking_preference` | 投资组合经理新增风险排序、资金分配理由、排名与后续收益的关系 | 目前仅供 Researcher 和开发评估诊断，没有正式 PM 消费端 | 不能声称已经影响未来 rank 或资金部署；本次不新增消费链 |
+| `research_position_feedback` | 正式 action-value 是否被 PM 实际声明消费，以及该合约后续是否成交和结算 | Researcher 和开发评估诊断 | 只匹配 `learning_used.alpha_setup_action_values` 与最终 `decision_learning_rows`；未实际消费学习时不强制生成反馈，也不作为新 rank、手数或交易输入 |
 | `setup_execution_learning` | 盘中触发、未成交、涨跌停、追价、执行质量 | 投资组合经理经 `decision_memory_retrieval` 消费后写入未来合约执行字段 | 只能影响未来 `final_action_contract.execution_profile/entry_trigger`，不改方向、不改手数；交易员不直接读取 |
-| `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval`、PM 生命周期路由和必要的 Step5 资金部署间接消费 | 只影响未来证据解释、排序分项和冲突处理偏好；不创建交易权限，不改当天事实 |
+| `evidence_fusion_attribution` | PM 是否正确处理多维证据一致性、冲突、反向证据、新闻时效、profile 下假突破和确认需求 | 目前仅供 Researcher 和开发评估诊断，没有正式分析师或 PM 消费端 | 不能声称已影响未来证据、rank 或仓位；不创建交易权限，不改当天事实，本次不新增消费链 |
 
 运营风控事件也要记录，但不进入策略 alpha 学习。`source_type=rollover` 用于换月成本、合约切换和敞口恢复检查；`source_type=forced_risk` 用于保证金风险和强减结果检查。它们可以进入运营/风险复盘，不能写成策略 open/hold/exit 正负样本。
 
@@ -101,6 +101,10 @@ tail_loss_protect
 open 评价“当时开仓是否有正期望”；add 评价“同方向扩大风险是否有效”；hold 评价“继续持有是否保护收益或扩大收益”；reduce 评价“减仓是否保护收益或降低尾部风险”；exit 评价“退出是否避免回吐或尾部亏损”；conditional_monitor 评价“等待触发是否应被保留为盘中监控”；execution 评价“触发方式和成交质量是否改善结果”。
 
 不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被投资组合经理写入 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能改变方向或目标手数，也不能由交易员直接读取后放宽触发。
+
+open/add 的收益只来自完整策略 episode，并按实际平仓日逐条落样；日内或日终 PnL 碎片不能重复充当 open/add 收益，也不能把一笔完整交易重复计成多笔 profile 交易。日记录仍可为 hold、reduce、exit 和 execution lane 提供对应生命周期事实。完整 episode 只是 action-value 候选来源：状态字段不完整、没有合法 preference 或只形成弱先验时，可以保留样本和 profile，但不得被提升成 PM 正式 canonical 学习。
+
+`memory_side_role` 随最终学习 lane 固定：open/add/scale/increase 使用 `target_side`，hold/reduce/exit 使用 `current_position_side`，conditional_monitor 使用 `trigger_side`，execution 使用 `historical_sample_side`。
 
 action-value 必须保留以下核心字段，用于 `decision_memory_retrieval` 质量排序和审计保真：
 
@@ -183,20 +187,11 @@ signal_collection_contract
 -> PM Step6 原子生成 FuturesRecommendation / final_action_contract / 最终合约自身检查
 ```
 
-多维证据融合学习进入 PM 的固定链路是：
-
-```text
-Reviewer fusion_attribution_label
--> Researcher evidence_fusion_attribution
--> 下一交易日 decision_memory_retrieval / analyst_learning_calibration
--> signal_collection_contract.evidence_fusion
--> PM scorecard.pm_fusion_diagnostics
--> portfolio_manager.final_action_contract.evidence_used.pm_fusion_diagnostics
-```
-
-这条链只改变未来预测证据解释、PM 排序分项和冲突处理说明，不改变当天成交、结算或交易员执行权限。
+当前 AEC → SCC → PM 的证据融合来自当日正式预测证据及确定性融合函数，不来自 `evidence_fusion_attribution` 研究记录。后者目前没有正式消费端，不能用当日融合通路反推其学习闭环已经成立。
 
 研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
+
+PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开。`current_lots=0 -> target_lots!=0` 的条件 probe 在 PM 中仍使用 open/add 决策学习并参加新增风险 rank，但 `requires_intraday_confirmation` 继续要求 Trader 等待触发；只有手数不变且仅保留监控的最终合约才使用 conditional_monitor 决策学习。正式学习进入 `learning_used` 只证明 PM 消费事实，不证明合约一定获预算、通过审计、触发或成交。
 
 投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。交易员只读 `final_action_contract` 中的 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
 

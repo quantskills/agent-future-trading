@@ -33,14 +33,20 @@
 
 （2）[评估持仓血缘与区间边界] `futures_trade_pairs.py` 新增只供评估链使用的策略起源持仓配对，保留 rollover/forced-risk 的真实执行来源并在完整换月后传递原策略开仓血缘；`evaluation.py`、`analyze_strategy_attribution.py` 统一使用该配对口径，并让指定区间先重放截至结束日的成交历史、再按平仓日统计；相关评估测试覆盖运营平仓、完整换月传递、期初继承持仓和区间结束边界。原因：修复策略持仓被运营动作平仓后从胜率、质量指标和策略归因中漏算，以及子窗口无法识别期初持仓的问题。
 
-（3）[PM学习排名资金闭环] `portfolio_manager.py` 在精确检索及弱先验诊断完成后重建同一个Step4机会评分对象并保留Step2方向，显式非canonical及similar/weak prior记录不再进入正式学习；`pm_signal_fusion.py` 只消费完整canonical PM学习并将execution/profile严格隔离在执行画像；`pm_full_market_capital_deployment.py` 将资金效率纳入七项rank分量后统一截断，并按资金层、候选层、rank、当日证据、学习后候选质量、资金效率和ticker顺序消费预算。原因：修复后置精确action-value未进入scorecard、弱先验混入正式score/rank、执行学习借trigger分量污染rank、负原始分被二次加分抬正及同分候选退化为ticker排序的问题。
+（3）[PM正式学习到排名资金的内部传导] `portfolio_manager.py` 在精确检索及弱先验诊断完成后重建同一个Step4机会评分对象并保留Step2方向，显式非canonical及similar/weak prior记录不再进入正式学习；`pm_signal_fusion.py` 只消费完整canonical PM学习并将execution/profile严格隔离在执行画像；`pm_full_market_capital_deployment.py` 将资金效率纳入七项rank分量后统一截断，并按资金层、候选层、rank、当日证据、学习后候选质量、资金效率和ticker顺序消费预算。原因：修复已存在正式action-value时的PM内部score/rank传导问题；该项不代表上游完整episode已正确生成action-value，也不代表最终FAC和研究反馈已经闭合。
 
 ==========2026年07月21日==========
 
-（1）[PM学习生命周期与有符号rank闭环] `portfolio_manager.py` 在首次正式学习消费前组装并冻结显式`pm_learning`的完整canonical Step4池，隔离similar/weak/incomplete prior且禁止后置追加；`pm_signal_fusion.py` 仅让open/add/scale/increase学习进入新增风险候选质量和rank；`pm_full_market_capital_deployment.py` 将七项分量一次求和并保留有符号rank；`pm_contract_builder.py`、`final_action_semantics.py`、`pm_contract_self_check.py` 按最终手数生命周期先路由完整池，再严格分离正式决策行与execution/profile行。原因：让学习真实影响新增风险投资价值与预算顺序，同时保证条件开仓继续等待盘中触发、非新增风险动作无伪rank，并保持既有资金层、probe预算和20%硬门控不变。
+（1）[PM学习池、生命周期与有符号rank传导] `portfolio_manager.py` 在首次正式学习消费前组装并冻结显式`pm_learning`的完整canonical Step4池，隔离similar/weak/incomplete prior且禁止后置追加；`pm_signal_fusion.py` 仅让open/add/scale/increase学习进入新增风险候选质量和rank；`pm_full_market_capital_deployment.py` 将七项分量一次求和并保留有符号rank；`pm_contract_builder.py`、`final_action_semantics.py`、`pm_contract_self_check.py` 按当时的最终手数路由学习池并分离决策行与execution/profile行。原因：完成PM取得正式学习后的候选质量、rank和预算传导边界，同时保持条件触发、非新增风险无伪rank、既有资金层、probe预算和20%硬门控；该项不代表episode生产、动作计奖、最终FAC影响字段和研究反馈均已验证闭合。
 
 （2）[AEC到SCC及PM的新鲜度传导] `evidence_fusion_semantics.py` 不再让普通风险标签污染时效；`signal_evidence_collection.py` 由SCC来源AEC的唯一`fusion_evidence`生成并校验跨分析师融合；`pm_risk_gate.py`、`portfolio_manager.py` 的既有新闻规则只消费SCC重建证据中的正式新鲜度和相关性。原因：修复已有AEC时效在SCC中退化为unknown、共识分失真以及PM新闻规则固定读到零的问题；该项只完成AEC之后的传导和消费，未修复技术行情新鲜度的生产权。
 
 ==========2026年07月22日==========
 
 （1）[确定性数据新鲜度生产] `analyst_data_usage.py`、`technical.py` 以技术行情`latest_data_date`对比Router已确认的`morning_price_context.base_price_date`生成确定性时效；`prompt.py`、`analyst_structured_output.py` 移除LLM对`data_freshness`和系统不可用setup的生产权；`analyst_output_finalization.py`、`evidence_fusion_semantics.py` 只把确定性时效写入AEC并参与既有证据强度。原因：让数据新鲜度从生产端经AEC、SCC和PM真实影响候选质量、rank与目标手数，同时保持基本面/新闻算法、PM公式、参数、交易权限和回测流程不变。
+
+（2）[完整episode到实际学习消费与反馈] `research_learning.py`、`alpha_setup.py` 正确解引用并逐条保留完整策略episode，以真实开仓FAC动作和episode净收益形成样本、profile及符合既有完整性规则的canonical action-value；`pm_signal_fusion.py` 让policy正负计分按`policy_action`互斥；`final_action_semantics.py`、`pm_contract_builder.py` 按最终手数变化形成唯一PM决策生命周期，并使FAC正式学习清单和rank增量与最终资金部署一致；`research_review_helpers.py` 只对FAC实际匹配消费的正式学习形成反馈；`sqlite_helper.py` 统一similar诊断动作语义但继续保持非正式。原因：修复外置episode未解引用、分批覆盖、日收益碎片污染、policy正负双计、FAC学习影响失真和研究反馈读旧路径；学习为空、episode未达正式资格或PM未匹配消费仍是合法状态，均不阻断当前证据驱动的冷启动决策，也不保证最终触发成交。
+
+（3）[Step6最终学习需求一致性] `pm_contract_builder.py` 以Step5后的最终动作和手数重新生成FAC外层及最终生命周期trace的`memory_requirements`，同时保留Step4真实检索和Step5资金排名诊断；`test_phase_flow_regression.py`覆盖拟开仓候选未获预算后的最终wait、正式学习清空及检索事实保留。原因：防止最终不增仓合约继续声明拟开仓阶段的学习需求，又不把历史检索或资金分配过程伪装成Step6结果。
+
+（4）[实际生命周期、episode反馈与PM作用域闭合] `research_learning.py`、`alpha_setup.py` 以推荐真实成交和结算分项生成日频生命周期样本，未成交reduce/exit不再借期末剩余持仓伪造成交，部分平仓按实际手数归入reduce，hold、reduce/exit分别使用holding_pnl、close_pnl且open/add仍只由完整episode计奖；`research_memory_writers.py` 将完整episode按物理成交对去重后幂等回填开仓FAC实际消费的原反馈，正式学习ID不完全一致时拒绝回填；`sqlite_helper.py`、`pm_decision_memory_retrieval.py` 停止把缺失consumer_scope提升为pm_learning。原因：让真实生命周期收益、最终episode结果和显式学习作用域闭合到同一条canonical学习链，同时保持无学习冷启动、PM/rank、资金规则、Schema和交易链不变。

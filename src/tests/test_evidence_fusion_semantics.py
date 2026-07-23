@@ -16,6 +16,7 @@ from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_si
 from tools.agent_tools.decision.pm_contract_builder import build_final_action_contract
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
+from tools.agent_tools.research.research_review_helpers import _feedback_learning_refs
 from tools.common.evidence_fusion_semantics import (
     build_analyst_fusion_evidence,
     build_reviewer_fusion_attribution,
@@ -364,7 +365,11 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                 "action_name": "hold",
                 "canonical_action_family": "hold",
                 "action_value_lane": "hold",
+                "learning_lane": "hold",
                 "action_preference": "positive_candidate_hold",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "current_position_side",
                 "reward_mean": 0.11,
                 "sample_count": 3,
             },
@@ -375,9 +380,28 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                 "action_name": "add_or_open",
                 "canonical_action_family": "open_add_new_risk",
                 "action_value_lane": "open",
+                "learning_lane": "open",
                 "action_preference": "positive_candidate_open",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "target_side",
                 "reward_mean": 0.18,
                 "sample_count": 6,
+            },
+            {
+                "id": "open-opposite-side",
+                "ticker": "RB",
+                "side": "short",
+                "action_name": "open",
+                "canonical_action_family": "open_add_new_risk",
+                "action_value_lane": "open",
+                "learning_lane": "open",
+                "action_preference": "positive_candidate_open",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "target_side",
+                "reward_mean": 0.22,
+                "sample_count": 7,
             },
             {
                 "id": "exec-1",
@@ -386,7 +410,11 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                 "action_name": "execution",
                 "canonical_action_family": "execution",
                 "action_value_lane": "execution",
+                "learning_lane": "execution",
                 "action_preference": "positive_candidate_execution",
+                "canonical_action_value": True,
+                "consumer_scope": "pm_learning",
+                "memory_side_role": "historical_sample_side",
                 "reward_mean": 0.09,
                 "sample_count": 4,
             },
@@ -413,9 +441,12 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                 "primary_lifecycle_action_port": primary_port,
                 "pm_lifecycle_learning_router": router,
                 "alpha_setup_ev_fusion": {
-                    "rank_score_open_add_learning_delta": 0.031,
-                    "learning_impact_delta": 0.031,
+                    "rank_score_open_add_learning_delta": 0.999,
+                    "learning_impact_delta": 0.999,
                 },
+                "holding_rebalance_control": {"decision": "unrelated_hold"},
+                "winning_template_continuation": {"decision": "unrelated_reduce"},
+                "conditional_monitor_probe_plan": {"decision": "unrelated_monitor"},
             },
             opportunity_scorecard={
                 "preferred_side": "long",
@@ -431,6 +462,14 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             },
             market_confirmation={"confirmation_score": 0.70},
             alpha_setup_action_values=action_values,
+            execution_contract_fields={
+                "capital_deployment": {
+                    "selected_for_capital_deployment": True,
+                    "learning_impact_delta": {
+                        "rank_score_open_add_learning_delta": 0.031,
+                    },
+                },
+            },
         )
         trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
         self.assertEqual(trace["contract_lifecycle_port"], "open_add_new_risk")
@@ -440,8 +479,21 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         self.assertNotIn("lifecycle_transition_diagnostic", trace)
         self.assertNotIn("lifecycle_transition_reason", trace)
         self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["open-1"])
+        self.assertTrue(trace["decision_learning_rows"][0]["canonical_action_value"])
+        self.assertEqual(
+            trace["decision_learning_rows"][0]["consumer_scope"],
+            "pm_learning",
+        )
         self.assertEqual([row["id"] for row in trace["trigger_profile_learning"]], ["exec-1"])
         self.assertNotIn("hold-1", {row.get("id") for row in trace["decision_learning_rows"]})
+        self.assertNotIn(
+            "open-opposite-side",
+            {row.get("id") for row in trace["decision_learning_rows"]},
+        )
+        self.assertNotIn(
+            "open-opposite-side",
+            {row.get("id") for row in contract["learning_used"]["alpha_setup_action_values"]},
+        )
         self.assertNotIn("exec-1", {row.get("id") for row in trace["rejected_learning"]})
         self.assertFalse(trace["execution_profile_learning_direct_to_rank"])
         self.assertEqual(
@@ -450,7 +502,101 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         )
         impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(impact["open_add_rank_score_delta"], 0.031)
+        self.assertIsNone(impact["hold_decision"])
+        self.assertIsNone(impact["reduce_exit_decision"])
+        self.assertIsNone(impact["conditional_monitor_decision"])
+        self.assertTrue(trace["open_add_learning_decision"])
+        self.assertEqual(trace["hold_learning_decision"], {})
+        self.assertEqual(trace["reduce_exit_learning_decision"], {})
+        self.assertEqual(trace["conditional_monitor_learning_decision"], {})
         self.assertFalse(impact["execution_profile_learning_direct_to_rank"])
+
+    def test_position_feedback_refs_require_formal_and_final_decision_row_match(self):
+        formal = {
+            "id": "open-1",
+            "ticker": "RB",
+            "side": "long",
+            "setup_type": "trend_breakout",
+            "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "action_preference": "positive_candidate_open",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+            "reward_mean": 1250.0,
+            "sample_count": 3,
+        }
+        decision = {
+            "id": "open-1",
+            "canonical_action_family": "open_add_new_risk",
+            "lane": "open",
+            "canonical_action_value": True,
+            "consumer_scope": "pm_learning",
+        }
+        refs, policies = _feedback_learning_refs({
+            "learning_used": {
+                "alpha_setup_action_values": [formal],
+                "pm_lifecycle_learning_trace": {
+                    "decision_learning_rows": [decision],
+                },
+                "learning_context": {
+                    "memory_trace": {
+                        "selected_memory_refs": [{"id": "legacy-must-not-leak"}],
+                    },
+                },
+            },
+        })
+
+        self.assertEqual([row["id"] for row in refs], ["open-1"])
+        self.assertEqual(policies, [])
+        self.assertTrue(refs[0]["canonical_action_value"])
+        self.assertEqual(refs[0]["consumer_scope"], "pm_learning")
+
+        unmatched_refs, _ = _feedback_learning_refs({
+            "learning_used": {
+                "alpha_setup_action_values": [formal],
+                "pm_lifecycle_learning_trace": {
+                    "decision_learning_rows": [{**decision, "lane": "exit"}],
+                },
+                "learning_context": {
+                    "memory_trace": {
+                        "selected_memory_refs": [{"id": "legacy-must-not-leak"}],
+                    },
+                },
+            },
+        })
+        self.assertEqual(unmatched_refs, [])
+        for decision_override in (
+            {"canonical_action_value": False},
+            {"consumer_scope": "analysis_calibration"},
+        ):
+            with self.subTest(decision_override=decision_override):
+                invalid_refs, _ = _feedback_learning_refs({
+                    "learning_used": {
+                        "alpha_setup_action_values": [formal],
+                        "pm_lifecycle_learning_trace": {
+                            "decision_learning_rows": [
+                                {**decision, **decision_override}
+                            ],
+                        },
+                    },
+                })
+                self.assertEqual(invalid_refs, [])
+
+        policy_only_refs, policy_only_policies = _feedback_learning_refs({
+            "learning_used": {
+                "adaptive_policy_applied": [{
+                    "policy_type": "learning_mechanism:alpha_setup_ev",
+                    "policy_action": "cap",
+                    "ticker": "RB",
+                }],
+            },
+        })
+        self.assertEqual(policy_only_refs, [])
+        self.assertEqual(policy_only_policies, [])
 
     def test_reviewer_fusion_attribution_is_read_only_learning_context(self):
         attribution = build_reviewer_fusion_attribution(
