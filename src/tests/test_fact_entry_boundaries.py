@@ -20,6 +20,9 @@ from tools.common.contracts import (
     validate_researcher_artifact_boundary,
     validate_reviewer_artifact_boundary,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+)
 
 
 PROJECT_ROOT = SRC_ROOT.parent
@@ -612,7 +615,11 @@ class FactEntryBoundaryTest(unittest.TestCase):
             "contract_code": "bu2506",
             "open_action_evidence": True,
             "strong_current_evidence": True,
-            "invalidation_condition": {"type": "stop"},
+            "execution_profile": "breakout",
+            "invalidation": canonical_entry_invalidation_condition("breakout", "long"),
+            "invalidation_level": 3100.0,
+            "position_invalidation_level": 3050.0,
+            "valid_until": "2025-03-03 15:00:00",
             "target_margin_ratio_estimate": 0.01,
         }
         contract["learning_used"] = {

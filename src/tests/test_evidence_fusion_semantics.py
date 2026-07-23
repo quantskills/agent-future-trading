@@ -21,6 +21,9 @@ from tools.common.evidence_fusion_semantics import (
     build_analyst_fusion_evidence,
     build_reviewer_fusion_attribution,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+)
 from tools.common.signal_evidence_collection import build_signal_collection_contract
 from tests.contract_test_fixtures import build_test_aec
 
@@ -44,6 +47,18 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             setup_type="trend_breakout",
             factor_focus=["price", "inventory"],
             current_evidence_conflict=[],
+            invalidation_level=(
+                95.0
+                if analyst in {"technical", "commodity_news"}
+                and signal == Signal.BULLISH
+                else 105.0
+                if analyst in {"technical", "commodity_news"}
+                and signal == Signal.BEARISH
+                else None
+            ),
+            position_invalidation_level=(
+                94.0 if signal == Signal.BULLISH else 106.0 if signal == Signal.BEARISH else None
+            ),
         )
         context = {
             "tradeability": "high",
@@ -279,8 +294,23 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
         )
         self.assertIn("pm_fusion_diagnostics", contract["evidence_used"])
         self.assertIn("analyst_direction_evidence", contract["evidence_used"])
-        self.assertEqual(selected["opportunity_scorecard"]["preferred_side"], "flat")
-        self.assertNotIn("side_priority", contract["evidence_used"])
+        self.assertEqual(selected["opportunity_scorecard"]["preferred_side"], "long")
+        self.assertEqual(
+            collection["evidence_fusion"]["dominant_opposing_evidence"][0]["analyst"],
+            "fundamental",
+        )
+        self.assertNotIn(
+            "same_horizon_direction_opposition",
+            {
+                str(conflict)
+                for row in collection["evidence_fusion"]["cross_analyst_conflicts"]
+                for conflict in row.get("conflicts", [])
+            },
+        )
+        self.assertEqual(contract["evidence_used"]["side_priority"], 1)
+        self.assertTrue(
+            contract["evidence_used"]["side_priority_is_not_capital_rank"]
+        )
         self.assertIn("candidate_quality", contract["evidence_used"])
         self.assertIn("candidate_layer_hint", contract["evidence_used"])
         self.assertNotIn("capital_priority_score", contract["evidence_used"])
@@ -328,6 +358,11 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
                     "lots_delta": 1,
                     "final_action": "open_probe",
                     "contract_code": "rb2510",
+                    "execution_profile": "breakout",
+                    "invalidation": canonical_entry_invalidation_condition(
+                        "breakout",
+                        "long",
+                    ),
                     "invalidation_level": 3100.0,
                     "target_margin_ratio_estimate": 0.01,
                 }

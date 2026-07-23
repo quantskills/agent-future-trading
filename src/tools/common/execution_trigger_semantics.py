@@ -6,6 +6,7 @@ Analyst prose is evidence context and must not become Trader executable logic.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -27,14 +28,23 @@ NEW_RISK_ENTRY_PROFILES = TECHNICAL_ENTRY_PROFILES | NEWS_ENTRY_PROFILES
 _ENTRY_TRIGGER_BY_PROFILE_AND_SIDE = {
     ("breakout", "long"): "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
     ("breakout", "short"): "15分钟收盘价向下突破开盘区间下沿且低于VWAP",
-    ("pullback", "long"): "15分钟收盘价不低于VWAP且高于开盘区间下沿",
-    ("pullback", "short"): "15分钟收盘价不高于VWAP且低于开盘区间上沿",
+    ("pullback", "long"): "15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界",
+    ("pullback", "short"): "15分钟先向下扩张，随后回抽开盘区间下沿或VWAP，最终收盘重新严格跌回被回抽边界下方",
     ("vwap_confirmed", "long"): "15分钟收盘价不低于VWAP",
     ("vwap_confirmed", "short"): "15分钟收盘价不高于VWAP",
     ("event_immediate", "long"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
     ("event_immediate", "short"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
 }
 CANONICAL_ENTRY_TRIGGERS = frozenset(_ENTRY_TRIGGER_BY_PROFILE_AND_SIDE.values())
+
+
+_ENTRY_INVALIDATION_CONDITION_BY_SIDE = {
+    "long": "long_price_lte_invalidation_level",
+    "short": "short_price_gte_invalidation_level",
+}
+CANONICAL_ENTRY_INVALIDATION_CONDITIONS = frozenset(
+    _ENTRY_INVALIDATION_CONDITION_BY_SIDE.values()
+)
 
 
 _TRIGGER_SOURCE_BY_ANALYST_AND_PROFILE = {
@@ -84,6 +94,54 @@ def canonical_entry_trigger(profile: Any, side: Any) -> str:
 
 def is_canonical_entry_trigger(value: Any) -> bool:
     return str(value or "").strip() in CANONICAL_ENTRY_TRIGGERS
+
+
+def canonical_entry_invalidation_condition(profile: Any, side: Any) -> str:
+    """Return the registered pre-fill cancellation condition for one entry."""
+    normalized = normalize_execution_profile(profile)
+    side_text = str(side or "").strip().lower()
+    if normalized not in NEW_RISK_ENTRY_PROFILES:
+        return ""
+    return _ENTRY_INVALIDATION_CONDITION_BY_SIDE.get(side_text, "")
+
+
+def is_canonical_entry_invalidation_condition(
+    value: Any,
+    *,
+    profile: Any,
+    side: Any,
+) -> bool:
+    expected = canonical_entry_invalidation_condition(profile, side)
+    return bool(expected and str(value or "").strip() == expected)
+
+
+def entry_invalidation_contract_error(
+    *,
+    profile: Any,
+    side: Any,
+    invalidation_condition: Any,
+    invalidation_level: Any,
+) -> str:
+    """Validate one machine-executable pre-fill cancellation boundary."""
+    normalized = normalize_execution_profile(profile)
+    if normalized not in NEW_RISK_ENTRY_PROFILES:
+        return "execution_entry_invalidation_profile_invalid"
+    if isinstance(invalidation_level, bool) or not isinstance(
+        invalidation_level,
+        (int, float),
+    ):
+        return "execution_entry_invalidation_level_invalid"
+    if not math.isfinite(float(invalidation_level)) or float(
+        invalidation_level
+    ) <= 0.0:
+        return "execution_entry_invalidation_level_invalid"
+    if not is_canonical_entry_invalidation_condition(
+        invalidation_condition,
+        profile=normalized,
+        side=side,
+    ):
+        return "execution_entry_invalidation_condition_invalid"
+    return ""
 
 
 def execution_profile_allowed_for_analyst(analyst: Any, profile: Any) -> bool:

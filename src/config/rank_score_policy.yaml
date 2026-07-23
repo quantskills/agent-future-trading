@@ -2,17 +2,16 @@
 #
 # This catalog tunes only the single full-market capital rank score. It does
 # not define position size, margin floors, hard risk gates, trade authority, or
-# product blacklists. Defaults below mirror the previous code constants so
-# adding this catalog does not change current behavior by itself.
+# product blacklists. Layer bases occupy non-overlapping score bands so the
+# learned Step4 capital layer remains the dominant investment-value ordering.
 
 rank_score_policy:
   rank_score:
     cold_start_evidence_quality: 0.52
     capital_layer_priority:
-      tradeable_candidate: 0.18
-      probe_candidate: 0.10
-      watch_for_trigger: 0.02
-      no_opportunity: 0.00
+      alpha_scale: 6.00
+      real_budget: 3.00
+      exploration_probe: 0.00
 
     open_add_action_value_delta:
       max_abs_delta: 0.35
@@ -24,8 +23,7 @@ rank_score_policy:
       net_trigger_quality_loss_signal: -0.10
 
     trigger_execution_quality:
-      trigger_quality_positive_bonus: 1.00
-      trigger_quality_loss_penalty: 1.00
+      current_trigger_quality_weight: 0.08
 
     product_setup_trigger_history:
       alpha_profile_adjustment: 1.00

@@ -1,7 +1,10 @@
 ﻿from typing import Any, Mapping, Optional
 
 
-from tools.common.execution_trigger_semantics import canonical_entry_trigger
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
 
 
 ANALYST_OUTPUT_FORMAT = """
@@ -17,8 +20,9 @@ Output format:
 - price_percentile: 0.0-1.0 when inferable, otherwise null
 - entry_trigger: concrete current trigger fact or pending trigger condition
 - do not output action_name; action_name is reserved for Researcher action-value records, not analyst evidence
-- invalidation_level: price level when inferable, otherwise null
-- atr_stop_distance: ATR stop distance when inferable, otherwise null
+- invalidation_level: pre-fill cancellation price for this current-day entry setup; for long it is the price at or below which the unfilled setup is cancelled, and for short it is the price at or above which the unfilled setup is cancelled; otherwise null
+- position_invalidation_level: distinct post-fill position price for later hold/reduce/exit decisions; otherwise null
+- atr_stop_distance: post-fill ATR-based position stop distance when inferable, otherwise null
 - add_allowed: true only when this is a verified add-on signal
 - direction_anchor: short phrase describing the direction anchor, especially for fundamental signals
 - supply_demand_state, basis_state, inventory_state, warehouse_receipt_state, position_flow_state: concise state labels or "unknown"
@@ -43,13 +47,14 @@ Output format:
 - entry_timing_signal: fixed execution timing enum when this analyst has execution responsibility; a complete executable opportunity must not leave it empty, and setup_type must never be copied into it
 - price_location: price zone or percentile used for timing
 - trigger_valid: true only when the current trigger is already present in available evidence
+- trigger_quality_score: independent 0.0-1.0 strength of today's already-confirmed canonical technical or immediate-event trigger; use 0.0 for pending/watch, unconfirmed, no-opportunity, risk-reduction, and fundamental evidence; never copy setup_quality_score or historical performance into this field
 - A pending condition is watch_for_trigger only when it gives a concrete price,
   volume, or indicator condition that Trader can observe with T-day 15-minute
   market data and an independent invalidation boundary. Set trigger_valid=false.
 - A statement that no trigger exists, or that only waits for a future weekly or
   monthly data release, is no_opportunity unless it also defines that concrete
   T-day market condition. Do not label pending conditions tradeable_candidate.
-- invalidation_present: true only when price, ATR, or structured invalidation boundary is present
+- invalidation_present: true only when a valid pre-fill invalidation_level is present; deterministic finalization creates the canonical entry-cancellation condition
 - opportunity_type: trend_continuation / reversal / range_breakout / event_driven / medium_fundamental / short_timing / probe / no_trade / unknown
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
 - learning_impact_summary: object with historical_support, historical_contradiction, current_evidence_confirmed, current_evidence_missing, opportunity_state_reason, authority_boundary
@@ -58,7 +63,7 @@ Output format:
 - setup_quality_score: 0.0-1.0
 - entry_quality: poor / weak / acceptable / strong / unknown
 - entry_trigger: concrete entry/timing condition, not a broad directional opinion
-- exit_hint: concrete reduce/exit/invalidation condition
+- exit_hint: concrete post-fill reduce/exit condition; it is not a pre-fill entry-invalidation alias
 - holding_period_hint: expected holding style/window
 - factor_focus: list of factor/setup/catalyst groups that define learning scope
 - current_evidence_conflict: list of current evidence against this view
@@ -360,7 +365,8 @@ Return these explicit fields in addition to signal/confidence/justification:
 - setup_type: fundamental_timing_setup / unknown
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - entry_trigger: short-timing condition needed to make the fundamental thesis tradable
-- invalidation_level: null unless an explicit price invalidation level is inferable
+- invalidation_level: always null because fundamental evidence has no Trader entry profile
+- position_invalidation_level: explicit post-fill thesis invalidation price when inferable, otherwise null
 
 === DECISION GUIDANCE ===
 
@@ -437,6 +443,9 @@ Canonical Trader-observable entry conditions:
 - pullback short: {canonical_entry_trigger('pullback', 'short')}
 - vwap_confirmed long: {canonical_entry_trigger('vwap_confirmed', 'long')}
 - vwap_confirmed short: {canonical_entry_trigger('vwap_confirmed', 'short')}
+Deterministic pre-fill cancellation semantics (read-only; do not output these tokens):
+- long with valid invalidation_level: {canonical_entry_invalidation_condition('breakout', 'long')}
+- short with valid invalidation_level: {canonical_entry_invalidation_condition('breakout', 'short')}
 T-day open-dependent gap analysis is expected to be unavailable during the pre-open proposal stage.
 """
 
@@ -506,15 +515,17 @@ Output format:
 - entry_timing_signal: no_opportunity must use an empty string; every complete watch_for_trigger, probe_candidate, or tradeable_candidate must use exactly one of breakout / pullback / vwap_confirmed
 - watch_for_trigger means the canonical condition is pending, so set trigger_valid=false and current_trigger_confirmed=false while still filling entry_timing_signal
 - probe_candidate/tradeable_candidate means the same canonical condition is already confirmed, so fill entry_timing_signal and set trigger_valid=true and current_trigger_confirmed=true
+- trigger_quality_score measures only the current confirmed trigger itself; it must be 0.0 for watch_for_trigger/no_opportunity and must not be derived from setup_quality_score
 - a directional view without an exact T-day observable trigger or canonical invalidation is no_opportunity, not a profile-validation error
 - range_reversal, trend_breakout, short_timing, and other analytical shapes belong in setup_type/opportunity_type, never in entry_timing_signal
 - evidence_role: entry_timing for technical evidence
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
-- invalidation_level: nearest concrete invalidation price if inferable, otherwise null
+- invalidation_level: nearest concrete pre-fill cancellation price for the current-day technical entry; long uses a lower cancellation boundary and short uses an upper cancellation boundary; otherwise null
+- position_invalidation_level: distinct post-fill technical position invalidation price for later hold/reduce/exit decisions, otherwise null
 - opportunity_type: trend_continuation / reversal / range_breakout / short_timing / probe / no_trade
 - opportunity_state: no_opportunity / watch_for_trigger / probe_candidate / tradeable_candidate / risk_reduction_candidate
 - entry_trigger: explain the technical condition supporting entry_timing_signal; deterministic finalization replaces this prose with the canonical Trader condition
-- exit_hint: concrete current evidence or price condition that would require reduce/exit
+- exit_hint: concrete post-fill current evidence or price condition that would require reduce/exit; never use it as the pre-fill entry invalidation
 - holding_period_hint: expected short-term holding style/window
 - factor_focus: list of key technical factor groups that matter for this ticker today
 - current_evidence_conflict: list of technical evidence that conflicts with the signal
@@ -554,8 +565,11 @@ def build_futures_fundamental_prompt(
         "- setup_type: fundamental_timing_setup when factors form a setup, otherwise unknown\n"
         "- evidence_role=direction_context; this value is fixed for fundamental output\n"
         "- entry_timing_signal must be an empty string in every fundamental output; fundamental must not output a Trader execution profile\n"
+        "- trigger_quality_score must be 0.0 because fundamental supplies direction context, not a current Trader trigger\n"
         "- entry_trigger may describe research confirmation in your analysis, but it is not persisted as a Trader trigger\n"
-        "- exit_hint: fundamental or price evidence that invalidates or weakens the thesis\n"
+        "- invalidation_level must be null because fundamental evidence cannot supply a Trader entry boundary\n"
+        "- position_invalidation_level: post-fill fundamental thesis invalidation price when inferable\n"
+        "- exit_hint: post-fill fundamental or price evidence that invalidates or weakens the thesis\n"
         "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
         "- factor_focus: factor groups most relevant for this ticker now\n"
         "- current_evidence_conflict: current evidence contradicting the direction\n"
@@ -615,6 +629,7 @@ def build_futures_commodity_news_prompt(
         "Fill event_calibration_summary with effective_catalysts, background_noise, impact_window_assessment, price_volume_confirmation_required, and event_calibration_reason. "
         "Do not include lots, margin, final_action, target_lots, execution instructions, or trade authority in these summaries.\n"
         "Use evidence_role=event_catalyst. Only a complete probe_candidate/tradeable_candidate whose current event already satisfies the existing immediate-execution boundary may use entry_timing_signal=event_immediate. "
+        "Only that confirmed immediate event may report a non-zero trigger_quality_score; it must measure today's event trigger strength independently of setup quality and history. "
         "That complete immediate candidate must not leave entry_timing_signal empty. Otherwise use no_opportunity with an empty entry_timing_signal; news must not create watch_for_trigger or a normal 15-minute execution profile.\n"
     )
     prompt += learning_context_text or ""

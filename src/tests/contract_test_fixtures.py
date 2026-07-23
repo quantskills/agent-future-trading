@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from tools.common.execution_trigger_semantics import canonical_entry_trigger
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
 
 
 def build_test_aec(
@@ -33,7 +36,6 @@ def build_test_aec(
         if analyst == "technical" and directional
         else "no_opportunity"
     )
-    has_invalidation = directional if invalidation_present is None else invalidation_present
     source_name, source, dataset = {
         "technical": ("pandaai_market", "PandaAI", "daily_continuous_candles"),
         "fundamental": (
@@ -59,6 +61,7 @@ def build_test_aec(
         and state in {"probe_candidate", "tradeable_candidate"}
         else ""
     )
+    has_invalidation = bool(timing) if invalidation_present is None else invalidation_present
     default_trigger = canonical_entry_trigger(timing, side) if timing else ""
     contract: dict[str, Any] = {
         "contract_version": "agentquant.action_evidence.v1",
@@ -78,6 +81,12 @@ def build_test_aec(
         "evidence_role": role,
         "exit_hint": "close_beyond_invalidation" if directional else "",
         "invalidation_present": has_invalidation,
+        "invalidation_level": (
+            95.0 if side == "long" else 105.0 if side == "short" else None
+        ) if has_invalidation else None,
+        "position_invalidation_level": (
+            94.0 if side == "long" else 106.0 if side == "short" else None
+        ) if directional else None,
         "horizon_class": "short" if directional else "flat",
         "expected_horizon_days": 3 if directional else 0,
         "market_regime": "trend" if directional else "unknown",
@@ -112,10 +121,11 @@ def build_test_aec(
             "confirmation_requirements": [],
         },
     }
-    if has_invalidation and invalidation_condition:
-        contract["invalidation_condition"] = invalidation_condition
-    elif has_invalidation:
-        contract["invalidation_condition"] = "close_beyond_invalidation"
+    if has_invalidation:
+        contract["invalidation_condition"] = canonical_entry_invalidation_condition(
+            timing,
+            side,
+        )
     if extra:
         contract.update(extra)
     return contract

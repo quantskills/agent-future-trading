@@ -23,6 +23,10 @@ from tools.agent_tools.analysis.analyst_quality import (
 from tools.agent_tools.execution.trader_intraday_execution import (
     resolve_intraday_execution_basis,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
 
 
 class _FundamentalAPI:
@@ -267,7 +271,12 @@ class DataSourceSemanticsTest(unittest.TestCase):
                 "execution_contract": {
                     "execution_profile": "breakout",
                     "trigger_source": "technical_breakout",
-                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                    "invalidation": canonical_entry_invalidation_condition(
+                        "breakout", "long"
+                    ),
+                    "invalidation_level": 95.0,
+                    "valid_until": "2025-03-26 15:00:00",
                 }
             },
         )

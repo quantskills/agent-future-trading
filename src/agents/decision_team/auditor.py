@@ -23,6 +23,7 @@ from tools.common.final_action_semantics import (
     project_margin_transition,
     validate_final_action_lot_transition,
 )
+from tools.common.execution_trigger_semantics import entry_invalidation_contract_error
 
 
 APPROVED_AUDIT_VERDICTS = {"approve", "approve_with_warning"}
@@ -115,18 +116,18 @@ def _contract_margin_estimate(contract: Dict[str, Any]) -> Optional[float]:
 
 
 def _has_valid_invalidation_boundary(contract: Dict[str, Any]) -> bool:
-    for field in ("invalidation_condition", "invalidation"):
-        value = contract.get(field)
-        if isinstance(value, dict) and value:
-            return True
-        text = str(value or "").strip().lower()
-        if text and text not in {"none", "unknown", "not_applicable"}:
-            return True
-    for field in ("invalidation_level", "atr_stop_distance"):
-        value = _safe_float(contract.get(field))
-        if value is not None and value > 0:
-            return True
-    return False
+    target_lots = _safe_int(contract.get("target_lots"), 0) or 0
+    side = "long" if target_lots > 0 else "short" if target_lots < 0 else "flat"
+    return not entry_invalidation_contract_error(
+        profile=contract.get("execution_profile"),
+        side=side,
+        invalidation_condition=(
+            contract.get("invalidation")
+            if contract.get("invalidation") is not None
+            else contract.get("invalidation_condition")
+        ),
+        invalidation_level=contract.get("invalidation_level"),
+    )
 
 
 class Auditor:

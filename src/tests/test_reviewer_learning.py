@@ -847,6 +847,350 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn(CONTRACT_KEY, json.loads(event["action_json"]))
         conn.close()
 
+    def test_trade_episode_memory_preserves_economics_and_adds_full_fact_trace(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        cursor.execute("CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT NOT NULL)")
+        cursor.execute("INSERT INTO portfolio(id, config_id) VALUES ('pf', 'cfg')")
+        cursor.execute(
+            """
+            CREATE TABLE futures_recommendation (
+                id TEXT PRIMARY KEY,
+                config_id TEXT NOT NULL,
+                reference_portfolio_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                effective_trade_date TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                underlying_code TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                signal_snapshot TEXT,
+                status TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE futures_transactions (
+                id TEXT PRIMARY KEY,
+                portfolio_id TEXT NOT NULL,
+                config_id TEXT,
+                recommendation_id TEXT,
+                trading_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                contract_code TEXT,
+                action TEXT NOT NULL,
+                lots INTEGER NOT NULL,
+                execution_price REAL NOT NULL,
+                settle_price REAL,
+                contract_multiplier REAL NOT NULL,
+                margin_rate REAL NOT NULL,
+                margin_used REAL NOT NULL,
+                commission REAL DEFAULT 0,
+                source_type TEXT,
+                execution_phase TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE ticker_daily_pnl (
+                portfolio_id TEXT,
+                trading_date TEXT,
+                ticker TEXT,
+                daily_pnl REAL,
+                commission REAL,
+                holding_pnl REAL,
+                new_position_pnl REAL,
+                close_pnl REAL,
+                position_type TEXT,
+                lots INTEGER,
+                entry_price REAL,
+                settle_price REAL
+            )
+            """
+        )
+        _ensure_reviewer_learning_schema(cursor)
+
+        def snapshot(
+            action: str,
+            current_lots: int,
+            target_lots: int,
+            score: float,
+            entry_invalidation: float,
+            position_invalidation: float,
+        ) -> dict:
+            return {
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "confidence": score,
+                        "opportunity_state": "tradeable_candidate",
+                        "invalidation_present": True,
+                        "invalidation_condition": f"before entry trade below {entry_invalidation}",
+                        "invalidation_level": entry_invalidation,
+                        "position_invalidation_level": position_invalidation,
+                        "atr_stop_distance": 80.0,
+                        "expected_horizon_days": 5,
+                        "exit_hint": f"after entry close below {position_invalidation}",
+                    },
+                    fundamental={"signal": "Bullish", "confidence": 0.55},
+                    commodity_news={"signal": "Neutral", "confidence": 0.40},
+                ),
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "BU",
+                    "final_action": action,
+                    "current_lots": current_lots,
+                    "target_lots": target_lots,
+                    "lots_delta": target_lots - current_lots,
+                    "target_position_ratio": 0.02 if target_lots else 0.0,
+                    "setup_type": "trend_breakout_setup",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "invalidation": f"before entry trade below {entry_invalidation}",
+                    "invalidation_level": entry_invalidation,
+                    "position_invalidation_level": position_invalidation,
+                    "atr_stop_distance": 80.0,
+                    "expected_horizon_days": 5,
+                    "exit_hint": f"after entry close below {position_invalidation}",
+                    "evidence_used": {
+                        "opportunity_score": score,
+                        "market_confirmation_score": score,
+                    },
+                },
+            }
+
+        recommendation_rows = (
+            (
+                "rec-open",
+                "2025-03-10",
+                "open_probe",
+                2,
+                snapshot("open_probe", 0, 2, 0.52, 3100.0, 3050.0),
+            ),
+            (
+                "rec-reduce",
+                "2025-03-11",
+                "reduce",
+                1,
+                snapshot("reduce", 2, 1, 0.61, 3120.0, 3070.0),
+            ),
+            (
+                "rec-close",
+                "2025-03-12",
+                "exit",
+                1,
+                snapshot("exit", 1, 0, 0.34, 3150.0, 3090.0),
+            ),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_recommendation (
+                id, config_id, reference_portfolio_id, trading_date,
+                effective_trade_date, source_type, underlying_code,
+                contract_code, action, lots, signal_snapshot, status, created_at
+            ) VALUES (?, 'cfg', 'pf', ?, ?, 'strategy', 'BU', 'bu2506', ?, ?, ?, 'pending', ?)
+            """,
+            [
+                (
+                    rec_id,
+                    trading_date,
+                    trading_date,
+                    action,
+                    lots,
+                    json.dumps(payload),
+                    f"{trading_date}T09:00:00",
+                )
+                for rec_id, trading_date, action, lots, payload in recommendation_rows
+            ],
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_transactions (
+                id, portfolio_id, config_id, recommendation_id, trading_date,
+                ticker, contract_code, action, lots, execution_price, settle_price,
+                contract_multiplier, margin_rate, margin_used, commission,
+                source_type, execution_phase, created_at
+            ) VALUES (?, 'pf', 'cfg', ?, ?, 'BU', 'bu2506', ?, ?, ?, ?, 10, 0.1, 6400, ?,
+                'strategy', 'phase2', ?)
+            """,
+            (
+                ("tx-open", "rec-open", "2025-03-10", "open_long", 2, 3200.0, 3220.0, 2.0, "2025-03-10T09:30:00"),
+                ("tx-reduce", "rec-reduce", "2025-03-11", "close_long", 1, 3250.0, 3250.0, 1.0, "2025-03-11T14:30:00"),
+                ("tx-close", "rec-close", "2025-03-12", "close_long", 1, 3300.0, 3300.0, 1.0, "2025-03-12T14:30:00"),
+            ),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO ticker_daily_pnl (
+                portfolio_id, trading_date, ticker, daily_pnl, commission,
+                holding_pnl, new_position_pnl, close_pnl, position_type,
+                lots, entry_price, settle_price
+            ) VALUES ('pf', ?, 'BU', ?, ?, ?, ?, ?, ?, ?, 3200, ?)
+            """,
+            (
+                ("2025-03-10", 398.0, 2.0, 0.0, 400.0, 0.0, "new", 2, 3220.0),
+                ("2025-03-11", 499.0, 1.0, 0.0, 0.0, 500.0, "reduce", 1, 3250.0),
+                ("2025-03-12", 999.0, 1.0, 0.0, 0.0, 1000.0, "close", 0, 3300.0),
+            ),
+        )
+        self.assertEqual(
+            _write_trade_episode_memory(
+                cursor,
+                cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-11",
+            ),
+            0,
+        )
+        rows = _write_trade_episode_memory(
+            cursor,
+            cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-12",
+        )
+        self.assertEqual(rows, 2)
+        stored_rows = [
+            dict(row)
+            for row in cursor.execute(
+                "SELECT * FROM trade_episode_memory ORDER BY close_date"
+            ).fetchall()
+        ]
+        self.assertEqual([row["net_pnl"] for row in stored_rows], [498.0, 998.0])
+        payloads = [load_externalized_json(row["payload_json"]) for row in stored_rows]
+        self.assertEqual([payload["pair"]["gross_pnl"] for payload in payloads], [500.0, 1000.0])
+        self.assertEqual([payload["pair"]["commission"] for payload in payloads], [2.0, 2.0])
+        self.assertEqual([payload["pair"]["net_pnl"] for payload in payloads], [498.0, 998.0])
+        payload = payloads[0]
+        trace = payload["position_lifecycle_trace"]
+        self.assertFalse(trace["economic_result_recalculated"])
+        self.assertEqual(
+            payloads[1]["position_lifecycle_trace"]["position_cycle_transaction_ids"],
+            trace["position_cycle_transaction_ids"],
+        )
+        self.assertEqual(
+            [fact["trading_date"] for fact in trace["daily_facts"]],
+            ["2025-03-10", "2025-03-11", "2025-03-12"],
+        )
+        self.assertEqual(
+            [
+                fact["recommendations"][0]["final_action_contract"]["final_action"]
+                for fact in trace["daily_facts"]
+            ],
+            ["open_probe", "reduce", "exit"],
+        )
+        self.assertEqual(
+            trace["daily_facts"][0]["transactions"][0]["action"],
+            "open_long",
+        )
+        self.assertEqual(
+            trace["daily_facts"][1]["transactions"][0]["action"],
+            "close_long",
+        )
+        self.assertEqual(trace["daily_facts"][2]["transactions"][0]["action"], "close_long")
+        self.assertEqual(
+            trace["position_cycle_transaction_ids"],
+            ["tx-open", "tx-reduce", "tx-close"],
+        )
+        self.assertEqual(trace["daily_facts"][1]["ticker_settlement_facts"][0]["close_pnl"], 500.0)
+        self.assertTrue(trace["daily_facts"][1]["evidence_change"]["changed"])
+        self.assertTrue(trace["daily_facts"][1]["invalidation_change"]["changed"])
+        self.assertEqual(
+            trace["daily_facts"][0]["invalidation_state"]["fac_entry_invalidation_level"],
+            3100.0,
+        )
+        self.assertEqual(
+            trace["daily_facts"][0]["invalidation_state"]["fac_position_invalidation_level"],
+            3050.0,
+        )
+        self.assertEqual(
+            trace["daily_facts"][0]["invalidation_state"]["technical_entry_invalidation_level"],
+            3100.0,
+        )
+        self.assertEqual(
+            trace["daily_facts"][0]["invalidation_state"]["technical_position_invalidation_level"],
+            3050.0,
+        )
+        self.assertEqual(
+            trace["daily_facts"][1]["invalidation_change"]["changed_fields"]
+            ["fac_position_invalidation_level"],
+            {"previous": 3050.0, "current": 3070.0},
+        )
+        self.assertEqual(
+            trace["daily_facts"][0]["recommendations"][0]["signal_collection_contract"]
+            ["source_contracts"][0]["action_evidence_contract"]["analyst"],
+            "technical",
+        )
+
+        self.assertEqual(
+            _episode_alpha_setup_samples(
+                cursor,
+                cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-11",
+            ),
+            [],
+        )
+        samples = _episode_alpha_setup_samples(
+            cursor,
+            cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-12",
+        )
+        self.assertEqual(len(samples), 2)
+        self.assertEqual([sample["net_pnl"] for sample in samples], [498.0, 998.0])
+        self.assertTrue(
+            all(
+                sample["result"]["lifecycle_fact_dates"]
+                == ["2025-03-10", "2025-03-11", "2025-03-12"]
+                for sample in samples
+            )
+        )
+        profile_result = write_alpha_setup_profiles(
+            cursor,
+            cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-12",
+            strategy_recommendations=[],
+            transactions_by_recommendation={},
+        )
+        self.assertEqual(profile_result["rows"], 2)
+        stored_samples = cursor.execute(
+            """
+            SELECT trading_date, result_json
+            FROM alpha_setup_sample
+            WHERE config_id='cfg' AND source_type='trade_episode'
+            ORDER BY trading_date
+            """
+        ).fetchall()
+        self.assertEqual(
+            [row["trading_date"] for row in stored_samples],
+            ["2025-03-11", "2025-03-12"],
+        )
+        self.assertEqual(
+            [json.loads(row["result_json"])["close_date"] for row in stored_samples],
+            ["2025-03-11", "2025-03-12"],
+        )
+        action_value = cursor.execute(
+            """
+            SELECT sample_count, reward_sum, last_sample_date
+            FROM alpha_setup_action_value
+            WHERE config_id='cfg' AND canonical_action_family='open_add_new_risk'
+            """
+        ).fetchone()
+        self.assertIsNotNone(action_value)
+        self.assertEqual(action_value["sample_count"], 2)
+        self.assertEqual(action_value["reward_sum"], 1496.0)
+        self.assertEqual(action_value["last_sample_date"], "2025-03-12")
+        conn.close()
+
     def test_trade_episode_memory_keeps_original_review_date_on_refresh(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -1786,7 +2130,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
             ],
         )
 
@@ -1840,7 +2184,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
             ],
         )
 
@@ -2158,7 +2502,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
             ],
         )
 
@@ -2231,7 +2575,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
             ],
         )
 
@@ -2362,7 +2706,7 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
             ],
         )
 
@@ -6926,6 +7270,17 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
 
             db = SQLiteDB()
             db.db_path = str(db_path)
+            same_day_retrieval = retrieve_pm_memory(
+                db=db,
+                config_id="cfg",
+                ticker="BU",
+                side="long",
+                trading_date="2025-03-12",
+                horizon_class="short",
+                market_regime="trend",
+                setup_type="trend_breakout_setup",
+            )
+            self.assertEqual(same_day_retrieval["action_values"], [])
             retrieved = retrieve_pm_memory(
                 db=db,
                 config_id="cfg",

@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from graph.schema import BasePriceSource, MorningExecutionBasis
 from tools.common.contracts import sanitize_execution_contract
 from tools.common.execution_trigger_semantics import (
+    entry_invalidation_contract_error,
     execution_trigger_contract_error,
     normalize_execution_profile,
 )
@@ -14,6 +15,7 @@ from tools.common.execution_trigger_semantics import (
 
 _BUY_LIKE_ACTIONS = {"open_long", "close_short"}
 _SELL_LIKE_ACTIONS = {"open_short", "close_long"}
+_OPEN_ACTIONS = {"open_long", "open_short"}
 _IMMEDIATE_ACTIONS = {"close_long", "close_short"}
 
 
@@ -49,7 +51,15 @@ class IntradayExecutionSelection:
             "intraday_vwap_confirmed",
         }
         execution_failure_reason = "" if self.decision == "execute" else self.reason
-        missed_opportunity_flag = bool(self.decision in {"skip", "wait"} and self.reason not in {"hold_or_zero_lots"})
+        missed_opportunity_flag = bool(
+            self.decision in {"skip", "wait"}
+            and self.reason
+            not in {
+                "hold_or_zero_lots",
+                "fac_invalidated_before_entry",
+                "fac_expired_before_entry",
+            }
+        )
         return {
             "decision": self.decision,
             "reason": self.reason,
@@ -168,6 +178,7 @@ def select_intraday_execution(
         if action_value in _SELL_LIKE_ACTIONS
         else "flat"
     )
+    entry_action = action_value in _OPEN_ACTIONS
     contract_error = execution_trigger_contract_error(
         profile=execution_profile,
         side=execution_side,
@@ -183,6 +194,36 @@ def select_intraday_execution(
                 "contract_validation": "failed",
             },
         )
+    if entry_action:
+        invalidation_error = entry_invalidation_contract_error(
+            profile=execution_profile,
+            side=execution_side,
+            invalidation_condition=execution_contract.get("invalidation"),
+            invalidation_level=execution_contract.get("invalidation_level"),
+        )
+        if invalidation_error:
+            return IntradayExecutionSelection(
+                decision="skip" if finalize_untriggered else "wait",
+                reason=invalidation_error,
+                features={
+                    "execution_profile": execution_profile,
+                    "contract_validation": "failed",
+                },
+            )
+        valid_until = _parse_valid_until(execution_contract.get("valid_until"))
+        if valid_until is None:
+            return IntradayExecutionSelection(
+                decision="skip" if finalize_untriggered else "wait",
+                reason="execution_valid_until_invalid",
+                features={
+                    "execution_profile": execution_profile,
+                    "contract_validation": "failed",
+                },
+            )
+        invalidation_level = float(execution_contract["invalidation_level"])
+    else:
+        valid_until = None
+        invalidation_level = None
 
     if not normalized_execution_bars:
         return IntradayExecutionSelection(
@@ -197,6 +238,41 @@ def select_intraday_execution(
     )
     if force_immediate or action_value in _IMMEDIATE_ACTIONS or direct_contract_execution:
         execution_bar = _first_valid_execution_bar(normalized_execution_bars, min_volume=min_volume)
+        if entry_action:
+            bars_before_fill = [
+                bar
+                for bar in normalized_execution_bars
+                if execution_bar is None or bar["dt"] < execution_bar["dt"]
+            ]
+            invalidation_before_fill = _first_entry_invalidation_bar(
+                bars_before_fill,
+                side=execution_side,
+                invalidation_level=invalidation_level,
+                valid_until=valid_until,
+            )
+            if invalidation_before_fill is not None:
+                return _entry_non_execution_selection(
+                    reason="fac_invalidated_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=invalidation_before_fill,
+                )
+            expiry_observation = next(
+                (
+                    bar
+                    for bar in normalized_execution_bars
+                    if bar["dt"] > valid_until
+                    and (execution_bar is None or bar["dt"] <= execution_bar["dt"])
+                ),
+                None,
+            )
+            if expiry_observation is not None:
+                return _entry_non_execution_selection(
+                    reason="fac_expired_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=expiry_observation,
+                )
         if execution_bar is None:
             return IntradayExecutionSelection(
                 decision="skip" if finalize_untriggered else "wait",
@@ -207,6 +283,18 @@ def select_intraday_execution(
                     "execution_profile": execution_profile,
                 },
             )
+        if entry_action:
+            if _entry_invalidation_at_open(
+                execution_bar,
+                side=execution_side,
+                invalidation_level=invalidation_level,
+            ):
+                return _entry_non_execution_selection(
+                    reason="fac_invalidated_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=execution_bar,
+                )
         reason = (
             "intraday_event_immediate_execution"
             if execution_profile == "event_immediate" and direct_contract_execution
@@ -245,9 +333,22 @@ def select_intraday_execution(
 
     opening_range, opening_range_complete_at = _opening_range(normalized_execution_bars, config)
     require_complete_opening_range = bool(config.get("require_complete_opening_range", True))
+    first_invalidation_bar = _first_entry_invalidation_bar(
+        normalized_execution_bars,
+        side=execution_side,
+        invalidation_level=invalidation_level,
+        valid_until=valid_until,
+    )
     if require_complete_opening_range and opening_range_complete_at is not None:
         latest_execution_dt = normalized_execution_bars[-1]["dt"]
         if latest_execution_dt < opening_range_complete_at:
+            if first_invalidation_bar is not None:
+                return _entry_non_execution_selection(
+                    reason="fac_invalidated_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=first_invalidation_bar,
+                )
             return IntradayExecutionSelection(
                 decision="skip" if finalize_untriggered else "wait",
                 reason="intraday_opening_range_incomplete",
@@ -268,28 +369,70 @@ def select_intraday_execution(
     else:
         signal_bars_for_trigger = normalized_signal_bars
 
+    long_expansion_seen = False
+    short_expansion_seen = False
     for signal_bar in signal_bars_for_trigger:
+        if signal_bar["dt"] > valid_until:
+            return _entry_non_execution_selection(
+                reason="fac_expired_before_entry",
+                execution_profile=execution_profile,
+                execution_contract=execution_contract,
+                observed_bar=signal_bar,
+            )
+        if (
+            first_invalidation_bar is not None
+            and first_invalidation_bar["dt"] <= signal_bar["dt"]
+        ):
+            return _entry_non_execution_selection(
+                reason="fac_invalidated_before_entry",
+                execution_profile=execution_profile,
+                execution_contract=execution_contract,
+                observed_bar=first_invalidation_bar,
+            )
         historical_exec_bars = [bar for bar in normalized_execution_bars if bar["dt"] <= signal_bar["dt"]]
         if not historical_exec_bars:
             continue
         vwap_value = _vwap(historical_exec_bars)
         signal_close = _float(signal_bar.get("close"))
-        if signal_close is None or vwap_value is None:
+        signal_high = _float(signal_bar.get("high"), signal_close)
+        signal_low = _float(signal_bar.get("low"), signal_close)
+        if (
+            signal_close is None
+            or signal_high is None
+            or signal_low is None
+            or vwap_value is None
+        ):
             continue
 
-        long_breakout = action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value and signal_close >= opening_range["high"]
-        short_breakout = action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value and signal_close <= opening_range["low"]
+        long_breakout = (
+            action_value in _BUY_LIKE_ACTIONS
+            and signal_close > vwap_value
+            and signal_close > opening_range["high"]
+        )
+        short_breakout = (
+            action_value in _SELL_LIKE_ACTIONS
+            and signal_close < vwap_value
+            and signal_close < opening_range["low"]
+        )
+        long_reclaimed_boundary = bool(
+            (signal_low <= opening_range["high"] and signal_close > opening_range["high"])
+            or (signal_low <= vwap_value and signal_close > vwap_value)
+        )
+        short_reclaimed_boundary = bool(
+            (signal_high >= opening_range["low"] and signal_close < opening_range["low"])
+            or (signal_high >= vwap_value and signal_close < vwap_value)
+        )
         long_pullback = (
             execution_profile == "pullback"
             and action_value in _BUY_LIKE_ACTIONS
-            and signal_close >= vwap_value
-            and signal_close > opening_range["low"]
+            and long_expansion_seen
+            and long_reclaimed_boundary
         )
         short_pullback = (
             execution_profile == "pullback"
             and action_value in _SELL_LIKE_ACTIONS
-            and signal_close <= vwap_value
-            and signal_close < opening_range["high"]
+            and short_expansion_seen
+            and short_reclaimed_boundary
         )
         long_vwap_confirmed = execution_profile == "vwap_confirmed" and action_value in _BUY_LIKE_ACTIONS and signal_close >= vwap_value
         short_vwap_confirmed = execution_profile == "vwap_confirmed" and action_value in _SELL_LIKE_ACTIONS and signal_close <= vwap_value
@@ -303,6 +446,20 @@ def select_intraday_execution(
             long_trigger = long_breakout
             short_trigger = short_breakout
         if not (long_trigger or short_trigger):
+            long_expansion_seen = bool(
+                long_expansion_seen
+                or (
+                    signal_close > opening_range["high"]
+                    and signal_close > vwap_value
+                )
+            )
+            short_expansion_seen = bool(
+                short_expansion_seen
+                or (
+                    signal_close < opening_range["low"]
+                    and signal_close < vwap_value
+                )
+            )
             continue
 
         execution_bar = _next_execution_bar(
@@ -312,6 +469,27 @@ def select_intraday_execution(
         )
         if execution_bar is None:
             continue
+        if execution_bar["dt"] > valid_until:
+            return _entry_non_execution_selection(
+                reason="fac_expired_before_entry",
+                execution_profile=execution_profile,
+                execution_contract=execution_contract,
+                observed_bar=execution_bar,
+            )
+        invalidation_before_fill = _entry_invalidation_before_fill(
+            normalized_execution_bars,
+            trigger_dt=signal_bar["dt"],
+            execution_bar=execution_bar,
+            side=execution_side,
+            invalidation_level=invalidation_level,
+        )
+        if invalidation_before_fill is not None:
+            return _entry_non_execution_selection(
+                reason="fac_invalidated_before_entry",
+                execution_profile=execution_profile,
+                execution_contract=execution_contract,
+                observed_bar=invalidation_before_fill,
+            )
 
         chase_check = _passes_chase_filter(
             action_value=action_value,
@@ -325,7 +503,7 @@ def select_intraday_execution(
         if execution_profile == "pullback":
             trigger_reason = "intraday_pullback_confirmed"
             execution_mode = "pullback_confirmed"
-            trigger_rule = "vwap_pullback_support"
+            trigger_rule = "directional_expansion_then_boundary_or_vwap_reclaim"
         elif execution_profile == "vwap_confirmed":
             trigger_reason = "intraday_vwap_confirmed"
             execution_mode = "vwap_confirmed"
@@ -355,6 +533,20 @@ def select_intraday_execution(
             source=BasePriceSource.INTRADAY_NEXT_1M_OPEN,
         )
 
+    if first_invalidation_bar is not None:
+        return _entry_non_execution_selection(
+            reason="fac_invalidated_before_entry",
+            execution_profile=execution_profile,
+            execution_contract=execution_contract,
+            observed_bar=first_invalidation_bar,
+        )
+    if normalized_execution_bars[-1]["dt"] > valid_until:
+        return _entry_non_execution_selection(
+            reason="fac_expired_before_entry",
+            execution_profile=execution_profile,
+            execution_contract=execution_contract,
+            observed_bar=normalized_execution_bars[-1],
+        )
     return IntradayExecutionSelection(
         decision="skip" if finalize_untriggered else "wait",
         reason="intraday_trigger_not_met" if finalize_untriggered else "intraday_waiting_for_trigger",
@@ -417,6 +609,110 @@ def _execution_selection(
         signal_datetime=signal_bar["dt"].strftime("%Y-%m-%d %H:%M:%S") if signal_bar else None,
         features=features,
     )
+
+
+def _entry_non_execution_selection(
+    *,
+    reason: str,
+    execution_profile: str,
+    execution_contract: Dict[str, Any],
+    observed_bar: Dict[str, Any],
+) -> IntradayExecutionSelection:
+    observed_price = (
+        _float(observed_bar.get("low"))
+        if str(execution_contract.get("invalidation") or "").startswith("long_")
+        else _float(observed_bar.get("high"))
+    )
+    return IntradayExecutionSelection(
+        decision="skip",
+        reason=reason,
+        signal_datetime=observed_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+        features={
+            "execution_profile": execution_profile,
+            "execution_contract": execution_contract,
+            "entry_contract_state": "permanently_invalidated" if reason == "fac_invalidated_before_entry" else "expired",
+            "observed_datetime": observed_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+            "observed_price": observed_price,
+            "invalidation_level": execution_contract.get("invalidation_level"),
+            "valid_until": execution_contract.get("valid_until"),
+        },
+    )
+
+
+def _entry_bar_breaches_level(
+    bar: Dict[str, Any],
+    *,
+    side: str,
+    invalidation_level: float,
+) -> bool:
+    if side == "long":
+        low = _float(bar.get("low"), _float(bar.get("open")))
+        return low is not None and low <= invalidation_level
+    if side == "short":
+        high = _float(bar.get("high"), _float(bar.get("open")))
+        return high is not None and high >= invalidation_level
+    return False
+
+
+def _entry_invalidation_at_open(
+    bar: Dict[str, Any],
+    *,
+    side: str,
+    invalidation_level: float,
+) -> bool:
+    open_price = _float(bar.get("open"))
+    if open_price is None:
+        return False
+    if side == "long":
+        return open_price <= invalidation_level
+    if side == "short":
+        return open_price >= invalidation_level
+    return False
+
+
+def _first_entry_invalidation_bar(
+    bars: List[Dict[str, Any]],
+    *,
+    side: str,
+    invalidation_level: float,
+    valid_until: datetime,
+) -> Optional[Dict[str, Any]]:
+    for bar in bars:
+        if bar["dt"] > valid_until:
+            break
+        if _entry_bar_breaches_level(
+            bar,
+            side=side,
+            invalidation_level=invalidation_level,
+        ):
+            return bar
+    return None
+
+
+def _entry_invalidation_before_fill(
+    bars: List[Dict[str, Any]],
+    *,
+    trigger_dt: datetime,
+    execution_bar: Dict[str, Any],
+    side: str,
+    invalidation_level: float,
+) -> Optional[Dict[str, Any]]:
+    for bar in bars:
+        if bar["dt"] <= trigger_dt or bar["dt"] >= execution_bar["dt"]:
+            continue
+        if _entry_bar_breaches_level(
+            bar,
+            side=side,
+            invalidation_level=invalidation_level,
+        ):
+            return bar
+    if _entry_invalidation_at_open(
+        execution_bar,
+        side=side,
+        invalidation_level=invalidation_level,
+    ):
+        return execution_bar
+    return None
 
 
 def _normalize_bars(
@@ -591,6 +887,24 @@ def _normalize_date(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value.replace(hour=0, minute=0, second=0, microsecond=0)
     return datetime.strptime(str(value)[:10], "%Y-%m-%d")
+
+
+def _parse_valid_until(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None, microsecond=0)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=None)
+    if len(text) == 10:
+        parsed = parsed.replace(hour=23, minute=59, second=59)
+    return parsed.replace(microsecond=0)
 
 
 def _enum_value(value: Any) -> Any:

@@ -397,7 +397,9 @@ def extract_signal_lifecycle(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "expected_horizon_days": _optional_int(contract.get("expected_horizon_days")),
         "entry_trigger": contract.get("entry_trigger"),
         "action_name": contract.get("final_action"),
-        "invalidation_level": _optional_float(contract.get("invalidation_level")),
+        "position_invalidation_level": _optional_float(
+            contract.get("position_invalidation_level")
+        ),
         "atr_stop_distance": _optional_float(contract.get("atr_stop_distance")),
         "setup_type": contract.get("setup_type"),
         "market_regime": contract.get("market_regime"),

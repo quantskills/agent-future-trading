@@ -43,6 +43,9 @@ from tools.common.contracts import (
     validate_internal_message_contract,
     validate_trade_research_contract,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+)
 
 
 class AgentContractFixtureTest(unittest.TestCase):
@@ -688,7 +691,18 @@ class AgentContractFixtureTest(unittest.TestCase):
             agent_name="technical",
             signal=Signal.BULLISH,
             would_change_view_if="long technical idea invalid if price closes below trigger area",
-            metadata={"action_evidence_contract": {"invalidation_present": True}},
+            metadata={
+                "action_evidence_contract": {
+                    "side": "long",
+                    "entry_timing_signal": "breakout",
+                    "invalidation_present": True,
+                    "invalidation_level": 95.0,
+                    "invalidation_condition": canonical_entry_invalidation_condition(
+                        "breakout",
+                        "long",
+                    ),
+                }
+            },
         )
 
         self.assertFalse(_has_structured_invalidation_condition([weak]))
@@ -712,7 +726,11 @@ class AgentContractFixtureTest(unittest.TestCase):
                 "metadata": {
                     "action_evidence_contract": {
                         "invalidation_present": True,
-                        "invalidation_condition": "long setup invalid if price closes below breakout area",
+                        "invalidation_level": 95.0,
+                        "invalidation_condition": canonical_entry_invalidation_condition(
+                            "breakout",
+                            "long",
+                        ),
                     }
                 },
             }
@@ -1023,9 +1041,8 @@ class FundamentalDirectionContextFinalizationTest(unittest.TestCase):
             setup_quality_ok=True,
             trigger_valid=trigger_confirmed,
             current_trigger_confirmed=trigger_confirmed,
-            invalidation_present=bool(invalidation_condition),
+            invalidation_present=False,
             entry_trigger=entry_trigger,
-            invalidation_condition=invalidation_condition or None,
         )
         signal = AnalystSignal(
             agent_name="fundamental",
@@ -1034,7 +1051,7 @@ class FundamentalDirectionContextFinalizationTest(unittest.TestCase):
             entry_trigger=entry_trigger,
             exit_hint=invalidation_condition,
             holding_period_hint="1-3 trading days while the setup remains valid",
-            invalidation_level=3050.0 if invalidation_condition else None,
+            position_invalidation_level=3050.0 if invalidation_condition else None,
             business_quality_score=0.82,
             factor_alignment_score=0.78,
             data_coverage_score=0.82,
@@ -1042,10 +1059,9 @@ class FundamentalDirectionContextFinalizationTest(unittest.TestCase):
             horizon_class="short",
             opportunity_state=opportunity_state,
             trigger_valid=trigger_confirmed,
-            invalidation_present=bool(invalidation_condition),
+            invalidation_present=False,
             metadata={
                 "data_usage_summary": seed["data_usage_summary"],
-                "invalidation_condition": invalidation_condition,
                 "learning_scope": seed["learning_scope"],
                 "product_profile_evidence": seed["product_profile_evidence"],
             },
@@ -1085,10 +1101,9 @@ class FundamentalDirectionContextFinalizationTest(unittest.TestCase):
         self.assertEqual(contract["evidence_role"], "direction_context")
         self.assertEqual(contract["entry_timing_signal"], "")
         self.assertEqual(contract["entry_trigger"], "")
-        self.assertEqual(
-            contract["invalidation_condition"],
-            "setup invalid if price closes below 3050",
-        )
+        self.assertNotIn("invalidation_condition", contract)
+        self.assertIsNone(contract["invalidation_level"])
+        self.assertEqual(contract["position_invalidation_level"], 3050.0)
 
     def test_quality_approved_direction_still_cannot_create_execution_candidate(self):
         result = self._finalize(

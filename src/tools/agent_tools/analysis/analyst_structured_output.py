@@ -117,6 +117,16 @@ class FundamentalAnalystOutput(_LLMAnalystOutput):
     """Fundamental output supplies direction context and no Trader profile."""
 
     setup_type: Literal["fundamental_timing_setup", "unknown"] = "unknown"
+    trigger_quality_score: Literal[0.0] = Field(
+        default=0.0,
+        description=(
+            "Fundamental direction context has no current Trader trigger quality"
+        ),
+    )
+    invalidation_level: None = Field(
+        default=None,
+        description="Fundamental evidence cannot produce a pre-fill Trader entry boundary",
+    )
     entry_timing_signal: str = Field(
         default="",
         description="Fundamental has no Trader execution profile and must return an empty string",
@@ -127,6 +137,8 @@ class FundamentalAnalystOutput(_LLMAnalystOutput):
     def reject_execution_profile(self):
         if str(self.entry_timing_signal or "").strip():
             raise ValueError("fundamental_execution_profile_forbidden")
+        if bool(self.invalidation_present):
+            raise ValueError("fundamental_entry_invalidation_forbidden")
         self.entry_timing_signal = ""
         return self
 

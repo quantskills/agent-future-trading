@@ -44,15 +44,7 @@ def build_scc_market_confirmation(
         for item in evidence_items
         if str(item.get("side") or "").lower() == target
     ]
-    opposing = [
-        str(item.get("analyst") or "")
-        for item in evidence_items
-        if target in {"long", "short"}
-        and str(item.get("side") or "").lower() in {"long", "short"}
-        and str(item.get("side") or "").lower() != target
-    ]
     conflicts = [str(item) for item in (fusion.get("cross_analyst_conflicts") or [])]
-    conflicts.extend(f"opposing_analyst:{name}" for name in opposing if name)
     if target in {"long", "short"} and dominant not in {target, "flat"}:
         conflicts.append(f"scc_dominant_side:{dominant}")
     return {
@@ -195,9 +187,6 @@ def _has_invalidation(signal: Any) -> bool:
             return True
     invalidation_level = getattr(signal, "invalidation_level", None)
     if invalidation_level is not None:
-        return True
-    atr_stop_distance = getattr(signal, "atr_stop_distance", None)
-    if atr_stop_distance is not None:
         return True
     text = str(getattr(signal, "invalidation_condition", "") or "").strip().lower()
     if not text:
@@ -931,10 +920,18 @@ def build_opportunity_scorecard(
                 entry_triggers.append(trigger_text)
             quality_scores.append(_safe_float(getattr(signal, "business_quality_score", 0.0), 0.0))
             setup_quality_scores.append(_setup_quality(signal))
-            trigger_quality_scores.append(_trigger_quality(signal))
+            analyst_name = normalize_analyst_name(getattr(signal, "agent_name", ""))
+            evidence_role = _signal_text(signal, "evidence_role")
+            if (
+                _has_entry_setup(signal)
+                and (
+                    (analyst_name == "technical" and evidence_role == "entry_timing")
+                    or (analyst_name == "commodity_news" and evidence_role == "event_catalyst")
+                )
+            ):
+                trigger_quality_scores.append(_trigger_quality(signal))
             setup_quality_notes.extend(_setup_quality_notes(signal))
             confidence_scores.append(_safe_float(getattr(signal, "confidence", 0.0), 0.0))
-            analyst_name = normalize_analyst_name(getattr(signal, "agent_name", ""))
             analyst_names.append(analyst_name)
             source_analysts.extend(_source_analysts(signal))
 

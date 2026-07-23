@@ -22,6 +22,11 @@ from tools.agent_tools.analysis.analyst_output_finalization import (
     finalize_analyst_signal,
     resolve_analyst_llm_config,
 )
+from tools.agent_tools.analysis.analyst_structured_output import (
+    CommodityNewsAnalystOutput,
+    FundamentalAnalystOutput,
+    TechnicalAnalystOutput,
+)
 from tools.agent_tools.analysis.analyst_data_usage import (
     resolve_technical_data_freshness,
 )
@@ -30,8 +35,14 @@ from tools.agent_tools.analysis.analyst_product_price_behavior_profile import (
     build_profile_usage_contract,
     get_product_price_behavior_profile,
 )
-from tools.common.execution_trigger_semantics import canonical_entry_trigger
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_signal_collection_contract,
+)
 from tests.contract_test_fixtures import build_test_aec
 
 
@@ -167,12 +178,13 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             evidence_role="entry_timing",
             entry_timing_signal="breakout",
             entry_trigger="15m bespoke model prose about support and volume",
-            exit_hint="close above the invalidation area",
+            exit_hint="after fill, close above 104 requires position exit",
             invalidation_level=102.0,
+            position_invalidation_level=104.0,
             factor_focus=["range_reversal", "volume"],
             metadata={
                 "data_usage_summary": self._data_usage("technical", "BU"),
-                "invalidation_condition": "15m close above 102",
+                "invalidation_condition": "legacy free-text must not survive",
             },
         )
 
@@ -196,6 +208,12 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertEqual(contract["setup_type"], "range_reversal_setup")
         self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(
+            contract["invalidation_condition"],
+            canonical_entry_invalidation_condition("breakout", "short"),
+        )
+        self.assertEqual(contract["invalidation_level"], 102.0)
+        self.assertEqual(contract["position_invalidation_level"], 104.0)
 
     def test_technical_profile_generates_canonical_trigger_before_prose_presence_check(self):
         signal = AnalystSignal(
@@ -237,6 +255,100 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             canonical_entry_trigger("breakout", "short"),
         )
         self.assertTrue(contract["invalidation_present"])
+
+    def test_role_output_trigger_quality_lands_in_aec_and_scc_only_for_confirmed_trigger(self):
+        signal = TechnicalAnalystOutput(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.78,
+            business_quality_score=0.90,
+            data_coverage_score=0.90,
+            price_percentile=0.50,
+            setup_type="trend_breakout_setup",
+            opportunity_type="short_timing",
+            opportunity_state="tradeable_candidate",
+            evidence_role="entry_timing",
+            entry_timing_signal="breakout",
+            entry_trigger="current breakout is confirmed by price and volume",
+            trigger_valid=True,
+            trigger_quality_score=0.83,
+            invalidation_present=True,
+            invalidation_level=95.0,
+            position_invalidation_level=92.0,
+            exit_hint="after fill, close below 92 requires position exit",
+            holding_period_hint="hold for one to two trading days",
+            tradeability_reason="trend, volume, and price location align",
+            factor_focus=["trend", "volume"],
+            metadata={
+                "data_usage_summary": self._data_usage("technical", "BU"),
+            },
+        )
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "high",
+                "setup_type": "trend_breakout_setup",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "freshness_score": 0.90,
+                "risk_flags": [],
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertIn(
+            contract["opportunity_state"],
+            {"probe_candidate", "tradeable_candidate"},
+        )
+        self.assertTrue(contract["current_trigger_confirmed"])
+        self.assertTrue(contract["trigger_valid"])
+        self.assertEqual(contract["trigger_quality_score"], 0.83)
+        self.assertEqual(finalized.trigger_quality_score, 0.83)
+
+        scc = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-26",
+            analyst_signals=[finalized],
+            enabled_analysts=["technical"],
+        )
+        self.assertEqual(
+            scc["source_contracts"][0]["action_evidence_contract"][
+                "trigger_quality_score"
+            ],
+            0.83,
+        )
+        pm_evidence = build_pm_evidence_signals_from_scc(scc)
+        self.assertEqual(len(pm_evidence), 1)
+        self.assertEqual(pm_evidence[0].trigger_quality_score, 0.83)
+
+        pending = signal.model_copy(
+            update={
+                "opportunity_state": "watch_for_trigger",
+                "trigger_valid": False,
+                "trigger_quality_score": 0.91,
+                "entry_trigger": "wait for a breakout above resistance",
+            },
+            deep=True,
+        )
+        pending_finalized = self._finalize_directional(
+            pending,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "high",
+                "setup_type": "trend_breakout_setup",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "freshness_score": 0.90,
+                "risk_flags": [],
+            },
+        )
+        pending_contract = pending_finalized.metadata["action_evidence_contract"]
+        self.assertEqual(pending_contract["opportunity_state"], "watch_for_trigger")
+        self.assertFalse(pending_contract["current_trigger_confirmed"])
+        self.assertFalse(pending_contract["trigger_valid"])
+        self.assertEqual(pending_contract["trigger_quality_score"], 0.0)
 
     def test_all_technical_profiles_generate_canonical_trigger_before_presence_check(self):
         for side, signal_value in (
@@ -341,6 +453,14 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         self.assertIn("Turnover intensity is elevated", prompt)
         self.assertIn(canonical_entry_trigger("breakout", "long"), prompt)
         self.assertIn(canonical_entry_trigger("breakout", "short"), prompt)
+        self.assertIn(
+            canonical_entry_invalidation_condition("breakout", "long"),
+            prompt,
+        )
+        self.assertIn(
+            canonical_entry_invalidation_condition("breakout", "short"),
+            prompt,
+        )
         self.assertIn("T-day open-dependent gap analysis is expected to be unavailable", prompt)
 
     def test_fundamental_finalization_keeps_direction_but_removes_execution_claim(self):
@@ -355,6 +475,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             entry_timing_signal="breakout",
             entry_trigger="15m close above a model-selected level",
             trigger_valid=True,
+            trigger_quality_score=0.88,
             invalidation_level=96.0,
             exit_hint="fundamental thesis invalidated below 96",
             factor_focus=["inventory", "basis"],
@@ -388,9 +509,10 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         self.assertEqual(contract["entry_trigger"], "")
         self.assertFalse(contract["trigger_valid"])
         self.assertFalse(contract["current_trigger_confirmed"])
+        self.assertEqual(contract["trigger_quality_score"], 0.0)
 
     def test_news_immediate_event_uses_only_event_immediate_profile(self):
-        signal = AnalystSignal(
+        signal = CommodityNewsAnalystOutput(
             agent_name="commodity_news",
             signal=Signal.BEARISH,
             confidence=0.80,
@@ -401,6 +523,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             entry_timing_signal="event_immediate",
             entry_trigger="current price and volume confirm the event",
             trigger_valid=True,
+            trigger_quality_score=0.76,
             event_type="supply_disruption",
             invalidation_level=105.0,
             exit_hint="event impact invalidated above 105",
@@ -432,6 +555,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
         )
         self.assertEqual(contract["opportunity_state"], "probe_candidate")
+        self.assertEqual(contract["trigger_quality_score"], 0.76)
 
     def test_fundamental_data_gap_forms_strict_scc_compatible_contract(self):
         signal = _build_no_fundamental_data_signal(
@@ -591,14 +715,19 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             self.assertNotIn("metadata.action_evidence_contract:", prompt)
             self.assertIn("opportunity_state", prompt)
         self.assertIn("breakout / pullback / vwap_confirmed", technical_prompt)
+        self.assertIn(canonical_entry_trigger("pullback", "long"), technical_prompt)
+        self.assertIn(canonical_entry_trigger("pullback", "short"), technical_prompt)
         self.assertIn("System-computed market-data recency (read-only fact)", technical_prompt)
         self.assertIn("every complete watch_for_trigger", technical_prompt)
         self.assertIn("Direction alone is not watch_for_trigger", technical_prompt)
+        self.assertIn("trigger_quality_score measures only the current confirmed trigger", technical_prompt)
         self.assertIn("evidence_role=direction_context", fundamental_prompt)
         self.assertIn("must not output a Trader execution profile", fundamental_prompt)
         self.assertIn("must be an empty string in every fundamental output", fundamental_prompt)
+        self.assertIn("trigger_quality_score must be 0.0", fundamental_prompt)
         self.assertIn("entry_timing_signal=event_immediate", news_prompt)
         self.assertIn("news must not create watch_for_trigger", news_prompt)
+        self.assertIn("non-zero trigger_quality_score", news_prompt)
 
     def test_three_analysts_use_shared_finalizer_and_no_news_product_map(self):
         for relative in (

@@ -207,9 +207,24 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 {
                     "invalidation": "",
                     "invalidation_level": None,
-                    "atr_stop_distance": None,
                 },
-                "new_risk_execution_missing_invalidation",
+                "new_risk_execution_missing_entry_invalidation",
+            ),
+            (
+                {
+                    "invalidation": "close below support",
+                    "invalidation_level": 2950.0,
+                },
+                "execution_entry_invalidation_condition_invalid",
+            ),
+            (
+                {
+                    "position_invalidation_level": None,
+                    "atr_stop_distance": None,
+                    "exit_hint": "",
+                    "expected_horizon_days": None,
+                },
+                "new_risk_execution_missing_position_exit_boundary",
             ),
         )
         for mutation, expected_error in mutations:
@@ -319,7 +334,7 @@ class PMAtomicContractFlowTests(unittest.TestCase):
             contract["entry_trigger"],
             "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
         )
-        self.assertEqual(contract["invalidation"], "15m close below 3420")
+        self.assertEqual(contract["invalidation"], "long_price_lte_invalidation_level")
         self.assertEqual(contract["execution_profile"], "breakout")
         self.assertEqual(contract["trigger_source"], "technical_breakout")
         self.assertEqual(contract["invalidation_level"], 3420.0)

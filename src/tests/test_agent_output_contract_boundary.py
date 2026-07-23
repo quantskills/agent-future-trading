@@ -75,7 +75,7 @@ def _analyst_action_contract(agent_name="technical"):
         opportunity_state="watch_for_trigger" if executable else "no_opportunity",
         trigger_valid=False,
         current_trigger_confirmed=False,
-        invalidation_present=True,
+        invalidation_present=executable,
         entry_trigger=None if executable else "",
         invalidation_condition="close_below_support",
         extra={
@@ -191,6 +191,7 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
                 "expected_horizon_days": 3,
                 "entry_trigger": "breakout",
                 "invalidation_level": 2950.0,
+                "position_invalidation_level": 2920.0,
                 "atr_stop_distance": 40.0,
                 "setup_type": "trend_continuation",
                 "market_regime": "trend",
@@ -204,12 +205,13 @@ class AgentOutputContractBoundaryTest(unittest.TestCase):
                 "expected_horizon_days": 3,
                 "entry_trigger": "breakout",
                 "action_name": "open_real",
-                "invalidation_level": 2950.0,
+                "position_invalidation_level": 2920.0,
                 "atr_stop_distance": 40.0,
                 "setup_type": "trend_continuation",
                 "market_regime": "trend",
             },
         )
+        self.assertNotIn("invalidation_level", lifecycle)
         self.assertNotIn("target_return", lifecycle)
 
     def test_analyst_output_is_evidence_only_and_common_semantics_can_read_it(self):

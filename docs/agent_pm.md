@@ -114,6 +114,9 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 - `trigger_source`
 - `entry_trigger`
 - `invalidation`
+- `invalidation_level`
+- `position_invalidation_level`
+- `atr_stop_distance`
 - `valid_until`
 - `requires_intraday_confirmation`
 - `can_execute_without_intraday_trigger`
@@ -182,11 +185,13 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 最终动作和持仓变化：只由 `final_action`、`current_lots`、`target_lots`、`lots_delta` 表达；生命周期由共享 `final_action_semantics` 和 `pm_lifecycle_learning_trace` 解释，不新增顶层生命周期字段。
 
-执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。合法 watch 获选后固定为条件执行；canonical 当前触发已确认且失效边界完整的 probe/tradeable 候选，经 Step5 和 Auditor 放行后可对任一合法 profile 形成 `can_execute_without_intraday_trigger=true`，该字段不改变 rank、预算或 sizing。
+执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。前五项必须来自同一被选 technical/event AEC；`invalidation`和`invalidation_level`只在首次成交前作废当前FAC。合法 watch 获选后固定为条件执行；当前触发已确认且入场作废边界完整的候选可形成直执行权限，该字段不改变rank、预算或sizing。
 
 新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 必须先按执行职责过滤，再比较同类合法证据的置信度：普通15分钟条件或直执行只选最终 `target_side` 下的 technical `entry_timing`；`event_immediate` 只选当前事件已满足即时边界的 commodity_news `event_catalyst`；fundamental 固定为 `direction_context`，只能支持方向和评分，不能成为 Trader 执行来源。反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
 
-`entry_trigger`、`invalidation`、`execution_profile`、`trigger_source` 以及存在的 `invalidation_level/atr_stop_distance` 必须由同一被选 AEC 原子形成。`execution_profile` 直接复制该 AEC 的 `entry_timing_signal`；PM 不得从 `entry_trigger/setup_type/opportunity_type` 的文字猜测 profile，也不得默认 `breakout`。technical 使用 `technical_breakout/technical_pullback`，commodity_news 使用 `commodity_news_event`。执行 action-value 继续作为已有 `execution_action_value_preference` 建议摘要被消费，但不得改写顶层 profile/source/trigger、创建失效边界或交易权限。
+SCC 与 PM 按角色和周期使用这三类证据：technical `entry_timing` 是短期入场与技术失效锚点，fundamental `direction_context` 是中期方向、持仓和放大依据，commodity_news `event_catalyst` 只作事件修正。中性证据不进入有效技术信号的共识分母；跨周期反向保留为持仓/放大风险，同一入场周期的反向证据才形成入场冲突。
+
+`entry_trigger`、`invalidation`、`invalidation_level`、`execution_profile` 和 `trigger_source` 必须由同一被选 AEC 原子形成。`position_invalidation_level/exit_hint/atr_stop_distance/expected_horizon_days` 是独立的成交后持仓事实，不得证明或替代入场作废。`execution_profile` 直接复制 AEC 的 `entry_timing_signal`；PM 不得从自由文本猜测profile，也不得默认`breakout`。执行action-value只能形成建议摘要，不得改写顶层执行事实或交易权限。
 
 风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 
@@ -883,6 +888,10 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 本步可以更新 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图，但不得改写原始 `opportunity_state`，也不生成最终动作。候选状态发生变化后，后续步骤继续读取同一个对象。
 
+Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`，随后继续服从手数取整、保证金、单品种、净敞口和账户硬上限。Step4 不读取或等待尚未生成的 `opportunity_rank`。
+
+现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、ATR、期限和持仓依据，结合当前明确技术反转、中期基本面反向或既有硬风险形成唯一hold/reduce/exit，绝不复用入场`invalidation_level`。
+
 #### 4.8 状态更新
 
 本步把以下内容写回同一个产品候选状态：
@@ -1055,9 +1064,9 @@ rank_score =
 | 积分项 | 当前参数 | 含义 |
 |---|---:|---|
 | 当日证据质量 | `cold_start_evidence_quality * 0.52` | `cold_start_evidence_quality` 只汇总当日方向、状态、业务/setup、置信度、市场确认和融合共识，保证当前结构化证据是排名主体 |
-| `tradeable_candidate` | `+0.18` | 完整可交易候选层级积分 |
-| `probe_candidate` | `+0.10` | 探索候选层级积分 |
-| `watch_for_trigger` | `+0.02` | 等待触发候选层级积分 |
+| `alpha_scale` | `+6.00` | Step4 已确认的放大资金层级积分 |
+| `real_budget` | `+3.00` | Step4 已确认的正常资金层级积分 |
+| `exploration_probe` | `+0.00` | Step4 已确认的探索资金层级积分 |
 | 正向 action-value | `+0.18 * positive_learning_signal` | 已验证正向 open/add/scale 经验 |
 | trigger 正向质量 | `+0.08 * trigger_quality_positive_signal` | 与新增风险相关的正向触发经验 |
 | 负向 action-value | `-0.18 * negative_learning_signal` | 已验证负向新增风险经验 |
@@ -1068,6 +1077,7 @@ rank_score =
 | 每项 gating failure | `-0.025` | 对未满足条件逐项扣分 |
 | gating failure 总上限 | `-0.16` | 限定该类扣分边界 |
 | 资金效率 | 最高 `+0.02` | 同等质量下优先资金效率更高者 |
+| 当日 trigger 质量 | `+0.08 * trigger_quality_score` | 只读取PM由已验证SCC重建的当日technical/event执行证据；历史trigger结果不得进入本分项 |
 
 `product_setup_trigger_history`、当前 trigger 质量、市场冲突、关键数据缺口、基本面缺口和失效风险继续按 catalog 中对应权重计入。所有积分必须保留组成项，不能只保存一个无法解释的总分。
 
@@ -1094,9 +1104,9 @@ rank_score =
 
 #### 5.7 排名顺序
 
-交易属性必须在进入 rank 前由既有 `final_entry_authority.authority_type` 确定。`exploration_probe` 固定映射到 `capital_layer=exploration_probe`，`real_budget_entry` 固定映射到 `capital_layer=real_budget_entry`；只有既有资金利用控制已经确认高质量学习和 alpha release 时，`real_budget_entry` 才映射到 `alpha_scale_entry`。rank 不生成、修改或升级 `final_entry_authority`。
+交易属性必须在进入 rank 前由 Step4 的最终 scorecard 和 `final_entry_authority` 确定。`exploration_probe`、`real_budget_entry`、`alpha_scale_entry` 均由 Step4 的当日证据、正式学习和失效边界形成；rank 不生成、修改或升级资金层。
 
-PM 只对实际增加风险的候选排序，固定顺序为 `capital_layer -> capital_priority_tier -> rank_score -> cold_start_evidence_quality -> candidate_quality -> capital_efficiency -> ticker`：
+PM 只对实际增加风险的候选排序。资金层、当日证据、正式 open/add 学习、setup 历史、当前 trigger 质量、资金效率及冲突/失效风险各自只进入一次 `rank_score`；最终排序固定为 `rank_score` 降序，再以标准化 `ticker` 作为唯一稳定兜底键，不再用资金层、tier、证据、`candidate_quality` 或资金效率形成第二套排序：
 
 1. `alpha_scale_entry`：当前证据成立，且有重复正向真实经验支持的已验证候选。
 2. `real_budget_entry`：当前证据完整的 `tradeable_candidate`。
@@ -1106,7 +1116,7 @@ PM 只对实际增加风险的候选排序，固定顺序为 `capital_layer -> c
 
 每个进入队列的候选只能获得一个连续、唯一的全市场 `opportunity_rank`。产品内部 `side_priority`、`ticker_side_priority` 不能替代全市场 rank。
 
-无论 `rank_score` 或 `opportunity_rank` 多高，`exploration_probe` 始终是小仓试探，不得因排名升为 `real_budget_entry` 或 `alpha_scale_entry`；其 `0.008` 起点和 `0.015` 上限继续由既有 `position_budget_policy` 与最终权限链控制，rank 工具不重复生成第二套 probe 上限。正常交易和已确认放大资金层天然排在小仓试探之前。
+无论 `rank_score` 或 `opportunity_rank` 多高，`exploration_probe` 始终是小仓试探，不得由 Step5 升为 `real_budget_entry` 或 `alpha_scale_entry`；其计划比例已由 Step4 按 `candidate_quality` 在 `0.008-0.015` 内确定，rank 工具不重复生成第二套比例。层级分采用6/3/0，严格大于其余六项的最大合法总跨度，因此任意alpha_scale都高于任意real，任意real都高于任意probe；同层内部仍由同一个总分的证据、历史学习、setup、当日trigger、资金效率和风险拉开顺序。
 
 #### 5.8 排名与预算原子绑定
 

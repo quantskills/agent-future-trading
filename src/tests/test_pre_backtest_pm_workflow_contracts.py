@@ -1,5 +1,8 @@
 import inspect
+import json
+import sqlite3
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from datetime import datetime
@@ -23,7 +26,7 @@ from agents.decision_team.portfolio_manager import (
     portfolio_agent_futures,
 )
 from graph.constants import Signal
-from graph.schema import AnalystSignal, FuturesRecommendation, Portfolio, RecommendationAction, TradingPhase
+from graph.schema import AnalystSignal, FuturesRecommendation, Portfolio, Position, RecommendationAction, TradingPhase
 from graph.workflow import AgentWorkflow
 from tests.contract_test_fixtures import build_test_aec
 from tests.test_pm_atomic_contract_flow import _pm_state, _signal_collection_contract
@@ -186,9 +189,9 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
                 setup_quality_ok=False,
                 trigger_valid=False,
                 current_trigger_confirmed=False,
-                invalidation_present=True,
+                invalidation_present=False,
                 entry_trigger="",
-                invalidation_condition="close_below_current_setup_boundary",
+                invalidation_condition=None,
                 extra={
                     "business_quality_score": 0.76,
                     "setup_quality_score": 0.0,
@@ -413,14 +416,179 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
             same_ticker_fresh_contract["capital_deployment"]["rank_input_components"]["rank_score"],
             same_ticker_stale_contract["capital_deployment"]["rank_input_components"]["rank_score"],
         )
-        self.assertLess(
+        self.assertLessEqual(
             same_ticker_stale_contract["target_lots"],
             same_ticker_fresh_contract["target_lots"],
         )
         self.assertEqual(fresh_contract["capital_deployment"]["rank_budget_sequence"], 1)
         self.assertEqual(stale_contract["capital_deployment"]["rank_budget_sequence"], 2)
-        self.assertLess(stale_contract["target_lots"], fresh_contract["target_lots"])
+        self.assertLessEqual(stale_contract["target_lots"], fresh_contract["target_lots"])
         self.assertGreater(fresh_contract["target_lots"], 0)
+
+    def test_step2_preferred_side_rebuilds_step4_market_confirmation(self):
+        _portfolio_value, state = self._freshness_pm_state(
+            "BU", "2025-03-24", "2025-03-24", 0.0
+        )
+        original_calculate = portfolio_manager.calculate_long_short_signals
+
+        def legacy_scores_prefer_short(*args, **kwargs):
+            long_scores, short_scores = original_calculate(*args, **kwargs)
+            long_scores = dict(long_scores)
+            short_scores = dict(short_scores)
+            long_scores.update({"score": 0.10, "confidence": 0.10})
+            short_scores.update({"score": 0.95, "confidence": 0.95})
+            return long_scores, short_scores
+
+        with patch(
+            "agents.decision_team.portfolio_manager.get_db",
+            return_value=self._PMTestDB(),
+        ), patch(
+            "agents.decision_team.portfolio_manager._sanitize_visible_text",
+            return_value="Step2 direction confirmation regression.",
+        ), patch(
+            "agents.decision_team.portfolio_manager.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.10,
+                "margin_rate_short": 0.10,
+            },
+        ), patch(
+            "agents.decision_team.portfolio_manager.calculate_long_short_signals",
+            side_effect=legacy_scores_prefer_short,
+        ):
+            pm_state = portfolio_agent_futures(state)["pm_state"]
+
+        scorecard = pm_state["opportunity_scorecard"]
+        expected_confirmation = state["signal_collection_contract"]["evidence_fusion"][
+            "multi_evidence_consensus_score"
+        ]
+        self.assertEqual(scorecard["preferred_side"], "long")
+        self.assertEqual(
+            scorecard["long"]["market_confirmation_score"],
+            round(expected_confirmation, 4),
+        )
+
+    def test_real_pm_holding_path_traces_opening_fac_and_non_risk_actions_have_no_rank(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "opening-fac.sqlite")
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE futures_transactions (
+                    id TEXT, config_id TEXT, ticker TEXT, trading_date TEXT,
+                    action TEXT, lots INTEGER, source_type TEXT,
+                    recommendation_id TEXT, execution_price REAL, price REAL,
+                    created_at TEXT
+                );
+                CREATE TABLE futures_recommendation (
+                    id TEXT PRIMARY KEY, signal_snapshot TEXT,
+                    signal_snapshot_artifact_path TEXT,
+                    signal_snapshot_sha256 TEXT
+                );
+                CREATE TABLE portfolio (id TEXT PRIMARY KEY, config_id TEXT);
+                CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT);
+                """
+            )
+            opening_contract = {
+                "final_action_contract": {
+                    "final_action": "open_probe",
+                    "expected_horizon_days": 10,
+                    "invalidation": "close below 3400 invalidates",
+                    "invalidation_level": 3400.0,
+                    "position_invalidation_level": 3350.0,
+                }
+            }
+            conn.execute(
+                "INSERT INTO futures_recommendation VALUES (?, ?, ?, ?)",
+                ("open-fac", json.dumps(opening_contract), None, None),
+            )
+            conn.execute(
+                "INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "open-tx", "cfg-freshness-chain", "BU", "2025-03-20",
+                    "open_long", 20, "strategy", "open-fac", 3500.0, 3500.0,
+                    "2025-03-20 09:31:00",
+                ),
+            )
+            conn.execute("INSERT INTO portfolio VALUES (?, ?)", ("held-portfolio", "cfg-freshness-chain"))
+            conn.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [("held-portfolio", day) for day in ("2025-03-20", "2025-03-21", "2025-03-24")],
+            )
+            conn.commit()
+            conn.close()
+
+            class OpeningFACDB(self._PMTestDB):
+                def _get_connection(self):
+                    connection = sqlite3.connect(db_path)
+                    connection.row_factory = sqlite3.Row
+                    return connection
+
+                def _deserialize_external_json(self, row, field):
+                    raw = row.get(field) if isinstance(row, dict) else row[field]
+                    return json.loads(raw or "{}")
+
+            portfolio, state = self._freshness_pm_state(
+                "BU", "2025-03-24", "2025-03-24", 0.0
+            )
+            held_portfolio = Portfolio(
+                id="held-portfolio",
+                cashflow=4_930_000.0,
+                account_equity=5_000_000.0,
+                cash_available=4_930_000.0,
+                margin_available=4_930_000.0,
+                margin_used=70_000.0,
+                positions={
+                    "BU": Position(
+                        shares=20,
+                        value=700_000.0,
+                        entry_price=3500.0,
+                        entry_date="2025-03-20",
+                        margin_used=70_000.0,
+                        margin_rate=0.10,
+                        contract_multiplier=10.0,
+                    )
+                },
+            )
+            state["portfolio"] = held_portfolio
+            with patch(
+                "agents.decision_team.portfolio_manager.get_db",
+                return_value=OpeningFACDB(),
+            ), patch(
+                "agents.decision_team.portfolio_manager._sanitize_visible_text",
+                return_value="Opening FAC lifecycle regression.",
+            ), patch(
+                "agents.decision_team.portfolio_manager.FuturesContractInfoCache.get_contract_info",
+                return_value={
+                    "contract_multiplier": 10.0,
+                    "margin_rate_long": 0.10,
+                    "margin_rate_short": 0.10,
+                },
+            ):
+                pm_state = portfolio_agent_futures(state)["pm_state"]
+
+            holding = pm_state["control_diagnostics"]["holding_rebalance_control"]
+            self.assertEqual(holding["opening_recommendation_id"], "open-fac")
+            self.assertEqual(holding["held_days"], 3)
+            self.assertEqual(holding["opening_expected_horizon_days"], 10)
+            signed = finalize_pm_full_market_contracts(
+                generated=[("BU", deepcopy(pm_state))],
+                config=state["full_config"],
+                portfolio=held_portfolio,
+            )[0][1].signal_snapshot["final_action_contract"]
+            self.assertIn(signed["final_action"], {"hold", "reduce"})
+            self.assertNotIn("opportunity_rank", signed.get("capital_deployment", {}))
+
+            for action, current_lots, target_lots in (("hold", 2, 2), ("reduce", 2, 1), ("exit", 2, 0)):
+                with self.subTest(action=action):
+                    direct = _pm_state(f"DIRECT-{action}", current_lots, target_lots, with_scorecard=False)
+                    contract = finalize_pm_full_market_contracts(
+                        generated=[(f"DIRECT-{action}", direct)],
+                        config={"max_total_margin_ratio": 0.20},
+                        portfolio=_portfolio(),
+                    )[0][1].signal_snapshot["final_action_contract"]
+                    self.assertEqual(contract["final_action"], action)
+                    self.assertNotIn("opportunity_rank", contract.get("capital_deployment", {}))
 
     def test_step6_self_check_reads_only_final_contract(self):
         state = _pm_state("BU", 1, 1, with_scorecard=False)

@@ -56,6 +56,7 @@ from tools.agent_tools.decision.pm_capital_deployment_policy import (
 from tools.agent_tools.decision.pm_invalidation_policy import (
     _apply_pretrade_invalidation_control,
     _has_explicit_stop_protection,
+    _has_position_exit_boundary,
     _has_structured_invalidation_condition,
 )
 from tools.agent_tools.decision.pm_reason_effects import (
@@ -66,7 +67,13 @@ from tools.agent_tools.decision.pm_reason_effects import (
 )
 from tools.agent_tools.decision.pm_risk_controls import business_quality_position_gate
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
-from tools.agent_tools.decision.pm_full_market_capital_deployment import apply_full_market_capital_deployment
+from tools.agent_tools.execution.trader_execution_exit_policy import resolve_exit_policy_config
+from tools.agent_tools.decision.pm_full_market_capital_deployment import (
+    CAPITAL_LAYER_ALPHA_SCALE,
+    CAPITAL_LAYER_EXPLORATION,
+    CAPITAL_LAYER_REAL_BUDGET,
+    apply_full_market_capital_deployment,
+)
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.agent_tools.decision.pm_lifecycle_learning_router import route_lifecycle_learning
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
@@ -93,6 +100,7 @@ from tools.common.signal_evidence_collection import (
     validate_signal_collection_contract,
 )
 from tools.common.execution_trigger_semantics import (
+    entry_invalidation_contract_error,
     execution_profile_allowed_for_analyst,
     execution_profile_from_learning_setup,
     execution_trigger_contract_error,
@@ -572,7 +580,10 @@ def _scorecard_probe_seed(
     probe_floor = max(0.0, _safe_float(watch_for_trigger_cfg.get("probe_floor_ratio"), 0.005))
     candidates: list[tuple[str, dict]] = []
     scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
-    for side in ("long", "short"):
+    preferred_side = str(scorecard.get("preferred_side") or "").strip().lower()
+    if preferred_side not in {"long", "short"}:
+        return "flat", 0.0, {}
+    for side in (preferred_side,):
         row = scorecard.get(side) if isinstance(scorecard.get(side), dict) else {}
         if not row:
             continue
@@ -823,7 +834,8 @@ def _enrich_final_authority_with_analyst_evidence(
     has_open_evidence = False
     has_technical_confirmation = False
     has_event_catalyst = False
-    has_invalidation = False
+    has_entry_invalidation = False
+    has_position_exit_boundary = False
     for signal in analyst_signals or []:
         agent = _normalize_agent_name(str(getattr(signal, "agent_name", "") or ""))
         if agent not in {"technical", "fundamental", "commodity_news"}:
@@ -849,8 +861,10 @@ def _enrich_final_authority_with_analyst_evidence(
         if agent == "commodity_news" and current_evidence and evidence_role == "event_catalyst":
             has_event_catalyst = True
             has_open_evidence = True
-        if invalidation_present:
-            has_invalidation = True
+        if invalidation_present and (not target_side or side == target_side):
+            has_entry_invalidation = True
+        if _has_position_exit_boundary([signal], target_side=target_side):
+            has_position_exit_boundary = True
         evidence_by_agent[agent] = {
             "evidence_role": evidence_role,
             "side": side,
@@ -874,7 +888,12 @@ def _enrich_final_authority_with_analyst_evidence(
     )
     authority["technical_confirmation"] = bool(authority.get("technical_confirmation") or has_technical_confirmation)
     authority["event_catalyst_confirmation"] = bool(authority.get("event_catalyst_confirmation") or has_event_catalyst)
-    authority["has_invalidation_or_stop"] = bool(authority.get("has_invalidation_or_stop") or has_invalidation)
+    authority["has_entry_invalidation"] = bool(
+        authority.get("has_entry_invalidation") or has_entry_invalidation
+    )
+    authority["has_position_exit_boundary"] = bool(
+        authority.get("has_position_exit_boundary") or has_position_exit_boundary
+    )
     return authority
 
 
@@ -996,6 +1015,8 @@ def _final_contract_scope_from_scc(
             "expected_horizon_days": execution_fields.get("expected_horizon_days"),
             "market_regime": execution_fields.get("market_regime"),
             "invalidation_level": execution_fields.get("invalidation_level"),
+            "position_invalidation_level": execution_fields.get("position_invalidation_level"),
+            "exit_hint": execution_fields.get("exit_hint"),
             "atr_stop_distance": execution_fields.get("atr_stop_distance"),
         }
     side = "long" if target_lots > 0 else "short" if target_lots < 0 else ""
@@ -1023,22 +1044,15 @@ def _final_contract_scope_from_scc(
         return {}
     aligned.sort(key=lambda row: (row[1], row[0]))
     primary = aligned[0][2]
-    technical = next(
-        (
-            contract
-            for _order, _confidence, contract in aligned
-            if str(contract.get("analyst") or "") == "technical"
-        ),
-        None,
-    )
-    invalidation_source = technical or primary
     return {
         "setup_type": primary.get("setup_type"),
         "horizon_class": primary.get("horizon_class"),
         "expected_horizon_days": primary.get("expected_horizon_days"),
         "market_regime": primary.get("market_regime"),
-        "invalidation_level": invalidation_source.get("invalidation_level"),
-        "atr_stop_distance": invalidation_source.get("atr_stop_distance"),
+        "invalidation_level": None,
+        "position_invalidation_level": primary.get("position_invalidation_level"),
+        "exit_hint": primary.get("exit_hint"),
+        "atr_stop_distance": primary.get("atr_stop_distance"),
     }
 
 
@@ -1231,7 +1245,6 @@ def _pm_step6_clear_undeployed_conditional_authority(
     authority["requires_authority"] = False
     authority["open_action_evidence"] = False
     authority["strong_current_evidence"] = False
-    authority["rank_capital_priority_real_budget_release"] = False
     authority["reason_codes"] = [
         str(reason)
         for reason in (authority.get("reason_codes") or [])
@@ -1811,10 +1824,16 @@ def _apply_position_budget_policy_for_new_entry(
         control_diagnostics["position_budget_policy"] = diagnostics | {"decision": "disabled"}
         return target_lots, target_value, abs(target_value) * float(margin_rate), current_net_exposure, target_ratio, margin_rate, None
 
-    if current_lots != 0 and cfg.get("apply_min_to_new_entries_only", True):
+    increasing_same_side = bool(
+        current_lots
+        and target_lots
+        and (current_lots > 0) == (target_lots > 0)
+        and abs(target_lots) > abs(current_lots)
+    )
+    if current_lots != 0 and not increasing_same_side:
         target_value = float(current_price) * int(target_lots) * float(multiplier)
         target_ratio = target_value / max(float(account_equity or 0.0), 1.0)
-        control_diagnostics["position_budget_policy"] = diagnostics | {"decision": "existing_position_not_applicable"}
+        control_diagnostics["position_budget_policy"] = diagnostics | {"decision": "non_increasing_position_not_applicable"}
         return target_lots, target_value, abs(target_value) * float(margin_rate), current_net_exposure, target_ratio, margin_rate, None
 
     if target_lots == 0:
@@ -1841,9 +1860,18 @@ def _apply_position_budget_policy_for_new_entry(
     side_sign = 1 if target_lots > 0 else -1
     current_abs_lots = abs(int(target_lots))
     current_margin = current_abs_lots * one_lot_margin
+    planned_margin_ratio = max(
+        0.0,
+        min(
+            _safe_float(final_entry_authority.get("target_margin_ratio"), 0.0),
+            _safe_float(final_entry_authority.get("max_allowed_margin_ratio"), 0.0),
+        ),
+    )
+    planned_margin = equity * planned_margin_ratio
     min_required_margin = max(
         equity * float(cfg.get("min_real_trade_margin_ratio") or 0.0),
         float(cfg.get("min_real_trade_margin_abs") or 0.0),
+        planned_margin,
     )
     diagnostics.update({
         "one_lot_margin": one_lot_margin,
@@ -1851,15 +1879,27 @@ def _apply_position_budget_policy_for_new_entry(
         "min_required_margin": min_required_margin,
         "target_lots_before_abs": current_abs_lots,
         "final_authority_type": final_entry_authority.get("authority_type"),
+        "capital_layer": final_entry_authority.get("capital_layer"),
+        "capital_ratio_source": final_entry_authority.get("capital_ratio_source"),
+        "candidate_quality": final_entry_authority.get("candidate_quality"),
+        "planned_margin_ratio": planned_margin_ratio,
+        "planned_margin": planned_margin,
         "max_allowed_margin_ratio": final_entry_authority.get("max_allowed_margin_ratio"),
     })
     if str(final_entry_authority.get("authority_type") or "") != "real_budget_entry":
         max_allowed_margin_ratio = _safe_float(final_entry_authority.get("max_allowed_margin_ratio"), 0.0)
         max_allowed_margin = equity * max(0.0, max_allowed_margin_ratio)
         probe_floor_margin = equity * max(0.0, float(cfg.get("probe_margin_ratio") or 0.0))
-        desired_abs_lots = max(current_abs_lots, int(math.ceil(probe_floor_margin / one_lot_margin))) if probe_floor_margin > 0 else current_abs_lots
+        desired_probe_margin = max(probe_floor_margin, planned_margin)
+        desired_abs_lots = int(math.ceil(desired_probe_margin / one_lot_margin)) if desired_probe_margin > 0 else current_abs_lots
+        if increasing_same_side:
+            desired_abs_lots = max(abs(int(current_lots)), desired_abs_lots)
         one_lot_ratio = one_lot_notional / equity
-        max_lots_by_margin = int(max(0.0, margin_available) // one_lot_margin)
+        max_lots_by_margin = (
+            abs(int(current_lots)) + int(max(0.0, margin_available) // one_lot_margin)
+            if increasing_same_side
+            else int(max(0.0, margin_available) // one_lot_margin)
+        )
         max_lots_by_position = int(max(0.0, max_position_ratio) // one_lot_ratio) if one_lot_ratio > 0 else 0
         max_lots_by_probe_margin = int(max_allowed_margin // one_lot_margin) if max_allowed_margin > 0 else desired_abs_lots
         net_without_ticker = float(current_net_exposure or 0.0) - float(current_ticker_exposure or 0.0)
@@ -1874,6 +1914,8 @@ def _apply_position_budget_policy_for_new_entry(
             max_lots_by_probe_margin if max_lots_by_probe_margin > 0 else desired_abs_lots,
             max_lots_by_net,
         )
+        if increasing_same_side:
+            feasible_abs_lots = max(abs(int(current_lots)), feasible_abs_lots)
         target_lots_after = side_sign * max(0, feasible_abs_lots)
         target_value = target_lots_after * one_lot_notional
         margin_required_after = abs(target_lots_after) * one_lot_margin
@@ -1882,6 +1924,7 @@ def _apply_position_budget_policy_for_new_entry(
         diagnostics.update({
             "decision": "exploration_probe_probe_floor_applied",
             "probe_floor_margin": probe_floor_margin,
+            "desired_probe_margin": desired_probe_margin,
             "desired_abs_lots": desired_abs_lots,
             "max_lots_by_margin": max_lots_by_margin,
             "max_lots_by_position": max_lots_by_position,
@@ -1892,14 +1935,30 @@ def _apply_position_budget_policy_for_new_entry(
             "target_margin_after": margin_required_after,
             "target_ratio_after": target_ratio,
             "projected_net_exposure_after": projected_net,
-            "why": "exploration_uses_probe_margin_floor_and_cap; min_real_trade_margin_floor_applies_only_to_real_budget_entry",
+            "why": "Step4 candidate quality selects the probe margin inside its configured range before lot rounding",
         })
         control_diagnostics["position_budget_policy"] = diagnostics
+        if increasing_same_side and abs(target_lots_after) <= abs(int(current_lots)):
+            current_value = int(current_lots) * one_lot_notional
+            current_margin_total = abs(int(current_lots)) * one_lot_margin
+            return (
+                int(current_lots),
+                current_value,
+                current_margin_total,
+                float(current_net_exposure),
+                float(current_ticker_exposure),
+                margin_rate,
+                "step4_add_plan_no_incremental_capacity",
+            )
         if target_lots_after == 0:
             return 0, 0.0, 0.0, current_net_exposure - current_ticker_exposure, 0.0, margin_rate, "exploration_probe_no_feasible_lot"
         control_reasons.append("exploration_probe_probe_floor_applied")
         return target_lots_after, target_value, margin_required_after, projected_net, target_ratio, margin_rate, None
-    if current_margin + 1e-9 >= min_required_margin:
+    if (
+        not increasing_same_side
+        and current_margin + 1e-9 >= min_required_margin
+        and abs(current_margin - planned_margin) < one_lot_margin
+    ):
         target_value = side_sign * current_abs_lots * one_lot_notional
         target_ratio = target_value / equity
         control_diagnostics["position_budget_policy"] = diagnostics | {"decision": "already_meets_minimum"}
@@ -1913,9 +1972,15 @@ def _apply_position_budget_policy_for_new_entry(
             None,
         )
 
-    desired_abs_lots = max(current_abs_lots, int(math.ceil(min_required_margin / one_lot_margin)))
+    desired_abs_lots = int(math.ceil(min_required_margin / one_lot_margin))
+    if increasing_same_side:
+        desired_abs_lots = max(abs(int(current_lots)), desired_abs_lots)
     one_lot_ratio = one_lot_notional / equity
-    max_lots_by_margin = int(max(0.0, margin_available) // one_lot_margin)
+    max_lots_by_margin = (
+        abs(int(current_lots)) + int(max(0.0, margin_available) // one_lot_margin)
+        if increasing_same_side
+        else int(max(0.0, margin_available) // one_lot_margin)
+    )
     max_lots_by_position = int(max(0.0, max_position_ratio) // one_lot_ratio) if one_lot_ratio > 0 else 0
     max_single_margin = equity * max(0.0, float(cfg.get("max_single_ticker_margin_ratio") or 0.0))
     max_lots_by_single_margin = int(max_single_margin // one_lot_margin) if one_lot_margin > 0 else 0
@@ -1931,6 +1996,8 @@ def _apply_position_budget_policy_for_new_entry(
         max_lots_by_single_margin,
         max_lots_by_net,
     )
+    if increasing_same_side:
+        feasible_abs_lots = max(abs(int(current_lots)), feasible_abs_lots)
     diagnostics.update({
         "desired_abs_lots": desired_abs_lots,
         "max_lots_by_margin": max_lots_by_margin,
@@ -1940,16 +2007,34 @@ def _apply_position_budget_policy_for_new_entry(
         "feasible_abs_lots": feasible_abs_lots,
     })
     if feasible_abs_lots < desired_abs_lots:
-        if cfg.get("block_below_min_when_cannot_scale", True):
-            diagnostics["decision"] = "minimum_margin_not_reachable_watchlist"
-            control_diagnostics["position_budget_policy"] = diagnostics
-            control_reasons.append("minimum_real_trade_margin_not_reachable")
-            control_notes.append(
-                f"{ticker} qualified new entry kept as watchlist: target margin {current_margin:.0f} "
-                f"is below minimum {min_required_margin:.0f}, and hard limits allow only {feasible_abs_lots} lot(s)."
-            )
-            return 0, 0.0, 0.0, current_net_exposure - current_ticker_exposure, 0.0, margin_rate, "minimum_real_trade_margin_not_reachable"
+        diagnostics["step4_layer_plan_shrunk_by_hard_limits"] = True
+        control_reasons.append("step4_layer_plan_shrunk_by_hard_limits")
+        control_notes.append(
+            f"{ticker} Step4 layer plan shrunk by existing lot, margin, position and net-exposure caps: "
+            f"{desired_abs_lots}->{feasible_abs_lots} lot(s)."
+        )
         desired_abs_lots = max(0, feasible_abs_lots)
+
+    if increasing_same_side and desired_abs_lots <= abs(int(current_lots)):
+        current_value = int(current_lots) * one_lot_notional
+        current_margin_total = abs(int(current_lots)) * one_lot_margin
+        current_ratio = current_value / equity
+        diagnostics.update({
+            "decision": "add_plan_no_incremental_capacity",
+            "target_lots_after": int(current_lots),
+            "target_margin_after": current_margin_total,
+            "target_ratio_after": current_ratio,
+        })
+        control_diagnostics["position_budget_policy"] = diagnostics
+        return (
+            int(current_lots),
+            current_value,
+            current_margin_total,
+            float(current_net_exposure),
+            current_ratio,
+            margin_rate,
+            "step4_add_plan_no_incremental_capacity",
+        )
 
     if desired_abs_lots <= 0:
         diagnostics["decision"] = "no_feasible_lot"
@@ -2073,6 +2158,7 @@ def _is_lifecycle_exit_required_reason(control_reasons: list[str]) -> bool:
         or "new_position_loss_revalidation_failed" in reason_set
         or "exploration_probe_reconfirm_failed" in reason_set
         or "exploration_probe_reconfirm_reduce" in reason_set
+        or "fundamental_medium_opposition" in reason_set
         or "winning_template_continuation_protective_reduce" in reason_set
         or "hold_exit_action_value_protection" in reason_set
     )
@@ -2106,7 +2192,8 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
     technical_opposes = bool(alpha_ev.get("technical_opposes_side"))
     has_tradeable_support = bool(alpha_ev.get("has_tradeable_support"))
     has_monitorable_setup = bool(alpha_ev.get("has_monitorable_setup"))
-    has_invalidation = bool(alpha_ev.get("has_invalidation_or_stop"))
+    has_entry_invalidation = bool(alpha_ev.get("has_entry_invalidation"))
+    has_position_exit_boundary = bool(alpha_ev.get("has_position_exit_boundary"))
     event_catalyst = bool(
         alpha_ev.get("event_catalyst_supports_side")
         or alpha_ev.get("news_event_catalyst_supports_side")
@@ -2127,11 +2214,11 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         and not technical_opposes
         and strong_realtime
         and independent_support_count >= 1
-        and has_invalidation
+        and has_entry_invalidation
     )
     event_catalyst_confirmation = bool(
         event_catalyst
-        and has_invalidation
+        and has_entry_invalidation
         and not technical_opposes
         and (strong_realtime or strong_market or confirmation_score >= 0.60)
     )
@@ -2140,7 +2227,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         and scorecard_state in {"probe_candidate", "tradeable_candidate"}
         and confirmation_score >= 0.60
         and not technical_opposes
-        and has_invalidation
+        and has_entry_invalidation
     )
     watch_for_trigger_without_setup = bool(
         scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
@@ -2156,7 +2243,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         and independent_support_count >= 1
         and not watch_for_trigger_without_setup
         and not technical_opposes
-        and has_invalidation
+        and has_entry_invalidation
     )
     watch_for_trigger_without_confirmation = bool(
         watch_for_trigger_without_setup and not market_confirmation
@@ -2169,8 +2256,14 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         or analyst_tradeable_probe
     )
     current_trade_authority = bool(
-        open_action_evidence
-        or (qualified_positive and (technical_confirmation or event_catalyst_confirmation or market_confirmation))
+        has_position_exit_boundary
+        and (
+            open_action_evidence
+            or (
+                qualified_positive
+                and (technical_confirmation or event_catalyst_confirmation or market_confirmation)
+            )
+        )
     )
     return {
         "scorecard_state": scorecard_state,
@@ -2183,7 +2276,8 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         "technical_opposes_side": technical_opposes,
         "has_tradeable_support": has_tradeable_support,
         "has_monitorable_setup": has_monitorable_setup,
-        "has_invalidation_or_stop": has_invalidation,
+        "has_entry_invalidation": has_entry_invalidation,
+        "has_position_exit_boundary": has_position_exit_boundary,
         "event_catalyst_supports_side": event_catalyst,
         "confirmation_score": confirmation_score,
         "independent_support_count": independent_support_count,
@@ -2198,7 +2292,11 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         "current_trade_authority": current_trade_authority,
         "action_evidence_router": {
             "open": {
-                "required": ["technical_trigger_or_event_catalyst", "invalidation_boundary"],
+                "required": [
+                    "technical_trigger_or_event_catalyst",
+                    "entry_invalidation_boundary",
+                    "position_exit_boundary",
+                ],
                 "technical_trigger": technical_confirmation,
                 "event_catalyst": event_catalyst_confirmation,
                 "current_setup_confirmation": current_setup_confirmation,
@@ -2212,72 +2310,6 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
             "exit": {"learning": "exit_action_value"},
             "scale": {"learning": "open_action_value_plus_current_confirmation"},
         },
-    }
-
-
-def _rank_supported_real_budget_release(
-    *,
-    alpha_ev: dict,
-    trade_authority: dict,
-    opportunity_cfg: dict,
-    open_action_evidence: bool,
-    strong_current_evidence: bool,
-) -> tuple[bool, dict]:
-    """Release real budget only when the capital-priority rank has current evidence."""
-    if not isinstance(alpha_ev, dict):
-        alpha_ev = {}
-    if not isinstance(trade_authority, dict):
-        trade_authority = {}
-    if not isinstance(opportunity_cfg, dict):
-        opportunity_cfg = {}
-
-    rank_value = alpha_ev.get("opportunity_rank")
-    try:
-        opportunity_rank = int(rank_value) if rank_value not in (None, "") else None
-    except (TypeError, ValueError):
-        opportunity_rank = None
-    priority_score = _safe_float(
-        alpha_ev.get("capital_priority_score", alpha_ev.get("opportunity_score", alpha_ev.get("score"))),
-        0.0,
-    )
-    priority_tier = _safe_int(alpha_ev.get("capital_priority_tier"), 0)
-    min_score = max(
-        _safe_float(opportunity_cfg.get("tradeable_threshold"), 0.58),
-        _safe_float(opportunity_cfg.get("real_budget_entry_capital_priority_min_score"), 0.58),
-    )
-    min_tier = max(3, _safe_int(opportunity_cfg.get("real_budget_entry_capital_priority_min_tier"), 3))
-    scorecard_state = str(trade_authority.get("scorecard_state") or alpha_ev.get("scorecard_state") or "").lower()
-    rank_is_capital_priority = bool(
-        alpha_ev.get("rank_is_capital_priority")
-        or alpha_ev.get("opportunity_rank_meaning")
-        or alpha_ev.get("rank_semantics_version")
-        or alpha_ev.get("capital_priority_score") not in (None, "")
-    )
-    passed = bool(
-        rank_is_capital_priority
-        and opportunity_rank == 1
-        and priority_score >= min_score
-        and priority_tier >= min_tier
-        and scorecard_state == "tradeable_candidate"
-        and bool(open_action_evidence)
-        and bool(strong_current_evidence)
-        and bool(trade_authority.get("has_invalidation_or_stop"))
-        and not bool(trade_authority.get("technical_opposes_side"))
-    )
-    return passed, {
-        "decision": "allow" if passed else "reject",
-        "rank_is_capital_priority": rank_is_capital_priority,
-        "opportunity_rank": opportunity_rank,
-        "capital_priority_score": priority_score,
-        "capital_priority_tier": priority_tier,
-        "min_capital_priority_score": min_score,
-        "min_capital_priority_tier": min_tier,
-        "scorecard_state": scorecard_state,
-        "open_action_evidence": bool(open_action_evidence),
-        "strong_current_evidence": bool(strong_current_evidence),
-        "has_invalidation_or_stop": bool(trade_authority.get("has_invalidation_or_stop")),
-        "technical_opposes_side": bool(trade_authority.get("technical_opposes_side")),
-        "boundary": "rank_supports_real_budget_only_after_current_evidence_and_risk_gates",
     }
 
 
@@ -2476,8 +2508,10 @@ def _conditional_monitor_probe_seed_plan(
         blocked_reasons.append("missing_monitorable_setup")
     if bool(trade_authority.get("watch_for_trigger_without_setup")):
         blocked_reasons.append("watch_for_trigger_without_setup")
-    if not bool(trade_authority.get("has_invalidation_or_stop")):
-        blocked_reasons.append("missing_invalidation_or_stop")
+    if not bool(trade_authority.get("has_entry_invalidation")):
+        blocked_reasons.append("missing_entry_invalidation")
+    if not bool(trade_authority.get("has_position_exit_boundary")):
+        blocked_reasons.append("missing_position_exit_boundary")
     if hard_zero or hard_blocks:
         blocked_reasons.append("hard_block_present")
     if negative_profile:
@@ -2596,26 +2630,37 @@ def _qualified_analyst_tradeable_probe_candidate(
     if float(account_equity or 0.0) <= 0:
         detail["blocked_reasons"].append("account_equity_invalid")
 
+    position_exit_boundary_present = any(
+        _signal_side_text(getattr(signal, "signal", None)) == target_side
+        and _has_position_exit_boundary([signal])
+        for signal in analyst_signals or []
+    )
     for signal in analyst_signals or []:
         signal_side = _signal_side_text(getattr(signal, "signal", None))
         if signal_side != target_side:
             continue
         state = str(getattr(signal, "opportunity_state", "") or "").strip().lower()
         trigger_valid = _canonical_trigger_valid(signal)
-        invalidation_present = _canonical_invalidation_present(signal)
+        entry_invalidation_present = _canonical_invalidation_present(signal)
         action_contract = _canonical_action_evidence_contract(signal)
         if action_contract:
             state = str(action_contract.get("opportunity_state") or state or "").strip().lower()
         tradeable_candidate = bool(
             state in {"probe_candidate", "tradeable_candidate"}
         )
-        if tradeable_candidate and trigger_valid and invalidation_present:
+        if (
+            tradeable_candidate
+            and trigger_valid
+            and entry_invalidation_present
+            and position_exit_boundary_present
+        ):
             detail["matched_analysts"].append(
                 {
                     "analyst": _normalize_agent_name(str(getattr(signal, "agent_name", "") or "unknown")),
                     "opportunity_state": state,
                     "trigger_valid": True,
-                    "invalidation_present": True,
+                    "entry_invalidation_present": True,
+                    "position_exit_boundary_present": True,
                     "side": signal_side,
                 }
             )
@@ -2647,7 +2692,110 @@ _FINAL_ACTION_AUTHORITY_HARD_BLOCK_REASONS = {
     "negative_expectancy_cap_or_exit",
     "negative_expectancy_new_entry_watchlist_only",
     "missing_pretrade_invalidation",
+    "missing_position_exit_boundary",
 }
+
+
+def _step4_capital_plan(
+    *,
+    alpha_ev: dict,
+    trade_authority: dict,
+    control_diagnostics: dict,
+    full_config: dict,
+    can_real: bool,
+    can_explore: bool,
+) -> dict:
+    """Choose the Step4 capital layer and its continuous margin plan.
+
+    This runs before the all-market rank.  It uses only the final scorecard,
+    current execution/invalidation facts and the frozen canonical open/add
+    learning pool already summarized by ``alpha_setup_ev_fusion``.
+    """
+    budget = _position_budget_policy_config(full_config)
+    ev_cfg = (_get_portfolio_manager_config(full_config).get("alpha_setup_ev_fusion") or {})
+    mature_sample_count = int(
+        ev_cfg.get(
+            "real_trade_min_action_value_samples",
+            ev_cfg.get("min_action_value_samples", 2),
+        )
+        or 2
+    )
+    quality = max(0.0, min(1.0, _safe_float(alpha_ev.get("candidate_quality"), 0.0)))
+    action_stats = alpha_ev.get("action_value_stats") if isinstance(alpha_ev.get("action_value_stats"), dict) else {}
+    capital_target = (
+        control_diagnostics.get("capital_utilization_target")
+        if isinstance(control_diagnostics.get("capital_utilization_target"), dict)
+        else {}
+    )
+    scorecard_state = str(trade_authority.get("scorecard_state") or "").strip().lower()
+    qualified_positive = bool(alpha_ev.get("positive_action_value"))
+    mature_repeated_positive = bool(
+        qualified_positive
+        and alpha_ev.get("qualified_positive_expectancy")
+        and int(action_stats.get("sample_count") or 0) >= mature_sample_count
+        and _safe_float(action_stats.get("reward_sum"), 0.0) > 0.0
+    )
+    strong_confirmation = bool(
+        trade_authority.get("strong_market_confirmation")
+        or trade_authority.get("technical_confirmation")
+        or trade_authority.get("current_setup_confirmation")
+    )
+    alpha_scale = bool(
+        can_real
+        and mature_repeated_positive
+        and scorecard_state == "tradeable_candidate"
+        and strong_confirmation
+        and trade_authority.get("has_entry_invalidation")
+        and trade_authority.get("has_position_exit_boundary")
+        and not trade_authority.get("technical_opposes_side")
+        and alpha_ev.get("fundamental_supports_side")
+        and not alpha_ev.get("fundamental_opposes_side")
+    )
+    exceptional = bool(
+        alpha_scale
+        and str(capital_target.get("target_mode") or "").lower() == "alpha_release_max_boost"
+    )
+    if alpha_scale:
+        layer = CAPITAL_LAYER_ALPHA_SCALE
+        if exceptional:
+            lower = _safe_float(budget.get("exceptional_margin_ratio"), 0.075)
+            upper = _safe_float(budget.get("exceptional_margin_max_ratio"), 0.130)
+            ratio_source = "exceptional_margin_ratio"
+        else:
+            lower = _safe_float(budget.get("deployable_margin_ratio"), 0.060)
+            upper = _safe_float(budget.get("deployable_margin_max_ratio"), 0.120)
+            ratio_source = "deployable_margin_ratio"
+    elif can_real and qualified_positive:
+        layer = CAPITAL_LAYER_REAL_BUDGET
+        lower = _safe_float(budget.get("normal_trade_margin_ratio"), 0.030)
+        upper = _safe_float(budget.get("normal_trade_margin_max_ratio"), 0.060)
+        ratio_source = "normal_trade_margin_ratio"
+    elif can_explore:
+        layer = CAPITAL_LAYER_EXPLORATION
+        lower = _safe_float(budget.get("probe_margin_ratio"), 0.008)
+        upper = _safe_float(budget.get("probe_margin_max_ratio"), 0.015)
+        ratio_source = "probe_margin_ratio"
+    else:
+        return {
+            "capital_layer": "",
+            "capital_ratio_source": "",
+            "candidate_quality": quality,
+            "target_margin_ratio": 0.0,
+            "max_margin_ratio": 0.0,
+            "alpha_scale_eligible": False,
+            "exceptional_validated": False,
+        }
+    lower = max(0.0, lower)
+    upper = max(lower, upper)
+    return {
+        "capital_layer": layer,
+        "capital_ratio_source": ratio_source,
+        "candidate_quality": quality,
+        "target_margin_ratio": lower + quality * (upper - lower),
+        "max_margin_ratio": upper,
+        "alpha_scale_eligible": alpha_scale,
+        "exceptional_validated": exceptional,
+    }
 
 
 def _final_contract_authority(
@@ -2667,8 +2815,6 @@ def _final_contract_authority(
     budget_cfg = _position_budget_policy_config(full_config or {})
     market_cfg = (full_config or {}).get("market_confirmation") or {}
     analyst_policy = (full_config or {}).get("analyst_weight_policy") or {}
-    pm_config = _get_portfolio_manager_config(full_config or {})
-    opportunity_cfg = ((pm_config.get("quality_aware_fusion") or {}).get("opportunity_scorecard") or {})
     alpha_ev = control_diagnostics.get("alpha_setup_ev_fusion") if isinstance(control_diagnostics, dict) else {}
     if not isinstance(alpha_ev, dict):
         alpha_ev = {}
@@ -2686,7 +2832,8 @@ def _final_contract_authority(
         alpha_ev = dict(alpha_ev)
         alpha_ev["analyst_tradeable_probe_candidate"] = True
         alpha_ev["has_tradeable_support"] = True
-        alpha_ev["has_invalidation_or_stop"] = True
+        alpha_ev["has_entry_invalidation"] = True
+        alpha_ev["has_position_exit_boundary"] = True
         if not alpha_ev.get("scorecard_state"):
             alpha_ev["scorecard_state"] = "probe_candidate"
     reason_effects = reason_effect_summary(reasons)
@@ -2721,15 +2868,6 @@ def _final_contract_authority(
         or event_catalyst_confirmation
     )
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
-    rank_capital_priority_real_budget_release, rank_capital_priority_release_detail = (
-        _rank_supported_real_budget_release(
-            alpha_ev=alpha_ev,
-            trade_authority=trade_authority,
-            opportunity_cfg=opportunity_cfg,
-            open_action_evidence=open_action_evidence,
-            strong_current_evidence=strong_current_evidence,
-        )
-    )
     watch_for_trigger_without_setup = bool(trade_authority.get("watch_for_trigger_without_setup"))
     scorecard_state = str(trade_authority.get("scorecard_state") or "").lower()
     market_conflict = "market_confirmation_conflict" in reason_set
@@ -2746,7 +2884,8 @@ def _final_contract_authority(
         and bool(alpha_ev.get("setup_quality_ok"))
         and bool(alpha_ev.get("has_monitorable_setup") or control_diagnostics.get("conditional_monitor_probe_seed"))
         and not watch_for_trigger_without_setup
-        and bool(trade_authority.get("has_invalidation_or_stop"))
+        and bool(trade_authority.get("has_entry_invalidation"))
+        and bool(trade_authority.get("has_position_exit_boundary"))
         and not hard_zero
         and not hard_blocks
         and not negative_profile
@@ -2802,19 +2941,20 @@ def _final_contract_authority(
         and not watch_for_trigger_block
         and open_action_evidence
         and tradeable_state
-        and (
-            (qualified_positive and strong_current_evidence)
-            or (release_qualified and qualified_positive)
-            or rank_capital_priority_real_budget_release
-        )
+        and bool(alpha_ev.get("positive_action_value"))
+        and strong_current_evidence
+        and trade_authority.get("has_entry_invalidation")
+        and trade_authority.get("has_position_exit_boundary")
+        and not alpha_ev.get("fundamental_opposes_side")
     )
     can_explore = bool(
         not hard_zero
         and not hard_blocks
-        and not negative_profile
         and (not weak_conflict_probe or conditional_trigger_authority)
         and not watch_for_trigger_block
         and tradeable_state
+        and trade_authority.get("has_entry_invalidation")
+        and trade_authority.get("has_position_exit_boundary")
         and (
             (release_qualified and open_action_evidence)
             or strong_current_evidence
@@ -2830,6 +2970,14 @@ def _final_contract_authority(
     ):
         can_real = False
         can_explore = False
+    capital_plan = _step4_capital_plan(
+        alpha_ev=alpha_ev,
+        trade_authority=trade_authority,
+        control_diagnostics=control_diagnostics if isinstance(control_diagnostics, dict) else {},
+        full_config=full_config or {},
+        can_real=can_real,
+        can_explore=can_explore,
+    )
     analyst_prior_audit = {
         "config_file": "analyst_prior_profiles.yaml",
         "runtime_compat_fields": ["portfolio_manager.sector_weights", "portfolio_manager.strategic_view_weights"],
@@ -2845,16 +2993,20 @@ def _final_contract_authority(
     }
     if can_real:
         authority_type = "real_budget_entry"
-        decision = "allow_real_new_entry"
+        decision = (
+            "allow_alpha_scale_new_risk"
+            if capital_plan.get("capital_layer") == CAPITAL_LAYER_ALPHA_SCALE
+            else "allow_real_new_entry"
+        )
         max_allowed_margin_ratio = min(
-            float(budget_cfg.get("normal_trade_margin_max_ratio") or 0.0),
+            _safe_float(capital_plan.get("max_margin_ratio"), 0.0),
             float(budget_cfg.get("hard_max_total_margin_ratio") or 0.20),
         )
     elif can_explore:
         authority_type = "exploration_probe"
         decision = "allow_exploration_probe"
         max_allowed_margin_ratio = min(
-            float(budget_cfg.get("probe_margin_max_ratio") or 0.0),
+            _safe_float(capital_plan.get("max_margin_ratio"), 0.0),
             float(budget_cfg.get("hard_max_total_margin_ratio") or 0.20),
         )
     else:
@@ -2887,7 +3039,7 @@ def _final_contract_authority(
             + (["hard_zero"] if hard_zero else [])
             + (["analyst_tradeable_probe_candidate"] if analyst_tradeable_probe_candidate else [])
             + (["conditional_trigger_authority"] if conditional_trigger_authority else [])
-            + (["rank_capital_priority_real_budget_release"] if rank_capital_priority_real_budget_release else [])
+            + (["step4_alpha_scale_release"] if capital_plan.get("capital_layer") == CAPITAL_LAYER_ALPHA_SCALE else [])
         )
     )
     return has_authority, {
@@ -2918,12 +3070,6 @@ def _final_contract_authority(
             "market_confirmation": {
                 "min_confirmation_score_for_new_entry": market_cfg.get("min_confirmation_score_for_new_entry"),
             },
-            "opportunity_scorecard": {
-                "single_tradeable_candidate_setup_confirmation_score": opportunity_cfg.get("single_tradeable_candidate_setup_confirmation_score"),
-                "tradeable_threshold": opportunity_cfg.get("tradeable_threshold"),
-                "real_budget_entry_capital_priority_min_score": opportunity_cfg.get("real_budget_entry_capital_priority_min_score"),
-                "real_budget_entry_capital_priority_min_tier": opportunity_cfg.get("real_budget_entry_capital_priority_min_tier"),
-            },
             "watch_for_trigger_new_entry": watch_for_trigger_semantic_audit,
         },
         "watch_for_trigger_cannot_open_position": bool(analyst_policy.get("watch_for_trigger_cannot_open_position", True)),
@@ -2952,13 +3098,19 @@ def _final_contract_authority(
         "weak_only": weak_only,
         "release": release,
         "release_qualified": release_qualified,
-        "rank_capital_priority_real_budget_release": rank_capital_priority_real_budget_release,
-        "rank_capital_priority_release_detail": rank_capital_priority_release_detail,
+        "capital_layer": capital_plan.get("capital_layer") or "",
+        "capital_ratio_source": capital_plan.get("capital_ratio_source") or "",
+        "candidate_quality": _safe_float(capital_plan.get("candidate_quality"), 0.0),
+        "target_margin_ratio": _safe_float(capital_plan.get("target_margin_ratio"), 0.0),
+        "alpha_scale_eligible": bool(capital_plan.get("alpha_scale_eligible")),
+        "exceptional_validated": bool(capital_plan.get("exceptional_validated")),
         "qualified_positive": qualified_positive,
         "analyst_tradeable_probe_candidate": analyst_tradeable_probe_candidate,
         "strong_realtime_evidence": strong_realtime,
         "strong_market_confirmation": strong_market,
         "strong_current_evidence": strong_current_evidence,
+        "has_entry_invalidation": bool(trade_authority.get("has_entry_invalidation")),
+        "has_position_exit_boundary": bool(trade_authority.get("has_position_exit_boundary")),
         "confirmation_score": confirmation_score,
         "independent_support_count": independent_support_count,
         "market_confirmation": trade_authority.get("market_confirmation"),
@@ -3162,6 +3314,11 @@ def _derive_signal_contract_fields(signal, agent_name: str) -> dict:
         "entry_trigger": entry_trigger,
         "invalidation": invalidation_condition,
         "invalidation_condition": invalidation_condition,
+        "invalidation_level": action_contract.get("invalidation_level"),
+        "position_invalidation_level": action_contract.get("position_invalidation_level"),
+        "exit_hint": action_contract.get("exit_hint"),
+        "atr_stop_distance": action_contract.get("atr_stop_distance"),
+        "expected_horizon_days": action_contract.get("expected_horizon_days"),
         "horizon_class": horizon_class,
         "trend_direction": trend_direction,
         "entry_timing_signal": entry_timing_signal,
@@ -3665,8 +3822,14 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
             "signal": str(action_contract.get("signal") or ""),
             "evidence_role": action_contract.get("evidence_role"),
             "entry_trigger": str(action_contract.get("entry_trigger") or "").strip(),
+            "trigger_quality_score": max(
+                0.0,
+                min(1.0, _safe_float(action_contract.get("trigger_quality_score"), 0.0)),
+            ),
             "invalidation": str(action_contract.get("invalidation_condition") or "").strip(),
             "invalidation_level": action_contract.get("invalidation_level"),
+            "position_invalidation_level": action_contract.get("position_invalidation_level"),
+            "exit_hint": str(action_contract.get("exit_hint") or "").strip(),
             "atr_stop_distance": action_contract.get("atr_stop_distance"),
             "setup_type": str(action_contract.get("setup_type") or "").strip(),
             "horizon_class": action_contract.get("horizon_class"),
@@ -3687,15 +3850,72 @@ def _execution_signal_payloads(analyst_signals: list | None, target_side: str) -
     return payloads
 
 
+def _target_execution_lifecycle_boundaries(
+    analyst_signals: list | None,
+    target_side: str,
+) -> tuple[bool, bool]:
+    """Read entry and post-fill boundaries from aligned formal AECs."""
+    payloads = _execution_signal_payloads(analyst_signals, target_side)
+    entry_invalidation_present = False
+    position_exit_boundary_present = False
+    for analyst in ANALYST_ORDER:
+        payload = payloads.get(analyst)
+        if not isinstance(payload, dict) or payload.get("side") != target_side:
+            continue
+        if _execution_payload_has_position_exit_boundary(payload):
+            position_exit_boundary_present = True
+        if analyst not in {"technical", "commodity_news"}:
+            continue
+        profile = normalize_execution_profile(payload.get("entry_timing_signal"))
+        if not execution_profile_allowed_for_analyst(analyst, profile):
+            continue
+        if _execution_payload_has_invalidation(payload):
+            entry_invalidation_present = True
+    # Unit-level helpers also accept an SCC-rebuilt evidence object directly.
+    # The production PM path has already replaced state analyst payloads with
+    # ``build_pm_evidence_signals_from_scc`` before reaching this function.
+    for signal in analyst_signals or []:
+        if _signal_side_text(getattr(signal, "signal", None)) != target_side:
+            continue
+        agent = _normalize_agent_name(str(getattr(signal, "agent_name", "") or ""))
+        if _has_position_exit_boundary([signal], target_side=target_side):
+            position_exit_boundary_present = True
+        if agent in {"technical", "commodity_news"} and _has_structured_invalidation_condition(
+            [signal],
+            target_side=target_side,
+        ):
+            entry_invalidation_present = True
+    return entry_invalidation_present, position_exit_boundary_present
+
+
 def _execution_payload_has_invalidation(payload: dict) -> bool:
     if not payload.get("invalidation_present"):
         return False
-    condition = str(payload.get("invalidation") or "").strip().lower()
-    if condition not in {"", "unknown", "none", "n/a", "null"}:
+    return not entry_invalidation_contract_error(
+        profile=payload.get("entry_timing_signal") or payload.get("execution_profile"),
+        side=payload.get("side"),
+        invalidation_condition=payload.get("invalidation"),
+        invalidation_level=payload.get("invalidation_level"),
+    )
+
+
+def _execution_payload_has_position_exit_boundary(payload: dict) -> bool:
+    try:
+        if float(payload.get("position_invalidation_level") or 0.0) > 0.0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if float(payload.get("atr_stop_distance") or 0.0) > 0.0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if str(payload.get("exit_hint") or "").strip():
         return True
-    if payload.get("invalidation_level") is not None:
-        return True
-    return payload.get("atr_stop_distance") is not None
+    try:
+        return float(payload.get("expected_horizon_days") or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def _select_execution_evidence_payload(
@@ -3757,6 +3977,32 @@ def _select_execution_evidence_payload(
     return eligible[0]
 
 
+def _select_position_lifecycle_evidence_payload(
+    payloads: dict,
+    *,
+    target_side: str,
+) -> dict:
+    """Select one same-side post-fill lifecycle AEC independently of entry."""
+    analyst_order = {name: index for index, name in enumerate(ANALYST_ORDER)}
+    eligible: list[dict] = []
+    for analyst in ANALYST_ORDER:
+        payload = payloads.get(analyst)
+        if not isinstance(payload, dict) or payload.get("side") != target_side:
+            continue
+        if not _execution_payload_has_position_exit_boundary(payload):
+            continue
+        eligible.append(payload)
+    if not eligible:
+        raise ValueError("pm_position_lifecycle_evidence_not_found")
+    eligible.sort(
+        key=lambda payload: (
+            -_safe_float(payload.get("confidence"), 0.0),
+            analyst_order.get(str(payload.get("agent_name") or ""), len(analyst_order)),
+        )
+    )
+    return eligible[0]
+
+
 def _execution_profile_and_source(payload: dict, *, authority_type: str) -> tuple[str, str]:
     _ = authority_type
     profile = normalize_execution_profile(payload.get("execution_profile"))
@@ -3794,6 +4040,7 @@ def _build_execution_contract_fields(
     authority_type = str(final_entry_authority.get("authority_type") or "not_applicable")
     signal_payloads = _execution_signal_payloads(analyst_signals, target_side)
     selected_execution_evidence = None
+    selected_position_lifecycle_evidence = None
 
     if target_lots == current_lots or lots_delta == 0:
         profile = "hold"
@@ -3816,6 +4063,10 @@ def _build_execution_contract_fields(
         profile, trigger_source = _execution_profile_and_source(
             selected_execution_evidence,
             authority_type=authority_type,
+        )
+        selected_position_lifecycle_evidence = _select_position_lifecycle_evidence_payload(
+            signal_payloads,
+            target_side=target_side,
         )
 
     entry_trigger = (
@@ -3867,12 +4118,17 @@ def _build_execution_contract_fields(
         "target_lots": int(target_lots),
         "lots_delta": int(lots_delta),
         "entry_trigger": entry_trigger,
+        "trigger_quality_score": (
+            selected_execution_evidence.get("trigger_quality_score")
+            if selected_execution_evidence
+            else 0.0
+        ),
         "invalidation": invalidation,
         "setup_type": selected_execution_evidence.get("setup_type") if selected_execution_evidence else None,
         "horizon_class": selected_execution_evidence.get("horizon_class") if selected_execution_evidence else None,
         "expected_horizon_days": (
-            selected_execution_evidence.get("expected_horizon_days")
-            if selected_execution_evidence
+            selected_position_lifecycle_evidence.get("expected_horizon_days")
+            if selected_position_lifecycle_evidence
             else None
         ),
         "market_regime": selected_execution_evidence.get("market_regime") if selected_execution_evidence else None,
@@ -3881,9 +4137,19 @@ def _build_execution_contract_fields(
             if selected_execution_evidence
             else None
         ),
+        "position_invalidation_level": (
+            selected_position_lifecycle_evidence.get("position_invalidation_level")
+            if selected_position_lifecycle_evidence
+            else None
+        ),
+        "exit_hint": (
+            selected_position_lifecycle_evidence.get("exit_hint")
+            if selected_position_lifecycle_evidence
+            else None
+        ),
         "atr_stop_distance": (
-            selected_execution_evidence.get("atr_stop_distance")
-            if selected_execution_evidence
+            selected_position_lifecycle_evidence.get("atr_stop_distance")
+            if selected_position_lifecycle_evidence
             else None
         ),
         "valid_until": f"{date_text} 15:00:00" if date_text else "",
@@ -4919,10 +5185,12 @@ def _current_open_evidence_snapshot(
     has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
     setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
     has_monitorable_setup = _scorecard_monitorable_setup(side_scorecard)
-    has_invalidation = (
-        _has_structured_invalidation_condition(analyst_signals or [])
-        or _has_explicit_stop_protection(analyst_signals or [])
-        or _scorecard_invalidation_present(side_scorecard)
+    (
+        has_entry_invalidation,
+        has_position_exit_boundary,
+    ) = _target_execution_lifecycle_boundaries(
+        analyst_signals or [],
+        side,
     )
     payloads = _analyst_signal_payloads(analyst_signals or {})
     min_support_confidence = float(ev_cfg.get("real_trade_min_analyst_confidence", 0.45) or 0.45)
@@ -4941,6 +5209,7 @@ def _current_open_evidence_snapshot(
     )
     technical_opposes_side = _payload_opposes_side(technical_payload, side, min_support_confidence)
     fundamental_supports_side = _payload_supports_side(fundamental_payload, side, min_support_confidence)
+    fundamental_opposes_side = _payload_opposes_side(fundamental_payload, side, min_support_confidence)
     news_supports_side = _payload_supports_side(news_payload, side, min_support_confidence)
     news_override = _news_high_quality_override(news_payload, side, ev_cfg)
     independent_support_count = sum(
@@ -4957,8 +5226,16 @@ def _current_open_evidence_snapshot(
     strong_realtime_evidence = bool(
         technical_entry_timing_supports_side
         or news_override
-        or (independent_support_count >= 2 and has_invalidation and confirmation_score >= min_confirmation)
-        or (strong_market_confirmation and has_tradeable_support and has_invalidation)
+        or (
+            independent_support_count >= 2
+            and has_entry_invalidation
+            and confirmation_score >= min_confirmation
+        )
+        or (
+            strong_market_confirmation
+            and has_tradeable_support
+            and has_entry_invalidation
+        )
     )
     alpha_ev = {
         "scorecard_state": layer,
@@ -4969,12 +5246,14 @@ def _current_open_evidence_snapshot(
         "technical_entry_timing_supports_side": technical_entry_timing_supports_side,
         "technical_opposes_side": technical_opposes_side,
         "fundamental_supports_side": fundamental_supports_side,
+        "fundamental_opposes_side": fundamental_opposes_side,
         "news_supports_side": news_supports_side,
         "news_high_quality_override": news_override,
         "has_tradeable_support": has_tradeable_support,
         "has_monitorable_setup": has_monitorable_setup,
         "setup_quality_ok": setup_quality_ok,
-        "has_invalidation_or_stop": has_invalidation,
+        "has_entry_invalidation": has_entry_invalidation,
+        "has_position_exit_boundary": has_position_exit_boundary,
         "current_confirmation_score": confirmation_score,
         "independent_support_count": independent_support_count,
     }
@@ -4999,8 +5278,12 @@ def _positive_open_action_value_seed(
     min_action_samples = int(ev_cfg.get("real_trade_min_action_value_samples", ev_cfg.get("min_action_value_samples", 2)) or 2)
     positive_reward_min = float(ev_cfg.get("positive_reward_mean_min", 0.0) or 0.0)
     positive_sum_min = float(ev_cfg.get("real_trade_positive_reward_sum_min", 0.0) or 0.0)
+    scorecard = opportunity_scorecard if isinstance(opportunity_scorecard, dict) else {}
+    preferred_side = str(scorecard.get("preferred_side") or "").strip().lower()
+    if preferred_side not in {"long", "short"}:
+        return {}
     candidates: list[dict] = []
-    for side in ("long", "short"):
+    for side in (preferred_side,):
         for row in _action_value_rows_for_side(
             alpha_setup_action_values,
             ticker=ticker,
@@ -5278,8 +5561,14 @@ def _learning_to_position_trace(
                 if isinstance(market_confirmation, dict)
                 else None
             ),
-            "has_structured_invalidation": _has_structured_invalidation_condition(analyst_signals or []),
-            "has_explicit_stop_protection": _has_explicit_stop_protection(analyst_signals or []),
+            "has_structured_invalidation": _has_structured_invalidation_condition(
+                analyst_signals or [],
+                target_side=final_side,
+            ),
+            "has_explicit_stop_protection": _has_explicit_stop_protection(
+                analyst_signals or [],
+                target_side=final_side,
+            ),
             "candidate_memory_cannot_hold_losing_position": True,
             "requires_today_signal_market_state_and_invalidation": True,
         },
@@ -5795,38 +6084,162 @@ def _load_drawdown_control_from_recommendation(db, recommendation_row: dict) -> 
     return drawdown if isinstance(drawdown, dict) else {}
 
 
-def _trading_days_between_settlements(
+def _load_opening_fac_context(
     *,
     db,
     config_id: str,
-    after_date: str,
-    before_date: str,
-) -> int:
-    if not after_date or not before_date:
-        return 0
+    ticker: str,
+    trading_date,
+    current_lots: int,
+) -> dict:
+    """Resolve the still-open strategy lot lineage to its opening FAC."""
+    current_side = "long" if int(current_lots or 0) > 0 else "short" if int(current_lots or 0) < 0 else ""
+    decision_day = _normalize_trading_day_value(trading_date)
+    if not db or not config_id or not ticker or not current_side or not decision_day:
+        if int(current_lots or 0) != 0:
+            raise RuntimeError("pm_opening_fac_context_inputs_missing")
+        return {}
     conn = None
     try:
         conn = db._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             '''
-            SELECT COUNT(DISTINCT substr(ds.trading_date, 1, 10)) AS day_count
-            FROM daily_settlement ds
-            JOIN portfolio p ON ds.portfolio_id = p.id
-            WHERE p.config_id = ?
-              AND substr(ds.trading_date, 1, 10) > ?
-              AND substr(ds.trading_date, 1, 10) < ?
+            SELECT ft.id,
+                   ft.trading_date,
+                   ft.action,
+                   ft.lots,
+                   ft.source_type,
+                   ft.recommendation_id,
+                   COALESCE(ft.execution_price, ft.price) AS execution_price,
+                   fr.signal_snapshot,
+                   fr.signal_snapshot_artifact_path,
+                   fr.signal_snapshot_sha256
+            FROM futures_transactions ft
+            LEFT JOIN futures_recommendation fr ON fr.id = ft.recommendation_id
+            WHERE ft.config_id = ?
+              AND upper(ft.ticker) = upper(?)
+              AND substr(ft.trading_date, 1, 10) < ?
+            ORDER BY substr(ft.trading_date, 1, 10), ft.created_at, ft.id
             ''',
-            (config_id, after_date, before_date),
+            (config_id, ticker, decision_day),
         )
-        row = cursor.fetchone()
-        return int((row["day_count"] if row else 0) or 0)
+        active: dict[str, list[dict]] = {"long": [], "short": []}
+        for raw_row in cursor.fetchall():
+            row = dict(raw_row)
+            source_type = str(row.get("source_type") or "strategy").strip().lower()
+            action = str(row.get("action") or "").strip().lower()
+            lots = max(0, abs(_safe_int(row.get("lots"), 0)))
+            if lots <= 0 or source_type == "rollover":
+                continue
+            if action in {"open_long", "open_short"}:
+                if source_type != "strategy":
+                    continue
+                side = "long" if action == "open_long" else "short"
+                active[side].append({"remaining_lots": lots, "row": row})
+                continue
+            if action not in {"close_long", "close_short"}:
+                continue
+            side = "long" if action == "close_long" else "short"
+            remaining = lots
+            while remaining > 0 and active[side]:
+                first = active[side][0]
+                consumed = min(remaining, int(first.get("remaining_lots") or 0))
+                first["remaining_lots"] = int(first.get("remaining_lots") or 0) - consumed
+                remaining -= consumed
+                if int(first.get("remaining_lots") or 0) <= 0:
+                    active[side].pop(0)
+        candidates = [item for item in active[current_side] if int(item.get("remaining_lots") or 0) > 0]
+        if not candidates:
+            raise RuntimeError("pm_opening_fac_lineage_missing")
+        opening_row = dict(candidates[0].get("row") or {})
+        if not str(opening_row.get("recommendation_id") or "").strip():
+            raise RuntimeError("pm_opening_fac_recommendation_missing")
+        loader = getattr(db, "_deserialize_external_json", None)
+        if callable(loader):
+            snapshot = loader(opening_row, "signal_snapshot")
+        else:
+            raw_snapshot = opening_row.get("signal_snapshot")
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) and raw_snapshot.strip() else {}
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        if not contract:
+            raise RuntimeError("pm_opening_fac_contract_missing")
+        opening_day = _normalize_trading_day_value(opening_row.get("trading_date"))
+        held_trading_days = 0
+        if opening_day and opening_day < decision_day:
+            cursor.execute(
+                '''
+                SELECT COUNT(DISTINCT substr(ds.trading_date, 1, 10)) AS day_count
+                FROM daily_settlement ds
+                JOIN portfolio p ON ds.portfolio_id = p.id
+                WHERE p.config_id = ?
+                  AND substr(ds.trading_date, 1, 10) > ?
+                  AND substr(ds.trading_date, 1, 10) < ?
+                ''',
+                (config_id, opening_day, decision_day),
+            )
+            day_row = cursor.fetchone()
+            held_trading_days = 1 + int((day_row["day_count"] if day_row else 0) or 0)
+        return {
+            "recommendation_id": str(opening_row.get("recommendation_id") or ""),
+            "opening_trading_date": opening_day,
+            "held_trading_days": held_trading_days,
+            "expected_horizon_days": _safe_int(contract.get("expected_horizon_days"), 0),
+            "position_invalidation_level": _safe_float(
+                contract.get("position_invalidation_level"),
+                0.0,
+            ),
+            "exit_hint": str(contract.get("exit_hint") or ""),
+            "atr_stop_distance": _safe_float(contract.get("atr_stop_distance"), 0.0),
+            "opening_execution_price": _safe_float(opening_row.get("execution_price"), 0.0),
+            "setup_type": str(contract.get("setup_type") or ""),
+            "final_action": str(contract.get("final_action") or ""),
+        }
+    except RuntimeError:
+        raise
     except Exception as exc:
-        pass
-        return 0
+        raise RuntimeError("pm_opening_fac_context_failed") from exc
     finally:
         if conn:
             conn.close()
+
+
+def _opening_fac_position_invalidation_breached(
+    *,
+    opening_fac_context: dict | None,
+    ticker: str,
+    current_side: str,
+    current_price: float,
+    current_position,
+    full_config: dict | None,
+) -> bool:
+    context = opening_fac_context if isinstance(opening_fac_context, dict) else {}
+    level = _safe_float(context.get("position_invalidation_level"), 0.0)
+    price = _safe_float(current_price, 0.0)
+    if price <= 0.0:
+        return False
+    if level > 0.0:
+        if current_side == "long":
+            return price <= level
+        if current_side == "short":
+            return price >= level
+    atr_distance = _safe_float(context.get("atr_stop_distance"), 0.0)
+    entry_price = _safe_float(context.get("opening_execution_price"), 0.0)
+    if entry_price <= 0.0:
+        entry_price = _safe_float(getattr(current_position, "entry_price", None), 0.0)
+    if atr_distance > 0.0 and entry_price > 0.0:
+        policy = resolve_exit_policy_config(
+            full_config or {},
+            ticker,
+            str(context.get("setup_type") or ""),
+        )
+        stop_distance = atr_distance * _safe_float(policy.get("atr_multiplier"), 1.8)
+        if current_side == "long":
+            return price <= entry_price - stop_distance
+        if current_side == "short":
+            return price >= entry_price + stop_distance
+    return False
 
 
 def _drawdown_recovery_probe_history(
@@ -6539,10 +6952,12 @@ def _apply_alpha_setup_ev_position_control(
         has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
         setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
         has_monitorable_setup = _scorecard_monitorable_setup(side_scorecard)
-        has_invalidation = (
-            _has_structured_invalidation_condition(analyst_signals or [])
-            or _has_explicit_stop_protection(analyst_signals or [])
-            or _scorecard_invalidation_present(side_scorecard)
+        (
+            has_entry_invalidation,
+            has_position_exit_boundary,
+        ) = _target_execution_lifecycle_boundaries(
+            analyst_signals or [],
+            target_side,
         )
         payloads = _analyst_signal_payloads(analyst_signals or {})
         min_support_confidence = float(ev_cfg.get("real_trade_min_analyst_confidence", 0.45) or 0.45)
@@ -6571,8 +6986,16 @@ def _apply_alpha_setup_ev_position_control(
         strong_realtime_evidence = bool(
             technical_entry_timing_supports_side
             or _news_high_quality_override(news_payload, target_side, ev_cfg)
-            or (independent_support_count >= 2 and has_invalidation and confirmation_score >= float(ev_cfg.get("min_confirmation_score", 0.52) or 0.52))
-            or (strong_market_confirmation and has_tradeable_support and has_invalidation)
+            or (
+                independent_support_count >= 2
+                and has_entry_invalidation
+                and confirmation_score >= float(ev_cfg.get("min_confirmation_score", 0.52) or 0.52)
+            )
+            or (
+                strong_market_confirmation
+                and has_tradeable_support
+                and has_entry_invalidation
+            )
         )
         diagnostics["alpha_setup_ev_fusion"] = {
             "enabled": True,
@@ -6590,7 +7013,8 @@ def _apply_alpha_setup_ev_position_control(
             "has_tradeable_support": has_tradeable_support,
             "has_monitorable_setup": has_monitorable_setup,
             "setup_quality_ok": setup_quality_ok,
-            "has_invalidation_or_stop": has_invalidation,
+            "has_entry_invalidation": has_entry_invalidation,
+            "has_position_exit_boundary": has_position_exit_boundary,
             "strong_realtime_evidence": strong_realtime_evidence,
             "strong_market_confirmation": strong_market_confirmation,
             "technical_supports_side": technical_entry_timing_supports_side,
@@ -6695,10 +7119,12 @@ def _apply_alpha_setup_ev_position_control(
     has_tradeable_support = layer in {"tradeable_candidate", "probe_candidate"}
     setup_quality_ok = _scorecard_setup_quality_ok(side_scorecard)
     has_monitorable_setup = _scorecard_monitorable_setup(side_scorecard)
-    has_invalidation = (
-        _has_structured_invalidation_condition(analyst_signals or [])
-        or _has_explicit_stop_protection(analyst_signals or [])
-        or _scorecard_invalidation_present(side_scorecard)
+    (
+        has_entry_invalidation,
+        has_position_exit_boundary,
+    ) = _target_execution_lifecycle_boundaries(
+        analyst_signals or [],
+        target_side,
     )
     payloads = _analyst_signal_payloads(analyst_signals or {})
     technical_payload = payloads.get("technical", {})
@@ -6742,6 +7168,11 @@ def _apply_alpha_setup_ev_position_control(
     technical_supports_side = technical_entry_timing_supports_side
     technical_opposes_side = _payload_opposes_side(technical_payload, target_side, min_support_confidence)
     fundamental_supports_side = _payload_supports_side(fundamental_payload, target_side, min_support_confidence)
+    fundamental_opposes_side = _payload_opposes_side(
+        fundamental_payload,
+        target_side,
+        min_support_confidence,
+    )
     news_supports_side = _payload_supports_side(news_payload, target_side, min_support_confidence)
     independent_support_count = sum(
         1 for item in (technical_supports_side, fundamental_supports_side, news_supports_side) if item
@@ -6751,8 +7182,16 @@ def _apply_alpha_setup_ev_position_control(
     strong_realtime_evidence = bool(
         technical_supports_side
         or _news_high_quality_override(news_payload, target_side, ev_cfg)
-        or (independent_support_count >= 2 and has_invalidation and confirmation_score >= min_confirmation)
-        or (strong_market_confirmation and has_tradeable_support and has_invalidation)
+        or (
+            independent_support_count >= 2
+            and has_entry_invalidation
+            and confirmation_score >= min_confirmation
+        )
+        or (
+            strong_market_confirmation
+            and has_tradeable_support
+            and has_entry_invalidation
+        )
     )
 
     gate_failures: list[str] = []
@@ -6762,8 +7201,10 @@ def _apply_alpha_setup_ev_position_control(
         gate_failures.append("alpha_setup_current_confirmation_low")
     if require_support and state in {"deployable", "protected"} and not has_tradeable_support:
         gate_failures.append("alpha_setup_release_requires_tradeable_support")
-    if require_invalidation and state in {"deployable", "protected"} and not has_invalidation:
+    if require_invalidation and state in {"deployable", "protected"} and not has_entry_invalidation:
         gate_failures.append("alpha_setup_release_requires_invalidation")
+    if state in {"deployable", "protected"} and not has_position_exit_boundary:
+        gate_failures.append("alpha_setup_release_requires_position_exit_boundary")
     if state in {"capped", "rejected"}:
         gate_failures.append(f"alpha_setup_{state}")
     if "critical_data_gap" in gating_failures:
@@ -6904,7 +7345,8 @@ def _apply_alpha_setup_ev_position_control(
         "has_tradeable_support": has_tradeable_support,
         "has_monitorable_setup": has_monitorable_setup,
         "setup_quality_ok": setup_quality_ok,
-        "has_invalidation_or_stop": has_invalidation,
+        "has_entry_invalidation": has_entry_invalidation,
+        "has_position_exit_boundary": has_position_exit_boundary,
         "expectancy_lane": expectancy_lane,
         "positive_action_value": positive_action_value,
         "positive_action_value_candidate": positive_action_value_candidate,
@@ -6926,6 +7368,7 @@ def _apply_alpha_setup_ev_position_control(
         "technical_entry_timing_supports_side": technical_entry_timing_supports_side,
         "technical_opposes_side": technical_opposes_side,
         "fundamental_supports_side": fundamental_supports_side,
+        "fundamental_opposes_side": fundamental_opposes_side,
         "news_supports_side": news_supports_side,
         "independent_support_count": independent_support_count,
         "profile_stats": {
@@ -7162,8 +7605,11 @@ def _apply_drawdown_and_ticker_loss_control(
         confirmation = market_confirmation or {}
         confirmations = confirmation.get("confirmations") or []
         confirmation_score = _safe_float(confirmation.get("confirmation_score"), 0.0)
-        stop_protected = _has_explicit_stop_protection(analyst_signals or [])
         target_side = _target_side_from_ratio(position_ratio)
+        stop_protected = _has_explicit_stop_protection(
+            analyst_signals or [],
+            target_side=target_side,
+        )
         drawdown_diag = {
             "enabled": True,
             "drawdown": drawdown,
@@ -7976,7 +8422,10 @@ def _apply_mature_alpha_release_control(
 
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
     state_summary = _side_opportunity_state_summary(analyst_signals, target_side)
-    has_invalidation = _has_structured_invalidation_condition(analyst_signals or [])
+    has_invalidation, has_position_exit_boundary = _target_execution_lifecycle_boundaries(
+        analyst_signals or [],
+        target_side,
+    )
     policy_records = _mature_alpha_policy_records(adaptive_policy_state, target_side)
     fast_candidate_records = _fast_candidate_alpha_records(adaptive_policy_state, target_side)
     min_confidence = _safe_float(control.get("min_policy_confidence"), 0.60)
@@ -7997,6 +8446,8 @@ def _apply_mature_alpha_release_control(
         gate_failures.append("no_tradeable_candidate_support")
     if bool(control.get("require_invalidation", True)) and not has_invalidation:
         gate_failures.append("missing_invalidation_boundary")
+    if not has_position_exit_boundary:
+        gate_failures.append("missing_position_exit_boundary")
     if not eligible_records:
         gate_failures.append("no_eligible_mature_alpha_policy")
 
@@ -8006,6 +8457,7 @@ def _apply_mature_alpha_release_control(
         "confirmation_score": confirmation_score,
         "min_confirmation_score": min_confirmation,
         "has_invalidation": bool(has_invalidation),
+        "has_position_exit_boundary": bool(has_position_exit_boundary),
         "opportunity_state_summary": state_summary,
         "policy_count": len(policy_records),
         "eligible_policy_count": len(eligible_records),
@@ -8082,7 +8534,6 @@ def _apply_fast_candidate_alpha_probe_control(
     long_records = [row for row in long_records if _safe_float(row.get("confidence_score"), 0.0) >= min_policy_confidence]
     short_records = [row for row in short_records if _safe_float(row.get("confidence_score"), 0.0) >= min_policy_confidence]
     confirmation_score = _safe_float((market_confirmation or {}).get("confirmation_score"), 0.0)
-    has_invalidation = _has_structured_invalidation_condition(analyst_signals or [])
     min_confirmation = _safe_float(control.get("min_confirmation_score"), 0.58)
 
     candidates: list[tuple[str, list[dict], dict]] = []
@@ -8095,7 +8546,6 @@ def _apply_fast_candidate_alpha_probe_control(
         "enabled": True,
         "confirmation_score": confirmation_score,
         "min_confirmation_score": min_confirmation,
-        "has_invalidation": bool(has_invalidation),
         "long_candidate_count": len(long_records),
         "short_candidate_count": len(short_records),
         "long_state_summary": long_summary,
@@ -8109,6 +8559,10 @@ def _apply_fast_candidate_alpha_probe_control(
 
     chosen: tuple[str, list[dict], dict] | None = None
     for side, records, summary in candidates:
+        has_invalidation, has_position_exit_boundary = _target_execution_lifecycle_boundaries(
+            analyst_signals or [],
+            side,
+        )
         gate_failures: list[str] = []
         if confirmation_score < min_confirmation:
             gate_failures.append("market_confirmation_below_probe_threshold")
@@ -8118,6 +8572,14 @@ def _apply_fast_candidate_alpha_probe_control(
             gate_failures.append("no_tradeable_candidate_support")
         if bool(control.get("require_invalidation", True)) and not has_invalidation:
             gate_failures.append("missing_invalidation_boundary")
+        if not has_position_exit_boundary:
+            gate_failures.append("missing_position_exit_boundary")
+        diagnostics["fast_candidate_alpha_probe"][f"{side}_entry_invalidation"] = bool(
+            has_invalidation
+        )
+        diagnostics["fast_candidate_alpha_probe"][f"{side}_position_exit_boundary"] = bool(
+            has_position_exit_boundary
+        )
         if not gate_failures:
             if chosen is None or len(records) > len(chosen[1]):
                 chosen = (side, records, summary)
@@ -8182,7 +8644,9 @@ def _horizon_consistency_result(
     news_payload: dict | None,
     market_confirmation: dict | None,
     control: dict,
-    has_invalidation: bool,
+    has_entry_invalidation: bool,
+    has_position_exit_boundary: bool,
+    lifecycle: str,
 ) -> dict:
     side_signal = "Bullish" if side == "long" else "Bearish" if side == "short" else "Neutral"
     matching_horizons = []
@@ -8207,7 +8671,9 @@ def _horizon_consistency_result(
         "decision_horizon": decision_horizon,
         "requires_short_timing": False,
         "short_timing_support": False,
-        "has_invalidation": bool(has_invalidation),
+        "lifecycle": str(lifecycle or "new_entry"),
+        "has_entry_invalidation": bool(has_entry_invalidation),
+        "has_position_exit_boundary": bool(has_position_exit_boundary),
         "fail_reasons": [],
     }
     if not detail["enabled"] or side not in {"long", "short"}:
@@ -8229,8 +8695,11 @@ def _horizon_consistency_result(
     detail["short_timing_support"] = bool(short_timing_support)
     if requires_short_timing and not short_timing_support:
         detail["fail_reasons"].append("missing_short_timing_confirmation")
-    if requires_short_timing and bool(control.get("medium_requires_invalidation", True)) and not has_invalidation:
-        detail["fail_reasons"].append("missing_invalidation_boundary")
+    if requires_short_timing and bool(control.get("medium_requires_invalidation", True)):
+        if detail["lifecycle"] == "new_entry" and not has_entry_invalidation:
+            detail["fail_reasons"].append("missing_entry_invalidation_boundary")
+        if not has_position_exit_boundary:
+            detail["fail_reasons"].append("missing_position_exit_boundary")
     detail["passed"] = not detail["fail_reasons"]
     return detail
 
@@ -8325,6 +8794,8 @@ def _apply_holding_rebalance_control(
     risk_level: RiskLevel,
     adaptive_policy_state: list | None = None,
     prior_control_reasons: list[str] | None = None,
+    opening_fac_context: dict | None = None,
+    current_price: float = 0.0,
 ) -> tuple[float, list[str], list[str], dict]:
     reasons: list[str] = []
     notes: list[str] = []
@@ -8366,11 +8837,21 @@ def _apply_holding_rebalance_control(
     news_payload = payloads.get("commodity_news")
     lifecycle_config = control.get("position_lifecycle") or {}
     horizon_config = control.get("horizon_consistency") or {}
-    has_invalidation_boundary = _has_structured_invalidation_condition(analyst_signals)
+    has_entry_invalidation_boundary = _has_structured_invalidation_condition(
+        analyst_signals,
+        target_side=calibration_side,
+    )
+    has_current_position_exit_boundary = _has_position_exit_boundary(
+        analyst_signals,
+        target_side=calibration_side,
+    )
 
     current_lots = int(getattr(current_position, "shares", 0) or 0) if current_position else 0
+    opening_context = opening_fac_context if isinstance(opening_fac_context, dict) else {}
     held_days = (
-        _days_held(getattr(current_position, "entry_date", None), trading_date)
+        _safe_int(opening_context.get("held_trading_days"), 0)
+        if current_position and current_lots != 0 and opening_context
+        else _days_held(getattr(current_position, "entry_date", None), trading_date)
         if current_position and current_lots != 0
         else None
     )
@@ -8390,7 +8871,15 @@ def _apply_holding_rebalance_control(
             "confirmation_score": float(confirmation_score),
             "min_rebalance_ratio": float(min_rebalance_ratio),
             "min_new_entry_ratio": float(min_new_entry_ratio),
-            "has_invalidation_boundary": bool(has_invalidation_boundary),
+            "has_entry_invalidation_boundary": bool(has_entry_invalidation_boundary),
+            "has_current_position_exit_boundary": bool(
+                has_current_position_exit_boundary
+            ),
+            "opening_recommendation_id": opening_context.get("recommendation_id"),
+            "opening_expected_horizon_days": opening_context.get("expected_horizon_days"),
+            "opening_position_invalidation_level": opening_context.get(
+                "position_invalidation_level"
+            ),
             "contextual_rule_calibration": contextual_diag,
         }
     }
@@ -8480,7 +8969,9 @@ def _apply_holding_rebalance_control(
                 news_payload=news_payload,
                 market_confirmation=market_confirmation,
                 control=horizon_config,
-                has_invalidation=has_invalidation_boundary,
+                has_entry_invalidation=has_entry_invalidation_boundary,
+                has_position_exit_boundary=has_current_position_exit_boundary,
+                lifecycle="new_entry",
             )
             detail["horizon_consistency"] = new_entry_horizon
             if not new_entry_horizon.get("passed", True):
@@ -8526,7 +9017,7 @@ def _apply_holding_rebalance_control(
                 opportunity_scorecard_side=scorecard_side,
                 state_summary=state_summary,
                 horizon_result=new_entry_horizon,
-                has_invalidation=has_invalidation_boundary,
+                has_invalidation=has_entry_invalidation_boundary,
                 adaptive_policy_state=adaptive_policy_state,
                 control=control.get("daily_tradeability_gate") or {},
             )
@@ -8566,7 +9057,7 @@ def _apply_holding_rebalance_control(
         return position_ratio, reasons, notes, diagnostics
 
     opposite_side = "short" if current_side == "long" else "long"
-    reversal_side = target_side if target_side in {"long", "short"} else opposite_side
+    reversal_side = opposite_side
     target_strength = _side_signal_strength(reversal_side, long_scores, short_scores)
     current_strength = _side_signal_strength(current_side, long_scores, short_scores)
     fundamental_supports_current = _fundamental_anchor_supports(fundamental_payload, current_side, control)
@@ -8578,6 +9069,34 @@ def _apply_holding_rebalance_control(
     news_supports_current = _news_high_quality_override(news_payload, current_side, control)
     news_override = _news_high_quality_override(news_payload, reversal_side, control)
     signal_counts_current = _side_signal_counts(payloads, current_side)
+    opening_position_invalidation_breached = _opening_fac_position_invalidation_breached(
+        opening_fac_context=opening_context,
+        ticker=ticker,
+        current_side=current_side,
+        current_price=current_price,
+        current_position=current_position,
+        full_config=full_config,
+    )
+    technical_invalidation_confirmed = bool(
+        opening_position_invalidation_breached
+        or (
+            technical_supports_target
+            and not technical_supports_current
+            and signal_counts_current.get("opposite", 0) > 0
+        )
+    )
+    fundamental_medium_opposition = bool(
+        fundamental_supports_target and not fundamental_supports_current
+    )
+    expected_horizon_days = _safe_int(opening_context.get("expected_horizon_days"), 0)
+    opening_horizon_due = bool(
+        expected_horizon_days > 0
+        and held_days is not None
+        and held_days >= expected_horizon_days
+    )
+    explicit_lifecycle_break = bool(
+        technical_invalidation_confirmed or fundamental_medium_opposition
+    )
     current_horizon_consistency = _horizon_consistency_result(
         side=current_side,
         target_lots_hint=1 if current_side == "long" else -1,
@@ -8586,7 +9105,15 @@ def _apply_holding_rebalance_control(
         news_payload=news_payload,
         market_confirmation=market_confirmation,
         control=horizon_config,
-        has_invalidation=has_invalidation_boundary,
+        has_entry_invalidation=True,
+        has_position_exit_boundary=bool(
+            has_current_position_exit_boundary
+            or _safe_float(opening_context.get("position_invalidation_level"), 0.0) > 0.0
+            or _safe_float(opening_context.get("atr_stop_distance"), 0.0) > 0.0
+            or _safe_int(opening_context.get("expected_horizon_days"), 0) > 0
+            or str(opening_context.get("exit_hint") or "").strip()
+        ),
+        lifecycle="holding",
     )
 
     lifecycle_enabled = bool(lifecycle_config.get("enabled", True))
@@ -8615,6 +9142,7 @@ def _apply_holding_rebalance_control(
         and position_pnl_ratio <= float(lifecycle_config.get("failed_loss_ratio", -0.05))
         and not fundamental_supports_current
         and confirmation_score <= float(lifecycle_config.get("failed_max_confirmation_score", 0.45))
+        and explicit_lifecycle_break
     )
     loss_revalidation_due = (
         lifecycle_enabled
@@ -8623,7 +9151,11 @@ def _apply_holding_rebalance_control(
         and position_pnl_ratio <= float(lifecycle_config.get("loss_revalidation_ratio", -0.02))
         and not trend_position
     )
-    loss_revalidation_failed = loss_revalidation_due and not loss_revalidated
+    loss_revalidation_failed = (
+        loss_revalidation_due
+        and not loss_revalidated
+        and explicit_lifecycle_break
+    )
     new_loss_revalidation_due = (
         lifecycle_enabled
         and bool(lifecycle_config.get("new_loss_revalidation_enabled", True))
@@ -8653,20 +9185,24 @@ def _apply_holding_rebalance_control(
             new_loss_failures.append("analyst_conflict")
         if current_strength < min_new_loss_strength or confirmation_score < min_new_loss_confirmation:
             new_loss_failures.append("insufficient_same_day_evidence")
-        if not has_invalidation_boundary:
-            new_loss_failures.append("missing_invalidation_boundary")
+        if not current_horizon_consistency.get("has_position_exit_boundary"):
+            new_loss_failures.append("missing_position_exit_boundary")
         if bool(horizon_config.get("apply_to_losing_holds", True)) and not current_horizon_consistency.get("passed", True):
             new_loss_failures.extend(
                 f"horizon_{reason}" for reason in current_horizon_consistency.get("fail_reasons", [])
             )
     new_loss_revalidated = new_loss_revalidation_due and not new_loss_failures
-    new_loss_revalidation_failed = new_loss_revalidation_due and bool(new_loss_failures)
+    new_loss_revalidation_failed = (
+        new_loss_revalidation_due
+        and bool(new_loss_failures)
+        and explicit_lifecycle_break
+    )
     new_loss_revalidation_exit = (
         new_loss_revalidation_failed
         and (
             position_pnl_ratio <= float(lifecycle_config.get("new_loss_revalidation_exit_ratio", -0.02))
             or (
-                "missing_invalidation_boundary" in new_loss_failures
+                "missing_position_exit_boundary" in new_loss_failures
                 and "current_signal_neutral_or_absent" in new_loss_failures
             )
         )
@@ -8731,7 +9267,7 @@ def _apply_holding_rebalance_control(
         or exploration_positive_hold
     )
     exploration_reconfirm_failures: list[str] = []
-    if exploration_reconfirm_due and not exploration_reconfirmed:
+    if exploration_reconfirm_due and not exploration_reconfirmed and explicit_lifecycle_break:
         if current_state not in {"probe_candidate", "tradeable_candidate"}:
             exploration_reconfirm_failures.append(f"layer_{current_state or 'missing'}")
         if confirmation_score < float(lifecycle_config.get("exploration_reconfirm_min_confirmation_score", 0.55)):
@@ -8751,6 +9287,7 @@ def _apply_holding_rebalance_control(
     exploration_reconfirm_exit = (
         exploration_reconfirm_due
         and not exploration_reconfirmed
+        and explicit_lifecycle_break
         and (
             position_pnl_ratio <= float(lifecycle_config.get("exploration_reconfirm_exit_ratio", -0.003))
             or confirmation_score <= float(lifecycle_config.get("exploration_reconfirm_exit_confirmation_score", 0.48))
@@ -8768,6 +9305,7 @@ def _apply_holding_rebalance_control(
         lifecycle_enabled
         and held_days is not None
         and held_days >= int(lifecycle_config.get("probe_max_hold_days", 2))
+        and (expected_horizon_days <= 0 or opening_horizon_due)
         and position_pnl_ratio < float(lifecycle_config.get("probe_min_profit_ratio", 0.01))
         and confirmation_score < float(lifecycle_config.get("probe_min_confirmation_score", 0.55))
         and not trend_position
@@ -8794,6 +9332,7 @@ def _apply_holding_rebalance_control(
         and position_pnl_ratio < 0
         and not current_horizon_consistency.get("passed", True)
         and not trend_position
+        and explicit_lifecycle_break
     )
     horizon_losing_hold_exit = (
         horizon_losing_hold_failed
@@ -8817,6 +9356,13 @@ def _apply_holding_rebalance_control(
         "fundamental_supports_target": bool(fundamental_supports_target),
         "technical_supports_current": bool(technical_supports_current),
         "technical_supports_target": bool(technical_supports_target),
+        "opening_position_invalidation_breached": bool(
+            opening_position_invalidation_breached
+        ),
+        "technical_invalidation_confirmed": bool(technical_invalidation_confirmed),
+        "fundamental_medium_opposition": bool(fundamental_medium_opposition),
+        "opening_horizon_due": bool(opening_horizon_due),
+        "explicit_lifecycle_break": bool(explicit_lifecycle_break),
         "news_supports_current": bool(news_supports_current),
         "news_hold_anchor_current": bool(news_hold_anchor_current),
         "news_high_quality_override": bool(news_override),
@@ -8852,6 +9398,37 @@ def _apply_holding_rebalance_control(
         "strong_reversal": bool(strong_reversal),
         "strong_exit": bool(strong_exit),
     })
+
+    if opening_position_invalidation_breached:
+        reasons.append("position_lifecycle_failed")
+        notes.append(
+            f"{ticker} {current_side} opening FAC position invalidation breached "
+            f"at price={current_price:.6g}."
+        )
+        detail["decision"] = "exit_opening_fac_position_invalidation"
+        detail["final_target_ratio"] = 0.0
+        return 0.0, reasons, notes, diagnostics
+
+    if technical_invalidation_confirmed and target_side == current_side:
+        reasons.append("position_lifecycle_failed")
+        notes.append(
+            f"{ticker} {current_side} current technical evidence confirms the opposite side; exiting."
+        )
+        detail["decision"] = "exit_current_technical_invalidation"
+        detail["final_target_ratio"] = 0.0
+        return 0.0, reasons, notes, diagnostics
+
+    if fundamental_medium_opposition and target_side == current_side:
+        max_reduction = max(0.0, min(1.0, float(control.get("max_daily_reduction_ratio", 0.40))))
+        reduced_ratio = _signed_abs(current_side, abs(current_ratio) * (1.0 - max_reduction))
+        reasons.append("fundamental_medium_opposition")
+        notes.append(
+            f"{ticker} {current_side} medium-horizon fundamental evidence opposes the hold; "
+            f"ratio {current_ratio:.2%}->{reduced_ratio:.2%}."
+        )
+        detail["decision"] = "reduce_fundamental_medium_opposition"
+        detail["final_target_ratio"] = float(reduced_ratio)
+        return reduced_ratio, reasons, notes, diagnostics
 
     if failed_position:
         reasons.append("position_lifecycle_failed")
@@ -8904,7 +9481,7 @@ def _apply_holding_rebalance_control(
         detail["final_target_ratio"] = 0.0
         return 0.0, reasons, notes, diagnostics
 
-    if exploration_reconfirm_due and not exploration_reconfirmed:
+    if exploration_reconfirm_due and not exploration_reconfirmed and explicit_lifecycle_break:
         reduction_multiplier = max(
             0.0,
             min(1.0, float(lifecycle_config.get("exploration_reconfirm_reduction_multiplier", 0.50) or 0.50)),
@@ -8980,7 +9557,7 @@ def _apply_holding_rebalance_control(
         detail["final_target_ratio"] = float(reduced_ratio)
         return reduced_ratio, reasons, notes, diagnostics
 
-    if probe_expired and not trend_position:
+    if probe_expired and not trend_position and explicit_lifecycle_break:
         reasons.append("position_lifecycle_probe_expired")
         notes.append(
             f"{ticker} {current_side} probe expired: held_days={held_days}, "
@@ -9003,6 +9580,17 @@ def _apply_holding_rebalance_control(
             detail["final_target_ratio"] = float(current_ratio)
             return current_ratio, reasons, notes, diagnostics
 
+        increasing = abs(position_ratio) > abs(current_ratio)
+        if increasing and not technical_supports_current:
+            reasons.append("holding_add_requires_current_technical_trigger")
+            notes.append(
+                f"{ticker} {current_side} add deferred: the existing position remains valid, "
+                "but incremental risk has no current technical entry trigger."
+            )
+            detail["decision"] = "keep_current_without_add_trigger"
+            detail["final_target_ratio"] = float(current_ratio)
+            return current_ratio, reasons, notes, diagnostics
+
         reducing = abs(position_ratio) < abs(current_ratio)
         protective_reduce_requested = any(
             reason in reasons
@@ -9017,6 +9605,15 @@ def _apply_holding_rebalance_control(
                 "hold_exit_action_value_protection",
             }
         )
+        if reducing and not strong_exit and not explicit_lifecycle_break and not protective_reduce_requested:
+            reasons.append("holding_lifecycle_not_invalidated")
+            notes.append(
+                f"{ticker} {current_side} position retained: no opening invalidation, "
+                "explicit reversal, medium-horizon fundamental opposition or hard risk."
+            )
+            detail["decision"] = "keep_current_without_lifecycle_break"
+            detail["final_target_ratio"] = float(current_ratio)
+            return current_ratio, reasons, notes, diagnostics
         if profitable_hold_supported and reducing and not strong_exit and not protective_reduce_requested:
             reasons.append("profitable_hold_continuation")
             notes.append(
@@ -9084,6 +9681,28 @@ def _apply_holding_rebalance_control(
                 "winning_template_continuation_protective_reduce",
             }
         )
+        if not strong_exit and not explicit_lifecycle_break and not protective_exit_requested:
+            if profitable_hold_supported:
+                reasons.append("profitable_hold_continuation")
+                notes.append(
+                    f"{ticker} {current_side} profitable position retained without a lifecycle break."
+                )
+                detail["decision"] = "keep_profitable_supported_exit_deferred"
+            elif trend_position:
+                reasons.append("position_lifecycle_trend_hold")
+                notes.append(
+                    f"{ticker} {current_side} trend position retained without a lifecycle break."
+                )
+                detail["decision"] = "keep_trend_position_exit_deferred"
+            else:
+                reasons.append("holding_lifecycle_not_invalidated")
+                notes.append(
+                    f"{ticker} {current_side} position retained: absence of a new entry trigger "
+                    "is not an exit condition."
+                )
+                detail["decision"] = "keep_current_without_lifecycle_break"
+            detail["final_target_ratio"] = float(current_ratio)
+            return current_ratio, reasons, notes, diagnostics
         if profitable_hold_supported and not strong_exit and not protective_exit_requested:
             reasons.append("profitable_hold_continuation")
             notes.append(
@@ -9727,6 +10346,13 @@ def _run_pm_six_step_decision(state: FundState):
     current_net_exposure = _current_net_exposure(portfolio, account_equity)
     current_ticker_exposure = _signed_position_ratio(current_position, account_equity)
     current_lots_for_control = int(getattr(current_position, "shares", 0) or 0)
+    opening_fac_context = _load_opening_fac_context(
+        db=db,
+        config_id=config_id,
+        ticker=ticker,
+        trading_date=trading_date,
+        current_lots=current_lots_for_control,
+    )
     pre_control_ratio = position_risk.optimal_position_ratio
 
     bq_ratio, bq_reasons, bq_notes, bq_diagnostics = _apply_business_quality_position_gate(
@@ -9803,6 +10429,11 @@ def _run_pm_six_step_decision(state: FundState):
     opportunity_scorecard = ticker_side_selection_result["opportunity_scorecard"]
     fusion_context["opportunity_scorecard"] = opportunity_scorecard
     preferred_side = str(opportunity_scorecard.get("preferred_side") or "flat").strip().lower()
+    target_side_for_confirmation = preferred_side
+    market_confirmation = build_scc_market_confirmation(
+        signal_collection_contract,
+        target_direction=preferred_side,
+    )
     if position_risk.optimal_position_ratio:
         if preferred_side == "long":
             position_risk.optimal_position_ratio = abs(position_risk.optimal_position_ratio)
@@ -10298,7 +10929,8 @@ def _run_pm_six_step_decision(state: FundState):
                     "technical_entry_timing_supports_side",
                     "technical_opposes_side",
                     "has_tradeable_support",
-                    "has_invalidation_or_stop",
+                    "has_entry_invalidation",
+                    "has_position_exit_boundary",
                     "current_confirmation_score",
                     "independent_support_count",
                 )
@@ -10686,6 +11318,8 @@ def _run_pm_six_step_decision(state: FundState):
         risk_level=risk_level,
         adaptive_policy_state=adaptive_policy_state,
         prior_control_reasons=control_reasons,
+        opening_fac_context=opening_fac_context,
+        current_price=float(current_price),
     )
     control_reasons.extend(reasons)
     control_notes.extend(notes)
@@ -11040,7 +11674,11 @@ def _run_pm_six_step_decision(state: FundState):
         and risk_level not in (RiskLevel.DANGER, RiskLevel.EMERGENCY)
         and getattr(current_position, "entry_date", None)
     ):
-        held_days = _days_held(current_position.entry_date, trading_date)
+        held_days = (
+            _safe_int(opening_fac_context.get("held_trading_days"), 0)
+            if opening_fac_context
+            else _days_held(current_position.entry_date, trading_date)
+        )
         reducing_exposure = (
             target_lots == 0
             or (current_lots > 0 and target_lots < current_lots)
@@ -11146,6 +11784,18 @@ def _run_pm_six_step_decision(state: FundState):
         )
         final_entry_authority["target_lots_before_gate"] = int(target_lots)
         final_entry_authority["target_ratio_before_gate"] = float(position_risk.optimal_position_ratio)
+        step4_capital_side = "long" if target_lots > 0 else "short"
+        step4_capital_row = (
+            opportunity_scorecard.get(step4_capital_side)
+            if isinstance(opportunity_scorecard.get(step4_capital_side), dict)
+            else {}
+        )
+        if step4_capital_row and final_entry_authority.get("capital_layer"):
+            step4_capital_row["capital_layer"] = final_entry_authority.get("capital_layer")
+            step4_capital_row["capital_ratio_source"] = final_entry_authority.get("capital_ratio_source")
+            step4_capital_row["alpha_scale_eligible"] = bool(
+                final_entry_authority.get("alpha_scale_eligible")
+            )
         control_diagnostics["final_action_authority"] = final_entry_authority
         if (
             final_entry_authority.get("requires_authority")
@@ -11168,7 +11818,9 @@ def _run_pm_six_step_decision(state: FundState):
             new_net_exposure = current_net_exposure
             control_block_reason = "final_contract_authority_not_met"
 
-    if current_lots == 0 and target_lots != 0:
+    if contract_requires_full_market_capital_rank(
+        {"current_lots": current_lots, "target_lots": target_lots}
+    ):
         (
             target_lots,
             target_value,
@@ -11205,13 +11857,29 @@ def _run_pm_six_step_decision(state: FundState):
     ):
         target_side = "long" if target_lots > 0 else "short"
         try:
-            _select_execution_evidence_payload(
+            selected_execution_evidence = _select_execution_evidence_payload(
                 _execution_signal_payloads(analyst_signals, target_side),
                 target_side=target_side,
                 conditional_path=bool(
                     final_entry_authority.get("conditional_trigger_authority")
                 ),
             )
+            selected_scorecard_row = (
+                opportunity_scorecard.get(target_side)
+                if isinstance(opportunity_scorecard.get(target_side), dict)
+                else {}
+            )
+            if selected_scorecard_row:
+                selected_scorecard_row["trigger_quality_score"] = max(
+                    0.0,
+                    min(
+                        1.0,
+                        _safe_float(
+                            selected_execution_evidence.get("trigger_quality_score"),
+                            0.0,
+                        ),
+                    ),
+                )
         except ValueError as exc:
             if str(exc) != "pm_execution_evidence_not_found":
                 raise
@@ -11407,7 +12075,9 @@ def _run_pm_six_step_decision(state: FundState):
         "target_lots": int(target_lots),
         "lots_delta": int(target_lots - current_lots),
         "holding_days": (
-            _days_held(getattr(current_position, "entry_date", None), trading_date)
+            _safe_int(opening_fac_context.get("held_trading_days"), 0)
+            if opening_fac_context
+            else _days_held(getattr(current_position, "entry_date", None), trading_date)
             if current_position and current_lots != 0
             else None
         ),

@@ -90,6 +90,27 @@ def _side(value: Any) -> str:
     return "flat"
 
 
+def classify_evidence_horizon(item: Mapping[str, Any] | None) -> str:
+    """Map one formal AEC role/horizon to its deterministic decision horizon.
+
+    Role is authoritative because the three analysts intentionally operate on
+    different parts of the lifecycle.  ``horizon_class`` remains the fallback
+    for already-validated evidence that does not declare one of those roles.
+    """
+    values = item if isinstance(item, Mapping) else {}
+    role = _lower(values.get("evidence_role"))
+    if role in {"entry_timing", "event_catalyst"}:
+        return "entry"
+    if role == "direction_context":
+        return "position"
+    horizon = _lower(values.get("horizon_class"), "unknown")
+    if horizon in {"intraday", "short", "event", "event_short"}:
+        return "entry"
+    if horizon in {"medium", "medium_term", "long", "long_term"}:
+        return "position"
+    return "unknown"
+
+
 def _contract_from_signal(signal: Any) -> dict:
     metadata = getattr(signal, "metadata", None)
     if isinstance(metadata, Mapping):
@@ -282,6 +303,22 @@ def build_signal_collection_fusion_summary(
     dominant_opposing: list[dict[str, Any]] = []
     side_counts: Counter[str] = Counter()
     side_strength: Counter[str] = Counter()
+    same_horizon_opposition_count = 0
+    dominant_horizon = "unknown"
+    if dominant_side in {"long", "short"}:
+        for role in ("entry_timing", "event_catalyst", "direction_context"):
+            anchor = next(
+                (
+                    item
+                    for item in items
+                    if _side(item.get("side")) == dominant_side
+                    and _lower(item.get("evidence_role")) == role
+                ),
+                None,
+            )
+            if anchor is not None:
+                dominant_horizon = classify_evidence_horizon(anchor)
+                break
     for item in items:
         analyst = _text(item.get("analyst"), "unknown")
         side = _side(item.get("side"))
@@ -293,36 +330,81 @@ def build_signal_collection_fusion_summary(
         freshness_by_analyst[analyst] = freshness
         side_strength[side] += _safe_float(fusion.get("evidence_strength_score"), 0.0)
         item_conflicts = _as_list(fusion.get("current_evidence_conflict") or item.get("current_evidence_conflict"))
-        if item_conflicts:
-            conflicts.append({"analyst": analyst, "side": side, "conflicts": [str(v) for v in item_conflicts if str(v)]})
-        missing.extend(str(v) for v in _as_list(fusion.get("missing_evidence") or item.get("missing_evidence")) if str(v))
-        confirmation_requirements.extend(
-            str(v) for v in _as_list(fusion.get("confirmation_requirements")) if str(v)
+        item_horizon = classify_evidence_horizon(item)
+        same_horizon_opposition = bool(
+            dominant_side in {"long", "short"}
+            and side in {"long", "short"}
+            and side != dominant_side
+            and dominant_horizon != "unknown"
+            and item_horizon == dominant_horizon
         )
-        if dominant_side in {"long", "short"} and side not in {dominant_side, "flat"}:
-            dominant_opposing.append(
+        entry_relevant = bool(
+            dominant_side not in {"long", "short"}
+            or side == dominant_side
+            or same_horizon_opposition
+        )
+        if item_conflicts and entry_relevant:
+            conflicts.append(
                 {
                     "analyst": analyst,
                     "side": side,
-                    "strength": strength,
-                    "freshness": freshness,
                     "conflicts": [str(v) for v in item_conflicts if str(v)],
                 }
             )
+        if entry_relevant:
+            missing.extend(
+                str(v)
+                for v in _as_list(fusion.get("missing_evidence") or item.get("missing_evidence"))
+                if str(v)
+            )
+            confirmation_requirements.extend(
+                str(v) for v in _as_list(fusion.get("confirmation_requirements")) if str(v)
+            )
+        if dominant_side in {"long", "short"} and side not in {dominant_side, "flat"}:
+            opposing_payload = {
+                "analyst": analyst,
+                "side": side,
+                "strength": strength,
+                "freshness": freshness,
+                "conflicts": [str(v) for v in item_conflicts if str(v)],
+            }
+            if same_horizon_opposition:
+                same_horizon_opposition_count += 1
+                conflicts.append(
+                    {
+                        "analyst": analyst,
+                        "side": side,
+                        "conflicts": ["same_horizon_direction_opposition"],
+                    }
+                )
+            else:
+                dominant_opposing.append(opposing_payload)
     directional = [side for side in ("long", "short") if side_counts.get(side)]
     if not directional:
         alignment_state = "no_direction"
-    elif side_counts.get("long") and side_counts.get("short"):
+    elif same_horizon_opposition_count:
         alignment_state = "conflicted"
-    elif sum(1 for item in items if _side(item.get("side")) in {"long", "short"}) >= 2:
+    elif sum(1 for item in items if _side(item.get("side")) == dominant_side) >= 2:
         alignment_state = "aligned"
     else:
         alignment_state = "single_source"
     consensus_score = 0.0
     if dominant_side in {"long", "short"}:
-        support = side_counts.get(dominant_side, 0)
-        oppose = side_counts.get("short" if dominant_side == "long" else "long", 0)
-        raw = (support + side_strength.get(dominant_side, 0.0)) / max(1.0, len(items) + support + oppose)
+        relevant_items = [
+            item
+            for item in items
+            if _side(item.get("side")) == dominant_side
+            or (
+                _side(item.get("side")) in {"long", "short"}
+                and classify_evidence_horizon(item) == dominant_horizon
+            )
+        ]
+        support = sum(1 for item in relevant_items if _side(item.get("side")) == dominant_side)
+        oppose = sum(1 for item in relevant_items if _side(item.get("side")) not in {dominant_side, "flat"})
+        raw = (support + side_strength.get(dominant_side, 0.0)) / max(
+            1.0,
+            len(relevant_items) + support + oppose,
+        )
         consensus_score = _clip(raw - 0.18 * oppose)
     return {
         "contract_version": FUSION_SEMANTICS_VERSION,
@@ -347,7 +429,7 @@ def build_pm_fusion_diagnostics(signal_collection_contract: Mapping[str, Any] | 
     requirements = fusion.get("confirmation_requirements") or []
     missing = fusion.get("missing_evidence") or []
     consensus = _safe_float(fusion.get("multi_evidence_consensus_score"), 0.0)
-    conflict_count = len(_as_list(conflicts)) + len(_as_list(opposing))
+    conflict_count = len(_as_list(conflicts))
     missing_count = len(_as_list(missing))
     requirement_count = len(_as_list(requirements))
     fusion_penalty = min(0.22, 0.04 * conflict_count + 0.025 * missing_count)
@@ -362,7 +444,7 @@ def build_pm_fusion_diagnostics(signal_collection_contract: Mapping[str, Any] | 
         "missing_evidence_count": missing_count,
         "confirmation_requirement_count": requirement_count,
         "fusion_score_adjustment": round(confirmation_bonus - fusion_penalty, 4),
-        "requires_pm_conflict_resolution": bool(conflict_count or opposing),
+        "requires_pm_conflict_resolution": bool(conflict_count),
         "requires_pm_confirmation_explanation": bool(requirements),
         "no_trade_authority": True,
     }

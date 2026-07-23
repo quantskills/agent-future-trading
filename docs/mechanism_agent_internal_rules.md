@@ -64,8 +64,8 @@ LLM 智能体：自由推理 -> 结构化落地字段 -> 下游确定性消费
 
 | 状态词 | 状态类型 | 产生者 | 消费者 | 含义 | 是否能直接交易 |
 |---|---|---|---|---|---|
-| `no_opportunity` | 机会状态 | 分析师 | 信号收集员、PM | 当前没有完整的逻辑 T 日可观察入场条件与独立失效边界；可保留方向和研究证据 | 否，不计入新增风险支持 |
-| `watch_for_trigger` | 机会状态 | 分析师 | 信号收集员、PM | setup、Trader 可用 T 日15分钟行情观察的具体 `entry_trigger` 和失效边界完整，但当前触发未成立 | 否，不能直接交易；只能由 PM 写成条件触发合约 |
+| `no_opportunity` | 机会状态 | 分析师 | 信号收集员、PM | 当前没有完整的逻辑 T 日可观察入场条件与首次成交前作废边界；可保留方向和研究证据 | 否，不计入新增风险支持 |
+| `watch_for_trigger` | 机会状态 | 分析师 | 信号收集员、PM | setup、Trader 可用 T 日15分钟行情观察的具体 `entry_trigger`，以及同源canonical condition+level入场作废边界完整，但当前触发未成立 | 否，不能直接交易；只能由 PM 写成条件触发合约 |
 | `probe_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立，但证据偏弱、单一或仍需小额验证 | 否，不能直接交易；PM 可转成 `open_probe` |
 | `tradeable_candidate` | 机会状态 | 分析师 | 信号收集员、PM | 当前触发成立、setup 和失效边界完整、证据强 | 否，不能直接交易；PM 可转成 `open_real/add/scale` |
 | `risk_reduction_candidate` | 机会状态 | 分析师/PM 诊断 | PM | 只针对已有持仓，当前证据支持 hold、减仓、退出或风险收缩；空仓时仅保留研究证据 | 否；不得进入新增风险证据、rank、预算或交易权限，PM 只能经既有持仓生命周期转成 `hold/reduce/exit` |
@@ -156,9 +156,11 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | LLM 智能体 | 输出契约 | 必须覆盖的结构化字段 | 自由文本允许范围 | 禁止 |
 |---|---|---|---|---|
-| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 `entry_timing_signal` 只允许 `breakout/pullback/vwap_confirmed`；正式 `entry_trigger` 由共享 canonical 定义生成；其余方向、setup、触发确认、失效和质量字段保持完整；确定性时效由收口工具写入 AEC | 解释价格形态、分析 setup、失效位、品种趋势惯性、波动纪律、假突破风险和只读时效事实的影响 | 输出手数、仓位、PM rank、资金理由、`data_freshness`、`data_unavailable_no_trade`、`final_action_contract`；自创执行 profile 或正式触发文字 |
-| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`；保留方向、供需、库存、利润、基差、失效和研究证据；确定性时效由收口工具写入 AEC | 解释商品驱动优先级、持续性、反向压制、只读时效事实和需要技术面确认的原因 | 输出 Trader profile、执行触发、`data_freshness`、`data_unavailable_no_trade`、手数、仓位、交易动作或资金部署 |
+| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 profile 只允许 `breakout/pullback/vwap_confirmed`；共享代码生成canonical trigger和pre-fill condition；分别输出入场 `invalidation_level` 与持仓 `position_invalidation_level/ATR/exit_hint` | 解释价格形态、setup、两类失效、趋势惯性、波动和假突破风险 | 输出手数、仓位、rank、资金理由、数据时效、最终合约；自创profile或执行文字 |
+| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`、`invalidation_level=null`；可保留成交后 `position_invalidation_level/exit_hint/horizon` | 解释供需、库存、利润、基差、驱动持续性和中期持仓反向风险 | 输出Trader profile、入场失效、数据时效、手数、动作或资金部署 |
 | 期货新闻面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=event_catalyst`；只有当前事件已满足即时执行边界时允许 `entry_timing_signal=event_immediate` 并由共享 canonical 定义生成正式触发；其他新闻证据不创建普通15分钟 profile | 解释新闻事件、政策冲击、影响窗口、是否已兑现、事件催化价值和一次性冲击风险 | 把普通新闻方向写成 watch/profile，或直接写交易动作和手数 |
+
+跨分析师融合按角色周期解释：technical `entry_timing` 是短期入场和技术失效锚点，fundamental `direction_context` 是中期方向、持仓和放大依据，commodity_news `event_catalyst` 只作事件修正。中性证据不进入有效技术信号的共识分母，其内部缺失和冲突也不作为短期入场扣分；跨周期反向及其内部冲突只保留为持仓/放大风险，同一入场周期反向和主方向 AEC 的内部冲突才进入 PM 入场风险解释。
 | 研究员 | 结构化研究成果 | `research_domain`、`sample_scope`、`source_trading_date/trading_date`、`setup_type/profile`、`action_value` 或 `policy_state`、`confidence`、`validity_window`、`evidence_scope`、`excluded_reason` | 解释因果、冲突、反事实、不确定性和未来适用条件 | 修改当天合约、成交、结算、PnL；直接给 Trader 执行规则 |
 
 落地硬规则：
@@ -216,7 +218,8 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 | 当前触发是否成立 | `trigger_valid`、`current_trigger_confirmed` | 自由文本触发权限 |
 | 技术面等待触发 | `opportunity_state=watch_for_trigger`、固定 `entry_timing_signal`、共享 canonical `entry_trigger` | 直接成交、自由文字触发 |
 | 新闻即时事件 | `opportunity_state=probe_candidate/tradeable_candidate`、`entry_timing_signal=event_immediate`、当前触发确认 | 普通15分钟 watch |
-| 失效边界 | `invalidation_present`、`invalidation_condition` | 无边界开仓 |
+| 首次成交前作废边界 | `invalidation_present`、canonical `invalidation_condition`、正数有限 `invalidation_level` | 用 `exit_hint`、ATR或自由文本冒充入场边界 |
+| 成交后持仓边界 | `position_invalidation_level`、`exit_hint`、`atr_stop_distance`、`expected_horizon_days` | 与入场边界串用或让Trader同日生成第二策略动作 |
 | 证据冲突 | `current_evidence_conflict`、`conflicting_factors` | 强行给方向 |
 | 证据强弱 | `fusion_evidence.evidence_strength`及方向、质量、冲突字段 | PM score、rank、手数 |
 | 确定性数据时效 | LLM只读；收口工具写入 `data_freshness`、`fusion_evidence.evidence_freshness`、`fusion_evidence.evidence_decay_risk` | LLM输出或改写时效、PM score、rank、手数 |
@@ -407,8 +410,8 @@ PM 每次生成 `final_action_contract` 必须按以下顺序执行。代码可�
 | 1 | 读取标准输入 | workflow 已提供的 `signal_collection_contract`、账户/持仓/行情读取入口 | 只读信号收集员正式证据包、账户、持仓、合约、市场数据，并写入同一个 PM 内存状态 | 在 PM 内调用证据包 builder；读取上游内部草稿；生成任何独立输出 |
 | 2 | 单品种方向 | `pm_ticker_side_selection`、SCC 方向事实 | 无真实冲突时只把 SCC 唯一 long/short 主方向写成优先级1并同步 `preferred_side`；flat/mixed/conflicted 时保持 flat | 读取学习或机会分重选方向；比较持仓、生成生命周期、rank、手数和交易权限 |
 | 3 | 持仓与交易状态 | `pm_lifecycle_action_port`、`pm_state_transition`、`current_lots`、Step2 方向结果 | 在内存中比较持仓与代表方向，形成 `candidate_quality`、`candidate_layer_hint`、`primary_lifecycle_action_port` | 改写上游 `opportunity_state`；生成最终动作、目标手数和合约；把 Step3 与 Step6 比较作为失败依据 |
-| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 在首次正式学习消费前取得完整 canonical PM 学习池，保留 Step2 方向，随后冻结该池并把拒绝原因留在同一个 PM 内存状态 | Step4 后追加正式学习；把 similar/weak/incomplete prior 当正式记录；把临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限 |
-| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓；七项有符号总和不截断，并按固定排序生成预算顺序 | 让非新增风险合约进入 rank；以负分或零分禁止 probe；让 `add/scale` 绕过 rank；生成第二排名分数或独立 artifact |
+| 4 | 生命周期学习消费 | `decision_memory_retrieval.retrieve_pm_memory`、生命周期学习路由 | 在首次正式学习消费前取得完整 canonical PM 学习池，保留 Step2 方向并冻结；同一个最终 scorecard 结合当日证据和正式学习确定生命周期、`candidate_quality`、probe/real/scale 资金层及层内连续比例 | Step4 后追加正式学习；依赖尚未生成的 rank 升层；把 similar/weak/incomplete prior 当正式记录；把临时路由当最终 `decision_learning_rows`；拿 execution 学习给开仓权限 |
+| 5 | 新增风险全市场 rank 与部署 | `pm_full_market_capital_deployment` | 只处理实际增加风险的 `open/open_probe/open_real/add/scale` 和条件开仓；七项有符号总和不截断，只按 `rank_score` 降序和 ticker 稳定键生成预算顺序 | 让非新增风险合约进入 rank；以负分或零分禁止 probe；让 `add/scale` 绕过 rank；再按层级、tier、证据、候选质量或资金效率生成第二排序；生成第二排名分数或独立 artifact |
 | 6 | 最终合约签发与自检 | `pm_contract_builder`、`step6_contract_generation_check`、`pm_contract_self_check`、`FuturesRecommendation` 返回入口 | 从最终 PM 内存状态原子生成唯一 `final_action_contract` 与唯一 `FuturesRecommendation`，按最终动作和手数重新形成学习事实，并检查最终输出自身 | 分散写多个交易合约；读取 Step1–5 早期状态做回溯比较；返回半成品；让 Trader/Reviewer 补签合约 |
 
 顺序硬规则：
@@ -428,14 +431,14 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 
 | 交易强度/控制项 | 对应配置位置 | 主要参数 | 生效边界 |
 |---|---|---|---|
-| 小额试探 `open_probe` | `src/config/dev.yaml: position_budget_policy` | `probe_margin_ratio`、`probe_margin_max_ratio`、`min_real_trade_margin_ratio` | 只决定 probe 保证金层级；不能突破总保证金硬上限 |
+| 小额试探 `open_probe` | `src/config/dev.yaml: position_budget_policy` | `probe_margin_ratio`、`probe_margin_max_ratio`、`min_real_trade_margin_ratio` | Step4 按最终 `candidate_quality` 在 `0.008-0.015` 内连续确定计划保证金比例；不能突破总保证金硬上限 |
 | 小额试探质量门槛 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.watch_for_trigger_new_entry` | `probe_max_ratio`、`probe_floor_ratio`、`scorecard_probe_min_score`、`single_high_quality_probe_*` | 只允许完整条件机会或当前触发候选进入受控 probe；不能把方向观点变成交易 |
 | 正常真实开仓 `open_real` | `src/config/dev.yaml: position_budget_policy` | `normal_trade_margin_ratio`、`normal_trade_margin_max_ratio`、`deployable_margin_ratio`、`deployable_margin_max_ratio` | 只能由 PM 在 `tradeable_candidate`、资金和风险达标后写入同一张 `final_action_contract` |
 | 正常开仓质量门槛 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.quality_aware_fusion.opportunity_scorecard` | `tradeable_threshold`、`deployable_threshold`、`min_tradeable_candidate_setup_quality`、`min_deployable_setup_quality` | 只影响 PM 排序和仓位层级；不能绕过失效边界或审计 |
 | 放大交易 `scale/add` | `src/config/dev.yaml: capital_utilization_control` | `strong_opportunity_target_margin_ratio_*`、`max_margin_ratio_after_scaling`、`exceptional_validated_*` | 只向强机会、正向学习、强确认和止损/失效边界同时达标的候选释放 |
 | 正向学习释放 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.alpha_setup_ev_fusion` | `positive_expectancy_multiplier`、`min_action_value_samples`、`min_action_value_confidence`、`require_tradeable_support_for_release`、`require_invalidation_for_release` | 只能提高 PM 优先级或释放仓位层级；不能单独生成动作、手数或交易权限 |
 | 条件触发候选 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.watch_for_trigger_new_entry` | `semantic_role`、`requires_final_contract_authority`、`allow_probe`、`probe_max_ratio`、`probe_floor_ratio` | 只允许 PM 写入需要盘中确认的条件触发合约；Trader 未触发不得成交 |
-| 失效边界控制 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.holding_rebalance_control.position_lifecycle` | `require_pretrade_invalidation_for_new_entry`、`missing_invalidation_cap_multiplier`、`missing_invalidation_probe_max_ratio` | 新开/加仓必须有失效边界；缺失时只能降级或阻断，不能正常开仓 |
+| 失效边界控制 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.holding_rebalance_control.position_lifecycle` | `require_pretrade_invalidation_for_new_entry`、`missing_invalidation_cap_multiplier`、`missing_invalidation_probe_max_ratio` | 新开/加仓分别验证canonical入场作废边界和成交后持仓依据；两者不得合并成一个布尔值 |
 | 账户硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破；Auditor 与运营风控链负责硬边界，复盘员只记录真实账户风险事实和归因，不做二次合法性裁决 |
 | PM 计划预算和复盘诊断 | `src/config/dev.yaml: position_budget_policy / capital_utilization_control / net_exposure_control` | `max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_margin_ratio*`、`warning_target_margin_ratio_max`、`recovery_*` | 只服务 PM Step5 计划预算、rank/部署和资金层级；真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时，复盘员只能写事实归因/预警，不能作为日终 hard fail |
 | 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling` | 只作为账户级风险边界或降级依据；不能创建交易机会 |
@@ -450,6 +453,8 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 4. `execution_*_catalog.yaml` 只定义手续费、滑点和退出执行事实；不能产生 PM 交易动作。
 5. 任何 YAML 参数如果会改变交易强度，必须落到 probe、normal、scale、hard cap、diagnostic 中的一类，不能成为第六套隐性门控。
 
+Step4先用当日证据和冻结canonical学习决定probe/real/alpha_scale及层内连续比例；Step5不得反向升层。Step5只对新增风险计算一次七项有符号总分，其中层级分固定为`alpha_scale=6.0`、`real_budget=3.0`、`exploration_probe=0.0`，当日trigger分固定为已验证SCC执行来源的`trigger_quality_score*0.08`。历史trigger结果只属于open/add学习分量。最终只按`rank_score`降序和ticker排序，负分不禁入；6/3/0分带必须保证任意scale高于任意real、任意real高于任意probe，同层再由其余分量区分。
+
 ### 6.4 新开仓机会状态流转
 
 | 输入状态 | 必要条件 | 输出 |
@@ -459,8 +464,8 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | `watch_for_trigger` | setup 完整、失效边界完整、方向明确、风险预算可承受、当前触发未确认 | 条件触发合约 |
 | `probe_candidate` | 当前触发确认、失效边界完整、风险预算可承受 | `open_probe` |
 | `tradeable_candidate` | 当前证据强、失效边界完整、资金和风险可承受 | `open_real`；若资金或风险只允许试探，则 `open_probe` |
-| `tradeable_candidate` | 当前证据强、历史同类 action-value 为正、rank 靠前、资金和风险可承受 | `open_real`，并提高资金优先级 |
-| `tradeable_candidate` | 当前证据极强、历史同类 action-value 为正且样本质量达标、rank 靠前、组合仍有可用风险预算 | 放大新开仓目标手数；仍写入同一张 `final_action_contract` |
+| `tradeable_candidate` | 当前证据完整且正式同类 action-value 为正 | Step4升级为`real_budget`并提高层内计划比例；随后进入Step5唯一rank |
+| `tradeable_candidate` | 成熟重复正收益、强确认、两类失效边界及同向基本面支持同时成立 | Step4升级为`alpha_scale`；随后进入Step5唯一rank和预算 |
 | `tradeable_candidate` | 当前证据强但组合资金已接近硬上限、单品种风险过高或冲突未完全解除 | `open_probe` 或较小 `open_real`，并写明缩手数原因 |
 | hard block | 越权、未来信息、价格异常、保证金硬风险、合约非法 | `wait/0` 或风险处置 |
 | negative learning block | 负向 action-value、重复亏损且无新证据 | `wait/0` 或降级观察 |
@@ -633,9 +638,14 @@ PM 不能：
 | `final_action=wait/hold` 且 `lots_delta=0` | 不下单 | no trade fact |
 | `requires_intraday_confirmation=true` | 只监控触发；触发后按合约执行，未触发不成交 | trigger checked / executed or not triggered |
 | `can_execute_without_intraday_trigger=true` | 不再复判15分钟触发，按合约使用合法1分钟线直接执行 | execution_result；`trigger_checked=false` |
+| 首次成交前先命中canonical `invalidation_level` | 当前FAC永久作废，不改`target_lots` | `fac_invalidated_before_entry`，当日不成交 |
+| 首次成交前超过`valid_until` | 当前FAC永久到期 | `fac_expired_before_entry`，当日不成交 |
+| trigger先成立且成交前未失效 | 下一合法1分钟只成交一次；成交后不再检查入场失效 | 单一策略成交事实 |
 | `open/open_probe/open_real/add/scale/reduce/exit` 且审计通过 | 按合约方向和 `lots_delta` 执行 | 成交、未成交或部分执行事实 |
 | 行情缺失、价格异常、合约不可交易 | 不成交 | execution_block_reason |
 | 到达日内收尾仍未触发 | 记为未触发，不成交 | intraday_trigger_not_met |
+
+策略Trader不读取`position_invalidation_level/ATR/exit_hint`生成退出，不运行第二套策略退出判断。成交后的持仓失效、技术反转和基本面中期反向由下一交易日PM结合原开仓FAC形成唯一`hold/reduce/exit`；forced-risk等运营路径保持独立。
 
 Trader、Auditor 与 PM 的 add/scale 保证金安全口径固定为 `projected_total_margin=current_account_margin-current_ticker_margin+target_ticker_margin`，增量为 `max(0,target_ticker_margin-current_ticker_margin)`。不得把目标品种总保证金直接与剩余保证金比较而重复计算已有持仓；reduce/exit 不得被新增风险保证金检查阻断。
 
@@ -784,7 +794,7 @@ Phase4 后事实
 
 LLM 推理可以充分展开，但必须落成结构化研究成果。自由文本只能解释原因，不能成为下游直接消费的研究结论。
 
-学习事实按三层区分：完整且合法的策略 `trade_episode_memory` 是已结算 episode 事实；episode 可以生成 setup 样本和 profile，但不保证生成带正式 preference 的 canonical action-value；只有 PM 最终 `learning_used.alpha_setup_action_values` 与同一 FAC 的 `pm_lifecycle_learning_trace.decision_learning_rows` 按 ID、canonical、scope、family 和 lane 一致匹配，才算该次决策实际消费。裸 transaction、未完成 episode、rollover 和 forced_risk 不能生成策略 open/add 学习。open/add 绩效按完整 episode 计数和计奖，日记录只继续服务对应 hold/reduce/exit/execution 生命周期，不能把同一笔交易按持仓天数重复计数。
+学习事实按三层区分：完整且合法的策略 `trade_episode_memory` 是已结算 episode 事实；episode 可以生成 setup 样本和 profile，但不保证生成带正式 preference 的 canonical action-value；只有 PM 最终 `learning_used.alpha_setup_action_values` 与同一 FAC 的 `pm_lifecycle_learning_trace.decision_learning_rows` 按 ID、canonical、scope、family 和 lane 一致匹配，才算该次决策实际消费。策略成交按 ticker/side 重放 `0 -> 持仓 -> 完全归零` 周期，分批减仓在归零前不提前形成完整 episode；归零后各物理 pair 仍保留原收益、手续费、close date、去重键和反馈 ID，并共享同一 AEC/SCC/FAC、成交、结算、证据及失效变化轨迹。裸 transaction、未完成 episode、rollover 和 forced_risk 不能生成策略 open/add 学习。open/add 绩效按现有物理 pair 口径计数和计奖，日记录只继续服务对应 hold/reduce/exit/execution 生命周期，不能把同一笔交易按持仓天数重复计数。
 
 ### 11.2 研究输出分域
 

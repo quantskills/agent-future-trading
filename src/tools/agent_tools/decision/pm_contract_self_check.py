@@ -20,6 +20,7 @@ from tools.common.final_action_semantics import (
 )
 from tools.common.execution_trigger_semantics import (
     CANONICAL_EXECUTION_PROFILES,
+    entry_invalidation_contract_error,
     execution_trigger_contract_error,
 )
 
@@ -78,6 +79,15 @@ def _present(value: Any) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def _positive_number(value: Any) -> bool:
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    try:
+        return float(value) > 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def _contract_has_any_rank(contract: Mapping[str, Any]) -> bool:
@@ -363,28 +373,31 @@ def _execution_contract_errors(contract: Mapping[str, Any]) -> List[str]:
         trigger_source=trigger_source,
     ) == "execution_entry_trigger_contract_invalid":
         errors.append("execution_entry_trigger_contract_invalid")
-    invalidation = str(contract.get("invalidation") or "").strip().lower()
-    invalidation_condition_present = invalidation not in {"", "unknown", "none", "n/a", "null"}
+    invalidation_condition = contract.get("invalidation") or contract.get(
+        "invalidation_condition"
+    )
     invalidation_level = contract.get("invalidation_level")
-    try:
-        invalidation_level_present = (
-            not isinstance(invalidation_level, bool)
-            and invalidation_level not in (None, "")
-            and float(invalidation_level) > 0
-        )
-    except (TypeError, ValueError):
-        invalidation_level_present = False
-    atr_stop_distance = contract.get("atr_stop_distance")
-    try:
-        atr_stop_present = (
-            not isinstance(atr_stop_distance, bool)
-            and atr_stop_distance not in (None, "")
-            and float(atr_stop_distance) > 0
-        )
-    except (TypeError, ValueError):
-        atr_stop_present = False
-    if not (invalidation_condition_present or invalidation_level_present or atr_stop_present):
-        errors.append("new_risk_execution_missing_invalidation")
+    entry_invalidation_error = entry_invalidation_contract_error(
+        profile=profile,
+        side=("long" if _as_int(contract.get("target_lots")) > 0 else "short"),
+        invalidation_condition=invalidation_condition,
+        invalidation_level=invalidation_level,
+    )
+    if entry_invalidation_error:
+        if not _present(invalidation_condition) and not _present(invalidation_level):
+            errors.append("new_risk_execution_missing_entry_invalidation")
+        else:
+            errors.append(entry_invalidation_error)
+    position_exit_boundary_present = bool(
+        _positive_number(contract.get("position_invalidation_level"))
+        or _positive_number(contract.get("atr_stop_distance"))
+        or str(contract.get("exit_hint") or "").strip()
+        or _positive_number(contract.get("expected_horizon_days"))
+    )
+    if not position_exit_boundary_present:
+        errors.append("new_risk_execution_missing_position_exit_boundary")
+    if not str(contract.get("valid_until") or "").strip():
+        errors.append("new_risk_execution_missing_valid_until")
     return errors
 
 

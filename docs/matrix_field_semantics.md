@@ -50,7 +50,7 @@
 | `updated_at` | 可变学习 / 组合记录 | 更新时间。 |
 | `last_updated` | 绩效 / 模板记录 | 最后更新时间。 |
 | `snapshot_at` | memory history / 快照记录 | 快照生成时间。 |
-| `valid_until` | 记忆 / 策略 / 学习 | 有效截止日期。 |
+| `valid_until` | 记忆 / 策略 / 学习 / 执行 | 有效截止日期；在新增风险 FAC 中表示本次未成交入场方案的截止时刻，Trader 必须按分钟行情时间执行，过期后当日永久不成交。 |
 | `active` | 记忆 / 策略 / 学习 | 是否启用。 |
 | `status` | 生命周期记录 / Protocol Governor 报告及 `checks[]` | 业务记录沿用既有生命周期状态；PG 报告只使用 `passed`、`failed`，单项检查可额外使用 `skipped`。 |
 | `checks` | Protocol Governor 回测前报告 / 每日回测后报告 | PG 已执行检查的有序列表；每项只能包含已登记的 `check_name`、`status`、`violation_codes` 和 `diagnostic_codes`。 |
@@ -228,12 +228,13 @@
 | `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
 | `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
-| `exit_hint` | 分析师证据 | 退出 / 减仓提示；不是失效边界别名。生产者形成明确失效条件时必须先写入 canonical `invalidation_condition`。 |
+| `exit_hint` | 分析师证据 | 成交后的退出 / 减仓提示；不是入场作废边界别名，不得提升为 `invalidation_condition` 或证明 `invalidation_present`。 |
 | `holding_period_hint` | 分析师证据 | 持仓周期提示。 |
-| `invalidation_present` | 分析师证据 | 是否已有明确失效边界；只能由非空 canonical `invalidation_condition`、合法数值 `invalidation_level` 或正数 `atr_stop_distance` 证明，布尔值本身不能自证。 |
-| `invalidation_condition` | 分析师 / 复盘 | canonical 失效条件；`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 均不得作为其别名。 |
-| `invalidation_level` | 分析师 / 执行风控 | 数值失效价位。 |
-| `atr_stop_distance` | 分析师 / 执行风控 | ATR 止损距离。 |
+| `invalidation_present` | 分析师证据 | 首次成交前是否已有机器可执行的入场作废边界；必须由与 `entry_timing_signal+side` 匹配的 canonical `invalidation_condition` 和正数有限 `invalidation_level` 共同证明，布尔值本身、`exit_hint`、ATR 均不能自证。 |
+| `invalidation_condition` | 分析师 / FAC / Trader | 首次成交前的 canonical 入场作废条件，只允许 `long_price_lte_invalidation_level` 或 `short_price_gte_invalidation_level`，并必须与同一 technical/event AEC 的 profile、side、level 一致；自由文本不得作为别名。 |
+| `invalidation_level` | 分析师 / FAC / Trader | 首次成交前的数值入场作废价；只取消当前未成交 FAC，不得作为成交后持仓止损。 |
+| `position_invalidation_level` | 分析师 / FAC / PM 持仓生命周期 | 成交后的数值持仓失效价；PM 次日追溯原开仓 FAC 时用于 hold/reduce/exit，不进入 Trader 的当日入场作废判断。 |
+| `atr_stop_distance` | 分析师 / FAC / PM 持仓生命周期 | 成交后的 ATR 持仓止损距离；不得证明入场作废边界。 |
 | `add_allowed` | 分析师证据 | 证据是否允许加仓讨论；最终仍由 PM 决定。 |
 | `evidence_role` | 分析师证据 | 分析师职责的固定结构化角色：technical=`entry_timing`、fundamental=`direction_context`、commodity_news=`event_catalyst`。基本面方向证据不能成为 Trader 执行来源。 |
 | `evidence_quality` | 分析师证据 | 证据质量。 |
@@ -299,7 +300,7 @@
 | `status` / `flags` / `missing_evidence` / `source` | Workflow、PM、Auditor 共用的 SCC 数据质量摘要 | 由共享 `build_scc_data_quality_summary` 从已校验 SCC 投影；`status` 只允许 `clean/warning/hard_fail`，`source` 固定为 `signal_collection_contract`。只有 `status=hard_fail` 可形成候选硬数据阻断；warning、基本面/新闻无当日新增和 `missing_evidence` 不能冒充 hard fail，不得使用 `quality_status` 等别名。 |
 | `setup_types` | `signal_collection_contract` | 从上游分析师证据收集到的 `setup_type` 列表。 |
 | `horizon_scope` | `signal_collection_contract` | 汇总后的证据期限范围，来源于 `horizon_class`、`analyst_horizon` 等字段。 |
-| `invalidation_summary` | `signal_collection_contract` | 从上游证据汇总出的失效边界和失效条件。 |
+| `invalidation_summary` | `signal_collection_contract` | 从上游证据汇总出的首次成交前 canonical 入场作废边界；不得把持仓 `exit_hint`、`position_invalidation_level` 或 ATR 混入该证明。 |
 | `collector_decision_boundary` | `signal_collection_contract` | 信号收集员权限边界标记，固定表达其无交易权限，例如 `no_trade_authority`。 |
 
 ## 4. 基本面分析师字段
@@ -364,16 +365,17 @@
 | `horizon_class` | `final_action_contract.horizon_class` | 分析师在AEC生产原始期限类别；PM Step6只从SCC中选择与最终方向、动作及Step4学习作用域一致的最终值。Trader、Reviewer和Researcher只读消费。 |
 | `expected_horizon_days` | `final_action_contract.expected_horizon_days` | 分析师在AEC生产原始天数；PM Step6只从与最终方向和 `horizon_class` 一致的真实AEC中选择，缺失时保持缺失。Trader、Reviewer和Researcher只读消费。 |
 | `market_regime` | `final_action_contract.market_regime` | 分析师在AEC生产原始市场状态；PM Step6只从SCC中选择与最终方向和Step4学习检索作用域一致的最终值。Trader、Reviewer、Researcher和下一交易日PM学习只读消费。 |
-| `invalidation_level` | `final_action_contract.invalidation_level` | 被 PM Step6 选为唯一执行证据的 AEC 所生产的数值失效价位；只在真实数值存在时与该 AEC 的触发、profile 和来源一并写入，禁止默认值、反方向填充或跨分析师拼接。Auditor、Trader、Reviewer和Researcher只读消费。 |
-| `atr_stop_distance` | `final_action_contract.atr_stop_distance` | 被 PM Step6 选为唯一执行证据的 AEC 所生产的 ATR 止损距离；只在真实生产时与同一 AEC 的 setup、触发和失效条件一并写入，禁止默认值或从另一分析师借用。Trader、Reviewer和Researcher只读消费。 |
+| `invalidation_level` | `final_action_contract.invalidation_level` | 被 PM Step6 选为唯一执行证据的 technical/event AEC 所生产的首次成交前作废价；必须与同一 AEC 的 canonical `invalidation`、profile、side 和 trigger 一并写入。Auditor 校验，Trader 仅在首次成交前按分钟时序消费。 |
+| `position_invalidation_level` | `final_action_contract.position_invalidation_level` | 成交后的持仓失效价；PM 次日通过原开仓 recommendation/FAC 追溯并结合当前技术、基本面和硬风险决定唯一 hold/reduce/exit。不得回填为入场 `invalidation_level`，Trader 不据此产生同日第二个策略动作。 |
+| `atr_stop_distance` | `final_action_contract.atr_stop_distance` | 成交后的 ATR 持仓止损距离；只在真实生产时写入，PM 次日持仓生命周期只读消费，禁止默认值或用于证明当日入场作废。 |
 | `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
 | `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / `final_action_contract.learning_used` 摘要 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作；Auditor 不消费或复审该摘要。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
 | `execution_profile` | `final_action_contract` | `breakout/pullback/vwap_confirmed/event_immediate/exit_immediate/hold`。新增风险时 PM 只复制唯一被选执行 AEC 的 `entry_timing_signal`，不得从 `entry_trigger/setup_type/opportunity_type` 自由文本推断，也不得默认 `breakout`。执行 action-value 可保留为现有建议摘要，但不得改写顶层 profile、触发、来源或权限。 |
 | `trigger_source` | `final_action_contract` / Trader 执行摘要 | 唯一顶层执行触发来源：technical 的 `breakout` 使用 `technical_breakout`，`pullback/vwap_confirmed` 使用 `technical_pullback`，commodity_news 的 `event_immediate` 使用 `commodity_news_event`；非新增风险使用 `none` 或 `position_lifecycle`。fundamental 不得成为执行来源；`execution_action_value_*` 只允许存在于既有 `execution_action_value_preference` 建议摘要，不能替代顶层来源。 |
 | `entry_trigger` | `final_action_contract` / Trader 执行摘要 | 新增风险时只复制唯一被选 AEC 的 canonical `entry_trigger`；条件 FAC 必须为 Trader 在逻辑 T 日可观察的具体触发，禁止读取其他分析师或补造默认触发。 |
-| `invalidation` | `final_action_contract` / Trader 执行摘要 | 新增风险时只复制唯一被选 AEC 的 canonical `invalidation_condition`；可与同一 AEC 的 `invalidation_level`、`atr_stop_distance` 共同证明失效边界，禁止使用 `exit_hint`、`would_change_view_if` 或其他别名。 |
-| `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `contract_code`、`setup_type`、`horizon_class`、`expected_horizon_days`、`market_regime`、`execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`atr_stop_distance`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含完整AEC、`target_lots`、`lots_delta`、`final_action`、`learning_used`、`opportunity_rank`、`opportunity_score*`、`capital_allocation_reason`、`position_sizing_result` 或 PM 学习解释。 |
+| `invalidation` | `final_action_contract` / Trader 执行摘要 | 新增风险时只复制唯一被选 technical/event AEC 的 canonical `invalidation_condition`，并与同一 AEC 的 `invalidation_level` 共同证明首次成交前作废边界；`position_invalidation_level`、ATR、`exit_hint` 和自由文本均不得证明它。 |
+| `execution_contract` | Trader Phase2 执行摘要 / 执行 payload | 从已审计 `final_action_contract` 白名单抽取的执行摘要，不是第二张交易合约。只能包含 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger`、`authority_type`、`max_allowed_margin_ratio`、执行相关 `reason_codes` 和 `execution_action_value_preference`；不得包含持仓失效字段、完整AEC、目标手数、rank、资金或 PM 学习解释。 |
 | `final_contract_execution_fields` | Trader Phase2 执行学习上下文 / 执行摘要 | 从已审计 `final_action_contract` 抽取的执行必要字段摘要，可用于记录执行来源和复盘追溯；不是第二张交易合约，不能携带 PM 学习、排名、资金部署解释。 |
 | `conditional_trigger_authority` | `final_action_contract` | PM 允许 Trader 盘中监控条件触发的受控 probe 权限；不等于当前触发成立，也不等于可无条件成交。合法 watch 有资格进入原 Step5 新增风险排名，但只有实际获选并形成非零条件目标的 FAC 才置为 true；已审计通过后必须先由 Trader 用15分钟线写触发/未触发事实，触发后再用1分钟线执行。 |
 | `requires_intraday_confirmation` | `final_action_contract` / 执行字段 | 是否必须等待盘中触发确认；条件 probe 必须为 true。 |
@@ -865,8 +867,9 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `final_action_contract.horizon_class` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 与最终方向、动作及Step4学习作用域一致的最终期限类别。 |
 | `final_action_contract.expected_horizon_days` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 仅从与最终方向和 `horizon_class` 一致的真实AEC中选择；缺失时保持缺失。 |
 | `final_action_contract.market_regime` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher / 下一交易日PM只读 | 与最终方向和Step4学习检索作用域一致的最终市场状态。 |
-| `final_action_contract.invalidation_level` | 分析师AEC生产原始值；PM Step6选择；Auditor / Trader / Reviewer / Researcher只读 | 仅在真实数值存在且来源方向与最终方向一致时写入；禁止默认值和反方向填充。 |
-| `final_action_contract.atr_stop_distance` | technical AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 仅在真实生产且与最终方向及setup一致时写入；禁止默认值。 |
+| `final_action_contract.invalidation_level` | technical/event AEC生产；PM Step6选择；Auditor校验；Trader首次成交前消费 | 与同源 canonical `invalidation`、profile、side、trigger 原子写入，只取消当日未成交 FAC。 |
+| `final_action_contract.position_invalidation_level` | 分析师AEC生产；PM Step6选择；下一交易日PM消费 | 只服务成交后持仓生命周期，不得进入Trader入场作废判断。 |
+| `final_action_contract.atr_stop_distance` | 分析师AEC生产；PM Step6选择；下一交易日PM消费 | 仅在真实生产且与最终方向及setup一致时写入；禁止用于证明入场失效。 |
 | `final_action_contract.evidence_used` | PM 唯一合约 | PM Step6 写入的最终证据、方向、rank、资金部署和 sizing 解释容器。 |
 | `evidence_used.scorecard_preferred_side` / `scorecard_state` / `scorecard_score` | PM 最终证据 | PM scorecard 的首选方向、最终机会状态和分数。 |
 | `evidence_used.direction_evidence_strength` / `direction_evidence_boundary` | PM 最终证据 | 方向证据质量和“只读 SCC、不重建方向证据”的边界。 |
@@ -1023,7 +1026,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `phase2_execution.last_checked_at` / `cutoff_datetime` / `finalize_untriggered` / `loop_iteration` / `reason` | Trader Phase2 | 最后检查、数据截止、未触发收口、循环次数和运行原因。 |
 | `phase2_execution.current_lots_before` / `two_step_reversal` | Trader Phase2 | 执行前持仓及是否需要先退出再反向开仓。 |
 | `phase2_execution.execution_contract` | Trader 执行摘要 | 从已审 `final_action_contract` 白名单提取的执行规则，不是第二张合约。 |
-| `execution_contract.execution_profile` / `trigger_source` / `entry_trigger` / `invalidation` / `valid_until` | Trader 执行摘要 | PM 既定执行 profile、触发来源、入场、失效和有效期。 |
+| `execution_contract.execution_profile` / `trigger_source` / `entry_trigger` / `invalidation` / `invalidation_level` / `valid_until` | Trader 执行摘要 | PM 既定执行 profile、同源触发、首次成交前作废条件/价位及截止时刻；Trader 按分钟真实时序判断，先作废则返回 `fac_invalidated_before_entry`，先触发则只成交一次。 |
 | `execution_contract.requires_intraday_confirmation` / `can_execute_without_intraday_trigger` / `authority_type` / `max_allowed_margin_ratio` / `reason_codes` | Trader 执行摘要 | 盘中确认、直接执行、权限、保证金和原因边界。 |
 | `execution_contract.execution_action_value_preference` | Trader 执行摘要 | PM 已落地的 execution profile 偏好；Trader 不读取研究库或完整AEC。 |
 | `phase2_execution.translated_decision.action` / `lots` / `contract_code` / `price` | Trader 翻译决策 | 合约翻译后的订单动作、手数、具体合约和价格。 |
@@ -1046,14 +1049,14 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `contract_authority_audit.authority_type` / `authority_decision` / `max_allowed_margin_ratio` / `reason_codes` / `open_action_evidence` / `strong_current_evidence` / `watch_for_trigger_block` / `conditional_trigger_authority` / `requires_intraday_confirmation` | Trader 权限审计 | 从唯一合约提取的最终入场权限事实。 |
 | `authority_consistency.passed` / `reason` / `selected_authority` / `sources` / `business_boundary` | Trader 权限一致性 | 唯一合约权限是否自洽及其来源；不得在冲突镜像中自行选择。 |
 | `authority_consistency.sources[].source` / `authority_type` / `authority_decision` / `open_action_evidence` / `strong_current_evidence` / `max_allowed_margin_ratio` | Trader 权限来源 | 权限来源和关键权限字段。 |
-| `phase2_execution.contract_execution_observation.signal_invalidation_observed` / `exit_policy_required` / `exit_policy_reason` / `business_boundary` | Trader 合约观察 | 盘中是否触及失效、是否要求退出策略及其边界。 |
+| `phase2_execution.contract_execution_observation.business_boundary` | Trader 合约观察 | 声明 Trader 只执行成交前入场作废，不用拟开仓 `target_lots` 伪造持仓失效，也不在 Phase2 生成 hold/reduce/exit 策略。 |
 | `phase2_execution.entry_authority_gate.status` / `reason` / `current_lots` / `target_lots` / `business_boundary` | Trader 入场安全闸 | 条件新增风险在触发后是否允许进入下单安全检查。 |
-| `phase2_execution.exit_policy.enabled` / `exit_required` / `target_lots` / `reason` / `policy` / `same_direction_supported` / `days_held` / `is_probe` | Trader 退出策略 | 已审合约下的止损、止盈、时间退出和 probe 持仓事实。 |
+| `phase2_execution.exit_policy.enabled` / `exit_required` / `target_lots` / `reason` / `policy` / `same_direction_supported` / `days_held` / `is_probe` | Trader 非策略运营路径 | 仅保留既有非策略运营订单兼容事实；策略 FAC 路径不得运行或落地该退出判断，唯一日频 hold/reduce/exit 必须由 PM 在 Phase1 签署。 |
 | `phase2_execution.entry_timing.entry_action_family` / `opening_range` / `target_lots_source` | Trader 入场时机 | 入场动作家族、开盘区间和目标手数来源。 |
 | `phase2_execution.execution_simulation.base_price` / `base_price_source` / `base_price_date` / `open_price` / `prev_close_price` / `warning_message` | Trader 执行模拟 | 回测、模拟盘和实盘共用的价格基准与警告。 |
 | `execution_translation.translated_orders` / `rewrite_reasons` / `reference_action` / `reference_lots` | Trader 翻译事实 | 翻译订单、确定性改写原因和参考动作/手数。 |
 | `translated_orders[].stage` / `action` / `lots` / `contract_code` / `price` | Trader 翻译订单 | 单条订单阶段、动作、手数、合约和价格。 |
-| `execution_translation.signal_lifecycle.horizon_class` / `expected_horizon_days` / `entry_trigger` / `invalidation_level` / `atr_stop_distance` / `setup_type` / `market_regime` | Trader 信号生命周期 | 仅从已审计 `final_action_contract` 白名单抽取的PM最终期限、触发、失效、止损、setup和市场状态；不得从SCC重新选择或读旧顶层analyst snapshot。 |
+| `execution_translation.signal_lifecycle.horizon_class` / `expected_horizon_days` / `entry_trigger` / `position_invalidation_level` / `atr_stop_distance` / `setup_type` / `market_regime` | Trader 信号生命周期摘要 | 仅记录已审计 FAC 的持仓周期事实供执行归因；策略路径明确剔除入场 `invalidation_level`，不得从SCC重选、不得触发同日退出。 |
 | `execution_translation.signal_lifecycle.target_price` | Trader运行时派生 | 仅在Trader存在合法输入时才允许派生；不是AEC、SCC或PM必传事实。当前无合法 `target_return` 生产者时不得伪造。 |
 | `execution_translation.phase2_order_plan.current_lots` / `target_lots` / `action` / `lots` / `contract_code` / `price` | Trader Phase2 订单计划 | 最终合约翻译出的当前/目标手数和订单。 |
 | `phase2_order_plan.account_equity` / `current_price` / `risk_level` / `cashflow_ratio` / `current_margin_ratio` / `max_total_margin_ratio` / `max_single_margin_ratio` / `remaining_margin` | Trader 下单安全事实 | FAC 静态计划检查继续按 `projected_total_margin=current_account_margin-current_ticker_margin+target_ticker_margin`、`incremental_margin=max(0,target_ticker_margin-current_ticker_margin)` 计算。策略新增风险在 `_build_transaction()` 中取得实际执行价和最终动态保证金率后，只计算一次 `actual_order_margin=execution_price*lots*contract_multiplier*dynamic_margin_rate`，再按 `projected_margin_ratio=(current_actual_total_margin+actual_order_margin)/(cashflow+current_actual_total_margin)` 复核顶层硬线；小于或等于上限保持 PM 原手数，超过上限使用既有 `margin_insufficient` 整单阻断。不得比较实际保证金与 FAC `max_allowed_margin_ratio`，不得动态缩手；`reduce/exit/forced-risk/rollover` 不进入该新增风险检查。 |

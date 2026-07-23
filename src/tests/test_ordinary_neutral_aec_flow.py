@@ -138,13 +138,12 @@ def _finalize(
     analyst: str,
     signal: AnalystSignal,
     *,
-    invalidation_condition: str = "",
+    invalidation_level: float | None = None,
 ) -> AnalystSignal:
     metadata = dict(signal.metadata or {})
     metadata["data_usage_summary"] = _data_usage(analyst)
-    if invalidation_condition:
-        metadata["invalidation_condition"] = invalidation_condition
     signal.metadata = metadata
+    signal.invalidation_level = invalidation_level
     profile = get_product_price_behavior_profile("BU")
     usage = build_profile_usage_contract("BU", analyst, profile)
     return finalize_analyst_signal(
@@ -323,7 +322,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 finalized = _finalize(
                     analyst,
                     signal,
-                    invalidation_condition="long setup invalid if price closes below 2980",
+                    invalidation_level=2980.0,
                 )
                 contract = finalized.metadata["action_evidence_contract"]
                 self.assertEqual(contract["signal"], "Neutral")
@@ -331,7 +330,10 @@ class OpportunityFinalizationTest(unittest.TestCase):
                 self.assertEqual(contract["opportunity_state"], expected_state)
                 self.assertFalse(contract["trigger_valid"])
                 self.assertFalse(contract["current_trigger_confirmed"])
-                self.assertTrue(contract["invalidation_present"])
+                self.assertEqual(
+                    contract["invalidation_present"],
+                    analyst == "technical",
+                )
                 if analyst != "technical":
                     self.assertEqual(contract["entry_timing_signal"], "")
                     self.assertEqual(contract["entry_trigger"], "")
@@ -343,7 +345,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
         finalized = _finalize(
             "technical",
             signal,
-            invalidation_condition="long setup invalid if price closes below 2980",
+            invalidation_level=2980.0,
         )
         contract = finalized.metadata["action_evidence_contract"]
         self.assertEqual(contract["opportunity_state"], "no_opportunity")
@@ -363,7 +365,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
         self.assertFalse(contract["invalidation_present"])
         self.assertNotIn("invalidation_condition", contract)
 
-    def test_specific_producer_exit_condition_lands_in_canonical_invalidation(self):
+    def test_exit_hint_does_not_become_pre_fill_invalidation(self):
         signal = _ordinary_neutral("technical")
         signal.counterfactual_side = "long"
         signal.neutral_opportunity_bucket = "watchlist_trigger"
@@ -373,12 +375,9 @@ class OpportunityFinalizationTest(unittest.TestCase):
         signal.exit_hint = "long setup invalid if price closes below 2980"
         finalized = _finalize("technical", signal)
         contract = finalized.metadata["action_evidence_contract"]
-        self.assertEqual(
-            contract["invalidation_condition"],
-            "long setup invalid if price closes below 2980",
-        )
-        self.assertTrue(contract["invalidation_present"])
-        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertNotIn("invalidation_condition", contract)
+        self.assertFalse(contract["invalidation_present"])
+        self.assertEqual(contract["opportunity_state"], "no_opportunity")
 
     def test_neutral_is_never_promoted_when_current_trigger_is_marked_true(self):
         signal = _ordinary_neutral("technical")
@@ -389,7 +388,7 @@ class OpportunityFinalizationTest(unittest.TestCase):
         finalized = _finalize(
             "technical",
             signal,
-            invalidation_condition="long setup invalid if price closes below 2980",
+            invalidation_level=2980.0,
         )
         contract = finalized.metadata["action_evidence_contract"]
         self.assertEqual(contract["signal"], "Neutral")

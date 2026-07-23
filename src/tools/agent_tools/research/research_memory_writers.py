@@ -1523,6 +1523,391 @@ def _write_template_and_analyst_learning(
     )
     return {"template_rows": template_rows, "analyst_rows": analyst_rows, "digest_rows": digest_rows}
 
+
+def _table_columns(cursor: sqlite3.Cursor, table_name: str) -> set[str]:
+    try:
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        return {str(row[1]) for row in cursor.fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _episode_fact_fields(row: Mapping[str, Any], fields: Tuple[str, ...]) -> Dict[str, Any]:
+    return {key: row.get(key) for key in fields if key in row}
+
+
+def _episode_signal_states(snapshot: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    scc = (
+        snapshot.get("signal_collection_contract")
+        if isinstance(snapshot.get("signal_collection_contract"), dict)
+        else {}
+    )
+    final_contract = (
+        snapshot.get("final_action_contract")
+        if isinstance(snapshot.get("final_action_contract"), dict)
+        else {}
+    )
+    technical_contract: Dict[str, Any] = {}
+    source_contracts = scc.get("source_contracts") if isinstance(scc.get("source_contracts"), list) else []
+    for source in source_contracts:
+        if not isinstance(source, dict):
+            continue
+        action_contract = (
+            source.get("action_evidence_contract")
+            if isinstance(source.get("action_evidence_contract"), dict)
+            else {}
+        )
+        analyst = str(
+            action_contract.get("analyst")
+            or source.get("analyst")
+            or source.get("source_agent")
+            or ""
+        ).strip().lower()
+        if analyst == "technical":
+            technical_contract = action_contract
+            break
+    return (
+        {
+            "scc_evidence_fusion": (
+                scc.get("evidence_fusion")
+                if isinstance(scc.get("evidence_fusion"), dict)
+                else {}
+            ),
+            "fac_evidence_used": (
+                final_contract.get("evidence_used")
+                if isinstance(final_contract.get("evidence_used"), dict)
+                else {}
+            ),
+        },
+        {
+            "fac_entry_invalidation_condition": final_contract.get("invalidation"),
+            "fac_entry_invalidation_level": final_contract.get("invalidation_level"),
+            "fac_position_invalidation_level": final_contract.get("position_invalidation_level"),
+            "fac_atr_stop_distance": final_contract.get("atr_stop_distance"),
+            "fac_expected_horizon_days": final_contract.get("expected_horizon_days"),
+            "fac_exit_hint": final_contract.get("exit_hint"),
+            "technical_entry_invalidation_present": technical_contract.get("invalidation_present"),
+            "technical_entry_invalidation_condition": technical_contract.get("invalidation_condition"),
+            "technical_entry_invalidation_level": technical_contract.get("invalidation_level"),
+            "technical_position_invalidation_level": technical_contract.get("position_invalidation_level"),
+            "technical_atr_stop_distance": technical_contract.get("atr_stop_distance"),
+            "technical_expected_horizon_days": technical_contract.get("expected_horizon_days"),
+            "technical_exit_hint": technical_contract.get("exit_hint"),
+        },
+    )
+
+
+def _episode_fact_change(
+    previous: Optional[Mapping[str, Any]],
+    current: Mapping[str, Any],
+    *,
+    previous_trading_date: Optional[str],
+) -> Dict[str, Any]:
+    if previous is None:
+        return {
+            "previous_trading_date": None,
+            "changed": False,
+            "changed_fields": {},
+        }
+    changed_fields = {
+        key: {"previous": previous.get(key), "current": current.get(key)}
+        for key in sorted(set(previous) | set(current))
+        if previous.get(key) != current.get(key)
+    }
+    return {
+        "previous_trading_date": previous_trading_date,
+        "changed": bool(changed_fields),
+        "changed_fields": changed_fields,
+    }
+
+
+def _completed_strategy_position_cycles(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    ticker: str,
+    side: str,
+    trading_date: str,
+) -> List[Dict[str, Any]]:
+    """Replay strategy fills into complete 0 -> position -> 0 cycles."""
+    transaction_columns = _table_columns(cursor, "futures_transactions")
+    required_columns = {
+        "id",
+        "config_id",
+        "ticker",
+        "trading_date",
+        "action",
+        "lots",
+        "source_type",
+        "created_at",
+    }
+    if not required_columns.issubset(transaction_columns):
+        return []
+    open_action = "open_long" if side == "long" else "open_short"
+    close_action = "close_long" if side == "long" else "close_short"
+    if side not in {"long", "short"}:
+        return []
+    cursor.execute(
+        '''
+        SELECT *
+        FROM futures_transactions
+        WHERE config_id = ?
+          AND UPPER(ticker) = ?
+          AND substr(trading_date, 1, 10) <= ?
+          AND LOWER(COALESCE(source_type, 'strategy')) = 'strategy'
+          AND action IN (?, ?)
+        ORDER BY substr(trading_date, 1, 10), created_at, id
+        ''',
+        (config_id, ticker, str(trading_date)[:10], open_action, close_action),
+    )
+    position_lots = 0
+    active_cycle: Optional[Dict[str, Any]] = None
+    completed: List[Dict[str, Any]] = []
+    for raw_row in cursor.fetchall():
+        row = dict(raw_row)
+        action = str(row.get("action") or "")
+        lots = abs(_safe_int(row.get("lots"), 0))
+        if lots <= 0:
+            continue
+        if action == open_action:
+            if position_lots <= 0:
+                active_cycle = {
+                    "side": side,
+                    "open_date": str(row.get("trading_date") or "")[:10],
+                    "close_date": None,
+                    "transactions": [],
+                }
+                position_lots = 0
+            position_lots += lots
+            if active_cycle is not None:
+                active_cycle["transactions"].append(row)
+            continue
+        if action != close_action or position_lots <= 0 or active_cycle is None:
+            continue
+        active_cycle["transactions"].append(row)
+        position_lots = max(0, position_lots - lots)
+        if position_lots == 0:
+            active_cycle["close_date"] = str(row.get("trading_date") or "")[:10]
+            active_cycle["transaction_ids"] = tuple(
+                str(item.get("id") or "")
+                for item in active_cycle["transactions"]
+                if item.get("id")
+            )
+            completed.append(active_cycle)
+            active_cycle = None
+    return completed
+
+
+def _completed_cycle_for_pair(
+    cycles: List[Dict[str, Any]],
+    pair: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    open_transaction_id = str(pair.get("open_transaction_id") or "")
+    close_transaction_id = str(pair.get("close_transaction_id") or "")
+    if not open_transaction_id or not close_transaction_id:
+        return None
+    for cycle in cycles:
+        transaction_ids = set(cycle.get("transaction_ids") or ())
+        if open_transaction_id in transaction_ids and close_transaction_id in transaction_ids:
+            return cycle
+    return None
+
+
+def _episode_position_lifecycle_trace(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    ticker: str,
+    pair: Mapping[str, Any],
+    position_cycle: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Collect settled, formal facts for the physical open/close episode.
+
+    The trace is descriptive only.  Pair economics remain owned by
+    ``build_completed_trade_pairs`` and are not recomputed from these rows.
+    """
+    open_date = str(position_cycle.get("open_date") or "")[:10]
+    close_date = str(position_cycle.get("close_date") or "")[:10]
+    if not open_date or not close_date or close_date < open_date:
+        return {}
+
+    recommendations_by_date: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    recommendation_columns = _table_columns(cursor, "futures_recommendation")
+    required_recommendation_columns = {
+        "id",
+        "config_id",
+        "underlying_code",
+        "trading_date",
+        "effective_trade_date",
+        "source_type",
+        "created_at",
+    }
+    if required_recommendation_columns.issubset(recommendation_columns):
+        cursor.execute(
+            '''
+            SELECT *
+            FROM futures_recommendation
+            WHERE config_id = ?
+              AND UPPER(underlying_code) = ?
+              AND LOWER(COALESCE(source_type, '')) = 'strategy'
+              AND substr(COALESCE(NULLIF(effective_trade_date, ''), trading_date), 1, 10)
+                  BETWEEN ? AND ?
+            ORDER BY substr(COALESCE(NULLIF(effective_trade_date, ''), trading_date), 1, 10),
+                     created_at, id
+            ''',
+            (config_id, ticker, open_date, close_date),
+        )
+        for raw_row in cursor.fetchall():
+            row = dict(raw_row)
+            fact_date = str(row.get("effective_trade_date") or row.get("trading_date") or "")[:10]
+            if fact_date:
+                recommendations_by_date[fact_date].append(row)
+
+    transactions_by_date: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for raw_row in position_cycle.get("transactions") or []:
+        if not isinstance(raw_row, Mapping):
+            continue
+        fact_date = str(raw_row.get("trading_date") or "")[:10]
+        if fact_date:
+            transactions_by_date[fact_date].append(
+                _episode_fact_fields(
+                    raw_row,
+                    (
+                        "id", "recommendation_id", "trading_date", "ticker",
+                        "contract_code", "action", "lots", "execution_price",
+                        "settle_price", "contract_multiplier", "margin_rate",
+                        "margin_used", "commission", "source_type", "execution_phase",
+                        "slippage_ticks", "slippage_amount",
+                    ),
+                )
+            )
+
+    ticker_settlements_by_date: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    ticker_pnl_columns = _table_columns(cursor, "ticker_daily_pnl")
+    portfolio_columns = _table_columns(cursor, "portfolio")
+    if (
+        {"portfolio_id", "trading_date", "ticker"}.issubset(ticker_pnl_columns)
+        and {"id", "config_id"}.issubset(portfolio_columns)
+    ):
+        cursor.execute(
+            '''
+            SELECT tdp.*
+            FROM ticker_daily_pnl tdp
+            JOIN portfolio p ON p.id = tdp.portfolio_id
+            WHERE p.config_id = ?
+              AND UPPER(tdp.ticker) = ?
+              AND substr(tdp.trading_date, 1, 10) BETWEEN ? AND ?
+            ORDER BY substr(tdp.trading_date, 1, 10), tdp.rowid
+            ''',
+            (config_id, ticker, open_date, close_date),
+        )
+        for raw_row in cursor.fetchall():
+            row = dict(raw_row)
+            fact_date = str(row.get("trading_date") or "")[:10]
+            if fact_date:
+                ticker_settlements_by_date[fact_date].append(
+                    _episode_fact_fields(
+                        row,
+                        (
+                            "trading_date", "ticker", "daily_pnl", "commission",
+                            "holding_pnl", "new_position_pnl", "close_pnl",
+                            "position_type", "lots", "entry_price", "settle_price",
+                        ),
+                    )
+                )
+
+    fact_dates = sorted(
+        {
+            open_date,
+            close_date,
+            *recommendations_by_date.keys(),
+            *transactions_by_date.keys(),
+            *ticker_settlements_by_date.keys(),
+        }
+    )
+    daily_facts: List[Dict[str, Any]] = []
+    previous_evidence: Optional[Dict[str, Any]] = None
+    previous_invalidation: Optional[Dict[str, Any]] = None
+    previous_date: Optional[str] = None
+    for fact_date in fact_dates:
+        recommendation_facts: List[Dict[str, Any]] = []
+        primary_snapshot: Dict[str, Any] = {}
+        for recommendation in recommendations_by_date.get(fact_date, []):
+            snapshot = _recommendation_snapshot(recommendation)
+            if snapshot:
+                primary_snapshot = snapshot
+            recommendation_facts.append(
+                {
+                    "recommendation": {
+                        key: recommendation.get(key)
+                        for key in (
+                            "id",
+                            "trading_date",
+                            "effective_trade_date",
+                            "source_type",
+                            "underlying_code",
+                            "contract_code",
+                            "action",
+                            "lots",
+                            "status",
+                        )
+                        if key in recommendation
+                    },
+                    "signal_collection_contract": (
+                        snapshot.get("signal_collection_contract")
+                        if isinstance(snapshot.get("signal_collection_contract"), dict)
+                        else {}
+                    ),
+                    "final_action_contract": (
+                        snapshot.get("final_action_contract")
+                        if isinstance(snapshot.get("final_action_contract"), dict)
+                        else {}
+                    ),
+                    "execution_result": _execution_result_from_snapshot(snapshot),
+                }
+            )
+        if primary_snapshot:
+            evidence_state, invalidation_state = _episode_signal_states(primary_snapshot)
+        else:
+            evidence_state = dict(previous_evidence or {})
+            invalidation_state = dict(previous_invalidation or {})
+        daily_facts.append(
+            {
+                "trading_date": fact_date,
+                "recommendations": recommendation_facts,
+                "transactions": transactions_by_date.get(fact_date, []),
+                "ticker_settlement_facts": ticker_settlements_by_date.get(fact_date, []),
+                "evidence_state": evidence_state,
+                "evidence_change": _episode_fact_change(
+                    previous_evidence,
+                    evidence_state,
+                    previous_trading_date=previous_date,
+                ),
+                "invalidation_state": invalidation_state,
+                "invalidation_change": _episode_fact_change(
+                    previous_invalidation,
+                    invalidation_state,
+                    previous_trading_date=previous_date,
+                ),
+            }
+        )
+        if primary_snapshot:
+            previous_evidence = evidence_state
+            previous_invalidation = invalidation_state
+            previous_date = fact_date
+
+    return {
+        "fact_source": "settled_aec_scc_fac_transaction_and_settlement_records",
+        "open_date": open_date,
+        "close_date": close_date,
+        "open_transaction_id": pair.get("open_transaction_id"),
+        "close_transaction_id": pair.get("close_transaction_id"),
+        "position_cycle_transaction_ids": list(position_cycle.get("transaction_ids") or ()),
+        "daily_facts": daily_facts,
+        "economic_result_source": "completed_trade_pair",
+        "economic_result_recalculated": False,
+    }
+
 def _write_trade_episode_memory(
     cursor: sqlite3.Cursor,
     *,
@@ -1554,6 +1939,7 @@ def _write_trade_episode_memory(
     now = _utc_now()
     inserted = 0
     episode_payloads: List[Dict[str, Any]] = []
+    cycle_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for pair in pairs:
         if str(pair.get("close_date") or "") > trading_date:
             continue
@@ -1563,6 +1949,18 @@ def _write_trade_episode_memory(
         side = str(pair.get("side") or "").lower()
         if not ticker or side not in {"long", "short"}:
             continue
+        cycle_key = (ticker, side)
+        if cycle_key not in cycle_cache:
+            cycle_cache[cycle_key] = _completed_strategy_position_cycles(
+                cursor,
+                config_id=config_id,
+                ticker=ticker,
+                side=side,
+                trading_date=trading_date,
+            )
+        position_cycle = _completed_cycle_for_pair(cycle_cache[cycle_key], pair)
+        if not position_cycle:
+            continue
         combo = _signal_combo_from_snapshot(snapshot)
         expected_days = _expected_horizon_days(snapshot, side)
         horizon = _horizon_class(expected_days, snapshot)
@@ -1570,7 +1968,7 @@ def _write_trade_episode_memory(
         template = _setup_type(side, combo, snapshot)
         sector = _sector_for_ticker(cfg, ticker)
         net_pnl = _safe_float(pair.get("net_pnl"))
-        episode_date = str(pair.get("close_date") or trading_date or "")
+        episode_date = str(position_cycle.get("close_date") or trading_date or "")
         lesson = _episode_lesson_text(
             ticker=ticker,
             side=side,
@@ -1587,6 +1985,21 @@ def _write_trade_episode_memory(
         close_tx = transaction_lookup.get(str(pair.get("close_transaction_id") or "")) or {}
         safe_snapshot = _learning_safe_snapshot(snapshot)
         opportunity_ranking_trace = _opportunity_ranking_trace(snapshot, side)
+        opening_lifecycle_trace = (
+            (final_contract.get("learning_used") or {}).get("pm_lifecycle_learning_trace") or {}
+            if isinstance(final_contract.get("learning_used"), dict)
+            else {}
+        )
+        position_lifecycle_trace = dict(opening_lifecycle_trace)
+        position_lifecycle_trace.update(
+            _episode_position_lifecycle_trace(
+                cursor,
+                config_id=config_id,
+                ticker=ticker,
+                pair=pair,
+                position_cycle=position_cycle,
+            )
+        )
         payload = {
             "pair": pair,
             "open_transaction": open_tx,
@@ -1608,11 +2021,7 @@ def _write_trade_episode_memory(
                 if isinstance(final_contract.get("learning_used"), dict)
                 else {}
             ),
-            "position_lifecycle_trace": (
-                (final_contract.get("learning_used") or {}).get("pm_lifecycle_learning_trace") or {}
-                if isinstance(final_contract.get("learning_used"), dict)
-                else {}
-            ),
+            "position_lifecycle_trace": position_lifecycle_trace,
             "loss_template_research_trace": (
                 {"reason_codes": final_contract.get("reason_codes") or []}
                 if final_contract

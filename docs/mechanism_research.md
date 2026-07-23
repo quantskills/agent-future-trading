@@ -67,7 +67,7 @@ Researcher 的数据库写入、`researcher_learning_completed`、外置 payload
 
 | 研究对象 | 记录什么 | 合法消费者 | 边界 |
 |---|---|---|---|
-| `trade_episode_memory` | 已成交策略 episode、证据、合约、执行、结算、PnL | 研究员生成样本、profile 和候选 action-value；分析师与 PM 不直接读取 episode 表 | 只来自 Phase4 后已验证且完整配对的策略 episode；裸 transaction、未完成持仓、rollover、forced_risk 不得冒充策略 episode 学习 |
+| `trade_episode_memory` | 仓位完全归零后的策略 episode、完整持仓周期 AEC/SCC/FAC、成交、结算、证据/失效变化及各物理 pair PnL | 研究员生成样本、profile 和候选 action-value；分析师与 PM 不直接读取 episode 表 | 只来自 Phase4 后已验证并完成 `0 -> 持仓 -> 0` 的策略周期；分批未归零、裸 transaction、rollover、forced_risk 不得冒充完整策略 episode 学习 |
 | `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
@@ -102,7 +102,7 @@ open 评价“当时开仓是否有正期望”；add 评价“同方向扩大�
 
 不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被投资组合经理写入 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能改变方向或目标手数，也不能由交易员直接读取后放宽触发。
 
-open/add 的收益只来自完整策略 episode，并按实际平仓日逐条落样；日内或日终 PnL 碎片不能重复充当 open/add 收益，也不能把一笔完整交易重复计成多笔 profile 交易。日记录仍可为 hold、reduce、exit 和 execution lane 提供对应生命周期事实。完整 episode 只是 action-value 候选来源：状态字段不完整、没有合法 preference 或只形成弱先验时，可以保留样本和 profile，但不得被提升成 PM 正式 canonical 学习。
+open/add 的收益只来自仓位完全归零后的完整策略 episode。系统按 ticker/side 重放策略成交识别完整持仓周期；分批平仓未归零时不提前落完整 episode，归零后每个既有物理 pair 仍按自己的开平收益、手续费、close date 和去重键逐条落样，并共享同一完整生命周期轨迹，不重算或聚合覆盖经济结果。组内最后样本以归零日刷新 profile/action-value，使周期 T 的结果只能在 T+1 以后消费。日内或日终 PnL 碎片不能重复充当 open/add 收益；日记录仍可为 hold、reduce、exit 和 execution lane 提供对应生命周期事实。完整 episode 只是 action-value 候选来源：状态字段不完整、没有合法 preference 或只形成弱先验时，可以保留样本和 profile，但不得被提升成 PM 正式 canonical 学习。
 
 `memory_side_role` 随最终学习 lane 固定：open/add/scale/increase 使用 `target_side`，hold/reduce/exit 使用 `current_position_side`，conditional_monitor 使用 `trigger_side`，execution 使用 `historical_sample_side`。
 

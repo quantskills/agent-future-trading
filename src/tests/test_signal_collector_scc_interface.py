@@ -90,7 +90,7 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         self.assertEqual(contract["dominant_side"], "long")
         self.assertEqual(contract["evidence_items"][0]["confidence"], 0.6)
 
-    def test_equal_long_short_evidence_is_mixed(self):
+    def test_cross_horizon_opposition_is_position_risk_not_entry_conflict(self):
         contract = build_signal_collection_contract(
             ticker="BU",
             trading_date="2025-03-25",
@@ -100,8 +100,105 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
                 _formal_signal("commodity_news", side="flat"),
             ],
         )
-        self.assertEqual(contract["dominant_side"], "mixed")
+        self.assertEqual(contract["dominant_side"], "long")
+        self.assertEqual(contract["side_consensus"], "single_analyst_support")
+        self.assertEqual(contract["evidence_conflict_level"], "low")
+        self.assertEqual(contract["opposing_analysts"], ["fundamental"])
+        self.assertEqual(contract["evidence_fusion"]["cross_analyst_conflicts"], [])
+        self.assertEqual(
+            [row["analyst"] for row in contract["evidence_fusion"]["dominant_opposing_evidence"]],
+            ["fundamental"],
+        )
+
+    def test_same_horizon_news_opposition_remains_entry_conflict(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long"),
+                _formal_signal("fundamental", side="flat"),
+                _formal_signal("commodity_news", side="short"),
+            ],
+        )
+        self.assertEqual(contract["dominant_side"], "long")
         self.assertEqual(contract["side_consensus"], "conflicted")
+        self.assertEqual(contract["evidence_conflict_level"], "medium")
+        self.assertEqual(
+            contract["evidence_fusion"]["cross_analyst_conflicts"][0]["analyst"],
+            "commodity_news",
+        )
+
+    def test_neutral_context_does_not_dilute_technical_entry_consensus(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long", strength_score=0.72),
+                _formal_signal("fundamental", side="flat", strength_score=0.0),
+                _formal_signal("commodity_news", side="flat", strength_score=0.0),
+            ],
+        )
+        self.assertGreaterEqual(
+            contract["evidence_fusion"]["multi_evidence_consensus_score"],
+            0.8,
+        )
+
+    def test_neutral_context_conflicts_and_missing_do_not_penalize_entry(self):
+        technical = _formal_signal("technical", side="long", strength_score=0.72)
+        fundamental = _formal_signal("fundamental", side="flat", strength_score=0.0)
+        news = _formal_signal("commodity_news", side="flat", strength_score=0.0)
+        for signal, marker in ((fundamental, "fundamental_neutral_gap"), (news, "news_neutral_gap")):
+            fusion = signal.metadata["action_evidence_contract"]["fusion_evidence"]
+            fusion["current_evidence_conflict"] = [marker]
+            fusion["missing_evidence"] = [marker]
+            fusion["confirmation_requirements"] = [marker]
+
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[technical, fundamental, news],
+        )
+
+        fusion = contract["evidence_fusion"]
+        self.assertGreaterEqual(fusion["multi_evidence_consensus_score"], 0.8)
+        self.assertEqual(fusion["cross_analyst_conflicts"], [])
+        self.assertEqual(fusion["missing_evidence"], [])
+        self.assertEqual(fusion["confirmation_requirements"], [])
+
+    def test_analyst_internal_conflict_still_reaches_pm_risk_without_changing_direction(self):
+        technical = _formal_signal("technical", side="long")
+        technical.metadata["action_evidence_contract"]["fusion_evidence"][
+            "current_evidence_conflict"
+        ] = ["false_breakout_risk"]
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                technical,
+                _formal_signal("fundamental", side="flat"),
+                _formal_signal("commodity_news", side="flat"),
+            ],
+        )
+        self.assertEqual(contract["dominant_side"], "long")
+        self.assertEqual(contract["side_consensus"], "single_analyst_support")
+        self.assertEqual(
+            contract["evidence_fusion"]["cross_analyst_conflicts"],
+            [
+                {
+                    "analyst": "technical",
+                    "side": "long",
+                    "conflicts": ["false_breakout_risk"],
+                }
+            ],
+        )
+        confirmation = pm_signal_fusion.build_scc_market_confirmation(
+            contract,
+            target_direction="long",
+        )
+        self.assertTrue(confirmation["conflicts"])
+        diagnostics = pm_signal_fusion.build_pm_fusion_diagnostics(contract)
+        self.assertEqual(diagnostics["cross_analyst_conflict_count"], 1)
+        self.assertTrue(diagnostics["requires_pm_conflict_resolution"])
 
     def test_trigger_status_only_uses_dominant_side_evidence(self):
         contract = build_signal_collection_contract(
@@ -175,6 +272,12 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
             "product_profile_evidence",
             contract["source_contracts"][0]["action_evidence_contract"],
         )
+        self.assertIn(
+            "position_invalidation_level",
+            contract["source_contracts"][0]["action_evidence_contract"],
+        )
+        self.assertNotIn("position_invalidation_level", contract)
+        self.assertNotIn("position_invalidation_level", contract["evidence_items"][0])
 
     def test_scc_data_quality_flags_are_derived_from_nested_source_facts(self):
         technical = _formal_signal("technical", side="flat")
@@ -332,6 +435,26 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         wrong_state = {**action_contract, "opportunity_state": "ready_to_buy"}
         with self.assertRaisesRegex(ValueError, "invalid_opportunity_state"):
             validate_action_evidence_contract(wrong_state, analyst="technical")
+
+        wrong_entry_invalidation = {
+            **action_contract,
+            "invalidation_condition": "short_price_gte_invalidation_level",
+        }
+        with self.assertRaisesRegex(ValueError, "entry_invalidation_not_canonical"):
+            validate_action_evidence_contract(
+                wrong_entry_invalidation,
+                analyst="technical",
+            )
+
+        atr_only = {
+            **action_contract,
+            "invalidation_level": None,
+            "invalidation_condition": "",
+            "invalidation_present": True,
+            "atr_stop_distance": 3.0,
+        }
+        with self.assertRaisesRegex(ValueError, "invalidation_proof_missing"):
+            validate_action_evidence_contract(atr_only, analyst="technical")
 
         unknown_field = {**action_contract, "private_direction_score": 0.9}
         with self.assertRaisesRegex(ValueError, "unregistered_field"):
@@ -564,6 +687,24 @@ class SignalCollectorSccInterfaceTest(unittest.TestCase):
         self.assertIn("build_scc_market_confirmation", pm_source)
         self.assertNotIn("MarketConfirmationEngine", pm_source)
         self.assertNotIn("pandaai_extra_data", pm_source)
+
+    def test_pm_market_confirmation_keeps_cross_horizon_opposition_out_of_entry_conflicts(self):
+        contract = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-25",
+            analyst_signals=[
+                _formal_signal("technical", side="long"),
+                _formal_signal("fundamental", side="short"),
+                _formal_signal("commodity_news", side="flat"),
+            ],
+        )
+        confirmation = pm_signal_fusion.build_scc_market_confirmation(
+            contract,
+            target_direction="long",
+        )
+        self.assertEqual(confirmation["status"], "supported")
+        self.assertEqual(confirmation["conflicts"], [])
+        self.assertIn("fundamental", contract["opposing_analysts"])
 
 
 if __name__ == "__main__":

@@ -23,10 +23,18 @@ from agents.decision_team.portfolio_manager import (
 )
 from agents.execution_team.trader import (
     _auditor_verdict_allows_strategy_execution,
+    _mark_intraday_non_execution,
+    _resolve_phase2_execution_basis,
     _translate_pre_open_recommendation_to_order,
 )
 from graph.constants import Signal
-from graph.schema import AnalystSignal, FuturesAction, Portfolio, Position
+from graph.schema import (
+    AnalystSignal,
+    FuturesAction,
+    Portfolio,
+    Position,
+    RecommendationStatus,
+)
 from tests.contract_test_fixtures import build_test_aec, build_test_signal
 from tools.agent_tools.analysis.analyst_quality import apply_trade_research_contract
 from tools.agent_tools.decision.pm_signal_fusion import (
@@ -40,6 +48,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
+from tools.common.execution_trigger_semantics import canonical_entry_invalidation_condition
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_scc_data_quality_summary,
@@ -71,14 +80,19 @@ def _analyst_signal(
     canonical_trigger = {
         ("breakout", "long"): "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
         ("breakout", "short"): "15分钟收盘价向下突破开盘区间下沿且低于VWAP",
-        ("pullback", "long"): "15分钟收盘价不低于VWAP且高于开盘区间下沿",
-        ("pullback", "short"): "15分钟收盘价不高于VWAP且低于开盘区间上沿",
+        ("pullback", "long"): "15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界",
+        ("pullback", "short"): "15分钟先向下扩张，随后回抽开盘区间下沿或VWAP，最终收盘重新严格跌回被回抽边界下方",
         ("vwap_confirmed", "long"): "15分钟收盘价不低于VWAP",
         ("vwap_confirmed", "short"): "15分钟收盘价不高于VWAP",
         ("event_immediate", "long"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
         ("event_immediate", "short"): "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
     }.get((formal_timing, side), "")
     resolved_entry_trigger = entry_trigger if entry_trigger is not None else canonical_trigger
+    invalidation_condition = (
+        canonical_entry_invalidation_condition(formal_timing, side)
+        if invalidation_present
+        else ""
+    )
     aec = build_test_aec(
         analyst,
         signal=signal.value,
@@ -91,11 +105,7 @@ def _analyst_signal(
         current_trigger_confirmed=current_trigger_confirmed,
         invalidation_present=invalidation_present,
         entry_trigger=resolved_entry_trigger,
-        invalidation_condition=(
-            "close beyond the validated invalidation boundary"
-            if invalidation_present
-            else None
-        ),
+        invalidation_condition=invalidation_condition,
         extra={
             "evidence_role": (
                 "entry_timing"
@@ -124,6 +134,7 @@ def _analyst_signal(
         trigger_valid=trigger_valid,
         invalidation_present=invalidation_present,
         invalidation_level=96.0 if invalidation_present else None,
+        position_invalidation_level=94.0 if invalidation_present else None,
         evidence_role="entry_timing" if analyst == "technical" else "event_catalyst",
         event_type="supply_disruption" if analyst == "commodity_news" else "none",
         metadata={"action_evidence_contract": aec},
@@ -141,6 +152,14 @@ def _entry_authority(*, conditional: bool = False, allowed: bool = True) -> dict
         "can_execute_without_intraday_trigger": False if conditional else None,
         "max_allowed_margin_ratio": 0.015,
         "reason_codes": ["conditional_trigger_authority"] if conditional else ["test_pm_final_trade_authority"],
+    }
+
+
+def _entry_execution_boundary(side: str) -> dict:
+    return {
+        "invalidation": canonical_entry_invalidation_condition("breakout", side),
+        "invalidation_level": 95.0 if side == "long" else 105.0,
+        "valid_until": "2025-03-26 15:00:00",
     }
 
 
@@ -188,6 +207,7 @@ def _non_triggering_signal_bars() -> list[dict]:
 
 def _strategy_contract(*, current_lots: int, target_lots: int, final_action: str) -> dict:
     increases_risk = current_lots == 0 or abs(target_lots) > abs(current_lots)
+    side = "long" if target_lots > 0 else "short"
     authority_type = "scale" if increases_risk and current_lots else "real_budget_entry"
     if final_action in {"reduce", "exit"}:
         authority_type = final_action
@@ -211,9 +231,16 @@ def _strategy_contract(*, current_lots: int, target_lots: int, final_action: str
         "can_execute_without_intraday_trigger": True,
         "execution_profile": "breakout",
         "trigger_source": "technical_breakout",
-        "entry_trigger": "break above the validated range",
-        "invalidation": "close beyond the validated invalidation boundary",
-        "invalidation_condition": "close beyond the validated invalidation boundary",
+        "entry_trigger": (
+            "15分钟收盘价向上突破开盘区间上沿且高于VWAP"
+            if side == "long"
+            else "15分钟收盘价向下突破开盘区间下沿且低于VWAP"
+        ),
+        "invalidation": canonical_entry_invalidation_condition("breakout", side),
+        "invalidation_condition": canonical_entry_invalidation_condition("breakout", side),
+        "invalidation_level": 3500.0 if side == "long" else 4500.0,
+        "position_invalidation_level": 3400.0 if side == "long" else 4600.0,
+        "valid_until": "2025-03-26 15:00:00",
         "target_margin_ratio_estimate": 0.06 if increases_risk else 0.02,
         "max_allowed_margin_ratio": 0.12,
         "reason_codes": ["test_pm_final_trade_authority"],
@@ -360,7 +387,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
     def test_trader_honors_direct_execution_for_every_canonical_entry_profile(self):
         trigger_by_profile = {
             "breakout": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
-            "pullback": "15分钟收盘价不低于VWAP且高于开盘区间下沿",
+            "pullback": "15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界",
             "vwap_confirmed": "15分钟收盘价不低于VWAP",
             "event_immediate": "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
         }
@@ -379,6 +406,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     config={"opening_range_minutes": 1, "min_execution_volume": 1},
                     decision_context={
                         "execution_contract": {
+                            **_entry_execution_boundary("long"),
                             "execution_profile": profile,
                             "trigger_source": source_by_profile[profile],
                             "entry_trigger": trigger_by_profile[profile],
@@ -400,6 +428,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
             decision_context={
                 "execution_contract": {
+                    **_entry_execution_boundary("long"),
                     "execution_profile": "breakout",
                     "trigger_source": "technical_breakout",
                     "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
@@ -415,6 +444,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             config={"opening_range_minutes": 1, "min_execution_volume": 1},
             decision_context={
                 "execution_contract": {
+                    **_entry_execution_boundary("long"),
                     "execution_profile": "breakout",
                     "trigger_source": "technical_breakout",
                     "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
@@ -429,6 +459,467 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         self.assertTrue(watch.to_audit_payload()["trigger_checked"])
         self.assertFalse(no_bar.should_execute)
         self.assertEqual(no_bar.reason, "intraday_no_valid_bar")
+
+    def test_breakout_requires_strict_boundary_crossing(self):
+        execution_bars = _execution_bars()
+        cases = (
+            (
+                "open_long",
+                101.0,
+                "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+            ),
+            (
+                "open_short",
+                99.0,
+                "15分钟收盘价向下突破开盘区间下沿且低于VWAP",
+            ),
+        )
+        for action, boundary_close, trigger in cases:
+            with self.subTest(action=action):
+                result = select_intraday_execution(
+                    signal_bars=[
+                        {
+                            "datetime": "2025-03-26 10:00:00",
+                            "open": boundary_close,
+                            "high": boundary_close,
+                            "low": boundary_close,
+                            "close": boundary_close,
+                            "volume": 10,
+                        }
+                    ],
+                    execution_bars=execution_bars,
+                    action=action,
+                    config={"opening_range_minutes": 1, "min_execution_volume": 1},
+                    decision_context={
+                        "execution_contract": {
+                            **_entry_execution_boundary("long" if action == "open_long" else "short"),
+                            "execution_profile": "breakout",
+                            "trigger_source": "technical_breakout",
+                            "entry_trigger": trigger,
+                            "can_execute_without_intraday_trigger": False,
+                            "requires_intraday_confirmation": True,
+                        }
+                    },
+                )
+                self.assertFalse(result.should_execute)
+                self.assertEqual(result.reason, "intraday_trigger_not_met")
+
+    def test_entry_invalidation_before_trigger_permanently_cancels_fac(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-26 10:00:00",
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "volume": 10,
+                }
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 99.0, "high": 100.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 09:31:00", "open": 99.0, "high": 99.0, "low": 94.0, "close": 96.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 101.0, "high": 102.0, "low": 94.0, "close": 101.0, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                }
+            },
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.reason, "fac_invalidated_before_entry")
+        self.assertEqual(result.features["entry_contract_state"], "permanently_invalidated")
+        self.assertFalse(result.to_audit_payload()["missed_opportunity_flag"])
+
+    def test_direct_entry_scans_all_bars_before_first_fill_for_invalidation(self):
+        result = select_intraday_execution(
+            signal_bars=[],
+            execution_bars=[
+                {
+                    "datetime": "2025-03-26 09:30:00",
+                    "open": 99.0,
+                    "high": 100.0,
+                    "low": 94.0,
+                    "close": 96.0,
+                    "volume": 0,
+                },
+                {
+                    "datetime": "2025-03-26 09:31:00",
+                    "open": 101.0,
+                    "high": 102.0,
+                    "low": 100.0,
+                    "close": 101.0,
+                    "volume": 10,
+                },
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    "requires_intraday_confirmation": False,
+                    "can_execute_without_intraday_trigger": True,
+                }
+            },
+            finalize_untriggered=False,
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.decision, "skip")
+        self.assertEqual(result.reason, "fac_invalidated_before_entry")
+        self.assertEqual(result.features["observed_datetime"], "2025-03-26 09:30:00")
+
+        expired_contract = {
+            **_entry_execution_boundary("long"),
+            "execution_profile": "breakout",
+            "trigger_source": "technical_breakout",
+            "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+            "requires_intraday_confirmation": False,
+            "can_execute_without_intraday_trigger": True,
+            "valid_until": "2025-03-26 09:30:30",
+        }
+        expired = select_intraday_execution(
+            signal_bars=[],
+            execution_bars=[
+                {
+                    "datetime": "2025-03-26 09:30:00",
+                    "open": 99.0,
+                    "high": 100.0,
+                    "low": 96.0,
+                    "close": 99.0,
+                    "volume": 0,
+                },
+                {
+                    "datetime": "2025-03-26 09:31:00",
+                    "open": 101.0,
+                    "high": 102.0,
+                    "low": 100.0,
+                    "close": 101.0,
+                    "volume": 10,
+                },
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={"execution_contract": expired_contract},
+            finalize_untriggered=False,
+        )
+
+        self.assertFalse(expired.should_execute)
+        self.assertEqual(expired.decision, "skip")
+        self.assertEqual(expired.reason, "fac_expired_before_entry")
+
+    def test_entry_invalidation_and_expiry_are_terminal_during_paper_loop(self):
+        class FakeDB:
+            def __init__(self):
+                self.status_updates = []
+
+            def update_futures_recommendation_status(self, recommendation_id, status, **kwargs):
+                self.status_updates.append((recommendation_id, status, kwargs))
+
+        for reason, contract_state in (
+            ("fac_invalidated_before_entry", "permanently_invalidated"),
+            ("fac_expired_before_entry", "expired"),
+        ):
+            with self.subTest(reason=reason):
+                db = FakeDB()
+                snapshot = {}
+                selection = SimpleNamespace(
+                    reason=reason,
+                    to_audit_payload=lambda reason=reason, contract_state=contract_state: {
+                        "decision": "skip",
+                        "reason": reason,
+                        "features": {"entry_contract_state": contract_state},
+                    },
+                )
+                _mark_intraday_non_execution(
+                    db=db,
+                    recommendation={"id": "rec-entry-terminal", "underlying_code": "RB"},
+                    audit_snapshot=snapshot,
+                    selection=selection,
+                    finalize_untriggered=False,
+                    runtime_mode="paper_loop",
+                    cutoff_datetime=None,
+                    loop_iteration=1,
+                )
+
+                self.assertEqual(db.status_updates[-1][1], RecommendationStatus.SKIPPED)
+                self.assertEqual(
+                    snapshot["execution_result"]["status"],
+                    RecommendationStatus.SKIPPED.value,
+                )
+                self.assertEqual(snapshot["execution_result"]["no_trade_reason"], reason)
+                self.assertEqual(snapshot["phase2_execution"]["status"], "skipped_intraday_trigger_not_met")
+
+    def test_event_immediate_entry_terminal_state_is_not_replaced_by_morning_basis(self):
+        morning_basis = SimpleNamespace(base_price=100.0)
+        unavailable_basis = SimpleNamespace(base_price=None)
+        for reason in (
+            "fac_invalidated_before_entry",
+            "fac_expired_before_entry",
+            "intraday_no_valid_bar",
+        ):
+            with self.subTest(reason=reason):
+                selection = SimpleNamespace(reason=reason)
+                with patch(
+                    "agents.execution_team.trader.intraday_confirmation_enabled",
+                    return_value=True,
+                ), patch(
+                    "agents.execution_team.trader._decision_context_from_recommendation",
+                    return_value={
+                        "execution_contract": {
+                            "execution_profile": "event_immediate",
+                            "can_execute_without_intraday_trigger": True,
+                        }
+                    },
+                ), patch(
+                    "agents.execution_team.trader.resolve_intraday_execution_basis",
+                    return_value=(unavailable_basis, selection),
+                ):
+                    resolved_basis, resolved_selection = _resolve_phase2_execution_basis(
+                        router=object(),
+                        cfg={"trading_date": "2025-03-26"},
+                        recommendation={"underlying_code": "BU", "contract_code": "BU2506"},
+                        decision=SimpleNamespace(
+                            action=FuturesAction.OPEN_LONG,
+                            lots=1,
+                            contract_code="BU2506",
+                        ),
+                        morning_price_context=morning_basis,
+                        cutoff_datetime=None,
+                        finalize_untriggered=False,
+                    )
+
+                self.assertIs(resolved_basis, unavailable_basis)
+                self.assertIs(resolved_selection, selection)
+
+        close_selection = SimpleNamespace(reason="intraday_no_valid_bar")
+        with patch(
+            "agents.execution_team.trader.intraday_confirmation_enabled",
+            return_value=True,
+        ), patch(
+            "agents.execution_team.trader._decision_context_from_recommendation",
+            return_value={"execution_contract": {"execution_profile": "exit_immediate"}},
+        ), patch(
+            "agents.execution_team.trader.resolve_intraday_execution_basis",
+            return_value=(unavailable_basis, close_selection),
+        ):
+            close_basis, close_result = _resolve_phase2_execution_basis(
+                router=object(),
+                cfg={"trading_date": "2025-03-26"},
+                recommendation={"underlying_code": "BU", "contract_code": "BU2506"},
+                decision=SimpleNamespace(
+                    action=FuturesAction.CLOSE_LONG,
+                    lots=1,
+                    contract_code="BU2506",
+                ),
+                morning_price_context=morning_basis,
+                cutoff_datetime=None,
+                finalize_untriggered=False,
+            )
+
+        self.assertIs(close_basis, morning_basis)
+        self.assertIsNone(close_result)
+
+    def test_trigger_before_later_invalidation_executes_only_the_open_leg(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 10:00:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 10}
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 99.0, "high": 100.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 101.0, "high": 102.0, "low": 94.0, "close": 96.0, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.reason, "intraday_trigger_confirmed")
+        self.assertEqual(result.base_price, 101.0)
+
+    def test_valid_until_expires_unfilled_entry_contract(self):
+        contract = {
+            **_entry_execution_boundary("long"),
+            "execution_profile": "breakout",
+            "trigger_source": "technical_breakout",
+            "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "valid_until": "2025-03-26 09:45:00",
+        }
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 10:00:00", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 10}
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 99.0, "high": 100.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 101.0, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={"execution_contract": contract},
+        )
+
+        self.assertFalse(result.should_execute)
+        self.assertEqual(result.reason, "fac_expired_before_entry")
+
+    def test_pullback_requires_prior_expansion_then_retrace_and_reclaim(self):
+        trigger = "15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界"
+        contract = {
+            **_entry_execution_boundary("long"),
+            "execution_profile": "pullback",
+            "trigger_source": "technical_pullback",
+            "entry_trigger": trigger,
+            "can_execute_without_intraday_trigger": False,
+            "requires_intraday_confirmation": True,
+        }
+        execution_bars = [
+            {
+                "datetime": "2025-03-26 09:30:00",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 10,
+            },
+            {
+                "datetime": "2025-03-26 09:46:00",
+                "open": 102.0,
+                "high": 102.2,
+                "low": 101.8,
+                "close": 102.0,
+                "volume": 10,
+            },
+            {
+                "datetime": "2025-03-26 10:01:00",
+                "open": 101.6,
+                "high": 101.8,
+                "low": 101.4,
+                "close": 101.7,
+                "volume": 10,
+            },
+        ]
+        no_expansion = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-26 10:00:00",
+                    "open": 101.2,
+                    "high": 101.8,
+                    "low": 100.8,
+                    "close": 101.5,
+                    "volume": 10,
+                }
+            ],
+            execution_bars=execution_bars,
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={"execution_contract": contract},
+        )
+        confirmed = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-26 09:45:00",
+                    "open": 101.5,
+                    "high": 102.5,
+                    "low": 101.4,
+                    "close": 102.0,
+                    "volume": 10,
+                },
+                {
+                    "datetime": "2025-03-26 10:00:00",
+                    "open": 101.8,
+                    "high": 102.0,
+                    "low": 100.8,
+                    "close": 101.5,
+                    "volume": 10,
+                },
+            ],
+            execution_bars=execution_bars,
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={"execution_contract": contract},
+        )
+        self.assertFalse(no_expansion.should_execute)
+        self.assertEqual(no_expansion.reason, "intraday_trigger_not_met")
+        self.assertTrue(confirmed.should_execute)
+        self.assertEqual(confirmed.reason, "intraday_pullback_confirmed")
+        self.assertEqual(
+            confirmed.features["trigger_rule"],
+            "directional_expansion_then_boundary_or_vwap_reclaim",
+        )
+
+        short_confirmed = select_intraday_execution(
+            signal_bars=[
+                {
+                    "datetime": "2025-03-26 09:45:00",
+                    "open": 98.5,
+                    "high": 98.6,
+                    "low": 97.5,
+                    "close": 98.0,
+                    "volume": 10,
+                },
+                {
+                    "datetime": "2025-03-26 10:00:00",
+                    "open": 98.2,
+                    "high": 99.2,
+                    "low": 98.0,
+                    "close": 98.5,
+                    "volume": 10,
+                },
+            ],
+            execution_bars=[
+                execution_bars[0],
+                {
+                    "datetime": "2025-03-26 09:46:00",
+                    "open": 98.0,
+                    "high": 98.2,
+                    "low": 97.8,
+                    "close": 98.0,
+                    "volume": 10,
+                },
+                {
+                    "datetime": "2025-03-26 10:01:00",
+                    "open": 98.4,
+                    "high": 98.6,
+                    "low": 98.2,
+                    "close": 98.3,
+                    "volume": 10,
+                },
+            ],
+            action="open_short",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **contract,
+                    "entry_trigger": "15分钟先向下扩张，随后回抽开盘区间下沿或VWAP，最终收盘重新严格跌回被回抽边界下方",
+                    **_entry_execution_boundary("short"),
+                }
+            },
+        )
+        self.assertTrue(short_confirmed.should_execute)
+        self.assertEqual(short_confirmed.reason, "intraday_pullback_confirmed")
 
     def test_trader_rejects_missing_or_invalid_profile_instead_of_defaulting_to_breakout(self):
         for execution_contract in (
@@ -579,7 +1070,10 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         )
 
         self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
-        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(
+            fields["invalidation"],
+            canonical_entry_invalidation_condition("breakout", "long"),
+        )
         self.assertEqual(fields["execution_profile"], "breakout")
         self.assertEqual(fields["trigger_source"], "technical_breakout")
 
@@ -597,7 +1091,7 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
                     "technical",
                     setup_type="range_reversal_setup",
                     entry_timing_signal="pullback",
-                    entry_trigger="15分钟收盘价不低于VWAP且高于开盘区间下沿",
+                    entry_trigger="15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界",
                 )
             ],
             conditional=True,
@@ -648,7 +1142,10 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         )
 
         self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
-        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(
+            fields["invalidation"],
+            canonical_entry_invalidation_condition("breakout", "long"),
+        )
         self.assertEqual(fields["trigger_source"], "technical_breakout")
 
     def test_multiple_sources_are_not_cross_combined(self):
@@ -672,7 +1169,10 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         )
 
         self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
-        self.assertEqual(fields["invalidation"], "technical 15m failure")
+        self.assertEqual(
+            fields["invalidation"],
+            canonical_entry_invalidation_condition("breakout", "long"),
+        )
         self.assertEqual(fields["trigger_source"], "technical_breakout")
 
     def test_invalid_timing_value_never_defaults_to_breakout(self):
@@ -728,7 +1228,10 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         )
 
         self.assertEqual(fields["entry_trigger"], "15分钟收盘价向上突破开盘区间上沿且高于VWAP")
-        self.assertEqual(fields["invalidation"], "15m close below 96")
+        self.assertEqual(
+            fields["invalidation"],
+            canonical_entry_invalidation_condition("breakout", "long"),
+        )
         self.assertEqual(fields["execution_profile"], "breakout")
         self.assertEqual(fields["trigger_source"], "technical_breakout")
         self.assertTrue(fields["can_execute_without_intraday_trigger"])
@@ -1076,7 +1579,21 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                         "short": {"final_state": "probe_candidate", "opportunity_score": 0.8},
                     },
                 )
-                self.assertEqual(result["opportunity_scorecard"]["preferred_side"], "flat")
+                scorecard = result["opportunity_scorecard"]
+                self.assertEqual(scorecard["preferred_side"], "flat")
+                side, ratio, row = _scorecard_probe_seed(
+                    opportunity_scorecard=scorecard,
+                    control={
+                        "watch_for_trigger_new_entry": {
+                            "allow_probe": True,
+                            "probe_max_ratio": 0.01,
+                            "probe_floor_ratio": 0.008,
+                            "scorecard_probe_min_supporting_signals": 1,
+                            "scorecard_probe_min_score": 0.0,
+                        }
+                    },
+                )
+                self.assertEqual((side, ratio, row), ("flat", 0.0, {}))
 
     def test_missing_evidence_lowers_quality_without_becoming_hard_data_gap(self):
         signals = [
@@ -1192,7 +1709,7 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
 
         def scorecard_for(signals: list[SimpleNamespace]) -> dict:
             scc = self._scc(signals)
-            return build_opportunity_scorecard(
+            scorecard = build_opportunity_scorecard(
                 ticker="BU",
                 analyst_signals=build_pm_evidence_signals_from_scc(scc),
                 market_confirmation=build_scc_market_confirmation(scc, target_direction="long"),
@@ -1200,6 +1717,16 @@ class OpportunityPathSemanticRepairTest(unittest.TestCase):
                 signal_collection_contract=scc,
                 config={},
             )
+            return select_ticker_side(
+                ticker="BU",
+                analyst_signals=build_pm_evidence_signals_from_scc(scc),
+                signal_collection_contract=scc,
+                market_confirmation=build_scc_market_confirmation(scc, target_direction="long"),
+                data_quality_summary=build_scc_data_quality_summary(scc),
+                decision_date="2025-03-26",
+                config={},
+                prebuilt_scorecard=scorecard,
+            )["opportunity_scorecard"]
 
         single = scorecard_for(single_signals)
         aligned = scorecard_for(aligned_signals)

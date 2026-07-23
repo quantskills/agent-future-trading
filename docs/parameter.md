@@ -45,23 +45,25 @@ rank_score =
 | 分项 | 字段 | 当前作用 |
 |---|---|---|
 | 冷启动证据质量 | `rank_score_components.cold_start_evidence_quality` | 无学习或学习样本少时的主排序依据 |
-| 资金层级资格 | `capital_layer_priority` | tradeable_candidate 高于 probe，高于 watch |
+| 资金层级资格 | `capital_layer_priority` | 固定`alpha_scale=6.0`、`real_budget=3.0`、`exploration_probe=0.0`；只进入唯一总分一次，并以大于其余六项合法总跨度的分带严格保证scale > real > probe |
 | open/add 学习 | `open_add_action_value_delta` | 正向学习提高 rank，负向/tail/entry loss 降低 rank |
 | 产品/setup/trigger 历史表现 | `product_setup_trigger_history` | alpha profile 对同类机会的加减分 |
-| 当前 trigger 质量 | `trigger_execution_quality` | 只使用新增风险候选自身的当前触发质量；execution/profile 学习不进入该分项 |
+| 当前 trigger 质量 | `trigger_execution_quality` | 固定`current_trigger_quality_weight=0.08`，只使用PM由已验证SCC重建的当日technical/event `trigger_quality_score`；历史trigger结果和execution/profile学习不进入该分项 |
 | 资金效率 | `capital_efficiency` | 预留小权重，40 日样本后再评估是否启用 |
 | 冲突/风险/失效边界 | `conflict_risk_invalidation_penalty` | 冲突、数据缺口、风险和失效边界不足的扣分 |
 
 权重配置入口固定为 `src/config/rank_score_policy.yaml`，由 `dev.yaml.config_catalogs.rank_score_policy` 引入并在运行时展开为 `rank_score_policy`。该 catalog 只允许微调 `rank_score` 权重和资金效率小修正，不允许改仓位参数、交易权限、`0.008` probe、`20%` 总保证金硬边界或 `0.5` 净敞口计划预算。样本不足 40 个干净交易日前，不应调整该 catalog。
 
+失效字段不是可调参数：`invalidation_level+canonical invalidation_condition+valid_until`只定义首次成交前作废；`position_invalidation_level/atr_stop_distance/exit_hint/expected_horizon_days`只定义成交后由下一交易日PM消费的持仓依据。两组字段不得通过YAML互相替代。
+
 资金部署规则：
 
 - 从空仓建立非零仓位，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale` 进入 1-N 排名；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控没有 rank。
-- 固定按 `capital_layer -> capital_priority_tier -> rank_score -> cold_start_evidence_quality -> candidate_quality -> capital_efficiency -> ticker` 排出 1-N。
+- 固定按唯一 `rank_score` 降序、再按标准化 `ticker` 排出 1-N；资金层、证据、学习、trigger、资金效率和风险已经各自进入总分一次，不再形成第二套排序。
 - `rank=1` 只表示最值得占用资金，不自动升仓。
-- `watch_for_trigger / exploration_probe` 仍使用原 0.008 小探针资金层。
-- `tradeable_candidate` 才能进入 normal 真实资金层。
-- 反复验证有 alpha 的候选才允许进入 strong / scale 资金层。
+- Step4 按最终 `candidate_quality` 在现有区间内连续形成计划比例：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`。
+- 正式 canonical open/add 正向学习与完整当日证据共同成立时才允许由 probe 升为 real；成熟重复正收益、强确认、失效边界完整且没有中期基本面反向时才允许进入 scale。
+- Step5 不升层、不重算 `candidate_quality`，只用唯一 rank 顺序消费预算。
 - 资金按 rank 顺序逐个占用 PM 计划预算；触及总保证金硬边界、单品种签约/部署约束或净敞口计划预算后，后续候选还原为 wait/hold，并写入 `no_rank_or_budget_no_new_exposure`。
 
 ## 30 个交易日后复核

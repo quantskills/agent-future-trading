@@ -54,7 +54,10 @@ def rank_metadata_for_row(row: Dict[str, Any]) -> dict[str, str]:
     return {
         "rank_capital_role": _rank_capital_role_for_layer(layer),
         "capital_layer": layer,
-        "capital_ratio_source": _capital_ratio_source_for_layer(layer),
+        "capital_ratio_source": (
+            str(row.get("capital_ratio_source") or "").strip()
+            or _capital_ratio_source_for_layer(layer)
+        ),
         "rank_reason": _rank_reason_for_layer(row, layer),
     }
 
@@ -103,22 +106,6 @@ def _final_entry_authority(pm_state: Dict[str, Any]) -> Dict[str, Any]:
     return authority if isinstance(authority, dict) else {}
 
 
-def _alpha_scale_eligible_from_pm_state(pm_state: Dict[str, Any], row: Dict[str, Any]) -> bool:
-    authority_type = _clean_key(_final_entry_authority(pm_state).get("authority_type"))
-    diagnostics = pm_state.get("control_diagnostics") if isinstance(pm_state.get("control_diagnostics"), dict) else {}
-    target = (
-        diagnostics.get("capital_utilization_target")
-        if isinstance(diagnostics.get("capital_utilization_target"), dict)
-        else {}
-    )
-    return bool(
-        authority_type == "real_budget_entry"
-        and _candidate_state(row) == "tradeable_candidate"
-        and target.get("high_quality_memory") is True
-        and _clean_key(target.get("target_mode")) in {"alpha_release_boost", "alpha_release_max_boost"}
-    )
-
-
 def _capital_layer_for_ranked_row(row: Dict[str, Any]) -> str:
     layer = _clean_key(row.get("capital_layer"))
     return layer if layer in {
@@ -129,15 +116,19 @@ def _capital_layer_for_ranked_row(row: Dict[str, Any]) -> str:
 
 
 def _capital_layer_from_pm_state(pm_state: Dict[str, Any], row: Dict[str, Any]) -> str:
-    authority_type = _clean_key(_final_entry_authority(pm_state).get("authority_type"))
+    authority = _final_entry_authority(pm_state)
+    declared_layer = _clean_key(authority.get("capital_layer"))
+    if declared_layer in {
+        CAPITAL_LAYER_ALPHA_SCALE,
+        CAPITAL_LAYER_REAL_BUDGET,
+        CAPITAL_LAYER_EXPLORATION,
+    }:
+        return declared_layer
+    authority_type = _clean_key(authority.get("authority_type"))
     if authority_type == "exploration_probe":
         return CAPITAL_LAYER_EXPLORATION
     if authority_type == "real_budget_entry":
-        return (
-            CAPITAL_LAYER_ALPHA_SCALE
-            if _alpha_scale_eligible_from_pm_state(pm_state, row)
-            else CAPITAL_LAYER_REAL_BUDGET
-        )
+        return CAPITAL_LAYER_REAL_BUDGET
     return ""
 
 
@@ -188,13 +179,12 @@ def _policy_float(section: Dict[str, Any], key: str, default: float) -> float:
     return _safe_float(section.get(key), default)
 
 
-def _capital_priority_tier_for_state(state: Any) -> int:
+def _capital_priority_tier_for_layer(layer: Any) -> int:
     return {
-        "tradeable_candidate": 3,
-        "probe_candidate": 2,
-        "watch_for_trigger": 1,
-        "no_opportunity": 0,
-    }.get(_clean_key(state), 0)
+        CAPITAL_LAYER_ALPHA_SCALE: 3,
+        CAPITAL_LAYER_REAL_BUDGET: 2,
+        CAPITAL_LAYER_EXPLORATION: 1,
+    }.get(_clean_key(layer), 0)
 
 
 def _rank_learning_delta(action_value_learning: Dict[str, Any], *, policy: Dict[str, Any]) -> float:
@@ -226,22 +216,26 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     rank_section = _policy_section(policy, "rank_score")
     score_components = row.get("opportunity_score_components") if isinstance(row.get("opportunity_score_components"), dict) else {}
     action_value_learning = row.get("action_value_learning_summary") if isinstance(row.get("action_value_learning_summary"), dict) else {}
-    state = _candidate_state(row)
+    layer = _capital_layer_for_ranked_row(row)
     tier_bonus_cfg = _policy_section(rank_section, "capital_layer_priority")
     tier_bonus = {
-        "tradeable_candidate": 0.18,
-        "probe_candidate": 0.10,
-        "watch_for_trigger": 0.02,
-        "no_opportunity": 0.0,
+        "alpha_scale": 6.0,
+        "real_budget": 3.0,
+        "exploration_probe": 0.0,
     }
     if tier_bonus_cfg:
         tier_bonus = {key: _safe_float(tier_bonus_cfg.get(key), value) for key, value in tier_bonus.items()}
+    layer_policy_key = {
+        CAPITAL_LAYER_ALPHA_SCALE: "alpha_scale",
+        CAPITAL_LAYER_REAL_BUDGET: "real_budget",
+        CAPITAL_LAYER_EXPLORATION: "exploration_probe",
+    }.get(layer, "")
     rank_score_inputs = (
         row.get("rank_score_input_components")
         if isinstance(row.get("rank_score_input_components"), dict)
         else {}
     )
-    cold_start_quality = (
+    cold_start_quality = _bounded(
         _safe_float(rank_score_inputs.get("cold_start_evidence_quality"), 0.0)
         if "cold_start_evidence_quality" in rank_score_inputs
         else _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
@@ -252,10 +246,8 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     )
     trigger_section = _policy_section(rank_section, "trigger_execution_quality")
     trigger_execution_quality = (
-        _policy_float(trigger_section, "trigger_quality_positive_bonus", 1.0)
-        * _safe_float(score_components.get("trigger_quality_positive_bonus"), 0.0)
-        + _policy_float(trigger_section, "trigger_quality_loss_penalty", 1.0)
-        * _safe_float(score_components.get("trigger_quality_loss_penalty"), 0.0)
+        _policy_float(trigger_section, "current_trigger_quality_weight", 0.08)
+        * _bounded(_safe_float(row.get("trigger_quality_score"), 0.0))
     )
     history_section = _policy_section(rank_section, "product_setup_trigger_history")
     product_setup_trigger_history = (
@@ -281,7 +273,7 @@ def _rank_score_components_for_row(row: Dict[str, Any], *, config: Dict[str, Any
     )
     return {
         "cold_start_evidence_quality": round(cold_start_evidence, 6),
-        "capital_layer_priority": round(tier_bonus.get(state, 0.0), 6),
+        "capital_layer_priority": round(tier_bonus.get(layer_policy_key, 0.0), 6),
         "open_add_action_value_delta": round(_rank_learning_delta(action_value_learning, policy=policy), 6),
         "product_setup_trigger_history": round(product_setup_trigger_history, 6),
         "trigger_execution_quality": round(trigger_execution_quality, 6),
@@ -302,7 +294,7 @@ def _ensure_final_rank_score_fields(
     row["rank_score_components"] = components
     row["rank_score"] = rank_score
     row["capital_priority_score"] = rank_score
-    row["capital_priority_tier"] = _capital_priority_tier_for_state(row.get("final_state") or row.get("opportunity_state"))
+    row["capital_priority_tier"] = _capital_priority_tier_for_layer(row.get("capital_layer"))
     return row
 
 
@@ -608,11 +600,16 @@ def _daily_capital_deployment_config(config: Dict[str, Any]) -> Dict[str, float]
     )
     hard_max = _safe_positive_ratio(config.get("max_total_margin_ratio"), 0.20)
     target = _safe_positive_ratio(capital.get("target_margin_ratio_confirmed"), 0.10)
+    strong_target = _safe_positive_ratio(
+        capital.get("strong_opportunity_target_margin_ratio_confirmed"),
+        0.18,
+    )
     min_probe = _safe_positive_ratio(budget.get("min_real_trade_margin_ratio"), 0.008)
     max_single = _safe_positive_ratio(budget.get("max_single_ticker_margin_ratio"), 0.13)
     max_net = _safe_positive_ratio(net_control.get("max_net_exposure"), 0.50)
     return {
         "target_margin_ratio": min(target, hard_max),
+        "strong_opportunity_target_margin_ratio": min(strong_target, hard_max),
         "min_probe_margin_ratio": min_probe,
         "max_single_ticker_margin_ratio": min(max_single, hard_max),
         "hard_max_total_margin_ratio": hard_max,
@@ -752,34 +749,15 @@ def _capital_rank_eligible(pm_state: Dict[str, Any], row: Dict[str, Any]) -> boo
     return _float_field(row, "opportunity_score", _float_field(row, "score", 0.0)) > 0.0
 
 
-def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[int, float, float, float, float]:
-    try:
-        tier = int(row.get("capital_priority_tier") or 0)
-    except (TypeError, ValueError):
-        tier = 0
-    rank_score = _float_field(row, "rank_score")
-    rank_score_inputs = (
-        row.get("rank_score_input_components")
-        if isinstance(row.get("rank_score_input_components"), dict)
-        else {}
-    )
-    rank_score_components = (
-        row.get("rank_score_components")
-        if isinstance(row.get("rank_score_components"), dict)
-        else {}
-    )
-    cold_start_evidence = _float_field(rank_score_inputs, "cold_start_evidence_quality")
-    candidate_quality = _float_field(row, "candidate_quality")
-    capital_efficiency = _float_field(rank_score_components, "capital_efficiency")
-    return tier, rank_score, cold_start_evidence, candidate_quality, capital_efficiency
+def _capital_rank_sort_tuple(row: Dict[str, Any]) -> Tuple[float]:
+    """Return the sole numeric Step5 ordering key.
 
-
-def _capital_layer_sort_priority(row: Dict[str, Any]) -> int:
-    return {
-        CAPITAL_LAYER_ALPHA_SCALE: 3,
-        CAPITAL_LAYER_REAL_BUDGET: 2,
-        CAPITAL_LAYER_EXPLORATION: 1,
-    }.get(_capital_layer_for_ranked_row(row), 0)
+    Evidence, learning, final Step4 capital layer, setup history, trigger
+    quality, capital efficiency and risk are already represented exactly once
+    inside ``rank_score``.  Re-sorting on any component would create a second
+    capital-priority mechanism.
+    """
+    return (_float_field(row, "rank_score"),)
 
 
 def _capital_efficiency_rank_bonus(
@@ -808,8 +786,9 @@ def apply_full_market_capital_deployment(
     """Apply Step5 rank and capital deployment directly to PM memory states."""
     deployment_cfg = _daily_capital_deployment_config(config)
     candidates: List[
-        Tuple[int, int, float, float, float, float, str, Dict[str, Any], str, float, float, float, float, float]
+        Tuple[float, str, Dict[str, Any], str, float, float, float, float, float]
     ] = []
+    has_alpha_scale_candidate = False
     for ticker, pm_state in generated:
         context = pm_state.get("recommendation_context") if isinstance(pm_state.get("recommendation_context"), dict) else {}
         status = context.get("status")
@@ -837,8 +816,11 @@ def apply_full_market_capital_deployment(
                 },
             )
             continue
-        row["alpha_scale_eligible"] = _alpha_scale_eligible_from_pm_state(pm_state, row)
         row["capital_layer"] = _capital_layer_from_pm_state(pm_state, row)
+        row["capital_ratio_source"] = str(
+            _final_entry_authority(pm_state).get("capital_ratio_source") or ""
+        ).strip()
+        row["alpha_scale_eligible"] = row["capital_layer"] == CAPITAL_LAYER_ALPHA_SCALE
         if not _capital_rank_eligible(pm_state, row):
             _update_pm_state_with_deployment(
                 pm_state,
@@ -853,6 +835,10 @@ def apply_full_market_capital_deployment(
                 },
             )
             continue
+        has_alpha_scale_candidate = bool(
+            has_alpha_scale_candidate
+            or row["capital_layer"] == CAPITAL_LAYER_ALPHA_SCALE
+        )
         try:
             score = float(row.get("opportunity_score", row.get("score", 0.0)) or 0.0)
         except (TypeError, ValueError):
@@ -879,18 +865,10 @@ def apply_full_market_capital_deployment(
         rank_score = _float_field(row, "rank_score")
         target_position_ratio = _contract_target_position_ratio(pm_state)
         current_ticker_exposure = _portfolio_ticker_exposure(portfolio, str(ticker).upper())
-        tier, sorted_rank_score, cold_start_evidence, candidate_quality, capital_efficiency = (
-            _capital_rank_sort_tuple(row)
-        )
-        rank_score = sorted_rank_score
+        (rank_score,) = _capital_rank_sort_tuple(row)
         candidates.append(
             (
-                _capital_layer_sort_priority(row),
-                tier,
                 rank_score,
-                cold_start_evidence,
-                candidate_quality,
-                capital_efficiency,
                 str(ticker).upper(),
                 pm_state,
                 side,
@@ -902,32 +880,21 @@ def apply_full_market_capital_deployment(
             )
         )
 
-    candidates.sort(
-        key=lambda item: (
-            -item[0],
-            -item[1],
-            -item[2],
-            -item[3],
-            -item[4],
-            -item[5],
-            item[6],
-        )
-    )
+    candidates.sort(key=lambda item: (-item[0], item[1]))
     used_margin_ratio = _portfolio_margin_ratio(portfolio)
     running_net_exposure = _portfolio_current_net_exposure(portfolio)
-    target_margin_ratio = deployment_cfg["target_margin_ratio"]
+    target_margin_ratio = (
+        deployment_cfg["strong_opportunity_target_margin_ratio"]
+        if has_alpha_scale_candidate
+        else deployment_cfg["target_margin_ratio"]
+    )
     max_single_ratio = deployment_cfg["max_single_ticker_margin_ratio"]
     hard_max_margin_ratio = deployment_cfg["hard_max_total_margin_ratio"]
     max_net_exposure = deployment_cfg["max_net_exposure"]
     budget_ceiling = min(target_margin_ratio, hard_max_margin_ratio)
 
     for rank, (
-        _,
-        _,
         rank_score,
-        _,
-        _,
-        _,
         _,
         pm_state,
         side,

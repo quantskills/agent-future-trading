@@ -8,6 +8,7 @@ the structured evidence produced by analysts and emits a single
 from __future__ import annotations
 
 from collections import Counter
+import math
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
@@ -15,11 +16,16 @@ from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.common.execution_trigger_semantics import (
     TECHNICAL_ENTRY_PROFILES,
+    canonical_entry_invalidation_condition,
     canonical_entry_trigger,
+    is_canonical_entry_invalidation_condition,
     is_canonical_entry_trigger,
     normalize_execution_profile,
 )
-from tools.common.evidence_fusion_semantics import build_signal_collection_fusion_summary
+from tools.common.evidence_fusion_semantics import (
+    build_signal_collection_fusion_summary,
+    classify_evidence_horizon,
+)
 from tools.common.final_action_semantics import FORBIDDEN_ANALYST_TRADE_AUTHORITY_KEYS
 
 
@@ -552,21 +558,33 @@ def _optional_contract_number(
         return False
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"action_evidence_contract_invalid_number:{field}")
+    if not math.isfinite(float(value)):
+        raise ValueError(f"action_evidence_contract_invalid_number:{field}")
     if positive and float(value) <= 0.0:
         raise ValueError(f"action_evidence_contract_invalid_positive_number:{field}")
     return True
 
 
 def _has_canonical_invalidation_proof(contract: Mapping[str, Any]) -> bool:
-    condition = _text(contract.get("invalidation_condition")).strip().lower()
-    condition_present = condition not in {"", "unknown", "none", "n/a", "null"}
-    level_present = _optional_contract_number(contract, "invalidation_level")
-    atr_present = _optional_contract_number(
+    level_present = _optional_contract_number(
         contract,
-        "atr_stop_distance",
+        "invalidation_level",
         positive=True,
     )
-    return condition_present or level_present or atr_present
+    signal = _text(contract.get("signal"))
+    side = (
+        _text(contract.get("counterfactual_side")).lower()
+        if signal == Signal.NEUTRAL.value
+        else _text(contract.get("side")).lower()
+    )
+    return bool(
+        level_present
+        and is_canonical_entry_invalidation_condition(
+            contract.get("invalidation_condition"),
+            profile=contract.get("entry_timing_signal"),
+            side=side,
+        )
+    )
 
 
 def validate_action_evidence_contract(
@@ -628,6 +646,11 @@ def validate_action_evidence_contract(
         raise ValueError("action_evidence_contract_invalid_signal")
     if side != expected_side:
         raise ValueError("action_evidence_contract_signal_side_mismatch")
+    execution_side = (
+        _text(contract.get("counterfactual_side")).lower()
+        if signal == Signal.NEUTRAL.value
+        else side
+    )
 
     try:
         confidence = float(contract.get("confidence"))
@@ -659,11 +682,6 @@ def validate_action_evidence_contract(
             "probe_candidate",
             "tradeable_candidate",
         }
-        execution_side = (
-            _text(contract.get("counterfactual_side")).lower()
-            if signal == Signal.NEUTRAL.value
-            else side
-        )
         if contract_analyst == "fundamental":
             if executable_state or entry_timing_signal or _text(contract.get("entry_trigger")):
                 raise ValueError(
@@ -707,6 +725,30 @@ def validate_action_evidence_contract(
                 raise ValueError(
                     "action_evidence_contract_no_opportunity_execution_claim"
                 )
+    _optional_contract_number(
+        contract,
+        "position_invalidation_level",
+        positive=True,
+    )
+    _optional_contract_number(
+        contract,
+        "atr_stop_distance",
+        positive=True,
+    )
+    raw_invalidation_condition = _text(
+        contract.get("invalidation_condition")
+    ).strip()
+    expected_invalidation_condition = canonical_entry_invalidation_condition(
+        entry_timing_signal,
+        execution_side,
+    )
+    if raw_invalidation_condition and (
+        not expected_invalidation_condition
+        or raw_invalidation_condition != expected_invalidation_condition
+    ):
+        raise ValueError(
+            "action_evidence_contract_entry_invalidation_not_canonical"
+        )
     invalidation_proof = _has_canonical_invalidation_proof(contract)
     if contract.get("invalidation_present") is True and not invalidation_proof:
         raise ValueError("action_evidence_contract_invalidation_proof_missing")
@@ -963,6 +1005,7 @@ def _fusion_summary_inputs(
     evidence_items: Iterable[Mapping[str, Any]],
     source_contracts: Iterable[Mapping[str, Any]],
 ) -> list[dict]:
+    source_contracts = list(source_contracts or [])
     fusion_by_analyst: dict[str, dict] = {}
     for source in source_contracts:
         if not isinstance(source, Mapping):
@@ -978,7 +1021,23 @@ def _fusion_summary_inputs(
         if not isinstance(item, Mapping):
             continue
         merged = dict(item)
-        merged["fusion_evidence"] = dict(fusion_by_analyst.get(_text(item.get("analyst"))) or {})
+        analyst = _text(item.get("analyst"))
+        source_contract = next(
+            (
+                source.get("action_evidence_contract")
+                for source in source_contracts
+                if isinstance(source, Mapping)
+                and _text(source.get("analyst")) == analyst
+                and isinstance(source.get("action_evidence_contract"), Mapping)
+            ),
+            {},
+        )
+        merged["evidence_role"] = _text(source_contract.get("evidence_role"))
+        merged["horizon_class"] = _text(
+            source_contract.get("horizon_class") or item.get("horizon_class"),
+            "unknown",
+        )
+        merged["fusion_evidence"] = dict(fusion_by_analyst.get(analyst) or {})
         inputs.append(merged)
     return inputs
 
@@ -1025,7 +1084,29 @@ def _data_quality_flags_from_usage(analyst: str, data_usage: Any) -> list[str]:
     return flags
 
 
-def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
+def _direction_summary(
+    evidence_items: list[Mapping[str, Any]],
+    source_contracts: Iterable[Mapping[str, Any]],
+) -> dict:
+    source_context: dict[str, dict[str, Any]] = {}
+    for source in source_contracts:
+        if not isinstance(source, Mapping):
+            continue
+        analyst = _text(source.get("analyst"))
+        action_contract = source.get("action_evidence_contract")
+        if analyst and isinstance(action_contract, Mapping):
+            source_context[analyst] = dict(action_contract)
+    enriched_items: list[dict[str, Any]] = []
+    for item in evidence_items:
+        enriched = dict(item)
+        context = source_context.get(_text(item.get("analyst")), {})
+        enriched["evidence_role"] = _text(context.get("evidence_role"))
+        enriched["horizon_class"] = _text(
+            context.get("horizon_class") or item.get("horizon_class"),
+            "unknown",
+        )
+        enriched_items.append(enriched)
+
     side_counts: Counter[str] = Counter()
     side_confidence: Counter[str] = Counter()
     trigger_states_by_side: dict[str, Counter[str]] = {
@@ -1033,40 +1114,70 @@ def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
         "short": Counter(),
         "flat": Counter(),
     }
-    for item in evidence_items:
+    for item in enriched_items:
         side = _text(item.get("side"), "flat").lower()
         side_counts[side] += 1
         side_confidence[side] += float(item.get("confidence") or 0.0)
         trigger_states_by_side[side][_text(item.get("trigger_status"), "watch_for_trigger")] += 1
-    long_key = (side_counts.get("long", 0), side_confidence.get("long", 0.0))
-    short_key = (side_counts.get("short", 0), side_confidence.get("short", 0.0))
-    if long_key == short_key and long_key[0] > 0:
-        dominant_side = "mixed"
-    elif long_key > short_key:
-        dominant_side = "long"
-    elif short_key > long_key:
-        dominant_side = "short"
+
+    directional_items = [
+        item for item in enriched_items if _text(item.get("side")).lower() in {"long", "short"}
+    ]
+    technical_anchor = next(
+        (item for item in directional_items if _text(item.get("evidence_role")) == "entry_timing"),
+        None,
+    )
+    immediate_event_anchor = next(
+        (
+            item
+            for item in directional_items
+            if _text(item.get("evidence_role")) == "event_catalyst"
+            and _text(item.get("opportunity_state")).lower()
+            in {"probe_candidate", "tradeable_candidate"}
+        ),
+        None,
+    )
+    direction_anchor = next(
+        (item for item in directional_items if _text(item.get("evidence_role")) == "direction_context"),
+        None,
+    )
+    fallback_event_anchor = next(
+        (item for item in directional_items if _text(item.get("evidence_role")) == "event_catalyst"),
+        None,
+    )
+    anchor = technical_anchor or immediate_event_anchor or direction_anchor or fallback_event_anchor
+    if anchor is not None:
+        dominant_side = _text(anchor.get("side"), "flat").lower()
     else:
-        dominant_side = "flat"
+        long_key = (side_counts.get("long", 0), side_confidence.get("long", 0.0))
+        short_key = (side_counts.get("short", 0), side_confidence.get("short", 0.0))
+        dominant_side = "long" if long_key > short_key else "short" if short_key > long_key else "flat"
+    dominant_horizon = classify_evidence_horizon(anchor or {})
     supporting = [
         _text(item.get("analyst"))
-        for item in evidence_items
+        for item in enriched_items
         if item.get("side") == dominant_side and dominant_side != "flat"
     ]
     opposing_side = "short" if dominant_side == "long" else "long" if dominant_side == "short" else ""
     opposing = [
         _text(item.get("analyst"))
-        for item in evidence_items
+        for item in enriched_items
         if item.get("side") == opposing_side
+    ]
+    same_horizon_opposing = [
+        _text(item.get("analyst"))
+        for item in enriched_items
+        if item.get("side") == opposing_side
+        and classify_evidence_horizon(item) == dominant_horizon
     ]
     neutral = [
         _text(item.get("analyst"))
-        for item in evidence_items
+        for item in enriched_items
         if item.get("side") == "flat"
     ]
     consensus = (
         "conflicted"
-        if dominant_side == "mixed" or opposing
+        if same_horizon_opposing
         else "no_direction"
         if dominant_side == "flat"
         else "multi_analyst_support"
@@ -1076,7 +1187,7 @@ def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
     strength_scores = [
         float(item.get("confidence") or 0.0)
         * _evidence_quality_score(item.get("evidence_quality"))
-        for item in evidence_items
+        for item in enriched_items
         if item.get("side") == dominant_side and dominant_side != "flat"
     ]
     strength = _quality_label(sum(strength_scores) / len(strength_scores)) if strength_scores else "unknown"
@@ -1100,7 +1211,13 @@ def _direction_summary(evidence_items: list[Mapping[str, Any]]) -> dict:
         "opposing_analysts": sorted(set(opposing)),
         "neutral_analysts": sorted(set(neutral)),
         "evidence_strength": strength,
-        "evidence_conflict_level": "high" if len(opposing) >= 2 else "medium" if opposing else "low",
+        "evidence_conflict_level": (
+            "high"
+            if len(same_horizon_opposing) >= 2
+            else "medium"
+            if same_horizon_opposing
+            else "low"
+        ),
     }
 
 
@@ -1204,7 +1321,7 @@ def validate_signal_collection_contract(
                 raise ValueError(
                     f"signal_collection_evidence_item_semantic_mismatch:{analyst}:{field}"
                 )
-    expected_direction = _direction_summary(expected_items)
+    expected_direction = _direction_summary(expected_items, source_contracts)
     for field, expected_value in expected_direction.items():
         if contract.get(field) != expected_value:
             raise ValueError(f"signal_collection_{field}_mismatch")
@@ -1460,7 +1577,7 @@ def build_signal_collection_contract(
     missing_agents = [name for name in enabled if name not in seen_agents]
     missing_evidence.extend(f"missing_analyst:{name}" for name in missing_agents)
 
-    direction_summary = _direction_summary(evidence_items)
+    direction_summary = _direction_summary(evidence_items, source_contracts)
     dominant_side = direction_summary["dominant_side"]
     fusion_summary = build_signal_collection_fusion_summary(
         _fusion_summary_inputs(evidence_items, source_contracts),

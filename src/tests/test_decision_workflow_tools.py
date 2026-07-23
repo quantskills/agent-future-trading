@@ -14,7 +14,13 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal, RecommendationSourceType, RecommendationStatus
+from agents.decision_team.portfolio_manager import _build_execution_contract_fields
 from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
+from tools.agent_tools.decision.pm_invalidation_policy import (
+    _apply_pretrade_invalidation_control,
+    _has_position_exit_boundary,
+    _has_structured_invalidation_condition,
+)
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.decision.pm_full_market_capital_deployment import (
     CAPITAL_LAYER_ALPHA_SCALE,
@@ -40,6 +46,9 @@ from tools.agent_tools.decision.pm_ticker_side_selection import (
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
 from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+)
 from tests.contract_test_fixtures import build_test_aec
 from tests.test_pm_atomic_contract_flow import _pm_state
 
@@ -92,8 +101,7 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
         opportunity_state="tradeable_candidate" if executable else "no_opportunity",
         trigger_valid=executable,
         current_trigger_confirmed=executable,
-        invalidation_present=side != "flat",
-        invalidation_condition="invalid if price closes back into range" if side != "flat" else None,
+        invalidation_present=executable,
     )
     contract.update(contract_overrides)
     return AnalystSignal(
@@ -108,6 +116,128 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
 
 
 class DecisionWorkflowToolTest(unittest.TestCase):
+    def test_entry_invalidation_and_position_exit_boundary_are_independent(self):
+        signal = _signal("technical", Signal.BULLISH, 0.72)
+        contract = signal.metadata["action_evidence_contract"]
+        contract.update(
+            {
+                "invalidation_present": True,
+                "invalidation_condition": canonical_entry_invalidation_condition(
+                    contract["entry_timing_signal"],
+                    contract["side"],
+                ),
+                "invalidation_level": 95.0,
+                "position_invalidation_level": None,
+                "exit_hint": "",
+                "atr_stop_distance": None,
+                "expected_horizon_days": 0,
+            }
+        )
+
+        self.assertTrue(_has_structured_invalidation_condition([signal]))
+        self.assertFalse(_has_position_exit_boundary([signal]))
+        _ratio, reasons, _notes, diagnostics = _apply_pretrade_invalidation_control(
+            ticker="BU",
+            position_ratio=0.05,
+            current_ratio=0.0,
+            max_position_ratio=0.10,
+            analyst_signals=[signal],
+            full_config={},
+        )
+        self.assertNotIn("missing_pretrade_invalidation", reasons)
+        self.assertIn("missing_position_exit_boundary", reasons)
+        self.assertTrue(
+            diagnostics["pretrade_invalidation"]["entry_invalidation_present"]
+        )
+        self.assertFalse(
+            diagnostics["pretrade_invalidation"]["position_exit_boundary_present"]
+        )
+
+        contract["invalidation_condition"] = "close below entry setup boundary"
+        self.assertFalse(_has_structured_invalidation_condition([signal]))
+
+    def test_pm_selects_entry_and_same_side_position_lifecycle_independently(self):
+        technical = _signal(
+            "technical",
+            Signal.BULLISH,
+            0.72,
+            position_invalidation_level=None,
+            exit_hint="",
+            atr_stop_distance=None,
+            expected_horizon_days=0,
+        )
+        fundamental = _signal(
+            "fundamental",
+            Signal.BULLISH,
+            0.84,
+            position_invalidation_level=91.0,
+            exit_hint="reduce if medium-term basis reverses",
+            atr_stop_distance=7.0,
+            expected_horizon_days=12,
+        )
+
+        fields = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=1,
+            analyst_signals=[technical, fundamental],
+            final_entry_authority={
+                "authority_type": "real_budget_entry",
+                "conditional_trigger_authority": False,
+                "open_action_evidence": True,
+            },
+            trading_date="2025-03-05",
+            recommendation_intent={},
+            control_reasons=[],
+        )
+
+        technical_contract = technical.metadata["action_evidence_contract"]
+        self.assertEqual(fields["entry_trigger"], technical_contract["entry_trigger"])
+        self.assertEqual(
+            fields["invalidation_level"],
+            technical_contract["invalidation_level"],
+        )
+        self.assertEqual(fields["position_invalidation_level"], 91.0)
+        self.assertEqual(fields["atr_stop_distance"], 7.0)
+        self.assertEqual(fields["expected_horizon_days"], 12)
+        self.assertEqual(
+            fields["exit_hint"],
+            "reduce if medium-term basis reverses",
+        )
+
+    def test_pretrade_boundaries_ignore_opposite_side_lifecycle(self):
+        technical = _signal(
+            "technical",
+            Signal.BULLISH,
+            0.72,
+            position_invalidation_level=None,
+            exit_hint="",
+            atr_stop_distance=None,
+            expected_horizon_days=0,
+        )
+        opposite_fundamental = _signal(
+            "fundamental",
+            Signal.BEARISH,
+            0.90,
+            position_invalidation_level=106.0,
+            expected_horizon_days=12,
+        )
+
+        _ratio, reasons, _notes, diagnostics = _apply_pretrade_invalidation_control(
+            ticker="BU",
+            position_ratio=0.05,
+            current_ratio=0.0,
+            max_position_ratio=0.10,
+            analyst_signals=[technical, opposite_fundamental],
+            full_config={},
+        )
+
+        self.assertNotIn("missing_pretrade_invalidation", reasons)
+        self.assertIn("missing_position_exit_boundary", reasons)
+        self.assertFalse(
+            diagnostics["pretrade_invalidation"]["position_exit_boundary_present"]
+        )
+
     def test_signal_collector_preserves_source_evidence_without_trade_authority(self):
         contract = build_signal_collection_contract(
             ticker="BU",
@@ -335,6 +465,81 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         self.assertEqual(result["candidate_count"], 0)
         self.assertNotIn("capital_deployment", pm_state)
+
+    def test_alpha_scale_queue_uses_existing_strong_opportunity_margin_target(self):
+        scale = _pm_state("CU", 0, 1, with_scorecard=False)
+        scale["final_entry_authority"].update(
+            {
+                "authority_type": "real_budget_entry",
+                "capital_layer": CAPITAL_LAYER_ALPHA_SCALE,
+                "max_allowed_margin_ratio": 0.12,
+            }
+        )
+        scale["target_position_ratio"] = 0.12
+        scale["position_ratio"] = 0.12
+        scale["target_margin_ratio_estimate"] = 0.12
+        scale["margin_required"] = 120_000.0
+        scale["opportunity_scorecard"] = {
+            "preferred_side": "long",
+            "long": {
+                "side": "long",
+                "final_state": "tradeable_candidate",
+                "opportunity_score": 0.80,
+                "score": 0.80,
+                "rank_score_input_components": {"cold_start_evidence_quality": 0.80},
+                "opportunity_score_components": {},
+            },
+        }
+        real = copy.deepcopy(scale)
+        real["final_entry_authority"]["capital_layer"] = "real_budget_entry"
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        apply_full_market_capital_deployment(
+            generated=[("CU", scale)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "capital_utilization_control": {
+                    "target_margin_ratio_confirmed": 0.10,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        deployment = scale["capital_deployment"]
+        self.assertTrue(deployment["selected_for_capital_deployment"])
+        self.assertEqual(deployment["target_margin_ratio_budget"], 0.18)
+
+        apply_full_market_capital_deployment(
+            generated=[("CU", real)],
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "capital_utilization_control": {
+                    "target_margin_ratio_confirmed": 0.10,
+                    "strong_opportunity_target_margin_ratio_confirmed": 0.18,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        normal_deployment = real["capital_deployment"]
+        self.assertFalse(normal_deployment["selected_for_capital_deployment"])
+        self.assertEqual(normal_deployment["target_margin_ratio_budget"], 0.10)
 
     def test_full_market_deployment_ignores_signed_contract_without_internal_candidate(self):
         scorecard = {
@@ -961,7 +1166,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertEqual(stronger["capital_deployment"]["rank_budget_sequence"], 1)
         self.assertEqual(weaker["capital_deployment"]["rank_budget_sequence"], 2)
 
-    def test_full_market_rank_tie_uses_candidate_quality_before_ticker(self):
+    def test_full_market_rank_tie_uses_ticker_not_a_second_quality_sort(self):
         low = _pm_state("AL", 0, 1, with_scorecard=False)
         high = _pm_state("ZN", 0, 1, with_scorecard=False)
         for pm_state, ticker, quality in ((low, "AL", 0.20), (high, "ZN", 0.80)):
@@ -997,12 +1202,12 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             portfolio=portfolio,
         )
 
-        self.assertEqual(high["capital_deployment"]["opportunity_rank"], 1)
-        self.assertTrue(high["capital_deployment"]["selected_for_capital_deployment"])
-        self.assertEqual(low["capital_deployment"]["opportunity_rank"], 2)
-        self.assertFalse(low["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(low["capital_deployment"]["opportunity_rank"], 1)
+        self.assertTrue(low["capital_deployment"]["selected_for_capital_deployment"])
+        self.assertEqual(high["capital_deployment"]["opportunity_rank"], 2)
+        self.assertFalse(high["capital_deployment"]["selected_for_capital_deployment"])
 
-    def test_capital_rank_sort_tuple_uses_registered_tie_break_fields(self):
+    def test_capital_rank_sort_tuple_has_only_the_single_rank_score(self):
         row = {
             "capital_priority_tier": 2,
             "rank_score": 0.50,
@@ -1013,7 +1218,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
 
         self.assertEqual(
             _capital_rank_sort_tuple(row),
-            (2, 0.50, 0.40, 0.70, 0.01),
+            (0.50,),
         )
 
     def test_rank_policy_catalog_has_no_inactive_execution_or_stale_window_keys(self):
@@ -1036,6 +1241,18 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                 "capital_efficiency",
                 "conflict_risk_invalidation_penalty",
             },
+        )
+        self.assertEqual(
+            policy["capital_layer_priority"],
+            {
+                "alpha_scale": 6.0,
+                "real_budget": 3.0,
+                "exploration_probe": 0.0,
+            },
+        )
+        self.assertEqual(
+            policy["trigger_execution_quality"],
+            {"current_trigger_quality_weight": 0.08},
         )
         self.assertEqual(
             set(policy["open_add_action_value_delta"]),
@@ -1101,6 +1318,165 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             default_row["rank_score_components"]["open_add_action_value_delta"],
         )
         self.assertGreater(boosted_row["rank_score"], default_row["rank_score"])
+
+    def test_step4_capital_layer_is_counted_once_inside_the_single_rank(self):
+        scores = {}
+        for layer in (
+            CAPITAL_LAYER_EXPLORATION,
+            "real_budget_entry",
+            CAPITAL_LAYER_ALPHA_SCALE,
+        ):
+            row = {
+                "capital_layer": layer,
+                "final_state": "tradeable_candidate",
+                "rank_score_input_components": {"cold_start_evidence_quality": 0.40},
+                "opportunity_score_components": {},
+                "action_value_learning_summary": {},
+            }
+            ranked = _ensure_final_rank_score_fields(row, config={})
+            scores[layer] = ranked["rank_score"]
+        self.assertGreater(scores[CAPITAL_LAYER_ALPHA_SCALE], scores["real_budget_entry"])
+        self.assertGreater(scores["real_budget_entry"], scores[CAPITAL_LAYER_EXPLORATION])
+
+    def test_single_rank_layer_bases_dominate_all_other_valid_component_extremes(self):
+        strongest_lower_layer = {
+            "final_state": "tradeable_candidate",
+            "rank_score_input_components": {"cold_start_evidence_quality": 1.0},
+            "trigger_quality_score": 1.0,
+            "opportunity_score_components": {"alpha_profile_adjustment": 0.09},
+            "action_value_learning_summary": {"positive_learning_signal": 1.0},
+        }
+        weakest_higher_layer = {
+            "final_state": "tradeable_candidate",
+            "rank_score_input_components": {"cold_start_evidence_quality": 0.0},
+            "trigger_quality_score": 0.0,
+            "opportunity_score_components": {
+                "alpha_profile_adjustment": -0.08,
+                "fusion_score_adjustment": -0.18,
+                "market_conflict_penalty": -0.10,
+                "critical_data_gap_penalty": -0.12,
+                "fundamental_gap_penalty": -0.06,
+            },
+            "gating_failures": [f"failure_{index}" for index in range(8)],
+            "action_value_learning_summary": {"negative_learning_signal": 1.0},
+        }
+        probe = _ensure_final_rank_score_fields(
+            {**strongest_lower_layer, "capital_layer": CAPITAL_LAYER_EXPLORATION},
+            config={},
+            capital_efficiency_bonus=0.02,
+        )
+        real = _ensure_final_rank_score_fields(
+            {**weakest_higher_layer, "capital_layer": "real_budget_entry"},
+            config={},
+        )
+        strongest_real = _ensure_final_rank_score_fields(
+            {**strongest_lower_layer, "capital_layer": "real_budget_entry"},
+            config={},
+            capital_efficiency_bonus=0.02,
+        )
+        scale = _ensure_final_rank_score_fields(
+            {**weakest_higher_layer, "capital_layer": CAPITAL_LAYER_ALPHA_SCALE},
+            config={},
+        )
+
+        self.assertGreater(real["rank_score"], probe["rank_score"])
+        self.assertGreater(scale["rank_score"], strongest_real["rank_score"])
+
+    def test_rank_budget_sequence_uses_layer_bases_inside_the_only_rank_score(self):
+        generated = []
+        for ticker, layer, evidence in (
+            ("AL", CAPITAL_LAYER_EXPLORATION, 1.0),
+            ("ZN", "real_budget_entry", 0.0),
+            ("CU", CAPITAL_LAYER_ALPHA_SCALE, 0.0),
+        ):
+            state = _pm_state(ticker, 0, 1, with_scorecard=False)
+            state["final_entry_authority"]["capital_layer"] = layer
+            state["opportunity_scorecard"] = {
+                "preferred_side": "long",
+                "long": {
+                    "side": "long",
+                    "final_state": "tradeable_candidate",
+                    "opportunity_score": evidence,
+                    "score": evidence,
+                    "candidate_quality": evidence,
+                    "rank_score_input_components": {
+                        "cold_start_evidence_quality": evidence,
+                    },
+                    "trigger_quality_score": evidence,
+                    "opportunity_score_components": {},
+                    "action_value_learning_summary": {},
+                },
+            }
+            generated.append((ticker, state))
+        portfolio = SimpleNamespace(
+            account_equity=1_000_000.0,
+            cashflow=1_000_000.0,
+            margin_used=0.0,
+            positions={},
+        )
+
+        apply_full_market_capital_deployment(
+            generated=generated,
+            config={
+                "max_total_margin_ratio": 0.20,
+                "position_budget_policy": {
+                    "min_real_trade_margin_ratio": 0.008,
+                    "max_single_ticker_margin_ratio": 0.13,
+                },
+                "net_exposure_control": {"max_net_exposure": 0.50},
+            },
+            portfolio=portfolio,
+        )
+
+        by_ticker = {ticker: state for ticker, state in generated}
+        self.assertEqual(
+            by_ticker["CU"]["capital_deployment"]["rank_budget_sequence"],
+            1,
+        )
+        self.assertEqual(
+            by_ticker["ZN"]["capital_deployment"]["rank_budget_sequence"],
+            2,
+        )
+        self.assertEqual(
+            by_ticker["AL"]["capital_deployment"]["rank_budget_sequence"],
+            3,
+        )
+
+    def test_historical_trigger_outcome_and_current_trigger_quality_enter_distinct_rank_components(self):
+        base = {
+            "capital_layer": CAPITAL_LAYER_EXPLORATION,
+            "final_state": "tradeable_candidate",
+            "rank_score_input_components": {"cold_start_evidence_quality": 0.5},
+            "opportunity_score_components": {
+                "trigger_quality_positive_bonus": 0.08,
+                "trigger_quality_loss_penalty": -0.10,
+            },
+            "action_value_learning_summary": {
+                "positive_learning_signal": 0.5,
+                "trigger_quality_positive_signal": 0.75,
+            },
+        }
+        weak_today = _ensure_final_rank_score_fields(
+            {**copy.deepcopy(base), "trigger_quality_score": 0.2},
+            config={},
+        )
+        strong_today = _ensure_final_rank_score_fields(
+            {**copy.deepcopy(base), "trigger_quality_score": 0.8},
+            config={},
+        )
+
+        self.assertEqual(
+            weak_today["rank_score_components"]["open_add_action_value_delta"],
+            strong_today["rank_score_components"]["open_add_action_value_delta"],
+        )
+        self.assertEqual(
+            weak_today["rank_score_components"]["trigger_execution_quality"],
+            0.016,
+        )
+        self.assertEqual(
+            strong_today["rank_score_components"]["trigger_execution_quality"],
+            0.064,
+        )
 
     def test_rank_python_uses_catalog_keys_and_registered_rank_input_names(self):
         deployment_source = (

@@ -629,6 +629,7 @@ def build_final_action_contract(
             "trigger_source",
             "entry_trigger",
             "invalidation",
+            "invalidation_level",
             "valid_until",
             "requires_intraday_confirmation",
             "can_execute_without_intraday_trigger",
@@ -736,6 +737,8 @@ def build_final_action_contract(
         "expected_horizon_days": final_scope.get("expected_horizon_days"),
         "market_regime": final_scope.get("market_regime"),
         "invalidation_level": final_scope.get("invalidation_level"),
+        "position_invalidation_level": final_scope.get("position_invalidation_level"),
+        "exit_hint": final_scope.get("exit_hint"),
         "atr_stop_distance": final_scope.get("atr_stop_distance"),
         "evidence_used": {
             "scorecard_preferred_side": scorecard.get("preferred_side"),

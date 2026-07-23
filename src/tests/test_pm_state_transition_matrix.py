@@ -14,7 +14,10 @@ from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecyc
 from tools.agent_tools.decision.pm_position_transition import classify_position_transition
 from tools.agent_tools.decision.pm_state_transition import classify_pm_decision_state
 from tools.common.final_action_semantics import full_market_rank_source_payload
-from tools.common.execution_trigger_semantics import canonical_entry_trigger
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
 
 
 class PMStateTransitionMatrixTest(unittest.TestCase):
@@ -155,7 +158,10 @@ class PMStateTransitionMatrixTest(unittest.TestCase):
             execution_profile="breakout",
             trigger_source="technical_breakout",
             entry_trigger=canonical_entry_trigger("breakout", "long"),
-            invalidation="15m close below the invalidation boundary",
+            invalidation=canonical_entry_invalidation_condition("breakout", "long"),
+            invalidation_level=95.0,
+            position_invalidation_level=94.0,
+            valid_until="2025-03-25 15:00:00",
             learning_used={
                 "alpha_setup_action_values": [
                     {

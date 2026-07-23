@@ -650,8 +650,12 @@ def _resolve_phase2_execution_basis(
         else {}
     )
     execution_profile = str(execution_contract.get("execution_profile") or decision_context.get("execution_profile") or "")
+    is_position_reduction = action_value in {
+        FuturesAction.CLOSE_LONG.value,
+        FuturesAction.CLOSE_SHORT.value,
+    }
     force_immediate = bool(
-        action_value in {FuturesAction.CLOSE_LONG.value, FuturesAction.CLOSE_SHORT.value}
+        is_position_reduction
         or execution_profile == "exit_immediate"
         or (
             execution_profile == "event_immediate"
@@ -670,7 +674,7 @@ def _resolve_phase2_execution_basis(
         finalize_untriggered=finalize_untriggered,
         force_immediate=force_immediate,
     )
-    if basis.base_price is None and force_immediate:
+    if basis.base_price is None and is_position_reduction:
         logger.warning(
             f"Intraday basis unavailable for immediate {recommendation['underlying_code']} close; "
             "falling back to morning execution basis."
@@ -713,7 +717,14 @@ def _mark_intraday_non_execution(
         translation["intraday_execution"] = selection.to_audit_payload()
         add_rewrite_reason(audit_snapshot, selection.reason)
 
-    if not finalize_untriggered:
+    terminal_entry_contract = bool(
+        selection is not None
+        and selection.reason in {
+            "fac_invalidated_before_entry",
+            "fac_expired_before_entry",
+        }
+    )
+    if not finalize_untriggered and not terminal_entry_contract:
         _record_phase2_state(
             audit_snapshot,
             mode=runtime_mode,
@@ -1062,6 +1073,15 @@ def _translate_pre_open_recommendation_to_order(
     current_lots = int(getattr(current_position, "shares", 0) or 0)
     contract_code = getattr(current_position, "contract_code", None) or recommendation.get("contract_code")
     final_action_contract = _final_action_contract_from_snapshot(snapshot)
+    if _is_strategy_recommendation(recommendation) and final_action_contract:
+        signal_lifecycle = dict(signal_lifecycle or {})
+        signal_lifecycle.pop("invalidation_level", None)
+        position_invalidation_level = _safe_float(
+            final_action_contract.get("position_invalidation_level"),
+            0.0,
+        )
+        if position_invalidation_level > 0.0:
+            signal_lifecycle["position_invalidation_level"] = position_invalidation_level
     final_action_contract_errors = validate_final_action_contract(final_action_contract) if final_action_contract else []
     if _is_strategy_recommendation(recommendation) and final_action_contract_errors:
         add_rewrite_reason(
@@ -1189,30 +1209,13 @@ def _translate_pre_open_recommendation_to_order(
             "lots_delta": int(target_lots - current_lots),
         }
         ensure_execution_translation(snapshot)["signal_lifecycle"] = dict(signal_lifecycle or {})
-        signal_invalidation_observed = _signal_invalidation_breached(
-            current_price,
-            target_lots,
-            signal_lifecycle,
-        )
-        exit_policy_result = evaluate_exit_policy(
-            ticker=ticker,
-            current_price=float(current_price),
-            current_lots=current_lots,
-            target_lots=target_lots,
-            lifecycle=signal_lifecycle,
-            current_position=current_position,
-            trading_date=recommendation.get("effective_trade_date") or recommendation.get("trading_date"),
-            config=config,
-        )
         phase2_execution = _ensure_phase2_execution(snapshot)
         phase2_execution["contract_execution_observation"] = {
-            "signal_invalidation_observed": bool(signal_invalidation_observed),
-            "exit_policy_required": bool(exit_policy_result.get("exit_required")),
-            "exit_policy_reason": exit_policy_result.get("reason"),
             "business_boundary": (
-                "Trader records execution observations but does not rewrite "
-                "strategy final_action_contract target_lots; PM/Auditor must "
-                "encode reduce/exit/hold before Phase2."
+                "Trader executes the signed pre-fill invalidation contract in the "
+                "intraday selector, never treats planned target_lots as an existing "
+                "position invalidation observation, and requires PM to encode the "
+                "only daily hold/reduce/exit decision before Phase2."
             ),
         }
 
@@ -1260,7 +1263,6 @@ def _translate_pre_open_recommendation_to_order(
                     ),
                 }
 
-        phase2_execution["exit_policy"] = exit_policy_result
         phase2_execution["entry_timing"] = phase2_entry_audit(
             target_lots=target_lots,
             current_lots=current_lots,
@@ -1884,6 +1886,10 @@ def _process_strategy_recommendations(
             if intraday_selection is not None:
                 summary["intraday"][f"{intraday_selection.decision}:{intraday_selection.reason}"] += 1
             if intraday_selection is not None and not intraday_selection.should_execute:
+                terminal_entry_contract = intraday_selection.reason in {
+                    "fac_invalidated_before_entry",
+                    "fac_expired_before_entry",
+                }
                 _mark_intraday_non_execution(
                     db=db,
                     recommendation=recommendation,
@@ -1898,7 +1904,7 @@ def _process_strategy_recommendations(
                     f"Intraday execution gate held {ticker}: "
                     f"decision={intraday_selection.decision}, reason={intraday_selection.reason}"
                 )
-                if finalize_untriggered:
+                if finalize_untriggered or terminal_entry_contract:
                     summary["skipped"] += 1
                     summary["no_trade_reasons"][intraday_selection.reason] += 1
                 else:

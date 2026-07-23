@@ -1040,16 +1040,55 @@ def write_alpha_setup_profiles(
                     "lifecycle_state": execution_result.get("lifecycle_state"),
                     "profile_state_hint": execution_result.get("profile_state_hint"),
                 })
-    for episode_sample in episode_samples:
-        episode_close_date = str(
-            ((episode_sample.get("result") or {}) if isinstance(episode_sample.get("result"), dict) else {}).get("close_date")
-            or trading_date
+    # Preserve every physical pair sample, but make the final pair in each
+    # existing sample-identity group carry the 0 -> position -> 0 completion
+    # date so the resulting profile/action-value cannot become visible early.
+    episode_group_last: Dict[tuple, tuple[str, int]] = {}
+    for index, episode_sample in enumerate(episode_samples):
+        result_payload = (
+            episode_sample.get("result")
+            if isinstance(episode_sample.get("result"), dict)
+            else {}
+        )
+        group_key = (
+            str(episode_sample.get("ticker") or "").upper(),
+            str(episode_sample.get("side") or "").lower(),
+            str(episode_sample.get("scope_key") or ""),
+            str(episode_sample.get("setup_type") or ""),
+            str(episode_sample.get("source_type") or ""),
+            str(episode_sample.get("recommendation_id") or ""),
+        )
+        pair_close_date = str(result_payload.get("close_date") or "")[:10]
+        if group_key not in episode_group_last or pair_close_date >= episode_group_last[group_key][0]:
+            episode_group_last[group_key] = (pair_close_date, index)
+    for index, episode_sample in enumerate(episode_samples):
+        result_payload = (
+            episode_sample.get("result")
+            if isinstance(episode_sample.get("result"), dict)
+            else {}
+        )
+        group_key = (
+            str(episode_sample.get("ticker") or "").upper(),
+            str(episode_sample.get("side") or "").lower(),
+            str(episode_sample.get("scope_key") or ""),
+            str(episode_sample.get("setup_type") or ""),
+            str(episode_sample.get("source_type") or ""),
+            str(episode_sample.get("recommendation_id") or ""),
+        )
+        pair_close_date = str(result_payload.get("close_date") or trading_date)[:10]
+        episode_completion_date = str(
+            result_payload.get("episode_completion_date") or pair_close_date
         )[:10]
+        episode_learning_date = (
+            episode_completion_date
+            if episode_group_last.get(group_key, ("", -1))[1] == index
+            else pair_close_date
+        )
         result = upsert_alpha_setup_sample_and_profile(
             cursor,
             cfg=cfg,
             config_id=config_id,
-            trading_date=episode_close_date,
+            trading_date=episode_learning_date,
             sample=episode_sample,
         )
         if result.get("rows"):
@@ -1124,8 +1163,8 @@ def _episode_alpha_setup_samples(
             SELECT *
             FROM trade_episode_memory
             WHERE config_id = ?
-              AND COALESCE(close_date, episode_date, trading_date) = ?
-            ORDER BY COALESCE(close_date, episode_date, trading_date), last_reviewed_at, id
+              AND COALESCE(episode_date, close_date, trading_date) = ?
+            ORDER BY COALESCE(episode_date, close_date, trading_date), close_date, last_reviewed_at, id
             """,
             (config_id, str(trading_date)[:10]),
         )
@@ -1222,6 +1261,16 @@ def _episode_alpha_setup_samples(
             opportunity_state=opportunity_state,
         )
         data_usage = payload.get("data_usage_summary") if isinstance(payload.get("data_usage_summary"), dict) else {}
+        position_lifecycle_trace = (
+            payload.get("position_lifecycle_trace")
+            if isinstance(payload.get("position_lifecycle_trace"), dict)
+            else {}
+        )
+        lifecycle_daily_facts = (
+            position_lifecycle_trace.get("daily_facts")
+            if isinstance(position_lifecycle_trace.get("daily_facts"), list)
+            else []
+        )
         data_combo = _episode_data_combo(data_usage, payload)
         scope_key = build_alpha_setup_scope_key(
             ticker=ticker,
@@ -1233,6 +1282,9 @@ def _episode_alpha_setup_samples(
         )
         net_pnl = float(row.get("net_pnl") or 0.0)
         close_date = str(row.get("close_date") or row.get("episode_date") or trading_date)[:10]
+        episode_completion_date = str(
+            row.get("episode_date") or row.get("close_date") or trading_date
+        )[:10]
         samples.append({
             "ticker": ticker,
             "side": side,
@@ -1264,6 +1316,7 @@ def _episode_alpha_setup_samples(
                 "close_transaction_id": pair.get("close_transaction_id"),
                 "open_date": row.get("open_date"),
                 "close_date": close_date,
+                "episode_completion_date": episode_completion_date,
                 "episode_date": row.get("episode_date"),
                 "lesson_text": row.get("lesson_text"),
                 "opportunity_type": opportunity_type,
@@ -1271,6 +1324,7 @@ def _episode_alpha_setup_samples(
                 "analyst_payloads": payload.get("analyst_payloads") or {},
                 "data_usage_summary": data_usage,
                 "final_action_contract": final_contract,
+                "position_lifecycle_trace": position_lifecycle_trace,
                 "learning_boundary": {
                     "learning_source": "trade_episode_memory",
                     "strategy_episode_only": True,
@@ -1285,6 +1339,13 @@ def _episode_alpha_setup_samples(
                 "close_date": close_date,
                 "holding_days": int(float(row.get("holding_days") or 0)),
                 "return_on_notional": float(row.get("return_on_notional") or 0.0),
+                "lifecycle_fact_dates": [
+                    str(fact.get("trading_date") or "")[:10]
+                    for fact in lifecycle_daily_facts
+                    if isinstance(fact, dict) and fact.get("trading_date")
+                ],
+                "episode_completion_date": episode_completion_date,
+                "settled_fact_cutoff": episode_completion_date,
                 "no_future_leakage": True,
             },
         })

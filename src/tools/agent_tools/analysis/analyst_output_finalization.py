@@ -61,6 +61,7 @@ def _preserve_data_unavailable_boundary(signal: Any) -> None:
     signal.neutral_trigger_condition = ""
     signal.counterfactual_side = "flat"
     signal.invalidation_level = None
+    signal.position_invalidation_level = None
     signal.atr_stop_distance = None
     contract = metadata.get("action_evidence_contract")
     if isinstance(contract, dict):
@@ -86,6 +87,7 @@ def _preserve_data_unavailable_boundary(signal: Any) -> None:
                 "evidence_strength": "weak",
                 "evidence_freshness": "missing",
                 "invalidation_level": None,
+                "position_invalidation_level": None,
                 "atr_stop_distance": None,
                 "would_change_view_if": "",
                 "neutral_trigger_condition": "",

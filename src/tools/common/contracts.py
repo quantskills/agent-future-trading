@@ -49,6 +49,7 @@ REQUIRED_TRADE_RESEARCH_FIELDS = [
     "factor_focus",
     "current_evidence_conflict",
     "invalidation_level",
+    "position_invalidation_level",
 ]
 
 PM_EXPLANATION_FIELDS = {
@@ -118,6 +119,7 @@ EXECUTION_CONTRACT_KEYS = {
     "trigger_source",
     "entry_trigger",
     "invalidation",
+    "invalidation_level",
     "valid_until",
     "requires_intraday_confirmation",
     "can_execute_without_intraday_trigger",
@@ -141,7 +143,9 @@ FINAL_CONTRACT_EXECUTION_FIELD_KEYS = {
     "invalidation",
     "invalidation_condition",
     "invalidation_level",
+    "position_invalidation_level",
     "atr_stop_distance",
+    "valid_until",
     "setup_type",
     "horizon_class",
     "expected_horizon_days",
@@ -582,6 +586,7 @@ def build_trade_research_contract(
     factor_focus: Optional[Iterable[str]] = None,
     current_evidence_conflict: Optional[Iterable[str]] = None,
     invalidation_level: Any = None,
+    position_invalidation_level: Any = None,
     atr_stop_distance: Any = None,
     sample_state: str = "current_day_evidence",
     maturity: str = "candidate",
@@ -601,6 +606,7 @@ def build_trade_research_contract(
         "factor_focus": list(factor_focus or []),
         "current_evidence_conflict": list(current_evidence_conflict or []),
         "invalidation_level": invalidation_level,
+        "position_invalidation_level": position_invalidation_level,
         "atr_stop_distance": atr_stop_distance,
         "sample_state": str(sample_state or "current_day_evidence"),
         "maturity": str(maturity or "candidate"),

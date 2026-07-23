@@ -30,6 +30,10 @@ from tools.agent_tools.analysis.analyst_structured_output import (
     FundamentalAnalystOutput,
     TechnicalAnalystOutput,
 )
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    entry_invalidation_contract_error,
+)
 
 
 def _llm_config() -> dict:
@@ -96,6 +100,14 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
 
     def test_llm_role_schemas_exclude_deterministic_freshness_and_system_unavailable_setup(self):
         self.assertIn("data_freshness", AnalystSignal.model_json_schema()["properties"])
+        self.assertIn(
+            "trigger_quality_score",
+            AnalystSignal.model_json_schema()["properties"],
+        )
+        self.assertIn(
+            "position_invalidation_level",
+            AnalystSignal.model_json_schema()["properties"],
+        )
         for output_model in (
             TechnicalAnalystOutput,
             FundamentalAnalystOutput,
@@ -109,6 +121,13 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
                     "data_unavailable_no_trade",
                     setup_schema.get("enum", []),
                 )
+                self.assertIn("trigger_quality_score", schema["properties"])
+        self.assertEqual(
+            FundamentalAnalystOutput.model_json_schema()["properties"][
+                "trigger_quality_score"
+            ].get("const"),
+            0.0,
+        )
 
     def _technical_signal(self, *, timing: str, trigger: str, invalidation_level=95.0) -> AnalystSignal:
         return AnalystSignal(
@@ -123,21 +142,61 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             entry_trigger=trigger,
             invalidation_present=invalidation_level is not None,
             invalidation_level=invalidation_level,
+            position_invalidation_level=92.0,
+            atr_stop_distance=3.0,
             exit_hint=(
-                "15m close below 95 invalidates the setup"
-                if invalidation_level is not None
-                else ""
+                "after fill, close below 92 requires position exit"
             ),
             factor_focus=["trend", "volume"],
             metadata={
                 "data_usage_summary": self._data_usage("technical", "RB"),
-                **(
-                    {"invalidation_condition": "15m close below 95 invalidates the setup"}
-                    if invalidation_level is not None
-                    else {}
-                ),
             },
         )
+
+    def test_entry_and_position_invalidation_are_distinct_after_finalization(self):
+        contract = self._finalize(
+            self._technical_signal(
+                timing="breakout",
+                trigger="15m close breaks above resistance with volume confirmation",
+            )
+        ).metadata["action_evidence_contract"]
+
+        self.assertEqual(contract["invalidation_level"], 95.0)
+        self.assertEqual(contract["position_invalidation_level"], 92.0)
+        self.assertEqual(contract["atr_stop_distance"], 3.0)
+        self.assertEqual(
+            contract["invalidation_condition"],
+            canonical_entry_invalidation_condition("breakout", "long"),
+        )
+        self.assertTrue(contract["invalidation_present"])
+
+    def test_exit_hint_and_atr_cannot_prove_pre_fill_invalidation(self):
+        signal = self._technical_signal(
+            timing="breakout",
+            trigger="15m close breaks above resistance with volume confirmation",
+            invalidation_level=None,
+        )
+        contract = self._finalize(signal).metadata["action_evidence_contract"]
+
+        self.assertEqual(contract["opportunity_state"], "no_opportunity")
+        self.assertFalse(contract["invalidation_present"])
+        self.assertNotIn("invalidation_condition", contract)
+        self.assertEqual(contract["position_invalidation_level"], 92.0)
+        self.assertEqual(contract["atr_stop_distance"], 3.0)
+
+    def test_entry_invalidation_contract_rejects_nonpositive_and_nonfinite_levels(self):
+        condition = canonical_entry_invalidation_condition("breakout", "long")
+        for level in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(level=level):
+                self.assertEqual(
+                    entry_invalidation_contract_error(
+                        profile="breakout",
+                        side="long",
+                        invalidation_condition=condition,
+                        invalidation_level=level,
+                    ),
+                    "execution_entry_invalidation_level_invalid",
+                )
 
     def test_complete_watch_missing_or_invalid_profile_fails_explicitly(self):
         for timing in ("", "range_reversal"):
@@ -211,7 +270,22 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
 
         self.assertEqual(FundamentalAnalystOutput().entry_timing_signal, "")
         with self.assertRaises(ValidationError):
+            FundamentalAnalystOutput(trigger_quality_score=0.5)
+        with self.assertRaises(ValidationError):
             FundamentalAnalystOutput(entry_timing_signal="breakout")
+        with self.assertRaises(ValidationError):
+            FundamentalAnalystOutput(
+                invalidation_level=95.0,
+                invalidation_present=True,
+            )
+        fundamental_position_boundary = FundamentalAnalystOutput(
+            position_invalidation_level=92.0,
+            exit_hint="after fill, fundamental reversal requires position exit",
+        )
+        self.assertEqual(
+            fundamental_position_boundary.position_invalidation_level,
+            92.0,
+        )
 
         news_payload = {
             "signal": "Bearish",

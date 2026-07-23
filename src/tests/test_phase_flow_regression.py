@@ -39,6 +39,8 @@ from agents.decision_team.portfolio_manager import (
     _apply_alpha_setup_ev_position_control,
     _apply_drawdown_and_ticker_loss_control,
     _apply_holding_rebalance_control,
+    _load_opening_fac_context,
+    _opening_fac_position_invalidation_breached,
     _apply_position_budget_policy_for_new_entry,
     _alpha_setup_action_value_trace,
     _conditional_monitor_probe_seed_plan,
@@ -82,6 +84,7 @@ from tools.common.signal_evidence_collection import (
     build_signal_collection_contract,
 )
 from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
     canonical_entry_trigger,
     trigger_source_for_analyst_profile,
 )
@@ -104,6 +107,7 @@ from tools.agent_tools.decision.pm_signal_fusion import (
     build_opportunity_scorecard,
 )
 from tools.agent_tools.decision.pm_full_market_capital_deployment import (
+    CAPITAL_LAYER_ALPHA_SCALE,
     CAPITAL_LAYER_EXPLORATION,
     CAPITAL_LAYER_REAL_BUDGET,
     CAPITAL_RATIO_SOURCE_EXPLORATION,
@@ -165,6 +169,27 @@ from apis.pandaai import PandaAIAPI
 from graph.workflow import AgentWorkflow
 
 
+def _canonical_pm_execution_metadata(
+    *,
+    side: str = "long",
+    state: str = "tradeable_candidate",
+    confirmed: bool = True,
+    ticker: str = "BU",
+) -> dict:
+    return {
+        "action_evidence_contract": build_test_aec(
+            "technical",
+            ticker=ticker,
+            signal="Bullish" if side == "long" else "Bearish",
+            side=side,
+            opportunity_state=state,
+            trigger_valid=confirmed,
+            current_trigger_confirmed=confirmed,
+            invalidation_present=True,
+        )
+    }
+
+
 class _FakeRouter:
     def __init__(self, trade_dates):
         self.trade_dates = trade_dates
@@ -187,7 +212,7 @@ def _signal_collection_contract_fixture(
     trigger_valid: bool = False,
     current_trigger_confirmed: bool = False,
     entry_trigger: str | None = None,
-    invalidation_condition: str = "close_below_trigger",
+    invalidation_condition: str | None = None,
 ) -> dict:
     signal_value = "Bullish" if side == "long" else "Bearish"
     action_contract = build_test_aec(
@@ -203,6 +228,10 @@ def _signal_collection_contract_fixture(
         invalidation_present=True,
         entry_trigger=entry_trigger,
         invalidation_condition=invalidation_condition,
+        extra={
+            "invalidation_level": 95.0 if side == "long" else 105.0,
+            "position_invalidation_level": 94.0 if side == "long" else 106.0,
+        },
     )
     signal = SimpleNamespace(
         agent_name="technical",
@@ -290,7 +319,7 @@ def _pm_state_fixture(contract: dict, *, ticker: str = "", scorecard: dict | Non
             invalidation_condition=str(
                 contract.get("invalidation")
                 or contract.get("invalidation_condition")
-                or "close_below_trigger"
+                or canonical_entry_invalidation_condition("breakout", target_side)
             ),
         )
     execution_fields.setdefault("pm_six_step_stage", "steps_1_4_candidate_generated")
@@ -2040,9 +2069,10 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertEqual(signal.entry_timing_signal, "")
         self.assertEqual(signal.entry_trigger, "")
         self.assertIn(
-            "fundamental_anchor_has_short_trigger_and_invalidation",
+            "fundamental_anchor_requires_short_trigger_and_invalidation",
             signal.current_evidence_conflict,
         )
+        self.assertFalse(signal.invalidation_present)
 
     def test_pm_blocks_watch_for_trigger_new_entry_without_hard_product_rule(self):
         signal = AnalystSignal(
@@ -3641,6 +3671,14 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     if directional
                     else None
                 ),
+                extra=(
+                    {
+                        "invalidation_level": 3520.0,
+                        "position_invalidation_level": 3540.0,
+                    }
+                    if directional
+                    else None
+                ),
             )
             signals.append(
                 AnalystSignal(
@@ -4189,9 +4227,8 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                         opportunity_state="no_opportunity",
                         trigger_valid=False,
                         current_trigger_confirmed=False,
-                        invalidation_present=True,
+                        invalidation_present=False,
                         entry_trigger="",
-                        invalidation_condition="fundamental_setup_invalidated",
                     ),
                 },
             ),
@@ -5155,6 +5192,7 @@ class PMRiskGateRegressionTest(unittest.TestCase):
     def test_scorecard_single_high_quality_setup_can_seed_probe(self):
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
+                "preferred_side": "long",
                 "long": {
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
@@ -5193,6 +5231,7 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         """Regression for 2025-04-10 ZN: PM seed must use scorecard layer, not only raw score."""
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
+                "preferred_side": "long",
                 "long": {
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
@@ -5230,9 +5269,10 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         self.assertGreater(ratio, 0.0)
         self.assertEqual(row["final_state"], "tradeable_candidate")
 
-    def test_scorecard_probe_seed_prefers_candidate_quality(self):
+    def test_scorecard_probe_seed_keeps_step2_side_when_opposite_quality_is_higher(self):
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
+                "preferred_side": "long",
                 "long": {
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 2,
@@ -5266,13 +5306,14 @@ class PMRiskGateRegressionTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(side, "short")
-        self.assertLess(ratio, 0.0)
-        self.assertEqual(row["candidate_quality"], 0.91)
+        self.assertEqual(side, "long")
+        self.assertGreater(ratio, 0.0)
+        self.assertEqual(row["candidate_quality"], 0.60)
 
     def test_scorecard_watch_for_trigger_seed_is_conditional_monitor_candidate(self):
         side, ratio, row = _scorecard_probe_seed(
             opportunity_scorecard={
+                "preferred_side": "short",
                 "short": {
                     "final_state": "watch_for_trigger",
                     "supporting_signal_count": 2,
@@ -5309,6 +5350,7 @@ class PMRiskGateRegressionTest(unittest.TestCase):
     def test_scorecard_confirmed_tradeable_candidate_with_technical_opposition_does_not_seed_probe(self):
         side, ratio, _row = _scorecard_probe_seed(
             opportunity_scorecard={
+                "preferred_side": "long",
                 "long": {
                     "final_state": "tradeable_candidate",
                     "supporting_signal_count": 1,
@@ -6008,7 +6050,25 @@ class AlphaReleaseCapitalUtilizationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.80,
                     counter_evidence="basis weakens and price closes below breakout shelf",
-                    metadata={"action_evidence_contract": {"invalidation_present": True}},
+                    metadata={
+                        "action_evidence_contract": build_test_aec(
+                            "technical",
+                            ticker="BU",
+                            signal="Bullish",
+                            side="long",
+                            opportunity_state="tradeable_candidate",
+                            trigger_valid=True,
+                            current_trigger_confirmed=True,
+                            invalidation_present=True,
+                            extra={
+                                "invalidation_level": 3200.0,
+                                "position_invalidation_level": None,
+                                "exit_hint": "",
+                                "atr_stop_distance": None,
+                                "expected_horizon_days": 0,
+                            },
+                        )
+                    },
                 )
             ],
         )
@@ -6304,6 +6364,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
     def _base_scorecard(self, layer="tradeable_candidate"):
         return {
+            "preferred_side": "long",
             "long": {
                 "final_state": layer,
                 "gating_failures": [],
@@ -6956,6 +7017,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.62,
                     invalidation_level=9000.0,
+                    position_invalidation_level=9000.0,
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above short-term resistance with volume confirmation",
                     entry_quality="acceptable",
@@ -6970,7 +7032,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                             trigger_valid=True,
                             current_trigger_confirmed=True,
                             invalidation_present=True,
-                            invalidation_condition="15m close below 9000",
                         ),
                         "technical_context": {
                             "dominant_direction": "bullish",
@@ -7029,6 +7090,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.60,
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     opportunity_state="tradeable_candidate",
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
@@ -7083,10 +7145,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_quality="strong",
                     evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="RB"),
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
                 AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.35),
@@ -7152,6 +7216,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 entry_trigger="current breakout above prior high is confirmed",
                 price_percentile=0.56,
                 invalidation_level=3300.0,
+                position_invalidation_level=3300.0,
             ),
             technical_context,
             analyst="technical",
@@ -7393,10 +7458,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=9000.0,
+                    position_invalidation_level=9000.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_quality="strong",
                     evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="P"),
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.58),
             ],
@@ -7432,10 +7499,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7497,10 +7566,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7545,10 +7616,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7587,6 +7660,64 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertGreater(seed["seed_position_ratio"], 0.0)
         self.assertEqual(seed["row"]["action_preference"], "positive_candidate_open")
 
+        flat_scorecard = self._base_scorecard(layer="tradeable_candidate")
+        flat_scorecard["preferred_side"] = "flat"
+        flat_seed = _positive_open_action_value_seed(
+            ticker="RB",
+            alpha_setup_action_values=[seed["row"]],
+            analyst_signals=[technical],
+            opportunity_scorecard=flat_scorecard,
+            market_confirmation={"confirmation_score": 0.70},
+            full_config={},
+            max_position_ratio=0.05,
+        )
+        self.assertEqual(flat_seed, {})
+
+    def test_positive_open_learning_seed_keeps_step2_side_when_opposite_reward_is_higher(self):
+        action_values = [
+            {
+                "ticker": "RB",
+                "side": "long",
+                "action_name": "open",
+                "sample_count": 4,
+                "reward_mean": 300.0,
+                "reward_sum": 1200.0,
+                "confidence_score": 0.70,
+                "action_preference": "positive_candidate_open",
+                "max_position_impact": 0.03,
+            },
+            {
+                "ticker": "RB",
+                "side": "short",
+                "action_name": "open",
+                "sample_count": 8,
+                "reward_mean": 900.0,
+                "reward_sum": 7200.0,
+                "confidence_score": 0.90,
+                "action_preference": "positive_candidate_open",
+                "max_position_impact": 0.05,
+            },
+        ]
+        with patch(
+            "agents.decision_team.portfolio_manager._action_value_can_support_real_amplification",
+            return_value=True,
+        ), patch(
+            "agents.decision_team.portfolio_manager._current_open_evidence_snapshot",
+            return_value={"trade_authority": {"open_action_evidence": True}},
+        ):
+            seed = _positive_open_action_value_seed(
+                ticker="RB",
+                alpha_setup_action_values=action_values,
+                analyst_signals=[],
+                opportunity_scorecard={"preferred_side": "long"},
+                market_confirmation={"confirmation_score": 0.70},
+                full_config={},
+                max_position_ratio=0.05,
+            )
+
+        self.assertEqual(seed["side"], "long")
+        self.assertEqual(seed["row"]["reward_sum"], 1200.0)
+
     def test_single_exact_positive_open_action_value_seeds_probe_candidate_only(self):
         technical = AnalystSignal(
             agent_name="technical",
@@ -7595,10 +7726,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="P"),
         )
         seed = _positive_open_action_value_seed(
             ticker="P",
@@ -7645,10 +7778,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
 
         for legacy_preference in ("positive_candidate_add", "positive_candidate_scale"):
@@ -7697,10 +7832,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7734,10 +7871,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7776,10 +7915,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="breakout above opening range with volume confirmation",
             invalidation_level=3300.0,
+            position_invalidation_level=3300.0,
             trigger_valid=True,
             invalidation_present=True,
             entry_quality="strong",
             evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="RB"),
         )
         seed = _positive_open_action_value_seed(
             ticker="RB",
@@ -7856,10 +7997,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_quality="strong",
                     evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="J"),
                 )
             ],
             market_confirmation={"confirmation_score": 0.70},
@@ -7931,10 +8074,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_quality="strong",
                     evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="RB"),
                 )
             ],
             market_confirmation={"confirmation_score": 0.70},
@@ -7995,10 +8140,12 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     opportunity_state="tradeable_candidate",
                     entry_trigger="breakout above opening range with volume confirmation",
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_quality="strong",
                     evidence_role="entry_timing",
+                    metadata=_canonical_pm_execution_metadata(ticker="RB"),
                 )
             ],
             market_confirmation={"confirmation_score": 0.70},
@@ -8066,6 +8213,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     confidence=0.55,
                     opportunity_state="tradeable_candidate",
                     invalidation_level=5600.0,
+                    position_invalidation_level=5600.0,
                     trigger_valid=True,
                     invalidation_present=True,
                     entry_trigger="current breakdown below support is confirmed",
@@ -8146,6 +8294,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     signal=Signal.BULLISH,
                     confidence=0.60,
                     invalidation_level=3300.0,
+                    position_invalidation_level=3300.0,
                     opportunity_state="tradeable_candidate",
                 ),
                 AnalystSignal(agent_name="fundamental", signal=Signal.BULLISH, confidence=0.55),
@@ -8280,6 +8429,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="tradeable_candidate",
             entry_trigger="current breakout confirmed above resistance",
             invalidation_level=3500.0,
+            position_invalidation_level=3500.0,
             trigger_valid=True,
             invalidation_present=True,
         )
@@ -9048,6 +9198,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     confidence=0.70,
                     opportunity_state="tradeable_candidate",
                     invalidation_level=9000.0,
+                    position_invalidation_level=9000.0,
                     trigger_valid=True,
                     invalidation_present=True,
                 )
@@ -9258,7 +9409,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": True,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
                     "qualified_positive_expectancy": False,
@@ -9286,11 +9438,13 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
                     "scorecard_state": "tradeable_candidate",
+                    "candidate_quality": 0.50,
                     "strong_realtime_evidence": True,
                     "strong_market_confirmation": True,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "has_tradeable_support": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
@@ -9319,6 +9473,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "opportunity_state": "tradeable_candidate",
                     "trigger_valid": True,
                     "invalidation_present": True,
+                    "invalidation_level": 5400.0,
+                    "invalidation_condition": "long_price_lte_invalidation_level",
+                    "position_invalidation_level": 5350.0,
+                    "expected_horizon_days": 3,
                 }
             },
         )
@@ -9333,7 +9491,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "alpha_setup_ev_fusion": {
                 "scorecard_state": "tradeable_candidate",
                 "has_tradeable_support": True,
-                "has_invalidation_or_stop": True,
+                "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                 "current_confirmation_score": 0.58,
                 "independent_support_count": 1,
                 "negative_action_value": False,
@@ -9411,7 +9570,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "alpha_setup_ev_fusion": {
                 "scorecard_state": "watch_for_trigger",
                 "has_tradeable_support": False,
-                "has_invalidation_or_stop": True,
+                "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                 "current_confirmation_score": 0.70,
                 "independent_support_count": 1,
             }
@@ -9754,7 +9914,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -9777,7 +9938,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -9813,7 +9975,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "has_tradeable_support": False,
                     "has_monitorable_setup": True,
                     "setup_quality_ok": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -9866,7 +10029,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "has_tradeable_support": False,
                 "has_monitorable_setup": True,
                 "setup_quality_ok": True,
-                "has_invalidation_or_stop": True,
+                "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                 "technical_supports_side": True,
                 "technical_entry_timing_supports_side": False,
                 "technical_opposes_side": False,
@@ -9954,18 +10118,15 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             opportunity_state="watch_for_trigger",
             entry_trigger="wait for post-open break below support with volume confirmation",
             invalidation_level=3520.0,
+            position_invalidation_level=3520.0,
             trigger_valid=False,
             evidence_role="entry_timing",
-            metadata={
-                "action_evidence_contract": {
-                    "opportunity_state": "watch_for_trigger",
-                    "setup_quality_ok": True,
-                    "trigger_valid": False,
-                    "current_trigger_confirmed": False,
-                    "invalidation_present": True,
-                    "entry_trigger": "wait for post-open break below support with volume confirmation",
-                }
-            },
+            metadata=_canonical_pm_execution_metadata(
+                side="short",
+                state="watch_for_trigger",
+                confirmed=False,
+                ticker="BU",
+            ),
         )
         alpha_ev = _current_open_evidence_snapshot(
             side="short",
@@ -10018,7 +10179,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": True,
                     "setup_quality_ok": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
@@ -10049,7 +10211,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_realtime_evidence": False,
                     "strong_market_confirmation": True,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -10072,7 +10235,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -10109,7 +10273,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "has_tradeable_support": False,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
@@ -10140,7 +10305,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": False,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "has_tradeable_support": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
@@ -10170,7 +10336,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "current_confirmation_score": 0.72,
@@ -10316,7 +10483,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "current_confirmation_score": 0.62,
                     "independent_support_count": 2,
@@ -10336,7 +10504,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": False,
                     "technical_supports_side": False,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "current_confirmation_score": 0.62,
                     "independent_support_count": 2,
@@ -10348,6 +10517,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertTrue(release_detail["executable_setup_confirmation"])
         self.assertTrue(allowed)
         self.assertTrue(detail["strong_current_evidence"])
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_EXPLORATION)
         self.assertIn("horizon_consistency_probe_cap", detail["reason_effects"]["soft_limits"])
 
     def test_fundamental_tradeable_candidate_with_strong_market_confirmation_can_probe(self):
@@ -10374,7 +10544,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "fundamental_supports_side": True,
                 "news_supports_side": False,
                 "has_tradeable_support": True,
-                "has_invalidation_or_stop": True,
+                "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                 "qualified_positive_expectancy": False,
                 "positive_action_value": False,
                 "positive_profile": False,
@@ -10416,7 +10587,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "fundamental_supports_side": True,
                     "news_supports_side": True,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "current_confirmation_score": 0.80,
                     "independent_support_count": 2,
@@ -10449,7 +10621,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "scorecard_state": "watch_for_trigger",
                     "watch_for_trigger_without_setup": True,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "strong_market_confirmation": True,
                     "current_confirmation_score": 0.72,
@@ -10496,7 +10669,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "alpha_setup_ev_fusion": {
                     "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "technical_supports_side": False,
@@ -10544,21 +10718,25 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         """Full chain: analyst setup -> scorecard -> PM seed -> action-value -> real probe."""
         technical = AnalystSignal(
             agent_name="technical",
-            signal=Signal.NEUTRAL,
-            confidence=0.35,
-            opportunity_state="no_opportunity",
-        )
-        fundamental = AnalystSignal(
-            agent_name="fundamental",
             signal=Signal.BULLISH,
             confidence=0.50,
             opportunity_state="tradeable_candidate",
             setup_quality_score=0.76,
             business_quality_score=0.72,
-            entry_trigger="enter only if futures hold above support after selloff and basis remains backwardation",
             trigger_valid=True,
             invalidation_present=True,
             invalidation_level=21000.0,
+            position_invalidation_level=21000.0,
+            evidence_role="entry_timing",
+            metadata=_canonical_pm_execution_metadata(ticker="ZN"),
+        )
+        fundamental = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.BULLISH,
+            confidence=0.50,
+            opportunity_state="no_opportunity",
+            setup_quality_score=0.76,
+            business_quality_score=0.72,
             would_change_view_if="long setup invalid if basis flips to contango or inventory builds for two consecutive weeks",
             horizon_class="medium",
         )
@@ -10583,6 +10761,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "technical_opposition_min_confidence": 0.45,
             },
         )
+        scorecard["preferred_side"] = "long"
         side, seed_ratio, row = _scorecard_probe_seed(
             opportunity_scorecard=scorecard,
             control={
@@ -10703,7 +10882,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 {
                     "scorecard_state": "watch_for_trigger",
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "positive_profile": False,
@@ -10724,7 +10904,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 {
                     "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -10746,7 +10927,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 {
                     "scorecard_state": "tradeable_candidate",
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -10803,7 +10985,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "technical_supports_side": False,
                     "technical_entry_timing_supports_side": False,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "positive_profile": False,
@@ -10841,7 +11024,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "trigger_valid": False,
                     "event_catalyst_supports_side": False,
                     "has_tradeable_support": False,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "positive_profile": False,
@@ -10873,7 +11057,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "strong_market_confirmation": True,
                     "qualified_positive_expectancy": False,
                     "negative_action_value": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "current_confirmation_score": 0.75,
                     "independent_support_count": 2,
                 }
@@ -10893,12 +11078,14 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_diagnostics={
                 "alpha_setup_ev_fusion": {
                     "scorecard_state": "tradeable_candidate",
+                    "candidate_quality": 0.50,
                     "has_tradeable_support": True,
                     "qualified_positive_expectancy": True,
                     "positive_action_value": True,
                     "technical_supports_side": True,
                     "technical_entry_timing_supports_side": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "strong_realtime_evidence": True,
                     "current_confirmation_score": 0.72,
                     "independent_support_count": 2,
@@ -10931,13 +11118,86 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertEqual(detail["authority_type"], "real_budget_entry")
         self.assertTrue(detail["open_action_evidence"])
         self.assertTrue(detail["strong_current_evidence"])
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_REAL_BUDGET)
+        self.assertAlmostEqual(detail["target_margin_ratio"], 0.045)
         self.assertIn("source_parameters", detail)
         self.assertEqual(
             detail["source_parameters"]["position_budget_policy"]["min_real_trade_margin_ratio"],
             0.008,
         )
 
-    def test_rank_one_tradeable_candidate_with_current_evidence_releases_real_budget(self):
+    def test_mature_positive_learning_and_strong_current_evidence_upgrade_step4_to_scale(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion", "qualified_positive_expectancy"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "tradeable_candidate",
+                    "candidate_quality": 0.75,
+                    "has_tradeable_support": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                    "qualified_positive_expectancy": True,
+                    "positive_action_value": True,
+                    "strong_realtime_evidence": True,
+                    "strong_market_confirmation": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": True,
+                    "technical_opposes_side": False,
+                    "fundamental_supports_side": True,
+                    "fundamental_opposes_side": False,
+                    "current_confirmation_score": 0.78,
+                    "independent_support_count": 2,
+                    "action_value_stats": {
+                        "sample_count": 5,
+                        "reward_sum": 12000.0,
+                    },
+                }
+            },
+            full_config={
+                "position_budget_policy": {
+                    "deployable_margin_ratio": 0.060,
+                    "deployable_margin_max_ratio": 0.120,
+                    "hard_max_total_margin_ratio": 0.20,
+                }
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "real_budget_entry")
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
+        self.assertAlmostEqual(detail["target_margin_ratio"], 0.105)
+        self.assertIn("step4_alpha_scale_release", detail["reason_codes"])
+
+    def test_medium_horizon_fundamental_opposition_prevents_scale_but_not_probe(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=["alpha_setup_ev_fusion", "qualified_positive_expectancy"],
+            control_diagnostics={
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "tradeable_candidate",
+                    "candidate_quality": 0.75,
+                    "has_tradeable_support": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                    "qualified_positive_expectancy": True,
+                    "positive_action_value": True,
+                    "strong_realtime_evidence": True,
+                    "strong_market_confirmation": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": True,
+                    "technical_opposes_side": False,
+                    "fundamental_opposes_side": True,
+                    "current_confirmation_score": 0.78,
+                    "independent_support_count": 2,
+                    "action_value_stats": {"sample_count": 5, "reward_sum": 12000.0},
+                }
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "exploration_probe")
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+
+    def test_rank_is_not_used_by_step4_to_upgrade_an_unlearned_probe(self):
         allowed, detail = _final_contract_authority(
             control_reasons=["alpha_setup_ev_fusion"],
             control_diagnostics={
@@ -10948,7 +11208,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "capital_priority_score": 0.86,
                     "capital_priority_tier": 3,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -10973,11 +11234,45 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
 
         self.assertTrue(allowed)
-        self.assertEqual(detail["authority_type"], "real_budget_entry")
-        self.assertTrue(detail["rank_capital_priority_real_budget_release"])
-        self.assertIn("rank_capital_priority_real_budget_release", detail["reason_codes"])
-        self.assertTrue(detail["rank_capital_priority_release_detail"]["open_action_evidence"])
-        self.assertTrue(detail["rank_capital_priority_release_detail"]["has_invalidation_or_stop"])
+        self.assertEqual(detail["authority_type"], "exploration_probe")
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertNotIn("rank_capital_priority_real_budget_release", detail)
+        self.assertNotIn("rank_capital_priority_real_budget_release", detail["reason_codes"])
+
+    def test_probe_candidate_quality_spans_the_existing_margin_range(self):
+        def authority_for_quality(quality):
+            return _final_contract_authority(
+                control_reasons=["alpha_setup_ev_fusion"],
+                control_diagnostics={
+                    "alpha_setup_ev_fusion": {
+                        "scorecard_state": "tradeable_candidate",
+                        "candidate_quality": quality,
+                        "has_tradeable_support": True,
+                        "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                        "positive_action_value": False,
+                        "strong_realtime_evidence": True,
+                        "strong_market_confirmation": True,
+                        "technical_supports_side": True,
+                        "technical_entry_timing_supports_side": True,
+                        "technical_opposes_side": False,
+                        "current_confirmation_score": 0.72,
+                        "independent_support_count": 1,
+                    }
+                },
+                full_config={
+                    "position_budget_policy": {
+                        "probe_margin_ratio": 0.008,
+                        "probe_margin_max_ratio": 0.015,
+                    }
+                },
+            )[1]
+
+        low = authority_for_quality(0.0)
+        high = authority_for_quality(1.0)
+        self.assertEqual(low["capital_layer"], CAPITAL_LAYER_EXPLORATION)
+        self.assertAlmostEqual(low["target_margin_ratio"], 0.008)
+        self.assertAlmostEqual(high["target_margin_ratio"], 0.015)
 
     def test_rank_one_without_current_evidence_does_not_release_real_budget(self):
         allowed, detail = _final_contract_authority(
@@ -10990,7 +11285,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                     "capital_priority_score": 0.90,
                     "capital_priority_tier": 3,
                     "has_tradeable_support": True,
-                    "has_invalidation_or_stop": False,
+                    "has_entry_invalidation": False,
+                    "has_position_exit_boundary": True,
                     "qualified_positive_expectancy": False,
                     "positive_action_value": False,
                     "positive_profile": False,
@@ -11007,9 +11303,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertNotEqual(detail["authority_type"], "real_budget_entry")
-        self.assertFalse(detail["rank_capital_priority_real_budget_release"])
+        self.assertNotIn("rank_capital_priority_real_budget_release", detail)
 
-    def test_position_budget_floor_applies_only_to_real_budget_entry(self):
+    def test_position_budget_uses_step4_layer_plan_before_lot_rounding(self):
         common = {
             "ticker": "ZZ",
             "target_lots": 1,
@@ -11043,6 +11339,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "authority_type": "real_budget_entry",
                 "strong_current_evidence": True,
                 "decision": "allow_real_new_entry",
+                "capital_layer": CAPITAL_LAYER_REAL_BUDGET,
+                "capital_ratio_source": "normal_trade_margin_ratio",
+                "candidate_quality": 0.50,
+                "target_margin_ratio": 0.045,
+                "max_allowed_margin_ratio": 0.060,
             },
             control_reasons=real_reasons,
             control_notes=real_notes,
@@ -11057,6 +11358,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 "strong_current_evidence": False,
                 "max_allowed_margin_ratio": 0.015,
                 "decision": "allow_exploration_probe",
+                "capital_layer": CAPITAL_LAYER_EXPLORATION,
+                "capital_ratio_source": "probe_margin_ratio",
+                "candidate_quality": 0.50,
+                "target_margin_ratio": 0.0115,
             },
             control_reasons=probe_reasons,
             control_notes=probe_notes,
@@ -11072,6 +11377,51 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             probe_diag["position_budget_policy"]["decision"],
             "exploration_probe_probe_floor_applied",
         )
+        self.assertAlmostEqual(
+            probe_diag["position_budget_policy"]["planned_margin_ratio"],
+            0.0115,
+        )
+
+    def test_add_sizing_never_turns_an_incremental_candidate_into_a_reduce(self):
+        reasons, notes, diagnostics = [], [], {}
+        result = _apply_position_budget_policy_for_new_entry(
+            ticker="ZZ",
+            target_lots=12,
+            current_lots=10,
+            current_price=5000.0,
+            multiplier=10.0,
+            margin_rate=0.10,
+            account_equity=1_000_000.0,
+            margin_available=0.0,
+            max_position_ratio=0.50,
+            max_net_exposure=0.50,
+            current_net_exposure=0.50,
+            current_ticker_exposure=0.50,
+            final_entry_authority={
+                "requires_authority": True,
+                "authority_type": "real_budget_entry",
+                "capital_layer": CAPITAL_LAYER_ALPHA_SCALE,
+                "capital_ratio_source": "deployable_margin_ratio",
+                "target_margin_ratio": 0.06,
+                "max_allowed_margin_ratio": 0.12,
+            },
+            full_config={
+                "position_budget_policy": {
+                    "enabled": True,
+                    "min_real_trade_margin_ratio": 0.008,
+                    "min_real_trade_margin_abs": 0.0,
+                    "max_single_ticker_margin_ratio": 0.13,
+                    "block_below_min_when_cannot_scale": True,
+                }
+            },
+            control_reasons=reasons,
+            control_notes=notes,
+            control_diagnostics=diagnostics,
+        )
+
+        self.assertEqual(result[0], 10)
+        self.assertGreaterEqual(abs(result[0]), 10)
+        self.assertEqual(result[-1], "step4_add_plan_no_incremental_capacity")
 
     def test_action_value_trace_separates_open_hold_exit_execution(self):
         trace = _alpha_setup_action_value_trace([
@@ -11699,13 +12049,117 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
 
 
 class HoldingLifecycleRegressionTest(unittest.TestCase):
+    def test_current_position_traces_opening_fac_by_transaction_recommendation_id(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE futures_transactions (id TEXT, config_id TEXT, ticker TEXT, "
+                "trading_date TEXT, action TEXT, lots INTEGER, source_type TEXT, "
+                "recommendation_id TEXT, execution_price REAL, price REAL, created_at TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE futures_recommendation (id TEXT, signal_snapshot TEXT, "
+                "signal_snapshot_artifact_path TEXT, signal_snapshot_sha256 TEXT)"
+            )
+            conn.execute("CREATE TABLE portfolio (id TEXT, config_id TEXT)")
+            conn.execute(
+                "CREATE TABLE daily_settlement (portfolio_id TEXT, trading_date TEXT)"
+            )
+            snapshot = json.dumps(
+                {
+                    "final_action_contract": {
+                        "final_action": "open_probe",
+                        "expected_horizon_days": 3,
+                        "invalidation_level": 95.0,
+                        "position_invalidation_level": 93.0,
+                        "invalidation": "15m close below 95",
+                        "atr_stop_distance": 2.0,
+                        "setup_type": "technical_pullback",
+                    }
+                }
+            )
+            conn.execute(
+                "INSERT INTO futures_recommendation VALUES (?, ?, NULL, NULL)",
+                ("open-rec", snapshot),
+            )
+            conn.execute(
+                "INSERT INTO futures_transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "tx-open", "cfg", "ZZ", "2025-03-20", "open_long", 2,
+                    "strategy", "open-rec", 100.0, 100.0, "2025-03-20 09:31:00",
+                ),
+            )
+            conn.execute("INSERT INTO portfolio VALUES (?, ?)", ("pf", "cfg"))
+            conn.executemany(
+                "INSERT INTO daily_settlement VALUES (?, ?)",
+                [("pf", "2025-03-20"), ("pf", "2025-03-21")],
+            )
+            conn.commit()
+            conn.close()
+
+            class _DB:
+                def _get_connection(self):
+                    connection = sqlite3.connect(path)
+                    connection.row_factory = sqlite3.Row
+                    return connection
+
+                def _deserialize_external_json(self, row, field):
+                    return json.loads(row.get(field) or "{}")
+
+            context = _load_opening_fac_context(
+                db=_DB(),
+                config_id="cfg",
+                ticker="ZZ",
+                trading_date="2025-03-24",
+                current_lots=2,
+            )
+
+            self.assertEqual(context["recommendation_id"], "open-rec")
+            self.assertEqual(context["held_trading_days"], 2)
+            self.assertEqual(context["expected_horizon_days"], 3)
+            self.assertEqual(context["position_invalidation_level"], 93.0)
+            self.assertNotIn("invalidation_level", context)
+            self.assertEqual(context["atr_stop_distance"], 2.0)
+            self.assertEqual(context["opening_execution_price"], 100.0)
+
+            atr_only_context = dict(context)
+            atr_only_context["position_invalidation_level"] = 0.0
+            self.assertTrue(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=atr_only_context,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=96.0,
+                    current_position=SimpleNamespace(entry_price=100.0),
+                    full_config={},
+                )
+            )
+
+            conn = sqlite3.connect(path)
+            conn.execute("DELETE FROM futures_transactions")
+            conn.commit()
+            conn.close()
+            with self.assertRaisesRegex(RuntimeError, "pm_opening_fac_lineage_missing"):
+                _load_opening_fac_context(
+                    db=_DB(),
+                    config_id="cfg",
+                    ticker="ZZ",
+                    trading_date="2025-03-24",
+                    current_lots=2,
+                )
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
     def test_new_loss_revalidation_bypasses_cooling_period_deferral(self):
         self.assertTrue(
             _is_lifecycle_exit_required_reason(["new_position_loss_revalidation_failed"])
         )
         self.assertFalse(_is_lifecycle_exit_required_reason(["cooling_period"]))
 
-    def test_losing_position_without_revalidation_exits_generically(self):
+    def test_losing_position_without_explicit_invalidation_stays_held(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -11731,13 +12185,94 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
+        self.assertEqual(ratio, 0.10)
+        self.assertIn("holding_lifecycle_not_invalidated", reasons)
+        detail = diagnostics["holding_rebalance_control"]
+        self.assertEqual(detail["decision"], "keep_current_without_lifecycle_break")
+        self.assertFalse(detail["loss_revalidated"])
+
+    def test_opening_fac_numeric_invalidation_can_release_the_position(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-5000.0,
+        )
+        ratio, reasons, notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-04",
+            position_ratio=0.08,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.35},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={
+                "recommendation_id": "open-fac-1",
+                "held_trading_days": 1,
+                "expected_horizon_days": 3,
+                "position_invalidation_level": 95.0,
+            },
+            current_price=94.0,
+        )
+
         self.assertEqual(ratio, 0.0)
         self.assertIn("position_lifecycle_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
-        self.assertEqual(detail["decision"], "force_exit_failed_position")
-        self.assertFalse(detail["loss_revalidated"])
+        self.assertTrue(detail["opening_position_invalidation_breached"])
+        self.assertEqual(detail["opening_recommendation_id"], "open-fac-1")
 
-    def test_losing_position_with_partial_revalidation_reduces_not_adds(self):
+    def test_entry_invalidation_level_is_not_reused_as_position_exit(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-04",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.35},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={
+                "recommendation_id": "open-fac-entry-only",
+                "held_trading_days": 1,
+                "expected_horizon_days": 3,
+                "invalidation_level": 95.0,
+                "position_invalidation_level": 90.0,
+            },
+            current_price=94.0,
+        )
+
+        self.assertEqual(ratio, 0.10)
+        self.assertNotIn("position_lifecycle_failed", reasons)
+        self.assertFalse(
+            diagnostics["holding_rebalance_control"][
+                "opening_position_invalidation_breached"
+            ]
+        )
+
+    def test_losing_position_without_new_trigger_neither_adds_nor_exits(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -11763,11 +12298,124 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertEqual(ratio, 0.0)
-        self.assertIn("new_position_loss_revalidation_failed", reasons)
+        self.assertEqual(ratio, 0.10)
+        self.assertIn("holding_add_requires_current_technical_trigger", reasons)
         self.assertEqual(
             diagnostics["holding_rebalance_control"]["decision"],
-            "exit_failed_new_loss_revalidation",
+            "keep_current_without_add_trigger",
+        )
+
+    def test_unconfirmed_probe_without_lifecycle_break_is_not_reduced(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=-500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-10",
+            position_ratio=0.05,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.NEUTRAL, confidence=0.40),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.40},
+            short_scores={"score": 0.10, "confidence": 0.30},
+            market_confirmation={"confirmation_score": 0.35},
+            full_config={},
+            fusion_context={
+                "opportunity_scorecard": {
+                    "long": {"final_state": "watch_for_trigger", "gating_failures": []}
+                }
+            },
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={"held_trading_days": 3, "expected_horizon_days": 5},
+        )
+
+        self.assertEqual(ratio, 0.10)
+        self.assertNotIn("exploration_probe_reconfirm_reduce", reasons)
+        self.assertEqual(
+            diagnostics["holding_rebalance_control"]["decision"],
+            "keep_current_without_lifecycle_break",
+        )
+
+    def test_same_side_plan_exits_on_current_technical_invalidation(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-05",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.BEARISH, confidence=0.75),
+                AnalystSignal(agent_name="fundamental", signal=Signal.NEUTRAL, confidence=0.35),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.20, "confidence": 0.35},
+            short_scores={"score": 0.70, "confidence": 0.70},
+            market_confirmation={"confirmation_score": 0.72},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={"held_trading_days": 2, "expected_horizon_days": 5},
+        )
+
+        self.assertEqual(ratio, 0.0)
+        self.assertIn("position_lifecycle_failed", reasons)
+        self.assertEqual(
+            diagnostics["holding_rebalance_control"]["decision"],
+            "exit_current_technical_invalidation",
+        )
+
+    def test_same_side_plan_reduces_on_medium_horizon_fundamental_opposition(self):
+        position = SimpleNamespace(
+            shares=10,
+            entry_date="2025-03-03",
+            margin_used=100000.0,
+            unrealized_pnl=500.0,
+        )
+        ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
+            ticker="ZZ",
+            trading_date="2025-03-05",
+            position_ratio=0.10,
+            current_ratio=0.10,
+            current_position=position,
+            analyst_signals=[
+                AnalystSignal(agent_name="technical", signal=Signal.BULLISH, confidence=0.70),
+                AnalystSignal(
+                    agent_name="fundamental",
+                    signal=Signal.BEARISH,
+                    confidence=0.70,
+                    horizon_class="medium",
+                    business_quality_score=0.70,
+                    metadata={"tradeability": "medium"},
+                ),
+                AnalystSignal(agent_name="commodity_news", signal=Signal.NEUTRAL, confidence=0.30),
+            ],
+            long_scores={"score": 0.60, "confidence": 0.65},
+            short_scores={"score": 0.35, "confidence": 0.50},
+            market_confirmation={"confirmation_score": 0.55},
+            full_config={},
+            fusion_context={},
+            risk_level=RiskLevel.SAFE,
+            opening_fac_context={"held_trading_days": 2, "expected_horizon_days": 5},
+        )
+
+        self.assertAlmostEqual(ratio, 0.06)
+        self.assertIn("fundamental_medium_opposition", reasons)
+        self.assertEqual(
+            diagnostics["holding_rebalance_control"]["decision"],
+            "reduce_fundamental_medium_opposition",
         )
 
     def test_losing_position_with_current_evidence_can_hold_same_side(self):
@@ -11806,7 +12454,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("position_lifecycle_loss_revalidation_failed", reasons)
         self.assertTrue(diagnostics["holding_rebalance_control"]["loss_revalidated"])
 
-    def test_new_losing_position_requires_same_day_evidence_and_invalidation(self):
+    def test_new_losing_position_is_not_exited_only_for_missing_reconfirmation(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -11836,12 +12484,15 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertEqual(ratio, 0.0)
-        self.assertIn("new_position_loss_revalidation_failed", reasons)
+        self.assertEqual(ratio, 0.10)
+        self.assertNotIn("new_position_loss_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
-        self.assertTrue(detail["new_loss_revalidation_failed"])
+        self.assertFalse(detail["new_loss_revalidation_failed"])
         self.assertIn("current_signal_neutral_or_absent", detail["new_loss_revalidation_failures"])
-        self.assertIn("missing_invalidation_boundary", detail["new_loss_revalidation_failures"])
+        self.assertIn(
+            "missing_position_exit_boundary",
+            detail["new_loss_revalidation_failures"],
+        )
 
     def test_medium_horizon_new_entry_caps_to_probe_when_short_timing_is_missing(self):
         position = None
@@ -11881,7 +12532,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             ratio,
         )
 
-    def test_losing_position_with_fundamental_anchor_still_needs_current_confirmation(self):
+    def test_losing_position_with_same_side_fundamental_anchor_is_not_forced_out(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -11919,12 +12570,12 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             risk_level=RiskLevel.SAFE,
         )
 
-        self.assertAlmostEqual(ratio, 0.0)
-        self.assertIn("new_position_loss_revalidation_failed", reasons)
+        self.assertAlmostEqual(ratio, 0.10)
+        self.assertNotIn("new_position_loss_revalidation_failed", reasons)
         detail = diagnostics["holding_rebalance_control"]
         self.assertTrue(detail["fundamental_supports_current"])
         self.assertFalse(detail["loss_revalidated"])
-        self.assertEqual(detail["decision"], "exit_failed_new_loss_revalidation")
+        self.assertEqual(detail["decision"], "keep_current_small_delta")
 
     def test_profitable_supported_hold_defers_plain_exit(self):
         position = SimpleNamespace(
@@ -12443,7 +13094,14 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
             market_confirmation={"confirmation_score": 0.90, "confirmations": ["a", "b", "c"]},
             signal_combo=("Bullish", "Bullish", "Neutral"),
             strategy_memory={},
-            analyst_signals=[AnalystSignal(agent_name="technical", signal=Signal.BULLISH, invalidation_level=100.0)],
+            analyst_signals=[
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    invalidation_level=100.0,
+                    position_invalidation_level=100.0,
+                )
+            ],
             full_config=self._base_config(),
         )
 
@@ -12465,7 +13123,14 @@ class DrawdownProtectionRegressionTest(unittest.TestCase):
             market_confirmation={"confirmation_score": 0.90, "confirmations": ["a", "b", "c"]},
             signal_combo=("Bullish", "Bullish", "Neutral"),
             strategy_memory={},
-            analyst_signals=[AnalystSignal(agent_name="technical", signal=Signal.BULLISH, invalidation_level=100.0)],
+            analyst_signals=[
+                AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    invalidation_level=100.0,
+                    position_invalidation_level=100.0,
+                )
+            ],
             full_config=self._base_config(),
         )
 
@@ -12479,10 +13144,16 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
     @staticmethod
     def _execution_contract(profile: str, side: str, *, direct: bool = False) -> dict:
         analyst = "commodity_news" if profile == "event_immediate" else "technical"
+        entry_level = 1.0 if side == "long" else 1_000_000_000.0
+        position_level = 0.5 if side == "long" else 2_000_000_000.0
         return {
             "execution_profile": profile,
             "trigger_source": trigger_source_for_analyst_profile(analyst, profile),
             "entry_trigger": canonical_entry_trigger(profile, side),
+            "invalidation": canonical_entry_invalidation_condition(profile, side),
+            "invalidation_level": entry_level,
+            "position_invalidation_level": position_level,
+            "valid_until": "2099-12-31 15:00:00",
             "can_execute_without_intraday_trigger": direct,
         }
 
@@ -12700,9 +13371,8 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
             setup_type="trend_breakout",
             trigger_valid=False,
             current_trigger_confirmed=False,
-            invalidation_present=True,
+            invalidation_present=False,
             entry_trigger="",
-            invalidation_condition="15m close below the factor invalidation level",
         )
         signal = AnalystSignal(
             agent_name="fundamental",
@@ -12926,21 +13596,22 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertEqual(result.base_datetime, "2025-01-06 10:16:00")
         self.assertEqual(result.reason, "intraday_trigger_confirmed")
 
-    def test_pullback_profile_uses_vwap_support_without_opening_range_breakout(self):
+    def test_pullback_profile_requires_expansion_retrace_and_reclaim(self):
         signal_bars = [
-            {"datetime": "2025-01-06 10:00:00", "open": 100, "high": 101, "low": 99, "close": 100.6, "volume": 10},
+            {"datetime": "2025-01-06 09:45:00", "open": 101.5, "high": 102.5, "low": 101.4, "close": 102.0, "volume": 10},
+            {"datetime": "2025-01-06 10:00:00", "open": 101.8, "high": 102.0, "low": 100.8, "close": 101.5, "volume": 10},
         ]
         execution_bars = [
-            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101.5, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 09:31:00", "open": 100, "high": 101.5, "low": 99, "close": 100, "volume": 10},
-            {"datetime": "2025-01-06 10:01:00", "open": 100.7, "high": 101, "low": 100, "close": 100.7, "volume": 10},
+            {"datetime": "2025-01-06 09:30:00", "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+            {"datetime": "2025-01-06 09:46:00", "open": 102, "high": 102.2, "low": 101.8, "close": 102, "volume": 10},
+            {"datetime": "2025-01-06 10:01:00", "open": 101.6, "high": 101.8, "low": 101.4, "close": 101.7, "volume": 10},
         ]
 
         result = select_intraday_execution(
             signal_bars=signal_bars,
             execution_bars=execution_bars,
             action="open_long",
-            config={"opening_range_minutes": 2, "min_execution_volume": 1, "max_chase_ratio": 0.02},
+            config={"opening_range_minutes": 1, "min_execution_volume": 1, "max_chase_ratio": 0.02},
             decision_context={
                 "execution_contract": self._execution_contract("pullback", "long")
             },
@@ -12949,7 +13620,10 @@ class IntradayExecutionRegressionTest(unittest.TestCase):
         self.assertTrue(result.should_execute)
         self.assertEqual(result.reason, "intraday_pullback_confirmed")
         self.assertEqual(result.features["execution_profile"], "pullback")
-        self.assertEqual(result.features["trigger_rule"], "vwap_pullback_support")
+        self.assertEqual(
+            result.features["trigger_rule"],
+            "directional_expansion_then_boundary_or_vwap_reclaim",
+        )
 
     def test_event_immediate_requires_pm_authority_to_bypass_intraday_trigger(self):
         signal_bars = [
@@ -15180,7 +15854,8 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 {
                     "open_action_evidence": True,
                     "technical_confirmation": True,
-                    "has_invalidation_or_stop": True,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
                 }
             )
         return authority
@@ -16388,7 +17063,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
             -26,
         )
 
-    def test_phase2_records_signal_invalidation_but_does_not_rewrite_final_contract(self):
+    def test_phase2_preserves_entry_invalidation_without_planned_position_observation(self):
         portfolio = Portfolio(
             id="p1",
             cashflow=5162600.45,
@@ -16401,6 +17076,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
                 "horizon_class": "short",
                 "expected_horizon_days": 2,
                 "invalidation_level": 4400.0,
+                "position_invalidation_level": 4700.0,
             }
         )
         signal_snapshot = {
@@ -16439,10 +17115,12 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         self.assertEqual(decision.action, FuturesAction.OPEN_SHORT)
         self.assertEqual(decision.lots, 26)
         observation = snapshot["phase2_execution"]["contract_execution_observation"]
-        self.assertTrue(observation["signal_invalidation_observed"])
-        self.assertIn("does not rewrite", observation["business_boundary"])
+        self.assertNotIn("signal_invalidation_observed", observation)
+        self.assertIn("never treats planned target_lots", observation["business_boundary"])
         self.assertNotIn("signal_invalidation_level", translation.get("rewrite_reasons", []))
-        self.assertEqual(translation["phase2_order_plan"]["signal_lifecycle"]["invalidation_level"], 4400.0)
+        lifecycle = translation["phase2_order_plan"]["signal_lifecycle"]
+        self.assertNotIn("invalidation_level", lifecycle)
+        self.assertEqual(lifecycle["position_invalidation_level"], 4700.0)
 
     def test_phase2_ignores_opposing_invalidation_level_for_short_target(self):
         portfolio = Portfolio(
@@ -16574,7 +17252,7 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         )
         self.assertNotIn("signal_lifecycle_direction_filter", translation)
 
-    def test_phase2_no_trade_reason_keeps_signal_invalidation_before_position_matched(self):
+    def test_phase2_no_trade_does_not_create_planned_position_invalidation_observation(self):
         portfolio = Portfolio(
             id="p1",
             cashflow=5162600.45,
@@ -16628,7 +17306,9 @@ class OrderTranslationRegressionTest(unittest.TestCase):
         translation = snapshot.get("execution_translation", {})
         self.assertEqual(decision.action, FuturesAction.HOLD)
         self.assertIsNone(infer_no_trade_reason(snapshot))
-        self.assertFalse(snapshot["phase2_execution"]["contract_execution_observation"]["signal_invalidation_observed"])
+        observation = snapshot["phase2_execution"]["contract_execution_observation"]
+        self.assertNotIn("signal_invalidation_observed", observation)
+        self.assertIn("never treats planned target_lots", observation["business_boundary"])
         self.assertNotIn("position_matched", translation.get("rewrite_reasons", []))
 
     def test_time_stop_does_not_flatten_supported_same_direction_hold(self):

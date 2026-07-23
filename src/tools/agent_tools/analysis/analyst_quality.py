@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from collections import Counter, defaultdict
@@ -18,7 +19,9 @@ from tools.common.contracts import (
 from tools.common.evidence_fusion_semantics import build_analyst_fusion_evidence
 from tools.common.execution_trigger_semantics import (
     TECHNICAL_ENTRY_PROFILES,
+    canonical_entry_invalidation_condition,
     canonical_entry_trigger,
+    is_canonical_entry_invalidation_condition,
     normalize_execution_profile,
 )
 from tools.common.signal_evidence_collection import (
@@ -680,10 +683,6 @@ def _technical_setup_scope(quality_context: Dict[str, Any], opportunity_type: st
             quality_context.get("required_confirmation")
             or "current technical confirmation"
         ),
-        "invalidation_template": (
-            quality_context.get("invalidation_condition")
-            or "T-day confirmation fails, price closes back inside the failed trigger area, or opposite momentum/volume confirmation appears"
-        ),
     }
 
 
@@ -816,6 +815,16 @@ def _signal_side(signal: AnalystSignal) -> str:
     return "flat"
 
 
+def _entry_side(signal: AnalystSignal) -> str:
+    side = _signal_side(signal)
+    if side in {"long", "short"}:
+        return side
+    counterfactual = str(
+        getattr(signal, "counterfactual_side", "") or ""
+    ).strip().lower()
+    return counterfactual if counterfactual in {"long", "short"} else "flat"
+
+
 def _has_trade_setup_text(signal: AnalystSignal) -> bool:
     return has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
 
@@ -827,43 +836,48 @@ def _has_numeric_invalidation(value: Any, *, positive: bool = False) -> bool:
         parsed = float(value)
     except (TypeError, ValueError):
         return False
+    if not math.isfinite(parsed):
+        return False
     return parsed > 0.0 if positive else True
 
 
+def _has_entry_invalidation_level(value: Any) -> bool:
+    return _has_numeric_invalidation(value, positive=True)
+
+
 def has_analyst_invalidation_boundary(signal: AnalystSignal) -> bool:
-    """Return whether the producer supplied a boundary finalization can canonicalize."""
-    metadata = getattr(signal, "metadata", {}) or {}
-    return bool(
-        _has_numeric_invalidation(getattr(signal, "invalidation_level", None))
-        or _has_numeric_invalidation(
-            getattr(signal, "atr_stop_distance", None),
-            positive=True,
-        )
-        or _has_specific_invalidation_text(metadata.get("invalidation_condition"))
-        or _has_specific_invalidation_text(getattr(signal, "exit_hint", ""))
+    """Return whether the producer supplied a valid pre-fill price boundary."""
+    return _has_entry_invalidation_level(
+        getattr(signal, "invalidation_level", None)
     )
 
 
 def _land_canonical_invalidation_condition(
     signal: AnalystSignal,
     metadata: Dict[str, Any],
+    *,
+    analyst: str,
 ) -> tuple[Dict[str, Any], List[str]]:
-    """Land an explicit producer condition before shared validation.
-
-    ``exit_hint`` is an analyst output field, but downstream consumers only
-    recognize the registered ``invalidation_condition``. Generic exit hints
-    and view-change observations are intentionally not promoted.
-    """
+    """Land only the registered pre-fill boundary derived from profile/side."""
     notes: List[str] = []
-    existing = str(metadata.get("invalidation_condition") or "").strip()
-    if _has_specific_invalidation_text(existing):
-        return metadata, notes
-    explicit_exit = str(getattr(signal, "exit_hint", "") or "").strip()
-    if _has_specific_invalidation_text(explicit_exit):
-        metadata = {**metadata, "invalidation_condition": explicit_exit}
-        notes.append("producer_invalidation_landed_in_canonical_field")
+    metadata = dict(metadata)
+    profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+    side = _entry_side(signal)
+    condition = ""
+    profile_allowed = bool(
+        (analyst == "technical" and profile in TECHNICAL_ENTRY_PROFILES)
+        or (analyst == "commodity_news" and profile == "event_immediate")
+    )
+    if profile_allowed and _has_entry_invalidation_level(
+        getattr(signal, "invalidation_level", None)
+    ):
+        condition = canonical_entry_invalidation_condition(profile, side)
+    if condition:
+        metadata["invalidation_condition"] = condition
+        notes.append("canonical_pre_fill_invalidation_landed")
     else:
-        metadata = dict(metadata)
         metadata.pop("invalidation_condition", None)
     return metadata, notes
 
@@ -871,18 +885,31 @@ def _land_canonical_invalidation_condition(
 def _trade_setup_contract_presence(signal: AnalystSignal) -> Dict[str, bool]:
     entry_present = has_concrete_entry_trigger(getattr(signal, "entry_trigger", ""))
     metadata = getattr(signal, "metadata", {}) or {}
+    profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+    side = _entry_side(signal)
     invalidation_present = bool(
-        _has_numeric_invalidation(getattr(signal, "invalidation_level", None))
-        or _has_numeric_invalidation(
-            getattr(signal, "atr_stop_distance", None),
-            positive=True,
+        _has_entry_invalidation_level(
+            getattr(signal, "invalidation_level", None)
         )
-        or _has_specific_invalidation_text(metadata.get("invalidation_condition"))
+        and is_canonical_entry_invalidation_condition(
+            metadata.get("invalidation_condition"),
+            profile=profile,
+            side=side,
+        )
     )
     exit_present = (
         _has_actionable_text(getattr(signal, "exit_hint", ""))
         or _has_actionable_text(getattr(signal, "counter_evidence", ""))
-        or invalidation_present
+        or _has_numeric_invalidation(
+            getattr(signal, "position_invalidation_level", None),
+            positive=True,
+        )
+        or _has_numeric_invalidation(
+            getattr(signal, "atr_stop_distance", None),
+            positive=True,
+        )
     )
     holding_present = _has_actionable_text(getattr(signal, "holding_period_hint", "")) or _has_actionable_text(
         _holding_period_hint(signal)
@@ -912,14 +939,14 @@ def _derive_analyst_trade_setup_fields(
 ) -> Dict[str, Any]:
     """Return only registered producer fields; never manufacture a setup.
 
-    This compatibility-shaped helper remains local to the finalizer so callers
-    keep one path. It may land an explicit producer invalidation into its
-    canonical field, but it never creates entry, direction, or market facts.
+    This helper deterministically registers the numeric pre-fill boundary and
+    never promotes post-fill exit/ATR evidence into entry cancellation.
     """
-    _ = quality_context, analyst
+    _ = quality_context
     metadata, notes = _land_canonical_invalidation_condition(
         signal,
         dict(getattr(signal, "metadata", {}) or {}),
+        analyst=analyst,
     )
     return {
         "invalidation_condition": metadata.get("invalidation_condition", ""),
@@ -1011,6 +1038,44 @@ def _finalize_analyst_execution_semantics(
     signal.entry_timing_signal = ""
     signal.entry_trigger = ""
     return "no_opportunity", "", False
+
+
+def _final_trigger_quality_score(
+    signal: AnalystSignal,
+    *,
+    analyst: str,
+    opportunity_state: str,
+    current_trigger_confirmed: bool,
+    trigger_valid: bool,
+) -> float:
+    """Keep only an independent, currently confirmed canonical trigger score."""
+    if str(analyst) not in {"technical", "commodity_news"}:
+        return 0.0
+    if str(opportunity_state or "").strip().lower() not in {
+        "probe_candidate",
+        "tradeable_candidate",
+    }:
+        return 0.0
+    if not current_trigger_confirmed or not trigger_valid:
+        return 0.0
+    profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+    if analyst == "technical":
+        if profile not in TECHNICAL_ENTRY_PROFILES:
+            return 0.0
+    elif profile != "event_immediate":
+        return 0.0
+    side = _entry_side(signal)
+    expected_trigger = canonical_entry_trigger(profile, side)
+    if not expected_trigger or str(
+        getattr(signal, "entry_trigger", "") or ""
+    ).strip() != expected_trigger:
+        return 0.0
+    value = _safe_float(getattr(signal, "trigger_quality_score", 0.0), 0.0)
+    if not math.isfinite(value):
+        return 0.0
+    return max(0.0, min(1.0, value))
 
 
 def _price_percentile(value: Any) -> Optional[float]:
@@ -1248,6 +1313,35 @@ def apply_trade_research_contract(
         getattr(signal, "opportunity_state", "") or ""
     ).strip().lower()
     is_risk_reduction = original_opportunity_state == "risk_reduction_candidate"
+    raw_declared_profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+    raw_declared_trigger = str(
+        getattr(signal, "entry_trigger", "") or ""
+    ).strip()
+    declared_new_risk_state = original_opportunity_state in {
+        "watch_for_trigger",
+        "probe_candidate",
+        "tradeable_candidate",
+    }
+    if (
+        declared_new_risk_state
+        and not is_neutral
+        and _entry_side(signal) in {"long", "short"}
+        and has_concrete_entry_trigger(raw_declared_trigger)
+        and has_analyst_invalidation_boundary(signal)
+        and (
+            (
+                analyst == "technical"
+                and raw_declared_profile not in TECHNICAL_ENTRY_PROFILES
+            )
+            or (
+                analyst == "commodity_news"
+                and raw_declared_profile != "event_immediate"
+            )
+        )
+    ):
+        raise ValueError("analyst_execution_profile_missing")
     derived_setup = _derive_analyst_trade_setup_fields(signal, quality_context, analyst)
     derived_invalidation = str(derived_setup.get("invalidation_condition") or "").strip()
     if derived_invalidation:
@@ -1454,6 +1548,23 @@ def apply_trade_research_contract(
             current_trigger_confirmed=current_trigger_confirmed,
         )
     )
+    if candidate_state not in {
+        "watch_for_trigger",
+        "probe_candidate",
+        "tradeable_candidate",
+    }:
+        metadata = dict(metadata)
+        metadata.pop("invalidation_condition", None)
+        signal.metadata = metadata
+        signal.invalidation_level = None
+        has_invalidation = False
+        setup_presence = _trade_setup_contract_presence(signal)
+        missing_setup_fields = _trade_setup_missing_fields(setup_presence)
+        critical_missing_setup_fields = [
+            field
+            for field in missing_setup_fields
+            if field in {"entry_trigger_present", "invalidation_present"}
+        ]
     pending_conditional_trigger = candidate_state == "watch_for_trigger"
     action_evidence_contract = _build_action_evidence_contract(
         signal,
@@ -1533,6 +1644,14 @@ def apply_trade_research_contract(
     signal.trigger_valid = final_trigger_valid
     action_evidence_contract["trigger_valid"] = bool(signal.trigger_valid)
     action_evidence_contract["current_trigger_confirmed"] = final_trigger_confirmed
+    signal.trigger_quality_score = _final_trigger_quality_score(
+        signal,
+        analyst=analyst,
+        opportunity_state=opportunity_state,
+        current_trigger_confirmed=final_trigger_confirmed,
+        trigger_valid=final_trigger_valid,
+    )
+    action_evidence_contract["trigger_quality_score"] = signal.trigger_quality_score
     action_evidence_contract["invalidation_present"] = bool(signal.invalidation_present)
     action_evidence_contract["setup_quality_ok"] = bool(
         action_evidence_contract.get("setup_quality_ok")
@@ -1597,6 +1716,11 @@ def apply_trade_research_contract(
         factor_focus=focus,
         current_evidence_conflict=conflicts,
         invalidation_level=getattr(signal, "invalidation_level", None),
+        position_invalidation_level=getattr(
+            signal,
+            "position_invalidation_level",
+            None,
+        ),
         atr_stop_distance=getattr(signal, "atr_stop_distance", None),
         sample_state="current_day_evidence",
         maturity="candidate" if opportunity_state != "tradeable_candidate" else "validated",
@@ -1775,23 +1899,18 @@ def build_technical_context(
     if trend_continuation_setup_ok:
         setup_family = "trend_breakout"
         required_confirmation = "trend/MACD/DI alignment plus volume or open-interest confirmation"
-        invalidation_template = "price closes back inside the failed breakout area or opposite momentum/volume confirmation appears"
     elif range_reversal_setup_ok:
         setup_family = "range_reversal"
         required_confirmation = "RSI/Stochastic/mean-reversion signal aligns with nearby support/resistance and volume is not weak"
-        invalidation_template = "price fails to hold the reversal area or resumes breakout against the reversal side"
     elif volatility_breakout_setup_ok:
         setup_family = "volatility_breakout"
         required_confirmation = "high-volatility breakout keeps direction with strong volume and no opposite technical vote"
-        invalidation_template = "breakout fails on volume or closes back through the trigger zone"
     elif dominant_direction in {"bullish", "bearish"}:
         setup_family = "direction_watchlist"
         required_confirmation = "wait for current price/volume confirmation before any real position"
-        invalidation_template = "opposite technical vote or failed trigger keeps the idea on watchlist"
     else:
         setup_family = "no_trade"
         required_confirmation = "no directional technical setup"
-        invalidation_template = "not applicable"
 
     sector_policy = _technical_setup_policy(ticker)
     preferred_setups = set(str(item) for item in sector_policy.get("preferred_setups") or [])
@@ -1829,7 +1948,6 @@ def build_technical_context(
         "setup_type": setup_family,
         "setup_quality_ok": setup_quality_ok,
         "required_confirmation": required_confirmation,
-        "invalidation_condition": invalidation_template,
         "learning_scope": {
             "setup_family": setup_family,
             "sector_setup_alignment": sector_setup_alignment,

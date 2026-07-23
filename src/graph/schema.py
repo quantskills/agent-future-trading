@@ -40,8 +40,18 @@ class AnalystSignal(BaseModel):
         default=None,
         description="Current price percentile in the analyst lookback window, 0.0 to 1.0 when available",
     )
-    invalidation_level: Optional[float] = Field(default=None, description="Price level invalidating the signal")
-    atr_stop_distance: Optional[float] = Field(default=None, description="ATR-based stop distance when available")
+    invalidation_level: Optional[float] = Field(
+        default=None,
+        description="Pre-fill price boundary that permanently cancels the current-day entry contract",
+    )
+    position_invalidation_level: Optional[float] = Field(
+        default=None,
+        description="Post-fill price boundary used only for the position hold/reduce/exit lifecycle",
+    )
+    atr_stop_distance: Optional[float] = Field(
+        default=None,
+        description="Post-fill ATR-based position stop distance when available",
+    )
     add_allowed: bool = Field(default=False, description="Whether this signal permits adding to an existing position")
     direction_anchor: str = Field(default="unknown", description="Medium-horizon directional anchor")
     supply_demand_state: str = Field(default="unknown", description="Supply-demand state")
@@ -103,13 +113,23 @@ class AnalystSignal(BaseModel):
         description="Commodity-news analyst event calibration summary; empty for non-news analysts",
     )
     setup_quality_score: float = Field(default=0.0, description="Trade setup quality from 0.0 to 1.0")
+    trigger_quality_score: float = Field(
+        default=0.0,
+        description=(
+            "Independent strength of the current confirmed entry trigger from 0.0 to 1.0; "
+            "not setup completeness or historical performance"
+        ),
+    )
     entry_quality: str = Field(default="unknown", description="entry quality: poor / weak / acceptable / strong / unknown")
     setup_quality_notes: List[str] = Field(default_factory=list, description="Machine-readable setup quality notes")
     entry_trigger: str = Field(
         default="",
         description="Canonical Trader trigger generated from entry_timing_signal and side",
     )
-    exit_hint: str = Field(default="", description="Structured exit, reduction, or invalidation hint")
+    exit_hint: str = Field(
+        default="",
+        description="Structured post-fill exit or reduction hint; never a pre-fill entry invalidation alias",
+    )
     holding_period_hint: str = Field(default="", description="Expected holding style/window in plain text")
     evidence_role: str = Field(
         default="",
@@ -129,7 +149,10 @@ class AnalystSignal(BaseModel):
     )
     price_location: str = Field(default="", description="Price location or zone used for entry timing")
     trigger_valid: bool = Field(default=False, description="Whether current trigger is valid for a real trade candidate")
-    invalidation_present: bool = Field(default=False, description="Whether invalidation boundary is present")
+    invalidation_present: bool = Field(
+        default=False,
+        description="Whether a machine-executable pre-fill entry invalidation boundary is present",
+    )
     factor_focus: List[str] = Field(default_factory=list, description="Primary factor groups or evidence surfaces")
     current_evidence_conflict: List[str] = Field(default_factory=list, description="Current evidence that conflicts with the view")
     research_contract_version: str = Field(default="agentquant.research.v1", description="Trade research contract version")
@@ -266,9 +289,9 @@ class AnalystSignal(BaseModel):
             score = 0.0
         return max(0.0, min(1.0, score))
 
-    @field_validator("setup_quality_score", mode="before")
+    @field_validator("setup_quality_score", "trigger_quality_score", mode="before")
     @classmethod
-    def normalize_setup_quality_score(cls, value):
+    def normalize_setup_and_trigger_quality_scores(cls, value):
         try:
             score = float(value if value is not None else 0.0)
         except Exception:
