@@ -55,7 +55,7 @@ Phase4 标记 completed 只表示复盘验收通过；它不能触发 `strategy_
 
 研究员可以按配置调用 LLM，但只能在Phase4 completed且结算事实形成后运行。运行前必须以真实 `signal_record_id`、recommendation ID、transaction recommendation ID、交易日期和config ID验证 AEC → SCC → FAC → Auditor → `execution_result` → transaction → settlement；零成交是合法链路。研究员只保存验证后的结构化 evidence pack 和研究结果，不保存prompt、原始response、内部推理、隐藏上下文或未验证工具结果。研究信息包括分析师校准类研究、交易决策类 action-value、alpha setup profile、adaptive policy state、执行学习、排序偏好和研究反馈；这些信息供其他智能体按各自权限通过正式检索接口使用。研究员不能下交易指令，不能改账，不能绕过投资组合经理、审计员或交易员。
 
-PM 持仓生命周期进入 Researcher 校准的唯一正式接口是 `final_action_contract.learning_used.pm_lifecycle_learning_impact_delta`。Researcher 可读取其中已登记的 `trace_version`、`hold_decision`、`reduce_exit_decision`、`current_lots`、`target_lots`、`lots_delta` 等字段，但不得恢复 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象或用 `lifecycle_classification` 代替正式决策字段。
+PM 持仓生命周期进入 Researcher 校准的唯一正式接口是 `final_action_contract.learning_used.pm_lifecycle_learning_impact_delta`。Researcher 可读取其中已登记的 `trace_version`、`hold_decision`、`reduce_exit_decision`、`current_lots`、`target_lots`、`lots_delta` 等字段，但这些字段也可如实记录当日独立生命周期规则的结果；是否存在历史学习因果影响，只能由同一 FAC 最终 `decision_learning_rows` 与 `alpha_setup_action_values` 的精确正式 ID 共同证明。不得恢复 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象或用 `lifecycle_classification` 代替正式决策字段。
 
 Researcher 的数据库写入、`researcher_learning_completed`、外置 payload artifact、template prior 和历史学习快照按一次运行原子提交。任何写入或提交失败都必须回滚数据库、删除本次新 artifact、恢复运行前已有 artifact，且不得留下完成事件；该原子性不改变学习算法和学习结果允许为空的边界。
 
@@ -67,11 +67,11 @@ Researcher 的数据库写入、`researcher_learning_completed`、外置 payload
 
 | 研究对象 | 记录什么 | 合法消费者 | 边界 |
 |---|---|---|---|
-| `trade_episode_memory` | 仓位完全归零后的策略 episode、完整持仓周期 AEC/SCC/FAC、成交、结算、证据/失效变化及各物理 pair PnL | 研究员生成样本、profile 和候选 action-value；分析师与 PM 不直接读取 episode 表 | 只来自 Phase4 后已验证并完成 `0 -> 持仓 -> 0` 的策略周期；分批未归零、裸 transaction、rollover、forced_risk 不得冒充完整策略 episode 学习 |
+| `trade_episode_memory` | 仓位完全归零后的策略 episode、完整持仓周期 AEC/SCC/FAC、成交、结算、证据/失效变化及各物理 pair PnL | 研究员生成样本、profile 和候选 action-value；分析师只经 `analyst_learning_context` 消费 T+1 可见的相对生命周期摘要；PM 不读取 episode 表 | 只来自 Phase4 后已验证并完成 `0 -> 持仓 -> 0` 的策略周期；分批未归零、裸 transaction、rollover、forced_risk 不得冒充完整策略 episode 学习；历史绝对价格不得进入分析师提示词 |
 | `no_trade_opportunity_memory` | 未交易机会、no-trade 原因、影子结果、错过机会 | 研究员汇总；分析师读取校准摘要；投资组合经理经 `decision_memory_retrieval` 间接消费 | 不能直接授权开仓，只能作为先验、反证或排序诊断 |
 | `alpha_setup_sample` | 单个 setup 的交易、未交易、执行样本 | 研究员汇总 | 必须有交易日、方向、setup、horizon、regime、数据质量 |
 | `alpha_setup_profile` | setup 生命周期、胜率、盈亏因子、净 PnL、最大亏损 | 分析师读取校准类摘要；投资组合经理经 `decision_memory_retrieval` 消费交易决策类摘要 | 只作为同作用域证据，不是品种黑名单 |
-| `alpha_setup_action_value` | 按 `canonical_action_family` 与 open/add/hold/reduce/exit/execution/conditional_monitor lane 分账的动作学习结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费；分析师只消费校准类摘要 | 交易员不直接读取；审计员不直接读取；不能跨 action family/lane 使用 |
+| `alpha_setup_action_value` | 按 `canonical_action_family` 与 open/add/hold/reduce/exit/execution/conditional_monitor lane 分账的动作学习结果，并带 `memory_side_role` | 投资组合经理只经 `decision_memory_retrieval` 消费顶层 `pm_learning` 正式行；分析师只消费其中显式授权 `analyst_calibration` 的安全投影 | 分析师不得读取原始 PM 行；交易员、审计员不直接读取；不能跨 action family/lane 使用 |
 | `adaptive_policy_state` | protect/cap/probe/watchlist 等未来策略状态 | 投资组合经理只经 `decision_memory_retrieval` 消费 | 必须被当日证据、失效边界、资金和审计再验证；审计员和交易员不直接消费 |
 | `opportunity_ranking_preference` | 投资组合经理新增风险排序、资金分配理由、排名与后续收益的关系 | 目前仅供 Researcher 和开发评估诊断，没有正式 PM 消费端 | 不能声称已经影响未来 rank 或资金部署；本次不新增消费链 |
 | `research_position_feedback` | 正式 action-value 是否被 PM 实际声明消费，以及该合约后续是否成交和结算 | Researcher 和开发评估诊断 | 只匹配 `learning_used.alpha_setup_action_values` 与最终 `decision_learning_rows`；未实际消费学习时不强制生成反馈，也不作为新 rank、手数或交易输入 |
@@ -136,6 +136,10 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
 
+完整持仓 episode 进入分析师提示词时，只投影结构化的相对结构失效距离、原始 ATR 距离、预期/实际持有期、最终退出原因和已结算结果；其检索继续服从既有 ticker/sector/horizon 范围和 T+1 边界，历史开仓价、历史结构价等绝对价格不得复制到当日信号，旧 episode 自由文本不得作为回退来源。正式 action-value 只有在同品种、严格早于当日、有效期合法、canonical 语义完整，且其内嵌 `signal_calibration.contract_version` 合法、`consumer_scope=analyst_calibration` 并明确允许 `analysis_team` 使用时，才投影为不含原始学习 ID、reward、rank、手数和保证金的提示词摘要；similar、weak、incomplete、counterfactual prior 不进入该投影。
+
+技术参数学习先有界调整参数，再重新计算当日指标，提示词只接收不含学习 ID 的已应用摘要。技术分析师可以结合该摘要、相对化 episode 经验和当日价格结构提出新的 `position_invalidation_level/exit_hint`；结构位必须由当日正式参考价做方向校验，原始 ATR14 始终由已完成 OHLC 确定性计算并在 finalization 覆盖落地。基本面学习只校准当日独立形成中期方向时的证据评估、预期持有期和退出解释，不得覆盖方向，也不得生产数值结构位；新闻学习只校准事件影响窗口。
+
 学习记录不得替代当日数据，不得单独创造方向、setup、触发、失效边界或交易权限；检索为空属于合法冷启动。最终唯一 `action_evidence_contract` 必须在学习校对、数据质量/时效和商品 profile 评估完成后由共享确定性工具生成。
 
 分析师不能用 action-value 输出手数、保证金、最终开仓、加仓、减仓或平仓命令，也不能输出 `opportunity_score`、`opportunity_rank`、`capital_allocation_reason`。分析师只提供结构化预测证据，排序、资金部署和目标手数由投资组合经理及其确定性工具完成。
@@ -192,6 +196,8 @@ signal_collection_contract
 研究记忆只影响评分分项、排序分项、仓位生命周期解释和执行 profile 偏好，不能单独创造交易机会。当前触发不成立时，正向历史只能支持观察或条件监控；当前证据强但没有真实历史时，历史分项按冷启动中性处理；当前证据强但历史亏损明确时，排名必须降级并写入 `capital_allocation_reason`。
 
 PM 的决策学习生命周期与 Trader 的条件执行生命周期必须分开。`current_lots=0 -> target_lots!=0` 的条件 probe 在 PM 中仍使用 open/add 决策学习并参加新增风险 rank，但 `requires_intraday_confirmation` 继续要求 Trader 等待触发；只有手数不变且仅保留监控的最终合约才使用 conditional_monitor 决策学习。正式学习进入 `learning_used` 只证明 PM 消费事实，不证明合约一定获预算、通过审计、触发或成交。
+
+对最终 `hold/reduce/exit` 合约，生命周期匹配只是必要条件。只有某条正式 action-value 的精确 ID 被对应软生命周期控制选中、实际改变了最终动作或仓位比例，并且该影响没有被后续规则覆盖，才允许同时进入最终 `decision_learning_rows` 与 `learning_used.alpha_setup_action_values`。唯一窄桥接是：canonical、`pm_learning` 的负向 hold 记录确实使同方向持仓比例下降时，可保持原 hold family/lane 和精确 ID 进入最终 reduce FAC；它不得被重标为 reduce，也不得把其他 hold 记录全局放行。结构/ATR 止损、明确技术反转、基本面中期反向和其他独立确定性生命周期规则即使得到同 lane 历史记录，也不得把该记录写成实际消费学习。
 
 投资组合经理可以消费 execution action-value，但只能把它转成未来最终合约里的合约化执行字段。交易员只读 `final_action_contract` 中的 `execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger` 和盘中数据，不读取 action-value、`strategy_memory` 或 `adaptive_policy_state`。
 

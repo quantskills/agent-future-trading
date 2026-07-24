@@ -191,7 +191,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 SCC 与 PM 按角色和周期使用这三类证据：technical `entry_timing` 是短期入场与技术失效锚点，fundamental `direction_context` 是中期方向、持仓和放大依据，commodity_news `event_catalyst` 只作事件修正。中性证据不进入有效技术信号的共识分母；跨周期反向保留为持仓/放大风险，同一入场周期的反向证据才形成入场冲突。
 
-`entry_trigger`、`invalidation`、`invalidation_level`、`execution_profile` 和 `trigger_source` 必须由同一被选 AEC 原子形成。`position_invalidation_level/exit_hint/atr_stop_distance/expected_horizon_days` 是独立的成交后持仓事实，不得证明或替代入场作废。`execution_profile` 直接复制 AEC 的 `entry_timing_signal`；PM 不得从自由文本猜测profile，也不得默认`breakout`。执行action-value只能形成建议摘要，不得改写顶层执行事实或交易权限。
+`entry_trigger`、`invalidation`、`invalidation_level`、`execution_profile` 和 `trigger_source` 必须由同一被选 AEC 原子形成。`position_invalidation_level/exit_hint/atr_stop_distance/expected_horizon_days` 是独立的成交后持仓事实，不得证明或替代入场作废。technical使用已完成OHLC确定性生成原始ATR14，AEC finalization负责把它写入`atr_stop_distance`，LLM不得生产或改写ATR。PM不直读原始AEC，只从已验证SCC重建内部证据：同方向technical优先提供结构失效，当前已确认的`event_immediate`可在technical结构位缺失时提供同源当日事件结构位；technical提供方向无关ATR；同方向fundamental只成对提供`horizon_class+expected_horizon_days`及中期方向，数值结构位固定为空；`exit_hint`仅解释。`execution_profile`直接复制AEC的`entry_timing_signal`；PM不得从自由文本猜测profile，也不得默认`breakout`。执行action-value只能形成建议摘要，不得改写顶层执行事实或交易权限。
 
 风险约束：来自 SCC 的 `invalidation_summary`、PM `risk_controls` 和 `max_allowed_margin_ratio`。
 
@@ -840,6 +840,8 @@ action-value 语义完整性复用现有共享校验：
 
 Step4 必须在首次消费正式 action-value 前完成本次决策所需的完整 canonical 候选学习池，并覆盖新增风险、持仓、减仓/退出、条件监控和 execution/profile lane。随后唯一 scorecard、候选控制和 Step5 都读取该池；Step4 完成后不得再检索或追加正式 action-value。Step4 不直接形成最终 `learning_used.alpha_setup_action_values`，也不新增冻结 ID 字段或第二套候选对象。
 
+分析师提示词中的 action-value 安全投影只用于生成当日 AEC，不是 PM 正式学习来源。PM 仍只从已验证 SCC 消费当日证据，并只经 `decision_memory_retrieval` 取得顶层 `pm_learning` 正式行；不得从分析师 learning trace、AEC 或 SCC 反向恢复、复制或重复登记 action-value。
+
 `final_action_contract.learning_used.alpha_setup_action_values` 是 PM 最终正式 canonical action-value 主证据列表。第 6 步必须按最终 `final_action`、最终持仓变化和最终生命周期重新路由 Step4 候选学习池；只有最终路由实际接收的完整 canonical 记录，才允许进入该正式列表。禁止直接复制第 4 步初始生命周期路由结果。
 
 以下材料只能进入最终 `learning_used.memory_retrieval.rejected_or_downgraded` 所需的内部诊断集合：
@@ -890,7 +892,7 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`，随后继续服从手数取整、保证金、单品种、净敞口和账户硬上限。Step4 不读取或等待尚未生成的 `opportunity_rank`。
 
-现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、ATR、期限和持仓依据，结合当前明确技术反转、中期基本面反向或既有硬风险形成唯一hold/reduce/exit，绝不复用入场`invalidation_level`。
+现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位在开仓FAC组装时按盘前参考价校验，次日消费时再按真实开仓成交价校验；合法结构位与`开仓价±ATR×当前真实命中的default/sector倍数`分别计算后取OR，任一触发均形成唯一exit。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出；其余保持既有hold/生命周期判断。现有template/setup ATR覆盖只有setup键精确匹配时才生效，不宣称普遍命中。
 
 #### 4.8 状态更新
 
@@ -1401,7 +1403,7 @@ PM 从第 4 步保留的完整 canonical action-value 候选学习池重新开�
 - `decision_learning_rows`：与最终生命周期匹配的决策层学习。
 - `trigger_profile_learning_rows`：execution、trigger、profile 类执行画像学习。
 
-只有最终 `decision_learning_rows` 中实际被最终动作消费的完整 canonical 记录，才进入 `learning_used.alpha_setup_action_values`。不得先截取 Step4 列表再路由，不得复制 Step4 临时 `decision_learning_rows`，不得让未匹配最终生命周期的记录进入正式主证据列表。
+只有最终 `decision_learning_rows` 中实际被最终动作消费的完整 canonical 记录，才进入 `learning_used.alpha_setup_action_values`。对 `hold/reduce/exit`，最终生命周期匹配仍不等于实际消费：必须由软生命周期控制精确选中同一 action-value ID、真实改变最终动作或比例，且影响未被后续规则覆盖。负向hold学习若精确造成同方向减仓，可保持原hold family/lane及ID进入reduce FAC，但不得重标为reduce或放行其他hold记录。结构/ATR 止损、明确技术反转、基本面中期反向及其他独立确定性生命周期规则不得冒领同 lane 学习；这些当日结果可以留在`pm_lifecycle_learning_impact_delta`，但没有匹配正式ID时不构成历史学习消费。不得先截取 Step4 列表再路由，不得复制 Step4 临时 `decision_learning_rows`，不得让未匹配或未产生实际影响的记录进入正式主证据列表。
 
 `trigger_profile_learning_rows` 只进入 `learning_used.pm_lifecycle_learning_trace` 及执行画像摘要，矩阵规定的 `execution_profile_learning_direct_to_rank` 必须为 `false`。它不能改变最终动作、candidate quality、rank、预算和手数。
 

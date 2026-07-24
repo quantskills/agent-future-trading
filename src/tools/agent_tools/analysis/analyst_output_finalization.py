@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from typing import Any, Mapping
 
 from graph.constants import Signal
@@ -122,6 +123,112 @@ def _land_deterministic_data_freshness(
         signal.data_freshness = "stale"
     else:
         signal.data_freshness = "unknown"
+
+
+def _finite_positive_number(value: Any) -> float | None:
+    """Normalize an existing numeric contract fact without inventing a value."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _land_entry_invalidation_fact(
+    signal: Any,
+    quality_context: Mapping[str, Any],
+    analyst: str,
+) -> None:
+    """Validate the pre-fill cancellation price against the formal reference."""
+    analyst_name = str(analyst or "").strip().lower()
+    if analyst_name not in {"technical", "commodity_news"}:
+        return
+
+    entry_level = _finite_positive_number(
+        getattr(signal, "invalidation_level", None)
+    )
+    reference_price = _finite_positive_number(
+        quality_context.get("position_invalidation_reference_price")
+    )
+    raw_signal = getattr(signal, "signal", None)
+    signal_text = getattr(raw_signal, "value", raw_signal)
+    if str(signal_text or "").strip() == Signal.BULLISH.value:
+        entry_side = "long"
+    elif str(signal_text or "").strip() == Signal.BEARISH.value:
+        entry_side = "short"
+    else:
+        counterfactual_side = str(
+            getattr(signal, "counterfactual_side", "") or ""
+        ).strip().lower()
+        entry_side = (
+            counterfactual_side
+            if counterfactual_side in {"long", "short"}
+            else "flat"
+        )
+
+    if not (
+        entry_level is not None
+        and reference_price is not None
+        and (
+            (entry_side == "long" and entry_level < reference_price)
+            or (entry_side == "short" and entry_level > reference_price)
+        )
+    ):
+        entry_level = None
+    signal.invalidation_level = entry_level
+
+
+def _land_position_exit_facts(
+    signal: Any,
+    quality_context: Mapping[str, Any],
+    analyst: str,
+) -> None:
+    """Land system-owned ATR before AEC build and sanitize the LLM structure level."""
+    position_level = _finite_positive_number(
+        getattr(signal, "position_invalidation_level", None)
+    )
+    analyst_name = str(analyst or "").strip().lower()
+    if analyst_name in {"technical", "commodity_news"}:
+        reference_price = _finite_positive_number(
+            quality_context.get("position_invalidation_reference_price")
+        )
+        raw_signal = getattr(signal, "signal", None)
+        signal_value = getattr(raw_signal, "value", raw_signal)
+        if str(signal_value or "").strip() == Signal.BULLISH.value:
+            position_side = "long"
+        elif str(signal_value or "").strip() == Signal.BEARISH.value:
+            position_side = "short"
+        else:
+            counterfactual_side = str(
+                getattr(signal, "counterfactual_side", "") or ""
+            ).strip().lower()
+            position_side = (
+                counterfactual_side
+                if counterfactual_side in {"long", "short"}
+                else "flat"
+            )
+        if not (
+            position_level is not None
+            and reference_price is not None
+            and (
+                (position_side == "long" and position_level < reference_price)
+                or (position_side == "short" and position_level > reference_price)
+            )
+        ):
+            position_level = None
+        signal.atr_stop_distance = (
+            _finite_positive_number(quality_context.get("atr_stop_distance"))
+            if analyst_name == "technical"
+            else None
+        )
+    else:
+        position_level = None
+        signal.atr_stop_distance = None
+    signal.position_invalidation_level = position_level
 
 
 def build_required_market_data_unavailable_signal(
@@ -245,6 +352,8 @@ def finalize_analyst_signal(
         ticker=ticker,
         learning_context=learning_context or {},
     )
+    _land_entry_invalidation_fact(signal, context, analyst)
+    _land_position_exit_facts(signal, context, analyst)
     signal = apply_signal_quality_gate(signal, context, config, analyst)
     signal = apply_business_quality_enrichment(signal, context, config, analyst)
     _land_deterministic_data_freshness(signal, context, analyst)

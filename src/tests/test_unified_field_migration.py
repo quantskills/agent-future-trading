@@ -14,14 +14,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from database.sqlite_setup import _ensure_reviewer_learning_schema
 from tools.agent_tools.control.pg_unified_field_audit import (
-    iter_runtime_field_files,
     scan_legacy_field_token_locations,
     scan_runtime_field_usage,
 )
-
-
-def _iter_runtime_files():
-    yield from iter_runtime_field_files(SRC_ROOT)
 
 
 class UnifiedFieldMigrationTests(unittest.TestCase):

@@ -131,6 +131,19 @@ def build_test_aec(
     return contract
 
 
+def build_test_data_usage(
+    analyst: str,
+    ticker: str,
+    *,
+    trading_date: str = "2025-03-26",
+) -> dict[str, Any]:
+    return build_test_aec(
+        analyst,
+        ticker=ticker,
+        trading_date=trading_date,
+    )["data_usage_summary"]
+
+
 def build_test_signal(
     analyst: str,
     *,

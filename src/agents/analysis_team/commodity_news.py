@@ -34,6 +34,16 @@ thresholds = {
 }
 
 
+def _finite_positive_price(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0.0 or number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
 def _build_no_news_signal(
     *,
     ticker: str,
@@ -115,6 +125,10 @@ def commodity_news_agent(state: FundState):
     info_cutoff = state.get("info_cutoff") or ("pre_open" if pre_open_only else "unspecified")
     cfg = state.get("config", {}) or {}
     full_config = state.get("full_config", cfg) or {}
+    morning_price_context = state.get("morning_price_context")
+    position_invalidation_reference_price = _finite_positive_price(
+        getattr(morning_price_context, "base_price", None)
+    )
 
     if state.get("pre_open_reference_price_unavailable"):
         signal = build_required_market_data_unavailable_signal(
@@ -204,6 +218,7 @@ def commodity_news_agent(state: FundState):
         product_profile_context=format_profile_for_commodity_news(ticker, product_profile),
         llm_path=llm_path,
         learning_context_text=learning_context.get("text", ""),
+        position_invalidation_reference_price=position_invalidation_reference_price,
     )
 
     try:
@@ -262,9 +277,13 @@ def commodity_news_agent(state: FundState):
             "position_authority_boundary": "news_signal_requires_pm_auditor_trader_confirmation",
         },
     }
+    news_quality_context = dict(news_context)
+    news_quality_context["position_invalidation_reference_price"] = (
+        position_invalidation_reference_price
+    )
     signal = finalize_analyst_signal(
         signal,
-        quality_context=news_context,
+        quality_context=news_quality_context,
         full_config=full_config,
         analyst="commodity_news",
         ticker=ticker,

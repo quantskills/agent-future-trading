@@ -156,11 +156,13 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 | LLM 智能体 | 输出契约 | 必须覆盖的结构化字段 | 自由文本允许范围 | 禁止 |
 |---|---|---|---|---|
-| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 profile 只允许 `breakout/pullback/vwap_confirmed`；共享代码生成canonical trigger和pre-fill condition；分别输出入场 `invalidation_level` 与持仓 `position_invalidation_level/ATR/exit_hint` | 解释价格形态、setup、两类失效、趋势惯性、波动和假突破风险 | 输出手数、仓位、rank、资金理由、数据时效、最终合约；自创profile或执行文字 |
-| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`、`invalidation_level=null`；可保留成交后 `position_invalidation_level/exit_hint/horizon` | 解释供需、库存、利润、基差、驱动持续性和中期持仓反向风险 | 输出Trader profile、入场失效、数据时效、手数、动作或资金部署 |
+| 技术面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=entry_timing`；可执行 profile 只允许 `breakout/pullback/vwap_confirmed`；共享代码生成canonical trigger和pre-fill condition；LLM可提出入场`invalidation_level`、持仓`position_invalidation_level/exit_hint`，原始ATR14只由technical确定性代码从已完成OHLC计算并由finalization写入 | 解释价格形态、setup、两类失效、趋势惯性、波动和假突破风险；只读使用确定性ATR事实 | 输出手数、仓位、rank、资金理由、数据时效、ATR、最终合约；自创profile或执行文字 |
+| 基本面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=direction_context`、`entry_timing_signal=""`、`entry_trigger=""`、`invalidation_level=null`、`position_invalidation_level=null`；只保留成交后的中期方向、`exit_hint` 和 horizon | 解释供需、库存、利润、基差、驱动持续性和中期持仓反向风险 | 输出Trader profile、入场失效、数值结构止损、数据时效、手数、动作或资金部署 |
 | 期货新闻面分析师 | 唯一 `action_evidence_contract`，其中保真承载 `product_profile_evidence`、`fusion_evidence` | 固定 `evidence_role=event_catalyst`；只有当前事件已满足即时执行边界时允许 `entry_timing_signal=event_immediate` 并由共享 canonical 定义生成正式触发；其他新闻证据不创建普通15分钟 profile | 解释新闻事件、政策冲击、影响窗口、是否已兑现、事件催化价值和一次性冲击风险 | 把普通新闻方向写成 watch/profile，或直接写交易动作和手数 |
 
 跨分析师融合按角色周期解释：technical `entry_timing` 是短期入场和技术失效锚点，fundamental `direction_context` 是中期方向、持仓和放大依据，commodity_news `event_catalyst` 只作事件修正。中性证据不进入有效技术信号的共识分母，其内部缺失和冲突也不作为短期入场扣分；跨周期反向及其内部冲突只保留为持仓/放大风险，同一入场周期反向和主方向 AEC 的内部冲突才进入 PM 入场风险解释。
+
+分析师的退场学习输入只能是安全投影：完整 episode 只进入结构化的相对结构/ATR距离、持有期、退出原因和结果，禁止复制历史绝对价格，也禁止回退读取旧 episode 自由文本；正式 action-value 必须同品种、T+1、canonical 完整，并重新校验内嵌 `signal_calibration.contract_version` 与 `consumer_scope=analyst_calibration`，提示词不得暴露原始学习 ID、reward、rank、手数或保证金。技术参数规则先有界应用并重算当日指标；LLM只能基于重算后的当日结构提出新的持仓结构位，finalization按正式参考价校验并用确定性原始ATR14覆盖。学习不创建方向、交易权限或止损硬事实。
 | 研究员 | 结构化研究成果 | `research_domain`、`sample_scope`、`source_trading_date/trading_date`、`setup_type/profile`、`action_value` 或 `policy_state`、`confidence`、`validity_window`、`evidence_scope`、`excluded_reason` | 解释因果、冲突、反事实、不确定性和未来适用条件 | 修改当天合约、成交、结算、PnL；直接给 Trader 执行规则 |
 
 落地硬规则：
@@ -279,7 +281,7 @@ LLM 可以自由推理，但提示词、解析器和测试必须保证输出落�
 
 1. `setup_quality_ok=true` 只表示机会形态完整，不表示当前可成交。
 2. `trigger_valid=true/current_trigger_confirmed=true` 才表示当前触发成立。
-3. 非空 canonical `invalidation_condition`、合法数值 `invalidation_level` 或正数 `atr_stop_distance` 是进入 `watch_for_trigger/probe_candidate/tradeable_candidate` 的失效边界证明；`invalidation_present=true` 不能自证，`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger` 和通用 `exit_hint` 均不是失效边界别名。
+3. 与`entry_timing_signal+side`一致的非空canonical `invalidation_condition`和正数有限`invalidation_level`必须同时存在，才能证明进入`watch_for_trigger/probe_candidate/tradeable_candidate`所需的首次成交前作废边界；`invalidation_present=true`不能自证，`atr_stop_distance`只服务成交后持仓，`would_change_view_if`、`neutral_trigger_condition`、`entry_trigger`和通用`exit_hint`均不是入场作废别名。
 4. `watch_for_trigger` 是条件触发候选，不是交易动作，不是手数授权。
 5. `tradeable_candidate` 是强可交易候选，不等于 probe；它可以被 PM 转成 `open_real/add/scale`，但分析师不能直接给这些动作。
 6. 分析师不能把“长期方向”“普通事件方向”“历史校准”直接落成当前可成交候选。fundamental 永不提供执行 profile；commodity_news 只有当前即时事件边界成立时可形成 `event_immediate`；普通盘中触发只能来自 technical 的 canonical profile。
@@ -647,6 +649,10 @@ PM 不能：
 
 策略Trader不读取`position_invalidation_level/ATR/exit_hint`生成退出，不运行第二套策略退出判断。成交后的持仓失效、技术反转和基本面中期反向由下一交易日PM结合原开仓FAC形成唯一`hold/reduce/exit`；forced-risk等运营路径保持独立。
 
+成交后退场链固定为：technical确定性原始ATR14与LLM结构失效价随AEC进入唯一SCC，PM只从已验证SCC重建内部证据，分别取得同方向结构位、方向无关ATR和同方向fundamental期限/中期方向。次日PM追溯原开仓FAC，以合法结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发签exit；明确技术反转签exit，基本面中期反向签reduce，期限到达只触发复评。`exit_hint`只解释，期限不冒充止损；现有template/setup覆盖只在setup键精确匹配时生效。
+
+策略reduce/exit虽然是即时优先动作，仍必须取得合法1分钟成交基准。真实非异常分钟空结果只形成未成交事实和零transaction，禁止回退盘前参考价伪造成交；分钟接口异常继续hard fail。Trader仍不读取持仓失效字段、不重新决定退场，也不生成同日第二个策略动作。
+
 Trader、Auditor 与 PM 的 add/scale 保证金安全口径固定为 `projected_total_margin=current_account_margin-current_ticker_margin+target_ticker_margin`，增量为 `max(0,target_ticker_margin-current_ticker_margin)`。不得把目标品种总保证金直接与剩余保证金比较而重复计算已有持仓；reduce/exit 不得被新增风险保证金检查阻断。
 
 ### 8.2 交易员必须写清
@@ -909,7 +915,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 | 关键规则 | 覆盖测试文件 | 回测前总入口 | 每日回测后总入口 |
 |---|---|---|---|
 | 事实入口、artifact/payload 边界、业务模块不能绕写核心事实 | `src/tests/test_fact_entry_boundaries.py` | `pre_backtest_test.py` | 不进入 |
-| 合格 `watch_for_trigger` 必须进入条件触发合约，不能被清成普通 `wait/0` | `src/tests/test_pm_watch_for_trigger_release.py` | `pre_backtest_test.py` | 不进入 |
+| 合格 `watch_for_trigger` 必须进入条件触发合约，不能被清成普通 `wait/0` | `src/tests/test_pm_atomic_contract_flow.py` | `pre_backtest_test.py` | 不进入 |
 | PM 状态转换矩阵：`watch_for_trigger/probe_candidate/tradeable_candidate/open_real/add/scale/reduce/exit` | `src/tests/test_pm_state_transition_matrix.py` | `pre_backtest_test.py` | 不进入 |
 | 分析师 LLM 输出落地：结构化字段可表达 setup/触发/失效，但不能落地手数、仓位或最终动作 | `src/tests/test_analyst_output_landing.py` | `pre_backtest_test.py` | 不进入 |
 | PM、Trader、Reviewer、Audit 的合约读取和执行摘要边界 | `src/tests/test_fact_entry_boundaries.py`、`src/tests/test_system_invariant_audit.py` | `pre_backtest_test.py` | 每日只跑真实产物 audit，不跑 unittest |
@@ -928,7 +934,7 @@ LLM 推理可以充分展开，但必须落成结构化研究成果。自由文�
 src/run/pre_backtest_test.py
 -> test_fact_entry_boundaries
 -> test_accountant_settlement_formulas
--> test_pm_watch_for_trigger_release
+-> test_pm_atomic_contract_flow
 -> test_pm_state_transition_matrix
 -> test_analyst_output_landing
 -> test_system_invariant_audit

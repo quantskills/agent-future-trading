@@ -56,7 +56,7 @@ def _declares_complete_executable_setup(
 
 
 class _LLMAnalystOutput(AnalystSignal):
-    """LLM-facing analyst output; system-owned freshness is not producible."""
+    """LLM-facing output; system-owned freshness and ATR are not producible."""
 
     @classmethod
     def __get_pydantic_json_schema__(
@@ -68,9 +68,14 @@ class _LLMAnalystOutput(AnalystSignal):
         properties = schema.get("properties")
         if isinstance(properties, dict):
             properties.pop("data_freshness", None)
+            properties.pop("atr_stop_distance", None)
         required = schema.get("required")
         if isinstance(required, list):
-            schema["required"] = [name for name in required if name != "data_freshness"]
+            schema["required"] = [
+                name
+                for name in required
+                if name not in {"data_freshness", "atr_stop_distance"}
+            ]
         return schema
 
 
@@ -126,6 +131,13 @@ class FundamentalAnalystOutput(_LLMAnalystOutput):
     invalidation_level: None = Field(
         default=None,
         description="Fundamental evidence cannot produce a pre-fill Trader entry boundary",
+    )
+    position_invalidation_level: None = Field(
+        default=None,
+        description=(
+            "Fundamental evidence supplies medium-horizon direction and timing, "
+            "not an executable position price boundary"
+        ),
     )
     entry_timing_signal: str = Field(
         default="",

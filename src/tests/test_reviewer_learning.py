@@ -27,6 +27,11 @@ from agents.decision_team.portfolio_manager import (
 from database.sqlite_setup import _ensure_reviewer_learning_schema, _ensure_strategy_memory_schema
 from graph.constants import Signal
 from graph.schema import AnalystSignal
+from llm.prompt import (
+    build_futures_commodity_news_prompt,
+    build_futures_fundamental_prompt,
+    build_futures_technical_prompt,
+)
 from tools.agent_tools.analysis.analyst_business_quality import apply_business_quality_enrichment
 from database.artifact_store import (
     externalize_json_for_db,
@@ -65,6 +70,7 @@ from tools.common.alpha_setup import (
     infer_setup_type,
     upsert_alpha_setup_sample_and_profile,
 )
+from tools.common.execution_trigger_semantics import canonical_entry_trigger
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from tools.agent_tools.research.reviewer_phase4_review import (
     _final_action_semantic_summary,
@@ -158,8 +164,41 @@ class _ExploratoryLearningDB(_FakeLearningDB):
                 "setup_type": "long_breakout_short",
                 "holding_days": 2,
                 "net_pnl": 1250.0,
-                "lesson_text": "breakout held while inventory and price trend agreed",
+                "lesson_text": (
+                    "breakout held while inventory and price trend agreed; "
+                    "historical_open=3200.0, historical_invalidation=3100.0"
+                ),
                 "payload": {
+                    "pair": {
+                        "open_price": 3200.0,
+                        "holding_days": 2,
+                        "net_pnl": 1250.0,
+                    },
+                    "position_lifecycle_trace": {
+                        "daily_facts": [
+                            {
+                                "trading_date": "2025-03-10",
+                                "invalidation_state": {
+                                    "fac_position_invalidation_level": 3100.0,
+                                    "fac_atr_stop_distance": 80.0,
+                                    "fac_expected_horizon_days": 3,
+                                },
+                                "recommendations": [],
+                            },
+                            {
+                                "trading_date": "2025-03-12",
+                                "invalidation_state": {},
+                                "recommendations": [
+                                    {
+                                        "final_action_contract": {
+                                            "final_action": "exit",
+                                            "reason_codes": ["technical_position_invalidation_triggered"],
+                                        }
+                                    }
+                                ],
+                            },
+                        ]
+                    },
                     CONTRACT_KEY: {
                         "usable_memory": ["same-scope breakout episode worked"],
                         "usage_boundary": ["same-scope prior only"],
@@ -232,6 +271,10 @@ class _ExploratoryLearningDB(_FakeLearningDB):
 
 
 class _ActionValueLearningDB(_FakeLearningDB):
+    def __init__(self, action_values=None):
+        super().__init__()
+        self.action_values = list(action_values or [])
+
     def get_analyst_learning_digest(self, **kwargs):
         self.digest_calls += 1
         return []
@@ -240,10 +283,101 @@ class _ActionValueLearningDB(_FakeLearningDB):
         return []
 
     def get_alpha_setup_action_values(self, **kwargs):
-        raise AssertionError("analyst learning context must not read trade-decision action-values")
+        return list(self.action_values)
 
     def get_similar_alpha_setup_action_values(self, **kwargs):
         raise AssertionError("analyst learning context must not read similar trade-decision action-values")
+
+
+def _formal_analyst_action_value(
+    row_id,
+    *,
+    canonical=True,
+    include_canonical=True,
+    consumer_scope="pm_learning",
+    ticker="SR",
+    last_sample_date="2025-03-07",
+    source_quality="exact_real_state",
+    calibration_scope="analyst_calibration",
+    usable_by=None,
+):
+    payload = {
+        "amplification_scope_quality": source_quality,
+        "product_learning_performance_key": {
+            "contract_version": "agentquant.product_learning_performance_key.v1",
+            "performance_scope_key": (
+                f"{ticker}|long|trend_breakout_setup|breakout_above_5678.9|"
+                "technical|capital_deployed"
+            ),
+            "ticker": ticker,
+            "side": "long",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "trigger_key": "breakout_above_5678.9",
+            "deployment_outcome": {
+                "deployment_tier": "capital_deployed",
+                "opportunity_rank": 1,
+                "opportunity_score": 0.91,
+                "target_lots": 3,
+                "margin_ratio": 0.12,
+            },
+            "entry_quality_outcome": {
+                "contract_version": "agentquant.entry_quality_outcome.v1",
+                "entry_quality_verdict": "entry_quality_supported",
+                "trigger_quality_verdict": "trigger_quality_supported",
+                "trigger_confirmation_adjustment": "standard_confirmation_supported",
+                "trigger_key": "breakout_above_5678.9",
+                "entry_trigger": "breakout above historical 5678.9",
+                "support_weight": 1.7,
+                "penalty_weight": -0.2,
+            },
+        },
+        "signal_calibration": {
+            "contract_version": "agentquant.analysis_signal_calibration.v1",
+            "source_action_value_contract": "agentquant.research_action_value.v1",
+            "source_canonical_action_family": "open_add_new_risk",
+            "consumer_scope": calibration_scope,
+            "source_action_value_lane": "open",
+            "source_action_preference": "positive_candidate_open",
+            "source_quality": source_quality,
+            "reward_source": "trade_episode",
+            "calibration_bias": "positive_evidence_calibration",
+            "usable_by": list(usable_by if usable_by is not None else ["analysis_team"]),
+            "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
+            "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
+            "current_data_must_dominate": True,
+        },
+    }
+    if include_canonical:
+        payload["canonical_action_value"] = canonical
+    return {
+        "id": row_id,
+        "scope_key": f"{ticker}|long|short|trend|trend_breakout_setup|technical",
+        "ticker": ticker,
+        "side": "long",
+        "horizon_class": "short",
+        "market_regime": "trend",
+        "setup_type": "trend_breakout_setup",
+        "data_combo": "technical",
+        "action_name": "open",
+        "canonical_action_family": "open_add_new_risk",
+        "sample_count": 4,
+        "reward_sum": 1200.0,
+        "reward_mean": 300.0,
+        "win_rate": 0.75,
+        "confidence_score": 0.72,
+        "action_preference": "positive_candidate_open",
+        "reward_source": "trade_episode",
+        "evidence_scope": source_quality,
+        "action_value_lane": "open",
+        "consumer_scope": consumer_scope,
+        "learning_lane": "open",
+        "last_sample_date": last_sample_date,
+        "valid_until": "2025-04-30",
+        "payload": payload,
+    }
 
 
 class _ProductLearningProfileDB(_FakeLearningDB):
@@ -301,6 +435,16 @@ class _ProductLearningProfileDB(_FakeLearningDB):
                         "outcome_label": "profit",
                         "net_pnl": 3180.0,
                         "reward_source": "ticker_daily_pnl",
+                        "entry_quality_outcome": {
+                            "contract_version": "agentquant.entry_quality_outcome.v1",
+                            "entry_quality_verdict": "entry_loss_revalidate",
+                            "trigger_quality_verdict": "trigger_loss_revalidate",
+                            "trigger_confirmation_adjustment": "stronger_confirmation_required",
+                            "trigger_key": "opening_range_breakdown",
+                            "entry_trigger": "break below historical 3210.5",
+                            "support_weight": -0.4,
+                            "penalty_weight": 1.4,
+                        },
                         "not_trade_authority": True,
                         "future_only": True,
                     }
@@ -309,7 +453,7 @@ class _ProductLearningProfileDB(_FakeLearningDB):
         ]
 
     def get_alpha_setup_action_values(self, **kwargs):
-        raise AssertionError("analysts must not read PM action-values for product learning")
+        return []
 
     def get_similar_alpha_setup_action_values(self, **kwargs):
         raise AssertionError("analysts must not read similar PM action-values for product learning")
@@ -557,13 +701,21 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn("not trading authority", context["text"])
         self.assertIn("cannot size, add, justify position_matched", context["text"])
         self.assertIn("Next-round strategy update", context["text"])
-        self.assertIn("position=current confirmation and invalidation required", context["text"])
+        self.assertNotIn("position=current confirmation and invalidation required", context["text"])
         self.assertIn("position=no sizing impact without current confirmati", context["text"])
         self.assertIn("position=probe only until validated", context["text"])
         self.assertIn("rebuttable priors", context["text"])
         self.assertIn("confirms or contradicts", context["text"])
         self.assertIn("entry=wait for trend confirmation", context["text"])
         self.assertIn("invalidation=price falls back below breakout level", context["text"])
+        self.assertIn("structure_distance=3.12%", context["text"])
+        self.assertIn("raw_atr_distance=2.50%", context["text"])
+        self.assertIn("expected_horizon=3d", context["text"])
+        self.assertIn("actual_holding=2d", context["text"])
+        self.assertIn("final_exit_reason=technical_position_invalidation_triggered", context["text"])
+        self.assertIn("net_pnl=1250", context["text"])
+        self.assertNotIn("3200.0", context["text"])
+        self.assertNotIn("3100.0", context["text"])
         self.assertEqual(len(context["trade_episode_items"]), 1)
         self.assertEqual(len(context["no_trade_opportunity_items"]), 1)
         self.assertEqual(len(context["hypothesis_items"]), 1)
@@ -572,8 +724,14 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertEqual(db.budgets[0]["hypothesis_count"], 1)
         self.assertGreater(db.budgets[0]["total_context_chars"], db.budgets[0]["selected_chars"])
 
-    def test_learning_context_does_not_read_trade_decision_action_values_for_analysts(self):
-        db = _ActionValueLearningDB()
+    def test_learning_context_projects_only_safe_formal_action_values_for_analysts(self):
+        db = _ActionValueLearningDB([
+            _formal_analyst_action_value("av-explicit"),
+            _formal_analyst_action_value(
+                "av-derived-canonical",
+                include_canonical=False,
+            ),
+        ])
         context = build_learning_context(
             db=db,
             full_config={
@@ -587,7 +745,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
                         "alpha_setup_profile": {
                             "enabled": True,
                             "max_action_value_items": 2,
-                            "max_action_value_chars": 800,
+                            "max_action_value_chars": 2000,
                         },
                     },
                 },
@@ -597,19 +755,264 @@ class ReviewerLearningContextTest(unittest.TestCase):
             analyst="technical",
             ticker="SR",
             context={"sector": "agricultural", "market_regime": "trend"},
-            horizon_class="flat",
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(context["analyst_calibration_items"]), 2)
+        self.assertEqual(context["memory_trace"]["selected_counts"]["alpha_setup_action_value"], 2)
+        self.assertIn("Analyst-safe action-value calibration views", context["text"])
+        self.assertIn("signal_calibration_bias=positive_evidence_calibration", context["text"])
+        self.assertIn("lane=open", context["text"])
+        self.assertIn("entry_quality=entry_quality_supported", context["text"])
+        self.assertIn("trigger_quality=trigger_quality_supported", context["text"])
+        self.assertIn("confirmation=standard_confirmation_supported", context["text"])
+        self.assertIn("support=1.00", context["text"])
+        self.assertIn("penalty=0.00", context["text"])
+        self.assertNotIn("reward_mean=", context["text"])
+        self.assertNotIn("reward_sum=", context["text"])
+        self.assertNotIn("target_lots", context["text"])
+        self.assertNotIn("opportunity_rank", context["text"])
+        self.assertNotIn("historical_pm_rank", context["text"])
+        self.assertNotIn("historical_pm_score", context["text"])
+        self.assertNotIn("capital_deployed", context["text"])
+        self.assertNotIn("5678.9", context["text"])
+        self.assertNotIn("av-explicit", context["text"])
+        self.assertNotIn("av-derived-canonical", context["text"])
+        for item in context["analyst_calibration_items"]:
+            self.assertEqual(item["signal_calibration"]["consumer_scope"], "analyst_calibration")
+            self.assertIn("analysis_team", item["signal_calibration"]["usable_by"])
+            self.assertNotIn("reward_sum", item)
+            self.assertNotIn("action_preference", item)
+            self.assertNotIn("scope_key", item)
+            self.assertNotIn("max_position_impact", item)
+            entry_view = item["product_learning_calibration_view"][
+                "entry_quality_calibration"
+            ]
+            self.assertEqual(entry_view["support_weight"], 1.0)
+            self.assertEqual(entry_view["penalty_weight"], 0.0)
+            self.assertEqual(entry_view["trigger_key"], "unknown_trigger")
+
+    def test_learning_context_preserves_registered_trigger_without_exposing_entry_to_fundamental(self):
+        row = _formal_analyst_action_value("av-canonical-trigger")
+        canonical_trigger = canonical_entry_trigger("breakout", "long")
+        product_key = row["payload"]["product_learning_performance_key"]
+        product_key["trigger_key"] = canonical_trigger
+        product_key["entry_quality_outcome"]["trigger_key"] = canonical_trigger
+        db = _ActionValueLearningDB([row])
+        config = {
+            "learning": {"enabled": True},
+            "learning_context": {
+                "enabled": True,
+                "max_items_per_prompt": 5,
+                "max_chars_per_prompt": 1800,
+                "exploratory_memory": {
+                    "enabled": True,
+                    "alpha_setup_profile": {
+                        "enabled": True,
+                        "max_action_value_items": 1,
+                        "max_action_value_chars": 1200,
+                    },
+                },
+            },
+        }
+
+        technical = build_learning_context(
+            db=db,
+            full_config=config,
+            config_id="cfg",
+            trading_date="2025-03-08",
+            analyst="technical",
+            ticker="SR",
+            context={"sector": "agricultural", "market_regime": "trend"},
+            horizon_class="short",
+        )
+        technical_entry = technical["analyst_calibration_items"][0][
+            "product_learning_calibration_view"
+        ]["entry_quality_calibration"]
+        self.assertNotEqual(technical_entry["trigger_key"], "unknown_trigger")
+        self.assertIn("15", technical_entry["trigger_key"])
+
+        fundamental = build_learning_context(
+            db=db,
+            full_config=config,
+            config_id="cfg",
+            trading_date="2025-03-08",
+            analyst="fundamental",
+            ticker="SR",
+            context={"sector": "agricultural", "market_regime": "trend"},
+            horizon_class="medium",
+        )
+        fundamental_view = fundamental["analyst_calibration_items"][0][
+            "product_learning_calibration_view"
+        ]
+        self.assertNotIn("entry_quality_calibration", fundamental_view)
+        self.assertNotIn("trigger_key", fundamental_view)
+        self.assertNotIn("entry_quality=", fundamental["text"])
+
+    def test_learning_context_rejects_unsafe_or_nonpast_action_value_projection(self):
+        wrong_calibration_version = _formal_analyst_action_value(
+            "av-unsafe-calibration-version"
+        )
+        wrong_calibration_version["payload"]["signal_calibration"][
+            "contract_version"
+        ] = "agentquant.analysis_signal_calibration.v0"
+        rejected = [
+            _formal_analyst_action_value("av-explicit-false", canonical=False),
+            _formal_analyst_action_value("av-missing-scope", consumer_scope=""),
+            _formal_analyst_action_value("av-future", last_sample_date="2025-03-08"),
+            {
+                **_formal_analyst_action_value("av-invalid-valid-until"),
+                "valid_until": "not-a-date",
+            },
+            _formal_analyst_action_value("av-other-ticker", ticker="BU"),
+            _formal_analyst_action_value(
+                "av-unsafe-calibration-scope",
+                calibration_scope="pm_learning",
+            ),
+            wrong_calibration_version,
+            _formal_analyst_action_value(
+                "av-unsafe-consumer",
+                usable_by=["portfolio_manager"],
+            ),
+            _formal_analyst_action_value(
+                "av-weak",
+                source_quality="weak_similar_prior",
+            ),
+            {
+                **_formal_analyst_action_value("av-incomplete"),
+                "action_preference": "",
+            },
+            {
+                key: value
+                for key, value in _formal_analyst_action_value(
+                    "av-missing-reward-metrics"
+                ).items()
+                if key not in {"reward_sum", "reward_mean", "win_rate"}
+            },
+        ]
+        context = build_learning_context(
+            db=_ActionValueLearningDB(rejected),
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 5,
+                    "max_chars_per_prompt": 1500,
+                    "exploratory_memory": {
+                        "enabled": True,
+                        "alpha_setup_profile": {
+                            "enabled": True,
+                            "max_action_value_items": 8,
+                            "max_action_value_chars": 1200,
+                        },
+                    },
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-08",
+            analyst="technical",
+            ticker="SR",
+            context={"sector": "agricultural", "market_regime": "trend"},
+            horizon_class="short",
         )
 
         self.assertEqual(context["analyst_calibration_items"], [])
         self.assertEqual(context["memory_trace"]["selected_counts"]["alpha_setup_action_value"], 0)
-        self.assertNotIn("Alpha setup action-value priors", context["text"])
-        self.assertNotIn("Analysts may use only the signal_calibration part", context["text"])
-        self.assertNotIn("lane=exit", context["text"])
-        self.assertNotIn("signal_calibration_bias=questions_same_side_continuation", context["text"])
-        self.assertNotIn("positive_candidate_exit", context["text"])
-        self.assertNotIn("reward_mean=", context["text"])
-        self.assertNotIn("reward_sum=", context["text"])
-        self.assertNotIn("hint=", context["text"])
+        self.assertNotIn("Analyst-safe action-value calibration views", context["text"])
+
+    def test_role_prompts_keep_learning_exit_calibration_within_analyst_boundary(self):
+        technical_prompt = build_futures_technical_prompt(
+            ticker="SR",
+            signal_results_compact={"trend": "Bullish"},
+            gap_analysis="N/A",
+            price_levels="current support and resistance",
+            deterministic_atr14=12.5,
+        )
+        fundamental_prompt = build_futures_fundamental_prompt(
+            ticker="SR",
+            fundamentals="current supply-demand evidence",
+            learning_context_text="historical medium-horizon learning",
+        )
+        news_prompt = build_futures_commodity_news_prompt(
+            ticker="SR",
+            instrument_context="sugar futures",
+            news=[{"title": "current event evidence"}],
+            learning_context_text="historical event learning",
+        )
+
+        self.assertIn("today's recalculated indicators and current price structure", technical_prompt)
+        self.assertIn("propose a new position_invalidation_level and exit_hint", technical_prompt)
+        self.assertIn("Raw ATR14 is a read-only deterministic current-market fact", technical_prompt)
+        self.assertIn(
+            "Historical entry-quality learning may calibrate only today's canonical profile selection and confirmation discipline",
+            technical_prompt,
+        )
+        self.assertIn("must not reselect direction or create an opportunity", technical_prompt)
+        self.assertIn(
+            "At the pre-open proposal stage, never claim that a T-day intraday trigger is already confirmed",
+            technical_prompt,
+        )
+        self.assertIn(
+            "Fundamental learning may calibrate only the evidence assessment for today's independently formed medium-horizon direction",
+            fundamental_prompt,
+        )
+        self.assertIn("it must not override direction", fundamental_prompt)
+        self.assertIn("position_invalidation_level must be null", fundamental_prompt)
+        self.assertIn("News learning may calibrate only the event impact window", news_prompt)
+        for prompt in (technical_prompt, fundamental_prompt, news_prompt):
+            self.assertIn("Historical absolute prices must never be copied", prompt)
+
+    def test_learning_context_does_not_fallback_to_legacy_episode_price_text(self):
+        class _LegacyEpisodeDB(_ExploratoryLearningDB):
+            def get_trade_episode_memory(self, **kwargs):
+                return [
+                    {
+                        "id": "legacy-episode",
+                        "ticker": kwargs.get("ticker", "BU"),
+                        "side": "long",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "setup_type": "trend_breakout_setup",
+                        "holding_days": 2,
+                        "net_pnl": -500.0,
+                        "lesson_text": "reuse stop 9876.5 and entry 9999.0",
+                        "payload": {
+                            CONTRACT_KEY: {
+                                "usable_memory": ["historical stop 9876.5"],
+                            }
+                        },
+                    }
+                ]
+
+        context = build_learning_context(
+            db=_LegacyEpisodeDB(),
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 3,
+                    "max_chars_per_prompt": 1200,
+                    "exploratory_memory": {
+                        "enabled": True,
+                        "max_episode_items": 2,
+                        "max_episode_chars": 900,
+                    },
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-12",
+            analyst="technical",
+            ticker="BU",
+            context={"sector": "energy", "market_regime": "trend"},
+            horizon_class="short",
+        )
+
+        self.assertIn(
+            "lifecycle=[actual_holding=2d, net_pnl=-500]",
+            context["text"],
+        )
+        self.assertNotIn("9876.5", context["text"])
+        self.assertNotIn("9999.0", context["text"])
 
     def test_learning_context_exposes_product_learning_profile_as_safe_calibration_view(self):
         db = _ProductLearningProfileDB()
@@ -641,21 +1044,25 @@ class ReviewerLearningContextTest(unittest.TestCase):
 
         self.assertEqual(len(context["alpha_setup_items"]), 1)
         view = context["alpha_setup_items"][0]["product_learning_calibration_view"]
-        self.assertEqual(view["performance_scope_key"], (
-            "EB|short|trend_breakout_setup|opening_range_breakdown|"
-            "technical:used|fundamental:used|news:fresh|capital_deployed"
-        ))
-        self.assertEqual(view["deployment_tier"], "capital_deployed")
-        self.assertEqual(view["historical_pm_rank"], 1)
-        self.assertEqual(view["historical_pm_score"], 0.83)
         self.assertTrue(view["not_trade_authority"])
+        entry_view = view["entry_quality_calibration"]
+        self.assertEqual(entry_view["trigger_key"], "opening_range_breakdown")
+        self.assertEqual(entry_view["entry_quality_verdict"], "entry_loss_revalidate")
+        self.assertEqual(entry_view["trigger_quality_verdict"], "trigger_loss_revalidate")
+        self.assertEqual(entry_view["trigger_confirmation_adjustment"], "stronger_confirmation_required")
+        self.assertEqual(entry_view["support_weight"], 0.0)
+        self.assertEqual(entry_view["penalty_weight"], 1.0)
         self.assertIn("Product learning:", context["text"])
-        self.assertIn("historical_pm_rank=1", context["text"])
-        self.assertIn("historical_pm_score=0.83", context["text"])
+        self.assertIn("entry_quality=entry_loss_revalidate", context["text"])
+        self.assertIn("confirmation=stronger_confirmation_required", context["text"])
         self.assertNotIn("authority_type", context["text"])
         self.assertNotIn("target_lots", context["text"])
         self.assertNotIn("lots_delta", context["text"])
         self.assertNotIn("final_action_contract", context["text"])
+        self.assertNotIn("historical_pm_rank", context["text"])
+        self.assertNotIn("historical_pm_score", context["text"])
+        self.assertNotIn("capital_deployed", context["text"])
+        self.assertNotIn("3210.5", context["text"])
         self.assertEqual(
             context["memory_trace"]["selected_memory_refs"][0]["product_learning_calibration_view"],
             view,
@@ -2130,7 +2537,12 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    position_invalidation_level=3200.0,
+                    atr_stop_distance=None,
+                ),
             ],
         )
 
@@ -2184,7 +2596,12 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    position_invalidation_level=3200.0,
+                    atr_stop_distance=None,
+                ),
             ],
         )
 
@@ -2502,7 +2919,12 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    position_invalidation_level=3200.0,
+                    atr_stop_distance=None,
+                ),
             ],
         )
 
@@ -2575,7 +2997,12 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    position_invalidation_level=3200.0,
+                    atr_stop_distance=None,
+                ),
             ],
         )
 
@@ -2706,7 +3133,12 @@ class AdaptivePolicyAuditorTest(unittest.TestCase):
             },
             adaptive_policy_state=[],
             analyst_signals=[
-                SimpleNamespace(position_invalidation_level=3200.0, atr_stop_distance=None),
+                SimpleNamespace(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    position_invalidation_level=3200.0,
+                    atr_stop_distance=None,
+                ),
             ],
         )
 

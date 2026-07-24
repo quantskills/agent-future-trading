@@ -136,6 +136,99 @@ def _latest_price_data_date(prices_df) -> Optional[pd.Timestamp]:
     return None if pd.isna(latest) else latest
 
 
+def _calculate_true_range(prices_df: pd.DataFrame) -> pd.Series:
+    """Return the existing OHLC true-range fact used by ADX and ATR."""
+    high = prices_df["high"]
+    low = prices_df["low"]
+    close = prices_df["close"]
+    return pd.concat(
+        [
+            high - low,
+            abs(high - close.shift()),
+            abs(low - close.shift()),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+
+def _calculate_atr(prices_df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Return the raw ATR series without applying any stop multiplier."""
+    return _calculate_true_range(prices_df).ewm(
+        span=period,
+        adjust=False,
+    ).mean()
+
+
+def calculate_raw_atr14(prices_df: pd.DataFrame) -> Optional[float]:
+    """Return the latest finite positive raw ATR14 from completed OHLC bars."""
+    try:
+        values = _calculate_atr(prices_df, period=14).dropna()
+        latest = float(values.iloc[-1]) if not values.empty else None
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    if latest is None or not math.isfinite(latest) or latest <= 0:
+        return None
+    return latest
+
+
+def _finite_positive_price(value: Any) -> Optional[float]:
+    """Normalize one existing formal price fact without creating a fallback."""
+    if isinstance(value, bool):
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return price if math.isfinite(price) and price > 0 else None
+
+
+def _technical_parameter_calibration_prompt_summary(diagnostics: dict | None) -> str:
+    """Describe already-applied rule calibration without exposing memory IDs."""
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    changes: list[str] = []
+    for applied in diagnostics.get("applied") or []:
+        if not isinstance(applied, dict):
+            continue
+        changed = applied.get("changed")
+        if not isinstance(changed, dict):
+            continue
+        for path in sorted(changed):
+            detail = changed.get(path)
+            if not isinstance(detail, dict):
+                continue
+            rule = str(detail.get("rule") or "bounded_rule")
+            before = detail.get("from")
+            after = detail.get("to")
+            changes.append(f"- {path}: {before} -> {after} ({rule})")
+
+    if changes:
+        displayed = changes[:8]
+        if len(changes) > len(displayed):
+            displayed.append(f"- {len(changes) - len(displayed)} additional bounded changes omitted")
+        result = [
+            "",
+            "=== Historical technical-rule calibration (system applied) ===",
+            "Validated past-only rules were applied before the indicator snapshot was recomputed:",
+            *displayed,
+            (
+                "The displayed indicators and technical context already include these bounded changes; "
+                "do not apply them a second time. Calibration does not change OHLC, raw ATR14, "
+                "stop multipliers, or trade authority."
+            ),
+        ]
+    else:
+        result = [
+            "",
+            "=== Historical technical-rule calibration (system applied) ===",
+            "No validated past-only technical-parameter change was applied for this scope.",
+            (
+                "The displayed indicators use the current base parameters. This status does not change "
+                "OHLC, raw ATR14, stop multipliers, or trade authority."
+            ),
+        ]
+    return "\n".join(result) + "\n"
+
+
 def _validate_pre_open_price_window(ticker: str, trading_date, prices_df, pre_open_only: bool) -> str:
     """Ensure pre-open technical signals only use completed bars before trading_date."""
     latest = _latest_price_data_date(prices_df)
@@ -242,6 +335,10 @@ def technical_agent(state: FundState):
         latest_data_date=latest_data_date,
         base_price_date=getattr(morning_price_context, "base_price_date", None),
     )
+    raw_atr14 = calculate_raw_atr14(prices_df)
+    position_invalidation_reference_price = _finite_positive_price(
+        getattr(morning_price_context, "base_price", None)
+    )
     # Compute adaptive market features before building indicator signals.
     features = calculate_market_features(prices_df)
     phase_value = str(getattr(phase, "value", phase)) if phase else ""
@@ -315,6 +412,12 @@ def technical_agent(state: FundState):
     technical_context = build_technical_context(ticker, signal_results, features)
     technical_context["freshness_score"] = freshness_score
     technical_context["data_freshness"] = freshness_label
+    technical_context["atr_stop_distance"] = raw_atr14
+    # Internal quality fact only. Finalization consumes it before AEC build;
+    # it is not a new analyst-contract field.
+    technical_context["position_invalidation_reference_price"] = (
+        position_invalidation_reference_price
+    )
     product_profile = get_product_price_behavior_profile(ticker, full_config)
     product_profile_usage = build_profile_usage_contract(ticker, "technical", product_profile)
     technical_context["product_profile_evidence"] = product_profile_usage
@@ -336,6 +439,8 @@ def technical_agent(state: FundState):
         consumed_indicators.append("gap_analysis")
     if price_levels:
         consumed_indicators.append("price_levels")
+    if raw_atr14 is not None:
+        consumed_indicators.append("atr14")
     # Build the futures-only technical-analysis prompt from the centralized
     # prompt module. Data preparation and learning retrieval remain here.
     prompt = build_futures_technical_prompt(
@@ -349,6 +454,10 @@ def technical_agent(state: FundState):
         llm_path=llm_path,
         data_recency_score=freshness_score,
         data_recency_label=freshness_label,
+        deterministic_atr14=raw_atr14,
+    )
+    prompt += _technical_parameter_calibration_prompt_summary(
+        technical_calibration_diag
     )
     learning_context = build_learning_context(
         db=db,
@@ -679,7 +788,6 @@ def _calculate_adx(prices_df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     high = prices_df['high']
     low = prices_df['low']
-    close = prices_df['close']
 
     plus_dm = high.diff()
     minus_dm = -low.diff()
@@ -687,12 +795,7 @@ def _calculate_adx(prices_df: pd.DataFrame, period: int = 14) -> pd.Series:
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm < 0] = 0
 
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr = tr.ewm(span=period, adjust=False).mean()
+    atr = _calculate_atr(prices_df, period=period)
     plus_di = 100 * (plus_dm.ewm(span=period, adjust=False).mean() / atr)
     minus_di = 100 * (minus_dm.ewm(span=period, adjust=False).mean() / atr)
 
@@ -734,18 +837,13 @@ def _calculate_di(prices_df: pd.DataFrame, period: int = 14, *, positive: bool =
     """Calculate +DI or -DI for directional ADX confirmation."""
     high = prices_df["high"]
     low = prices_df["low"]
-    close = prices_df["close"]
 
     plus_dm = high.diff()
     minus_dm = -low.diff()
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm < 0] = 0
 
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False).mean()
+    atr = _calculate_atr(prices_df, period=period)
     dm = plus_dm if positive else minus_dm
     return 100 * (dm.ewm(span=period, adjust=False).mean() / atr)
 

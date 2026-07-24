@@ -78,6 +78,7 @@ def _quality_context(analyst: str) -> dict:
                 "dominant_direction": "neutral",
                 "indicator_votes": {"details": {}},
                 "features": {},
+                "position_invalidation_reference_price": 3000.0,
             }
         )
     elif analyst == "fundamental":

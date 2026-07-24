@@ -59,15 +59,54 @@ def _family(row: Mapping[str, Any]) -> str:
     return _clean(row.get("canonical_action_family") or payload.get("canonical_action_family"))
 
 
+def _field(row: Mapping[str, Any], key: str) -> Any:
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    value = row.get(key)
+    return value if value not in (None, "") else payload.get(key)
+
+
+def _row_id(row: Mapping[str, Any]) -> str:
+    return str(_field(row, "id") or _field(row, "action_value_id") or "").strip()
+
+
+def _is_causal_negative_hold_reduce(
+    row: Mapping[str, Any],
+    *,
+    port: str,
+    causal_ids: set[str],
+) -> bool:
+    """Allow only an explicitly proven negative-hold row to explain a reduce."""
+    if port not in {"capital_release", "reduce_exit"} or not causal_ids:
+        return False
+    if _row_id(row) not in causal_ids:
+        return False
+    if _field(row, "canonical_action_value") is not True:
+        return False
+    return bool(
+        _clean(_field(row, "consumer_scope")) == "pm_learning"
+        and _family(row) == ACTION_FAMILY_HOLD
+        and _lane(row) == "hold"
+        and _clean(_field(row, "memory_side_role")) == "current_position_side"
+        and _clean(_field(row, "action_preference"))
+        in {"negative_hold_revalidate", "tail_loss_protect"}
+    )
+
+
 def route_lifecycle_learning(
     *,
     lifecycle_port: str,
     action_values: Iterable[Mapping[str, Any]] | None,
+    causal_negative_hold_reduce_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Split action-value learning into PM lifecycle decision, trigger/profile, and rejected lanes."""
     port = _clean(lifecycle_port)
     allowed = PORT_ALLOWED_LANES.get(port, set())
     allowed_families = PORT_ALLOWED_FAMILIES.get(port, set())
+    causal_ids = {
+        str(value or "").strip()
+        for value in (causal_negative_hold_reduce_ids or [])
+        if str(value or "").strip()
+    }
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     trigger_profile_rows: list[dict[str, Any]] = []
@@ -88,6 +127,7 @@ def route_lifecycle_learning(
             "canonical_action_family": family,
             "lane": lane,
             "action_preference": row.get("action_preference"),
+            "memory_side_role": _field(row, "memory_side_role"),
             "reward_mean": row.get("reward_mean"),
             "sample_count": row.get("sample_count"),
         }
@@ -107,7 +147,12 @@ def route_lifecycle_learning(
             })
             trigger_profile_indices.append(index)
             continue
-        if family in allowed_families and lane in allowed:
+        causal_negative_hold_reduce = _is_causal_negative_hold_reduce(
+            row,
+            port=port,
+            causal_ids=causal_ids,
+        )
+        if (family in allowed_families and lane in allowed) or causal_negative_hold_reduce:
             accepted.append(compact)
             accepted_indices.append(index)
         else:
@@ -116,7 +161,14 @@ def route_lifecycle_learning(
     return {
         "tool": "pm_lifecycle_learning_router",
         "pm_lifecycle_action_port": port,
-        "accepted_lanes": sorted(allowed),
+        "accepted_lanes": sorted(
+            allowed
+            | {
+                str(row.get("lane") or "")
+                for row in accepted
+                if str(row.get("lane") or "")
+            }
+        ),
         "decision_learning_rows": accepted,
         "accepted_learning": accepted,
         "accepted_indices": accepted_indices,

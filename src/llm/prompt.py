@@ -22,7 +22,6 @@ Output format:
 - do not output action_name; action_name is reserved for Researcher action-value records, not analyst evidence
 - invalidation_level: pre-fill cancellation price for this current-day entry setup; for long it is the price at or below which the unfilled setup is cancelled, and for short it is the price at or above which the unfilled setup is cancelled; otherwise null
 - position_invalidation_level: distinct post-fill position price for later hold/reduce/exit decisions; otherwise null
-- atr_stop_distance: post-fill ATR-based position stop distance when inferable, otherwise null
 - add_allowed: true only when this is a verified add-on signal
 - direction_anchor: short phrase describing the direction anchor, especially for fundamental signals
 - supply_demand_state, basis_state, inventory_state, warehouse_receipt_state, position_flow_state: concise state labels or "unknown"
@@ -95,7 +94,10 @@ PRODUCT_LEARNING_CALIBRATION_PROMPT_BOUNDARY = """
 === Product Learning Calibration Boundary ===
 When product_learning_calibration_view appears in learning_context, analysts may use
 product-level historical performance only to calibrate evidence quality, confidence,
-confirmation needs, setup classification, and validation questions. It must not create
+confirmation needs, setup classification, validation questions, and the analyst-specific
+exit evidence allowed below. Historical absolute prices must never be copied into today's
+trigger or invalidation; compare relative structure, ATR distance, horizon, and outcome,
+then recompute every current price level from today's evidence. It must not create
 or output opportunity_rank, opportunity_score, capital_allocation_reason, lots, margin,
 authority_type, final_action, final_action_contract, target_lots, or trade commands.
 PM alone converts calibrated evidence into ranking and capital deployment.
@@ -366,7 +368,7 @@ Return these explicit fields in addition to signal/confidence/justification:
 - do not output action_name; use opportunity_state, entry_trigger, and invalidation fields instead
 - entry_trigger: short-timing condition needed to make the fundamental thesis tradable
 - invalidation_level: always null because fundamental evidence has no Trader entry profile
-- position_invalidation_level: explicit post-fill thesis invalidation price when inferable, otherwise null
+- position_invalidation_level: always null; fundamental supplies medium-horizon direction, horizon and exit explanation, not an executable price stop
 
 === DECISION GUIDANCE ===
 
@@ -413,6 +415,7 @@ def build_futures_technical_prompt(
     llm_path: str = "cloud_only",
     data_recency_score: Optional[float] = None,
     data_recency_label: str = "unknown",
+    deterministic_atr14: Optional[float] = None,
 ) -> str:
     """Build the runtime China-futures technical analyst prompt.
 
@@ -458,6 +461,15 @@ T-day open-dependent gap analysis is expected to be unavailable during the pre-o
             "do not reproduce or modify it as an output field.\n"
         )
 
+    if deterministic_atr14 is not None:
+        prompt += (
+            "\nSystem-computed raw ATR14 (read-only market fact): "
+            f"{float(deterministic_atr14):.6f}. "
+            "Use it when interpreting volatility and post-fill position risk; "
+            "do not reproduce or modify it as an output field. Deterministic "
+            "finalization lands this value as atr_stop_distance.\n"
+        )
+
     if technical_summary:
         prompt += "\n" + str(technical_summary)
 
@@ -496,6 +508,11 @@ Quality discipline:
 
 Learning explanation:
 - Fill learning_impact_summary using only past research-learning context and today's technical evidence.
+- Historical entry-quality learning may calibrate only today's canonical profile selection and confirmation discipline. It must not reselect direction or create an opportunity.
+- Recompute today's entry invalidation from today's price structure. Never reuse a historical trigger sentence or historical price level as current authority.
+- Historical learning may calibrate post-fill exit evidence only indirectly: use today's recalculated indicators and current price structure to propose a new position_invalidation_level and exit_hint.
+- Never copy a historical absolute entry, stop, support, or resistance price. Historical lifecycle distances are comparison facts only.
+- Raw ATR14 is a read-only deterministic current-market fact. Do not output, rescale, or overwrite atr_stop_distance.
 - historical_support: past technical setups that support today's evidence quality.
 - historical_contradiction: past technical setups that warn against today's evidence quality.
 - current_evidence_confirmed: technical conditions already confirmed today.
@@ -514,7 +531,8 @@ Output format:
 - setup_type: trend_breakout_setup / trend_pullback_setup / range_reversal_setup / volatility_breakout_setup / unknown
 - entry_timing_signal: no_opportunity must use an empty string; every complete watch_for_trigger, probe_candidate, or tradeable_candidate must use exactly one of breakout / pullback / vwap_confirmed
 - watch_for_trigger means the canonical condition is pending, so set trigger_valid=false and current_trigger_confirmed=false while still filling entry_timing_signal
-- probe_candidate/tradeable_candidate means the same canonical condition is already confirmed, so fill entry_timing_signal and set trigger_valid=true and current_trigger_confirmed=true
+- At the pre-open proposal stage, never claim that a T-day intraday trigger is already confirmed. Technical entry opportunities must remain watch_for_trigger with trigger_valid=false and current_trigger_confirmed=false until deterministic intraday execution observes the canonical condition.
+- probe_candidate/tradeable_candidate are reserved for a later deterministic stage with an actually observed current-day trigger; do not output them as confirmed technical pre-open states
 - trigger_quality_score measures only the current confirmed trigger itself; it must be 0.0 for watch_for_trigger/no_opportunity and must not be derived from setup_quality_score
 - a directional view without an exact T-day observable trigger or canonical invalidation is no_opportunity, not a profile-validation error
 - range_reversal, trend_breakout, short_timing, and other analytical shapes belong in setup_type/opportunity_type, never in entry_timing_signal
@@ -568,7 +586,7 @@ def build_futures_fundamental_prompt(
         "- trigger_quality_score must be 0.0 because fundamental supplies direction context, not a current Trader trigger\n"
         "- entry_trigger may describe research confirmation in your analysis, but it is not persisted as a Trader trigger\n"
         "- invalidation_level must be null because fundamental evidence cannot supply a Trader entry boundary\n"
-        "- position_invalidation_level: post-fill fundamental thesis invalidation price when inferable\n"
+        "- position_invalidation_level must be null because executable structure stops come from current technical or confirmed immediate-event evidence\n"
         "- exit_hint: post-fill fundamental or price evidence that invalidates or weakens the thesis\n"
         "- holding_period_hint: expected holding window and whether this is short probe or trend hold\n"
         "- factor_focus: factor groups most relevant for this ticker now\n"
@@ -583,6 +601,9 @@ def build_futures_fundamental_prompt(
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"
         "When research memories are present, use them only as rebuttable priors. "
+        "Fundamental learning may calibrate only the evidence assessment for today's independently formed "
+        "medium-horizon direction, expected_horizon_days, and exit_hint; it must not override direction. "
+        "It must not copy historical absolute prices or modify ATR14. "
         "State whether today's available fundamentals, market state, and short-term trigger evidence "
         "confirm or contradict them. If the view is medium-term but lacks a short-term trigger or "
         "invalidation boundary, keep it as no_opportunity and identify the missing evidence without inventing it. "
@@ -604,6 +625,7 @@ def build_futures_commodity_news_prompt(
     product_profile_context: str = "",
     llm_path: str = "cloud_only",
     learning_context_text: str = "",
+    position_invalidation_reference_price: float | None = None,
 ) -> str:
     """Build the runtime China-futures commodity-news analyst prompt."""
     prompt = FUTURES_COMMODITY_NEWS_PROMPT.format(
@@ -632,10 +654,29 @@ def build_futures_commodity_news_prompt(
         "Only that confirmed immediate event may report a non-zero trigger_quality_score; it must measure today's event trigger strength independently of setup quality and history. "
         "That complete immediate candidate must not leave entry_timing_signal empty. Otherwise use no_opportunity with an empty entry_timing_signal; news must not create watch_for_trigger or a normal 15-minute execution profile.\n"
     )
+    try:
+        current_reference_price = float(position_invalidation_reference_price)
+    except (TypeError, ValueError):
+        current_reference_price = 0.0
+    if current_reference_price > 0.0:
+        prompt += (
+            "Current deterministic pre-open reference price is "
+            f"{current_reference_price:g}. Only a confirmed event_immediate candidate may propose "
+            "a new position_invalidation_level from today's event and this current reference: "
+            "below the reference for long, above it for short. Otherwise it must be null.\n"
+        )
+    else:
+        prompt += (
+            "Current deterministic pre-open reference price is unavailable; "
+            "position_invalidation_level must be null.\n"
+        )
     prompt += learning_context_text or ""
     prompt += (
         "\n\n=== Learning-to-signal requirement ===\n"
         "When research memories are present, use them only as rebuttable priors. "
+        "News learning may calibrate only the event impact window; it must not copy historical absolute prices, "
+        "produce a historical position stop, or modify ATR14. This does not prevent a confirmed current "
+        "event_immediate candidate from proposing the new current-event structure level defined above. "
         "Classify today's news as catalyst, noise, or no-trade value, and state whether it confirms "
         "or contradicts similar past cases. If Neutral, specify the concrete event/price/volume "
         "condition that would support later analysis. If a catalyst already satisfies the immediate-event boundary, has current confirmation, "

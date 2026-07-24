@@ -674,12 +674,6 @@ def _resolve_phase2_execution_basis(
         finalize_untriggered=finalize_untriggered,
         force_immediate=force_immediate,
     )
-    if basis.base_price is None and is_position_reduction:
-        logger.warning(
-            f"Intraday basis unavailable for immediate {recommendation['underlying_code']} close; "
-            "falling back to morning execution basis."
-        )
-        return morning_price_context, None
     return basis, selection
 
 

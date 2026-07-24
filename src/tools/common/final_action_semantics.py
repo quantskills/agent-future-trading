@@ -1080,6 +1080,56 @@ def _learning_row_lanes(rows: Iterable[Any]) -> set[str]:
     }
 
 
+def _causal_negative_hold_reduce_row(
+    contract: Mapping[str, Any],
+    trace: Mapping[str, Any],
+    impact: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> bool:
+    """Recognize the one legal hold-family bridge into a final risk reduction."""
+    row_id = _row_text(row, "id") or _row_text(row, "action_value_id")
+    decision = (
+        trace.get("reduce_exit_learning_decision")
+        if isinstance(trace.get("reduce_exit_learning_decision"), Mapping)
+        else {}
+    )
+    selected = (
+        decision.get("selected_action_value")
+        if isinstance(decision.get("selected_action_value"), Mapping)
+        else {}
+    )
+    selected_id = _row_text(selected, "id") or _row_text(selected, "action_value_id")
+    reasons = {
+        _clean(reason)
+        for reason in contract.get("reason_codes") or []
+        if _clean(reason)
+    }
+    current_lots = _int(contract.get("current_lots"), 0)
+    target_lots = _int(contract.get("target_lots"), 0)
+    risk_reduced = bool(
+        current_lots
+        and abs(target_lots) < abs(current_lots)
+        and (target_lots == 0 or (target_lots > 0) == (current_lots > 0))
+    )
+    return bool(
+        row_id
+        and row_id == selected_id
+        and _row_action_family(row) == ACTION_FAMILY_HOLD
+        and _action_value_lane(row) == "hold"
+        and _row_text(row, "memory_side_role") == "current_position_side"
+        and _row_text(row, "action_preference")
+        in {"negative_hold_revalidate", "tail_loss_protect"}
+        and _row_text(row, "consumer_scope") == PM_ACTION_VALUE_CONSUMER_SCOPE
+        and row.get("canonical_action_value") is True
+        and _clean(decision.get("decision")) == "learned_hold_exit_reduce"
+        and _clean(decision.get("action_value_preference")) == "bad_hold"
+        and "hold_exit_action_value_protection" in reasons
+        and risk_reduced
+        and bool(impact.get("reduce_exit_changes_position"))
+        and abs(_float(impact.get("position_ratio_delta"), 0.0)) > 1e-12
+    )
+
+
 def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | None) -> list[str]:
     """Return errors when non-rank lifecycle learning is not landed in the PM contract.
 
@@ -1119,10 +1169,27 @@ def lifecycle_learning_decision_contract_errors(contract: Mapping[str, Any] | No
             "hold_lifecycle_mixed_forbidden_learning_lanes:"
             + ",".join(sorted(lanes - {"hold"}))
         )
-    if port == "reduce_exit" and lanes - {"reduce", "exit"}:
+    forbidden_reduce_exit_lanes = set()
+    if port == "reduce_exit":
+        for row in decision_rows:
+            if not isinstance(row, Mapping):
+                continue
+            lane = _action_value_lane(row)
+            if lane in {"reduce", "exit"}:
+                continue
+            if lane == "hold" and isinstance(impact, Mapping) and _causal_negative_hold_reduce_row(
+                contract,
+                trace,
+                impact,
+                row,
+            ):
+                continue
+            if lane:
+                forbidden_reduce_exit_lanes.add(lane)
+    if forbidden_reduce_exit_lanes:
         errors.append(
             "reduce_exit_lifecycle_mixed_forbidden_learning_lanes:"
-            + ",".join(sorted(lanes - {"reduce", "exit"}))
+            + ",".join(sorted(forbidden_reduce_exit_lanes))
         )
     if port == "conditional_monitor" and lanes - {"conditional_monitor"}:
         errors.append(

@@ -56,6 +56,8 @@ rank_score =
 
 失效字段不是可调参数：`invalidation_level+canonical invalidation_condition+valid_until`只定义首次成交前作废；`position_invalidation_level/atr_stop_distance/exit_hint/expected_horizon_days`只定义成交后由下一交易日PM消费的持仓依据。两组字段不得通过YAML互相替代。
 
+`atr_stop_distance`固定为technical使用开仓前已完成OHLC按既有True Range/EWM口径确定性生成的原始ATR14，不是LLM输出，也不预乘止损倍数。下一交易日PM以真实开仓价为锚，乘`execution_exit_policy`当前真实命中的default/sector `atr_multiplier`后判断止损；本轮不修改任何倍数。现有template/setup覆盖只有setup键与catalog键精确相等时才生效，不能把未命中的覆盖值解释为已经参与交易。
+
 资金部署规则：
 
 - 从空仓建立非零仓位，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale` 进入 1-N 排名；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控没有 rank。

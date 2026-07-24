@@ -2229,6 +2229,15 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         and not technical_opposes
         and has_entry_invalidation
     )
+    monitorable_setup_confirmation = bool(
+        has_monitorable_setup
+        and scorecard_state == "watch_for_trigger"
+        and technical_support
+        and technical_entry_timing_support
+        and confirmation_score >= 0.60
+        and not technical_opposes
+        and has_entry_invalidation
+    )
     watch_for_trigger_without_setup = bool(
         scorecard_state in {"watch_for_trigger", "no_opportunity", "unknown", ""}
         and not has_tradeable_support
@@ -2236,6 +2245,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         and not technical_confirmation
         and not event_catalyst_confirmation
         and not current_setup_confirmation
+        and not monitorable_setup_confirmation
     )
     market_confirmation = bool(
         strong_market
@@ -2252,6 +2262,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         technical_confirmation
         or event_catalyst_confirmation
         or current_setup_confirmation
+        or monitorable_setup_confirmation
         or market_confirmation
         or analyst_tradeable_probe
     )
@@ -2285,6 +2296,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
         "technical_confirmation": technical_confirmation,
         "event_catalyst_confirmation": event_catalyst_confirmation,
         "current_setup_confirmation": current_setup_confirmation,
+        "monitorable_setup_confirmation": monitorable_setup_confirmation,
         "executable_setup_confirmation": current_setup_confirmation,
         "open_action_evidence": open_action_evidence,
         "watch_for_trigger_without_setup": watch_for_trigger_without_setup,
@@ -2300,6 +2312,7 @@ def _alpha_ev_trade_authority(alpha_ev: dict) -> dict:
                 "technical_trigger": technical_confirmation,
                 "event_catalyst": event_catalyst_confirmation,
                 "current_setup_confirmation": current_setup_confirmation,
+                "monitorable_setup_confirmation": monitorable_setup_confirmation,
                 "market_confirmation": market_confirmation,
                 "analyst_tradeable_probe_candidate": analyst_tradeable_probe,
                 "positive_open_action_value": qualified_positive,
@@ -2739,11 +2752,19 @@ def _step4_capital_plan(
         trade_authority.get("strong_market_confirmation")
         or trade_authority.get("technical_confirmation")
         or trade_authority.get("current_setup_confirmation")
+        or trade_authority.get("monitorable_setup_confirmation")
+    )
+    investment_setup_ready = bool(
+        scorecard_state == "tradeable_candidate"
+        or (
+            scorecard_state == "watch_for_trigger"
+            and trade_authority.get("monitorable_setup_confirmation")
+        )
     )
     alpha_scale = bool(
         can_real
         and mature_repeated_positive
-        and scorecard_state == "tradeable_candidate"
+        and investment_setup_ready
         and strong_confirmation
         and trade_authority.get("has_entry_invalidation")
         and trade_authority.get("has_position_exit_boundary")
@@ -2865,6 +2886,7 @@ def _final_contract_authority(
         trade_authority.get("market_confirmation")
         or trade_authority.get("technical_confirmation")
         or trade_authority.get("executable_setup_confirmation")
+        or trade_authority.get("monitorable_setup_confirmation")
         or event_catalyst_confirmation
     )
     open_action_evidence = bool(trade_authority.get("open_action_evidence"))
@@ -3115,6 +3137,7 @@ def _final_contract_authority(
         "independent_support_count": independent_support_count,
         "market_confirmation": trade_authority.get("market_confirmation"),
         "technical_confirmation": trade_authority.get("technical_confirmation"),
+        "monitorable_setup_confirmation": trade_authority.get("monitorable_setup_confirmation"),
         "event_catalyst_confirmation": trade_authority.get("event_catalyst_confirmation"),
         "open_action_evidence": open_action_evidence,
         "executable_setup_confirmation": trade_authority.get("executable_setup_confirmation"),
@@ -3802,6 +3825,7 @@ def _build_pm_decision_context(
         recommendation_intent=recommendation_intent or {},
         control_reasons=control_reasons or [],
         alpha_setup_action_values=alpha_setup_action_values,
+        reference_price=float(current_price),
     )
     plan.update(execution_fields)
     return plan
@@ -3857,13 +3881,14 @@ def _target_execution_lifecycle_boundaries(
     """Read entry and post-fill boundaries from aligned formal AECs."""
     payloads = _execution_signal_payloads(analyst_signals, target_side)
     entry_invalidation_present = False
-    position_exit_boundary_present = False
+    position_exit_boundary_present = _has_position_exit_boundary(
+        analyst_signals or [],
+        target_side=target_side,
+    )
     for analyst in ANALYST_ORDER:
         payload = payloads.get(analyst)
         if not isinstance(payload, dict) or payload.get("side") != target_side:
             continue
-        if _execution_payload_has_position_exit_boundary(payload):
-            position_exit_boundary_present = True
         if analyst not in {"technical", "commodity_news"}:
             continue
         profile = normalize_execution_profile(payload.get("entry_timing_signal"))
@@ -3878,8 +3903,6 @@ def _target_execution_lifecycle_boundaries(
         if _signal_side_text(getattr(signal, "signal", None)) != target_side:
             continue
         agent = _normalize_agent_name(str(getattr(signal, "agent_name", "") or ""))
-        if _has_position_exit_boundary([signal], target_side=target_side):
-            position_exit_boundary_present = True
         if agent in {"technical", "commodity_news"} and _has_structured_invalidation_condition(
             [signal],
             target_side=target_side,
@@ -3899,23 +3922,45 @@ def _execution_payload_has_invalidation(payload: dict) -> bool:
     )
 
 
-def _execution_payload_has_position_exit_boundary(payload: dict) -> bool:
+def _positive_finite_float(value) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
     try:
-        if float(payload.get("position_invalidation_level") or 0.0) > 0.0:
-            return True
+        number = float(value)
     except (TypeError, ValueError):
-        pass
-    try:
-        if float(payload.get("atr_stop_distance") or 0.0) > 0.0:
-            return True
-    except (TypeError, ValueError):
-        pass
-    if str(payload.get("exit_hint") or "").strip():
-        return True
-    try:
-        return float(payload.get("expected_horizon_days") or 0.0) > 0.0
-    except (TypeError, ValueError):
-        return False
+        return None
+    return number if math.isfinite(number) and number > 0.0 else None
+
+
+def _position_level_for_reference(
+    payload: dict | None,
+    *,
+    target_side: str,
+    reference_price: float,
+) -> float | None:
+    payload = payload if isinstance(payload, dict) else {}
+    if payload.get("side") != target_side:
+        return None
+    level = _positive_finite_float(payload.get("position_invalidation_level"))
+    reference = _positive_finite_float(reference_price)
+    if level is None or reference is None:
+        return None
+    if target_side == "long" and level < reference:
+        return level
+    if target_side == "short" and level > reference:
+        return level
+    return None
+
+
+def _horizon_pair(payload: dict | None) -> tuple[str | None, int | None]:
+    payload = payload if isinstance(payload, dict) else {}
+    horizon_class = str(payload.get("horizon_class") or "").strip()
+    expected_days = _safe_int(payload.get("expected_horizon_days"), 0)
+    if not horizon_class or horizon_class.lower() in {"unknown", "flat", "none"}:
+        return None, None
+    if expected_days <= 0:
+        return None, None
+    return horizon_class, expected_days
 
 
 def _select_execution_evidence_payload(
@@ -3977,30 +4022,70 @@ def _select_execution_evidence_payload(
     return eligible[0]
 
 
-def _select_position_lifecycle_evidence_payload(
+def _select_position_lifecycle_evidence_fields(
     payloads: dict,
     *,
     target_side: str,
+    selected_execution_evidence: dict,
+    reference_price: float,
 ) -> dict:
-    """Select one same-side post-fill lifecycle AEC independently of entry."""
-    analyst_order = {name: index for index, name in enumerate(ANALYST_ORDER)}
-    eligible: list[dict] = []
-    for analyst in ANALYST_ORDER:
-        payload = payloads.get(analyst)
-        if not isinstance(payload, dict) or payload.get("side") != target_side:
-            continue
-        if not _execution_payload_has_position_exit_boundary(payload):
-            continue
-        eligible.append(payload)
-    if not eligible:
-        raise ValueError("pm_position_lifecycle_evidence_not_found")
-    eligible.sort(
-        key=lambda payload: (
-            -_safe_float(payload.get("confidence"), 0.0),
-            analyst_order.get(str(payload.get("agent_name") or ""), len(analyst_order)),
-        )
+    """Assemble post-fill lifecycle facts by analyst role.
+
+    The input payloads are PM-internal evidence rebuilt from the already
+    validated SCC in the production path.  Entry execution remains single
+    source; post-fill structure, volatility and horizon keep their distinct
+    analyst responsibilities.
+    """
+    technical = payloads.get("technical") if isinstance(payloads.get("technical"), dict) else {}
+    fundamental = payloads.get("fundamental") if isinstance(payloads.get("fundamental"), dict) else {}
+
+    structure_source: dict = {}
+    position_level = _position_level_for_reference(
+        technical,
+        target_side=target_side,
+        reference_price=reference_price,
     )
-    return eligible[0]
+    if position_level is not None:
+        structure_source = technical
+    elif (
+        selected_execution_evidence.get("agent_name") == "commodity_news"
+        and selected_execution_evidence.get("execution_profile") == "event_immediate"
+    ):
+        position_level = _position_level_for_reference(
+            selected_execution_evidence,
+            target_side=target_side,
+            reference_price=reference_price,
+        )
+        if position_level is not None:
+            structure_source = selected_execution_evidence
+
+    # ATR is a direction-neutral deterministic technical fact.  No other
+    # analyst source can supply this executable stop distance.
+    atr_stop_distance = _positive_finite_float(technical.get("atr_stop_distance"))
+
+    horizon_class = None
+    expected_horizon_days = None
+    if fundamental.get("side") == target_side:
+        horizon_class, expected_horizon_days = _horizon_pair(fundamental)
+    if horizon_class is None:
+        horizon_class, expected_horizon_days = _horizon_pair(selected_execution_evidence)
+
+    if position_level is None and atr_stop_distance is None:
+        raise ValueError("pm_position_lifecycle_evidence_not_found")
+
+    exit_hint = str(structure_source.get("exit_hint") or "").strip()
+    if not exit_hint and fundamental.get("side") == target_side:
+        exit_hint = str(fundamental.get("exit_hint") or "").strip()
+    if not exit_hint:
+        exit_hint = str(selected_execution_evidence.get("exit_hint") or "").strip()
+
+    return {
+        "position_invalidation_level": position_level,
+        "atr_stop_distance": atr_stop_distance,
+        "horizon_class": horizon_class,
+        "expected_horizon_days": expected_horizon_days,
+        "exit_hint": exit_hint or None,
+    }
 
 
 def _execution_profile_and_source(payload: dict, *, authority_type: str) -> tuple[str, str]:
@@ -4029,6 +4114,7 @@ def _build_execution_contract_fields(
     recommendation_intent: dict,
     control_reasons: list[str],
     alpha_setup_action_values: list | None = None,
+    reference_price: float = 0.0,
 ) -> dict:
     """Translate PM target lots into a Trader-readable execution contract.
 
@@ -4064,9 +4150,11 @@ def _build_execution_contract_fields(
             selected_execution_evidence,
             authority_type=authority_type,
         )
-        selected_position_lifecycle_evidence = _select_position_lifecycle_evidence_payload(
+        selected_position_lifecycle_evidence = _select_position_lifecycle_evidence_fields(
             signal_payloads,
             target_side=target_side,
+            selected_execution_evidence=selected_execution_evidence,
+            reference_price=reference_price,
         )
 
     entry_trigger = (
@@ -4093,6 +4181,9 @@ def _build_execution_contract_fields(
         target_lots != current_lots
         and target_lots != 0
         and aligned_current_trigger
+        and selected_execution_evidence
+        and selected_execution_evidence.get("agent_name") == "commodity_news"
+        and profile == "event_immediate"
         and _semantic_authority_allows_entry(final_entry_authority)
     )
     can_execute_without_intraday_trigger = bool(
@@ -4107,7 +4198,16 @@ def _build_execution_contract_fields(
         alpha_setup_action_values=alpha_setup_action_values,
         final_entry_authority=final_entry_authority,
     )
-    execution_preference = proposed_execution_preference
+    execution_preference = (
+        {
+            **proposed_execution_preference,
+            "applied": False,
+            "diagnostic_only": True,
+            "not_formal_trigger_profile_consumption": True,
+        }
+        if proposed_execution_preference
+        else {}
+    )
 
     return {
         "contract_version": "agentquant.execution_contract_fields.v1",
@@ -4125,7 +4225,11 @@ def _build_execution_contract_fields(
         ),
         "invalidation": invalidation,
         "setup_type": selected_execution_evidence.get("setup_type") if selected_execution_evidence else None,
-        "horizon_class": selected_execution_evidence.get("horizon_class") if selected_execution_evidence else None,
+        "horizon_class": (
+            selected_position_lifecycle_evidence.get("horizon_class")
+            if selected_position_lifecycle_evidence
+            else None
+        ),
         "expected_horizon_days": (
             selected_position_lifecycle_evidence.get("expected_horizon_days")
             if selected_position_lifecycle_evidence
@@ -6165,6 +6269,9 @@ def _load_opening_fac_context(
         contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         if not contract:
             raise RuntimeError("pm_opening_fac_contract_missing")
+        opening_execution_price = _safe_float(opening_row.get("execution_price"), 0.0)
+        if opening_execution_price <= 0.0:
+            raise RuntimeError("pm_opening_fac_execution_price_missing")
         opening_day = _normalize_trading_day_value(opening_row.get("trading_date"))
         held_trading_days = 0
         if opening_day and opening_day < decision_day:
@@ -6192,7 +6299,7 @@ def _load_opening_fac_context(
             ),
             "exit_hint": str(contract.get("exit_hint") or ""),
             "atr_stop_distance": _safe_float(contract.get("atr_stop_distance"), 0.0),
-            "opening_execution_price": _safe_float(opening_row.get("execution_price"), 0.0),
+            "opening_execution_price": opening_execution_price,
             "setup_type": str(contract.get("setup_type") or ""),
             "final_action": str(contract.get("final_action") or ""),
         }
@@ -6219,15 +6326,16 @@ def _opening_fac_position_invalidation_breached(
     price = _safe_float(current_price, 0.0)
     if price <= 0.0:
         return False
-    if level > 0.0:
-        if current_side == "long":
-            return price <= level
-        if current_side == "short":
-            return price >= level
     atr_distance = _safe_float(context.get("atr_stop_distance"), 0.0)
     entry_price = _safe_float(context.get("opening_execution_price"), 0.0)
-    if entry_price <= 0.0:
-        entry_price = _safe_float(getattr(current_position, "entry_price", None), 0.0)
+    structure_breached = False
+    if level > 0.0 and entry_price > 0.0:
+        if current_side == "long" and level < entry_price:
+            structure_breached = price <= level
+        elif current_side == "short" and level > entry_price:
+            structure_breached = price >= level
+
+    atr_breached = False
     if atr_distance > 0.0 and entry_price > 0.0:
         policy = resolve_exit_policy_config(
             full_config or {},
@@ -6236,10 +6344,10 @@ def _opening_fac_position_invalidation_breached(
         )
         stop_distance = atr_distance * _safe_float(policy.get("atr_multiplier"), 1.8)
         if current_side == "long":
-            return price <= entry_price - stop_distance
-        if current_side == "short":
-            return price >= entry_price + stop_distance
-    return False
+            atr_breached = price <= entry_price - stop_distance
+        elif current_side == "short":
+            atr_breached = price >= entry_price + stop_distance
+    return bool(structure_breached or atr_breached)
 
 
 def _drawdown_recovery_probe_history(
@@ -9110,8 +9218,6 @@ def _apply_holding_rebalance_control(
             has_current_position_exit_boundary
             or _safe_float(opening_context.get("position_invalidation_level"), 0.0) > 0.0
             or _safe_float(opening_context.get("atr_stop_distance"), 0.0) > 0.0
-            or _safe_int(opening_context.get("expected_horizon_days"), 0) > 0
-            or str(opening_context.get("exit_hint") or "").strip()
         ),
         lifecycle="holding",
     )
@@ -9409,7 +9515,7 @@ def _apply_holding_rebalance_control(
         detail["final_target_ratio"] = 0.0
         return 0.0, reasons, notes, diagnostics
 
-    if technical_invalidation_confirmed and target_side == current_side:
+    if technical_invalidation_confirmed:
         reasons.append("position_lifecycle_failed")
         notes.append(
             f"{ticker} {current_side} current technical evidence confirms the opposite side; exiting."
@@ -9418,7 +9524,7 @@ def _apply_holding_rebalance_control(
         detail["final_target_ratio"] = 0.0
         return 0.0, reasons, notes, diagnostics
 
-    if fundamental_medium_opposition and target_side == current_side:
+    if fundamental_medium_opposition:
         max_reduction = max(0.0, min(1.0, float(control.get("max_daily_reduction_ratio", 0.40))))
         reduced_ratio = _signed_abs(current_side, abs(current_ratio) * (1.0 - max_reduction))
         reasons.append("fundamental_medium_opposition")
@@ -10851,12 +10957,15 @@ def _run_pm_six_step_decision(state: FundState):
     scorecard_probe_seed_applied = False
     scorecard_conditional_monitor_seed_applied = False
     scorecard_probe_seed_not_applied: dict = {}
+    scorecard_conditional_monitor = bool(
+        scorecard_probe_side in {"long", "short"}
+        and _scorecard_conditional_monitor_candidate(scorecard_probe_row)
+    )
     if (
         abs(position_risk.optimal_position_ratio) <= 1e-12
         and abs(current_ticker_exposure) <= 1e-12
         and scorecard_probe_side in {"long", "short"}
     ):
-        scorecard_conditional_monitor = _scorecard_conditional_monitor_candidate(scorecard_probe_row)
         position_risk.optimal_position_ratio = scorecard_probe_ratio
         if scorecard_conditional_monitor:
             scorecard_conditional_monitor_seed_applied = True
@@ -10872,7 +10981,28 @@ def _run_pm_six_step_decision(state: FundState):
     control_reasons: list[str] = []
     control_notes: list[str] = []
     control_diagnostics: dict = {}
-    if scorecard_probe_seed_applied:
+    if scorecard_conditional_monitor:
+        control_reasons.append("pm_watch_for_trigger_probe_cap")
+        control_notes.append(
+            f"{ticker} scorecard routed clean {scorecard_probe_side} watch-for-trigger opportunity "
+            f"to conditional monitor probe: score={scorecard_probe_row.get('score')}, "
+            f"ratio={scorecard_probe_ratio:.2%}"
+        )
+        control_diagnostics["conditional_monitor_probe_seed"] = {
+            "side": scorecard_probe_side,
+            "ratio": float(scorecard_probe_ratio),
+            "scorecard": scorecard_probe_row,
+            "status": (
+                "candidate_routed_to_conditional_monitor"
+                if scorecard_conditional_monitor_seed_applied
+                else "candidate_preserved_for_post_control_evaluation"
+            ),
+            "not_product_rule": True,
+            "soft_probe_only": True,
+            "requires_final_contract_authority": True,
+            "requires_intraday_confirmation": True,
+        }
+    elif scorecard_probe_seed_applied:
         control_reasons.append("scorecard_current_tradeable_probe_seed")
         control_notes.append(
             f"{ticker} scorecard converted qualified {scorecard_probe_side} opportunity to probe seed: "
@@ -10885,23 +11015,6 @@ def _run_pm_six_step_decision(state: FundState):
             "scorecard": scorecard_probe_row,
             "not_product_rule": True,
             "soft_probe_only": True,
-        }
-    elif scorecard_conditional_monitor_seed_applied:
-        control_reasons.append("pm_watch_for_trigger_probe_cap")
-        control_notes.append(
-            f"{ticker} scorecard routed clean {scorecard_probe_side} watch-for-trigger opportunity "
-            f"to conditional monitor probe: score={scorecard_probe_row.get('score')}, "
-            f"ratio={scorecard_probe_ratio:.2%}"
-        )
-        control_diagnostics["conditional_monitor_probe_seed"] = {
-            "side": scorecard_probe_side,
-            "ratio": float(scorecard_probe_ratio),
-            "scorecard": scorecard_probe_row,
-            "status": "candidate_routed_to_conditional_monitor",
-            "not_product_rule": True,
-            "soft_probe_only": True,
-            "requires_final_contract_authority": True,
-            "requires_intraday_confirmation": True,
         }
     elif scorecard_probe_seed_not_applied:
         control_diagnostics["scorecard_current_tradeable_probe_seed"] = scorecard_probe_seed_not_applied
@@ -11260,9 +11373,26 @@ def _run_pm_six_step_decision(state: FundState):
     control_notes.extend(notes)
     control_diagnostics.update(diagnostics)
 
-    position_risk.optimal_position_ratio, reasons, notes, diagnostics = _apply_alpha_setup_ev_position_control(
+    conditional_monitor_seed = (
+        control_diagnostics.get("conditional_monitor_probe_seed")
+        if isinstance(control_diagnostics.get("conditional_monitor_probe_seed"), dict)
+        else {}
+    )
+    alpha_control_input_ratio = float(position_risk.optimal_position_ratio or 0.0)
+    alpha_candidate_evaluation_only = bool(
+        abs(alpha_control_input_ratio) <= 1e-12
+        and abs(current_ticker_exposure) <= 1e-12
+        and str(conditional_monitor_seed.get("side") or "").lower() in {"long", "short"}
+        and abs(_safe_float(conditional_monitor_seed.get("ratio"), 0.0)) > 1e-12
+    )
+    if alpha_candidate_evaluation_only:
+        alpha_control_input_ratio = _signed_abs(
+            str(conditional_monitor_seed.get("side") or "").lower(),
+            _safe_float(conditional_monitor_seed.get("ratio"), 0.0),
+        )
+    alpha_control_ratio, reasons, notes, diagnostics = _apply_alpha_setup_ev_position_control(
         ticker=ticker,
-        position_ratio=position_risk.optimal_position_ratio,
+        position_ratio=alpha_control_input_ratio,
         current_ratio=current_ticker_exposure,
         opportunity_scorecard=opportunity_scorecard,
         alpha_setup_profiles=alpha_setup_profiles,
@@ -11272,6 +11402,11 @@ def _run_pm_six_step_decision(state: FundState):
         full_config=full_config,
         max_position_ratio=max_position_ratio,
     )
+    if not alpha_candidate_evaluation_only:
+        position_risk.optimal_position_ratio = alpha_control_ratio
+    elif isinstance(diagnostics.get("alpha_setup_ev_fusion"), dict):
+        diagnostics["alpha_setup_ev_fusion"]["candidate_evaluation_only"] = True
+        diagnostics["alpha_setup_ev_fusion"]["does_not_restore_unconditional_position"] = True
     control_reasons.extend(reasons)
     control_notes.extend(notes)
     control_diagnostics.update(diagnostics)
@@ -11516,6 +11651,20 @@ def _run_pm_six_step_decision(state: FundState):
         probe_release=probe_release,
         analyst_tradeable_probe=analyst_tradeable_probe,
     )
+    conditional_monitor_seed = (
+        control_diagnostics.get("conditional_monitor_probe_seed")
+        if isinstance(control_diagnostics.get("conditional_monitor_probe_seed"), dict)
+        else {}
+    )
+    if (
+        abs(minimum_probe_candidate_ratio) <= 1e-12
+        and abs(current_ticker_exposure) <= 1e-12
+        and str(conditional_monitor_seed.get("side") or "").lower() in {"long", "short"}
+    ):
+        minimum_probe_candidate_ratio = _signed_abs(
+            str(conditional_monitor_seed.get("side") or "").lower(),
+            _safe_float(conditional_monitor_seed.get("ratio"), 0.0),
+        )
     if (
         _should_attempt_minimum_real_probe(
             current_lots=current_lots,

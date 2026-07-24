@@ -652,12 +652,37 @@ def _current_entry_confirmation_available(
     return False
 
 
+def _is_pre_open_technical_signal(signal: AnalystSignal, analyst: str) -> bool:
+    """Read the registered market-data timing fact without trusting LLM claims."""
+    if str(analyst or "").strip().lower() != "technical":
+        return False
+    metadata = getattr(signal, "metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        return False
+    data_usage = metadata.get("data_usage_summary")
+    if not isinstance(data_usage, dict):
+        return False
+    sources = data_usage.get("sources")
+    if not isinstance(sources, dict):
+        return False
+    market_source = sources.get("pandaai_market")
+    return bool(
+        isinstance(market_source, dict)
+        and market_source.get("pre_open_only") is True
+    )
+
+
 def _current_entry_trigger_confirmed(
     signal: AnalystSignal,
     quality_context: Dict[str, Any],
     analyst: str,
     entry_trigger: Any,
 ) -> bool:
+    # Daily technical analysis runs before the open. Its complete canonical
+    # setup is a watch instruction for Trader, never proof that an intraday
+    # breakout/pullback has already happened.
+    if _is_pre_open_technical_signal(signal, analyst):
+        return False
     if _current_entry_confirmation_available(signal, quality_context, analyst):
         return True
     if _is_pending_conditional_entry_trigger(entry_trigger):

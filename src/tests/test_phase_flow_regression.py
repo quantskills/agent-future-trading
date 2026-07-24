@@ -2142,6 +2142,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "confidence_score": 0.70,
                         "action_preference": "controlled_open_or_add",
                         "signal_calibration": {
+                            "contract_version": "agentquant.analysis_signal_calibration.v1",
+                            "consumer_scope": "analyst_calibration",
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
                             "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
@@ -2258,6 +2260,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "confidence_score": 0.65,
                         "action_preference": "cap_revalidate_before_open",
                         "signal_calibration": {
+                            "contract_version": "agentquant.analysis_signal_calibration.v1",
+                            "consumer_scope": "analyst_calibration",
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
                             "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
@@ -2279,6 +2283,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "confidence_score": 0.75,
                         "action_preference": "controlled_open_or_add",
                         "signal_calibration": {
+                            "contract_version": "agentquant.analysis_signal_calibration.v1",
+                            "consumer_scope": "analyst_calibration",
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
                             "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
@@ -2350,6 +2356,61 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertEqual(calibration["positive_strength"], 0.0)
         self.assertEqual(calibration["negative_strength"], 0.0)
 
+    def test_analyst_learning_calibration_rejects_wrong_nested_scope_or_version(self):
+        base_row = {
+            "ticker": "RB",
+            "side": "long",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "action_name": "open",
+            "sample_count": 8,
+            "confidence_score": 0.70,
+            "signal_calibration": {
+                "contract_version": "agentquant.analysis_signal_calibration.v1",
+                "consumer_scope": "analyst_calibration",
+                "usable_by": ["analysis_team"],
+                "allowed_effects": ["evidence_quality_calibration"],
+                "forbidden_effects": [
+                    "trade_authority",
+                    "lots",
+                    "margin_ratio",
+                    "direction_override",
+                ],
+                "source_action_value_lane": "open",
+                "calibration_bias": "positive_evidence_calibration",
+            },
+        }
+        for field, value in (
+            ("contract_version", "agentquant.analysis_signal_calibration.v0"),
+            ("consumer_scope", "pm_learning"),
+        ):
+            with self.subTest(field=field):
+                row = dict(base_row)
+                calibration = dict(base_row["signal_calibration"])
+                calibration[field] = value
+                row["signal_calibration"] = calibration
+                signal = AnalystSignal(
+                    agent_name="technical",
+                    signal=Signal.BULLISH,
+                    confidence=0.50,
+                    business_quality_score=0.50,
+                    factor_alignment_score=0.50,
+                    horizon_class="short",
+                )
+                calibrated = calibrate_signal_with_learning_context(
+                    signal,
+                    analyst="technical",
+                    ticker="RB",
+                    learning_context={"analyst_calibration_items": [row]},
+                )
+                self.assertEqual(calibrated.business_quality_score, 0.50)
+                self.assertEqual(calibrated.factor_alignment_score, 0.50)
+                self.assertEqual(calibrated.confidence, 0.50)
+                self.assertFalse(
+                    calibrated.metadata["analyst_learning_calibration"]["enabled"]
+                )
+
     def test_news_learning_calibration_writes_event_summary_without_trade_authority(self):
         signal = AnalystSignal(
             agent_name="commodity_news",
@@ -2382,6 +2443,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "win_rate": 0.67,
                         "confidence_score": 0.55,
                         "signal_calibration": {
+                            "contract_version": "agentquant.analysis_signal_calibration.v1",
+                            "consumer_scope": "analyst_calibration",
                             "usable_by": ["analysis_team"],
                             "allowed_effects": ["evidence_quality_calibration", "setup_reliability_context"],
                             "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
@@ -6732,9 +6795,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             ["rb-open"],
         )
         self.assertEqual([row["id"] for row in trace["decision_learning_rows"]], ["rb-open"])
-        self.assertEqual(
-            [row["id"] for row in trace["trigger_profile_learning_rows"]],
-            ["rb-execution"],
+        self.assertEqual(trace["trigger_profile_learning_rows"], [])
+        self.assertIn(
+            "rb-execution",
+            {row.get("id") for row in trace["rejected_learning"]},
         )
         self.assertTrue(
             trace["pm_lifecycle_learning_router"][
@@ -6834,7 +6898,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         )
         self.assertNotIn("scorecard_current_tradeable_probe_seed", contract["reason_codes"])
 
-    def test_final_action_contract_routes_hold_learning_without_capital_rank(self):
+    def test_final_action_contract_does_not_claim_unchanged_hold_learning(self):
         contract = _build_final_action_contract(
             ticker="EB",
             current_lots=-12,
@@ -6859,6 +6923,7 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             market_confirmation={"confirmation_score": 0.55, "conflicts": []},
             alpha_setup_action_values=[
                 {
+                    "id": "eb-hold-not-causal",
                     "ticker": "EB",
                     "side": "short",
                     "action_name": "hold",
@@ -6881,11 +6946,18 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(contract["final_action"], "hold")
         self.assertEqual(trace["contract_lifecycle_port"], "hold")
-        self.assertIn("hold", trace["used_lanes"])
-        self.assertEqual(impact["hold_decision"], "continue_hold_with_learning_explanation")
+        self.assertEqual(trace["used_lanes"], [])
+        self.assertEqual(trace["decision_learning_rows"], [])
+        self.assertEqual(contract["learning_used"]["alpha_setup_action_values"], [])
+        self.assertEqual(
+            impact["hold_decision"],
+            "continue_hold_with_learning_explanation",
+        )
+        self.assertFalse(impact["hold_changes_position"])
+        self.assertEqual(impact["position_ratio_delta"], 0.0)
         self.assertNotIn("opportunity_rank", contract["evidence_used"])
 
-    def test_final_action_contract_routes_reduce_exit_learning_without_capital_rank(self):
+    def test_final_action_contract_routes_only_causal_reduce_exit_learning(self):
         contract = _build_final_action_contract(
             ticker="SR",
             current_lots=8,
@@ -6897,10 +6969,11 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             lots_to_trade_reason="protective_reduce_after_tail_loss",
             recommendation_intent={"action": "close_long", "lots": 5, "action_type": "decrease"},
             final_entry_authority={"authority_type": "not_applicable"},
-            control_reasons=["protective_reduce_after_tail_loss"],
+            control_reasons=["hold_exit_action_value_protection"],
             control_diagnostics={
                 "winning_template_continuation": {
-                    "decision": "protective_reduce",
+                    "decision": "learned_hold_exit_reduce",
+                    "selected_action_value": {"id": "sr-reduce-used"},
                     "pre_control_ratio": 0.04,
                     "final_ratio": 0.015,
                 },
@@ -6909,18 +6982,36 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             market_confirmation={"confirmation_score": 0.42, "conflicts": ["trend_fading"]},
             alpha_setup_action_values=[
                 {
+                    "id": "sr-reduce-used",
                     "ticker": "SR",
                     "side": "long",
-                    "action_name": "exit",
+                    "action_name": "reduce",
                     "canonical_action_value": True,
                     "canonical_action_family": "reduce_exit",
                     "consumer_scope": "pm_learning",
-                    "learning_lane": "exit",
-                    "action_value_lane": "exit",
+                    "learning_lane": "reduce",
+                    "action_value_lane": "reduce",
                     "memory_side_role": "current_position_side",
                     "action_preference": "positive_candidate_exit",
                     "canonical_action_value_source": "canonical_action_value",
                     "reward_mean": 1000.0,
+                    "reward_source": "trade_episode",
+                    "evidence_scope": "exact_real_state",
+                },
+                {
+                    "id": "sr-reduce-retrieved-only",
+                    "ticker": "SR",
+                    "side": "long",
+                    "action_name": "reduce",
+                    "canonical_action_value": True,
+                    "canonical_action_family": "reduce_exit",
+                    "consumer_scope": "pm_learning",
+                    "learning_lane": "reduce",
+                    "action_value_lane": "reduce",
+                    "memory_side_role": "current_position_side",
+                    "action_preference": "positive_candidate_exit",
+                    "canonical_action_value_source": "canonical_action_value",
+                    "reward_mean": 500.0,
                     "reward_source": "trade_episode",
                     "evidence_scope": "exact_real_state",
                 }
@@ -6931,9 +7022,259 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
         self.assertEqual(contract["final_action"], "reduce")
         self.assertEqual(trace["contract_lifecycle_port"], "reduce_exit")
-        self.assertIn("exit", trace["used_lanes"])
-        self.assertEqual(impact["reduce_exit_decision"], "protective_reduce")
+        self.assertIn("reduce", trace["used_lanes"])
+        self.assertEqual(
+            [row["id"] for row in trace["decision_learning_rows"]],
+            ["sr-reduce-used"],
+        )
+        self.assertEqual(
+            [row["id"] for row in contract["learning_used"]["alpha_setup_action_values"]],
+            ["sr-reduce-used"],
+        )
+        self.assertEqual(
+            impact["reduce_exit_decision"],
+            "learned_hold_exit_reduce",
+        )
+        self.assertTrue(impact["reduce_exit_changes_position"])
+        self.assertAlmostEqual(impact["position_ratio_delta"], -0.025)
         self.assertNotIn("opportunity_rank", contract["evidence_used"])
+
+    def test_final_action_contract_preserves_causal_negative_hold_id_for_reduce(self):
+        action_value = {
+            "id": "sr-negative-hold-used",
+            "ticker": "SR",
+            "side": "long",
+            "action_name": "hold",
+            "canonical_action_value": True,
+            "canonical_action_family": "hold",
+            "consumer_scope": "pm_learning",
+            "learning_lane": "hold",
+            "action_value_lane": "hold",
+            "memory_side_role": "current_position_side",
+            "action_preference": "negative_hold_revalidate",
+            "canonical_action_value_source": "canonical_action_value",
+            "reward_mean": -1200.0,
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+        }
+        contract = _build_final_action_contract(
+            ticker="SR",
+            current_lots=8,
+            target_lots=3,
+            position_ratio=0.015,
+            margin_required=0.0,
+            account_equity=5000000.0,
+            lots_to_trade=5,
+            lots_to_trade_reason="hold_exit_action_value_protection",
+            recommendation_intent={
+                "action": "close_long",
+                "lots": 5,
+                "action_type": "decrease",
+            },
+            final_entry_authority={"authority_type": "not_applicable"},
+            control_reasons=["hold_exit_action_value_protection"],
+            control_diagnostics={
+                "winning_template_continuation": {
+                    "decision": "learned_hold_exit_reduce",
+                    "selected_action_value": {"id": "sr-negative-hold-used"},
+                    "action_value_preference": "bad_hold",
+                    "pre_control_ratio": 0.04,
+                    "final_ratio": 0.015,
+                },
+                "holding_rebalance_control": {
+                    "decision": "allow_same_side_rebalance",
+                    "raw_target_ratio": 0.015,
+                    "final_target_ratio": 0.015,
+                },
+            },
+            opportunity_scorecard={
+                "preferred_side": "long",
+                "long": {"final_state": "risk_reduction_candidate"},
+            },
+            market_confirmation={
+                "confirmation_score": 0.42,
+                "conflicts": ["trend_fading"],
+            },
+            alpha_setup_action_values=[action_value],
+        )
+
+        trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+        impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
+        self.assertEqual(contract["final_action"], "reduce")
+        self.assertEqual(
+            [row["id"] for row in trace["decision_learning_rows"]],
+            ["sr-negative-hold-used"],
+        )
+        self.assertEqual(
+            [row["id"] for row in contract["learning_used"]["alpha_setup_action_values"]],
+            ["sr-negative-hold-used"],
+        )
+        self.assertIn("hold", trace["accepted_learning_lanes"])
+        self.assertEqual(
+            trace["reduce_exit_learning_decision"]["decision"],
+            "learned_hold_exit_reduce",
+        )
+        self.assertTrue(impact["reduce_exit_changes_position"])
+        self.assertAlmostEqual(impact["position_ratio_delta"], -0.025)
+
+    def test_final_action_contract_hard_exit_does_not_claim_retrieved_learning(self):
+        action_value = {
+            "id": "sr-exit-not-causal",
+            "ticker": "SR",
+            "side": "long",
+            "action_name": "exit",
+            "canonical_action_value": True,
+            "canonical_action_family": "reduce_exit",
+            "consumer_scope": "pm_learning",
+            "learning_lane": "exit",
+            "action_value_lane": "exit",
+            "memory_side_role": "current_position_side",
+            "action_preference": "positive_candidate_exit",
+            "canonical_action_value_source": "canonical_action_value",
+            "reward_mean": 1000.0,
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+        }
+        cases = (
+            ("exit_opening_fac_position_invalidation", "position_lifecycle_failed", 0, 0.0, "exit"),
+            ("exit_current_technical_invalidation", "position_lifecycle_failed", 0, 0.0, "exit"),
+            ("reduce_fundamental_medium_opposition", "fundamental_medium_opposition", 5, 0.025, "reduce"),
+            ("force_exit_failed_position", "position_lifecycle_failed", 0, 0.0, "exit"),
+        )
+        for decision, hard_reason, target_lots, target_ratio, final_action in cases:
+            with self.subTest(decision=decision):
+                contract = _build_final_action_contract(
+                    ticker="SR",
+                    current_lots=8,
+                    target_lots=target_lots,
+                    position_ratio=target_ratio,
+                    margin_required=0.0,
+                    account_equity=5000000.0,
+                    lots_to_trade=abs(8 - target_lots),
+                    lots_to_trade_reason=hard_reason,
+                    recommendation_intent={
+                        "action": "close_long",
+                        "lots": abs(8 - target_lots),
+                        "action_type": "close" if target_lots == 0 else "decrease",
+                    },
+                    final_entry_authority={"authority_type": "not_applicable"},
+                    control_reasons=[hard_reason, "hold_exit_action_value_protection"],
+                    control_diagnostics={
+                        "winning_template_continuation": {
+                            "decision": "learned_exit_action_value_protective_exit",
+                            "selected_action_value": {"id": "sr-exit-not-causal"},
+                            "pre_control_ratio": 0.04,
+                            "final_ratio": target_ratio,
+                        },
+                        "holding_rebalance_control": {
+                            "decision": decision,
+                            "raw_target_ratio": target_ratio,
+                            "final_target_ratio": target_ratio,
+                        },
+                    },
+                    opportunity_scorecard={
+                        "preferred_side": "long",
+                        "long": {"final_state": "risk_reduction_candidate"},
+                    },
+                    market_confirmation={"confirmation_score": 0.42, "conflicts": []},
+                    alpha_setup_action_values=[action_value],
+                )
+
+                trace = contract["learning_used"]["pm_lifecycle_learning_trace"]
+                impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
+                self.assertEqual(contract["final_action"], final_action)
+                self.assertEqual(trace["decision_learning_rows"], [])
+                self.assertEqual(contract["learning_used"]["alpha_setup_action_values"], [])
+                self.assertEqual(impact["reduce_exit_decision"], decision)
+                self.assertTrue(impact["reduce_exit_changes_position"])
+                self.assertEqual(impact["position_ratio_delta"], 0.0)
+
+    def test_final_action_contract_attributes_only_effective_alpha_lifecycle_learning(self):
+        action_value = {
+            "id": "sr-alpha-reduce",
+            "ticker": "SR",
+            "side": "long",
+            "action_name": "reduce",
+            "canonical_action_value": True,
+            "canonical_action_family": "reduce_exit",
+            "consumer_scope": "pm_learning",
+            "learning_lane": "reduce",
+            "action_value_lane": "reduce",
+            "memory_side_role": "current_position_side",
+            "action_preference": "positive_candidate_exit",
+            "canonical_action_value_source": "canonical_action_value",
+            "reward_mean": 1000.0,
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+        }
+
+        def build(*, action_value_effective: bool):
+            return _build_final_action_contract(
+                ticker="SR",
+                current_lots=8,
+                target_lots=4,
+                position_ratio=0.02,
+                margin_required=0.0,
+                account_equity=5000000.0,
+                lots_to_trade=4,
+                lots_to_trade_reason="alpha_setup_ev_fusion",
+                recommendation_intent={
+                    "action": "close_long",
+                    "lots": 4,
+                    "action_type": "decrease",
+                },
+                final_entry_authority={"authority_type": "not_applicable"},
+                control_reasons=["alpha_setup_ev_fusion"],
+                control_diagnostics={
+                    "alpha_setup_ev_fusion": {
+                        "intended_action": "reduce",
+                        "selected_action_value": {"id": "sr-alpha-reduce"},
+                        "positive_action_value": action_value_effective,
+                        "positive_action_value_candidate": False,
+                        "negative_action_value": False,
+                        "pre_control_ratio": 0.04,
+                        "final_ratio": 0.02,
+                    },
+                    "holding_rebalance_control": {
+                        "decision": "allow_same_side_rebalance",
+                        "raw_target_ratio": 0.02,
+                        "final_target_ratio": 0.02,
+                    },
+                },
+                opportunity_scorecard={
+                    "preferred_side": "long",
+                    "long": {"final_state": "risk_reduction_candidate"},
+                },
+                market_confirmation={"confirmation_score": 0.42, "conflicts": []},
+                alpha_setup_action_values=[action_value],
+            )
+
+        causal = build(action_value_effective=True)
+        profile_only = build(action_value_effective=False)
+        self.assertEqual(
+            [
+                row["id"]
+                for row in causal["learning_used"]["pm_lifecycle_learning_trace"][
+                    "decision_learning_rows"
+                ]
+            ],
+            ["sr-alpha-reduce"],
+        )
+        self.assertTrue(
+            causal["learning_used"]["pm_lifecycle_learning_impact_delta"][
+                "reduce_exit_changes_position"
+            ]
+        )
+        self.assertEqual(
+            profile_only["learning_used"]["pm_lifecycle_learning_trace"][
+                "decision_learning_rows"
+            ],
+            [],
+        )
+        self.assertEqual(
+            profile_only["learning_used"]["alpha_setup_action_values"],
+            [],
+        )
 
     def test_negative_action_value_blocks_repeat_new_entry_without_new_evidence(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -7347,8 +7688,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             execution_contract["execution_action_value_preference"]["execution_profile"],
             "pullback",
         )
-        self.assertTrue(execution_contract["can_execute_without_intraday_trigger"])
-        self.assertFalse(execution_contract["requires_intraday_confirmation"])
+        self.assertFalse(execution_contract["can_execute_without_intraday_trigger"])
+        self.assertTrue(execution_contract["requires_intraday_confirmation"])
         self.assertEqual(execution_contract["business_boundary"], "trader_executes_pm_plan_only_no_strategy_creation")
 
         final_contract = _build_final_action_contract(
@@ -7378,9 +7719,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 {
                     "datetime": "2025-03-10 10:00:00",
                     "open": 3500.0,
-                    "high": 3520.0,
+                    "high": 3560.0,
                     "low": 3485.0,
-                    "close": 3508.0,
+                    "close": 3550.0,
                     "volume": 12,
                 },
             ],
@@ -7403,10 +7744,10 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
                 },
                 {
                     "datetime": "2025-03-10 10:01:00",
-                    "open": 3510.0,
-                    "high": 3525.0,
-                    "low": 3500.0,
-                    "close": 3512.0,
+                    "open": 3552.0,
+                    "high": 3560.0,
+                    "low": 3545.0,
+                    "close": 3555.0,
                     "volume": 10,
                 },
             ],
@@ -7415,9 +7756,9 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             decision_context={"execution_contract": execution_contract},
         )
         self.assertTrue(result.should_execute)
-        self.assertEqual(result.reason, "intraday_immediate_execution")
+        self.assertEqual(result.reason, "intraday_trigger_confirmed")
         self.assertEqual(result.features["execution_profile"], "breakout")
-        self.assertFalse(result.to_audit_payload()["trigger_checked"])
+        self.assertTrue(result.to_audit_payload()["trigger_checked"])
 
     def test_single_exact_positive_open_action_value_becomes_candidate_not_real_budget(self):
         ratio, reasons, _notes, diagnostics = _apply_alpha_setup_ev_position_control(
@@ -11168,6 +11509,56 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(detail["target_margin_ratio"], 0.105)
         self.assertIn("step4_alpha_scale_release", detail["reason_codes"])
 
+    def test_pending_technical_setup_can_scale_without_becoming_direct_execution(self):
+        allowed, detail = _final_contract_authority(
+            control_reasons=[
+                "alpha_setup_ev_fusion",
+                "qualified_positive_expectancy",
+                "pm_watch_for_trigger_probe_cap",
+            ],
+            control_diagnostics={
+                "conditional_monitor_probe_seed": {"side": "long"},
+                "alpha_setup_ev_fusion": {
+                    "scorecard_state": "watch_for_trigger",
+                    "candidate_quality": 0.80,
+                    "setup_quality_ok": True,
+                    "has_monitorable_setup": True,
+                    "has_tradeable_support": False,
+                    "has_entry_invalidation": True,
+                    "has_position_exit_boundary": True,
+                    "qualified_positive_expectancy": True,
+                    "positive_action_value": True,
+                    "technical_supports_side": True,
+                    "technical_entry_timing_supports_side": True,
+                    "technical_opposes_side": False,
+                    "fundamental_supports_side": True,
+                    "fundamental_opposes_side": False,
+                    "strong_realtime_evidence": True,
+                    "strong_market_confirmation": True,
+                    "current_confirmation_score": 0.78,
+                    "independent_support_count": 2,
+                    "action_value_stats": {
+                        "sample_count": 5,
+                        "reward_sum": 12000.0,
+                    },
+                },
+            },
+            full_config={
+                "position_budget_policy": {
+                    "deployable_margin_ratio": 0.060,
+                    "deployable_margin_max_ratio": 0.120,
+                    "hard_max_total_margin_ratio": 0.20,
+                }
+            },
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(detail["authority_type"], "real_budget_entry")
+        self.assertEqual(detail["capital_layer"], CAPITAL_LAYER_ALPHA_SCALE)
+        self.assertTrue(detail["conditional_trigger_authority"])
+        self.assertTrue(detail["requires_intraday_confirmation"])
+        self.assertFalse(detail["can_execute_without_intraday_trigger"])
+
     def test_medium_horizon_fundamental_opposition_prevents_scale_but_not_probe(self):
         allowed, detail = _final_contract_authority(
             control_reasons=["alpha_setup_ev_fusion", "qualified_positive_expectancy"],
@@ -12137,6 +12528,86 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 )
             )
 
+            structure_not_breached = dict(context)
+            structure_not_breached["position_invalidation_level"] = 90.0
+            self.assertTrue(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=structure_not_breached,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=96.0,
+                    current_position=SimpleNamespace(entry_price=100.0),
+                    full_config={},
+                )
+            )
+
+            invalid_structure = dict(context)
+            invalid_structure["position_invalidation_level"] = 105.0
+            self.assertTrue(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=invalid_structure,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=96.0,
+                    current_position=SimpleNamespace(entry_price=100.0),
+                    full_config={},
+                )
+            )
+            self.assertFalse(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=invalid_structure,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=99.0,
+                    current_position=SimpleNamespace(entry_price=100.0),
+                    full_config={},
+                )
+            )
+
+            actual_fill_context = dict(context)
+            actual_fill_context["position_invalidation_level"] = 0.0
+            self.assertFalse(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=actual_fill_context,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=150.0,
+                    current_position=SimpleNamespace(entry_price=200.0),
+                    full_config={},
+                )
+            )
+
+            missing_fill_context = dict(context)
+            missing_fill_context["opening_execution_price"] = 0.0
+            self.assertFalse(
+                _opening_fac_position_invalidation_breached(
+                    opening_fac_context=missing_fill_context,
+                    ticker="ZZ",
+                    current_side="long",
+                    current_price=90.0,
+                    current_position=SimpleNamespace(entry_price=100.0),
+                    full_config={},
+                )
+            )
+
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "UPDATE futures_transactions SET execution_price = NULL, price = NULL"
+            )
+            conn.commit()
+            conn.close()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "pm_opening_fac_execution_price_missing",
+            ):
+                _load_opening_fac_context(
+                    db=_DB(),
+                    config_id="cfg",
+                    ticker="ZZ",
+                    trading_date="2025-03-24",
+                    current_lots=2,
+                )
+
             conn = sqlite3.connect(path)
             conn.execute("DELETE FROM futures_transactions")
             conn.commit()
@@ -12220,6 +12691,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
                 "held_trading_days": 1,
                 "expected_horizon_days": 3,
                 "position_invalidation_level": 95.0,
+                "opening_execution_price": 100.0,
             },
             current_price=94.0,
         )
@@ -12343,7 +12815,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             "keep_current_without_lifecycle_break",
         )
 
-    def test_same_side_plan_exits_on_current_technical_invalidation(self):
+    def test_opposite_raw_target_cannot_skip_current_technical_exit(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -12353,7 +12825,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
             ticker="ZZ",
             trading_date="2025-03-05",
-            position_ratio=0.10,
+            position_ratio=-0.08,
             current_ratio=0.10,
             current_position=position,
             analyst_signals=[
@@ -12377,7 +12849,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
             "exit_current_technical_invalidation",
         )
 
-    def test_same_side_plan_reduces_on_medium_horizon_fundamental_opposition(self):
+    def test_opposite_raw_target_cannot_skip_fundamental_reduce(self):
         position = SimpleNamespace(
             shares=10,
             entry_date="2025-03-03",
@@ -12387,7 +12859,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         ratio, reasons, _notes, diagnostics = _apply_holding_rebalance_control(
             ticker="ZZ",
             trading_date="2025-03-05",
-            position_ratio=0.10,
+            position_ratio=-0.08,
             current_ratio=0.10,
             current_position=position,
             analyst_signals=[
@@ -12760,7 +13232,7 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
         self.assertNotIn("profitable_hold_continuation", strong_reasons)
         self.assertIn(
             strong_diag["holding_rebalance_control"]["decision"],
-            {"downgrade_reversal_to_exit", "exit_failed_exploration_reconfirm"},
+            {"exit_current_technical_invalidation"},
         )
 
 
@@ -15534,6 +16006,141 @@ class Phase2RankedDynamicMarginRegressionTest(unittest.TestCase):
         self.assertEqual(summary["executed"], 4)
         self.assertEqual(summary["skipped"], 1)
         self.assertEqual(summary["no_trade_reasons"]["margin_insufficient"], 1)
+
+    def test_strategy_close_without_valid_intraday_basis_stays_unfilled(self):
+        recommendation = self._recommendation(
+            "EXIT",
+            current_lots=1,
+            target_lots=0,
+            base_price=100.0,
+        )
+        portfolio = self._portfolio(
+            positions={
+                "EXIT": Position(
+                    shares=1,
+                    entry_price=100.0,
+                    contract_code="EXIT2505",
+                    contract_multiplier=1.0,
+                    margin_rate=0.1,
+                    margin_used=10.0,
+                )
+            }
+        )
+
+        class FakeDB:
+            def __init__(self):
+                self.status_updates = []
+
+            def update_futures_recommendation_status(self, recommendation_id, status, **kwargs):
+                self.status_updates.append((recommendation_id, status, kwargs))
+                return True
+
+        class FakeRouter:
+            def resolve_morning_execution_base_price(self, **kwargs):
+                return SimpleNamespace(
+                    base_price=100.0,
+                    base_price_source="open",
+                    base_price_date="2025-03-26",
+                    open_price=100.0,
+                    prev_close_price=99.0,
+                    warning_message=None,
+                    intraday_audit=None,
+                )
+
+        class MissingIntradayBasis:
+            should_execute = False
+            decision = "skip"
+            reason = "intraday_no_valid_bar"
+            base_price = None
+            base_datetime = None
+            signal_datetime = None
+
+            def to_audit_payload(self):
+                return {
+                    "decision": self.decision,
+                    "reason": self.reason,
+                    "base_price": None,
+                    "base_datetime": None,
+                    "signal_datetime": None,
+                    "trigger_checked": True,
+                    "trigger_passed": False,
+                }
+
+        class FakeEngine:
+            def __init__(self):
+                self.calls = []
+
+            def execute_recommendation(self, **kwargs):
+                self.calls.append(kwargs)
+                return kwargs["portfolio"]
+
+        def fake_translate(*, recommendation, **kwargs):
+            return FuturesDecision(
+                ticker=recommendation["underlying_code"],
+                action=FuturesAction.CLOSE_LONG,
+                lots=1,
+                price=100.0,
+                settle_price=100.0,
+                margin_rate=0.1,
+                contract_multiplier=1.0,
+                contract_code=recommendation["contract_code"],
+                justification="test strategy close without intraday basis",
+            )
+
+        missing_basis = SimpleNamespace(base_price=None)
+        selection = MissingIntradayBasis()
+        db = FakeDB()
+        engine = FakeEngine()
+        with (
+            patch.object(trader_module, "_auditor_verdict_allows_strategy_execution", return_value=True),
+            patch.object(trader_module, "intraday_confirmation_enabled", return_value=True),
+            patch.object(trader_module, "_translate_pre_open_recommendation_to_order", side_effect=fake_translate),
+            patch.object(
+                trader_module,
+                "_resolve_phase2_execution_basis",
+                return_value=(missing_basis, selection),
+            ),
+        ):
+            final_portfolio, summary = trader_module._process_strategy_recommendations(
+                cfg={"trading_date": "2025-03-26"},
+                db=db,
+                config_id="cfg",
+                router=FakeRouter(),
+                execution_engine=engine,
+                portfolio=portfolio,
+                strategy_recommendations=[recommendation],
+                trading_date_value="2025-03-26",
+                runtime_mode="backtest_replay",
+                cutoff_datetime=None,
+                finalize_untriggered=True,
+                loop_iteration=1,
+            )
+
+        self.assertIs(final_portfolio, portfolio)
+        self.assertEqual(engine.calls, [])
+        self.assertEqual(summary["executed"], 0)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["no_trade_reasons"]["intraday_no_valid_bar"], 1)
+        persisted_snapshot = db.status_updates[-1][2]["signal_snapshot"]
+        self.assertEqual(persisted_snapshot["execution_result"]["transaction_count"], 0)
+        self.assertEqual(persisted_snapshot["execution_result"]["actual_transactions"], [])
+        self.assertEqual(
+            persisted_snapshot["execution_result"]["no_trade_reason"],
+            "intraday_no_valid_bar",
+        )
+        self.assertIsNone(
+            persisted_snapshot["phase2_execution"]["intraday_selection"]["base_price"]
+        )
+        self.assertEqual(
+            persisted_snapshot.get("execution_translation", {}).get("translated_orders"),
+            [],
+        )
+        self.assertNotIn(
+            "final_execution_basis",
+            persisted_snapshot.get("execution_translation", {}),
+        )
+        self.assertEqual(db.status_updates[-1][1], RecommendationStatus.SKIPPED)
+        self.assertEqual(final_portfolio.positions["EXIT"].shares, 1)
 
     def test_mixed_strategy_actions_waiting_conditions_do_not_freeze_later_rank(self):
         recommendations = [

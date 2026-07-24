@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import copy
 import threading
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from util.logger import logger
 from tools.common.learning_contract import CONTRACT_KEY, contract_prompt_line
@@ -23,6 +23,7 @@ from tools.common.alpha_setup import (
     compact_profile_for_trace,
     profile_prompt_line,
 )
+from tools.common.final_action_semantics import validate_action_value_write_consistency
 
 
 DEFAULT_HORIZON_BY_ANALYST = {
@@ -300,6 +301,7 @@ def _build_memory_trace(
     max_items: int,
     max_chars: int,
     alpha_setup_items: Optional[List[Dict[str, Any]]] = None,
+    analyst_calibration_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     selected_digest_items = [item for item in items if str(item.get("id") or "") in set(selected_ids)]
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
@@ -310,6 +312,7 @@ def _build_memory_trace(
         ("no_trade_opportunity_memory", no_trade_items, 4),
         ("exploratory_hypothesis", hypothesis_items, 4),
         ("alpha_setup_profile", alpha_setup_items or [], 4),
+        ("alpha_setup_action_value", analyst_calibration_items or [], 4),
     ):
         for item in collection[:limit]:
             refs.append(_memory_trace_ref(item, memory_type))
@@ -329,7 +332,7 @@ def _build_memory_trace(
             "no_trade_opportunity": len(no_trade_lines),
             "exploratory_hypothesis": len(hypothesis_lines),
             "alpha_setup_profile": len(alpha_setup_items or []),
-            "alpha_setup_action_value": 0,
+            "alpha_setup_action_value": len(analyst_calibration_items or []),
         },
         "hypothesis_status_counts": dict(hypothesis_status_counts),
         "candidate_hypothesis_count": int(hypothesis_status_counts.get("candidate", 0)),
@@ -350,6 +353,226 @@ def _compact_inline_text(value: Any, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _strictly_past_action_value(row: Mapping[str, Any], trading_date: Any) -> bool:
+    sample_date = _date_text(row.get("last_sample_date"))[:10]
+    decision_date = _date_text(trading_date)[:10]
+    try:
+        sample_day = datetime.fromisoformat(sample_date).date()
+        decision_day = datetime.fromisoformat(decision_date).date()
+    except (TypeError, ValueError):
+        return False
+    if sample_day >= decision_day:
+        return False
+    raw_valid_until = row.get("valid_until")
+    if raw_valid_until in {None, ""}:
+        return True
+    valid_until = _date_text(raw_valid_until)[:10]
+    try:
+        valid_day = datetime.fromisoformat(valid_until).date()
+    except (TypeError, ValueError):
+        return False
+    return valid_day >= decision_day
+
+
+def _canonical_flag(row: Mapping[str, Any], payload: Mapping[str, Any]) -> Optional[bool]:
+    values: List[Any] = []
+    if "canonical_action_value" in row:
+        values.append(row.get("canonical_action_value"))
+    if "canonical_action_value" in payload:
+        values.append(payload.get("canonical_action_value"))
+    if not values:
+        return None
+    normalized: List[bool] = []
+    for value in values:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"true", "1", "yes"}:
+                normalized.append(True)
+            elif text in {"false", "0", "no", ""}:
+                normalized.append(False)
+            else:
+                normalized.append(False)
+        else:
+            normalized.append(bool(value))
+    return False if False in normalized else True
+
+
+def _complete_canonical_action_value(row: Mapping[str, Any]) -> bool:
+    required = (
+        "scope_key",
+        "ticker",
+        "side",
+        "horizon_class",
+        "market_regime",
+        "setup_type",
+        "action_name",
+        "canonical_action_family",
+        "action_preference",
+        "reward_source",
+        "evidence_scope",
+    )
+    if any(not str(row.get(name) or "").strip() for name in required):
+        return False
+    if not str(row.get("action_value_lane") or "").strip():
+        return False
+    if not str(row.get("learning_lane") or "").strip():
+        return False
+    if all(
+        row.get(name) in {None, ""}
+        for name in ("reward_sum", "reward_mean", "win_rate")
+    ):
+        return False
+    return bool(validate_action_value_write_consistency(row).get("ok"))
+
+
+def _safe_analyst_action_value_projection(
+    row: Mapping[str, Any],
+    *,
+    analyst: str,
+    ticker: str,
+    trading_date: Any,
+) -> Optional[Dict[str, Any]]:
+    """Return only the analyst-safe projection of one formal PM action-value."""
+    if str(row.get("consumer_scope") or "").strip() != "pm_learning":
+        return None
+    if str(row.get("ticker") or "").strip().upper() != str(ticker or "").strip().upper():
+        return None
+    if not _strictly_past_action_value(row, trading_date):
+        return None
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    canonical_flag = _canonical_flag(row, payload)
+    if canonical_flag is False or not _complete_canonical_action_value(row):
+        return None
+    signal_calibration = payload.get("signal_calibration")
+    if not isinstance(signal_calibration, Mapping):
+        return None
+    if signal_calibration.get("contract_version") != "agentquant.analysis_signal_calibration.v1":
+        return None
+    if str(signal_calibration.get("consumer_scope") or "").strip() != "analyst_calibration":
+        return None
+    usable_by = {
+        str(value or "").strip()
+        for value in signal_calibration.get("usable_by") or []
+        if str(value or "").strip()
+    }
+    if "analysis_team" not in usable_by:
+        return None
+    quality_text = " ".join(
+        str(value or "").strip().lower()
+        for value in (
+            row.get("evidence_scope"),
+            row.get("reward_source"),
+            payload.get("amplification_scope_quality"),
+            signal_calibration.get("source_quality"),
+            payload.get("canonical_action_value_source"),
+        )
+    )
+    if any(token in quality_text for token in ("similar", "weak", "incomplete", "counterfactual")):
+        return None
+    # Missing canonical_action_value is accepted only after the same completeness
+    # and shared semantic checks used above; explicit false was already rejected.
+    projection = compact_action_value_for_analyst_trace(row)
+    projected_calibration = (
+        projection.get("signal_calibration")
+        if isinstance(projection.get("signal_calibration"), dict)
+        else {}
+    )
+    projected_calibration["consumer_scope"] = "analyst_calibration"
+    projection["signal_calibration"] = projected_calibration
+    if str(analyst or "").strip() != "technical":
+        product_view = projection.get("product_learning_calibration_view")
+        if isinstance(product_view, Mapping):
+            product_view = dict(product_view)
+            product_view.pop("entry_quality_calibration", None)
+            product_view.pop("trigger_key", None)
+            projection["product_learning_calibration_view"] = product_view
+    return projection
+
+
+def _episode_lifecycle_prompt_fact(item: Mapping[str, Any]) -> str:
+    """Compress existing lifecycle facts without exposing historical absolute prices."""
+    payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+    pair = payload.get("pair") if isinstance(payload.get("pair"), Mapping) else {}
+    trace = (
+        payload.get("position_lifecycle_trace")
+        if isinstance(payload.get("position_lifecycle_trace"), Mapping)
+        else {}
+    )
+    daily_facts = [
+        fact
+        for fact in trace.get("daily_facts") or []
+        if isinstance(fact, Mapping)
+    ]
+    opening_state: Mapping[str, Any] = {}
+    for fact in daily_facts:
+        candidate = fact.get("invalidation_state")
+        if isinstance(candidate, Mapping) and candidate:
+            opening_state = candidate
+            break
+    open_price = _finite_float(pair.get("open_price"))
+    structure_level = _finite_float(
+        opening_state.get("fac_position_invalidation_level")
+        or opening_state.get("technical_position_invalidation_level")
+    )
+    raw_atr = _finite_float(
+        opening_state.get("fac_atr_stop_distance")
+        or opening_state.get("technical_atr_stop_distance")
+    )
+    facts: List[str] = []
+    if open_price is not None and open_price > 0 and structure_level is not None and structure_level > 0:
+        facts.append(f"structure_distance={abs(structure_level - open_price) / open_price:.2%}")
+    if open_price is not None and open_price > 0 and raw_atr is not None and raw_atr > 0:
+        facts.append(f"raw_atr_distance={raw_atr / open_price:.2%}")
+    expected_horizon = (
+        opening_state.get("fac_expected_horizon_days")
+        or opening_state.get("technical_expected_horizon_days")
+    )
+    expected_horizon_number = _finite_float(expected_horizon)
+    if expected_horizon_number is not None and expected_horizon_number >= 0:
+        facts.append(f"expected_horizon={int(expected_horizon_number)}d")
+    actual_holding = item.get("holding_days") or pair.get("holding_days")
+    actual_holding_number = _finite_float(actual_holding)
+    if actual_holding_number is not None and actual_holding_number >= 0:
+        facts.append(f"actual_holding={int(actual_holding_number)}d")
+    exit_reason = ""
+    for fact in reversed(daily_facts):
+        recommendations = [
+            value
+            for value in fact.get("recommendations") or []
+            if isinstance(value, Mapping)
+        ]
+        for recommendation in reversed(recommendations):
+            contract = recommendation.get("final_action_contract")
+            if not isinstance(contract, Mapping):
+                continue
+            reason_codes = [
+                str(value or "").strip()
+                for value in contract.get("reason_codes") or []
+                if str(value or "").strip()
+            ]
+            exit_reason = ",".join(reason_codes[:3]) or str(contract.get("final_action") or "").strip()
+            if exit_reason:
+                break
+        if exit_reason:
+            break
+    if exit_reason:
+        facts.append(f"final_exit_reason={_compact_inline_text(exit_reason, 72)}")
+    net_pnl = _finite_float(item.get("net_pnl") if item.get("net_pnl") is not None else pair.get("net_pnl"))
+    if net_pnl is not None:
+        facts.append(f"net_pnl={net_pnl:.0f}")
+    return ", ".join(facts)
 
 
 def _learning_digest_lookup_attempts(
@@ -565,6 +788,8 @@ def build_learning_context(
     hypothesis_items: List[Dict[str, Any]] = []
     alpha_setup_items: List[Dict[str, Any]] = []
     alpha_setup_lines: List[str] = []
+    analyst_calibration_items: List[Dict[str, Any]] = []
+    analyst_calibration_lines: List[str] = []
     if exploration_enabled:
         episode_limit = int(exploration_cfg.get("max_episode_items", 3))
         no_trade_limit = int(exploration_cfg.get("max_no_trade_items", 3))
@@ -604,17 +829,25 @@ def build_learning_context(
             episode_items = []
         raw_episode_lines = []
         for item in episode_items:
-            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            contract_text = contract_prompt_line(payload.get(CONTRACT_KEY), max_chars=260)
-            contract_suffix = f" {contract_text}" if contract_text else ""
-            raw_episode_lines.append(
+            lifecycle_fact = _episode_lifecycle_prompt_fact(item)
+            episode_prefix = (
                 "- "
                 f"{item.get('ticker')}/{item.get('side')}/{item.get('horizon_class')}/"
                 f"{item.get('market_regime')}: pnl={float(item.get('net_pnl') or 0.0):.0f}, "
                 f"hold={int(item.get('holding_days') or 0)}d, "
                 f"template={item.get('setup_type')}; "
-                f"{item.get('lesson_text') or ''}{contract_suffix}"
             )
+            if lifecycle_fact:
+                # A complete lifecycle uses structured relative facts only.  The
+                # legacy lesson/contract text may contain historical price levels.
+                raw_episode_lines.append(
+                    f"{episode_prefix}lifecycle=[{lifecycle_fact}]."
+                )
+            else:
+                raw_episode_lines.append(
+                    f"{episode_prefix}lifecycle=[structured lifecycle facts unavailable; "
+                    "use performance summary only]."
+                )
         episode_lines, episode_dropped = _budget_plain_lines(
             raw_episode_lines,
             max_chars=episode_chars,
@@ -794,13 +1027,60 @@ def build_learning_context(
             except Exception:
                 logger.warning("analyst_alpha_setup_profile_unavailable")
                 alpha_setup_items = []
-            raw_alpha_lines = [f"- {profile_prompt_line(item)}" for item in alpha_setup_items]
+            raw_alpha_lines = [
+                f"- {profile_prompt_line(item, include_entry_calibration=analyst_key == 'technical')}"
+                for item in alpha_setup_items
+            ]
             alpha_setup_lines, alpha_setup_dropped = _budget_plain_lines(
                 raw_alpha_lines,
                 max_chars=alpha_chars,
                 max_items=alpha_limit,
             )
             dropped += alpha_setup_dropped
+            action_value_limit = int(alpha_cfg.get("max_action_value_items", 3) or 3)
+            action_value_chars = int(
+                alpha_cfg.get("max_action_value_chars", max(300, remaining_chars // 3)) or 300
+            )
+            raw_action_values: List[Dict[str, Any]] = []
+            try:
+                if hasattr(db, "get_alpha_setup_action_values"):
+                    raw_action_values = db.get_alpha_setup_action_values(
+                        config_id=config_id,
+                        ticker=str(ticker or "").upper(),
+                        horizon_class=horizon,
+                        market_regime=market_regime,
+                        trading_date=trading_date,
+                        limit=max(action_value_limit * 4, action_value_limit),
+                        consumer_scope="pm_learning",
+                    )
+            except Exception:
+                logger.warning("analyst_alpha_setup_action_value_calibration_unavailable")
+                raw_action_values = []
+            for row in raw_action_values or []:
+                if not isinstance(row, Mapping):
+                    continue
+                projection = _safe_analyst_action_value_projection(
+                    row,
+                    analyst=analyst_key,
+                    ticker=ticker,
+                    trading_date=trading_date,
+                )
+                if projection is not None:
+                    analyst_calibration_items.append(projection)
+                if len(analyst_calibration_items) >= action_value_limit:
+                    break
+            raw_calibration_lines = [
+                f"- {analyst_signal_calibration_prompt_line(item)}"
+                for item in analyst_calibration_items
+            ]
+            analyst_calibration_lines, action_value_dropped = _budget_plain_lines(
+                raw_calibration_lines,
+                max_chars=action_value_chars,
+                max_items=action_value_limit,
+            )
+            if len(analyst_calibration_lines) < len(analyst_calibration_items):
+                analyst_calibration_items = analyst_calibration_items[: len(analyst_calibration_lines)]
+            dropped += action_value_dropped
 
     try:
         if hasattr(db, "save_learning_context_budget"):
@@ -808,6 +1088,9 @@ def build_learning_context(
             episode_chars_used = sum(len(line) + 1 for line in episode_lines)
             hypothesis_chars_used = sum(len(line) + 1 for line in hypothesis_lines)
             alpha_setup_chars_used = sum(len(line) + 1 for line in alpha_setup_lines)
+            analyst_calibration_chars_used = sum(
+                len(line) + 1 for line in analyst_calibration_lines
+            )
             db.save_learning_context_budget(
                 config_id=config_id,
                 trading_date=trading_date,
@@ -824,6 +1107,7 @@ def build_learning_context(
                     + sum(len(line) + 1 for line in no_trade_lines)
                     + hypothesis_chars_used
                     + alpha_setup_chars_used
+                    + analyst_calibration_chars_used
                 ),
                 dropped_count=dropped,
                 max_items=max_items,
@@ -838,6 +1122,7 @@ def build_learning_context(
         and not no_trade_lines
         and not hypothesis_lines
         and not alpha_setup_lines
+        and not analyst_calibration_lines
     ):
         memory_trace = _build_memory_trace(
             analyst=analyst_key,
@@ -852,6 +1137,7 @@ def build_learning_context(
             no_trade_items=[],
             hypothesis_items=[],
             alpha_setup_items=[],
+            analyst_calibration_items=[],
             lines=[],
             episode_lines=[],
             no_trade_lines=[],
@@ -926,6 +1212,19 @@ def build_learning_context(
             "not product bans."
         )
         text_parts.extend(alpha_setup_lines)
+    if analyst_calibration_lines:
+        text_parts.append("Analyst-safe action-value calibration views:")
+        calibration_boundary = (
+            " Entry-quality outcomes may calibrate only current canonical profile selection and confirmation discipline."
+            if analyst_key == "technical"
+            else " Entry-quality outcomes are withheld because this analyst does not own technical entry timing."
+        )
+        text_parts.append(
+            "These are safe signal-calibration projections of formal same-ticker, past-only action-values."
+            f"{calibration_boundary} They are not raw PM records, contain no learning ID, PM rank/score, lots, margin, "
+            "or historical absolute price, and cannot create direction, opportunity, trade authority, or execution."
+        )
+        text_parts.extend(analyst_calibration_lines)
     text = "\n".join(text_parts) + "\n"
     hypothesis_status_counts = Counter(str(item.get("status") or "candidate") for item in hypothesis_items)
     memory_trace = _build_memory_trace(
@@ -941,6 +1240,7 @@ def build_learning_context(
         no_trade_items=no_trade_items,
         hypothesis_items=hypothesis_items,
         alpha_setup_items=alpha_setup_items,
+        analyst_calibration_items=analyst_calibration_items,
         lines=lines,
         episode_lines=episode_lines,
         no_trade_lines=no_trade_lines,
@@ -956,8 +1256,14 @@ def build_learning_context(
         "trade_episode_items": episode_items,
         "no_trade_opportunity_items": no_trade_items,
         "hypothesis_items": hypothesis_items,
-        "alpha_setup_items": [compact_profile_for_trace(item) for item in alpha_setup_items],
-        "analyst_calibration_items": [],
+        "alpha_setup_items": [
+            compact_profile_for_trace(
+                item,
+                include_entry_calibration=analyst_key == "technical",
+            )
+            for item in alpha_setup_items
+        ],
+        "analyst_calibration_items": analyst_calibration_items,
         "selected_ids": selected_ids,
         "horizon_class": horizon,
         "requested_horizon_class": horizon,

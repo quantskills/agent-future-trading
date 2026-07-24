@@ -225,16 +225,16 @@
 | `entry_quality` | 分析师证据 | 入场质量。 |
 | `entry_trigger` | 分析师证据 | 可执行 AEC 的机器可读盘中触发说明，由共享 canonical 定义根据 `entry_timing_signal+side` 确定性生成，不持久化 LLM 任意执行文字。technical 的说明必须与 Trader 15分钟算法一致；commodity_news 的 `event_immediate` 必须与即时事件边界一致；fundamental 固定为空。自由分析只能留在现有证据、冲突、确认需求和质量字段。 |
 | `entry_timing_signal` | 分析师证据 | 唯一执行时机枚举。technical 可执行证据只允许 `breakout/pullback/vwap_confirmed`，完整 watch 虽未触发也必须填写；commodity_news 只在当前事件已满足即时执行边界时允许 `event_immediate`；fundamental 固定为空。正常 `no_opportunity` 允许为空；已声明且方向、具体触发、canonical 失效边界完整的候选不得为空或使用非法枚举。`range_reversal/trend_breakout/short_timing` 等分析形态只属于 `setup_type/opportunity_type`。 |
-| `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 推出。 |
+| `current_trigger_confirmed` | 分析师证据 / `action_evidence_contract` / 执行证据 | 当前触发已经被明确事实确认；它是 `trigger_valid=true` 的事实来源之一，不能由 `setup_quality_ok` 或历史学习推出。盘前technical固定为false并保留为待盘中确认的canonical watch；只有确定性盘中观察或当前已确认的`event_immediate`事实可以确认触发。 |
 | `trigger_valid` | 分析师证据 | 当前触发是否已经成立。 |
-| `trigger_quality_score` | 分析师证据 | 当前触发强度。 |
+| `trigger_quality_score` | 分析师证据 | 当前触发强度，只来自当日正式触发事实；盘前technical、watch/no-op固定为0，历史episode只校准确认要求，不能在这里重复计分。 |
 | `exit_hint` | 分析师证据 | 成交后的退出 / 减仓提示；不是入场作废边界别名，不得提升为 `invalidation_condition` 或证明 `invalidation_present`。 |
 | `holding_period_hint` | 分析师证据 | 持仓周期提示。 |
 | `invalidation_present` | 分析师证据 | 首次成交前是否已有机器可执行的入场作废边界；必须由与 `entry_timing_signal+side` 匹配的 canonical `invalidation_condition` 和正数有限 `invalidation_level` 共同证明，布尔值本身、`exit_hint`、ATR 均不能自证。 |
 | `invalidation_condition` | 分析师 / FAC / Trader | 首次成交前的 canonical 入场作废条件，只允许 `long_price_lte_invalidation_level` 或 `short_price_gte_invalidation_level`，并必须与同一 technical/event AEC 的 profile、side、level 一致；自由文本不得作为别名。 |
 | `invalidation_level` | 分析师 / FAC / Trader | 首次成交前的数值入场作废价；只取消当前未成交 FAC，不得作为成交后持仓止损。 |
-| `position_invalidation_level` | 分析师 / FAC / PM 持仓生命周期 | 成交后的数值持仓失效价；PM 次日追溯原开仓 FAC 时用于 hold/reduce/exit，不进入 Trader 的当日入场作废判断。 |
-| `atr_stop_distance` | 分析师 / FAC / PM 持仓生命周期 | 成交后的 ATR 持仓止损距离；不得证明入场作废边界。 |
+| `position_invalidation_level` | technical或当前已确认event_immediate AEC / FAC / PM 持仓生命周期 | LLM只能基于当日technical结构或当前已确认事件提出成交后数值结构失效价；fundamental固定为null。AEC finalization只保留正数有限且方向合法的值，PM组装FAC时按目标方向及盘前参考价校验，次日消费时再按真实开仓成交价校验。不进入Trader当日入场作废判断。 |
+| `atr_stop_distance` | technical确定性计算 / AEC finalization / FAC / PM 持仓生命周期 | technical使用开仓前已完成OHLC的既有True Range口径确定性生成原始ATR14，finalization写入technical AEC并清空非technical来源；LLM不得生产或改写。PM次日才乘当前真实命中的default/sector倍数判断止损，不得证明入场作废边界。 |
 | `add_allowed` | 分析师证据 | 证据是否允许加仓讨论；最终仍由 PM 决定。 |
 | `evidence_role` | 分析师证据 | 分析师职责的固定结构化角色：technical=`entry_timing`、fundamental=`direction_context`、commodity_news=`event_catalyst`。基本面方向证据不能成为 Trader 执行来源。 |
 | `evidence_quality` | 分析师证据 | 证据质量。 |
@@ -363,11 +363,11 @@
 | `contract_code` | `final_action_contract.contract_code` | PM Step6只绑定正式输入事实：已有持仓优先绑定该持仓合约；新增风险绑定 Router 截止点内可见的具体合约。缺失时不得新增风险，禁止默认、猜测或品种代码代替具体合约；Auditor、Trader、Reviewer和Researcher只读消费。 |
 | `setup_type` | `final_action_contract.setup_type` | 分析师在AEC生产原始setup；PM Step6只从SCC中选择与最终方向、动作及Step4学习作用域一致的最终setup。Trader、Reviewer和Researcher只读消费，不得重选。 |
 | `horizon_class` | `final_action_contract.horizon_class` | 分析师在AEC生产原始期限类别；PM Step6只从SCC中选择与最终方向、动作及Step4学习作用域一致的最终值。Trader、Reviewer和Researcher只读消费。 |
-| `expected_horizon_days` | `final_action_contract.expected_horizon_days` | 分析师在AEC生产原始天数；PM Step6只从与最终方向和 `horizon_class` 一致的真实AEC中选择，缺失时保持缺失。Trader、Reviewer和Researcher只读消费。 |
+| `expected_horizon_days` | `final_action_contract.expected_horizon_days` | 分析师在AEC生产原始天数；PM Step6只从已验证SCC重建内部证据中选择，并优先与最终方向一致的fundamental `horizon_class+expected_horizon_days`整对事实；缺失时整对回退被选入场证据，不得跨源拼成期限。Trader、Reviewer和Researcher只读消费。 |
 | `market_regime` | `final_action_contract.market_regime` | 分析师在AEC生产原始市场状态；PM Step6只从SCC中选择与最终方向和Step4学习检索作用域一致的最终值。Trader、Reviewer、Researcher和下一交易日PM学习只读消费。 |
 | `invalidation_level` | `final_action_contract.invalidation_level` | 被 PM Step6 选为唯一执行证据的 technical/event AEC 所生产的首次成交前作废价；必须与同一 AEC 的 canonical `invalidation`、profile、side 和 trigger 一并写入。Auditor 校验，Trader 仅在首次成交前按分钟时序消费。 |
-| `position_invalidation_level` | `final_action_contract.position_invalidation_level` | 成交后的持仓失效价；PM 次日通过原开仓 recommendation/FAC 追溯并结合当前技术、基本面和硬风险决定唯一 hold/reduce/exit。不得回填为入场 `invalidation_level`，Trader 不据此产生同日第二个策略动作。 |
-| `atr_stop_distance` | `final_action_contract.atr_stop_distance` | 成交后的 ATR 持仓止损距离；只在真实生产时写入，PM 次日持仓生命周期只读消费，禁止默认值或用于证明当日入场作废。 |
+| `position_invalidation_level` | `final_action_contract.position_invalidation_level` | 从已验证SCC重建的同方向technical结构证据取得；当前已确认的event_immediate可在technical缺失时提供同源当日事件结构位，fundamental不得提供数值结构位。PM Step6先按盘前参考价验证，次日通过原开仓recommendation/FAC追溯并按真实开仓成交价复核。合法结构位与ATR并行判断，任一触发即形成唯一exit。不得回填为入场`invalidation_level`，Trader不据此产生同日第二个策略动作。 |
+| `atr_stop_distance` | `final_action_contract.atr_stop_distance` | 从已验证SCC重建technical AEC取得的确定性原始ATR14距离；PM次日使用原开仓价及当前真实命中的default/sector倍数计算止损，禁止默认补值或用于证明当日入场作废。现有template/setup覆盖键只有精确匹配时才生效，不宣称普遍命中。 |
 | `position_sizing_result` | `position_sizing` 输出 / PM 输入 / `final_action_contract.evidence_used` | 手数计算工具的确定性输出，记录建议 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由；不是最终交易合约，必须由 PM 写入唯一 `final_action_contract` 后才有交易效力。 |
 | `effective_memory_summary` | `decision_memory_retrieval` 输出 / PM 输入 / `final_action_contract.learning_used` 摘要 | PM 交易决策类研究记忆的质量优先摘要；记录有效 action-value 数量、剔除或降级原因、空壳历史处理、consumer_scope 和匹配层级。它不是交易授权，不能输出手数或交易动作；Auditor 不消费或复审该摘要。 |
 | `authority_type` | `final_action_contract` | watchlist_only、exploration_probe、real_budget_entry、scale、reduce、exit、risk_block、risk_exit、not_applicable。 |
@@ -451,7 +451,7 @@
 | `learning_impact_delta` | `final_action_contract.evidence_used` / `capital_deployment` | 学习对本次资金 rank 或生命周期决策的净影响拆解。rank 场景记录正向 open/add 学习、负向 open/add 学习、入场质量亏损、触发质量正负反馈等分项；非 rank 场景记录是否改变持仓解释、减仓/退出倾向、条件监控或 execution profile；`execution_profile_learning_direct_to_rank` 必须为 false。 |
 | `rank_cleanup_fields` | PM 全市场资金部署工具 / `final_action_semantics.canonicalize_final_action_contract_for_persistence()` | 非 full-market rank 清理只允许删除 rank 专属字段：`opportunity_rank`、`rank_source`、`rank_scope`、`capital_rank_generated_by`、`rank_capital_role`、`capital_layer`、`capital_ratio_source`、`rank_reason`、`rank_input_components`、`alpha_scale_eligible` 及其他 rank 语义布尔字段。`lifecycle_learning_trace`、`learning_impact_delta`、`pm_lifecycle_learning_trace`、`pm_lifecycle_learning_impact_delta` 是生命周期学习解释字段，不能因为合约不走 rank 而被清理。 |
 | `pm_lifecycle_learning_trace` | `final_action_contract.learning_used` | PM 合约构造器写入的最终动作生命周期学习 trace，覆盖 `open_add_new_risk`、`hold`、`reduce_exit`、`conditional_monitor` 和 `wait`。它用于证明 PM 把 action-value 按生命周期路由到正确决策口，不创建第二张交易合约。 |
-| `pm_lifecycle_learning_impact_delta` | `final_action_contract.learning_used`；Researcher `contextual_rule_calibration` evidence | PM 合约构造器写入的生命周期学习影响拆解，记录学习对 `target_lots/lots_delta`、持仓解释、释放资金动作、条件监控和 execution profile 的影响。Researcher 只可从该正式路径读取并原名保存已登记子集，用于未来情境校准；不得回读 `final_action_contract.action_candidates`、旧 `holding_rebalance_control` 对象或借用 `learning_to_position_summary.holding_lifecycle.lifecycle_classification`。它只解释最终合约结果，不授权 Trader 改手数或方向。 |
+| `pm_lifecycle_learning_impact_delta` | `final_action_contract.learning_used`；Researcher `contextual_rule_calibration` evidence | PM 合约构造器写入的生命周期结果与学习影响拆解，记录 `target_lots/lots_delta`、持仓解释、释放资金动作、条件监控和 execution profile。对象可保留当日独立硬规则产生的真实生命周期结果；只有同一FAC最终`decision_learning_rows`与`alpha_setup_action_values`的精确ID交集才证明历史学习造成影响。Researcher 只可从该正式路径读取并原名保存已登记子集，不得回读旧内部对象。它只解释最终合约结果，不授权 Trader 改手数或方向。 |
 | `primary_lifecycle_action_port` | `portfolio_manager.py` 第 3 步 / PM 内部学习与诊断 trace | PM 主链第 3 步生命周期分流口，必须在第 2 步方向选择后、学习路由前由 `pm_lifecycle_action_port.py` 生成。它只服务 PM 内部分流、学习路由和 provenance；不得写入 `final_action_contract.evidence_used`，也不得作为 Step6 最终合约失败依据。Step6 是否需要 Step5 只能按第 4 步最终候选是否实际增加风险判定：从空仓建立非零仓位，或同方向且 `abs(target_lots)>abs(current_lots)`，均为 `requires_full_market_rank=true`；不增加风险为 false。 |
 | `lifecycle_transition_diagnostic` | `pm_lifecycle_action_port.py` / PM 内部学习与诊断 trace | PM 内部用于解释候选生命周期曾经如何从 Step2 路径变化到后续候选形态的 provenance diagnostic。它不是最终合约自检，不是 workflow/PG 保存闸门，不得写入 `final_action_contract.evidence_used`，不得替代 `pm_six_step_trace.step6_contract_generation_check` 或 `pm_contract_self_check`。 |
 | `pm_six_step_trace.step6_contract_generation_check` | `signal_snapshot.pm_six_step_trace` | Step6 签约时生成的最终合约生成合法性检查。它只检查最终 `final_action_contract` 是否由合法 PM 机制生成，包括手数动作自洽、实际增加风险是否具备 Step5 deployment、非新增风险合约不伪造 rank、Step5 未部署是否还原为 `target_lots=current_lots` 且无本次新增风险权限、`capital_deployment` 语义完整、PM 中间态不得进入保存 artifact。它不比较 Step2 与 Step6 是否一致。 |
@@ -649,7 +649,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `evidence_scope` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | exact、partial、similar、counterfactual；PM 评分优先使用该字段判断学习作用域。 |
 | `canonical_action_family` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 / PM `learning_used` | action-value 的统一动作家族；固定枚举为 `open_add_new_risk`、`reduce_exit`、`execution`、`hold`、`no_trade`、`observe`、`conditional_monitor`。完整 family/lane/preference 矩阵见 `docs/matrix_action_canonical.md`。 |
 | `action_value_lane` | `alpha_setup_action_value` 顶层 canonical 列 / payload 兼容 | action-value 适用动作线；取值集合由 `src/tools/common/final_action_semantics.py` 与 `docs/matrix_action_canonical.md` 固定。 |
-| `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读显式 `pm_learning`，缺失值不得默认补成 PM scope；分析师和 Trader 分别只读各自 scope。`execution` family 的 `pm_learning` 只能进入 PM execution/profile 画像，不能进入 candidate quality、rank、方向、手数或交易授权。 |
+| `consumer_scope` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / 执行学习 trace | 学习记录的唯一消费边界；固定为 `pm_learning`、`analyst_calibration`、`trader_execution_learning`、`research_diagnostics`。PM 只读显式顶层 `pm_learning`，缺失值不得默认补成 PM scope；分析师不得读取原始 `pm_learning` 行，只能由学习上下文重新校验内嵌`signal_calibration.contract_version`和`consumer_scope=analyst_calibration`后投影安全摘要；Trader只读自身scope。`execution` family 的 `pm_learning` 只能进入 PM execution/profile 画像，不能进入 candidate quality、rank、方向、手数或交易授权。 |
 | `learning_lane` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload | 学习消费动作线；与 `action_value_lane` 对齐，用于声明该学习服务的生命周期入口，完整矩阵见 `docs/matrix_action_canonical.md`。 |
 | `memory_side_role` | `alpha_setup_action_value` 顶层 canonical 列 / 学习 payload / PM `learning_used` | 声明该学习记录中 `side` 的角色；固定为 `target_side`、`current_position_side`、`trigger_side`、`historical_sample_side`。新开仓/加仓读取目标方向，减仓/退出/持仓读取当前持仓方向，条件监控读取触发方向；会计师不读取该字段入账。 |
 | `product_learning_performance_key` | `alpha_setup_profile.payload_json` / `alpha_setup_action_value.payload_json` / 学习样本 payload | 产品级动态学习身份键，固定记录 ticker、side、setup_type、entry_trigger、evidence_combo、deployment_outcome、entry_quality_outcome、opportunity_rank、opportunity_score 与后续收益；只供下一轮分析师校准、PM 排名和资金部署学习使用，不创建交易权限、不替代 `final_action_contract`。 |
@@ -804,6 +804,8 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | 字段路径 | 生产与消费位置 | 固定含义 |
 |---|---|---|
 | `action_evidence_contract.learning_scope` | 三个分析师生成 / Signal Collector 保真传递 | 本专业学习、商品 profile 与市场状态的分析范围；只校准证据和提示词，不创建交易权限。 |
+| `analyst_learning_context.analyst_calibration_items` | 分析师内部提示词上下文 | 同品种、T+1、canonical完整且内嵌`analyst_calibration`作用域的正式action-value安全投影；technical可额外读取去绝对价格后的canonical触发键、入场/触发质量结论及有界确认调整，非technical不取得这些入场字段。提示词不含原始学习ID、reward、rank、手数或保证金；该内部对象不得进入AEC、SCC或PM，也不能重选方向、创建机会或直接授权交易。 |
+| `trade_episode_memory.payload_json.position_lifecycle_trace -> analyst_learning_context.text` | 分析师内部提示词上下文 | 对严格过去、已完成且命中既有检索范围的episode，只投影相对结构失效距离、原始ATR距离、预期/实际持有期、最终退出原因和净结果；历史绝对价格及原始episode payload不得进入提示词。 |
 | `learning_scope.setup_family` / `learning_scope.sector_setup_alignment` / `learning_scope.sector_preferred_setups` / `learning_scope.sector_caution_setups` | technical 学习范围 | 技术 setup 家族、板块匹配及优先/谨慎 setup。 |
 | `learning_scope.primary_confirmation` / `learning_scope.execution_focus` / `learning_scope.market_regime` | technical 学习范围 | 技术主确认、执行关注点和当日市场状态。 |
 | `learning_scope.factor_tree` / `learning_scope.primary_driver_groups` / `learning_scope.short_trigger_groups` / `learning_scope.conflict_groups` | fundamental 学习范围 | 基本面因子树、主驱动组、短期触发组和冲突组。 |
@@ -865,11 +867,11 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `final_action_contract.contract_code` | Router/持仓生产输入事实；PM Step6绑定；Auditor / Trader / Reviewer / Researcher只读 | 已有持仓优先绑定持仓合约；新增风险只绑定 Router 截止点内可见的合法具体合约，缺失时不得新增风险。 |
 | `final_action_contract.setup_type` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 与最终方向、动作及Step4学习作用域一致的最终setup；不得取第一个分析师或反方向值。 |
 | `final_action_contract.horizon_class` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 与最终方向、动作及Step4学习作用域一致的最终期限类别。 |
-| `final_action_contract.expected_horizon_days` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher只读 | 仅从与最终方向和 `horizon_class` 一致的真实AEC中选择；缺失时保持缺失。 |
+| `final_action_contract.expected_horizon_days` | 分析师AEC生产原始值；SCC保真；PM Step6选择；Trader / Reviewer / Researcher只读 | PM不直读原始AEC；从已验证SCC重建内部证据中优先选择同方向fundamental的`horizon_class+expected_horizon_days`整对事实，缺失时整对回退入场来源。期限到达只触发复评，不自动退出。 |
 | `final_action_contract.market_regime` | 分析师AEC生产原始值；PM Step6选择；Trader / Reviewer / Researcher / 下一交易日PM只读 | 与最终方向和Step4学习检索作用域一致的最终市场状态。 |
 | `final_action_contract.invalidation_level` | technical/event AEC生产；PM Step6选择；Auditor校验；Trader首次成交前消费 | 与同源 canonical `invalidation`、profile、side、trigger 原子写入，只取消当日未成交 FAC。 |
-| `final_action_contract.position_invalidation_level` | 分析师AEC生产；PM Step6选择；下一交易日PM消费 | 只服务成交后持仓生命周期，不得进入Trader入场作废判断。 |
-| `final_action_contract.atr_stop_distance` | 分析师AEC生产；PM Step6选择；下一交易日PM消费 | 仅在真实生产且与最终方向及setup一致时写入；禁止用于证明入场失效。 |
+| `final_action_contract.position_invalidation_level` | technical或当前已确认event_immediate结构证据生产；SCC保真；PM Step6选择；下一交易日PM消费 | PM只从已验证SCC重建同方向证据；technical优先，当前已确认event_immediate可提供同源当日事件结构位，fundamental固定为null。结构位先按盘前参考价、次日再按真实开仓成交价校验；只服务成交后持仓生命周期，不得进入Trader入场作废判断。 |
+| `final_action_contract.atr_stop_distance` | technical确定性计算；AEC finalization落地；SCC保真；PM Step6选择；下一交易日PM消费 | 原始ATR14是方向无关的technical市场事实；PM次日乘当前真实命中的default/sector倍数并与结构位并行止损，禁止用于证明入场失效。 |
 | `final_action_contract.evidence_used` | PM 唯一合约 | PM Step6 写入的最终证据、方向、rank、资金部署和 sizing 解释容器。 |
 | `evidence_used.scorecard_preferred_side` / `scorecard_state` / `scorecard_score` | PM 最终证据 | PM scorecard 的首选方向、最终机会状态和分数。 |
 | `evidence_used.direction_evidence_strength` / `direction_evidence_boundary` | PM 最终证据 | 方向证据质量和“只读 SCC、不重建方向证据”的边界。 |
@@ -896,7 +898,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `lifecycle_learning_trace.trace_version` / `contract_lifecycle_port` / `pm_lifecycle_action_port` / `router_source` / `rank_lifecycle` | PM 生命周期学习 trace | trace 版本、最终生命周期口、路由入口、来源和 rank 生命周期。 |
 | `lifecycle_learning_trace.allowed_learning_lanes` / `accepted_learning_lanes` / `blocked_learning_lanes` / `trigger_profile_learning_lanes` / `used_lanes` / `ignored_lanes` | PM 生命周期学习 trace | 允许、采用、阻断、execution/profile、已用和忽略的学习 lane。 |
 | `lifecycle_learning_trace.positive_count` / `negative_count` / `exact_real_count` / `episode_count` | PM 生命周期学习 trace | 被路由学习记录的正负、精确实盘和 episode 数量。 |
-| `lifecycle_learning_trace.decision_learning_rows` / `trigger_profile_learning_rows` / `rejected_learning` | PM 生命周期学习 trace | Step6 先对完整 Step4 正式池按最终手数生命周期路由，再形成的决策层、execution/profile 层和拒绝层列表；`decision_learning_rows` 与正式 `alpha_setup_action_values` 来源一致，execution/profile 仅在 `trigger_profile_learning_rows`。 |
+| `lifecycle_learning_trace.decision_learning_rows` / `trigger_profile_learning_rows` / `rejected_learning` | PM 生命周期学习 trace | Step6 先对完整 Step4 正式池按最终手数生命周期路由，再形成的决策层、execution/profile 层和拒绝层列表；`hold/reduce/exit`决策行还必须由对应软生命周期控制按精确ID实际改变最终动作或比例，独立硬退场事实不得冒领学习。canonical负向hold只有在其精确ID真实造成同方向减仓时，才可保持原family/lane进入reduce FAC，不能全局放宽。`decision_learning_rows` 与正式 `alpha_setup_action_values` 来源一致，execution/profile 仅在 `trigger_profile_learning_rows`。 |
 | `decision_learning_rows[].source_index` / `id` / `ticker` / `side` / `canonical_action_family` / `lane` / `action_preference` / `reward_mean` / `sample_count` | PM 最终决策学习行 | 被最终生命周期接受的 action-value 索引、身份、语义和样本表现。 |
 | `trigger_profile_learning_rows[].source_index` / `id` / `ticker` / `side` / `canonical_action_family` / `lane` / `action_preference` / `reward_mean` / `sample_count` / `route` / `not_rank_learning` | PM execution/profile 学习行 | 只供触发画像的学习记录，固定不进入 rank。 |
 | `rejected_learning[].source_index` / `id` / `ticker` / `side` / `canonical_action_family` / `lane` / `action_preference` / `reward_mean` / `sample_count` / `reason` / `errors` | PM 拒绝学习行 | 因语义或生命周期不匹配被拒绝的学习记录及原因。 |
@@ -911,7 +913,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `learning_impact_delta.hold_decision` / `hold_changes_position` / `reduce_exit_decision` / `reduce_exit_changes_position` / `conditional_monitor_decision` | PM 学习影响 | hold、reduce/exit 和条件监控学习对最终仓位的影响。 |
 | `learning_impact_delta.execution_profile_changed` / `execution_profile_learning_direct_to_rank` / `execution_profile_learning_observed` | PM 学习影响 | execution profile 是否改变、禁止直达 rank 和观察量。 |
 | `final_action_contract.learning_used` | PM 唯一合约 | PM Step4 消费并由 Step6 安全落入最终合约的学习事实。 |
-| `learning_used.alpha_setup_action_values[]` | PM 正式学习 | 通过 canonical、consumer_scope、日期和生命周期过滤的正式 action-value 列表。 |
+| `learning_used.alpha_setup_action_values[]` | PM 正式学习 | 通过 canonical、consumer_scope、日期和生命周期过滤，并且实际改变最终授权范围内决策的正式 action-value 列表；`hold/reduce/exit`必须与最终`decision_learning_rows`按精确ID一致。负向hold造成真实软减仓时保留原hold family/lane与精确ID，不重标为reduce；结构/ATR止损、技术反转、基本面反向等独立规则不得写入。 |
 | `alpha_setup_action_values[].action_value_id` / `scope_key` / `canonical_action_family` / `learning_lane` / `action_value_lane` / `action_preference` / `memory_side_role` | PM 正式学习行 | action-value 身份、范围、canonical 家族、lane、偏好和方向角色。 |
 | `alpha_setup_action_values[].reward_mean` / `reward_sum` / `win_rate` / `sample_count` / `last_sample_date` / `retrieval_match_level` | PM 正式学习行 | 历史收益、胜率、样本、最后日期和检索匹配层级。 |
 | `learning_used.memory_requirements.contract` / `action_lifecycle` / `action` / `current_position_side` / `target_side` / `contract_side_role` | PM 记忆要求 | 最终动作生命周期、动作和当前/目标方向角色。 |
@@ -1030,7 +1032,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `execution_contract.requires_intraday_confirmation` / `can_execute_without_intraday_trigger` / `authority_type` / `max_allowed_margin_ratio` / `reason_codes` | Trader 执行摘要 | 盘中确认、直接执行、权限、保证金和原因边界。 |
 | `execution_contract.execution_action_value_preference` | Trader 执行摘要 | PM 已落地的 execution profile 偏好；Trader 不读取研究库或完整AEC。 |
 | `phase2_execution.translated_decision.action` / `lots` / `contract_code` / `price` | Trader 翻译决策 | 合约翻译后的订单动作、手数、具体合约和价格。 |
-| `phase2_execution.intraday_selection.decision` / `reason` / `base_price` / `base_datetime` / `base_price_source` / `signal_datetime` | Trader 盘中选择 | 盘中执行/等待/跳过结论、原因和价格时间基准。 |
+| `phase2_execution.intraday_selection.decision` / `reason` / `base_price` / `base_datetime` / `base_price_source` / `signal_datetime` | Trader 盘中选择 | 盘中执行/等待/跳过结论、原因和价格时间基准。策略reduce/exit没有合法1分钟基准时保持零transaction和空成交价，禁止用盘前参考价回填；分钟接口异常继续hard fail。 |
 | `intraday_selection.trigger_checked` / `trigger_passed` / `execution_failure_reason` / `missed_opportunity_flag` / `learning_writeback_contract` | Trader 盘中选择 | 条件 FAC 的15分钟触发检查、执行失败、错过机会及未来学习写回契约；`can_execute_without_intraday_trigger=true` 的直执行路径不得伪记为 Trader 再次检查了触发。 |
 | `intraday_selection.price_chase_check.checked` / `passed` / `reason` / `gap_ratio` / `threshold` | Trader 追价检查 | 是否检查、是否通过、原因、跳空比例和配置阈值。 |
 | `intraday_selection.features.error` / `underlying_code` / `contract_code` / `action` / `execution_mode` / `execution_profile` / `execution_contract` | Trader 盘中特征 | 数据错误、产品合约、动作及执行模式/profile/规则。 |

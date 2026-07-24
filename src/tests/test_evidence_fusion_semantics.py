@@ -498,6 +498,12 @@ class EvidenceFusionSemanticsTest(unittest.TestCase):
             market_confirmation={"confirmation_score": 0.70},
             alpha_setup_action_values=action_values,
             execution_contract_fields={
+                "execution_profile": "pullback",
+                "execution_action_value_preference": {
+                    "enabled": True,
+                    "base_execution_profile": "breakout",
+                    "execution_profile": "pullback",
+                },
                 "capital_deployment": {
                     "selected_for_capital_deployment": True,
                     "learning_impact_delta": {

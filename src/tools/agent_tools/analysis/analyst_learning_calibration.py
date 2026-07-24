@@ -111,6 +111,10 @@ def _signal_calibration(row: Mapping[str, Any]) -> Mapping[str, Any]:
     usable_by = {str(item) for item in calibration.get("usable_by") or []}
     allowed = {str(item) for item in calibration.get("allowed_effects") or []}
     forbidden = {str(item) for item in calibration.get("forbidden_effects") or []}
+    if calibration.get("contract_version") != "agentquant.analysis_signal_calibration.v1":
+        return {}
+    if str(calibration.get("consumer_scope") or "").strip() != "analyst_calibration":
+        return {}
     if "analysis_team" not in usable_by:
         return {}
     if "evidence_quality_calibration" not in allowed and "setup_reliability_context" not in allowed:

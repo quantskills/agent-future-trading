@@ -6,6 +6,7 @@ It is side-effect free and must not repair or rewrite the contract.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Mapping
 
 from tools.common.final_action_semantics import (
@@ -85,7 +86,8 @@ def _positive_number(value: Any) -> bool:
     if isinstance(value, bool) or value in (None, ""):
         return False
     try:
-        return float(value) > 0.0
+        number = float(value)
+        return math.isfinite(number) and number > 0.0
     except (TypeError, ValueError):
         return False
 
@@ -391,8 +393,6 @@ def _execution_contract_errors(contract: Mapping[str, Any]) -> List[str]:
     position_exit_boundary_present = bool(
         _positive_number(contract.get("position_invalidation_level"))
         or _positive_number(contract.get("atr_stop_distance"))
-        or str(contract.get("exit_hint") or "").strip()
-        or _positive_number(contract.get("expected_horizon_days"))
     )
     if not position_exit_boundary_present:
         errors.append("new_risk_execution_missing_position_exit_boundary")

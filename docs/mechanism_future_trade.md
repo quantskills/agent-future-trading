@@ -50,10 +50,10 @@
 ### 4. 执行价格、盘中触发与滑点
 
 - Phase2 支持盘中执行确认：15 分钟级别判断信号，1 分钟级别选择成交候选价。
-- 开仓通常需要完整开盘区间、VWAP、突破/跌破条件和追价过滤；平仓、减仓和换约属于即时执行优先事项。
+- 开仓通常需要完整开盘区间、VWAP、突破/跌破条件和追价过滤；平仓、减仓和换约属于即时执行优先事项。策略reduce/exit仍必须取得合法1分钟成交基准，真实非异常空结果只形成零transaction，禁止回退盘前参考价伪造成交；forced-risk和rollover继续走各自既有运营执行边界。
 - `conditional_monitor` 只表示监控语义，不是新增 `final_action`，不增加风险时最终动作仍为 `wait/hold` 且不要求 rank。最终仍保留新增风险目标的条件 `open_probe` 必须经过 Step5，并在 `final_action_contract` 中写明 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`、方向、目标手数、触发条件和失效边界；交易员盘中只检查合约里的触发是否成立，成立才按合约成交，未触发只记录原因。
 - `opportunity_score/opportunity_rank` 不等于执行触发。它们只解释投资组合经理为什么把资金或监控资源给某个候选。交易员的执行触发仍只能来自 `final_action_contract` 的普通目标手数或条件监控字段，以及盘中真实行情。
-- 若没有启用或无法满足盘中确认，系统会使用早盘执行基准价或跳过交易，并写入原因。
+- 新增风险只有在配置明确不要求盘中确认时才沿既有盘前执行基准路径；需要盘中确认的入场和策略reduce/exit缺少合法分钟成交价时跳过并写明原因。分钟接口异常继续作为数据链hard fail，不能降级为合法空行情。
 - 滑点模型为 tick 模型：买入类动作按基准价加滑点，卖出类动作按基准价减滑点。
 - 滑点 tick 数支持按品种配置，例如部分品种 1 tick，部分品种 2 tick；滑点金额由合约最小变动价位计算。
 - 成交流水会记录基准价来源、基准日期、实际执行价、滑点模型、滑点 tick 和滑点金额。
@@ -63,6 +63,8 @@
 - 条件新增风险仍按已签 `rank_budget_sequence` 依次检查；未触发的产品只记录 waiting/skipped 和零 transaction，不冻结后续已触发产品。
 - 盘中触发失败、涨跌停/执行价问题和市场规则跳过会写入 `execution_learning_trace`，只供未来研究择时和执行策略，不回写当日交易流水。
 - 交易员不直接读取同作用域 `execution_action_value`、`strategy_memory` 或 `adaptive_policy_state`。execution 研究偏好必须先由投资组合经理经 `decision_memory_retrieval` 消费，并写入审计后的 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`；交易员只按最终合约和盘中数据选择触发或跳过，不能创造交易策略、改变方向、改变目标手数，也不能绕过投资组合经理、审计员、盘中触发、涨跌停、交割和保证金边界；回测与模拟盘必须保持同一套执行语义。
+
+成交后退场仍是日频PM机制。technical使用开仓前已完成OHLC确定性生成原始ATR14，AEC finalization负责落入正式证据；LLM只能提出结构失效价和解释，不能生产ATR。字段经AEC进入唯一SCC后，PM只能从已验证SCC重建内部证据，分别取得同方向结构位、technical方向无关ATR、同方向fundamental期限和中期方向。下一交易日PM追溯原开仓FAC：结构位或`真实开仓价±ATR×当前真实命中的default/sector倍数`任一触发则签唯一exit，明确技术反转签exit，基本面中期反向签reduce，期限到达只强制复评，其他情况继续hold/既有生命周期。`exit_hint`只解释，Trader不读取这些字段生成同日保护腿。现有template/setup倍数只有setup键精确匹配时才生效，不宣称普遍命中。
 
 ### 5. 手续费
 

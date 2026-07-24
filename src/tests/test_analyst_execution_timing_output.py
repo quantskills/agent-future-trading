@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from datetime import datetime
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pandas as pd
 from pydantic import ValidationError
 
 
@@ -16,7 +20,8 @@ from graph.constants import Signal
 from graph.schema import AnalystSignal
 from graph.workflow import _stable_phase1_failure_code
 from llm import inference
-from tests.contract_test_fixtures import build_test_aec
+from agents.analysis_team import technical
+from tests.contract_test_fixtures import build_test_aec, build_test_data_usage
 from tools.agent_tools.analysis.analyst_output_finalization import (
     finalize_analyst_signal,
 )
@@ -68,14 +73,6 @@ def _technical_payload(*, timing: str = "", trigger: str = "15m close breaks abo
 
 
 class AnalystExecutionTimingOutputTest(unittest.TestCase):
-    @staticmethod
-    def _data_usage(analyst: str, ticker: str) -> dict:
-        return build_test_aec(
-            analyst,
-            ticker=ticker,
-            trading_date="2025-03-26",
-        )["data_usage_summary"]
-
     def _finalize(self, signal: AnalystSignal, *, ticker: str = "RB") -> AnalystSignal:
         profile = get_product_price_behavior_profile(ticker)
         usage = build_profile_usage_contract(ticker, "technical", profile)
@@ -87,6 +84,8 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
                 "setup_type": "trend_breakout_setup",
                 "setup_quality_ok": True,
                 "market_regime": "trend",
+                "atr_stop_distance": 3.0,
+                "position_invalidation_reference_price": 100.0,
                 "risk_flags": [],
             },
             full_config={"llm": {"provider": "test", "model": "test-model"}},
@@ -108,6 +107,10 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             "position_invalidation_level",
             AnalystSignal.model_json_schema()["properties"],
         )
+        self.assertIn(
+            "atr_stop_distance",
+            AnalystSignal.model_json_schema()["properties"],
+        )
         for output_model in (
             TechnicalAnalystOutput,
             FundamentalAnalystOutput,
@@ -116,6 +119,7 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             with self.subTest(output_model=output_model.__name__):
                 schema = output_model.model_json_schema()
                 self.assertNotIn("data_freshness", schema["properties"])
+                self.assertNotIn("atr_stop_distance", schema["properties"])
                 setup_schema = schema["properties"]["setup_type"]
                 self.assertNotIn(
                     "data_unavailable_no_trade",
@@ -149,7 +153,7 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             ),
             factor_focus=["trend", "volume"],
             metadata={
-                "data_usage_summary": self._data_usage("technical", "RB"),
+                "data_usage_summary": build_test_data_usage("technical", "RB"),
             },
         )
 
@@ -169,6 +173,160 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
             canonical_entry_invalidation_condition("breakout", "long"),
         )
         self.assertTrue(contract["invalidation_present"])
+
+    def test_runtime_parameter_calibration_recomputes_prompt_context_without_changing_raw_atr(self):
+        frame = pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0, 103.0, 104.0],
+                "high": [102.0, 103.0, 104.0, 105.0, 106.0],
+                "low": [98.0, 99.0, 100.0, 101.0, 102.0],
+                "close": [101.0, 102.0, 103.0, 104.0, 105.0],
+                "volume": [1000, 1100, 1200, 1300, 1400],
+            },
+            index=pd.bdate_range(end="2025-03-25", periods=5),
+        )
+        base_params = {"trend": {"short": 8, "medium": 21, "long": 55}}
+
+        def run_with_rule(multiplier: float, record_id: str) -> tuple[str, dict]:
+            captured: dict = {}
+            router = Mock()
+            router.get_daily_candles_df.return_value = frame
+            policy_row = {
+                "id": record_id,
+                "ticker": "RB",
+                "side": "*",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "policy_type": "contextual_rule_calibration:technical_parameters",
+                "policy_action": "calibrate",
+                "rule_validation_status": "validated_rule_applied",
+                "confidence_score": 0.70,
+                "sample_count": 5,
+                "payload": {
+                    "rule_adjustments": {
+                        "technical_parameters": {
+                            "trend_short_multiplier": multiplier,
+                        }
+                    }
+                },
+            }
+
+            def signal_results(_prices, params, gap_analysis):
+                short = int(params["trend"]["short"])
+                trend = Signal.BULLISH if short < 8 else Signal.BEARISH
+                return {"trend": trend, "gap_analysis": gap_analysis}
+
+            def technical_context(_ticker, results, features):
+                trend = results["trend"]
+                direction = "bullish" if trend == Signal.BULLISH else "bearish"
+                return {
+                    "ticker": "RB",
+                    "sector": "ferrous",
+                    "tradeability": "medium",
+                    "setup_type": "trend_breakout_setup",
+                    "setup_quality_ok": True,
+                    "market_regime": "trend",
+                    "dominant_direction": direction,
+                    "risk_flags": [],
+                    "indicator_votes": {"details": {"trend": trend.value}},
+                    "features": features,
+                }
+
+            def llm_call(*, prompt, **_kwargs):
+                captured["prompt"] = prompt
+                return TechnicalAnalystOutput(
+                    signal=Signal.BULLISH,
+                    confidence=0.40,
+                    justification="No current executable trigger.",
+                    horizon_class="short",
+                    expected_horizon_days=2,
+                    setup_type="unknown",
+                    opportunity_type="no_trade",
+                    opportunity_state="no_opportunity",
+                    entry_timing_signal="",
+                    entry_trigger="",
+                    invalidation_present=False,
+                    position_invalidation_level=104.5,
+                )
+
+            full_config = {
+                "llm": {"provider": "test", "model": "test-model"},
+                "learning": {
+                    "contextual_rule_calibration": {
+                        "enabled": True,
+                        "technical_min_confidence": 0.35,
+                    }
+                },
+            }
+            state = {
+                "ticker": "RB",
+                "trading_date": datetime(2025, 3, 26),
+                "market_type": "china_futures",
+                "pre_open_only": True,
+                "info_cutoff": "pre_open",
+                "config_id": "cfg-technical-calibration",
+                "config": full_config,
+                "full_config": full_config,
+                "llm_config": full_config["llm"],
+                "morning_price_context": SimpleNamespace(
+                    base_price=104.0,
+                    base_price_date="2025-03-25",
+                    open_price=None,
+                    prev_close_price=104.0,
+                ),
+            }
+            with patch.object(technical, "Router", return_value=router), patch.object(
+                technical, "get_db", return_value=Mock()
+            ), patch.object(
+                technical,
+                "calculate_market_features",
+                return_value={"volatility": 0.20, "trend_strength": 30.0},
+            ), patch.object(
+                technical, "calculate_adaptive_params", return_value=deepcopy(base_params)
+            ), patch.object(
+                technical, "_build_technical_signal_results", side_effect=signal_results
+            ), patch.object(
+                technical, "build_technical_context", side_effect=technical_context
+            ), patch.object(
+                technical,
+                "retrieve_analyst_policy_calibration",
+                return_value=([policy_row], {"status": "validated_past_only"}),
+            ), patch.object(
+                technical, "resolve_config_id", return_value="cfg-technical-calibration"
+            ), patch.object(
+                technical,
+                "build_learning_context",
+                return_value={"text": "", "selected_ids": [], "memory_trace": {}},
+            ), patch.object(
+                technical, "agent_call", side_effect=llm_call
+            ), patch.object(technical.logger, "log_signal"):
+                signal = technical.technical_agent(state)["analyst_signals"][0]
+            return captured["prompt"], signal.metadata["action_evidence_contract"]
+
+        tighter_prompt, tighter_contract = run_with_rule(
+            0.85,
+            "private-learning-id-tight",
+        )
+        wider_prompt, wider_contract = run_with_rule(
+            1.15,
+            "private-learning-id-wide",
+        )
+
+        self.assertIn("TR:UP", tighter_prompt)
+        self.assertIn("TR:DOWN", wider_prompt)
+        self.assertIn("trend.short: 8 -> 7", tighter_prompt)
+        self.assertIn("trend.short: 8 -> 9", wider_prompt)
+        self.assertIn("already include these bounded changes", tighter_prompt)
+        self.assertNotIn("private-learning-id-tight", tighter_prompt)
+        self.assertNotIn("private-learning-id-wide", wider_prompt)
+        expected_atr = technical.calculate_raw_atr14(frame)
+        self.assertAlmostEqual(tighter_contract["atr_stop_distance"], expected_atr)
+        self.assertAlmostEqual(wider_contract["atr_stop_distance"], expected_atr)
+        # 104.5 would be valid against the frame's latest close (105) but is
+        # invalid against the formal morning base price (104), so it is cleared.
+        self.assertIsNone(tighter_contract["position_invalidation_level"])
+        self.assertIsNone(wider_contract["position_invalidation_level"])
+        self.assertNotIn("position_invalidation_reference_price", tighter_contract)
 
     def test_exit_hint_and_atr_cannot_prove_pre_fill_invalidation(self):
         signal = self._technical_signal(
@@ -219,7 +377,7 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
                 signal=Signal.NEUTRAL,
                 confidence=0.40,
                 opportunity_state="no_opportunity",
-                metadata={"data_usage_summary": self._data_usage("technical", "RB")},
+                metadata={"data_usage_summary": build_test_data_usage("technical", "RB")},
             ),
             self._technical_signal(timing="", trigger=""),
             self._technical_signal(
@@ -278,14 +436,11 @@ class AnalystExecutionTimingOutputTest(unittest.TestCase):
                 invalidation_level=95.0,
                 invalidation_present=True,
             )
-        fundamental_position_boundary = FundamentalAnalystOutput(
-            position_invalidation_level=92.0,
-            exit_hint="after fill, fundamental reversal requires position exit",
-        )
-        self.assertEqual(
-            fundamental_position_boundary.position_invalidation_level,
-            92.0,
-        )
+        with self.assertRaises(ValidationError):
+            FundamentalAnalystOutput(
+                position_invalidation_level=92.0,
+                exit_hint="after fill, fundamental reversal requires position exit",
+            )
 
         news_payload = {
             "signal": "Bearish",

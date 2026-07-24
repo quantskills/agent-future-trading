@@ -45,7 +45,10 @@ from tools.agent_tools.decision.pm_ticker_side_selection import (
     select_ticker_side,
 )
 from tools.agent_tools.decision.pm_position_sizing import build_position_sizing_result
-from tools.common.signal_evidence_collection import build_signal_collection_contract
+from tools.common.signal_evidence_collection import (
+    build_pm_evidence_signals_from_scc,
+    build_signal_collection_contract,
+)
 from tools.common.execution_trigger_semantics import (
     canonical_entry_invalidation_condition,
 )
@@ -156,23 +159,24 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         contract["invalidation_condition"] = "close below entry setup boundary"
         self.assertFalse(_has_structured_invalidation_condition([signal]))
 
-    def test_pm_selects_entry_and_same_side_position_lifecycle_independently(self):
+    def test_pm_assembles_position_lifecycle_fields_by_analyst_role(self):
         technical = _signal(
             "technical",
             Signal.BULLISH,
             0.72,
-            position_invalidation_level=None,
-            exit_hint="",
-            atr_stop_distance=None,
+            position_invalidation_level=91.0,
+            exit_hint="exit below technical structure",
+            atr_stop_distance=7.0,
             expected_horizon_days=0,
         )
         fundamental = _signal(
             "fundamental",
             Signal.BULLISH,
             0.84,
-            position_invalidation_level=91.0,
+            position_invalidation_level=80.0,
             exit_hint="reduce if medium-term basis reverses",
-            atr_stop_distance=7.0,
+            atr_stop_distance=99.0,
+            horizon_class="medium",
             expected_horizon_days=12,
         )
 
@@ -189,6 +193,7 @@ class DecisionWorkflowToolTest(unittest.TestCase):
             trading_date="2025-03-05",
             recommendation_intent={},
             control_reasons=[],
+            reference_price=100.0,
         )
 
         technical_contract = technical.metadata["action_evidence_contract"]
@@ -199,11 +204,128 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         )
         self.assertEqual(fields["position_invalidation_level"], 91.0)
         self.assertEqual(fields["atr_stop_distance"], 7.0)
+        self.assertEqual(fields["horizon_class"], "medium")
         self.assertEqual(fields["expected_horizon_days"], 12)
         self.assertEqual(
             fields["exit_hint"],
-            "reduce if medium-term basis reverses",
+            "exit below technical structure",
         )
+
+    def test_pm_horizon_pair_falls_back_atomically_to_entry_evidence(self):
+        technical = _signal(
+            "technical",
+            Signal.BULLISH,
+            0.72,
+            atr_stop_distance=4.0,
+            horizon_class="short",
+            expected_horizon_days=3,
+        )
+        incomplete_fundamental = _signal(
+            "fundamental",
+            Signal.BULLISH,
+            0.84,
+            horizon_class="medium",
+            expected_horizon_days=0,
+        )
+
+        fields = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=1,
+            analyst_signals=[technical, incomplete_fundamental],
+            final_entry_authority={
+                "authority_type": "real_budget_entry",
+                "conditional_trigger_authority": False,
+                "open_action_evidence": True,
+            },
+            trading_date="2025-03-05",
+            recommendation_intent={},
+            control_reasons=[],
+            reference_price=100.0,
+        )
+
+        self.assertEqual(fields["horizon_class"], "short")
+        self.assertEqual(fields["expected_horizon_days"], 3)
+
+    def test_event_entry_uses_same_source_structure_and_direction_neutral_technical_atr(self):
+        opposite_technical = _signal(
+            "technical",
+            Signal.BEARISH,
+            0.70,
+            position_invalidation_level=108.0,
+            atr_stop_distance=3.0,
+        )
+        event = _signal(
+            "commodity_news",
+            Signal.BULLISH,
+            0.82,
+            position_invalidation_level=92.0,
+            atr_stop_distance=99.0,
+        )
+
+        fields = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=1,
+            analyst_signals=[opposite_technical, event],
+            final_entry_authority={
+                "authority_type": "real_budget_entry",
+                "conditional_trigger_authority": False,
+                "open_action_evidence": True,
+            },
+            trading_date="2025-03-05",
+            recommendation_intent={},
+            control_reasons=[],
+            reference_price=100.0,
+        )
+
+        self.assertEqual(fields["execution_profile"], "event_immediate")
+        self.assertEqual(fields["position_invalidation_level"], 92.0)
+        self.assertEqual(fields["atr_stop_distance"], 3.0)
+
+    def test_pm_uses_scc_rebuilt_exit_facts_not_mutated_raw_analyst_payload(self):
+        technical = _signal(
+            "technical",
+            Signal.BULLISH,
+            0.72,
+            position_invalidation_level=94.0,
+            atr_stop_distance=2.0,
+        )
+        fundamental = _signal(
+            "fundamental",
+            Signal.BULLISH,
+            0.66,
+            horizon_class="medium",
+            expected_horizon_days=8,
+        )
+        news = _signal("commodity_news", Signal.NEUTRAL, 0.40)
+        scc = build_signal_collection_contract(
+            ticker="BU",
+            trading_date="2025-03-05",
+            analyst_signals=[technical, fundamental, news],
+            enabled_analysts=["technical", "fundamental", "commodity_news"],
+        )
+        technical.metadata["action_evidence_contract"]["position_invalidation_level"] = 150.0
+        technical.metadata["action_evidence_contract"]["atr_stop_distance"] = 999.0
+
+        fields = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=1,
+            analyst_signals=build_pm_evidence_signals_from_scc(scc),
+            final_entry_authority={
+                "authority_type": "real_budget_entry",
+                "conditional_trigger_authority": False,
+                "open_action_evidence": True,
+            },
+            trading_date="2025-03-05",
+            recommendation_intent={},
+            control_reasons=[],
+            reference_price=100.0,
+        )
+
+        self.assertEqual(fields["position_invalidation_level"], 94.0)
+        self.assertEqual(fields["atr_stop_distance"], 2.0)
 
     def test_pretrade_boundaries_ignore_opposite_side_lifecycle(self):
         technical = _signal(
@@ -633,6 +755,50 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         self.assertNotIn("exec-1", {row["id"] for row in result["rejected_learning"]})
         self.assertTrue(result["trigger_profile_learning"][0]["not_rank_learning"])
         self.assertFalse(result["trigger_profile_learning_direct_to_rank"])
+
+    def test_lifecycle_learning_router_allows_only_explicit_causal_negative_hold_reduce(self):
+        row = {
+            "id": "hold-negative-1",
+            "action_name": "hold",
+            "canonical_action_value": True,
+            "canonical_action_family": "hold",
+            "consumer_scope": "pm_learning",
+            "action_value_lane": "hold",
+            "learning_lane": "hold",
+            "memory_side_role": "current_position_side",
+            "action_preference": "negative_hold_revalidate",
+        }
+        rejected = route_lifecycle_learning(
+            lifecycle_port="reduce_exit",
+            action_values=[row],
+        )
+        self.assertEqual(rejected["decision_learning_rows"], [])
+
+        accepted = route_lifecycle_learning(
+            lifecycle_port="reduce_exit",
+            action_values=[row],
+            causal_negative_hold_reduce_ids=["hold-negative-1"],
+        )
+        self.assertEqual(
+            [item["id"] for item in accepted["decision_learning_rows"]],
+            ["hold-negative-1"],
+        )
+        self.assertIn("hold", accepted["accepted_lanes"])
+
+        for field, value in (
+            ("canonical_action_value", False),
+            ("consumer_scope", "analyst_calibration"),
+            ("action_preference", "positive_candidate_hold"),
+        ):
+            with self.subTest(field=field):
+                invalid = dict(row)
+                invalid[field] = value
+                result = route_lifecycle_learning(
+                    lifecycle_port="reduce_exit",
+                    action_values=[invalid],
+                    causal_negative_hold_reduce_ids=["hold-negative-1"],
+                )
+                self.assertEqual(result["decision_learning_rows"], [])
 
     def test_ticker_side_selection_selects_side_without_trade_authority(self):
         signal = _signal("technical", Signal.BULLISH, 0.74)

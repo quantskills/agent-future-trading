@@ -54,7 +54,7 @@ action_name -> canonical_action_family -> action_value_lane / learning_lane -> a
 3. PM 结合当日 `signal_collection_contract`、仓位、方向、资金预算、风险边界、失效条件和审计要求，签出唯一 `final_action_contract`。
 4. Trader 只按审计通过的 `final_action_contract.current_lots/target_lots/lots_delta/final_action` 与合约化触发字段执行。
 
-PM 最终合约里的 `decision_learning_rows` 只能是 Step6 按最终生命周期重新路由出的决策层学习证据；早期 Step2 router 结果只能作为 provenance / diagnostics，不得直接作为最终执行合约的决策层 trace。
+PM 最终合约里的 `decision_learning_rows` 只能是 Step6 按最终生命周期重新路由出的决策层学习证据；早期 Step2 router 结果只能作为 provenance / diagnostics，不得直接作为最终执行合约的决策层 trace。负向 hold 学习若被软生命周期控制精确选中并真实降低同方向持仓比例，可以保持原 `hold` family/lane 和精确 ID 进入最终 reduce FAC；这不是跨 family 重标，也不允许未命中或未改变仓位的 hold 记录进入 reduce。
 
 典型执行归类由 PM 当日合约决定：
 

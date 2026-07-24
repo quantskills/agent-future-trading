@@ -106,6 +106,7 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
             current_trigger_confirmed=True,
             invalidation_present=True,
             invalidation_level=3400.0,
+            position_invalidation_level=3350.0,
             exit_hint="close below 3400 invalidates the setup",
             evidence_quality="high",
             business_quality_score=0.76,
@@ -159,6 +160,12 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
         source = contract["data_usage_summary"]["sources"]["pandaai_market"]
         self.assertEqual(source["latest_data_date"], latest_data_date)
         self.assertNotIn("freshness_score", source)
+        self.assertIn("atr14", source["indicators_used"])
+        self.assertAlmostEqual(
+            contract["atr_stop_distance"],
+            technical.calculate_raw_atr14(frame),
+            places=12,
+        )
         signal.metadata["signal_record_id"] = f"technical-{ticker}-{latest_data_date}"
         return signal
 
@@ -398,6 +405,8 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
         self.assertEqual(stale_technical["data_freshness"], "stale")
         self.assertEqual(fresh_technical["fusion_evidence"]["evidence_freshness_score"], 1.0)
         self.assertEqual(stale_technical["fusion_evidence"]["evidence_freshness_score"], 0.35)
+        self.assertEqual(fresh_technical["position_invalidation_level"], 3350.0)
+        self.assertGreater(fresh_technical["atr_stop_distance"], 0.0)
         self.assertGreater(
             fresh_technical["fusion_evidence"]["evidence_strength_score"],
             stale_technical["fusion_evidence"]["evidence_strength_score"],
@@ -422,6 +431,11 @@ class PreBacktestPMWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(fresh_contract["capital_deployment"]["rank_budget_sequence"], 1)
         self.assertEqual(stale_contract["capital_deployment"]["rank_budget_sequence"], 2)
+        self.assertEqual(fresh_contract["position_invalidation_level"], 3350.0)
+        self.assertAlmostEqual(
+            fresh_contract["atr_stop_distance"],
+            fresh_technical["atr_stop_distance"],
+        )
         self.assertLessEqual(stale_contract["target_lots"], fresh_contract["target_lots"])
         self.assertGreater(fresh_contract["target_lots"], 0)
 

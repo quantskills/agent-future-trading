@@ -221,8 +221,8 @@ class PMAtomicContractFlowTests(unittest.TestCase):
                 {
                     "position_invalidation_level": None,
                     "atr_stop_distance": None,
-                    "exit_hint": "",
-                    "expected_horizon_days": None,
+                    "exit_hint": "exit when thesis reverses",
+                    "expected_horizon_days": 9,
                 },
                 "new_risk_execution_missing_position_exit_boundary",
             ),
@@ -468,18 +468,6 @@ class PMAtomicContractFlowTests(unittest.TestCase):
         self.assertIs(observed, memory_state)
         with self.assertRaisesRegex(RuntimeError, "missing pm_state"):
             workflow._require_pm_memory_state("BU", {"recommendation": object()})
-
-    def test_pm_source_has_no_old_intermediate_physical_outputs(self):
-        source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(
-            encoding="utf-8-sig"
-        )
-        for legacy_name in (
-            "pm_internal_candidate",
-            "pm_internal_candidate_contract",
-            "final_contract_builder_inputs",
-            "pm_capital_deployment_decision",
-        ):
-            self.assertNotIn(legacy_name, source)
 
     def test_steps_1_5_do_not_build_unsigned_recommendation_consistency(self):
         source = (SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py").read_text(

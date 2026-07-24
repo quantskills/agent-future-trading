@@ -254,9 +254,11 @@ class ResearcherLifecycleContractTest(unittest.TestCase):
                 impact = contract["learning_used"]["pm_lifecycle_learning_impact_delta"]
 
                 self.assertEqual(trace["contract_lifecycle_port"], "reduce_exit")
+                self.assertEqual(trace["reduce_exit_learning_decision"], {})
+                self.assertEqual(trace["decision_learning_rows"], [])
                 self.assertEqual(
-                    trace["reduce_exit_learning_decision"]["decision"],
-                    expected_decision,
+                    contract["learning_used"]["alpha_setup_action_values"],
+                    [],
                 )
                 self.assertEqual(trace["hold_learning_decision"], {})
                 self.assertEqual(trace["open_add_learning_decision"], {})

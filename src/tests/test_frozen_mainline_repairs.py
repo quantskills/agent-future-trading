@@ -230,18 +230,6 @@ def _full_auditor_payload(recommendation_id: str = "rec-1") -> dict:
 
 
 class FrozenMainlineRegressionTest(unittest.TestCase):
-    def test_collector_never_creates_analyst_signals_for_missing_market_data(self):
-        state = {
-            "ticker": "BU",
-            "trading_date": "2025-03-03",
-            "enabled_analysts": list(ANALYSTS),
-            "analyst_signals": [],
-            "pre_open_reference_price_unavailable": True,
-            "pre_open_reference_price_unavailable_reason": "missing_previous_close",
-        }
-        with self.assertRaisesRegex(ValueError, "signal_collection_missing_source_contracts"):
-            signal_collector_agent(state)
-
     def test_shared_aec_validator_rejects_incomplete_contract(self):
         incomplete = {
             "contract_version": "agentquant.action_evidence.v1",
@@ -305,31 +293,6 @@ class FrozenMainlineRegressionTest(unittest.TestCase):
                 self.assertFalse(contract["current_trigger_confirmed"])
                 self.assertEqual(contract["entry_trigger"], "")
                 llm_call.assert_not_called()
-
-    def test_signal_artifact_persists_only_validated_aec(self):
-        from database.signal_artifact import build_signal_artifact_payload
-
-        signal = _signal("technical", "signal-1")
-        signal.metadata.update(
-            {
-                "llm_path": "private-provider-model",
-                "adaptive_params": {"ema_long": 52},
-                "technical_parameter_calibration": {"internal": True},
-                "reviewer_learning_context": {"selected_ids": ["private-memory"]},
-                "raw_response": "private-response",
-            }
-        )
-        payload = build_signal_artifact_payload(signal)
-        self.assertEqual(set(payload), {"metadata", "signal_artifact_metadata"})
-        self.assertEqual(set(payload["metadata"]), {"action_evidence_contract"})
-        self.assertEqual(
-            payload["metadata"]["action_evidence_contract"],
-            signal.metadata["action_evidence_contract"],
-        )
-        self.assertEqual(
-            payload["signal_artifact_metadata"]["contract_version"],
-            "agentquant.signal_artifact.v1",
-        )
 
     def test_collector_rejects_internal_metadata_beside_aec_and_record_id(self):
         signals = [

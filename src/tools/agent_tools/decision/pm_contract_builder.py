@@ -206,6 +206,184 @@ def _contract_lifecycle_port(
     })
 
 
+def _action_value_id(row: dict | None) -> str:
+    row = row if isinstance(row, dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    return str(
+        row.get("id")
+        or row.get("action_value_id")
+        or payload.get("id")
+        or payload.get("action_value_id")
+        or ""
+    ).strip()
+
+
+def _action_value_field(row: dict | None, key: str) -> Any:
+    row = row if isinstance(row, dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    value = row.get(key)
+    return value if value not in (None, "") else payload.get(key)
+
+
+_INDEPENDENT_LIFECYCLE_DECISIONS = {
+    "exit_opening_fac_position_invalidation",
+    "exit_current_technical_invalidation",
+    "reduce_fundamental_medium_opposition",
+    "force_exit_failed_position",
+    "exit_failed_new_loss_revalidation",
+    "reduce_failed_new_loss_revalidation",
+    "exit_failed_exploration_reconfirm",
+    "reduce_unconfirmed_exploration_probe",
+    "exit_horizon_mismatch_losing_hold",
+    "reduce_horizon_mismatch_losing_hold",
+    "exit_failed_loss_revalidation",
+    "reduce_failed_loss_revalidation",
+    "exit_unvalidated_probe",
+    "allow_reversal",
+    "downgrade_reversal_to_exit",
+}
+
+_LEARNING_REDUCTION_ALLOWED_HOLDING_DECISIONS = {
+    "allow_profit_protective_reduce_before_min_hold",
+    "cap_same_side_reduction",
+    "allow_same_side_rebalance",
+    "allow_exit",
+}
+
+
+def _final_lots_reduce_existing_risk(current_lots: int, target_lots: int) -> bool:
+    current = int(current_lots or 0)
+    target = int(target_lots or 0)
+    if current == 0 or abs(target) >= abs(current):
+        return False
+    return target == 0 or (target > 0) == (current > 0)
+
+
+def _actual_lifecycle_learning_details(
+    diagnostics: dict,
+    *,
+    lifecycle_port: str,
+    control_reasons: list[str],
+    current_lots: int,
+    target_lots: int,
+    action_values: list | None,
+) -> list[tuple[str, dict]]:
+    """Return lifecycle learning rows that demonstrably changed Step4 output.
+
+    The frozen Step4 pool describes what PM was allowed to consume.  A final
+    FAC may claim a hold/reduce/exit row only when an existing diagnostic names
+    that exact action-value and records a real ratio change.  Deterministic
+    structure/ATR exits, technical reversals and fundamental reductions remain
+    authoritative even when a same-lane learning row happened to be retrieved.
+    """
+    if lifecycle_port not in {"hold", "reduce_exit"}:
+        return []
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    reason_set = {str(reason or "").strip() for reason in control_reasons or []}
+    holding = diagnostics.get("holding_rebalance_control")
+    holding = holding if isinstance(holding, dict) else {}
+    holding_decision = _clean_text(holding.get("decision"))
+    if (
+        holding_decision in _INDEPENDENT_LIFECYCLE_DECISIONS
+        or holding_decision.startswith("keep_")
+        or holding_decision.startswith("skip_")
+        or holding_decision == "no_existing_position"
+    ):
+        return []
+
+    actual: list[tuple[str, dict]] = []
+    continuation = diagnostics.get("winning_template_continuation")
+    continuation = continuation if isinstance(continuation, dict) else {}
+    continuation_changed = _control_changed_ratio(
+        continuation,
+        before_key="pre_control_ratio",
+        after_key="final_ratio",
+    )
+    alpha_ev = diagnostics.get("alpha_setup_ev_fusion")
+    alpha_ev = alpha_ev if isinstance(alpha_ev, dict) else {}
+    intended_action = _clean_text(alpha_ev.get("intended_action"))
+    alpha_matches_lifecycle = (
+        lifecycle_port == "hold" and intended_action == "hold"
+    ) or (
+        lifecycle_port == "reduce_exit" and intended_action in {"reduce", "exit"}
+    )
+    alpha_id = _action_value_id(alpha_ev.get("selected_action_value"))
+    if (
+        alpha_matches_lifecycle
+        and alpha_id
+        and "alpha_setup_ev_fusion" in reason_set
+        and not continuation_changed
+        and bool(
+            alpha_ev.get("positive_action_value")
+            or alpha_ev.get("positive_action_value_candidate")
+            or alpha_ev.get("negative_action_value")
+        )
+        and _control_changed_ratio(
+            alpha_ev,
+            before_key="pre_control_ratio",
+            after_key="final_ratio",
+        )
+    ):
+        actual.append((alpha_id, alpha_ev))
+
+    continuation_id = _action_value_id(continuation.get("selected_action_value"))
+    rows_by_id = {
+        _action_value_id(row): row
+        for row in (action_values or [])
+        if isinstance(row, dict) and _action_value_id(row)
+    }
+    continuation_row = rows_by_id.get(continuation_id, {})
+    continuation_family = _clean_text(
+        _action_value_field(continuation_row, "canonical_action_family")
+    )
+    continuation_lane = _clean_text(
+        _action_value_field(continuation_row, "learning_lane")
+        or _action_value_field(continuation_row, "action_value_lane")
+    )
+    continuation_preference = _clean_text(
+        _action_value_field(continuation_row, "action_preference")
+    )
+    continuation_decision = _clean_text(continuation.get("decision"))
+    causal_negative_hold_reduce = bool(
+        continuation_decision == "learned_hold_exit_reduce"
+        and _clean_text(continuation.get("action_value_preference")) == "bad_hold"
+        and continuation_family == "hold"
+        and continuation_lane == "hold"
+        and continuation_preference
+        in {"negative_hold_revalidate", "tail_loss_protect"}
+    )
+    causal_reduce_exit = bool(
+        continuation_family == "reduce_exit"
+        and continuation_lane in {"reduce", "exit"}
+    )
+    if (
+        lifecycle_port == "reduce_exit"
+        and continuation_id
+        and _action_value_field(continuation_row, "canonical_action_value") is True
+        and _clean_text(_action_value_field(continuation_row, "consumer_scope"))
+        == "pm_learning"
+        and "hold_exit_action_value_protection" in reason_set
+        and continuation_decision
+        in {
+            "learned_exit_action_value_protective_exit",
+            "learned_hold_exit_reduce",
+        }
+        and (causal_negative_hold_reduce or causal_reduce_exit)
+        and _final_lots_reduce_existing_risk(current_lots, target_lots)
+        and (
+            not holding_decision
+            or holding_decision in _LEARNING_REDUCTION_ALLOWED_HOLDING_DECISIONS
+        )
+        and _control_changed_ratio(
+            continuation,
+            before_key="pre_control_ratio",
+            after_key="final_ratio",
+        )
+    ):
+        actual.append((continuation_id, continuation))
+    return actual
+
+
 def _pm_lifecycle_learning_trace(
     *,
     final_action: str,
@@ -219,7 +397,7 @@ def _pm_lifecycle_learning_trace(
     select_learning_trace_action_values: Callable[[list | None, int], List[dict]],
     execution_contract_payload: dict,
     control_reasons: list[str],
-) -> tuple[dict, list[dict]]:
+) -> tuple[dict, list[dict], list[tuple[str, dict]]]:
     lifecycle_port = _contract_lifecycle_port(
         final_action=final_action,
         current_lots=current_lots,
@@ -228,9 +406,24 @@ def _pm_lifecycle_learning_trace(
         reason_codes=control_reasons,
     )
     final_route_values = final_route_action_values if isinstance(final_route_action_values, list) else []
+    actual_lifecycle_learning = _actual_lifecycle_learning_details(
+        diagnostics,
+        lifecycle_port=lifecycle_port,
+        control_reasons=control_reasons,
+        current_lots=current_lots,
+        target_lots=target_lots,
+        action_values=final_route_values,
+    )
+    causal_negative_hold_reduce_ids = {
+        row_id
+        for row_id, detail in actual_lifecycle_learning
+        if _clean_text(detail.get("decision")) == "learned_hold_exit_reduce"
+        and _clean_text(detail.get("action_value_preference")) == "bad_hold"
+    }
     complete_pool_router = route_lifecycle_learning(
         lifecycle_port=lifecycle_port,
         action_values=final_route_values,
+        causal_negative_hold_reduce_ids=causal_negative_hold_reduce_ids,
     )
     final_contract_learning_filter = filter_action_values_for_contract_learning(
         {
@@ -252,10 +445,17 @@ def _pm_lifecycle_learning_trace(
         for row in (final_contract_learning_filter.get("rows") or [])
         if isinstance(row, dict)
     ]
+    if lifecycle_port in {"hold", "reduce_exit"}:
+        actual_ids = {row_id for row_id, _detail in actual_lifecycle_learning}
+        decision_source_rows = [
+            row for row in decision_source_rows
+            if _action_value_id(row) in actual_ids
+        ]
     selected_action_values = select_learning_trace_action_values(decision_source_rows, 10)
     selected_router = route_lifecycle_learning(
         lifecycle_port=lifecycle_port,
         action_values=selected_action_values,
+        causal_negative_hold_reduce_ids=causal_negative_hold_reduce_ids,
     )
     selected_decision_indices = {
         int(index)
@@ -273,6 +473,7 @@ def _pm_lifecycle_learning_trace(
     selected_router = route_lifecycle_learning(
         lifecycle_port=lifecycle_port,
         action_values=selected_action_values,
+        causal_negative_hold_reduce_ids=causal_negative_hold_reduce_ids,
     )
     lifecycle_router = dict(selected_router)
     for key in (
@@ -327,9 +528,57 @@ def _pm_lifecycle_learning_trace(
                 enriched["action_value_lane"] = lane
             enriched_rows.append(enriched)
         lifecycle_router[key] = enriched_rows
+    execution_pref = execution_contract_payload.get("execution_action_value_preference")
+    execution_pref = execution_pref if isinstance(execution_pref, dict) else {}
+    final_execution_profile = _clean_text(execution_contract_payload.get("execution_profile"))
+    preferred_execution_profile = _clean_text(execution_pref.get("execution_profile"))
+    base_execution_profile = _clean_text(execution_pref.get("base_execution_profile"))
+    execution_profile_changed = bool(
+        execution_pref.get("enabled")
+        and final_execution_profile
+        and preferred_execution_profile
+        and base_execution_profile
+        and final_execution_profile == preferred_execution_profile
+        and final_execution_profile != base_execution_profile
+    )
+    if not execution_profile_changed:
+        unlanded_execution_rows = [
+            {
+                **row,
+                "route": "rejected_or_downgraded_execution_suggestion_not_landed",
+                "rejection_reason": "execution_profile_suggestion_not_landed_in_final_contract",
+                "diagnostic_only": True,
+            }
+            for row in (lifecycle_router.get("trigger_profile_learning_rows") or [])
+            if isinstance(row, dict)
+        ]
+        existing_rejected = [
+            row
+            for row in (lifecycle_router.get("rejected_learning_rows") or [])
+            if isinstance(row, dict)
+        ]
+        merged_rejected = existing_rejected + unlanded_execution_rows
+        lifecycle_router["trigger_profile_learning_rows"] = []
+        lifecycle_router["trigger_profile_learning"] = []
+        lifecycle_router["trigger_profile_indices"] = []
+        lifecycle_router["execution_profile_learning"] = []
+        lifecycle_router["execution_profile_indices"] = []
+        lifecycle_router["rejected_learning_rows"] = merged_rejected
+        lifecycle_router["rejected_learning"] = merged_rejected
+        lifecycle_router["execution_suggestion_landed"] = False
+    else:
+        lifecycle_router["execution_suggestion_landed"] = True
     lifecycle_router["complete_step4_pool_routed_before_formal_selection"] = True
     lifecycle_router["complete_step4_pool_count"] = len(final_route_values)
     used_lanes = sorted({lane for lane in (_action_value_lane(row) for row in selected_action_values) if lane})
+    selected_ids = {
+        row_id for row_id in (_action_value_id(row) for row in selected_action_values) if row_id
+    }
+    selected_lifecycle_learning = [
+        (row_id, detail)
+        for row_id, detail in actual_lifecycle_learning
+        if row_id in selected_ids
+    ]
     memory_retrieval = diagnostics.get("final_action_memory_retrieval")
     memory_retrieval = memory_retrieval if isinstance(memory_retrieval, dict) else {}
     decision_learning_rows = (
@@ -356,13 +605,13 @@ def _pm_lifecycle_learning_trace(
     rejected_lanes = sorted({
         lane for lane in (_action_value_lane(row) for row in (rejected or [])) if lane
     })
-    accepted_by_port = {
+    accepted_by_port = list(lifecycle_router.get("accepted_lanes") or {
         "open_add_new_risk": ["open", "add", "scale", "increase"],
         "hold": ["hold"],
         "reduce_exit": ["reduce", "exit"],
         "conditional_monitor": ["conditional_monitor"],
         "wait": [],
-    }.get(lifecycle_port, [])
+    }.get(lifecycle_port, []))
     hold_learning_decision = {}
     reduce_exit_learning_decision = {}
     open_add_learning_decision = {}
@@ -374,14 +623,16 @@ def _pm_lifecycle_learning_trace(
             else {}
         )
     elif lifecycle_port == "hold":
-        hold_learning_decision = _final_lifecycle_control_detail(
-            diagnostics,
-            lifecycle_port=lifecycle_port,
+        hold_learning_decision = (
+            selected_lifecycle_learning[-1][1]
+            if selected_lifecycle_learning
+            else {}
         )
     elif lifecycle_port == "reduce_exit":
-        reduce_exit_learning_decision = _final_lifecycle_control_detail(
-            diagnostics,
-            lifecycle_port=lifecycle_port,
+        reduce_exit_learning_decision = (
+            selected_lifecycle_learning[-1][1]
+            if selected_lifecycle_learning
+            else {}
         )
     elif lifecycle_port == "conditional_monitor":
         conditional_monitor_learning_decision = (
@@ -432,7 +683,7 @@ def _pm_lifecycle_learning_trace(
             "requires_intraday_confirmation",
         ],
     }
-    return trace, selected_action_values
+    return trace, selected_action_values, selected_lifecycle_learning
 
 
 def _control_changed_ratio(detail: dict, *, before_key: str, after_key: str) -> bool:
@@ -451,7 +702,13 @@ def _final_lifecycle_control_detail(
     *,
     lifecycle_port: str,
 ) -> dict:
-    """Return the diagnostic that actually formed the final lifecycle result."""
+    """Return the current-day control that formed the lifecycle result.
+
+    This result remains available to Researcher for future calibration even
+    when no historical action-value caused it.  Formal FAC action-value rows
+    are selected separately by _actual_lifecycle_learning_details().
+    """
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     holding = diagnostics.get("holding_rebalance_control")
     holding = holding if isinstance(holding, dict) else {}
     continuation = diagnostics.get("winning_template_continuation")
@@ -459,6 +716,12 @@ def _final_lifecycle_control_detail(
     holding_has_decision = bool(str(holding.get("decision") or "").strip())
     continuation_has_decision = bool(str(continuation.get("decision") or "").strip())
     if lifecycle_port == "reduce_exit":
+        if (
+            holding_has_decision
+            and _clean_text(holding.get("decision"))
+            in _INDEPENDENT_LIFECYCLE_DECISIONS
+        ):
+            return holding
         holding_changed = _control_changed_ratio(
             holding,
             before_key="raw_target_ratio",
@@ -489,12 +752,29 @@ def _pm_lifecycle_learning_impact_delta(
     diagnostics: dict,
     capital_deployment: dict | None,
     execution_contract_payload: dict,
+    selected_lifecycle_learning: list[tuple[str, dict]] | None = None,
 ) -> dict:
     alpha_ev = diagnostics.get("alpha_setup_ev_fusion")
     alpha_ev = alpha_ev if isinstance(alpha_ev, dict) else {}
-    lifecycle_control = _final_lifecycle_control_detail(
+    actual_lifecycle_learning = [
+        (row_id, detail)
+        for row_id, detail in (selected_lifecycle_learning or [])
+        if row_id and isinstance(detail, dict)
+    ]
+    causal_lifecycle_control = (
+        actual_lifecycle_learning[-1][1]
+        if lifecycle_port in {"hold", "reduce_exit"}
+        and actual_lifecycle_learning
+        else {}
+    )
+    lifecycle_result_control = _final_lifecycle_control_detail(
         diagnostics,
         lifecycle_port=lifecycle_port,
+    )
+    lifecycle_decision_control = (
+        causal_lifecycle_control
+        if str(causal_lifecycle_control.get("decision") or "").strip()
+        else lifecycle_result_control
     )
     conditional = diagnostics.get("conditional_monitor_probe_plan")
     conditional = conditional if isinstance(conditional, dict) else {}
@@ -506,24 +786,41 @@ def _pm_lifecycle_learning_impact_delta(
     )
     execution_pref = execution_contract_payload.get("execution_action_value_preference")
     execution_pref = execution_pref if isinstance(execution_pref, dict) else {}
+    final_execution_profile = _clean_text(execution_contract_payload.get("execution_profile"))
+    preferred_execution_profile = _clean_text(execution_pref.get("execution_profile"))
+    base_execution_profile = _clean_text(execution_pref.get("base_execution_profile"))
+    execution_profile_changed = bool(
+        execution_pref.get("enabled")
+        and final_execution_profile
+        and preferred_execution_profile
+        and base_execution_profile
+        and final_execution_profile == preferred_execution_profile
+        and final_execution_profile != base_execution_profile
+    )
     relevant_detail = (
         alpha_ev
         if lifecycle_port == "open_add_new_risk"
-        else lifecycle_control
+        else (causal_lifecycle_control or lifecycle_result_control)
         if lifecycle_port in {"hold", "reduce_exit"}
         else conditional
         if lifecycle_port == "conditional_monitor"
         else {}
     )
+    first_lifecycle_detail = (
+        actual_lifecycle_learning[0][1]
+        if lifecycle_port in {"hold", "reduce_exit"}
+        and actual_lifecycle_learning
+        else relevant_detail
+    )
     pre_ratio = _safe_float(
-        relevant_detail.get("pre_control_ratio"),
-        _safe_float(relevant_detail.get("raw_target_ratio"), position_ratio),
+        first_lifecycle_detail.get("pre_control_ratio"),
+        _safe_float(first_lifecycle_detail.get("raw_target_ratio"), position_ratio),
     )
     hold_decision = (
-        lifecycle_control.get("decision") if lifecycle_port == "hold" else None
+        lifecycle_decision_control.get("decision") if lifecycle_port == "hold" else None
     )
     reduce_exit_decision = (
-        lifecycle_control.get("decision") if lifecycle_port == "reduce_exit" else None
+        lifecycle_decision_control.get("decision") if lifecycle_port == "reduce_exit" else None
     )
     conditional_monitor_decision = (
         conditional.get("decision") if lifecycle_port == "conditional_monitor" else None
@@ -551,13 +848,18 @@ def _pm_lifecycle_learning_impact_delta(
             alpha_ev.get("expectancy_lane") if lifecycle_port == "open_add_new_risk" else None
         ),
         "hold_decision": hold_decision,
-        "hold_changes_position": False,
+        "hold_changes_position": bool(
+            lifecycle_port == "hold"
+            and causal_lifecycle_control
+            and abs(float(position_ratio or 0.0) - pre_ratio) > 1e-12
+        ),
         "reduce_exit_decision": reduce_exit_decision,
         "reduce_exit_changes_position": bool(
-            lifecycle_port == "reduce_exit" and int(current_lots or 0) != int(target_lots or 0)
+            lifecycle_port == "reduce_exit"
+            and int(current_lots or 0) != int(target_lots or 0)
         ),
         "conditional_monitor_decision": conditional_monitor_decision,
-        "execution_profile_changed": bool(execution_pref.get("enabled")),
+        "execution_profile_changed": execution_profile_changed,
         "execution_profile_learning_direct_to_rank": False,
     }
 
@@ -670,7 +972,11 @@ def build_final_action_contract(
             action_value = futures_action_cls(str(action_value))
         except Exception:
             pass
-    pm_lifecycle_trace, selected_action_values = _pm_lifecycle_learning_trace(
+    (
+        pm_lifecycle_trace,
+        selected_action_values,
+        selected_lifecycle_learning,
+    ) = _pm_lifecycle_learning_trace(
         final_action=final_action,
         current_lots=current_lots,
         target_lots=target_lots,
@@ -697,6 +1003,7 @@ def build_final_action_contract(
         diagnostics=diagnostics,
         capital_deployment=capital_deployment,
         execution_contract_payload=execution_contract_payload,
+        selected_lifecycle_learning=selected_lifecycle_learning,
     )
     position_sizing_result = _contract_position_sizing_result(
         execution_fields=execution_contract_payload,

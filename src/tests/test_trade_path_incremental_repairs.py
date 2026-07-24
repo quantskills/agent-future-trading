@@ -317,7 +317,7 @@ def _execution_config() -> dict:
 
 
 class DirectAndConditionalExecutionPathTest(unittest.TestCase):
-    def test_pm_marks_currently_confirmed_technical_trigger_as_direct_execution(self):
+    def test_pm_keeps_preopen_technical_entry_conditional_even_when_aec_is_confirmed(self):
         for profile in ("breakout", "pullback"):
             with self.subTest(profile=profile):
                 plan = _build_pm_decision_context(
@@ -339,8 +339,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     control_reasons=["test_pm_final_trade_authority"],
                 )
 
-                self.assertTrue(plan["can_execute_without_intraday_trigger"])
-                self.assertFalse(plan["requires_intraday_confirmation"])
+                self.assertFalse(plan["can_execute_without_intraday_trigger"])
+                self.assertTrue(plan["requires_intraday_confirmation"])
 
     def test_pm_requires_current_confirmation_invalidation_and_funds_for_direct_execution(self):
         for signal in (
@@ -383,42 +383,6 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                     control_reasons=[],
                 )
         self.assertFalse(plan["can_execute_without_intraday_trigger"])
-
-    def test_trader_honors_direct_execution_for_every_canonical_entry_profile(self):
-        trigger_by_profile = {
-            "breakout": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
-            "pullback": "15分钟先向上扩张，随后回踩开盘区间上沿或VWAP，最终收盘重新严格站上被回踩边界",
-            "vwap_confirmed": "15分钟收盘价不低于VWAP",
-            "event_immediate": "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
-        }
-        source_by_profile = {
-            "breakout": "technical_breakout",
-            "pullback": "technical_pullback",
-            "vwap_confirmed": "technical_pullback",
-            "event_immediate": "commodity_news_event",
-        }
-        for profile in ("breakout", "pullback", "vwap_confirmed", "event_immediate"):
-            with self.subTest(profile=profile):
-                result = select_intraday_execution(
-                    signal_bars=_non_triggering_signal_bars(),
-                    execution_bars=_execution_bars(),
-                    action="open_long",
-                    config={"opening_range_minutes": 1, "min_execution_volume": 1},
-                    decision_context={
-                        "execution_contract": {
-                            **_entry_execution_boundary("long"),
-                            "execution_profile": profile,
-                            "trigger_source": source_by_profile[profile],
-                            "entry_trigger": trigger_by_profile[profile],
-                            "can_execute_without_intraday_trigger": True,
-                            "requires_intraday_confirmation": False,
-                        }
-                    },
-                )
-
-                self.assertTrue(result.should_execute)
-                self.assertEqual(result.base_price, 100.0)
-                self.assertFalse(result.to_audit_payload()["trigger_checked"])
 
     def test_watch_still_requires_15m_trigger_and_missing_1m_never_fabricates_fill(self):
         watch = select_intraday_execution(
@@ -540,7 +504,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         self.assertEqual(result.features["entry_contract_state"], "permanently_invalidated")
         self.assertFalse(result.to_audit_payload()["missed_opportunity_flag"])
 
-    def test_direct_entry_scans_all_bars_before_first_fill_for_invalidation(self):
+    def test_event_immediate_entry_scans_all_bars_before_first_fill_for_invalidation(self):
         result = select_intraday_execution(
             signal_bars=[],
             execution_bars=[
@@ -566,9 +530,12 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
             decision_context={
                 "execution_contract": {
                     **_entry_execution_boundary("long"),
-                    "execution_profile": "breakout",
-                    "trigger_source": "technical_breakout",
-                    "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+                    "invalidation": canonical_entry_invalidation_condition(
+                        "event_immediate", "long"
+                    ),
+                    "execution_profile": "event_immediate",
+                    "trigger_source": "commodity_news_event",
+                    "entry_trigger": "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
                     "requires_intraday_confirmation": False,
                     "can_execute_without_intraday_trigger": True,
                 }
@@ -583,9 +550,12 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
 
         expired_contract = {
             **_entry_execution_boundary("long"),
-            "execution_profile": "breakout",
-            "trigger_source": "technical_breakout",
-            "entry_trigger": "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
+            "invalidation": canonical_entry_invalidation_condition(
+                "event_immediate", "long"
+            ),
+            "execution_profile": "event_immediate",
+            "trigger_source": "commodity_news_event",
+            "entry_trigger": "当前事件已满足即时执行边界，使用首根合法1分钟线执行",
             "requires_intraday_confirmation": False,
             "can_execute_without_intraday_trigger": True,
             "valid_until": "2025-03-26 09:30:30",
@@ -662,7 +632,7 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 self.assertEqual(snapshot["execution_result"]["no_trade_reason"], reason)
                 self.assertEqual(snapshot["phase2_execution"]["status"], "skipped_intraday_trigger_not_met")
 
-    def test_event_immediate_entry_terminal_state_is_not_replaced_by_morning_basis(self):
+    def test_strategy_entry_or_close_without_intraday_basis_is_not_replaced_by_morning_basis(self):
         morning_basis = SimpleNamespace(base_price=100.0)
         unavailable_basis = SimpleNamespace(base_price=None)
         for reason in (
@@ -729,8 +699,8 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 finalize_untriggered=False,
             )
 
-        self.assertIs(close_basis, morning_basis)
-        self.assertIsNone(close_result)
+        self.assertIs(close_basis, unavailable_basis)
+        self.assertIs(close_result, close_selection)
 
     def test_trigger_before_later_invalidation_executes_only_the_open_leg(self):
         result = select_intraday_execution(
@@ -970,6 +940,7 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         confidence: float = 0.82,
         event_type: str = "none",
         invalidation_level: float = 96.0,
+        position_invalidation_level: float | None = 94.0,
         atr_stop_distance: float = 2.0,
         evidence_role: str | None = None,
         entry_timing_signal: str | None = None,
@@ -1004,6 +975,7 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             invalidation_condition=invalidation,
             extra={
                 "invalidation_level": invalidation_level,
+                "position_invalidation_level": position_invalidation_level,
                 "atr_stop_distance": atr_stop_distance,
                 "event_type": event_type,
                 "evidence_role": role,
@@ -1021,6 +993,7 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             trigger_valid=trigger_valid,
             invalidation_present=True,
             invalidation_level=invalidation_level,
+            position_invalidation_level=position_invalidation_level,
             event_type=event_type,
             evidence_role=role,
             entry_timing_signal=timing,
@@ -1047,6 +1020,7 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             recommendation_intent={"action": "open_long"},
             control_reasons=[],
             alpha_setup_action_values=action_values,
+            reference_price=100.0,
         )
 
     def test_bu_prefers_technical_execution_role_before_higher_fundamental_confidence(self):
@@ -1121,6 +1095,10 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
             (news["execution_profile"], news["trigger_source"]),
             ("event_immediate", "commodity_news_event"),
         )
+        self.assertTrue(technical["requires_intraday_confirmation"])
+        self.assertFalse(technical["can_execute_without_intraday_trigger"])
+        self.assertFalse(news["requires_intraday_confirmation"])
+        self.assertTrue(news["can_execute_without_intraday_trigger"])
 
     def test_opposite_evidence_cannot_supply_execution_fields(self):
         fields = self._fields(
@@ -1234,11 +1212,14 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         )
         self.assertEqual(fields["execution_profile"], "breakout")
         self.assertEqual(fields["trigger_source"], "technical_breakout")
-        self.assertTrue(fields["can_execute_without_intraday_trigger"])
+        self.assertTrue(fields["requires_intraday_confirmation"])
+        self.assertFalse(fields["can_execute_without_intraday_trigger"])
         self.assertEqual(
             fields["execution_action_value_preference"]["execution_profile"],
             "pullback",
         )
+        self.assertFalse(fields["execution_action_value_preference"]["applied"])
+        self.assertTrue(fields["execution_action_value_preference"]["diagnostic_only"])
         self.assertTrue(
             fields["execution_action_value_preference"]["does_not_create_trade_authority"]
         )

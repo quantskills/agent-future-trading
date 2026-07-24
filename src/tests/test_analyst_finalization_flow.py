@@ -1,15 +1,22 @@
 import inspect
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pandas as pd
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from agents.analysis_team import commodity_news
 from agents.analysis_team.commodity_news import _build_no_news_signal
 from agents.analysis_team.fundamental import _build_no_fundamental_data_signal
+from agents.analysis_team.technical import calculate_raw_atr14
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from llm.prompt import (
@@ -43,7 +50,7 @@ from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_signal_collection_contract,
 )
-from tests.contract_test_fixtures import build_test_aec
+from tests.contract_test_fixtures import build_test_aec, build_test_data_usage
 
 
 def _finalize_data_gap(signal, *, analyst, ticker):
@@ -72,20 +79,16 @@ def _finalize_data_gap(signal, *, analyst, ticker):
 
 
 class AnalystFinalizationFlowTest(unittest.TestCase):
-    @staticmethod
-    def _data_usage(analyst: str, ticker: str) -> dict:
-        return build_test_aec(
-            analyst,
-            ticker=ticker,
-            trading_date="2025-03-26",
-        )["data_usage_summary"]
-
     def _finalize_directional(self, signal: AnalystSignal, *, analyst: str, ticker: str, context: dict):
         profile = get_product_price_behavior_profile(ticker)
         usage = build_profile_usage_contract(ticker, analyst, profile)
         return finalize_analyst_signal(
             signal,
-            quality_context={"sector": profile.get("sector", ""), **context},
+            quality_context={
+                "sector": profile.get("sector", ""),
+                "position_invalidation_reference_price": 100.0,
+                **context,
+            },
             full_config={"llm": {"provider": "test", "model": "test-model"}},
             analyst=analyst,
             ticker=ticker,
@@ -122,6 +125,166 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             inspect.getsource(resolve_technical_data_freshness),
         )
 
+    def test_raw_atr14_uses_completed_ohlc_true_range_ewm(self):
+        prices = pd.DataFrame(
+            {
+                "high": [101.0, 104.0, 106.0, 105.0, 109.0],
+                "low": [98.0, 100.0, 101.0, 99.0, 103.0],
+                "close": [100.0, 103.0, 102.0, 104.0, 108.0],
+            },
+            index=pd.bdate_range(end="2025-03-21", periods=5),
+        )
+        previous_close = prices["close"].shift()
+        true_range = pd.concat(
+            [
+                prices["high"] - prices["low"],
+                (prices["high"] - previous_close).abs(),
+                (prices["low"] - previous_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        expected = float(true_range.ewm(span=14, adjust=False).mean().iloc[-1])
+
+        self.assertAlmostEqual(calculate_raw_atr14(prices), expected, places=12)
+
+    def test_finalization_overwrites_llm_atr_before_aec_build(self):
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.55,
+            opportunity_type="no_trade",
+            opportunity_state="no_opportunity",
+            setup_type="unknown",
+            position_invalidation_level=92.0,
+            atr_stop_distance=999.0,
+            metadata={"data_usage_summary": build_test_data_usage("technical", "BU")},
+        )
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "low",
+                "setup_type": "no_trade",
+                "setup_quality_ok": False,
+                "market_regime": "range",
+                "atr_stop_distance": 4.25,
+                "risk_flags": [],
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertEqual(contract["position_invalidation_level"], 92.0)
+        self.assertEqual(contract["atr_stop_distance"], 4.25)
+        self.assertNotIn("position_invalidation_reference_price", contract)
+
+    def test_technical_structure_level_is_validated_against_formal_pre_open_reference(self):
+        cases = (
+            (Signal.BULLISH, 92.0, 92.0),
+            (Signal.BULLISH, 100.0, None),
+            (Signal.BULLISH, 108.0, None),
+            (Signal.BEARISH, 108.0, 108.0),
+            (Signal.BEARISH, 100.0, None),
+            (Signal.BEARISH, 92.0, None),
+        )
+        for direction, position_level, expected in cases:
+            with self.subTest(direction=direction.value, position_level=position_level):
+                signal = AnalystSignal(
+                    agent_name="technical",
+                    signal=direction,
+                    confidence=0.55,
+                    opportunity_type="no_trade",
+                    opportunity_state="no_opportunity",
+                    setup_type="unknown",
+                    position_invalidation_level=position_level,
+                    atr_stop_distance=999.0,
+                    metadata={
+                        "data_usage_summary": build_test_data_usage("technical", "BU")
+                    },
+                )
+                finalized = self._finalize_directional(
+                    signal,
+                    analyst="technical",
+                    ticker="BU",
+                    context={
+                        "tradeability": "low",
+                        "setup_type": "no_trade",
+                        "setup_quality_ok": False,
+                        "market_regime": "range",
+                        "atr_stop_distance": 4.25,
+                        "risk_flags": [],
+                    },
+                )
+                contract = finalized.metadata["action_evidence_contract"]
+                self.assertEqual(contract["position_invalidation_level"], expected)
+                self.assertEqual(contract["atr_stop_distance"], 4.25)
+                self.assertNotIn("position_invalidation_reference_price", contract)
+
+    def test_finalization_clears_fundamental_atr_and_structure_level(self):
+        signal = AnalystSignal(
+            agent_name="fundamental",
+            signal=Signal.NEUTRAL,
+            confidence=0.55,
+            opportunity_type="no_trade",
+            opportunity_state="no_opportunity",
+            setup_type="unknown",
+            position_invalidation_level=92.0,
+            atr_stop_distance=999.0,
+            metadata={"data_usage_summary": build_test_data_usage("fundamental", "BU")},
+        )
+        finalized = self._finalize_directional(
+            signal,
+            analyst="fundamental",
+            ticker="BU",
+            context={
+                "tradeability": "low",
+                "setup_type": "no_trade",
+                "setup_quality_ok": False,
+                "risk_flags": [],
+                "data_quality": {
+                    "coverage_ratio": 0.8,
+                    "factor_freshness_score": 0.8,
+                },
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertIsNone(contract["position_invalidation_level"])
+        self.assertIsNone(contract["atr_stop_distance"])
+
+    def test_finalization_validates_immediate_event_structure_without_event_atr(self):
+        cases = ((Signal.BULLISH, 92.0, 92.0), (Signal.BULLISH, 108.0, None))
+        for direction, position_level, expected in cases:
+            with self.subTest(position_level=position_level):
+                signal = AnalystSignal(
+                    agent_name="commodity_news",
+                    signal=direction,
+                    confidence=0.55,
+                    opportunity_type="no_trade",
+                    opportunity_state="no_opportunity",
+                    setup_type="unknown",
+                    position_invalidation_level=position_level,
+                    atr_stop_distance=999.0,
+                    metadata={
+                        "data_usage_summary": build_test_data_usage(
+                            "commodity_news",
+                            "BU",
+                        )
+                    },
+                )
+                finalized = self._finalize_directional(
+                    signal,
+                    analyst="commodity_news",
+                    ticker="BU",
+                    context={
+                        "tradeability": "low",
+                        "setup_type": "no_trade",
+                        "setup_quality_ok": False,
+                        "risk_flags": [],
+                    },
+                )
+                contract = finalized.metadata["action_evidence_contract"]
+                self.assertEqual(contract["position_invalidation_level"], expected)
+                self.assertIsNone(contract["atr_stop_distance"])
+
     def test_finalization_writes_deterministic_technical_freshness_to_aec(self):
         signal = AnalystSignal(
             agent_name="technical",
@@ -131,7 +294,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             opportunity_type="no_trade",
             opportunity_state="no_opportunity",
             setup_type="unknown",
-            metadata={"data_usage_summary": self._data_usage("technical", "BU")},
+            metadata={"data_usage_summary": build_test_data_usage("technical", "BU")},
         )
         finalized = self._finalize_directional(
             signal,
@@ -183,7 +346,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             position_invalidation_level=104.0,
             factor_focus=["range_reversal", "volume"],
             metadata={
-                "data_usage_summary": self._data_usage("technical", "BU"),
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
                 "invalidation_condition": "legacy free-text must not survive",
             },
         )
@@ -230,7 +393,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             invalidation_level=102.0,
             factor_focus=["trend", "volume"],
             metadata={
-                "data_usage_summary": self._data_usage("technical", "BU"),
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
                 "invalidation_condition": "15m close above 102 invalidates the setup",
             },
         )
@@ -256,7 +419,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertTrue(contract["invalidation_present"])
 
-    def test_role_output_trigger_quality_lands_in_aec_and_scc_only_for_confirmed_trigger(self):
+    def test_pre_open_technical_cannot_claim_current_trigger_confirmation(self):
         signal = TechnicalAnalystOutput(
             agent_name="technical",
             signal=Signal.BULLISH,
@@ -280,7 +443,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             tradeability_reason="trend, volume, and price location align",
             factor_focus=["trend", "volume"],
             metadata={
-                "data_usage_summary": self._data_usage("technical", "BU"),
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
             },
         )
         finalized = self._finalize_directional(
@@ -297,14 +460,13 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             },
         )
         contract = finalized.metadata["action_evidence_contract"]
-        self.assertIn(
-            contract["opportunity_state"],
-            {"probe_candidate", "tradeable_candidate"},
-        )
-        self.assertTrue(contract["current_trigger_confirmed"])
-        self.assertTrue(contract["trigger_valid"])
-        self.assertEqual(contract["trigger_quality_score"], 0.83)
-        self.assertEqual(finalized.trigger_quality_score, 0.83)
+        self.assertEqual(contract["opportunity_state"], "watch_for_trigger")
+        self.assertEqual(contract["entry_timing_signal"], "breakout")
+        self.assertTrue(contract["invalidation_present"])
+        self.assertFalse(contract["current_trigger_confirmed"])
+        self.assertFalse(contract["trigger_valid"])
+        self.assertEqual(contract["trigger_quality_score"], 0.0)
+        self.assertEqual(finalized.trigger_quality_score, 0.0)
 
         scc = build_signal_collection_contract(
             ticker="BU",
@@ -316,11 +478,11 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             scc["source_contracts"][0]["action_evidence_contract"][
                 "trigger_quality_score"
             ],
-            0.83,
+            0.0,
         )
         pm_evidence = build_pm_evidence_signals_from_scc(scc)
         self.assertEqual(len(pm_evidence), 1)
-        self.assertEqual(pm_evidence[0].trigger_quality_score, 0.83)
+        self.assertEqual(pm_evidence[0].trigger_quality_score, 0.0)
 
         pending = signal.model_copy(
             update={
@@ -350,6 +512,50 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         self.assertFalse(pending_contract["trigger_valid"])
         self.assertEqual(pending_contract["trigger_quality_score"], 0.0)
 
+    def test_entry_invalidation_level_is_validated_against_pre_open_reference(self):
+        signal = TechnicalAnalystOutput(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.78,
+            business_quality_score=0.90,
+            data_coverage_score=0.90,
+            price_percentile=0.50,
+            setup_type="trend_breakout_setup",
+            opportunity_type="long_timing",
+            opportunity_state="watch_for_trigger",
+            evidence_role="entry_timing",
+            entry_timing_signal="breakout",
+            entry_trigger="wait for a breakout above resistance",
+            trigger_valid=False,
+            invalidation_present=True,
+            invalidation_level=101.0,
+            position_invalidation_level=92.0,
+            exit_hint="after fill, close below 92 requires position exit",
+            factor_focus=["trend", "volume"],
+            metadata={
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
+            },
+        )
+
+        finalized = self._finalize_directional(
+            signal,
+            analyst="technical",
+            ticker="BU",
+            context={
+                "tradeability": "high",
+                "setup_type": "trend_breakout_setup",
+                "setup_quality_ok": True,
+                "market_regime": "trend",
+                "freshness_score": 0.90,
+                "risk_flags": [],
+            },
+        )
+        contract = finalized.metadata["action_evidence_contract"]
+        self.assertIsNone(contract["invalidation_level"])
+        self.assertFalse(contract["invalidation_present"])
+        self.assertEqual(contract["opportunity_state"], "no_opportunity")
+        self.assertEqual(contract["position_invalidation_level"], 92.0)
+
     def test_all_technical_profiles_generate_canonical_trigger_before_presence_check(self):
         for side, signal_value in (
             ("long", Signal.BULLISH),
@@ -368,10 +574,10 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
                         entry_timing_signal=execution_profile,
                         entry_trigger="",
                         exit_hint="15m close beyond the invalidation boundary",
-                        invalidation_level=102.0,
+                        invalidation_level=98.0 if side == "long" else 102.0,
                         factor_focus=["trend", "volume"],
                         metadata={
-                            "data_usage_summary": self._data_usage("technical", "BU"),
+                            "data_usage_summary": build_test_data_usage("technical", "BU"),
                             "invalidation_condition": (
                                 "15m close beyond the invalidation boundary"
                             ),
@@ -413,7 +619,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             entry_trigger="",
             factor_focus=["trend", "volume"],
             metadata={
-                "data_usage_summary": self._data_usage("technical", "BU"),
+                "data_usage_summary": build_test_data_usage("technical", "BU"),
             },
         )
 
@@ -446,6 +652,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
                 "turnover_value": "Turnover intensity is elevated",
             },
             price_levels=price_levels,
+            deterministic_atr14=12.5,
         )
 
         self.assertIn(price_levels, prompt)
@@ -462,6 +669,8 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             prompt,
         )
         self.assertIn("T-day open-dependent gap analysis is expected to be unavailable", prompt)
+        self.assertIn("System-computed raw ATR14 (read-only market fact): 12.500000", prompt)
+        self.assertIn("do not reproduce or modify it as an output field", prompt)
 
     def test_fundamental_finalization_keeps_direction_but_removes_execution_claim(self):
         signal = AnalystSignal(
@@ -480,7 +689,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             exit_hint="fundamental thesis invalidated below 96",
             factor_focus=["inventory", "basis"],
             metadata={
-                "data_usage_summary": self._data_usage("fundamental", "BU"),
+                "data_usage_summary": build_test_data_usage("fundamental", "BU"),
                 "invalidation_condition": "fundamental thesis invalidated below 96",
             },
         )
@@ -529,7 +738,7 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
             exit_hint="event impact invalidated above 105",
             factor_focus=["supply_disruption"],
             metadata={
-                "data_usage_summary": self._data_usage("commodity_news", "BU"),
+                "data_usage_summary": build_test_data_usage("commodity_news", "BU"),
                 "invalidation_condition": "event impact invalidated above 105",
             },
         )
@@ -556,6 +765,83 @@ class AnalystFinalizationFlowTest(unittest.TestCase):
         )
         self.assertEqual(contract["opportunity_state"], "probe_candidate")
         self.assertEqual(contract["trigger_quality_score"], 0.76)
+
+    def test_news_agent_uses_registered_reference_for_current_event_structure(self):
+        captured = {}
+        router = Mock()
+        news_item = Mock()
+        news_item.model_dump_json.return_value = "{}"
+        router.get_china_futures_news.return_value = [news_item]
+        news_context = {
+            "sector": "energy",
+            "tradeability": "high",
+            "setup_type": "news_event_setup",
+            "setup_quality_ok": True,
+            "tradable_event": True,
+            "price_reaction_required": False,
+            "price_reaction_confirmed": True,
+            "event_regime": "supply_disruption",
+            "risk_flags": [],
+        }
+
+        def llm_call(*, prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return CommodityNewsAnalystOutput(
+                signal=Signal.BEARISH,
+                confidence=0.80,
+                setup_type="news_event_setup",
+                opportunity_type="event_driven",
+                opportunity_state="tradeable_candidate",
+                evidence_role="event_catalyst",
+                entry_timing_signal="event_immediate",
+                entry_trigger="current event and price reaction are confirmed",
+                trigger_valid=True,
+                trigger_quality_score=0.76,
+                event_type="supply_disruption",
+                invalidation_level=105.0,
+                position_invalidation_level=103.0,
+                exit_hint="current event structure fails above 103",
+            )
+
+        full_config = {"llm": {"provider": "test", "model": "test-model"}}
+        state = {
+            "ticker": "BU",
+            "trading_date": datetime(2025, 3, 26),
+            "market_type": "china_futures",
+            "pre_open_only": True,
+            "info_cutoff": "pre_open",
+            "config": full_config,
+            "full_config": full_config,
+            "llm_config": full_config["llm"],
+            "morning_price_context": SimpleNamespace(
+                base_price=100.0,
+                base_price_date="2025-03-25",
+            ),
+        }
+        with patch.object(commodity_news, "Router", return_value=router), patch.object(
+            commodity_news, "get_db", return_value=Mock()
+        ), patch.object(
+            commodity_news, "summarize_news_events", return_value=news_context
+        ), patch.object(
+            commodity_news, "format_news_summary_for_prompt", return_value=""
+        ), patch.object(
+            commodity_news,
+            "build_learning_context",
+            return_value={"text": "", "selected_ids": [], "memory_trace": {}},
+        ), patch.object(
+            commodity_news,
+            "build_news_data_usage",
+            return_value=build_test_data_usage("commodity_news", "BU"),
+        ), patch.object(
+            commodity_news, "agent_call", side_effect=llm_call
+        ), patch.object(commodity_news.logger, "log_signal"):
+            signal = commodity_news.commodity_news_agent(state)["analyst_signals"][0]
+
+        contract = signal.metadata["action_evidence_contract"]
+        self.assertIn("Current deterministic pre-open reference price is 100", captured["prompt"])
+        self.assertEqual(contract["entry_timing_signal"], "event_immediate")
+        self.assertEqual(contract["position_invalidation_level"], 103.0)
+        self.assertNotIn("position_invalidation_reference_price", contract)
 
     def test_fundamental_data_gap_forms_strict_scc_compatible_contract(self):
         signal = _build_no_fundamental_data_signal(

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from tools.common.execution_trigger_semantics import (
     is_canonical_entry_invalidation_condition,
+    normalize_execution_profile,
 )
 from tools.common.position_lifecycle import (
     is_new_or_increasing_exposure as _is_new_or_increasing_exposure,
@@ -26,48 +28,12 @@ def _signal_metadata(signal: Any) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
-def _specific_invalidation_text(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text or text in {"unknown", "none", "n/a", "null"}:
-        return False
-    generic = {
-        "exit/reduce if current confirmation fails",
-        "wait_for_trigger",
-        "primary driver and secondary confirmation align with acceptable reward/risk",
-    }
-    if text in generic:
-        return False
-    return any(
-        token in text
-        for token in (
-            "invalid",
-            "fails",
-            "failure",
-            "breaks",
-            "below",
-            "above",
-            "close",
-            "stop",
-            "exit",
-            "reduce",
-            "contradict",
-            "conflict",
-            "reverses",
-            "loses",
-            "price fails",
-            "volume fails",
-            "regime flips",
-            "basis",
-            "inventory",
-        )
-    )
-
-
 def _positive_number(value: Any) -> bool:
     if isinstance(value, bool) or value in (None, ""):
         return False
     try:
-        return float(value) > 0.0
+        number = float(value)
+        return math.isfinite(number) and number > 0.0
     except (TypeError, ValueError):
         return False
 
@@ -103,22 +69,35 @@ def _has_explicit_stop_protection(
     This deliberately excludes ``invalidation_level``.  That field belongs to
     the unfilled entry setup and can only cancel the same-day FAC before its
     first fill.  Position protection uses the separately landed position
-    boundary, ATR distance, exit condition, or declared holding horizon.
+    boundary or a deterministic technical ATR distance.  Free-text exit hints
+    and holding horizons are lifecycle context, not executable stop proof.
     """
     for signal in signals or []:
         metadata = _signal_metadata(signal)
         action_contract = metadata.get("action_evidence_contract")
         facts = action_contract if isinstance(action_contract, dict) else signal
         getter = facts.get if isinstance(facts, dict) else lambda key: getattr(facts, key, None)
+        analyst = str(
+            getter("analyst")
+            or getter("agent_name")
+            or getattr(signal, "agent_name", "")
+            or ""
+        ).strip().lower()
+        # ATR is a direction-neutral volatility fact, but only the formal
+        # technical evidence source may supply it.
+        if analyst == "technical" and _positive_number(getter("atr_stop_distance")):
+            return True
         if not _fact_matches_target_side(getter, target_side):
             continue
-        if _positive_number(getter("position_invalidation_level")):
-            return True
-        if _positive_number(getter("atr_stop_distance")):
-            return True
-        if _specific_invalidation_text(getter("exit_hint")):
-            return True
-        if _positive_number(getter("expected_horizon_days")):
+        position_level_source_allowed = analyst == "technical" or (
+            analyst == "commodity_news"
+            and normalize_execution_profile(
+                getter("entry_timing_signal") or getter("execution_profile")
+            ) == "event_immediate"
+        )
+        if position_level_source_allowed and _positive_number(
+            getter("position_invalidation_level")
+        ):
             return True
     return False
 

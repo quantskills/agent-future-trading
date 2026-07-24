@@ -24,6 +24,7 @@ from tools.common.final_action_semantics import (
     contract_final_learning_lifecycle,
     validate_action_preference_family_consistency,
 )
+from tools.common.execution_trigger_semantics import CANONICAL_ENTRY_TRIGGERS
 from tools.agent_tools.research import research_memory_writers
 
 
@@ -1453,7 +1454,11 @@ def _upsert_action_values(
         )
 
 
-def profile_prompt_line(profile: Mapping[str, Any]) -> str:
+def profile_prompt_line(
+    profile: Mapping[str, Any],
+    *,
+    include_entry_calibration: bool = True,
+) -> str:
     state = str(profile.get("lifecycle_state") or "candidate")
     hint = str(
         profile.get("profile_state_hint")
@@ -1462,23 +1467,24 @@ def profile_prompt_line(profile: Mapping[str, Any]) -> str:
     product_view = compact_product_learning_performance_key_for_analyst(profile)
     product_suffix = ""
     if product_view:
-        product_suffix = (
-            " Product learning: "
-            f"scope={product_view.get('performance_scope_key')}, "
-            f"trigger={product_view.get('trigger_key')}, "
-            f"evidence={product_view.get('evidence_combo')}, "
-            f"deployment={product_view.get('deployment_tier')}, "
-            f"historical_pm_rank={product_view.get('historical_pm_rank')}, "
-            f"historical_pm_score={_safe_float(product_view.get('historical_pm_score')):.2f}, "
-            f"net_pnl={_safe_float(product_view.get('historical_net_pnl')):.0f}. "
-            "This is historical evidence-calibration context only."
-        )
+        entry_view = product_view.get("entry_quality_calibration")
+        if include_entry_calibration and isinstance(entry_view, Mapping) and entry_view:
+            product_suffix = (
+                " Product learning: "
+                f"trigger={entry_view.get('trigger_key')}, "
+                f"entry_quality={entry_view.get('entry_quality_verdict')}, "
+                f"trigger_quality={entry_view.get('trigger_quality_verdict')}, "
+                f"confirmation={entry_view.get('trigger_confirmation_adjustment')}, "
+                f"support={_safe_float(entry_view.get('support_weight')):.2f}, "
+                f"penalty={_safe_float(entry_view.get('penalty_weight')):.2f}. "
+                "This is bounded historical entry calibration only."
+            )
     return (
         f"{profile.get('ticker')}/{profile.get('side')}/{profile.get('horizon_class')}/"
         f"{profile.get('market_regime')}: setup={profile.get('setup_type')}, "
         f"state={state}, profile_state_hint={hint}, n={_safe_int(profile.get('sample_count'))}, "
         f"wr={_safe_float(profile.get('win_rate')):.2f}, pf={_safe_float(profile.get('profit_factor')):.2f}, "
-        f"pnl={_safe_float(profile.get('net_pnl')):.0f}, max_impact={_safe_float(profile.get('max_position_impact')):.3f}. "
+        f"pnl={_safe_float(profile.get('net_pnl')):.0f}. "
         "Use as rebuttable profile-state prior only; it is not an action preference or trade command; "
         f"current evidence and invalidation are required.{product_suffix}"
     )
@@ -1505,13 +1511,34 @@ def analyst_signal_calibration_prompt_line(action_value: Mapping[str, Any]) -> s
     source_quality = str(signal_calibration.get("source_quality") or payload.get("amplification_scope_quality") or "unknown")
     sample_count = _safe_int(action_value.get("sample_count"))
     confidence = _safe_float(action_value.get("confidence_score"))
+    product_view = (
+        action_value.get("product_learning_calibration_view")
+        if isinstance(action_value.get("product_learning_calibration_view"), Mapping)
+        else {}
+    )
+    entry_view = (
+        product_view.get("entry_quality_calibration")
+        if isinstance(product_view.get("entry_quality_calibration"), Mapping)
+        else {}
+    )
+    entry_suffix = ""
+    if entry_view:
+        entry_suffix = (
+            f" entry_trigger_key={entry_view.get('trigger_key')}, "
+            f"entry_quality={entry_view.get('entry_quality_verdict')}, "
+            f"trigger_quality={entry_view.get('trigger_quality_verdict')}, "
+            f"confirmation={entry_view.get('trigger_confirmation_adjustment')}, "
+            f"support={_safe_float(entry_view.get('support_weight')):.2f}, "
+            f"penalty={_safe_float(entry_view.get('penalty_weight')):.2f}."
+        )
     return (
         f"{action_value.get('ticker')}/{action_value.get('side')}/"
         f"{action_value.get('horizon_class')}/{action_value.get('market_regime')}: "
         f"setup={action_value.get('setup_type')}, action={action_value.get('action_name')}, lane={lane}, "
         f"signal_calibration_bias={bias}, source_quality={source_quality}, n={sample_count}, "
         f"conf={confidence:.2f}, analyst_allowed={allowed or 'evidence_quality_calibration'}, "
-        f"analyst_forbidden={forbidden or 'trade_authority,lots,margin_ratio,direction_override'}. "
+        f"analyst_forbidden={forbidden or 'trade_authority,lots,margin_ratio,direction_override'}."
+        f"{entry_suffix} "
         "Analyst use only: calibrate evidence quality, setup reliability, and fresh-data questions; "
         "no trade authority/lots/margin/direction override; "
         "do not infer trade authority, lots, margin, target position, direction override, PM decision, or Trader execution."
@@ -1549,6 +1576,56 @@ def _product_learning_key_from_payload(value: Mapping[str, Any]) -> Mapping[str,
     return {}
 
 
+def _bounded_analyst_weight(value: Any) -> float:
+    return round(min(1.0, max(0.0, _safe_float(value))), 4)
+
+
+def _analyst_safe_trigger_key(value: Any) -> str:
+    token = _clean_token(value, "unknown_trigger")[:120]
+    canonical_tokens = {
+        _clean_token(trigger, "")[:120]
+        for trigger in CANONICAL_ENTRY_TRIGGERS
+    }
+    if token in canonical_tokens:
+        return token
+    # Unregistered numeric text may encode a historical absolute level, so it
+    # cannot cross the analyst-safe boundary.
+    if any(ch.isdigit() for ch in token):
+        return "unknown_trigger"
+    return token
+
+
+def _entry_quality_calibration_view(value: Mapping[str, Any]) -> Dict[str, Any]:
+    key = _product_learning_key_from_payload(value)
+    payload = value.get("payload") if isinstance(value.get("payload"), Mapping) else {}
+    outcome = key.get("entry_quality_outcome")
+    if not isinstance(outcome, Mapping):
+        outcome = payload.get("entry_quality_outcome")
+    if not isinstance(outcome, Mapping):
+        return {}
+    if outcome.get("contract_version") != "agentquant.entry_quality_outcome.v1":
+        return {}
+    return {
+        "contract_version": "agentquant.entry_quality_calibration_view.v1",
+        "trigger_key": _analyst_safe_trigger_key(
+            outcome.get("trigger_key") or key.get("trigger_key")
+        ),
+        "entry_quality_verdict": _clean_token(
+            outcome.get("entry_quality_verdict"), "entry_outcome_neutral"
+        ),
+        "trigger_quality_verdict": _clean_token(
+            outcome.get("trigger_quality_verdict"), "trigger_outcome_neutral"
+        ),
+        "trigger_confirmation_adjustment": _clean_token(
+            outcome.get("trigger_confirmation_adjustment"), "neutral"
+        ),
+        "support_weight": _bounded_analyst_weight(outcome.get("support_weight")),
+        "penalty_weight": _bounded_analyst_weight(outcome.get("penalty_weight")),
+        "not_trade_authority": True,
+        "future_only": True,
+    }
+
+
 def compact_product_learning_performance_key_for_analyst(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Return an analyst-safe view of the product learning performance key.
 
@@ -1560,43 +1637,45 @@ def compact_product_learning_performance_key_for_analyst(value: Mapping[str, Any
     key = _product_learning_key_from_payload(value)
     if not key:
         return {}
-    deployment = key.get("deployment_outcome") if isinstance(key.get("deployment_outcome"), Mapping) else {}
-    return {
+    view = {
         "contract_version": "agentquant.product_learning_calibration_view.v1",
         "source_contract_version": key.get("contract_version"),
-        "performance_scope_key": key.get("performance_scope_key"),
         "ticker": key.get("ticker"),
         "side": key.get("side"),
         "horizon_class": key.get("horizon_class"),
         "market_regime": key.get("market_regime"),
         "setup_type": key.get("setup_type"),
         "action_name": key.get("action_name"),
-        "trigger_key": key.get("trigger_key"),
+        "trigger_key": _analyst_safe_trigger_key(key.get("trigger_key")),
         "evidence_combo": key.get("evidence_combo"),
-        "opportunity_state": key.get("opportunity_state"),
-        "deployment_tier": deployment.get("deployment_tier"),
-        "historical_pm_rank": deployment.get("opportunity_rank"),
-        "historical_pm_score": deployment.get("opportunity_score"),
-        "historical_selected_for_capital_deployment": bool(
-            deployment.get("selected_for_capital_deployment")
-        ),
-        "historical_net_pnl": key.get("net_pnl"),
         "outcome_label": key.get("outcome_label"),
         "reward_source": key.get("reward_source"),
         "not_trade_authority": True,
         "future_only": True,
         "analyst_usage_boundary": (
-            "product_performance_evidence_calibration_only_no_trade_authority_no_lots_no_margin"
+            "entry_evidence_calibration_only_no_trade_authority_no_lots_no_margin_no_pm_rank"
         ),
     }
+    entry_quality = _entry_quality_calibration_view(value)
+    if entry_quality:
+        view["entry_quality_calibration"] = entry_quality
+    return view
 
 
-def compact_profile_for_trace(profile: Mapping[str, Any]) -> Dict[str, Any]:
+def compact_profile_for_trace(
+    profile: Mapping[str, Any],
+    *,
+    include_entry_calibration: bool = True,
+) -> Dict[str, Any]:
     profile_state_hint = (
         profile.get("profile_state_hint")
         or "profile_observe"
     )
     product_view = compact_product_learning_performance_key_for_analyst(profile)
+    if product_view and not include_entry_calibration:
+        product_view = dict(product_view)
+        product_view.pop("entry_quality_calibration", None)
+        product_view.pop("trigger_key", None)
     return {
         "scope_key": profile.get("scope_key"),
         "ticker": profile.get("ticker"),
@@ -1628,7 +1707,6 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
     analyst_signal_calibration = _analyst_signal_calibration_view(signal_calibration)
     product_view = compact_product_learning_performance_key_for_analyst(action_value)
     return {
-        "scope_key": action_value.get("scope_key"),
         "ticker": action_value.get("ticker"),
         "side": action_value.get("side"),
         "horizon_class": action_value.get("horizon_class"),
@@ -1638,7 +1716,6 @@ def compact_action_value_for_analyst_trace(action_value: Mapping[str, Any]) -> D
         "action_name": action_value.get("action_name"),
         "sample_count": action_value.get("sample_count"),
         "confidence_score": action_value.get("confidence_score"),
-        "max_position_impact": action_value.get("max_position_impact"),
         "valid_until": action_value.get("valid_until"),
         "research_output_contract_version": payload.get("research_output_contract_version"),
         "action_value_lane": (
