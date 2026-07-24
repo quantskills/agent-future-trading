@@ -2589,6 +2589,36 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             "tail_loss_reward_threshold": -1000.0,
         }
 
+    def test_candidate_quality_does_not_recount_setup_learning_or_conflict(self):
+        row = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[self._tradeable_signal()],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[
+                self._action_value(
+                    action_preference="positive_candidate_open",
+                    lane="open",
+                    reward_mean=1600.0,
+                    reward_sum=6400.0,
+                )
+            ],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]
+
+        components = row["candidate_quality_components"]
+        self.assertEqual(
+            set(components),
+            {"opportunity_score", "trigger_quality", "invalidation_quality"},
+        )
+        self.assertAlmostEqual(components["trigger_quality"], 0.04)
+        self.assertAlmostEqual(components["invalidation_quality"], 0.04)
+        self.assertAlmostEqual(
+            row["candidate_quality"],
+            min(1.0, row["opportunity_score"] + 0.08),
+        )
+
     def test_episode_action_values_move_scorecard_rank_without_product_blacklist(self):
         signal = self._tradeable_signal()
         positive = build_opportunity_scorecard(
@@ -11706,7 +11736,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             "margin_rate": 0.10,
             "account_equity": 5_000_000.0,
             "margin_available": 1_000_000.0,
-            "max_position_ratio": 0.15,
             "max_net_exposure": 0.50,
             "current_net_exposure": 0.0,
             "current_ticker_exposure": 0.0,
@@ -11759,8 +11788,8 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             control_diagnostics=probe_diag,
         )
 
-        self.assertGreater(abs(real_result[0]), 0)
-        self.assertGreater(abs(probe_result[0]), 0)
+        self.assertEqual(abs(real_result[0]), 45)
+        self.assertEqual(abs(probe_result[0]), 12)
         self.assertLessEqual(probe_result[2], 5_000_000.0 * 0.015)
         self.assertIn("minimum_real_trade_margin_floor_applied", real_reasons)
         self.assertIn("exploration_probe_probe_floor_applied", probe_reasons)
@@ -11784,7 +11813,6 @@ class PMExpectancyTradeQualificationRegressionTest(unittest.TestCase):
             margin_rate=0.10,
             account_equity=1_000_000.0,
             margin_available=0.0,
-            max_position_ratio=0.50,
             max_net_exposure=0.50,
             current_net_exposure=0.50,
             current_ticker_exposure=0.50,
@@ -13153,6 +13181,30 @@ class HoldingLifecycleRegressionTest(unittest.TestCase):
 
         self.assertTrue(preserved)
         self.assertEqual(target_lots, 1)
+
+    def test_multi_lot_hold_ratio_is_not_repriced_into_a_reduce(self):
+        target_lots, preserved = _preserve_existing_lot_when_hold_ratio_survives(
+            target_lots=-16,
+            current_lots=-17,
+            target_ratio=-0.1210,
+            current_ratio=-0.1210,
+            control_reasons=["holding_lifecycle_not_invalidated"],
+        )
+
+        self.assertTrue(preserved)
+        self.assertEqual(target_lots, -17)
+
+    def test_true_reduce_ratio_is_not_preserved_as_hold(self):
+        target_lots, preserved = _preserve_existing_lot_when_hold_ratio_survives(
+            target_lots=-8,
+            current_lots=-17,
+            target_ratio=-0.0605,
+            current_ratio=-0.1210,
+            control_reasons=["holding_lifecycle_not_invalidated"],
+        )
+
+        self.assertFalse(preserved)
+        self.assertEqual(target_lots, -8)
 
     def test_profitable_supported_hold_blocks_weak_reversal_but_not_strong_reversal(self):
         position = SimpleNamespace(
@@ -14946,7 +14998,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         self.assertTrue(cfg["portfolio_manager"]["holding_rebalance_control"]["enabled"])
         self.assertTrue(cfg["pm_risk_gate"]["enabled"])
         self.assertTrue(cfg["trade_frequency_control"]["enabled"])
-        self.assertTrue(cfg["ticker_performance_control"]["enabled"])
+        self.assertNotIn("ticker_performance_control", cfg)
         self.assertTrue(cfg["ticker_loss_control"]["enabled"])
         self.assertTrue(cfg["dynamic_weights"]["enabled"])
         self.assertEqual(
@@ -14957,10 +15009,7 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
             cfg["_config_parameter_roles"]["trade_frequency_control"],
             "portfolio_policy_catalog_runtime_expanded",
         )
-        self.assertEqual(
-            cfg["_config_parameter_roles"]["ticker_performance_control"],
-            "portfolio_policy_catalog_runtime_expanded",
-        )
+        self.assertNotIn("ticker_performance_control", cfg["_config_parameter_roles"])
         self.assertEqual(
             cfg["_config_parameter_roles"]["ticker_loss_control"],
             "portfolio_policy_catalog_runtime_expanded",
@@ -14998,7 +15047,6 @@ class SettlementAccountingRegressionTest(unittest.TestCase):
         for moved_key in (
             "pm_risk_gate",
             "trade_frequency_control",
-            "ticker_performance_control",
             "ticker_loss_control",
             "dynamic_weights",
         ):

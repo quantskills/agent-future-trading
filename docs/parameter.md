@@ -63,9 +63,11 @@ rank_score =
 - 从空仓建立非零仓位，以及同方向且 `abs(target_lots)>abs(current_lots)` 的 `add/scale` 进入 1-N 排名；`wait/hold/reduce/exit`、当前反转退出腿和不增加风险的条件监控没有 rank。
 - 固定按唯一 `rank_score` 降序、再按标准化 `ticker` 排出 1-N；资金层、证据、学习、trigger、资金效率和风险已经各自进入总分一次，不再形成第二套排序。
 - `rank=1` 只表示最值得占用资金，不自动升仓。
+- `candidate_quality` 由唯一scorecard按 `opportunity_score + 0.04*trigger_valid + 0.04*invalidation_present` 计算并限制在 `[0,1]`；setup、学习/profile和冲突已经进入 `opportunity_score`，不得再次叠加。该限制只服务Step4比例，不适用于可为负的rank。
 - Step4 按最终 `candidate_quality` 在现有区间内连续形成计划比例：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`。
 - 正式 canonical open/add 正向学习与完整当日证据共同成立时才允许由 probe 升为 real；成熟重复正收益、强确认、失效边界完整且没有中期基本面反向时才允许进入 scale。
 - Step5 不升层、不重算 `candidate_quality`，只用唯一 rank 顺序消费预算。
+- Step4层内保证金比例是唯一软仓位计划；旧 `ticker_performance_control` 不再作为运行参数。`risk_control.max_single_position_ratio`只保留为Step4前名义风险锚，Step4后只能由可用保证金、单品种/总保证金硬线、净敞口、最小手数和手数取整收缩。
 - 资金按 rank 顺序逐个占用 PM 计划预算；触及总保证金硬边界、单品种签约/部署约束或净敞口计划预算后，后续候选还原为 wait/hold，并写入 `no_rank_or_budget_no_new_exposure`。
 
 ## 30 个交易日后复核

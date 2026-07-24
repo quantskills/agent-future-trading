@@ -109,19 +109,6 @@ trade_frequency_control:
   churn_total_pnl_below: -1000
   churn_cap_multiplier: 0.55
 
-ticker_performance_control:
-  # 品种近期表现保护：调低基础 sizing anchor，不是单品种硬上限。
-  enabled: true
-  lookback_days: 20
-  min_trade_days: 3
-  soft_avg_pnl_below: -300
-  soft_cap_multiplier: 0.50
-  severe_avg_pnl_below: -800
-  severe_win_rate_below: 0.35
-  severe_anchor_ratio: 0.03
-  recovery_avg_pnl_above: 200
-  recovery_cap_multiplier: 1.10
-
 ticker_loss_control:
   # 防止单个品种短窗口连续拖累组合。连续亏损只产生同作用域软风险标签，
   # 不写品种黑名单；有更强当日确认和有效失效边界时仍可进入受控 probe。

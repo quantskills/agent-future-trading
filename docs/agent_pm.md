@@ -112,6 +112,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 - `authority_type`
 - `execution_profile`
 - `trigger_source`
+- `trigger_confirmation_adjustment`
 - `entry_trigger`
 - `invalidation`
 - `invalidation_level`
@@ -185,7 +186,7 @@ PM 不直接读取行情原始序列、基本面原始数据、新闻原文作�
 
 最终动作和持仓变化：只由 `final_action`、`current_lots`、`target_lots`、`lots_delta` 表达；生命周期由共享 `final_action_semantics` 和 `pm_lifecycle_learning_trace` 解释，不新增顶层生命周期字段。
 
-执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。前五项必须来自同一被选 technical/event AEC；`invalidation`和`invalidation_level`只在首次成交前作废当前FAC。合法 watch 获选后固定为条件执行；当前触发已确认且入场作废边界完整的候选可形成直执行权限，该字段不改变rank、预算或sizing。
+执行触发条件：只使用矩阵登记的 `execution_profile`、`trigger_source`、`trigger_confirmation_adjustment`、`entry_trigger`、`invalidation`、`invalidation_level`、`valid_until`、`requires_intraday_confirmation`、`can_execute_without_intraday_trigger` 和 `conditional_trigger_authority`。profile、source、trigger 和入场作废边界必须来自同一被选 technical/event AEC；`trigger_confirmation_adjustment`只可来自结构化 weak-conflict 权限或同品种、同方向、同 setup、同 canonical trigger 的正式 canonical open/add 学习，不得解析 reason 文本。`invalidation`和`invalidation_level`只在首次成交前作废当前FAC。合法 watch 获选后固定为条件执行；当前触发已确认且入场作废边界完整的候选可形成直执行权限，该字段不改变rank、预算或sizing。
 
 新增风险的执行事实只允许来自 SCC 重建的三份已校验 AEC。PM Step6 必须先按执行职责过滤，再比较同类合法证据的置信度：普通15分钟条件或直执行只选最终 `target_side` 下的 technical `entry_timing`；`event_immediate` 只选当前事件已满足即时边界的 commodity_news `event_catalyst`；fundamental 固定为 `direction_context`，只能支持方向和评分，不能成为 Trader 执行来源。反方向、`no_opportunity` 和 `risk_reduction_candidate` 不得入选。
 
@@ -890,9 +891,13 @@ PM 先保留学习修正前的候选质量，再只用当前生命周期允许�
 
 本步可以更新 `candidate_quality`、`candidate_layer_hint` 和内部生命周期意图，但不得改写原始 `opportunity_state`，也不生成最终动作。候选状态发生变化后，后续步骤继续读取同一个对象。
 
-Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`，随后继续服从手数取整、保证金、单品种、净敞口和账户硬上限。Step4 不读取或等待尚未生成的 `opportunity_rank`。
+`candidate_quality` 只由唯一最终 scorecard 计算一次：`opportunity_score + trigger_valid完整性加分 + invalidation_present完整性加分`，再按候选比例语义限制在 `[0,1]`。`opportunity_score` 已经包含 setup、正式学习、profile 和冲突事实，Step2及后续控制不得再次加入这些原始分量或重算 `candidate_quality`。这里的 `[0,1]` 只服务 Step4 层内比例，不改变 Step5 保持有符号且可为负的 `rank_score`。
+
+Step4 还必须在 Step5 之前确定新增风险候选的最终资金层和层内计划比例。冷启动或未验证机会保持 `exploration_probe`；正式 canonical open/add 正向学习只有与当日完整证据、technical 触发和失效边界同时成立时才可升为 `real_budget_entry`，中期基本面明确反向时仍只能保留 probe；成熟重复正收益、强确认、失效边界和合格同向基本面支持同时成立时才可升为 `alpha_scale_entry`。计划保证金比例由最终 `candidate_quality` 在现有区间内连续映射：probe `0.008-0.015`、real `0.030-0.060`、scale `0.060-0.120`、exceptional `0.075-0.130`。这是新增风险仓位的唯一软计划；Step4输出后只允许可用保证金、单品种保证金硬线、总保证金硬线、净敞口、市场最小手数和手数取整收缩，不得再用日盈亏或名义仓位软比例二次改写。`risk_control.max_single_position_ratio`保留为Step4前的名义风险锚，不是Step4后的第二资金所有者。Step4 不读取或等待尚未生成的 `opportunity_rank`。
 
 现有持仓通过真实 transaction 的 `recommendation_id` 追溯原开仓 FAC，并按已结算交易日计算持有天数。没有新的入场 trigger 只表示不增加风险，不等于持仓失效；PM只读取原 FAC 的 `position_invalidation_level`、原始ATR14、期限和持仓依据，绝不复用入场`invalidation_level`。结构位在开仓FAC组装时按盘前参考价校验，次日消费时再按真实开仓成交价校验；合法结构位与`开仓价±ATR×当前真实命中的default/sector倍数`分别计算后取OR，任一触发均形成唯一exit。明确技术反转形成exit，基本面中期反向按既有规则形成reduce，期限到达只用当日技术与基本面强制复评，不自动退出；其余保持既有hold/生命周期判断。现有template/setup ATR覆盖只有setup键精确匹配时才生效，不宣称普遍命中。
+
+当最终生命周期结论为 hold、目标比例与当前比例相同且没有硬风险或真实 reduce/exit 覆盖时，PM直接保留 `current_lots`。不得把旧价格下的持仓比例按新价格重新换算并向零取整，从而制造没有策略依据的减仓。
 
 #### 4.8 状态更新
 
@@ -1181,7 +1186,7 @@ one_lot_margin = base_price * contract_multiplier * margin_rate
 max_lots_by_budget = floor(allocated_margin / one_lot_margin)
 ```
 
-PM 再依次施加可用保证金、单品种上限、组合保证金上限、净敞口上限、最大仓位比例、风险等级、回撤、冷却和最小真实交易预算约束，形成矩阵登记的 `position_sizing_result`。该对象记录 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由，不新增 sizing 子字段。
+PM 再依次施加可用保证金、单品种保证金硬上限、组合保证金硬上限、净敞口上限、风险等级、回撤、冷却和最小真实交易预算约束，形成矩阵登记的 `position_sizing_result`。Step4前使用的名义仓位锚和已删除的品种日盈亏软控制不得在这里成为第二套仓位上限。该对象记录 `current_lots`、`target_lots`、`lots_delta`、资金占用、风险约束和计算理由，不新增 sizing 子字段。
 
 不足一手时不得为了“必须交易”而向上取整。`reverse` 必须先计算原持仓释放，再只对反向新增风险部分占用预算，不能把平旧仓和开新仓的保证金重复计算。
 

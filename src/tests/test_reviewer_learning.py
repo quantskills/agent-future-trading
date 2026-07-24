@@ -46,6 +46,9 @@ from tools.agent_tools.analysis.analyst_learning_context import (
     build_learning_context,
     clear_learning_context_cache,
 )
+from tools.agent_tools.analysis.analyst_learning_calibration import (
+    calibrate_signal_with_learning_context,
+)
 from tools.agent_tools.analysis.analyst_technical_parameter_calibration import apply_technical_parameter_calibration
 from tools.common.learning_contract import CONTRACT_KEY
 from tools.common.neutral_accountability import (
@@ -289,6 +292,34 @@ class _ActionValueLearningDB(_FakeLearningDB):
         raise AssertionError("analyst learning context must not read similar trade-decision action-values")
 
 
+class _RegimeAwareActionValueLearningDB(_ActionValueLearningDB):
+    def __init__(self, action_values=None):
+        super().__init__(action_values)
+        self.action_value_calls = []
+
+    def get_alpha_setup_action_values(self, **kwargs):
+        self.action_value_calls.append(dict(kwargs))
+        rows = list(self.action_values)
+        market_regime = str(kwargs.get("market_regime") or "*")
+        if market_regime != "*":
+            rows = [
+                row
+                for row in rows
+                if str(row.get("market_regime") or "") in {market_regime, "*"}
+            ]
+        side = str(kwargs.get("side") or "*")
+        if side != "*":
+            rows = [row for row in rows if str(row.get("side") or "") in {side, "*"}]
+        horizon = str(kwargs.get("horizon_class") or "*")
+        if horizon != "*":
+            rows = [
+                row
+                for row in rows
+                if str(row.get("horizon_class") or "") in {horizon, "*"}
+            ]
+        return rows[: int(kwargs.get("limit") or len(rows))]
+
+
 def _formal_analyst_action_value(
     row_id,
     *,
@@ -378,6 +409,47 @@ def _formal_analyst_action_value(
         "valid_until": "2025-04-30",
         "payload": payload,
     }
+
+
+def _rescope_formal_analyst_action_value(
+    row_id,
+    *,
+    ticker="BU",
+    side="short",
+    horizon_class="short",
+    market_regime="high_volatility_bearish_trend",
+    last_sample_date="2025-03-26",
+):
+    row = _formal_analyst_action_value(
+        row_id,
+        ticker=ticker,
+        last_sample_date=last_sample_date,
+    )
+    row.update(
+        {
+            "scope_key": (
+                f"{ticker}|{side}|{horizon_class}|{market_regime}|"
+                "trend_breakout_setup|technical"
+            ),
+            "side": side,
+            "horizon_class": horizon_class,
+            "market_regime": market_regime,
+        }
+    )
+    product_key = row["payload"]["product_learning_performance_key"]
+    product_key.update(
+        {
+            "performance_scope_key": (
+                f"{ticker}|{side}|trend_breakout_setup|opening_range_breakdown|"
+                "technical|capital_deployed"
+            ),
+            "ticker": ticker,
+            "side": side,
+            "horizon_class": horizon_class,
+            "market_regime": market_regime,
+        }
+    )
+    return row
 
 
 class _ProductLearningProfileDB(_FakeLearningDB):
@@ -791,6 +863,191 @@ class ReviewerLearningContextTest(unittest.TestCase):
             self.assertEqual(entry_view["support_weight"], 1.0)
             self.assertEqual(entry_view["penalty_weight"], 0.0)
             self.assertEqual(entry_view["trigger_key"], "unknown_trigger")
+
+    def test_learning_context_prefers_exact_regime_before_cross_regime_fallback(self):
+        exact = _rescope_formal_analyst_action_value(
+            "av-exact-regime",
+            market_regime="bearish_trend",
+        )
+        cross_regime = _rescope_formal_analyst_action_value(
+            "av-cross-regime",
+            market_regime="high_volatility_bearish_trend",
+        )
+        db = _RegimeAwareActionValueLearningDB([exact, cross_regime])
+        context = build_learning_context(
+            db=db,
+            full_config={
+                "learning": {"enabled": True},
+                "learning_context": {
+                    "enabled": True,
+                    "max_items_per_prompt": 5,
+                    "max_chars_per_prompt": 1800,
+                    "exploratory_memory": {
+                        "enabled": True,
+                        "alpha_setup_profile": {
+                            "enabled": True,
+                            "max_action_value_items": 3,
+                            "max_action_value_chars": 1200,
+                        },
+                    },
+                },
+            },
+            config_id="cfg",
+            trading_date="2025-03-28",
+            analyst="technical",
+            ticker="BU",
+            context={
+                "sector": "energy",
+                "market_regime": "bearish_trend",
+                "dominant_direction": "bearish",
+            },
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(db.action_value_calls), 1)
+        self.assertEqual(len(context["analyst_calibration_items"]), 1)
+        self.assertEqual(
+            context["analyst_calibration_items"][0]["market_regime"],
+            "bearish_trend",
+        )
+        self.assertNotIn(
+            "retrieval_match_level",
+            context["analyst_calibration_items"][0],
+        )
+        self.assertNotIn("cross-regime same-ticker/side/horizon", context["text"])
+
+    def test_learning_context_cross_regime_fallback_is_safe_and_low_weight(self):
+        eligible = _rescope_formal_analyst_action_value(
+            "av-cross-regime-eligible",
+            market_regime="high_volatility_bearish_trend",
+        )
+        wrong_side = _rescope_formal_analyst_action_value(
+            "av-cross-regime-wrong-side",
+            side="long",
+            market_regime="high_volatility_bearish_trend",
+        )
+        wrong_side_exact_regime = _rescope_formal_analyst_action_value(
+            "av-exact-regime-wrong-side",
+            side="long",
+            market_regime="bearish_trend",
+        )
+        wrong_horizon = _rescope_formal_analyst_action_value(
+            "av-cross-regime-wrong-horizon",
+            horizon_class="medium",
+            market_regime="high_volatility_bearish_trend",
+        )
+        not_past = _rescope_formal_analyst_action_value(
+            "av-cross-regime-not-past",
+            market_regime="high_volatility_bearish_trend",
+            last_sample_date="2025-03-28",
+        )
+        missing_scope = _rescope_formal_analyst_action_value(
+            "av-cross-regime-missing-scope",
+            market_regime="high_volatility_bearish_trend",
+        )
+        missing_scope["consumer_scope"] = ""
+        db = _RegimeAwareActionValueLearningDB(
+            [
+                eligible,
+                wrong_side,
+                wrong_side_exact_regime,
+                wrong_horizon,
+                not_past,
+                missing_scope,
+            ]
+        )
+        config = {
+            "learning": {"enabled": True},
+            "learning_context": {
+                "enabled": True,
+                "max_items_per_prompt": 5,
+                "max_chars_per_prompt": 1800,
+                "exploratory_memory": {
+                    "enabled": True,
+                    "alpha_setup_profile": {
+                        "enabled": True,
+                        "max_action_value_items": 3,
+                        "max_action_value_chars": 1200,
+                    },
+                },
+            },
+        }
+        context = build_learning_context(
+            db=db,
+            full_config=config,
+            config_id="cfg",
+            trading_date="2025-03-28",
+            analyst="technical",
+            ticker="BU",
+            context={
+                "sector": "energy",
+                "market_regime": "bearish_trend",
+                "dominant_direction": "bearish",
+            },
+            horizon_class="short",
+        )
+
+        self.assertEqual(len(db.action_value_calls), 2)
+        self.assertEqual(db.action_value_calls[1]["ticker"], "BU")
+        self.assertEqual(db.action_value_calls[1]["side"], "short")
+        self.assertEqual(db.action_value_calls[1]["horizon_class"], "short")
+        self.assertEqual(db.action_value_calls[1]["market_regime"], "*")
+        self.assertEqual(len(context["analyst_calibration_items"]), 1)
+        item = context["analyst_calibration_items"][0]
+        self.assertEqual(
+            item["retrieval_match_level"],
+            "cross_regime_same_ticker_side_horizon",
+        )
+        self.assertIn("cross-regime same-ticker/side/horizon", context["text"])
+        self.assertIn("low-weight analyst calibration only", context["text"])
+        for row_id in (
+            "av-cross-regime-eligible",
+            "av-cross-regime-wrong-side",
+            "av-exact-regime-wrong-side",
+            "av-cross-regime-wrong-horizon",
+            "av-cross-regime-not-past",
+            "av-cross-regime-missing-scope",
+        ):
+            self.assertNotIn(row_id, context["text"])
+
+        fallback_signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.50,
+            business_quality_score=0.50,
+            factor_alignment_score=0.50,
+            horizon_class="short",
+        )
+        fallback_calibrated = calibrate_signal_with_learning_context(
+            fallback_signal,
+            analyst="technical",
+            ticker="BU",
+            learning_context=context,
+        )
+        exact_item = dict(item)
+        exact_item.pop("retrieval_match_level", None)
+        exact_signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BEARISH,
+            confidence=0.50,
+            business_quality_score=0.50,
+            factor_alignment_score=0.50,
+            horizon_class="short",
+        )
+        exact_calibrated = calibrate_signal_with_learning_context(
+            exact_signal,
+            analyst="technical",
+            ticker="BU",
+            learning_context={"analyst_calibration_items": [exact_item]},
+        )
+        fallback_strength = fallback_calibrated.metadata[
+            "analyst_learning_calibration"
+        ]["positive_strength"]
+        exact_strength = exact_calibrated.metadata[
+            "analyst_learning_calibration"
+        ]["positive_strength"]
+        self.assertGreater(fallback_strength, 0.0)
+        self.assertLess(fallback_strength, exact_strength)
 
     def test_learning_context_preserves_registered_trigger_without_exposing_entry_to_fundamental(self):
         row = _formal_analyst_action_value("av-canonical-trigger")

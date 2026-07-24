@@ -10,6 +10,8 @@ from tools.common.execution_trigger_semantics import (
     entry_invalidation_contract_error,
     execution_trigger_contract_error,
     normalize_execution_profile,
+    normalize_trigger_confirmation_adjustment,
+    requires_stronger_trigger_confirmation,
 )
 
 
@@ -179,11 +181,17 @@ def select_intraday_execution(
         else "flat"
     )
     entry_action = action_value in _OPEN_ACTIONS
+    trigger_confirmation_adjustment = normalize_trigger_confirmation_adjustment(
+        execution_contract.get("trigger_confirmation_adjustment")
+    )
     contract_error = execution_trigger_contract_error(
         profile=execution_profile,
         side=execution_side,
         entry_trigger=execution_contract.get("entry_trigger"),
         trigger_source=execution_contract.get("trigger_source"),
+        trigger_confirmation_adjustment=execution_contract.get(
+            "trigger_confirmation_adjustment"
+        ),
     )
     if contract_error:
         return IntradayExecutionSelection(
@@ -371,7 +379,7 @@ def select_intraday_execution(
 
     long_expansion_seen = False
     short_expansion_seen = False
-    for signal_bar in signal_bars_for_trigger:
+    for signal_index, signal_bar in enumerate(signal_bars_for_trigger):
         if signal_bar["dt"] > valid_until:
             return _entry_non_execution_selection(
                 reason="fac_expired_before_entry",
@@ -414,14 +422,20 @@ def select_intraday_execution(
             and signal_close < vwap_value
             and signal_close < opening_range["low"]
         )
-        long_reclaimed_boundary = bool(
-            (signal_low <= opening_range["high"] and signal_close > opening_range["high"])
-            or (signal_low <= vwap_value and signal_close > vwap_value)
+        long_reclaimed_opening = bool(
+            signal_low <= opening_range["high"] and signal_close > opening_range["high"]
         )
-        short_reclaimed_boundary = bool(
-            (signal_high >= opening_range["low"] and signal_close < opening_range["low"])
-            or (signal_high >= vwap_value and signal_close < vwap_value)
+        long_reclaimed_vwap = bool(
+            signal_low <= vwap_value and signal_close > vwap_value
         )
+        short_reclaimed_opening = bool(
+            signal_high >= opening_range["low"] and signal_close < opening_range["low"]
+        )
+        short_reclaimed_vwap = bool(
+            signal_high >= vwap_value and signal_close < vwap_value
+        )
+        long_reclaimed_boundary = bool(long_reclaimed_opening or long_reclaimed_vwap)
+        short_reclaimed_boundary = bool(short_reclaimed_opening or short_reclaimed_vwap)
         long_pullback = (
             execution_profile == "pullback"
             and action_value in _BUY_LIKE_ACTIONS
@@ -462,12 +476,105 @@ def select_intraday_execution(
             )
             continue
 
+        initial_trigger_bar = signal_bar
+        confirmed_signal_bar = signal_bar
+        if requires_stronger_trigger_confirmation(trigger_confirmation_adjustment):
+            next_index = signal_index + 1
+            if next_index >= len(signal_bars_for_trigger):
+                return IntradayExecutionSelection(
+                    decision="skip" if finalize_untriggered else "wait",
+                    reason=(
+                        "intraday_trigger_not_met"
+                        if finalize_untriggered
+                        else "intraday_waiting_for_trigger"
+                    ),
+                    features={
+                        "execution_profile": execution_profile,
+                        "execution_contract": execution_contract,
+                        "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
+                        "initial_trigger_datetime": signal_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "waiting_for_follow_through": True,
+                    },
+                )
+            follow_bar = signal_bars_for_trigger[next_index]
+            if follow_bar["dt"] > valid_until:
+                return _entry_non_execution_selection(
+                    reason="fac_expired_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=follow_bar,
+                )
+            if (
+                first_invalidation_bar is not None
+                and first_invalidation_bar["dt"] <= follow_bar["dt"]
+            ):
+                return _entry_non_execution_selection(
+                    reason="fac_invalidated_before_entry",
+                    execution_profile=execution_profile,
+                    execution_contract=execution_contract,
+                    observed_bar=first_invalidation_bar,
+                )
+            follow_exec_bars = [
+                bar for bar in normalized_execution_bars if bar["dt"] <= follow_bar["dt"]
+            ]
+            follow_vwap = _vwap(follow_exec_bars) if follow_exec_bars else None
+            follow_close = _float(follow_bar.get("close"))
+            follow_through = False
+            if follow_close is not None and follow_vwap is not None:
+                if execution_profile == "breakout":
+                    follow_through = bool(
+                        (long_trigger and follow_close > opening_range["high"] and follow_close > follow_vwap)
+                        or (short_trigger and follow_close < opening_range["low"] and follow_close < follow_vwap)
+                    )
+                elif execution_profile == "vwap_confirmed":
+                    follow_through = bool(
+                        (long_trigger and follow_close > follow_vwap)
+                        or (short_trigger and follow_close < follow_vwap)
+                    )
+                elif long_trigger:
+                    required_checks = []
+                    if long_reclaimed_opening:
+                        required_checks.append(follow_close > opening_range["high"])
+                    if long_reclaimed_vwap:
+                        required_checks.append(follow_close > follow_vwap)
+                    follow_through = bool(required_checks and all(required_checks))
+                elif short_trigger:
+                    required_checks = []
+                    if short_reclaimed_opening:
+                        required_checks.append(follow_close < opening_range["low"])
+                    if short_reclaimed_vwap:
+                        required_checks.append(follow_close < follow_vwap)
+                    follow_through = bool(required_checks and all(required_checks))
+            if not follow_through:
+                continue
+            confirmed_signal_bar = follow_bar
+            signal_close = follow_close
+            vwap_value = follow_vwap
+
         execution_bar = _next_execution_bar(
             normalized_execution_bars,
-            after_dt=signal_bar["dt"],
+            after_dt=confirmed_signal_bar["dt"],
             min_volume=min_volume,
         )
         if execution_bar is None:
+            if requires_stronger_trigger_confirmation(trigger_confirmation_adjustment):
+                return IntradayExecutionSelection(
+                    decision="skip" if finalize_untriggered else "wait",
+                    reason=(
+                        "intraday_trigger_not_met"
+                        if finalize_untriggered
+                        else "intraday_waiting_for_trigger"
+                    ),
+                    signal_datetime=confirmed_signal_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+                    features={
+                        "execution_profile": execution_profile,
+                        "execution_contract": execution_contract,
+                        "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
+                        "initial_trigger_datetime": initial_trigger_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "follow_through_datetime": confirmed_signal_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "waiting_for_execution_bar": True,
+                    },
+                )
             continue
         if execution_bar["dt"] > valid_until:
             return _entry_non_execution_selection(
@@ -478,7 +585,7 @@ def select_intraday_execution(
             )
         invalidation_before_fill = _entry_invalidation_before_fill(
             normalized_execution_bars,
-            trigger_dt=signal_bar["dt"],
+            trigger_dt=confirmed_signal_bar["dt"],
             execution_bar=execution_bar,
             side=execution_side,
             invalidation_level=invalidation_level,
@@ -515,7 +622,7 @@ def select_intraday_execution(
         return _execution_selection(
             reason=trigger_reason,
             execution_bar=execution_bar,
-            signal_bar=signal_bar,
+            signal_bar=confirmed_signal_bar,
             features={
                 "execution_mode": execution_mode,
                 "execution_profile": execution_profile,
@@ -529,6 +636,8 @@ def select_intraday_execution(
                 "eligible_signal_bars": len(signal_bars_for_trigger),
                 "execution_bars": len(normalized_execution_bars),
                 "chase_check": chase_check,
+                "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
+                "initial_trigger_datetime": initial_trigger_bar["dt"].strftime("%Y-%m-%d %H:%M:%S"),
             },
             source=BasePriceSource.INTRADAY_NEXT_1M_OPEN,
         )

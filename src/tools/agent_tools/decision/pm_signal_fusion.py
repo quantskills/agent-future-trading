@@ -680,16 +680,6 @@ def _capital_allocation_reason(*, row: Mapping[str, Any], deployable_threshold: 
     return "ranked_candidate_requires_pm_final_contract_authority"
 
 
-def _count_items(value: Any) -> int:
-    if isinstance(value, list):
-        return len([item for item in value if item])
-    if isinstance(value, Mapping):
-        return len(value)
-    if value in (None, "", False):
-        return 0
-    return 1
-
-
 def _candidate_layer_hint(final_state: str) -> str:
     state = str(final_state or "").strip().lower()
     if state == "tradeable_candidate":
@@ -704,32 +694,15 @@ def _candidate_layer_hint(final_state: str) -> str:
 def _candidate_quality_components(
     *,
     opportunity_score: float,
-    score_components: Mapping[str, Any],
-    gating_failures: Iterable[Any],
-    setup_quality: float,
     trigger_valid: bool,
     invalidation_count: int,
 ) -> dict[str, float]:
-    components = score_components if isinstance(score_components, Mapping) else {}
     trigger_quality = 0.04 if trigger_valid else 0.0
     invalidation_quality = 0.04 if invalidation_count > 0 else 0.0
-    product_profile_support = (
-        _safe_float(components.get("product_profile_alignment"), 0.0)
-        + _safe_float(components.get("alpha_profile_adjustment"), 0.0)
-        + _safe_float(components.get("positive_learning"), 0.0)
-    )
-    conflict_penalty = (
-        abs(min(0.0, _safe_float(components.get("fusion_score_adjustment"), 0.0)))
-        + abs(min(0.0, _safe_float(components.get("negative_learning"), 0.0)))
-        + 0.02 * _count_items(list(gating_failures or []))
-    )
     return {
         "opportunity_score": round(_safe_float(opportunity_score), 6),
-        "setup_quality": round(_safe_float(setup_quality), 6),
         "trigger_quality": round(trigger_quality, 6),
         "invalidation_quality": round(invalidation_quality, 6),
-        "product_profile_support": round(product_profile_support, 6),
-        "conflict_penalty": round(-conflict_penalty, 6),
     }
 
 
@@ -1160,9 +1133,6 @@ def build_opportunity_scorecard(
         )
         candidate_quality_components = _candidate_quality_components(
             opportunity_score=opportunity_score,
-            score_components=score_components,
-            gating_failures=gating_failures,
-            setup_quality=max_setup_quality,
             trigger_valid=bool(trigger_valid_count > 0),
             invalidation_count=invalidation_count,
         )

@@ -868,6 +868,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "side": "long",
                     "score": 0.95,
                     "opportunity_score": 0.95,
+                    "candidate_quality": 0.95,
+                    "candidate_quality_components": {"opportunity_score": 0.95},
                     "capital_priority_score": 0.99,
                     "capital_priority_tier": 1,
                     "final_state": "watch_for_trigger",
@@ -876,6 +878,8 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "side": "short",
                     "score": 0.74,
                     "opportunity_score": 0.74,
+                    "candidate_quality": 0.74,
+                    "candidate_quality_components": {"opportunity_score": 0.74},
                     "capital_priority_score": 0.50,
                     "capital_priority_tier": 3,
                     "final_state": "tradeable_candidate",
@@ -912,6 +916,13 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "side": "long",
                     "score": 0.48,
                     "opportunity_score": 0.48,
+                    "candidate_quality": 0.56,
+                    "candidate_quality_components": {
+                        "opportunity_score": 0.48,
+                        "trigger_quality": 0.04,
+                        "invalidation_quality": 0.04,
+                    },
+                    "candidate_layer_hint": "watch_for_trigger_candidate",
                     "capital_priority_score": 0.31,
                     "capital_priority_tier": 1,
                     "final_state": "watch_for_trigger",
@@ -924,6 +935,9 @@ class DecisionWorkflowToolTest(unittest.TestCase):
                     "side": "short",
                     "score": 0.51,
                     "opportunity_score": 0.51,
+                    "candidate_quality": 0.51,
+                    "candidate_quality_components": {"opportunity_score": 0.51},
+                    "candidate_layer_hint": "watch_for_trigger_candidate",
                     "capital_priority_score": 0.34,
                     "capital_priority_tier": 1,
                     "final_state": "watch_for_trigger",
@@ -936,6 +950,15 @@ class DecisionWorkflowToolTest(unittest.TestCase):
         scorecard = result["opportunity_scorecard"]
         self.assertEqual(scorecard["long"]["side_priority"], 1)
         self.assertIsNone(scorecard["short"]["side_priority"])
+        self.assertEqual(scorecard["long"]["candidate_quality"], 0.56)
+        self.assertEqual(
+            scorecard["long"]["candidate_quality_components"],
+            {
+                "opportunity_score": 0.48,
+                "trigger_quality": 0.04,
+                "invalidation_quality": 0.04,
+            },
+        )
         self.assertEqual(scorecard["long"]["candidate_layer_hint"], "watch_for_trigger_candidate")
         self.assertNotIn("rank_score", scorecard["long"])
         self.assertNotIn("capital_layer", scorecard["long"])

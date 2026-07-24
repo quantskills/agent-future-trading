@@ -442,7 +442,7 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 | 条件触发候选 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.watch_for_trigger_new_entry` | `semantic_role`、`requires_final_contract_authority`、`allow_probe`、`probe_max_ratio`、`probe_floor_ratio` | 只允许 PM 写入需要盘中确认的条件触发合约；Trader 未触发不得成交 |
 | 失效边界控制 | `src/config/portfolio_policy_catalog.yaml: portfolio_manager.holding_rebalance_control.position_lifecycle` | `require_pretrade_invalidation_for_new_entry`、`missing_invalidation_cap_multiplier`、`missing_invalidation_probe_max_ratio` | 新开/加仓分别验证canonical入场作废边界和成交后持仓依据；两者不得合并成一个布尔值 |
 | 账户硬资金上限 | `src/config/dev.yaml` | `max_total_margin_ratio`、`position_budget_policy.hard_max_total_margin_ratio`、`position_budget_policy.max_single_ticker_margin_ratio` | 任何学习、rank、释放、probe、scale 都不能突破；Auditor 与运营风控链负责硬边界，复盘员只记录真实账户风险事实和归因，不做二次合法性裁决 |
-| PM 计划预算和复盘诊断 | `src/config/dev.yaml: position_budget_policy / capital_utilization_control / net_exposure_control` | `max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_margin_ratio*`、`warning_target_margin_ratio_max`、`recovery_*` | 只服务 PM Step5 计划预算、rank/部署和资金层级；真实成交后因条件腿未触发、成交子集、价格变化或滑点产生偏离时，复盘员只能写事实归因/预警，不能作为日终 hard fail |
+| PM 计划预算和复盘诊断 | `src/config/dev.yaml: position_budget_policy / capital_utilization_control / net_exposure_control` | `max_net_exposure`、`strong_opportunity_max_net_exposure`、`target_margin_ratio_*`、`probe_margin_ratio`、`probe_margin_max_ratio`、`normal/deployable/exceptional_margin_ratio*`、`warning_target_margin_ratio_max`、`recovery_*` | Step4层内保证金比例是新增风险唯一软仓位计划；其后只允许现有硬资金线、净敞口、可用资金、最小手数和取整收缩，不得用日盈亏或名义仓位软比例二次改写。真实成交偏离只作复盘事实，不作为日终 hard fail |
 | 回撤和账户风险 | `src/config/dev.yaml: drawdown_control / risk_control` | `hard_drawdown`、`warning_drawdown`、`position_scaling` | 只作为账户级风险边界或降级依据；不能创建交易机会 |
 | 市场确认和冲突降级 | `src/config/portfolio_policy_catalog.yaml: market_confirmation` | `min_confirmation_score_for_new_entry`、`quality_gate_cap_multiplier`、`conflict_cap_multiplier`、`data_gap_cap_multiplier` | 只确认、降级或阻断当前机会；不能替代分析师 setup 或 PM 合约 |
 | PM 内部风险门槛 | `src/config/portfolio_policy_catalog.yaml: pm_risk_gate` | `quality_gate.*`、`cold_start.*`、`attribution_feedback.*` | 只影响 PM 签约前的风险降级或阻断；不是独立审计员写入口，不能让审计员直接改 PM 手数 |
@@ -456,6 +456,8 @@ PM 的小额试探、正常交易、放大交易和硬上限必须只读取下�
 5. 任何 YAML 参数如果会改变交易强度，必须落到 probe、normal、scale、hard cap、diagnostic 中的一类，不能成为第六套隐性门控。
 
 Step4先用当日证据和冻结canonical学习决定probe/real/alpha_scale及层内连续比例；Step5不得反向升层。Step5只对新增风险计算一次七项有符号总分，其中层级分固定为`alpha_scale=6.0`、`real_budget=3.0`、`exploration_probe=0.0`，当日trigger分固定为已验证SCC执行来源的`trigger_quality_score*0.08`。历史trigger结果只属于open/add学习分量。最终只按`rank_score`降序和ticker排序，负分不禁入；6/3/0分带必须保证任意scale高于任意real、任意real高于任意probe，同层再由其余分量区分。
+
+唯一scorecard按`opportunity_score + 0.04*trigger_valid + 0.04*invalidation_present`形成`candidate_quality`并限制到`[0,1]`；setup、正式学习/profile和冲突已在`opportunity_score`中计入，Step2及后续不得再加一次。这个有限分只服务Step4层内比例，不能替代或截断Step5有符号rank。最终生命周期为hold且目标比例未变时直接保留`current_lots`，不得因价格变化把同一比例重新换算成更少手数。
 
 ### 6.4 新开仓机会状态流转
 
@@ -493,6 +495,8 @@ watch_for_trigger 候选被压成受控观察/条件触发候选。
 它不能同时表示“候选”和“阻断”。若要阻断，必须由明确硬原因或缺失条件负责，例如无 setup、无失效边界、负向学习、保证金硬风险。
 
 PM 的自由文本说明不具有候选否决权。合法 canonical watch 必须先参加既有资金优先级竞争；只有实际获选并形成非零目标手数时，唯一 FAC 才写入 `conditional_trigger_authority=true`、`requires_intraday_confirmation=true`、`can_execute_without_intraday_trigger=false`。Step5 仍使用既有新增风险 rank；Step6 对该 `0 -> 非0` 合约使用 `open_add_new_risk` 决策学习，同时 Trader 继续等待盘中触发。只有 `target_lots=current_lots` 且仅保留监控时才使用 `conditional_monitor`。
+
+weak-conflict候选和同品种、同方向、同setup、同canonical trigger的正式canonical open/add学习若要求更强确认，必须通过`trigger_confirmation_adjustment`写入唯一FAC，不得解析reason文本。`breakout/pullback/vwap_confirmed`先满足原canonical触发，再由下一根已完成15分钟线确认仍处于对应边界/VWAP正确侧，最后使用下一根合法1分钟线成交；一次跟随确认失败不永久作废FAC，后续新的完整触发序列仍可重新确认，只有既有入场失效和`valid_until`产生终态。
 
 完整且当前已触发的单分析师候选也不得在 Step5 前清零。它保留真实单来源共识、证据强度和冲突，以较低原生分进入同一 rank；另外两名分析师的 `no_opportunity` 不是支持票，也不是否决票。最终是否获得预算、手数和 FAC 仍完全由既有 rank、预算、sizing 与 Auditor 决定。
 
@@ -639,6 +643,7 @@ PM 不能：
 |---|---|---|
 | `final_action=wait/hold` 且 `lots_delta=0` | 不下单 | no trade fact |
 | `requires_intraday_confirmation=true` | 只监控触发；触发后按合约执行，未触发不成交 | trigger checked / executed or not triggered |
+| `trigger_confirmation_adjustment=stronger/strict` | `breakout/pullback/vwap_confirmed`原触发后等待下一根完整15分钟线保持对应边界/VWAP；失败后可等待新的完整序列 | executed or continue waiting / final not triggered |
 | `can_execute_without_intraday_trigger=true` | 不再复判15分钟触发，按合约使用合法1分钟线直接执行 | execution_result；`trigger_checked=false` |
 | 首次成交前先命中canonical `invalidation_level` | 当前FAC永久作废，不改`target_lots` | `fac_invalidated_before_entry`，当日不成交 |
 | 首次成交前超过`valid_until` | 当前FAC永久到期 | `fac_expired_before_entry`，当日不成交 |
@@ -975,4 +980,4 @@ Researcher 写 `alpha_setup_action_value` 时必须保存 `canonical_action_fami
 
 `positive_candidate_open` 只允许落在 `canonical_action_family=open_add_new_risk` 且 lane 属于 `open/add/scale/increase` 的记录；`positive_candidate_exit` 只允许落在 `canonical_action_family=reduce_exit` 且 lane 属于 `reduce/exit` 的记录；`positive_candidate_execution` 只允许落在 `canonical_action_family=execution` 且 lane 为 `execution` 的记录。缺 `canonical_action_family`，或 family/lane/preference 不一致，属于系统字段语义 hard error。
 
-学习偏向不是明日执行指令。PM 可以把 open/add 学习用于同生命周期评分或降级，并把安全的历史 open/add 经验作为对应新增风险 rank 输入；当天实际增加风险的 `add/scale` 与新开仓一起参与 rank。reduce/exit 学习用于释放风险判断，execution 学习用于未来 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，但任何 action-value 都不能直接生成 `final_action`、方向、手数或资金部署。Trader 仍只执行审计通过后的 `final_action_contract`；Accountant 不消费 action-value。
+学习偏向不是明日执行指令。PM 可以把 open/add 学习用于同生命周期评分或降级，并把安全的历史 open/add 经验作为对应新增风险 rank 输入；当天实际增加风险的 `add/scale` 与新开仓一起参与 rank。与当日品种、方向、setup和canonical trigger精确匹配的正式open/add入场结果可以把既有`trigger_confirmation_adjustment`写入未来FAC；reduce/exit 学习用于释放风险判断，execution 学习用于未来 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`。任何 action-value 都不能直接生成 `final_action`、方向、手数或资金部署。Trader 仍只执行审计通过后的 `final_action_contract`；Accountant 不消费 action-value。

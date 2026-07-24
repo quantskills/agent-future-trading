@@ -105,6 +105,7 @@ from tools.common.execution_trigger_semantics import (
     execution_profile_from_learning_setup,
     execution_trigger_contract_error,
     normalize_execution_profile,
+    normalize_trigger_confirmation_adjustment,
     trigger_source_for_analyst_profile,
 )
 
@@ -1799,7 +1800,6 @@ def _apply_position_budget_policy_for_new_entry(
     margin_rate: float,
     account_equity: float,
     margin_available: float,
-    max_position_ratio: float,
     max_net_exposure: float,
     current_net_exposure: float,
     current_ticker_exposure: float,
@@ -1900,7 +1900,6 @@ def _apply_position_budget_policy_for_new_entry(
             if increasing_same_side
             else int(max(0.0, margin_available) // one_lot_margin)
         )
-        max_lots_by_position = int(max(0.0, max_position_ratio) // one_lot_ratio) if one_lot_ratio > 0 else 0
         max_lots_by_probe_margin = int(max_allowed_margin // one_lot_margin) if max_allowed_margin > 0 else desired_abs_lots
         net_without_ticker = float(current_net_exposure or 0.0) - float(current_ticker_exposure or 0.0)
         if side_sign > 0:
@@ -1910,7 +1909,6 @@ def _apply_position_budget_policy_for_new_entry(
         feasible_abs_lots = min(
             desired_abs_lots,
             max_lots_by_margin,
-            max_lots_by_position,
             max_lots_by_probe_margin if max_lots_by_probe_margin > 0 else desired_abs_lots,
             max_lots_by_net,
         )
@@ -1927,7 +1925,6 @@ def _apply_position_budget_policy_for_new_entry(
             "desired_probe_margin": desired_probe_margin,
             "desired_abs_lots": desired_abs_lots,
             "max_lots_by_margin": max_lots_by_margin,
-            "max_lots_by_position": max_lots_by_position,
             "max_lots_by_probe_margin": max_lots_by_probe_margin,
             "max_lots_by_net": max_lots_by_net,
             "feasible_abs_lots": feasible_abs_lots,
@@ -1981,7 +1978,6 @@ def _apply_position_budget_policy_for_new_entry(
         if increasing_same_side
         else int(max(0.0, margin_available) // one_lot_margin)
     )
-    max_lots_by_position = int(max(0.0, max_position_ratio) // one_lot_ratio) if one_lot_ratio > 0 else 0
     max_single_margin = equity * max(0.0, float(cfg.get("max_single_ticker_margin_ratio") or 0.0))
     max_lots_by_single_margin = int(max_single_margin // one_lot_margin) if one_lot_margin > 0 else 0
     net_without_ticker = float(current_net_exposure or 0.0) - float(current_ticker_exposure or 0.0)
@@ -1992,7 +1988,6 @@ def _apply_position_budget_policy_for_new_entry(
     feasible_abs_lots = min(
         desired_abs_lots,
         max_lots_by_margin,
-        max_lots_by_position,
         max_lots_by_single_margin,
         max_lots_by_net,
     )
@@ -2001,7 +1996,6 @@ def _apply_position_budget_policy_for_new_entry(
     diagnostics.update({
         "desired_abs_lots": desired_abs_lots,
         "max_lots_by_margin": max_lots_by_margin,
-        "max_lots_by_position": max_lots_by_position,
         "max_lots_by_single_margin": max_lots_by_single_margin,
         "max_lots_by_net": max_lots_by_net,
         "feasible_abs_lots": feasible_abs_lots,
@@ -2010,7 +2004,7 @@ def _apply_position_budget_policy_for_new_entry(
         diagnostics["step4_layer_plan_shrunk_by_hard_limits"] = True
         control_reasons.append("step4_layer_plan_shrunk_by_hard_limits")
         control_notes.append(
-            f"{ticker} Step4 layer plan shrunk by existing lot, margin, position and net-exposure caps: "
+            f"{ticker} Step4 layer plan shrunk by existing lot, margin, single-ticker and net-exposure caps: "
             f"{desired_abs_lots}->{feasible_abs_lots} lot(s)."
         )
         desired_abs_lots = max(0, feasible_abs_lots)
@@ -4103,6 +4097,78 @@ def _execution_profile_and_source(payload: dict, *, authority_type: str) -> tupl
     return profile, source
 
 
+def _entry_trigger_confirmation_adjustment(
+    *,
+    ticker: str,
+    side: str,
+    setup_type: str,
+    entry_trigger: str,
+    execution_profile: str,
+    final_entry_authority: dict,
+    alpha_setup_action_values: list | None,
+) -> str:
+    """Route only structured weak-conflict/formal entry learning to execution."""
+    if execution_profile not in {"breakout", "pullback", "vwap_confirmed"}:
+        return "not_applicable"
+    severity = {
+        "not_applicable": 0,
+        "neutral": 1,
+        "standard_confirmation_supported": 2,
+        "stronger_confirmation_required": 3,
+        "strict_confirmation_required": 4,
+    }
+    selected = (
+        "stronger_confirmation_required"
+        if bool(final_entry_authority.get("weak_conflict_probe"))
+        else "not_applicable"
+    )
+    ticker_key = str(ticker or "").strip().upper()
+    side_key = str(side or "").strip().lower()
+    setup_key = str(setup_type or "").strip().lower()
+    trigger_key = str(entry_trigger or "").strip()
+    for row in _formal_pm_learning_action_values(alpha_setup_action_values):
+        if str(row.get("ticker") or "").strip().upper() != ticker_key:
+            continue
+        if str(row.get("side") or "").strip().lower() != side_key:
+            continue
+        if str(row.get("setup_type") or "").strip().lower() != setup_key:
+            continue
+        if str(row.get("canonical_action_family") or "").strip().lower() != "open_add_new_risk":
+            continue
+        lane = str(
+            row.get("action_value_lane")
+            or row.get("learning_lane")
+            or row.get("action_name")
+            or ""
+        ).strip().lower()
+        if lane not in {"open", "add", "scale", "increase"}:
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        product_key = (
+            payload.get("product_learning_performance_key")
+            if isinstance(payload.get("product_learning_performance_key"), dict)
+            else {}
+        )
+        outcome = (
+            payload.get("entry_quality_outcome")
+            if isinstance(payload.get("entry_quality_outcome"), dict)
+            else product_key.get("entry_quality_outcome")
+            if isinstance(product_key.get("entry_quality_outcome"), dict)
+            else {}
+        )
+        if str(outcome.get("contract_version") or "").strip() != "agentquant.entry_quality_outcome.v1":
+            continue
+        historical_trigger = str(outcome.get("entry_trigger") or "").strip()
+        if not trigger_key or historical_trigger != trigger_key:
+            continue
+        adjustment = normalize_trigger_confirmation_adjustment(
+            outcome.get("trigger_confirmation_adjustment")
+        )
+        if severity[adjustment] > severity[selected]:
+            selected = adjustment
+    return selected
+
+
 def _build_execution_contract_fields(
     *,
     ticker: str = "",
@@ -4208,11 +4274,25 @@ def _build_execution_contract_fields(
         if proposed_execution_preference
         else {}
     )
+    trigger_confirmation_adjustment = _entry_trigger_confirmation_adjustment(
+        ticker=ticker,
+        side=target_side,
+        setup_type=(
+            selected_execution_evidence.get("setup_type")
+            if selected_execution_evidence
+            else ""
+        ),
+        entry_trigger=entry_trigger,
+        execution_profile=profile,
+        final_entry_authority=final_entry_authority,
+        alpha_setup_action_values=alpha_setup_action_values,
+    )
 
     return {
         "contract_version": "agentquant.execution_contract_fields.v1",
         "execution_profile": profile,
         "trigger_source": trigger_source,
+        "trigger_confirmation_adjustment": trigger_confirmation_adjustment,
         "target_side": target_side,
         "current_lots": int(current_lots),
         "target_lots": int(target_lots),
@@ -8238,10 +8318,12 @@ def _preserve_existing_lot_when_hold_ratio_survives(
     current_ratio: float,
     control_reasons: list[str],
 ) -> tuple[int, bool]:
-    """Keep an existing one-lot position when strategy controls preserved its side."""
-    if current_lots == 0 or target_lots != 0:
+    """Keep exact lots when the final lifecycle decision preserved the position."""
+    if current_lots == 0 or target_lots == current_lots:
         return target_lots, False
     if abs(target_ratio) <= 1e-12 or abs(current_ratio) <= 1e-12:
+        return target_lots, False
+    if abs(float(target_ratio) - float(current_ratio)) > 1e-12:
         return target_lots, False
     same_side_ratio = (current_lots > 0 and target_ratio > 0) or (current_lots < 0 and target_ratio < 0)
     if not same_side_ratio:
@@ -8249,6 +8331,8 @@ def _preserve_existing_lot_when_hold_ratio_survives(
     hold_reasons = {
         "profitable_hold_continuation",
         "position_lifecycle_trend_hold",
+        "holding_lifecycle_not_invalidated",
+        "holding_add_requires_current_technical_trigger",
         "holding_period_control",
         "fundamental_anchor_rebalance_cap",
         "minimum_rebalance_threshold",
@@ -9954,42 +10038,6 @@ def _run_pm_six_step_decision(state: FundState):
     position_scaling = get_position_scaling_factor(risk_level, full_config)
     max_single_margin_ratio = get_max_single_position_ratio(risk_level, full_config)
 
-    # Scale down weak tickers before risk control so persistent laggards cannot dominate capital usage.
-    ticker_perf = {}
-    performance_control = full_config.get("ticker_performance_control", {}) or {}
-    performance_control_enabled = performance_control.get("enabled", True)
-    if db and config_id and performance_control_enabled:
-        ticker_perf = db.get_ticker_performance(
-            config_id=config_id,
-            ticker=ticker,
-            trading_date=trading_date,
-            lookback_days=int(performance_control.get("lookback_days", 20)),
-        )
-    if performance_control_enabled and ticker_perf.get("trade_days", 0) >= int(performance_control.get("min_trade_days", 5)):
-        avg_pnl = float(ticker_perf.get("avg_daily_pnl", 0.0) or 0.0)
-        cumulative_pnl = float(ticker_perf.get("cumulative_pnl", 0.0) or 0.0)
-        win_rate = float(ticker_perf.get("win_rate", 0.0) or 0.0)
-        original_cap = max_single_margin_ratio
-        severe_trigger = (
-            avg_pnl <= float(performance_control.get("severe_avg_pnl_below", performance_control.get("hard_avg_pnl_below", -800)))
-            or (
-                cumulative_pnl < 0
-                and win_rate <= float(performance_control.get("severe_win_rate_below", performance_control.get("hard_win_rate_below", 0.35)))
-            )
-        )
-        if severe_trigger:
-            severe_anchor = float(performance_control.get("severe_anchor_ratio", performance_control.get("hard_cap_ratio", 0.03)))
-            max_single_margin_ratio = min(max_single_margin_ratio, severe_anchor)
-            pass
-        elif avg_pnl < float(performance_control.get("soft_avg_pnl_below", -300)):
-            max_single_margin_ratio *= float(performance_control.get("soft_cap_multiplier", 0.50))
-            pass
-        elif avg_pnl > float(performance_control.get("recovery_avg_pnl_above", 200)):
-            max_single_margin_ratio = min(
-                max_single_margin_ratio * float(performance_control.get("recovery_cap_multiplier", 1.10)),
-                original_cap,
-            )
-
     # Risk-state logging for the phase1 futures flow.
     if risk_level == RiskLevel.WARNING:
         pass
@@ -11596,14 +11644,15 @@ def _run_pm_six_step_decision(state: FundState):
         new_net_exposure = current_net_exposure
         control_reasons.append("existing_lot_hold_preserved")
         control_notes.append(
-            f"{ticker} existing {preserved_side} lot preserved: strategy controls kept same-side "
-            f"ratio {current_ticker_exposure:.2%}, preventing integer lot truncation to flat."
+            f"{ticker} existing {preserved_side} position preserved at {target_lots} lot(s): "
+            f"the final lifecycle decision kept ratio {current_ticker_exposure:.2%}, so price-only "
+            "integer lot translation must not create a reduction."
         )
         control_diagnostics["existing_lot_hold_preserved"] = {
             "current_lots": int(current_lots),
             "target_lots": int(target_lots),
             "current_ratio": float(current_ticker_exposure),
-            "reason": "same_side_hold_ratio_survived_lot_translation",
+            "reason": "unchanged_hold_ratio_preserves_current_lots",
         }
 
     probe_release, probe_release_detail = _qualified_real_probe_release(
@@ -11987,7 +12036,6 @@ def _run_pm_six_step_decision(state: FundState):
             margin_rate=float(margin_rate),
             account_equity=float(account_equity),
             margin_available=float(margin_available),
-            max_position_ratio=float(max_position_ratio),
             max_net_exposure=float(max_net_exposure),
             current_net_exposure=float(current_net_exposure),
             current_ticker_exposure=float(current_ticker_exposure),
@@ -12184,7 +12232,6 @@ def _run_pm_six_step_decision(state: FundState):
     plan_snapshot["current_net_exposure"] = float(current_net_exposure)
     plan_snapshot["current_ticker_exposure"] = float(current_ticker_exposure)
     plan_snapshot["projected_net_exposure"] = float(new_net_exposure)
-    plan_snapshot["max_position_ratio_after_performance"] = float(max_position_ratio)
     plan_snapshot["analyst_signal_combo"] = list(signal_combo)
     plan_snapshot["adaptive_fusion"] = fusion_context
     plan_snapshot["decision_horizon"] = _resolve_decision_horizon(analyst_signals, target_lots)
@@ -12400,8 +12447,6 @@ def _run_pm_six_step_decision(state: FundState):
             "notes": control_notes,
             "diagnostics": control_diagnostics,
         }
-    if ticker_perf:
-        plan_snapshot["ticker_performance"] = ticker_perf
     pm_state_update.update(
         {
             "position_ratio": position_risk.optimal_position_ratio,

@@ -163,7 +163,6 @@ def _apply_portfolio_policy_catalog(
         "pm_risk_gate",
         "auditor",
         "trade_frequency_control",
-        "ticker_performance_control",
         "ticker_loss_control",
         "dynamic_weights",
     ):
@@ -181,7 +180,6 @@ def _apply_portfolio_policy_catalog(
         roles["pm_risk_gate"] = "portfolio_policy_catalog_runtime_expanded"
         roles["auditor"] = "portfolio_policy_catalog_runtime_expanded"
         roles["trade_frequency_control"] = "portfolio_policy_catalog_runtime_expanded"
-        roles["ticker_performance_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["ticker_loss_control"] = "portfolio_policy_catalog_runtime_expanded"
         roles["dynamic_weights"] = "portfolio_policy_catalog_runtime_expanded"
 

@@ -929,6 +929,7 @@ def build_final_action_contract(
         for key in (
             "execution_profile",
             "trigger_source",
+            "trigger_confirmation_adjustment",
             "entry_trigger",
             "invalidation",
             "invalidation_level",

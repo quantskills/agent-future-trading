@@ -16,6 +16,7 @@ from agents.decision_team.auditor import audit_futures_recommendation
 from agents.decision_team.portfolio_manager import (
     RiskLevel,
     _build_execution_contract_fields,
+    _build_final_action_contract,
     _build_pm_decision_context,
     _enrich_final_authority_with_analyst_evidence,
     _scorecard_probe_seed,
@@ -48,7 +49,11 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.agent_tools.decision.pm_ticker_side_selection import select_ticker_side
 from tools.agent_tools.execution.trader_intraday_execution import select_intraday_execution
-from tools.common.execution_trigger_semantics import canonical_entry_invalidation_condition
+from tools.common.contracts import sanitize_execution_contract
+from tools.common.execution_trigger_semantics import (
+    canonical_entry_invalidation_condition,
+    canonical_entry_trigger,
+)
 from tools.common.signal_evidence_collection import (
     build_pm_evidence_signals_from_scc,
     build_scc_data_quality_summary,
@@ -467,6 +472,109 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
                 )
                 self.assertFalse(result.should_execute)
                 self.assertEqual(result.reason, "intraday_trigger_not_met")
+
+    def test_stronger_breakout_waits_for_follow_through_before_execution(self):
+        contract = {
+            **_entry_execution_boundary("long"),
+            "execution_profile": "breakout",
+            "trigger_source": "technical_breakout",
+            "entry_trigger": canonical_entry_trigger("breakout", "long"),
+            "requires_intraday_confirmation": True,
+            "can_execute_without_intraday_trigger": False,
+            "trigger_confirmation_adjustment": "stronger_confirmation_required",
+        }
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 10:00:00", "open": 101.0, "high": 102.5, "low": 100.8, "close": 102.0, "volume": 10},
+                {"datetime": "2025-03-26 10:15:00", "open": 102.0, "high": 102.8, "low": 101.5, "close": 102.2, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 102.0, "high": 102.2, "low": 101.8, "close": 102.0, "volume": 10},
+                {"datetime": "2025-03-26 10:16:00", "open": 102.3, "high": 102.5, "low": 102.0, "close": 102.2, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={"execution_contract": contract},
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.base_datetime, "2025-03-26 10:16:00")
+        self.assertEqual(result.signal_datetime, "2025-03-26 10:15:00")
+        self.assertEqual(
+            result.features["execution_contract"]["trigger_confirmation_adjustment"],
+            "stronger_confirmation_required",
+        )
+        self.assertEqual(
+            sanitize_execution_contract(contract)["trigger_confirmation_adjustment"],
+            "stronger_confirmation_required",
+        )
+
+    def test_stronger_vwap_waits_for_next_completed_bar(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 10:00:00", "open": 100.5, "high": 101.2, "low": 100.2, "close": 101.0, "volume": 10},
+                {"datetime": "2025-03-26 10:15:00", "open": 101.0, "high": 101.5, "low": 100.8, "close": 101.3, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 101.0, "high": 101.2, "low": 100.9, "close": 101.0, "volume": 10},
+                {"datetime": "2025-03-26 10:16:00", "open": 101.4, "high": 101.5, "low": 101.2, "close": 101.3, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "invalidation": canonical_entry_invalidation_condition(
+                        "vwap_confirmed", "long"
+                    ),
+                    "execution_profile": "vwap_confirmed",
+                    "trigger_source": "technical_pullback",
+                    "entry_trigger": canonical_entry_trigger("vwap_confirmed", "long"),
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "trigger_confirmation_adjustment": "stronger_confirmation_required",
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.base_datetime, "2025-03-26 10:16:00")
+        self.assertEqual(result.signal_datetime, "2025-03-26 10:15:00")
+
+    def test_failed_stronger_breakout_can_only_execute_after_a_fresh_trigger_and_confirmation(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 10:00:00", "open": 101.0, "high": 102.5, "low": 100.8, "close": 102.0, "volume": 10},
+                {"datetime": "2025-03-26 10:15:00", "open": 102.0, "high": 102.1, "low": 99.5, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:30:00", "open": 101.0, "high": 103.5, "low": 100.8, "close": 103.0, "volume": 10},
+                {"datetime": "2025-03-26 10:45:00", "open": 103.0, "high": 103.6, "low": 102.8, "close": 103.2, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 102.0, "high": 102.2, "low": 101.8, "close": 102.0, "volume": 10},
+                {"datetime": "2025-03-26 10:31:00", "open": 103.0, "high": 103.2, "low": 102.8, "close": 103.0, "volume": 10},
+                {"datetime": "2025-03-26 10:46:00", "open": 103.3, "high": 103.5, "low": 103.1, "close": 103.3, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "breakout",
+                    "trigger_source": "technical_breakout",
+                    "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "trigger_confirmation_adjustment": "strict_confirmation_required",
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.signal_datetime, "2025-03-26 10:45:00")
+        self.assertEqual(result.base_datetime, "2025-03-26 10:46:00")
 
     def test_entry_invalidation_before_trigger_permanently_cancels_fac(self):
         result = select_intraday_execution(
@@ -891,6 +999,38 @@ class DirectAndConditionalExecutionPathTest(unittest.TestCase):
         self.assertTrue(short_confirmed.should_execute)
         self.assertEqual(short_confirmed.reason, "intraday_pullback_confirmed")
 
+    def test_stronger_pullback_requires_next_completed_bar_to_hold_reclaimed_references(self):
+        result = select_intraday_execution(
+            signal_bars=[
+                {"datetime": "2025-03-26 09:45:00", "open": 101.5, "high": 103.0, "low": 101.4, "close": 102.5, "volume": 10},
+                {"datetime": "2025-03-26 10:00:00", "open": 102.0, "high": 102.2, "low": 100.5, "close": 101.5, "volume": 10},
+                {"datetime": "2025-03-26 10:15:00", "open": 101.5, "high": 102.0, "low": 101.2, "close": 101.6, "volume": 10},
+            ],
+            execution_bars=[
+                {"datetime": "2025-03-26 09:30:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10},
+                {"datetime": "2025-03-26 09:46:00", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 10},
+                {"datetime": "2025-03-26 10:01:00", "open": 101.5, "high": 101.7, "low": 101.3, "close": 101.5, "volume": 10},
+                {"datetime": "2025-03-26 10:16:00", "open": 101.7, "high": 101.9, "low": 101.5, "close": 101.7, "volume": 10},
+            ],
+            action="open_long",
+            config={"opening_range_minutes": 1, "min_execution_volume": 1},
+            decision_context={
+                "execution_contract": {
+                    **_entry_execution_boundary("long"),
+                    "execution_profile": "pullback",
+                    "trigger_source": "technical_pullback",
+                    "entry_trigger": canonical_entry_trigger("pullback", "long"),
+                    "requires_intraday_confirmation": True,
+                    "can_execute_without_intraday_trigger": False,
+                    "trigger_confirmation_adjustment": "stronger_confirmation_required",
+                }
+            },
+        )
+
+        self.assertTrue(result.should_execute)
+        self.assertEqual(result.base_datetime, "2025-03-26 10:16:00")
+        self.assertEqual(result.signal_datetime, "2025-03-26 10:15:00")
+
     def test_trader_rejects_missing_or_invalid_profile_instead_of_defaulting_to_breakout(self):
         for execution_contract in (
             {},
@@ -1099,6 +1239,158 @@ class Step6ExecutionEvidenceAlignmentTest(unittest.TestCase):
         self.assertFalse(technical["can_execute_without_intraday_trigger"])
         self.assertFalse(news["requires_intraday_confirmation"])
         self.assertTrue(news["can_execute_without_intraday_trigger"])
+
+    def test_structured_weak_conflict_requires_stronger_confirmation_without_reason_parsing(self):
+        signal = self._signal(
+            "technical",
+            entry_trigger=canonical_entry_trigger("breakout", "long"),
+        )
+        reason_only_authority = _entry_authority(conditional=True)
+        reason_only_authority["reason_codes"] = [
+            "weak_conflict_probe_requires_stronger_confirmation"
+        ]
+        reason_only = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=2,
+            analyst_signals=[signal],
+            final_entry_authority=reason_only_authority,
+            trading_date="2025-03-26",
+            recommendation_intent={"action": "open_long"},
+            control_reasons=[],
+            alpha_setup_action_values=[],
+            reference_price=100.0,
+        )
+        structured_authority = dict(reason_only_authority)
+        structured_authority["weak_conflict_probe"] = True
+        structured = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=2,
+            analyst_signals=[signal],
+            final_entry_authority=structured_authority,
+            trading_date="2025-03-26",
+            recommendation_intent={"action": "open_long"},
+            control_reasons=[],
+            alpha_setup_action_values=[],
+            reference_price=100.0,
+        )
+
+        self.assertEqual(reason_only["trigger_confirmation_adjustment"], "not_applicable")
+        self.assertEqual(
+            structured["trigger_confirmation_adjustment"],
+            "stronger_confirmation_required",
+        )
+        final_contract = _build_final_action_contract(
+            ticker="BU",
+            current_lots=0,
+            target_lots=2,
+            position_ratio=0.01,
+            margin_required=10_000.0,
+            account_equity=1_000_000.0,
+            lots_to_trade=2,
+            lots_to_trade_reason="test_stronger_confirmation",
+            recommendation_intent={"action": "open_long", "lots": 2},
+            final_entry_authority=structured_authority,
+            control_reasons=[],
+            control_diagnostics={},
+            opportunity_scorecard={
+                "preferred_side": "long",
+                "long": {"final_state": "probe_candidate", "score": 0.65},
+            },
+            market_confirmation={"confirmation_score": 0.65},
+            alpha_setup_action_values=[],
+            execution_contract_fields=structured,
+        )
+        self.assertEqual(
+            final_contract["trigger_confirmation_adjustment"],
+            "stronger_confirmation_required",
+        )
+
+    def test_formal_exact_open_learning_can_require_strict_confirmation(self):
+        formal = {
+            "id": "av-bu-long-breakout-loss",
+            "ticker": "BU",
+            "side": "long",
+            "setup_type": "trend_breakout",
+            "action_name": "open",
+            "canonical_action_family": "open_add_new_risk",
+            "action_value_lane": "open",
+            "learning_lane": "open",
+            "consumer_scope": "pm_learning",
+            "canonical_action_value": True,
+            "action_preference": "tail_loss_protect",
+            "reward_source": "trade_episode",
+            "evidence_scope": "exact_real_state",
+            "reward_sum": -4000.0,
+            "reward_mean": -2000.0,
+            "win_rate": 0.0,
+            "payload": {
+                "entry_quality_outcome": {
+                    "contract_version": "agentquant.entry_quality_outcome.v1",
+                    "trigger_confirmation_adjustment": "strict_confirmation_required",
+                    "entry_trigger": canonical_entry_trigger("breakout", "long"),
+                }
+            },
+        }
+        strict = self._fields(
+            [self._signal("technical", entry_trigger=canonical_entry_trigger("breakout", "long"))],
+            conditional=True,
+            action_values=[formal],
+        )
+        mismatched = self._fields(
+            [self._signal(
+                "technical",
+                setup_type="trend_breakout_setup",
+                entry_timing_signal="pullback",
+                entry_trigger=canonical_entry_trigger("pullback", "long"),
+            )],
+            conditional=True,
+            action_values=[formal],
+        )
+        weak_prior = {
+            **formal,
+            "canonical_action_value": False,
+            "evidence_scope": "similar_sql_prior",
+            "retrieval_match_level": "similar",
+        }
+        rejected = self._fields(
+            [self._signal("technical", entry_trigger=canonical_entry_trigger("breakout", "long"))],
+            conditional=True,
+            action_values=[weak_prior],
+        )
+
+        self.assertEqual(strict["trigger_confirmation_adjustment"], "strict_confirmation_required")
+        self.assertEqual(mismatched["trigger_confirmation_adjustment"], "not_applicable")
+        self.assertEqual(rejected["trigger_confirmation_adjustment"], "not_applicable")
+
+    def test_weak_conflict_vwap_uses_structured_stronger_confirmation(self):
+        authority = _entry_authority(conditional=True)
+        authority["weak_conflict_probe"] = True
+        fields = _build_execution_contract_fields(
+            ticker="BU",
+            current_lots=0,
+            target_lots=2,
+            analyst_signals=[
+                self._signal(
+                    "technical",
+                    setup_type="range_reversal_setup",
+                    entry_timing_signal="vwap_confirmed",
+                    entry_trigger=canonical_entry_trigger("vwap_confirmed", "long"),
+                )
+            ],
+            final_entry_authority=authority,
+            trading_date="2025-03-26",
+            recommendation_intent={"action": "open_long"},
+            control_reasons=[],
+            alpha_setup_action_values=[],
+            reference_price=100.0,
+        )
+
+        self.assertEqual(
+            fields["trigger_confirmation_adjustment"],
+            "stronger_confirmation_required",
+        )
 
     def test_opposite_evidence_cannot_supply_execution_fields(self):
         fields = self._fields(

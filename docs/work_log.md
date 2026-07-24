@@ -32,3 +32,11 @@
 （3）[开仓条件生产消费与学习闭环] `alpha_setup.py`、`analyst_learning_context.py` 将完整episode形成的正式入场/触发质量结论投影为technical专用、T+1、同品种、无学习ID/历史绝对价/资金字段的有界校准摘要；`prompt.py`、`analyst_quality.py`、`analyst_output_finalization.py` 让盘前technical只生产canonical待触发setup，固定当前触发与触发质量为未确认/零，并按当日正式参考价校验独立入场作废位；`portfolio_manager.py` 让该待触发setup在软确认控制把方向比例归零后仍复用Step2方向完成Step4学习、候选和层级评估，再形成需要盘中确认的新增风险FAC；`pm_contract_builder.py` 只在execution/profile学习真实改变最终执行profile时列入正式消费，否则保留为拒绝诊断。原因：补齐开仓条件从当日生产、AEC/SCC、Step4、rank/FAC到Trader的消费链，并让历史结果真实校准后续入场而不创建方向、机会、无条件仓位或重复rank计分。
 
 （4）[测试契约去重] `contract_test_fixtures.py` 统一分析师测试的数据使用摘要构造，相关分析师测试删除重复helper；`test_trade_path_incremental_repairs.py` 将无需盘中确认的测试样例限定为合法`event_immediate`，技术profile继续只走盘中确认。原因：减少重复测试实现，并防止测试fixture继续承载当前生产链不可达的技术直入语义。
+
+==========2026年07月25日==========
+
+（1）[hold手数与Step4资金所有权] `portfolio_manager.py` 在最终生命周期为hold且目标比例未变时直接保留`current_lots`，并删除Step4最终计划后的名义仓位二次裁剪及品种日盈亏软控制消费者；`portfolio_policy_catalog.yaml`、`config_normalizer.py`删除`ticker_performance_control`运行配置展开。原因：防止价格变化把同一持仓意图机械换算成减仓，并保证0.8%-1.5%等层内保证金计划只由Step4形成，后续仅受既有硬资金边界和手数取整收缩。
+
+（2）[分析师跨regime安全校准] `analyst_learning_context.py`、`analyst_learning_calibration.py` 在精确regime没有安全正式投影时，才允许同品种、同方向、同周期、T+1且canonical/作用域合法的跨regime摘要以低权重进入分析校准；技术参数overlay继续要求精确regime。原因：修复完整episode因regime字符串变化完全无法迭代分析的问题，同时避免跨状态经验覆盖当前证据或放宽PM学习边界。
+
+（3）[候选质量去重与更强入场确认] `pm_signal_fusion.py`只以已经包含setup、学习/profile及冲突的`opportunity_score`加一次trigger/失效完整性形成`candidate_quality`，`pm_ticker_side_selection.py`停止二次重算；`portfolio_manager.py`从结构化weak-conflict权限或同品种、同方向、同setup、同canonical trigger的精确正式open/add学习生成既有`trigger_confirmation_adjustment`，`pm_contract_builder.py`、`contracts.py`、`execution_trigger_semantics.py`、`trader_intraday_execution.py`将其保真传到Trader，使stronger/strict `breakout/pullback/vwap_confirmed`在原触发后等待下一根完整15分钟线确认再执行。原因：恢复Step4层内比例区分度，并让亏损学习与弱冲突要求真实改变后续入场方式，而不调整rank、ATR、probe参数或单日单动作规则。

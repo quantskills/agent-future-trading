@@ -32,6 +32,8 @@ DEFAULT_HORIZON_BY_ANALYST = {
     "commodity_news": "event_short",
 }
 
+ANALYST_CROSS_REGIME_RETRIEVAL_MATCH = "cross_regime_same_ticker_side_horizon"
+
 SECTOR_BY_TICKER = {
     "BU": "energy",
     "EB": "chemical",
@@ -124,6 +126,7 @@ def _learning_context_cache_key(
     horizon = str(horizon_class or DEFAULT_HORIZON_BY_ANALYST.get(analyst_key, "*"))
     sector = _context_sector(context, ticker)
     market_regime = _context_market_regime(context)
+    context_side = _context_side(context)
     trading_date_text = _date_text(trading_date)
     return (
         str(config_id or ""),
@@ -133,6 +136,7 @@ def _learning_context_cache_key(
         horizon,
         sector,
         market_regime,
+        context_side,
         int(context_cfg.get("max_items_per_prompt", 5)),
         int(context_cfg.get("max_chars_per_prompt", 1200)),
         bool(context_cfg.get("allow_cross_ticker_sector_fallback", True)),
@@ -184,6 +188,78 @@ def _context_market_regime(context: Optional[Dict[str, Any]]) -> str:
         return "*"
     regime = context.get("market_regime") or context.get("regime") or context.get("trend_stage")
     return str(regime or "*")
+
+
+def _context_side(context: Optional[Dict[str, Any]]) -> str:
+    """Return only a deterministic current-context side, never a text guess."""
+    if not isinstance(context, dict):
+        return ""
+
+    def _normalize(value: Any) -> str:
+        token = str(value or "").strip().lower()
+        if token in {"long", "bullish", "buy"}:
+            return "long"
+        if token in {"short", "bearish", "sell"}:
+            return "short"
+        return ""
+
+    for key in (
+        "preferred_side",
+        "side",
+        "dominant_direction",
+        "direction_hint",
+        "direction_context",
+        "trend_direction",
+        "event_direction",
+    ):
+        side = _normalize(context.get(key))
+        if side:
+            return side
+
+    pandaai_context = context.get("pandaai_extra_factors")
+    if isinstance(pandaai_context, Mapping):
+        side = _normalize(pandaai_context.get("direction_hint"))
+        if side:
+            return side
+
+    direction_counts = context.get("direction_counts")
+    if isinstance(direction_counts, Mapping):
+        bullish = int(direction_counts.get("bullish") or 0)
+        bearish = int(direction_counts.get("bearish") or 0)
+        if bullish > bearish:
+            return "long"
+        if bearish > bullish:
+            return "short"
+    return ""
+
+
+def _exact_market_regime_match(row: Mapping[str, Any], market_regime: str) -> bool:
+    current = str(market_regime or "*").strip()
+    if current in {"", "*"}:
+        return True
+    row_regime = str(row.get("market_regime") or "").strip()
+    return row_regime in {current, "*"}
+
+
+def _cross_regime_scope_match(
+    row: Mapping[str, Any],
+    *,
+    ticker: str,
+    side: str,
+    horizon_class: str,
+    market_regime: str,
+) -> bool:
+    """Bound cross-regime fallback to the same product, side, and horizon."""
+    current_regime = str(market_regime or "*").strip()
+    row_regime = str(row.get("market_regime") or "").strip()
+    return bool(
+        current_regime not in {"", "*"}
+        and row_regime not in {"", "*", current_regime}
+        and str(row.get("ticker") or "").strip().upper()
+        == str(ticker or "").strip().upper()
+        and str(row.get("side") or "").strip().lower() == str(side or "").strip().lower()
+        and str(row.get("horizon_class") or "").strip() == str(horizon_class or "").strip()
+    )
 
 
 def _budgeted_lines(items: Iterable[Dict[str, Any]], *, max_chars: int) -> tuple[List[str], List[str], int]:
@@ -501,6 +577,16 @@ def _safe_analyst_action_value_projection(
     return projection
 
 
+def _analyst_action_value_prompt_line(item: Mapping[str, Any]) -> str:
+    line = analyst_signal_calibration_prompt_line(item)
+    if str(item.get("retrieval_match_level") or "") == ANALYST_CROSS_REGIME_RETRIEVAL_MATCH:
+        line += (
+            " Retrieval match=cross-regime same-ticker/side/horizon; "
+            "use as low-weight analyst calibration only, and let current-regime evidence dominate."
+        )
+    return line
+
+
 def _episode_lifecycle_prompt_fact(item: Mapping[str, Any]) -> str:
     """Compress existing lifecycle facts without exposing historical absolute prices."""
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
@@ -707,6 +793,7 @@ def build_learning_context(
     horizon = str(horizon_class or DEFAULT_HORIZON_BY_ANALYST.get(analyst_key, "*"))
     sector = _context_sector(context, ticker)
     market_regime = _context_market_regime(context)
+    context_side = _context_side(context)
     max_items = int(context_cfg.get("max_items_per_prompt", 5))
     max_chars = int(context_cfg.get("max_chars_per_prompt", 1200))
     allow_cross_ticker_sector_fallback = bool(context_cfg.get("allow_cross_ticker_sector_fallback", True))
@@ -1047,6 +1134,7 @@ def build_learning_context(
                     raw_action_values = db.get_alpha_setup_action_values(
                         config_id=config_id,
                         ticker=str(ticker or "").upper(),
+                        side=context_side or None,
                         horizon_class=horizon,
                         market_regime=market_regime,
                         trading_date=trading_date,
@@ -1059,6 +1147,13 @@ def build_learning_context(
             for row in raw_action_values or []:
                 if not isinstance(row, Mapping):
                     continue
+                if not _exact_market_regime_match(row, market_regime):
+                    continue
+                if context_side and str(row.get("side") or "").strip().lower() not in {
+                    context_side,
+                    "*",
+                }:
+                    continue
                 projection = _safe_analyst_action_value_projection(
                     row,
                     analyst=analyst_key,
@@ -1069,8 +1164,54 @@ def build_learning_context(
                     analyst_calibration_items.append(projection)
                 if len(analyst_calibration_items) >= action_value_limit:
                     break
+
+            # Exact current-regime formal learning remains primary. Only when no
+            # safe exact projection exists may a same-product/side/horizon formal
+            # record from another regime enter as a bounded analyst-only prior.
+            if (
+                not analyst_calibration_items
+                and context_side
+                and market_regime not in {"", "*"}
+                and hasattr(db, "get_alpha_setup_action_values")
+            ):
+                cross_regime_rows: List[Dict[str, Any]] = []
+                try:
+                    cross_regime_rows = db.get_alpha_setup_action_values(
+                        config_id=config_id,
+                        ticker=str(ticker or "").upper(),
+                        side=context_side,
+                        horizon_class=horizon,
+                        market_regime="*",
+                        trading_date=trading_date,
+                        limit=max(action_value_limit * 4, action_value_limit),
+                        consumer_scope="pm_learning",
+                    )
+                except Exception:
+                    logger.warning("analyst_cross_regime_action_value_calibration_unavailable")
+                    cross_regime_rows = []
+                for row in cross_regime_rows or []:
+                    if not isinstance(row, Mapping) or not _cross_regime_scope_match(
+                        row,
+                        ticker=ticker,
+                        side=context_side,
+                        horizon_class=horizon,
+                        market_regime=market_regime,
+                    ):
+                        continue
+                    projection = _safe_analyst_action_value_projection(
+                        row,
+                        analyst=analyst_key,
+                        ticker=ticker,
+                        trading_date=trading_date,
+                    )
+                    if projection is None:
+                        continue
+                    projection["retrieval_match_level"] = ANALYST_CROSS_REGIME_RETRIEVAL_MATCH
+                    analyst_calibration_items.append(projection)
+                    if len(analyst_calibration_items) >= action_value_limit:
+                        break
             raw_calibration_lines = [
-                f"- {analyst_signal_calibration_prompt_line(item)}"
+                f"- {_analyst_action_value_prompt_line(item)}"
                 for item in analyst_calibration_items
             ]
             analyst_calibration_lines, action_value_dropped = _budget_plain_lines(

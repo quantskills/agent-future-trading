@@ -56,16 +56,6 @@ def _candidate_state(row: Mapping[str, Any]) -> str:
     return str(row.get("final_state") or row.get("opportunity_state") or "").strip().lower()
 
 
-def _count_items(value: Any) -> int:
-    if isinstance(value, list):
-        return len([item for item in value if item])
-    if isinstance(value, Mapping):
-        return len(value)
-    if value in (None, "", False):
-        return 0
-    return 1
-
-
 def _candidate_eligible(row: Mapping[str, Any]) -> bool:
     state = _candidate_state(row)
     if state in {"no_opportunity", "wait", "flat_wait", "blocked", "rejected"}:
@@ -102,41 +92,17 @@ def _strip_final_rank_fields(row: dict) -> None:
 
 
 def _candidate_quality_components(row: Mapping[str, Any]) -> dict[str, float]:
-    components = row.get("opportunity_score_components")
-    components = components if isinstance(components, Mapping) else {}
-    opportunity_score = _safe_float(row.get("opportunity_score", row.get("score")), 0.0)
-    evidence_quality = _safe_float(row.get("direction_evidence_strength"), 0.0)
-    setup_quality = _safe_float(row.get("setup_quality_score"), _safe_float(row.get("max_setup_quality"), 0.0))
-    trigger_quality = _safe_float(row.get("trigger_quality_score"), 0.0)
-    if bool(row.get("trigger_valid")) or bool(row.get("current_trigger_confirmed")):
-        trigger_quality += 0.04
-    invalidation_quality = 0.0
-    if _count_items(row.get("invalidation") or row.get("invalidation_condition") or row.get("invalidation_boundary")):
-        invalidation_quality += 0.04
-    product_profile_support = (
-        _safe_float(components.get("product_profile_alignment"), 0.0)
-        + _safe_float(components.get("alpha_profile_adjustment"), 0.0)
-        + _safe_float(components.get("positive_learning"), 0.0)
-    )
-    conflict_penalty = (
-        abs(min(0.0, _safe_float(components.get("fusion_score_adjustment"), 0.0)))
-        + abs(min(0.0, _safe_float(components.get("negative_learning"), 0.0)))
-        + 0.02 * _count_items(row.get("gating_failures") or row.get("cross_analyst_conflicts"))
-    )
+    components = row.get("candidate_quality_components")
+    if not isinstance(components, Mapping):
+        return {}
     return {
-        "opportunity_score": round(opportunity_score, 6),
-        "evidence_quality": round(evidence_quality, 6),
-        "setup_quality": round(setup_quality, 6),
-        "trigger_quality": round(trigger_quality, 6),
-        "invalidation_quality": round(invalidation_quality, 6),
-        "product_profile_support": round(product_profile_support, 6),
-        "conflict_penalty": round(-conflict_penalty, 6),
+        str(key): round(_safe_float(value), 6)
+        for key, value in components.items()
     }
 
 
 def _candidate_quality(row: Mapping[str, Any]) -> float:
-    components = _candidate_quality_components(row)
-    return round(_bounded(sum(float(value or 0.0) for value in components.values())), 6)
+    return round(_bounded(_safe_float(row.get("candidate_quality"), 0.0)), 6)
 
 
 def _resolved_scc_direction(contract: Mapping[str, Any] | None) -> str:
@@ -224,9 +190,6 @@ def select_ticker_side(
             row["side_priority"] = priority
             row["ticker_side_priority"] = priority
             row["side_priority_score"] = _candidate_quality(row)
-            row["candidate_quality"] = _candidate_quality(row)
-            row["candidate_quality_components"] = _candidate_quality_components(row)
-            row["candidate_layer_hint"] = _candidate_layer_hint(row)
             row.update(side_priority_semantics_payload())
 
     scorecard["preferred_side"] = preferred_side

@@ -24,6 +24,20 @@ TECHNICAL_ENTRY_PROFILES = frozenset({"breakout", "pullback", "vwap_confirmed"})
 NEWS_ENTRY_PROFILES = frozenset({"event_immediate"})
 NEW_RISK_ENTRY_PROFILES = TECHNICAL_ENTRY_PROFILES | NEWS_ENTRY_PROFILES
 
+TRIGGER_CONFIRMATION_ADJUSTMENTS = frozenset(
+    {
+        "not_applicable",
+        "neutral",
+        "standard_confirmation_supported",
+        "stronger_confirmation_required",
+        "strict_confirmation_required",
+    }
+)
+STRONGER_CONFIRMATION_ADJUSTMENTS = frozenset(
+    {"stronger_confirmation_required", "strict_confirmation_required"}
+)
+STRONGER_CONFIRMATION_ENTRY_PROFILES = TECHNICAL_ENTRY_PROFILES
+
 
 _ENTRY_TRIGGER_BY_PROFILE_AND_SIDE = {
     ("breakout", "long"): "15分钟收盘价向上突破开盘区间上沿且高于VWAP",
@@ -75,6 +89,15 @@ _EXECUTION_LEARNING_SETUP_TO_PROFILE = {
 def normalize_execution_profile(value: Any) -> str:
     profile = str(value or "").strip().lower()
     return profile if profile in CANONICAL_EXECUTION_PROFILES else ""
+
+
+def normalize_trigger_confirmation_adjustment(value: Any) -> str:
+    adjustment = str(value or "").strip().lower()
+    return adjustment if adjustment in TRIGGER_CONFIRMATION_ADJUSTMENTS else "not_applicable"
+
+
+def requires_stronger_trigger_confirmation(value: Any) -> bool:
+    return normalize_trigger_confirmation_adjustment(value) in STRONGER_CONFIRMATION_ADJUSTMENTS
 
 
 def execution_profile_from_learning_setup(value: Any) -> str:
@@ -173,6 +196,7 @@ def execution_trigger_contract_error(
     side: Any,
     entry_trigger: Any,
     trigger_source: Any,
+    trigger_confirmation_adjustment: Any = None,
 ) -> str:
     """Return a stable error code for one PM/Trader execution contract."""
     normalized = normalize_execution_profile(profile)
@@ -180,6 +204,14 @@ def execution_trigger_contract_error(
         return "execution_profile_contract_invalid"
     if not trigger_source_matches_profile(normalized, trigger_source):
         return "execution_trigger_source_contract_invalid"
+    raw_adjustment = str(trigger_confirmation_adjustment or "").strip().lower()
+    if raw_adjustment and raw_adjustment not in TRIGGER_CONFIRMATION_ADJUSTMENTS:
+        return "execution_trigger_confirmation_adjustment_invalid"
+    if (
+        requires_stronger_trigger_confirmation(raw_adjustment)
+        and normalized not in STRONGER_CONFIRMATION_ENTRY_PROFILES
+    ):
+        return "execution_trigger_confirmation_profile_invalid"
     if normalized in NEW_RISK_ENTRY_PROFILES:
         expected = canonical_entry_trigger(normalized, side)
         if not expected or str(entry_trigger or "").strip() != expected:

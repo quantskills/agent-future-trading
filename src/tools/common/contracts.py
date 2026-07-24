@@ -117,6 +117,7 @@ EXECUTION_ARTIFACT_CONTAINERS = (
 EXECUTION_CONTRACT_KEYS = {
     "execution_profile",
     "trigger_source",
+    "trigger_confirmation_adjustment",
     "entry_trigger",
     "invalidation",
     "invalidation_level",
@@ -155,6 +156,7 @@ FINAL_CONTRACT_EXECUTION_FIELD_KEYS = {
     "execution_profile",
     "execution_requirement",
     "trigger_source",
+    "trigger_confirmation_adjustment",
     "authority_type",
     "authority_decision",
     "reason_codes",

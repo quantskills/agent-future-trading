@@ -18,6 +18,9 @@ _DIRECTION_BY_SIDE = {
     "short": str(Signal.BEARISH.value).lower(),
 }
 
+_CROSS_REGIME_RETRIEVAL_MATCH = "cross_regime_same_ticker_side_horizon"
+_CROSS_REGIME_CALIBRATION_WEIGHT = 0.25
+
 
 def retrieve_analyst_policy_calibration(
     db: Any,
@@ -101,7 +104,31 @@ def _row_strength(row: Mapping[str, Any]) -> float:
     reward_component = min(0.20, abs(reward_mean) / 10000.0)
     win_component = min(0.15, abs(win_rate - 0.5) * 0.30)
     pnl_component = min(0.10, abs(pnl) / 50000.0)
-    return _clip(sample_component + confidence_component + reward_component + win_component + pnl_component, 0.0, 0.55)
+    strength = _clip(
+        sample_component + confidence_component + reward_component + win_component + pnl_component,
+        0.0,
+        0.55,
+    )
+    if str(row.get("retrieval_match_level") or "") == _CROSS_REGIME_RETRIEVAL_MATCH:
+        strength *= _CROSS_REGIME_CALIBRATION_WEIGHT
+    return strength
+
+
+def _bounded_same_ticker_strength(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    total_cap: float,
+    cross_regime_cap: float,
+) -> float:
+    exact_strength = 0.0
+    cross_regime_strength = 0.0
+    for row in rows:
+        strength = _row_strength(row)
+        if str(row.get("retrieval_match_level") or "") == _CROSS_REGIME_RETRIEVAL_MATCH:
+            cross_regime_strength += strength
+        else:
+            exact_strength += strength
+    return min(total_cap, exact_strength + min(cross_regime_cap, cross_regime_strength))
 
 
 def _signal_calibration(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -144,6 +171,8 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
         "confidence_score": row.get("confidence_score"),
         "signal_calibration": dict(calibration),
     }
+    if str(row.get("retrieval_match_level") or "") == _CROSS_REGIME_RETRIEVAL_MATCH:
+        safe_row["retrieval_match_level"] = _CROSS_REGIME_RETRIEVAL_MATCH
     if isinstance(product_view, Mapping):
         safe_row["product_learning_calibration_view"] = dict(product_view)
     return safe_row
@@ -422,8 +451,16 @@ def calibrate_signal_with_learning_context(
     broad_positive_rows = [row for row in broad if _row_is_positive(row)]
     broad_negative_rows = [row for row in broad if _row_is_negative(row)]
 
-    positive_strength = min(0.18, sum(_row_strength(row) for row in positive_rows))
-    negative_strength = min(0.24, sum(_row_strength(row) for row in negative_rows))
+    positive_strength = _bounded_same_ticker_strength(
+        positive_rows,
+        total_cap=0.18,
+        cross_regime_cap=0.06,
+    )
+    negative_strength = _bounded_same_ticker_strength(
+        negative_rows,
+        total_cap=0.24,
+        cross_regime_cap=0.08,
+    )
     broad_positive_strength = min(0.06, sum(_row_strength(row) for row in broad_positive_rows))
     broad_negative_strength = min(0.08, sum(_row_strength(row) for row in broad_negative_rows))
     net_adjustment = positive_strength + broad_positive_strength - negative_strength - broad_negative_strength
