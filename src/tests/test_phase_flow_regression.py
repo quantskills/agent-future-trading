@@ -61,6 +61,7 @@ from agents.decision_team.portfolio_manager import (
     _build_blocked_pm_memory_state_update,
     _build_pm_decision_context,
     _build_final_action_contract,
+    _build_pm_landing_consistency_audit,
     _build_release_block_diagnostics,
     _canonical_action_evidence_contract,
     _audit_frozen_step4_pm_memory,
@@ -117,6 +118,7 @@ from tools.agent_tools.decision.pm_full_market_capital_deployment import (
 )
 from tools.agent_tools.decision.pm_lifecycle_action_port import classify_lifecycle_action_port
 from tools.common.final_action_semantics import full_market_rank_source_payload
+from tools.common.contracts import validate_pm_artifact_boundary
 from tools.agent_tools.decision.pm_decision_memory_retrieval import retrieve_pm_memory
 from run.order import _reconcile_rollover_with_strategy_target, _translate_pre_open_recommendation_to_order
 from tools.agent_tools.execution.trader_futures_execution import ExecutionBlocked, FuturesExecutionEngine
@@ -5499,6 +5501,101 @@ class PMRiskGateRegressionTest(unittest.TestCase):
         self.assertNotEqual(output.decision, "block")
         self.assertIn("news_only_directional_trade", output.reasons)
         self.assertGreater(output.position_ratio_multiplier, 0.0)
+
+    def test_nonempty_provisional_policy_is_applied_without_leaking_into_fac(self):
+        gate = PMRiskGate(
+            {
+                "pm_risk_gate": {
+                    "enabled": True,
+                    "policy_version": "test_v1",
+                    "learning_mode": "audit_only",
+                    "attribution_feedback": {"enabled": False},
+                    "quality_gate": {"enabled": False},
+                },
+                "market_confirmation": {"enabled": False},
+            }
+        )
+        provisional_policy = {
+            "id": "75e2d9b2-46ec-4d94-8607-68b7dba5f991",
+            "ticker": "RB",
+            "side": "short",
+            "setup_type": "short_trend_breakout_setup_short",
+            "horizon_class": "short",
+            "policy_action": "probe_only",
+            "multiplier": 0.35,
+            "confidence": 0.4678433866666667,
+            "event_type": "consecutive_setup_losses",
+            "sample_count": 3,
+            "source_trading_date": "2025-04-21",
+            "valid_until": "2025-05-01",
+            "reason": "net_pnl=-5446; win_rate=0",
+        }
+        output = gate.plan(
+            PMRiskGateInput(
+                ticker="RB",
+                trading_date="2025-04-22",
+                signal_combo=["Bearish", "Neutral", "Neutral"],
+                raw_target_side="short",
+                raw_position_ratio=-0.015,
+                current_position_ratio=0.0,
+                signal_strength=0.60,
+                market_confirmation={"enabled": False},
+                provisional_policy_state=[provisional_policy],
+            )
+        )
+
+        self.assertEqual(output.decision, "probe_only")
+        self.assertAlmostEqual(output.position_ratio_multiplier, 0.35)
+        self.assertIn("provisional_policy_probe_only", output.reasons)
+        self.assertEqual(output.diagnostics["provisional_policy_state"], [provisional_policy])
+        self.assertEqual(output.diagnostics["provisional_policy_applied"], [provisional_policy])
+
+        landing_audit = _build_pm_landing_consistency_audit(
+            ticker="RB",
+            current_lots=0,
+            target_lots=-1,
+            current_position_ratio=0.0,
+            final_position_ratio=-0.00525,
+            recommendation_intent={"action": "open_short", "action_type": "open_short"},
+            lots_to_trade=1,
+            lots_to_trade_reason="provisional_policy_probe_only",
+            opportunity_scorecard={
+                "preferred_side": "short",
+                "short": {
+                    "final_state": "probe_candidate",
+                    "entry_setup_count": 1,
+                    "invalidation_count": 1,
+                },
+            },
+            analyst_signals=[],
+            pm_learning_audit={},
+            adaptive_policy_state=[],
+            alpha_setup_profiles=[],
+            alpha_setup_action_values=[],
+            pm_risk_gate_payload=output.model_dump(),
+            control_reasons=list(output.reasons),
+            margin_required=1000.0,
+            margin_available=100000.0,
+            market_confirmation={"confirmation_score": 0.60},
+        )
+        alignment = landing_audit["pm_risk_gate_alignment"]
+        self.assertEqual(alignment["decision"], "probe_only")
+        self.assertAlmostEqual(alignment["position_ratio_multiplier"], 0.35)
+        self.assertIn("provisional_policy_probe_only", alignment["reasons"])
+        self.assertNotIn("diagnostics", alignment)
+        self.assertNotIn("audit_payload", alignment)
+        self.assertNotIn("notes", alignment)
+        self.assertNotIn("provisional_policy_state", json.dumps(landing_audit))
+        self.assertNotIn("provisional_policy_applied", json.dumps(landing_audit))
+        validate_pm_artifact_boundary(
+            {
+                "final_action_contract": {
+                    "learning_used": {
+                        "pm_landing_consistency_audit": landing_audit,
+                    }
+                }
+            }
+        )
 
     def test_weak_signal_combo_new_entry_is_probe_capped_not_zeroed(self):
         ratio, reasons, notes, diagnostics = _apply_trade_frequency_control(

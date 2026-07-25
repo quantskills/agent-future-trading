@@ -5869,6 +5869,24 @@ def _contract_safe_learning_to_position_summary(trace: dict | None) -> dict:
     }
 
 
+def _contract_safe_pm_risk_gate_alignment(payload: dict | None) -> dict:
+    """Project the internal PM RiskGate verdict into a FAC-safe summary."""
+    payload = payload if isinstance(payload, dict) else {}
+    if not payload:
+        return {}
+    reasons = payload.get("reasons")
+    return {
+        "decision": payload.get("decision"),
+        "target_side": payload.get("target_side"),
+        "position_ratio_multiplier": payload.get("position_ratio_multiplier"),
+        "confidence_multiplier": payload.get("confidence_multiplier"),
+        "cap_multiplier": payload.get("cap_multiplier"),
+        "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+        "policy_version": payload.get("policy_version"),
+        "learning_mode": payload.get("learning_mode"),
+    }
+
+
 def _build_pm_landing_consistency_audit(
     *,
     ticker: str,
@@ -5998,7 +6016,7 @@ def _build_pm_landing_consistency_audit(
             "alpha_setup_action_preference_counts": action_value_trace.get("action_preference_counts", {}),
             "money_decision_trace_required": True,
         },
-        "pm_risk_gate_alignment": pm_risk_gate_payload or {},
+        "pm_risk_gate_alignment": _contract_safe_pm_risk_gate_alignment(pm_risk_gate_payload),
         "trader_pre_execution_feasibility": {
             "margin_required": float(margin_required or 0.0),
             "margin_available": float(margin_available or 0.0),

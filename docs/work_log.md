@@ -40,3 +40,5 @@
 （2）[分析师跨regime安全校准] `analyst_learning_context.py`、`analyst_learning_calibration.py` 在精确regime没有安全正式投影时，才允许同品种、同方向、同周期、T+1且canonical/作用域合法的跨regime摘要以低权重进入分析校准；技术参数overlay继续要求精确regime。原因：修复完整episode因regime字符串变化完全无法迭代分析的问题，同时避免跨状态经验覆盖当前证据或放宽PM学习边界。
 
 （3）[候选质量去重与更强入场确认] `pm_signal_fusion.py`只以已经包含setup、学习/profile及冲突的`opportunity_score`加一次trigger/失效完整性形成`candidate_quality`，`pm_ticker_side_selection.py`停止二次重算；`portfolio_manager.py`从结构化weak-conflict权限或同品种、同方向、同setup、同canonical trigger的精确正式open/add学习生成既有`trigger_confirmation_adjustment`，`pm_contract_builder.py`、`contracts.py`、`execution_trigger_semantics.py`、`trader_intraday_execution.py`将其保真传到Trader，使stronger/strict `breakout/pullback/vwap_confirmed`在原触发后等待下一根完整15分钟线确认再执行。原因：恢复Step4层内比例区分度，并让亏损学习与弱冲突要求真实改变后续入场方式，而不调整rank、ATR、probe参数或单日单动作规则。
+
+（4）[PM RiskGate临时策略合约边界] `portfolio_manager.py`保留非空`provisional_policy_state`在PM RiskGate内部的检索、判定和仓位倍率作用，但写入FAC的`pm_risk_gate_alignment`只投影决策、方向、倍率、原因码和策略版本，不再原样携带内部`diagnostics`、`audit_payload`、说明文本及临时策略记录。原因：修复首条真实RB临时策略生效后，原始研究对象经落地一致性审计进入FAC并被正确的PM事实边界拒绝，导致Phase1保存回滚；不改变临时策略的`probe_only=0.35`实际风控效果、学习、rank或交易规则。
