@@ -1040,55 +1040,25 @@ def write_alpha_setup_profiles(
                     "lifecycle_state": execution_result.get("lifecycle_state"),
                     "profile_state_hint": execution_result.get("profile_state_hint"),
                 })
-    # Preserve every physical pair sample, but make the final pair in each
-    # existing sample-identity group carry the 0 -> position -> 0 completion
-    # date so the resulting profile/action-value cannot become visible early.
-    episode_group_last: Dict[tuple, tuple[str, int]] = {}
-    for index, episode_sample in enumerate(episode_samples):
+    # Each row is already one complete 0 -> position -> 0 lifecycle.  Physical
+    # partial-close pairs remain inside the episode payload as economic detail
+    # and must not mature the setup as separate open/add samples.
+    for episode_sample in episode_samples:
         result_payload = (
             episode_sample.get("result")
             if isinstance(episode_sample.get("result"), dict)
             else {}
         )
-        group_key = (
-            str(episode_sample.get("ticker") or "").upper(),
-            str(episode_sample.get("side") or "").lower(),
-            str(episode_sample.get("scope_key") or ""),
-            str(episode_sample.get("setup_type") or ""),
-            str(episode_sample.get("source_type") or ""),
-            str(episode_sample.get("recommendation_id") or ""),
-        )
-        pair_close_date = str(result_payload.get("close_date") or "")[:10]
-        if group_key not in episode_group_last or pair_close_date >= episode_group_last[group_key][0]:
-            episode_group_last[group_key] = (pair_close_date, index)
-    for index, episode_sample in enumerate(episode_samples):
-        result_payload = (
-            episode_sample.get("result")
-            if isinstance(episode_sample.get("result"), dict)
-            else {}
-        )
-        group_key = (
-            str(episode_sample.get("ticker") or "").upper(),
-            str(episode_sample.get("side") or "").lower(),
-            str(episode_sample.get("scope_key") or ""),
-            str(episode_sample.get("setup_type") or ""),
-            str(episode_sample.get("source_type") or ""),
-            str(episode_sample.get("recommendation_id") or ""),
-        )
-        pair_close_date = str(result_payload.get("close_date") or trading_date)[:10]
         episode_completion_date = str(
-            result_payload.get("episode_completion_date") or pair_close_date
+            result_payload.get("episode_completion_date")
+            or result_payload.get("close_date")
+            or trading_date
         )[:10]
-        episode_learning_date = (
-            episode_completion_date
-            if episode_group_last.get(group_key, ("", -1))[1] == index
-            else pair_close_date
-        )
         result = upsert_alpha_setup_sample_and_profile(
             cursor,
             cfg=cfg,
             config_id=config_id,
-            trading_date=episode_learning_date,
+            trading_date=episode_completion_date,
             sample=episode_sample,
         )
         if result.get("rows"):
@@ -1199,13 +1169,12 @@ def _episode_alpha_setup_samples(
         payload_rec_id = str(payload.get("open_recommendation_id") or "").strip()
         if payload_rec_id and payload_rec_id != rec_id:
             continue
-        if (
-            str(pair.get("open_source_type") or "").strip().lower() != "strategy"
-            or str(pair.get("close_source_type") or "").strip().lower() != "strategy"
-            or bool(pair.get("contains_rollover"))
-            or bool(pair.get("contains_forced_risk"))
-            or bool(pair.get("contains_non_strategy"))
-        ):
+        origin_source_type = str(
+            pair.get("origin_source_type")
+            or pair.get("open_source_type")
+            or ""
+        ).strip().lower()
+        if origin_source_type != "strategy" or bool(pair.get("contains_forced_risk")):
             continue
         ticker = str(row.get("ticker") or "").upper()
         side = str(row.get("side") or "").lower()
@@ -1254,12 +1223,24 @@ def _episode_alpha_setup_samples(
         )
         opportunity_type = str(payload.get("opportunity_type") or "")
         opportunity_state = str(payload.get("opportunity_state") or "")
-        setup_type = infer_setup_type(
-            snapshot=signal_snapshot,
-            setup_type=row.get("setup_type"),
-            opportunity_type=opportunity_type,
-            opportunity_state=opportunity_state,
-        )
+        setup_type = str(
+            final_contract.get("setup_type")
+            or payload.get("setup_type")
+            or row.get("setup_type")
+            or ""
+        ).strip()
+        if not setup_type or setup_type.lower() in {"unknown", "*"}:
+            continue
+        entry_trigger = str(
+            final_contract.get("entry_trigger")
+            or payload.get("entry_trigger")
+            or ""
+        ).strip()
+        trigger_source = str(
+            final_contract.get("trigger_source")
+            or payload.get("trigger_source")
+            or ""
+        ).strip()
         data_usage = payload.get("data_usage_summary") if isinstance(payload.get("data_usage_summary"), dict) else {}
         position_lifecycle_trace = (
             payload.get("position_lifecycle_trace")
@@ -1291,8 +1272,9 @@ def _episode_alpha_setup_samples(
             "sector": row.get("sector") or "unknown",
             "horizon_class": row.get("horizon_class") or "unknown",
             "market_regime": row.get("market_regime") or "unknown",
-            "setup_type": row.get("setup_type") or "*",
             "setup_type": setup_type,
+            "entry_trigger": entry_trigger,
+            "trigger_source": trigger_source,
             "data_combo": data_combo,
             "scope_key": scope_key,
             "source_type": "trade_episode",
@@ -1324,6 +1306,8 @@ def _episode_alpha_setup_samples(
                 "analyst_payloads": payload.get("analyst_payloads") or {},
                 "data_usage_summary": data_usage,
                 "final_action_contract": final_contract,
+                "entry_trigger": entry_trigger,
+                "trigger_source": trigger_source,
                 "position_lifecycle_trace": position_lifecycle_trace,
                 "learning_boundary": {
                     "learning_source": "trade_episode_memory",

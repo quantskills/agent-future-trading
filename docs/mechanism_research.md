@@ -102,7 +102,7 @@ open 评价“当时开仓是否有正期望”；add 评价“同方向扩大�
 
 不同动作不能混用。历史 hold 赚钱不能证明新开仓赚钱；历史 exit 有效不能反向支持加仓；历史 execution 好只能被投资组合经理写入 `final_action_contract.execution_profile/entry_trigger/requires_intraday_confirmation/can_execute_without_intraday_trigger`，不能改变方向或目标手数，也不能由交易员直接读取后放宽触发。
 
-open/add 的收益只来自仓位完全归零后的完整策略 episode。系统按 ticker/side 重放策略成交识别完整持仓周期；分批平仓未归零时不提前落完整 episode，归零后每个既有物理 pair 仍按自己的开平收益、手续费、close date 和去重键逐条落样，并共享同一完整生命周期轨迹，不重算或聚合覆盖经济结果。组内最后样本以归零日刷新 profile/action-value，使周期 T 的结果只能在 T+1 以后消费。日内或日终 PnL 碎片不能重复充当 open/add 收益；日记录仍可为 hold、reduce、exit 和 execution lane 提供对应生命周期事实。完整 episode 只是 action-value 候选来源：状态字段不完整、没有合法 preference 或只形成弱先验时，可以保留样本和 profile，但不得被提升成 PM 正式 canonical 学习。
+open/add 的收益只来自仓位完全归零后的完整策略 episode。系统按 ticker/side 重放策略成交识别 `0 -> 持仓 -> 0` 的完整持仓周期；分批平仓未归零时不提前落完整 episode，最终归零后整个周期只形成一条 open/add episode/sample、一次 trade count 和一个最终净收益。各物理开平 pair 仅保留在 episode payload 中作为 gross PnL、手续费、close date 和去重明细，不得分别增加 sample、trade count、胜负或 tail loss。周期 T 的结果只能在 T+1 以后消费。日内或日终 PnL 碎片不能重复充当 open/add 收益；日记录仍只服务真实发生的 hold、reduce、exit 和 execution 生命周期。完整 episode 只是 action-value 候选来源：状态字段不完整、没有合法 preference 或只形成弱先验时，可以保留样本和 profile，但不得提升成 PM 正式 canonical 学习。
 
 `memory_side_role` 随最终学习 lane 固定：open/add/scale/increase 使用 `target_side`，hold/reduce/exit 使用 `current_position_side`，conditional_monitor 使用 `trigger_side`，execution 使用 `historical_sample_side`。
 
@@ -133,6 +133,8 @@ action-value 必须保留以下核心字段，用于 `decision_memory_retrieval`
 
 1. LLM 调用前，把仅限历史交易日且作用域匹配的校准摘要加入提示词，帮助模型识别该产品、setup 和本专业常见的有效证据、反例与数据缺口。
 2. LLM 返回后，用同一批合格记录执行确定性信号校对，将确认、削弱或反驳结果落入已登记的证据、冲突、缺失和质量字段。
+
+同一批通过 T+1、canonical、作用域、family/lane 和安全投影校验的正式 open/add 摘要必须同时用于 LLM 前 Prompt 和 LLM 后确定性校准，不得清空 Prompt 侧。Prompt 只允许模型条件性参考，最终 setup 或 canonical trigger 不精确匹配时，后置确定性校准贡献必须为零。
 
 技术面分析师额外保留一项专业机制：在 LLM 调用前，根据当前可见价格形成初始自适应参数和初始 `market_regime`，再读取过去有效、作用域匹配且经过验证的 `contextual_rule_calibration:technical_parameters`，有界调整 EMA、RSI 和 Bollinger 参数，并用校准后的参数重新计算最终技术指标和 `technical_context`。该机制不直接修改 `signal`、`opportunity_state`、触发、手数、rank、预算和交易权限。
 

@@ -201,11 +201,23 @@ def retrieve_pm_memory(
             "retrieval_attempts": attempts,
         }
 
-    layers = [
-        ("exact_state", horizon_class, market_regime, setup_type, "ticker_side_horizon_regime_setup"),
-        ("same_ticker_side_horizon", horizon_class, None, None, "ticker_side_horizon_fallback"),
-        ("same_ticker_side", None, None, None, "ticker_side_fallback"),
-    ]
+    layers = []
+    if _text(setup_type):
+        layers.append(
+            (
+                "exact_state",
+                horizon_class,
+                market_regime,
+                setup_type,
+                "ticker_side_horizon_regime_setup",
+            )
+        )
+    layers.extend(
+        [
+            ("same_ticker_side_horizon", horizon_class, None, None, "ticker_side_horizon_fallback"),
+            ("same_ticker_side", None, None, None, "ticker_side_fallback"),
+        ]
+    )
     rejected: list[dict] = []
     for match_level, layer_horizon, layer_regime, layer_setup, reason in layers:
         try:

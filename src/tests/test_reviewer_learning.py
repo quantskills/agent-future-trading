@@ -437,6 +437,7 @@ def _rescope_formal_analyst_action_value(
         }
     )
     product_key = row["payload"]["product_learning_performance_key"]
+    trigger_key = canonical_entry_trigger("breakout", side)
     product_key.update(
         {
             "performance_scope_key": (
@@ -447,8 +448,10 @@ def _rescope_formal_analyst_action_value(
             "side": side,
             "horizon_class": horizon_class,
             "market_regime": market_regime,
+            "trigger_key": trigger_key,
         }
     )
+    product_key["entry_quality_outcome"]["trigger_key"] = trigger_key
     return row
 
 
@@ -1017,6 +1020,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
             business_quality_score=0.50,
             factor_alignment_score=0.50,
             horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
         )
         fallback_calibrated = calibrate_signal_with_learning_context(
             fallback_signal,
@@ -1033,6 +1038,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
             business_quality_score=0.50,
             factor_alignment_score=0.50,
             horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
         )
         exact_calibrated = calibrate_signal_with_learning_context(
             exact_signal,
@@ -1511,6 +1518,131 @@ class ReviewerLearningContextTest(unittest.TestCase):
         self.assertIn(CONTRACT_KEY, json.loads(event["action_json"]))
         conn.close()
 
+    def test_rollover_extends_strategy_episode_without_creating_extra_sample(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE config (id TEXT PRIMARY KEY)")
+        cursor.execute("INSERT INTO config(id) VALUES ('cfg')")
+        cursor.execute(
+            """
+            CREATE TABLE futures_recommendation (
+                id TEXT PRIMARY KEY, config_id TEXT NOT NULL,
+                reference_portfolio_id TEXT NOT NULL, trading_date TEXT NOT NULL,
+                effective_trade_date TEXT NOT NULL, source_type TEXT NOT NULL,
+                underlying_code TEXT NOT NULL, contract_code TEXT, action TEXT NOT NULL,
+                lots INTEGER NOT NULL, signal_snapshot TEXT, status TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE futures_transactions (
+                id TEXT PRIMARY KEY, portfolio_id TEXT NOT NULL, config_id TEXT,
+                recommendation_id TEXT, trading_date TEXT NOT NULL, ticker TEXT NOT NULL,
+                contract_code TEXT, action TEXT NOT NULL, lots INTEGER NOT NULL,
+                execution_price REAL NOT NULL, settle_price REAL,
+                contract_multiplier REAL NOT NULL, margin_rate REAL NOT NULL,
+                margin_used REAL NOT NULL, commission REAL DEFAULT 0,
+                source_type TEXT, execution_phase TEXT, created_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_reviewer_learning_schema(cursor)
+        snapshot = {
+            "signal_collection_contract": _scc_from_analyst_payloads(
+                technical={"signal": "Bullish", "setup_type": "breakout"},
+                commodity_news={"signal": "Bullish", "setup_type": "event_catalyst"},
+            ),
+            "final_action_contract": {
+                "contract_version": "agentquant.final_action.v1",
+                "ticker": "RB",
+                "final_action": "open_probe",
+                "current_lots": 0,
+                "target_lots": 2,
+                "lots_delta": 2,
+                "setup_type": "trend_breakout_setup",
+                "entry_trigger": "breakout above opening range",
+                "trigger_source": "technical",
+                "horizon_class": "short",
+                "market_regime": "trend",
+            },
+        }
+        cursor.execute(
+            """
+            INSERT INTO futures_recommendation VALUES (
+                'rec-open', 'cfg', 'pf', '2025-03-10', '2025-03-10',
+                'strategy', 'RB', 'rb2505', 'open_long', 2, ?, 'pending',
+                '2025-03-10T09:00:00'
+            )
+            """,
+            (json.dumps(snapshot),),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO futures_transactions VALUES (
+                ?, 'pf', 'cfg', ?, ?, 'RB', ?, ?, ?, ?, ?, 10, 0.1, 1000,
+                ?, ?, 'phase2', ?
+            )
+            """,
+            [
+                ("tx-open", "rec-open", "2025-03-10", "rb2505", "open_long", 2, 3500.0, 3500.0, 2.0, "strategy", "2025-03-10T09:30:00"),
+                ("tx-roll-close", "rec-roll", "2025-03-12", "rb2505", "close_long", 2, 3520.0, 3520.0, 2.0, "rollover", "2025-03-12T14:00:00"),
+                ("tx-roll-open", "rec-roll", "2025-03-12", "rb2510", "open_long", 2, 3530.0, 3530.0, 2.0, "rollover", "2025-03-12T14:01:00"),
+                ("tx-close", "rec-close", "2025-03-14", "rb2510", "close_long", 2, 3560.0, 3560.0, 2.0, "strategy", "2025-03-14T14:30:00"),
+            ],
+        )
+
+        rows = _write_trade_episode_memory(
+            cursor,
+            cfg={"learning": {"trade_episode_memory": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-14",
+        )
+
+        self.assertEqual(rows, 1)
+        row = dict(cursor.execute("SELECT * FROM trade_episode_memory").fetchone())
+        payload = load_externalized_json(row["payload_json"])
+        self.assertEqual(row["setup_type"], "trend_breakout_setup")
+        self.assertEqual(payload["entry_trigger"], "breakout above opening range")
+        self.assertEqual(payload["trigger_source"], "technical")
+        self.assertTrue(payload["pair"]["contains_rollover"])
+        self.assertEqual(payload["pair"]["physical_pair_count"], 2)
+        self.assertEqual(payload["pair"]["net_pnl"], 992.0)
+        self.assertEqual(
+            payload["position_lifecycle_trace"]["position_cycle_transaction_ids"],
+            ["tx-open", "tx-roll-close", "tx-roll-open", "tx-close"],
+        )
+        profile_result = write_alpha_setup_profiles(
+            cursor,
+            cfg={"learning": {"alpha_setup_profile": {"enabled": True}}},
+            config_id="cfg",
+            trading_date="2025-03-14",
+            strategy_recommendations=[],
+            transactions_by_recommendation={},
+        )
+        self.assertEqual(profile_result["rows"], 1)
+        profile = cursor.execute(
+            "SELECT sample_count, trade_count, net_pnl FROM alpha_setup_profile"
+        ).fetchone()
+        self.assertEqual(profile["sample_count"], 1)
+        self.assertEqual(profile["trade_count"], 1)
+        self.assertEqual(profile["net_pnl"], 992.0)
+        self.assertEqual(
+            cursor.execute(
+                "SELECT COUNT(*) FROM alpha_setup_action_value WHERE action_name='open'"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            cursor.execute(
+                "SELECT COUNT(*) FROM alpha_setup_action_value WHERE action_name LIKE '%roll%'"
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
     def test_trade_episode_memory_preserves_economics_and_adds_full_fact_trace(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -1720,25 +1852,22 @@ class ReviewerLearningContextTest(unittest.TestCase):
             config_id="cfg",
             trading_date="2025-03-12",
         )
-        self.assertEqual(rows, 2)
+        self.assertEqual(rows, 1)
         stored_rows = [
             dict(row)
             for row in cursor.execute(
                 "SELECT * FROM trade_episode_memory ORDER BY close_date"
             ).fetchall()
         ]
-        self.assertEqual([row["net_pnl"] for row in stored_rows], [498.0, 998.0])
+        self.assertEqual([row["net_pnl"] for row in stored_rows], [1496.0])
         payloads = [load_externalized_json(row["payload_json"]) for row in stored_rows]
-        self.assertEqual([payload["pair"]["gross_pnl"] for payload in payloads], [500.0, 1000.0])
-        self.assertEqual([payload["pair"]["commission"] for payload in payloads], [2.0, 2.0])
-        self.assertEqual([payload["pair"]["net_pnl"] for payload in payloads], [498.0, 998.0])
+        self.assertEqual(payloads[0]["pair"]["physical_pair_count"], 2)
+        self.assertEqual(payloads[0]["pair"]["gross_pnl"], 1500.0)
+        self.assertEqual(payloads[0]["pair"]["commission"], 4.0)
+        self.assertEqual(payloads[0]["pair"]["net_pnl"], 1496.0)
         payload = payloads[0]
         trace = payload["position_lifecycle_trace"]
         self.assertFalse(trace["economic_result_recalculated"])
-        self.assertEqual(
-            payloads[1]["position_lifecycle_trace"]["position_cycle_transaction_ids"],
-            trace["position_cycle_transaction_ids"],
-        )
         self.assertEqual(
             [fact["trading_date"] for fact in trace["daily_facts"]],
             ["2025-03-10", "2025-03-11", "2025-03-12"],
@@ -1808,8 +1937,8 @@ class ReviewerLearningContextTest(unittest.TestCase):
             config_id="cfg",
             trading_date="2025-03-12",
         )
-        self.assertEqual(len(samples), 2)
-        self.assertEqual([sample["net_pnl"] for sample in samples], [498.0, 998.0])
+        self.assertEqual(len(samples), 1)
+        self.assertEqual([sample["net_pnl"] for sample in samples], [1496.0])
         self.assertTrue(
             all(
                 sample["result"]["lifecycle_fact_dates"]
@@ -1825,7 +1954,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             strategy_recommendations=[],
             transactions_by_recommendation={},
         )
-        self.assertEqual(profile_result["rows"], 2)
+        self.assertEqual(profile_result["rows"], 1)
         stored_samples = cursor.execute(
             """
             SELECT trading_date, result_json
@@ -1836,11 +1965,11 @@ class ReviewerLearningContextTest(unittest.TestCase):
         ).fetchall()
         self.assertEqual(
             [row["trading_date"] for row in stored_samples],
-            ["2025-03-11", "2025-03-12"],
+            ["2025-03-12"],
         )
         self.assertEqual(
             [json.loads(row["result_json"])["close_date"] for row in stored_samples],
-            ["2025-03-11", "2025-03-12"],
+            ["2025-03-12"],
         )
         action_value = cursor.execute(
             """
@@ -1850,7 +1979,7 @@ class ReviewerLearningContextTest(unittest.TestCase):
             """
         ).fetchone()
         self.assertIsNotNone(action_value)
-        self.assertEqual(action_value["sample_count"], 2)
+        self.assertEqual(action_value["sample_count"], 1)
         self.assertEqual(action_value["reward_sum"], 1496.0)
         self.assertEqual(action_value["last_sample_date"], "2025-03-12")
         conn.close()
@@ -4360,6 +4489,28 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             setup_type="",
             opportunity_type="",
             opportunity_state="",
+        )
+
+        self.assertEqual(setup_type, "trend_breakout_setup")
+
+    def test_episode_setup_identity_uses_opening_fac_not_news_scc(self):
+        setup_type = infer_setup_type(
+            snapshot={
+                "final_action_contract": {
+                    "setup_type": "trend_breakout_setup",
+                    "entry_trigger": "breakout above opening range",
+                },
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={"setup_type": "breakout"},
+                    commodity_news={
+                        "setup_type": "event_catalyst",
+                        "event_type": "news_event",
+                    },
+                ),
+            },
+            setup_type="news_event_setup",
+            opportunity_type="event_catalyst",
+            opportunity_state="tradeable_candidate",
         )
 
         self.assertEqual(setup_type, "trend_breakout_setup")
@@ -8069,7 +8220,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             )
             conn.close()
 
-    def test_episode_learning_rejects_incomplete_and_operational_pairs(self):
+    def test_episode_learning_rejects_invalid_and_forced_risk_but_accepts_rollover_lineage(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
@@ -8212,8 +8363,8 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 config_id="cfg",
                 trading_date=close_date,
             )
-            self.assertEqual(len(loaded), 1)
-            self.assertEqual(loaded[0]["ticker"], "TA")
+            self.assertEqual(len(loaded), 2)
+            self.assertEqual({row["ticker"] for row in loaded}, {"TA", "RO"})
 
             write_alpha_setup_profiles(
                 cursor,
@@ -8226,7 +8377,7 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             samples = cursor.execute(
                 "SELECT ticker FROM alpha_setup_sample WHERE source_type='trade_episode'"
             ).fetchall()
-            self.assertEqual([row["ticker"] for row in samples], ["TA"])
+            self.assertEqual({row["ticker"] for row in samples}, {"TA", "RO"})
             action_value = cursor.execute(
                 "SELECT * FROM alpha_setup_action_value WHERE ticker='TA'"
             ).fetchone()

@@ -42,3 +42,13 @@
 （3）[候选质量去重与更强入场确认] `pm_signal_fusion.py`只以已经包含setup、学习/profile及冲突的`opportunity_score`加一次trigger/失效完整性形成`candidate_quality`，`pm_ticker_side_selection.py`停止二次重算；`portfolio_manager.py`从结构化weak-conflict权限或同品种、同方向、同setup、同canonical trigger的精确正式open/add学习生成既有`trigger_confirmation_adjustment`，`pm_contract_builder.py`、`contracts.py`、`execution_trigger_semantics.py`、`trader_intraday_execution.py`将其保真传到Trader，使stronger/strict `breakout/pullback/vwap_confirmed`在原触发后等待下一根完整15分钟线确认再执行。原因：恢复Step4层内比例区分度，并让亏损学习与弱冲突要求真实改变后续入场方式，而不调整rank、ATR、probe参数或单日单动作规则。
 
 （4）[PM RiskGate临时策略合约边界] `portfolio_manager.py`保留非空`provisional_policy_state`在PM RiskGate内部的检索、判定和仓位倍率作用，但写入FAC的`pm_risk_gate_alignment`只投影决策、方向、倍率、原因码和策略版本，不再原样携带内部`diagnostics`、`audit_payload`、说明文本及临时策略记录。原因：修复首条真实RB临时策略生效后，原始研究对象经落地一致性审计进入FAC并被正确的PM事实边界拒绝，导致Phase1保存回滚；不改变临时策略的`probe_only=0.35`实际风控效果、学习、rank或交易规则。
+
+==========2026年07月26日==========
+
+（1）[完整策略周期学习身份与计数] `research_memory_writers.py`、`research_learning.py`、`alpha_setup.py`让换约成交仅参与原策略持仓血缘、手数和经济结果，换约后继续持仓延续原episode、最终归零结束原episode；完整episode的setup、entry trigger和trigger source只继承原开仓FAC，分批平仓pair保留为经济明细，但open/add仅按完整持仓周期形成一次sample、trade count和最终收益。原因：修复换约切断episode、新闻证据改写原技术setup以及分批平仓虚增样本、胜负和尾损的问题，同时保持换约不生成独立学习、forced-risk边界、T+1和反馈ID不变。
+
+（2）[分析师学习生命周期路由] `analyst_learning_context.py`、`analyst_learning_calibration.py`只将canonical open/add正式学习投影到入场校准，并要求当前setup与canonical trigger精确一致后才改变证据质量；hold、reduce/exit和execution/profile不得进入新增风险入场证据校准，无匹配记录保持冷启动。原因：防止仅因品种和方向相同便让持仓、退场或执行经验污染新的入场证据和置信度。
+
+（3）[PM精确setup检索键] `portfolio_manager.py`从已验证SCC重建的当前technical/event执行证据取得canonical setup作为精确学习检索键，禁止历史best profile、Step4 final_state及通配setup冒充精确命中；当前setup缺失时只走既有降级检索。原因：修复正式学习消费全部落入fallback、无法按当前真实setup影响候选质量、升层和rank的问题。
+
+（4）[分析师双路径学习与PM检索失败边界] `analyst_learning_context.py`恢复把经T+1、canonical、作用域和family/lane校验的正式open/add安全摘要按预算写入分析师Prompt，并保留同一批记录供LLM输出后按最终setup/canonical trigger确定性校准；hold、reduce/exit、execution/profile及similar/weak/incomplete仍不得进入新增风险入场校准。`portfolio_manager.py`不再吞掉当前canonical setup正式学习检索异常，只有检索成功且结果为空才按合法冷启动处理。对应测试恢复Prompt安全投影、跨regime低权重投影，并覆盖精确检索异常终止。原因：修复生命周期隔离时误将合格open/add学习从Prompt全部清空，以及真实检索故障被伪装成无学习而阻断分析迭代、候选升层和交易放大。

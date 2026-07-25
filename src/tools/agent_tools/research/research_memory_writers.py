@@ -36,7 +36,10 @@ from util.futures_audit import (
     infer_no_trade_reason,
     normalize_no_trade_reason,
 )
-from util.futures_trade_pairs import summarize_trade_pairs
+from util.futures_trade_pairs import (
+    build_strategy_originated_trade_pairs_with_diagnostics,
+    summarize_trade_pairs,
+)
 from util.logger import logger
 from tools.common.neutral_accountability import build_neutral_accountability_summary
 from tools.common.final_action_semantics import (
@@ -1621,6 +1624,40 @@ def _episode_fact_change(
     }
 
 
+def _strategy_originated_pairs_up_to(
+    cursor: sqlite3.Cursor,
+    *,
+    config_id: str,
+    trading_date: str,
+) -> List[Dict[str, Any]]:
+    """Read physical economics for strategy-originated rollover lineages.
+
+    This deliberately remains private to complete episode construction.
+    Rollover fills must contribute to the original strategy lifecycle's lots,
+    costs, and PnL, but must not become standalone template/action learning in
+    the other pair-based research writers.
+    """
+    cursor.execute(
+        """
+        SELECT *
+        FROM futures_transactions
+        WHERE config_id = ?
+          AND substr(trading_date, 1, 10) <= ?
+        ORDER BY substr(trading_date, 1, 10), created_at, id
+        """,
+        (config_id, str(trading_date)[:10]),
+    )
+    pairs, _ = build_strategy_originated_trade_pairs_with_diagnostics(
+        [dict(row) for row in cursor.fetchall()]
+    )
+    return [
+        pair
+        for pair in pairs
+        if str(pair.get("close_date") or "") <= str(trading_date)[:10]
+        and not bool(pair.get("contains_forced_risk"))
+    ]
+
+
 def _completed_strategy_position_cycles(
     cursor: sqlite3.Cursor,
     *,
@@ -1629,7 +1666,13 @@ def _completed_strategy_position_cycles(
     side: str,
     trading_date: str,
 ) -> List[Dict[str, Any]]:
-    """Replay strategy fills into complete 0 -> position -> 0 cycles."""
+    """Replay strategy-originated exposure into complete 0 -> position -> 0 cycles.
+
+    Rollover fills are operational rather than learning actions.  They are
+    nevertheless part of the original strategy position's physical lineage:
+    a balanced close/open transfer leaves exposure unchanged, while an
+    unmatched rollover close can finish the existing cycle.
+    """
     transaction_columns = _table_columns(cursor, "futures_transactions")
     required_columns = {
         "id",
@@ -1654,26 +1697,81 @@ def _completed_strategy_position_cycles(
         WHERE config_id = ?
           AND UPPER(ticker) = ?
           AND substr(trading_date, 1, 10) <= ?
-          AND LOWER(COALESCE(source_type, 'strategy')) = 'strategy'
+          AND LOWER(COALESCE(source_type, 'strategy')) IN ('strategy', 'rollover')
           AND action IN (?, ?)
         ORDER BY substr(trading_date, 1, 10), created_at, id
         ''',
         (config_id, ticker, str(trading_date)[:10], open_action, close_action),
     )
+    rows = [dict(raw_row) for raw_row in cursor.fetchall()]
+    rollover_groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if str(row.get("source_type") or "strategy").strip().lower() != "rollover":
+            continue
+        rollover_groups[
+            (
+                str(row.get("trading_date") or "")[:10],
+                str(row.get("recommendation_id") or row.get("id") or ""),
+            )
+        ].append(row)
+
     position_lots = 0
     active_cycle: Optional[Dict[str, Any]] = None
     completed: List[Dict[str, Any]] = []
-    for raw_row in cursor.fetchall():
-        row = dict(raw_row)
+    consumed_rollover_groups: set[Tuple[str, str]] = set()
+    for row in rows:
         action = str(row.get("action") or "")
         lots = abs(_safe_int(row.get("lots"), 0))
         if lots <= 0:
+            continue
+        source_type = str(row.get("source_type") or "strategy").strip().lower()
+        if source_type == "rollover":
+            group_key = (
+                str(row.get("trading_date") or "")[:10],
+                str(row.get("recommendation_id") or row.get("id") or ""),
+            )
+            if group_key in consumed_rollover_groups:
+                continue
+            consumed_rollover_groups.add(group_key)
+            group_rows = rollover_groups.get(group_key) or [row]
+            if active_cycle is None or position_lots <= 0:
+                continue
+            active_cycle["transactions"].extend(group_rows)
+            opened = sum(
+                abs(_safe_int(item.get("lots"), 0))
+                for item in group_rows
+                if str(item.get("action") or "") == open_action
+            )
+            closed = sum(
+                abs(_safe_int(item.get("lots"), 0))
+                for item in group_rows
+                if str(item.get("action") or "") == close_action
+            )
+            position_lots = max(0, position_lots + opened - closed)
+            if position_lots == 0:
+                final_row = max(
+                    group_rows,
+                    key=lambda item: (
+                        str(item.get("created_at") or ""),
+                        str(item.get("id") or ""),
+                    ),
+                )
+                active_cycle["close_date"] = str(final_row.get("trading_date") or "")[:10]
+                active_cycle["transaction_ids"] = tuple(
+                    str(item.get("id") or "")
+                    for item in active_cycle["transactions"]
+                    if item.get("id")
+                )
+                completed.append(active_cycle)
+                active_cycle = None
             continue
         if action == open_action:
             if position_lots <= 0:
                 active_cycle = {
                     "side": side,
                     "open_date": str(row.get("trading_date") or "")[:10],
+                    "open_transaction_id": row.get("id"),
+                    "open_recommendation_id": row.get("recommendation_id"),
                     "close_date": None,
                     "transactions": [],
                 }
@@ -1698,11 +1796,112 @@ def _completed_strategy_position_cycles(
     return completed
 
 
+def _aggregate_cycle_trade_pairs(
+    position_cycle: Mapping[str, Any],
+    physical_pairs: List[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Aggregate physical closes into one strategy lifecycle outcome."""
+    transaction_ids = {
+        str(item)
+        for item in (position_cycle.get("transaction_ids") or ())
+        if item
+    }
+    cycle_pairs = [
+        dict(pair)
+        for pair in physical_pairs
+        if str(pair.get("open_transaction_id") or "") in transaction_ids
+        and str(pair.get("close_transaction_id") or "") in transaction_ids
+        and bool(pair.get("strategy_originated", True))
+        and not bool(pair.get("contains_forced_risk"))
+    ]
+    if not cycle_pairs:
+        return None
+    cycle_pairs.sort(
+        key=lambda pair: (
+            str(pair.get("close_date") or ""),
+            str(pair.get("close_transaction_id") or ""),
+        )
+    )
+    opening_transaction_id = str(position_cycle.get("open_transaction_id") or "")
+    opening_pair = next(
+        (
+            pair
+            for pair in cycle_pairs
+            if str(pair.get("origin_open_transaction_id") or pair.get("open_transaction_id") or "")
+            == opening_transaction_id
+        ),
+        cycle_pairs[0],
+    )
+    closing_pair = cycle_pairs[-1]
+    strategy_open_lots = sum(
+        abs(_safe_int(item.get("lots"), 0))
+        for item in (position_cycle.get("transactions") or [])
+        if str(item.get("source_type") or "strategy").strip().lower() == "strategy"
+        and str(item.get("action") or "") in {"open_long", "open_short"}
+    )
+    gross_pnl = sum(_safe_float(pair.get("gross_pnl")) for pair in cycle_pairs)
+    commission = sum(_safe_float(pair.get("commission")) for pair in cycle_pairs)
+    net_pnl = sum(_safe_float(pair.get("net_pnl")) for pair in cycle_pairs)
+    total_notional = sum(
+        abs(
+            _safe_float(pair.get("open_price"))
+            * _safe_int(pair.get("lots"), 0)
+            * _safe_float(pair.get("contract_multiplier"), 1.0)
+        )
+        for pair in cycle_pairs
+    )
+    open_date = str(position_cycle.get("open_date") or opening_pair.get("origin_open_date") or "")[:10]
+    close_date = str(position_cycle.get("close_date") or closing_pair.get("close_date") or "")[:10]
+    try:
+        holding_days = max(
+            0,
+            (datetime.strptime(close_date, "%Y-%m-%d") - datetime.strptime(open_date, "%Y-%m-%d")).days,
+        )
+    except (TypeError, ValueError):
+        holding_days = 0
+    return {
+        "ticker": str(opening_pair.get("ticker") or "").upper(),
+        "contract_code": opening_pair.get("contract_code"),
+        "side": position_cycle.get("side") or opening_pair.get("side"),
+        "lots": strategy_open_lots or sum(_safe_int(pair.get("lots"), 0) for pair in cycle_pairs),
+        "open_transaction_id": opening_transaction_id or opening_pair.get("origin_open_transaction_id") or opening_pair.get("open_transaction_id"),
+        "close_transaction_id": closing_pair.get("close_transaction_id"),
+        "open_recommendation_id": position_cycle.get("open_recommendation_id") or opening_pair.get("origin_recommendation_id") or opening_pair.get("open_recommendation_id"),
+        "close_recommendation_id": closing_pair.get("close_recommendation_id"),
+        "open_source_type": "strategy",
+        "close_source_type": closing_pair.get("close_source_type"),
+        "origin_source_type": "strategy",
+        "origin_recommendation_id": position_cycle.get("open_recommendation_id") or opening_pair.get("origin_recommendation_id"),
+        "origin_open_transaction_id": opening_transaction_id,
+        "strategy_originated": True,
+        "contains_rollover": any(bool(pair.get("contains_rollover")) for pair in cycle_pairs),
+        "contains_forced_risk": False,
+        "contains_non_strategy": any(bool(pair.get("contains_non_strategy")) for pair in cycle_pairs),
+        "open_date": open_date,
+        "close_date": close_date,
+        "holding_days": holding_days,
+        "open_price": opening_pair.get("open_price"),
+        "close_price": closing_pair.get("close_price"),
+        "contract_multiplier": opening_pair.get("contract_multiplier"),
+        "gross_pnl": gross_pnl,
+        "commission": commission,
+        "net_pnl": net_pnl,
+        "return_on_notional": (net_pnl / total_notional) if total_notional else 0.0,
+        "physical_pairs": cycle_pairs,
+        "physical_pair_count": len(cycle_pairs),
+        "episode_economics_aggregated": True,
+    }
+
+
 def _completed_cycle_for_pair(
     cycles: List[Dict[str, Any]],
     pair: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    open_transaction_id = str(pair.get("open_transaction_id") or "")
+    open_transaction_id = str(
+        pair.get("origin_open_transaction_id")
+        or pair.get("open_transaction_id")
+        or ""
+    )
     close_transaction_id = str(pair.get("close_transaction_id") or "")
     if not open_transaction_id or not close_transaction_id:
         return None
@@ -1920,52 +2119,72 @@ def _write_trade_episode_memory(
     setattr(_write_trade_episode_memory, "last_payloads", [])
     if not bool(episode_cfg.get("enabled", True)):
         return 0
-    pairs = _completed_pairs_up_to(cursor, config_id=config_id, trading_date=trading_date)
+    pairs = _strategy_originated_pairs_up_to(
+        cursor,
+        config_id=config_id,
+        trading_date=trading_date,
+    )
     if not pairs:
         return 0
+    now = _utc_now()
+    inserted = 0
+    episode_payloads: List[Dict[str, Any]] = []
+    cycle_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    completed_episodes: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for ticker, side in sorted(
+        {
+            (str(pair.get("ticker") or "").upper(), str(pair.get("side") or "").lower())
+            for pair in pairs
+            if pair.get("ticker") and str(pair.get("side") or "").lower() in {"long", "short"}
+        }
+    ):
+        cycle_key = (ticker, side)
+        cycle_cache[cycle_key] = _completed_strategy_position_cycles(
+            cursor,
+            config_id=config_id,
+            ticker=ticker,
+            side=side,
+            trading_date=trading_date,
+        )
+        for position_cycle in cycle_cache[cycle_key]:
+            pair = _aggregate_cycle_trade_pairs(position_cycle, pairs)
+            if pair and str(pair.get("close_date") or "") <= trading_date:
+                completed_episodes.append((position_cycle, pair))
+
     recommendation_lookup = _recommendations_by_id(
         cursor,
-        [pair.get("open_recommendation_id") for pair in pairs if pair.get("open_recommendation_id")],
+        [pair.get("open_recommendation_id") for _, pair in completed_episodes if pair.get("open_recommendation_id")],
     )
     transaction_lookup = _transactions_by_id(
         cursor,
         [
             tx_id
-            for pair in pairs
+            for _, pair in completed_episodes
             for tx_id in (pair.get("open_transaction_id"), pair.get("close_transaction_id"))
             if tx_id
         ],
     )
-    now = _utc_now()
-    inserted = 0
-    episode_payloads: List[Dict[str, Any]] = []
-    cycle_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    for pair in pairs:
-        if str(pair.get("close_date") or "") > trading_date:
-            continue
+    for position_cycle, pair in completed_episodes:
         recommendation = recommendation_lookup.get(str(pair.get("open_recommendation_id") or ""))
         snapshot = _recommendation_snapshot(recommendation or {})
         ticker = str(pair.get("ticker") or "").upper()
         side = str(pair.get("side") or "").lower()
-        if not ticker or side not in {"long", "short"}:
-            continue
-        cycle_key = (ticker, side)
-        if cycle_key not in cycle_cache:
-            cycle_cache[cycle_key] = _completed_strategy_position_cycles(
-                cursor,
-                config_id=config_id,
-                ticker=ticker,
-                side=side,
-                trading_date=trading_date,
-            )
-        position_cycle = _completed_cycle_for_pair(cycle_cache[cycle_key], pair)
-        if not position_cycle:
-            continue
         combo = _signal_combo_from_snapshot(snapshot)
         expected_days = _expected_horizon_days(snapshot, side)
         horizon = _horizon_class(expected_days, snapshot)
         regime = _market_regime(snapshot)
-        template = _setup_type(side, combo, snapshot)
+        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
+        template = str(final_contract.get("setup_type") or "").strip()
+        if not template or template.lower() in {"unknown", "*"}:
+            # A completed strategy episode must keep the setup identity frozen by
+            # the opening FAC.  Do not infer a replacement from the surrounding
+            # SCC, because unrelated news/fundamental evidence can then relabel a
+            # technical entry.  A missing identity remains generic, so it can
+            # be retained as an episode fact without becoming canonical setup
+            # learning.
+            template = "generic_trade_setup"
+        entry_trigger = str(final_contract.get("entry_trigger") or "").strip()
+        trigger_source = str(final_contract.get("trigger_source") or "").strip()
         sector = _sector_for_ticker(cfg, ticker)
         net_pnl = _safe_float(pair.get("net_pnl"))
         episode_date = str(position_cycle.get("close_date") or trading_date or "")
@@ -1980,7 +2199,6 @@ def _write_trade_episode_memory(
         )
         data_usage = data_usage_from_snapshot(snapshot)
         data_usage_notes = compact_data_usage_notes(data_usage)
-        final_contract = snapshot.get("final_action_contract") if isinstance(snapshot.get("final_action_contract"), dict) else {}
         open_tx = transaction_lookup.get(str(pair.get("open_transaction_id") or "")) or {}
         close_tx = transaction_lookup.get(str(pair.get("close_transaction_id") or "")) or {}
         safe_snapshot = _learning_safe_snapshot(snapshot)
@@ -2005,6 +2223,9 @@ def _write_trade_episode_memory(
             "open_transaction": open_tx,
             "close_transaction": close_tx,
             "open_recommendation_id": pair.get("open_recommendation_id"),
+            "setup_type": template,
+            "entry_trigger": entry_trigger,
+            "trigger_source": trigger_source,
             "signal_snapshot": safe_snapshot,
             "trade_research_contract_summary": _opportunity_contract_summary(snapshot),
             "opportunity_type": _primary_opportunity_type(snapshot, side),
@@ -2149,7 +2370,10 @@ def _write_trade_episode_memory(
             event_type="trade_episode_memory",
             scope_type="daily",
             scope_key=trading_date,
-            evidence={"completed_pairs": len(pairs)},
+            evidence={
+                "completed_pairs": len(pairs),
+                "completed_position_episodes": len(completed_episodes),
+            },
             action={"episode_rows": inserted},
             status="applied",
         )
@@ -2304,30 +2528,44 @@ def _backfill_research_position_feedback_from_completed_episodes(
         if formal_ids != formal_alpha_ids:
             continue
 
-        gross_pnl = _safe_float(pair.get("gross_pnl"))
-        commission = _safe_float(pair.get("commission"))
-        net_pnl = _safe_float(pair.get("net_pnl"))
-        tolerance = max(1e-6, 1e-9 * max(abs(gross_pnl), abs(commission), abs(net_pnl), 1.0))
-        if abs((gross_pnl - commission) - net_pnl) > tolerance:
-            continue
-
         group_key = (recommendation_id, ticker, open_date)
         prior_formal_ids = formal_ids_by_group.get(group_key)
         if prior_formal_ids is not None and prior_formal_ids != formal_ids:
             invalid_groups.add(group_key)
             continue
         formal_ids_by_group[group_key] = formal_ids
-        pair_key = (open_transaction_id, close_transaction_id)
-        pair_result = {
-            "gross_pnl": gross_pnl,
-            "commission": commission,
-            "net_pnl": net_pnl,
-        }
-        prior_pair = grouped_pairs[group_key].get(pair_key)
-        if prior_pair is not None and prior_pair != pair_result:
-            invalid_groups.add(group_key)
-            continue
-        grouped_pairs[group_key][pair_key] = pair_result
+        physical_pairs = (
+            pair.get("physical_pairs")
+            if isinstance(pair.get("physical_pairs"), list)
+            else [pair]
+        )
+        for physical_pair in physical_pairs:
+            if not isinstance(physical_pair, dict):
+                invalid_groups.add(group_key)
+                continue
+            physical_open_id = str(physical_pair.get("open_transaction_id") or "").strip()
+            physical_close_id = str(physical_pair.get("close_transaction_id") or "").strip()
+            if not physical_open_id or not physical_close_id:
+                invalid_groups.add(group_key)
+                continue
+            gross_pnl = _safe_float(physical_pair.get("gross_pnl"))
+            commission = _safe_float(physical_pair.get("commission"))
+            net_pnl = _safe_float(physical_pair.get("net_pnl"))
+            tolerance = max(1e-6, 1e-9 * max(abs(gross_pnl), abs(commission), abs(net_pnl), 1.0))
+            if abs((gross_pnl - commission) - net_pnl) > tolerance:
+                invalid_groups.add(group_key)
+                continue
+            pair_key = (physical_open_id, physical_close_id)
+            pair_result = {
+                "gross_pnl": gross_pnl,
+                "commission": commission,
+                "net_pnl": net_pnl,
+            }
+            prior_pair = grouped_pairs[group_key].get(pair_key)
+            if prior_pair is not None and prior_pair != pair_result:
+                invalid_groups.add(group_key)
+                continue
+            grouped_pairs[group_key][pair_key] = pair_result
 
     updated = 0
     for group_key in sorted(grouped_pairs):

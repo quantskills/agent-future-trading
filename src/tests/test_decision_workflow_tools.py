@@ -14,7 +14,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal, RecommendationSourceType, RecommendationStatus
-from agents.decision_team.portfolio_manager import _build_execution_contract_fields
+from agents.decision_team.portfolio_manager import (
+    _ExplicitPMLearningScopeDBView,
+    _build_execution_contract_fields,
+    _current_canonical_setup_type_from_signals,
+)
 from tools.agent_tools.decision.pm_signal_fusion import build_opportunity_scorecard
 from tools.agent_tools.decision.pm_invalidation_policy import (
     _apply_pretrade_invalidation_control,
@@ -119,6 +123,158 @@ def _signal(agent_name: str, signal: Signal, confidence: float, **contract_overr
 
 
 class DecisionWorkflowToolTest(unittest.TestCase):
+    def test_pm_memory_without_current_setup_starts_at_fallback_not_exact(self):
+        class MemoryDB:
+            def get_alpha_setup_action_values(self, **_kwargs):
+                return []
+
+        result = retrieve_pm_memory(
+            db=MemoryDB(),
+            config_id="cfg",
+            ticker="BU",
+            side="long",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type=None,
+            trading_date="2025-03-03",
+        )
+
+        levels = [item["match_level"] for item in result["retrieval_attempts"]]
+        self.assertEqual(levels, ["same_ticker_side_horizon", "same_ticker_side"])
+        self.assertNotIn("exact_state", levels)
+
+    def test_pm_memory_successful_empty_exact_query_is_legal_cold_start(self):
+        class MemoryDB:
+            def get_alpha_setup_action_values(self, **_kwargs):
+                return []
+
+        result = retrieve_pm_memory(
+            db=MemoryDB(),
+            config_id="cfg",
+            ticker="BU",
+            side="long",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="trend_breakout_setup",
+            trading_date="2025-03-03",
+        )
+
+        self.assertEqual(result["action_values"], [])
+        self.assertEqual(result["effective_memory_summary"]["status"], "empty")
+        exact_attempt = result["retrieval_attempts"][0]
+        self.assertEqual(exact_attempt["match_level"], "exact_state")
+        self.assertEqual(exact_attempt["row_count"], 0)
+        self.assertNotIn("error", exact_attempt)
+
+    def test_pm_memory_exact_query_error_is_explicit_in_retrieval_attempt(self):
+        class MemoryDB:
+            def get_alpha_setup_action_values(self, **kwargs):
+                if kwargs.get("setup_type"):
+                    raise RuntimeError("simulated exact query failure")
+                return []
+
+        result = retrieve_pm_memory(
+            db=MemoryDB(),
+            config_id="cfg",
+            ticker="BU",
+            side="long",
+            horizon_class="short",
+            market_regime="trend",
+            setup_type="trend_breakout_setup",
+            trading_date="2025-03-03",
+        )
+
+        exact_attempt = result["retrieval_attempts"][0]
+        self.assertEqual(exact_attempt["match_level"], "exact_state")
+        self.assertEqual(exact_attempt["row_count"], 0)
+        self.assertIn("simulated exact query failure", exact_attempt["error"])
+
+    def test_pm_exact_setup_key_uses_only_current_scc_execution_setup(self):
+        technical = _signal(
+            "technical",
+            Signal.BULLISH,
+            0.72,
+            setup_type="trend_breakout_setup",
+        )
+        fundamental = _signal(
+            "fundamental",
+            Signal.BULLISH,
+            0.88,
+            setup_type="fundamental_timing_setup",
+        )
+
+        self.assertEqual(
+            _current_canonical_setup_type_from_signals(
+                "long",
+                [fundamental, technical],
+            ),
+            "trend_breakout_setup",
+        )
+        self.assertEqual(
+            _current_canonical_setup_type_from_signals("short", [fundamental, technical]),
+            "",
+        )
+
+        source = (
+            SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py"
+        ).read_text(encoding="utf-8-sig")
+        exact_start = source.index("exact_setup_type = _current_canonical_setup_type_from_signals")
+        exact_end = source.index("side_memory_result = retrieve_pm_memory", exact_start)
+        exact_key_block = source[exact_start:exact_end]
+        self.assertNotIn("best_alpha_setup_profile", exact_key_block)
+        self.assertNotIn("final_state", exact_key_block)
+
+        class SetupMemoryDB:
+            def get_alpha_setup_action_values(self, **_kwargs):
+                return [
+                    {
+                        "id": "current-setup",
+                        "setup_type": "trend_breakout_setup",
+                        "consumer_scope": "pm_learning",
+                    },
+                    {
+                        "id": "historical-other-setup",
+                        "setup_type": "news_event_setup",
+                        "consumer_scope": "pm_learning",
+                    },
+                    {
+                        "id": "wildcard-setup",
+                        "setup_type": "*",
+                        "consumer_scope": "pm_learning",
+                    },
+                ]
+
+        scoped = _ExplicitPMLearningScopeDBView(SetupMemoryDB())
+        self.assertEqual(
+            [row["id"] for row in scoped.get_alpha_setup_action_values(
+                setup_type="trend_breakout_setup",
+            )],
+            ["current-setup"],
+        )
+        self.assertEqual(
+            {
+                row["id"]
+                for row in scoped.get_alpha_setup_action_values(setup_type=None)
+            },
+            {"current-setup", "historical-other-setup", "wildcard-setup"},
+        )
+
+    def test_pm_exact_setup_retrieval_failure_cannot_become_cold_start(self):
+        source = (
+            SRC_ROOT / "agents" / "decision_team" / "portfolio_manager.py"
+        ).read_text(encoding="utf-8-sig")
+        exact_start = source.index(
+            "candidate_sides_for_exact: list[str] = []"
+        )
+        exact_end = source.index(
+            "if db and config_id:",
+            source.index("except Exception as exc:", exact_start),
+        )
+        exact_block = source[exact_start:exact_end]
+
+        self.assertIn("pm_exact_setup_learning_retrieval_failed", exact_block)
+        self.assertNotIn("except Exception as exc:\n            pass", exact_block)
+
     def test_entry_invalidation_and_position_exit_boundary_are_independent(self):
         signal = _signal("technical", Signal.BULLISH, 0.72)
         contract = signal.metadata["action_evidence_contract"]

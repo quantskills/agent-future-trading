@@ -4701,6 +4701,7 @@ class _ExplicitPMLearningScopeDBView:
     def get_alpha_setup_action_values(self, **kwargs):
         rows = self._db.get_alpha_setup_action_values(**kwargs)
         scoped_rows: list[dict] = []
+        requested_setup = str(kwargs.get("setup_type") or "").strip().lower()
         for row in rows or []:
             if not isinstance(row, dict):
                 continue
@@ -4710,8 +4711,17 @@ class _ExplicitPMLearningScopeDBView:
                 or payload.get("consumer_scope")
                 or ""
             ).strip().lower()
-            if consumer_scope == "pm_learning":
-                scoped_rows.append(row)
+            if consumer_scope != "pm_learning":
+                continue
+            if requested_setup and requested_setup != "*":
+                row_setup = str(
+                    row.get("setup_type")
+                    or payload.get("setup_type")
+                    or ""
+                ).strip().lower()
+                if row_setup != requested_setup:
+                    continue
+            scoped_rows.append(row)
         return scoped_rows
 
 
@@ -6099,6 +6109,36 @@ def _setup_type_from_signals(target_side: str, analyst_signals: list, signal_com
             return f"{target_side}_{setup_type}_{horizon}"[:160]
     normalized_combo = "_".join(str(item).lower() for item in signal_combo)
     return f"{target_side}_{normalized_combo}"[:160]
+
+
+def _current_canonical_setup_type_from_signals(
+    target_side: str,
+    analyst_signals: list,
+) -> str:
+    """Return the current executable setup carried by validated SCC evidence.
+
+    Production ``analyst_signals`` are rebuilt from the validated SCC before
+    entering PM.  Exact action-value retrieval must therefore use only the
+    current technical/event execution source selected from that evidence.  A
+    historical profile, a Step4 lifecycle state, or a synthesized signal
+    combination is not a current canonical setup.
+    """
+    payloads = _execution_signal_payloads(analyst_signals, target_side)
+    for conditional_path in (False, True):
+        try:
+            selected = _select_execution_evidence_payload(
+                payloads,
+                target_side=target_side,
+                conditional_path=conditional_path,
+            )
+        except ValueError as exc:
+            if str(exc) != "pm_execution_evidence_not_found":
+                raise
+            continue
+        setup_type = str(selected.get("setup_type") or "").strip()
+        if setup_type and setup_type.lower() not in {"unknown", "none", "null"}:
+            return setup_type
+    return ""
 
 
 def _target_side_from_ratio(position_ratio: float) -> str:
@@ -10657,10 +10697,9 @@ def _run_pm_six_step_decision(state: FundState):
             1 if step4_memory_side == "long" else -1,
         )
         early_market_regime = _market_regime_from_signals(analyst_signals, step4_memory_side)
-        early_setup_type = _setup_type_from_signals(
+        early_setup_type = _current_canonical_setup_type_from_signals(
             step4_memory_side,
             analyst_signals,
-            signal_combo,
         )
     if db and config_id and step4_memory_side:
         try:
@@ -10682,10 +10721,6 @@ def _run_pm_six_step_decision(state: FundState):
             early_adaptive_policy_state = early_memory_result.get("adaptive_policy_state") or []
             adaptive_policy_safety_trace = early_memory_result.get("adaptive_policy_safety_trace") or {}
             alpha_setup_profiles = early_memory_result.get("alpha_setup_profiles") or []
-            alpha_setup_action_values = _append_unique_action_values(
-                alpha_setup_action_values,
-                early_memory_result.get("action_values") or [],
-            )
             effective_memory_summary = early_memory_result.get("effective_memory_summary") or effective_memory_summary
             pm_learning_audit["decision_memory_retrieval_initial"] = {
                 "tool": "decision_memory_retrieval",
@@ -10703,8 +10738,8 @@ def _run_pm_six_step_decision(state: FundState):
             )
             pm_learning_audit["alpha_setup_profile_count"] = len(alpha_setup_profiles)
             pm_learning_audit["alpha_setup_profiles"] = alpha_setup_profiles[:6]
-            pm_learning_audit["alpha_setup_action_value_count"] = len(alpha_setup_action_values)
-            pm_learning_audit["alpha_setup_action_values"] = alpha_setup_action_values[:8]
+            pm_learning_audit["alpha_setup_action_value_count"] = 0
+            pm_learning_audit["alpha_setup_action_values"] = []
         except Exception:
             pm_learning_audit["decision_memory_retrieval_initial"] = {
                 "tool": "decision_memory_retrieval",
@@ -10794,21 +10829,9 @@ def _run_pm_six_step_decision(state: FundState):
                     1 if exact_side == "long" else -1,
                 )
                 exact_regime = _market_regime_from_signals(analyst_signals, exact_side)
-                side_card_for_exact = (
-                    opportunity_scorecard.get(exact_side)
-                    if isinstance(opportunity_scorecard.get(exact_side), dict)
-                    else {}
-                )
-                best_profile_for_exact = (
-                    side_card_for_exact.get("best_alpha_setup_profile")
-                    if isinstance(side_card_for_exact.get("best_alpha_setup_profile"), dict)
-                    else {}
-                )
-                exact_setup_type = str(
-                    best_profile_for_exact.get("setup_type")
-                    or side_card_for_exact.get("final_state")
-                    or _setup_type_from_signals(exact_side, analyst_signals, signal_combo)
-                    or ""
+                exact_setup_type = _current_canonical_setup_type_from_signals(
+                    exact_side,
+                    analyst_signals,
                 )
                 side_memory_result = retrieve_pm_memory(
                     db=pm_memory_db,
@@ -10821,6 +10844,19 @@ def _run_pm_six_step_decision(state: FundState):
                     trading_date=trading_date,
                     limit=12,
                 )
+                exact_retrieval_failed = any(
+                    str(attempt.get("match_level") or "").strip().lower()
+                    == "exact_state"
+                    and bool(str(attempt.get("error") or "").strip())
+                    for attempt in (
+                        side_memory_result.get("retrieval_attempts") or []
+                    )
+                    if isinstance(attempt, dict)
+                )
+                if exact_setup_type and exact_retrieval_failed:
+                    raise RuntimeError(
+                        "pm_exact_setup_action_value_query_failed"
+                    )
                 side_action_values = side_memory_result.get("action_values") or []
                 side_retrieval_detail = {
                     "tool": "decision_memory_retrieval",
@@ -10881,7 +10917,9 @@ def _run_pm_six_step_decision(state: FundState):
                 initial_lifecycle_learning_router["post_step3_exact_rows_added_before_step4_consumption"] = True
                 pm_learning_audit["initial_lifecycle_learning_router"] = initial_lifecycle_learning_router
         except Exception as exc:
-            pass
+            raise RuntimeError(
+                f"{ticker}: pm_exact_setup_learning_retrieval_failed"
+            ) from exc
     if db and config_id:
         try:
             similar_horizon = _resolve_decision_horizon(

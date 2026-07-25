@@ -23,7 +23,10 @@ from tools.common.alpha_setup import (
     compact_profile_for_trace,
     profile_prompt_line,
 )
-from tools.common.final_action_semantics import validate_action_value_write_consistency
+from tools.common.final_action_semantics import (
+    ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    validate_action_value_write_consistency,
+)
 
 
 DEFAULT_HORIZON_BY_ANALYST = {
@@ -545,6 +548,24 @@ def _safe_analyst_action_value_projection(
     }
     if "analysis_team" not in usable_by:
         return None
+    action_lane = str(row.get("action_value_lane") or "").strip().lower()
+    learning_lane = str(row.get("learning_lane") or "").strip().lower()
+    calibration_lane = str(
+        signal_calibration.get("source_action_value_lane") or ""
+    ).strip().lower()
+    action_family = str(
+        row.get("canonical_action_family") or ""
+    ).strip().lower()
+    calibration_family = str(
+        signal_calibration.get("source_canonical_action_family") or ""
+    ).strip().lower()
+    if (
+        learning_lane != action_lane
+        or calibration_lane != action_lane
+        or action_family != ACTION_FAMILY_OPEN_ADD_NEW_RISK
+        or calibration_family != action_family
+    ):
+        return None
     quality_text = " ".join(
         str(value or "").strip().lower()
         for value in (
@@ -579,6 +600,10 @@ def _safe_analyst_action_value_projection(
 
 def _analyst_action_value_prompt_line(item: Mapping[str, Any]) -> str:
     line = analyst_signal_calibration_prompt_line(item)
+    line += (
+        " Apply this entry calibration only when today's final setup_type and "
+        "canonical entry trigger match this row exactly; otherwise it contributes zero."
+    )
     if str(item.get("retrieval_match_level") or "") == ANALYST_CROSS_REGIME_RETRIEVAL_MATCH:
         line += (
             " Retrieval match=cross-regime same-ticker/side/horizon; "
@@ -1220,7 +1245,9 @@ def build_learning_context(
                 max_items=action_value_limit,
             )
             if len(analyst_calibration_lines) < len(analyst_calibration_items):
-                analyst_calibration_items = analyst_calibration_items[: len(analyst_calibration_lines)]
+                analyst_calibration_items = analyst_calibration_items[
+                    : len(analyst_calibration_lines)
+                ]
             dropped += action_value_dropped
 
     try:
@@ -1264,6 +1291,7 @@ def build_learning_context(
         and not hypothesis_lines
         and not alpha_setup_lines
         and not analyst_calibration_lines
+        and not analyst_calibration_items
     ):
         memory_trace = _build_memory_trace(
             analyst=analyst_key,

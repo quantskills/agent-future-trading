@@ -2123,6 +2123,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             business_quality_score=0.50,
             factor_alignment_score=0.50,
             horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
         )
         calibrated = calibrate_signal_with_learning_context(
             signal,
@@ -2151,6 +2153,12 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                             "forbidden_effects": ["trade_authority", "lots", "margin_ratio", "direction_override"],
                             "source_action_value_lane": "open",
                             "calibration_bias": "positive_evidence_calibration",
+                        },
+                        "product_learning_calibration_view": {
+                            "contract_version": "agentquant.product_learning_calibration_view.v1",
+                            "setup_type": "trend_breakout_setup",
+                            "action_name": "open",
+                            "trigger_key": canonical_entry_trigger("breakout", "long"),
                         },
                     }
                 ]
@@ -2186,6 +2194,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             business_quality_score=0.50,
             factor_alignment_score=0.50,
             horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
         )
         performance_scope = (
             "EB|short|trend_breakout_setup|opening_range_breakdown|"
@@ -2215,6 +2225,9 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                             "historical_pm_rank": 1,
                             "historical_pm_score": 0.83,
                             "historical_net_pnl": 3180.0,
+                            "setup_type": "trend_breakout_setup",
+                            "action_name": "open",
+                            "trigger_key": canonical_entry_trigger("breakout", "short"),
                             "not_trade_authority": True,
                             "future_only": True,
                         },
@@ -2233,7 +2246,106 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertNotIn("target_lots", impact)
         self.assertNotIn("lots_delta", impact)
 
-    def test_analyst_learning_calibration_marks_negative_same_scope_without_product_ban(self):
+    def test_entry_learning_rejects_wrong_lane_setup_and_trigger_with_zero_effect(self):
+        breakout_trigger = canonical_entry_trigger("breakout", "long")
+        pullback_trigger = canonical_entry_trigger("pullback", "long")
+
+        def action_value_row(*, lane="open", setup="trend_breakout_setup", trigger=breakout_trigger):
+            return {
+                "ticker": "RB",
+                "side": "long",
+                "horizon_class": "short",
+                "market_regime": "trend",
+                "setup_type": setup,
+                "action_name": lane,
+                "sample_count": 12,
+                "confidence_score": 0.85,
+                "signal_calibration": {
+                    "contract_version": "agentquant.analysis_signal_calibration.v1",
+                    "consumer_scope": "analyst_calibration",
+                    "usable_by": ["analysis_team"],
+                    "allowed_effects": ["evidence_quality_calibration"],
+                    "forbidden_effects": [
+                        "trade_authority",
+                        "lots",
+                        "margin_ratio",
+                        "direction_override",
+                    ],
+                    "source_action_value_lane": lane,
+                    "calibration_bias": "positive_evidence_calibration",
+                },
+                "product_learning_calibration_view": {
+                    "contract_version": "agentquant.product_learning_calibration_view.v1",
+                    "setup_type": setup,
+                    "action_name": lane,
+                    "trigger_key": trigger,
+                },
+            }
+
+        alpha_profile = {
+            "ticker": "RB",
+            "side": "long",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "setup_type": "trend_breakout_setup",
+            "sample_count": 9,
+            "net_pnl": 15000.0,
+            "win_rate": 0.80,
+            "confidence_score": 0.82,
+            "product_learning_calibration_view": {
+                "contract_version": "agentquant.product_learning_calibration_view.v1",
+                "setup_type": "trend_breakout_setup",
+                "action_name": "execution",
+                "trigger_key": breakout_trigger,
+            },
+        }
+        signal = AnalystSignal(
+            agent_name="technical",
+            signal=Signal.BULLISH,
+            confidence=0.50,
+            business_quality_score=0.50,
+            factor_alignment_score=0.50,
+            horizon_class="short",
+            setup_type="trend_breakout_setup",
+            entry_timing_signal="breakout",
+        )
+
+        calibrated = calibrate_signal_with_learning_context(
+            signal,
+            analyst="technical",
+            ticker="RB",
+            learning_context={
+                "alpha_setup_items": [alpha_profile],
+                "analyst_calibration_items": [
+                    action_value_row(lane="hold"),
+                    action_value_row(lane="reduce"),
+                    action_value_row(lane="exit"),
+                    action_value_row(lane="execution"),
+                    action_value_row(setup="trend_pullback_setup"),
+                    action_value_row(trigger=pullback_trigger),
+                ],
+            },
+        )
+
+        self.assertEqual(calibrated.business_quality_score, 0.50)
+        self.assertEqual(calibrated.factor_alignment_score, 0.50)
+        self.assertEqual(calibrated.confidence, 0.50)
+        self.assertNotIn("technical_learning_calibration", calibrated.factor_focus)
+        calibration = calibrated.metadata["analyst_learning_calibration"]
+        self.assertFalse(calibration["enabled"])
+        self.assertEqual(calibration["eligible_entry_learning_count"], 0)
+        self.assertEqual(calibration["positive_strength"], 0.0)
+        self.assertEqual(calibration["negative_strength"], 0.0)
+        self.assertEqual(
+            calibration["rejected_entry_learning_reason_counts"],
+            {
+                "learning_lane_not_open_add": 5,
+                "setup_mismatch": 1,
+                "canonical_trigger_mismatch": 1,
+            },
+        )
+
+    def test_fundamental_entry_learning_without_canonical_trigger_remains_cold_start(self):
         signal = AnalystSignal(
             agent_name="fundamental",
             signal=Signal.BEARISH,
@@ -2298,22 +2410,29 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             },
         )
 
-        self.assertLess(calibrated.business_quality_score, 0.62)
-        self.assertIn("factor_reliability_negative", calibrated.setup_quality_notes)
-        self.assertIn("fundamental_broad_prior_weak_only", calibrated.setup_quality_notes)
-        self.assertIn("fundamental_same_scope_negative_learning", calibrated.current_evidence_conflict)
+        self.assertEqual(calibrated.business_quality_score, 0.62)
+        self.assertEqual(calibrated.factor_alignment_score, 0.55)
+        self.assertEqual(calibrated.confidence, 0.62)
+        self.assertNotIn("factor_reliability_negative", calibrated.setup_quality_notes)
+        self.assertNotIn("fundamental_broad_prior_weak_only", calibrated.setup_quality_notes)
+        self.assertNotIn("fundamental_same_scope_negative_learning", calibrated.current_evidence_conflict)
         calibration = calibrated.metadata["analyst_learning_calibration"]
-        self.assertEqual(calibration["same_ticker_matched_count"], 1)
-        self.assertEqual(calibration["broad_prior_matched_count"], 1)
+        self.assertFalse(calibration["enabled"])
+        self.assertEqual(calibration["same_ticker_matched_count"], 0)
+        self.assertEqual(calibration["broad_prior_matched_count"], 0)
+        self.assertEqual(
+            calibration["rejected_entry_learning_reason_counts"],
+            {"setup_identity_missing_or_conflicting": 2},
+        )
         self.assertIn("no_trade_authority", calibration["authority_boundary"])
         impact = calibrated.learning_impact_summary
-        self.assertIn("J:short:inventory_basis_short_setup:trend:open", impact["historical_contradiction"])
-        self.assertIn("RB:short:inventory_basis_short_setup:trend:open", impact["historical_support"])
+        self.assertEqual(impact["historical_contradiction"], [])
+        self.assertEqual(impact["historical_support"], [])
         self.assertIn("no_trade_authority", impact["authority_boundary"])
         factor_summary = calibrated.factor_calibration_summary
         self.assertEqual(factor_summary["contract_version"], "agentquant.factor_calibration.v1")
-        self.assertIn("fundamental_learning_calibration", factor_summary["effective_factors"])
-        self.assertIn("fundamental_same_scope_negative_learning", factor_summary["stale_or_conflicting_factors"])
+        self.assertNotIn("fundamental_learning_calibration", factor_summary["effective_factors"])
+        self.assertNotIn("fundamental_same_scope_negative_learning", factor_summary["stale_or_conflicting_factors"])
         self.assertIn("no_trade_authority", factor_summary["authority_boundary"])
         self.assertEqual(calibrated.metadata["factor_calibration_summary"], factor_summary)
 
@@ -2425,6 +2544,8 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
             impact_window_days=2,
             trigger_valid=False,
             entry_trigger="wait for price and volume confirmation",
+            entry_timing_signal="event_immediate",
+            setup_type="news_event_setup",
             factor_focus=["supply_disruption_event"],
         )
         calibrated = calibrate_signal_with_learning_context(
@@ -2438,7 +2559,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                         "side": "long",
                         "horizon_class": "event_short",
                         "market_regime": "event_window",
-                        "setup_type": "news_event_probe",
+                        "setup_type": "news_event_setup",
                         "action_name": "open",
                         "sample_count": 3,
                         "reward_mean": 800.0,
@@ -2453,6 +2574,12 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
                             "source_action_value_lane": "open",
                             "calibration_bias": "positive_evidence_calibration",
                         },
+                        "product_learning_calibration_view": {
+                            "contract_version": "agentquant.product_learning_calibration_view.v1",
+                            "setup_type": "news_event_setup",
+                            "action_name": "open",
+                            "trigger_key": canonical_entry_trigger("event_immediate", "long"),
+                        },
                     }
                 ]
             },
@@ -2463,7 +2590,7 @@ class AnalystStrategyQualityRegressionTest(unittest.TestCase):
         self.assertIn("supply_disruption_event", event_summary["effective_catalysts"])
         self.assertEqual(event_summary["impact_window_assessment"], "2")
         self.assertTrue(event_summary["price_volume_confirmation_required"])
-        self.assertIn("BU:long:news_event_probe:event_window:open", event_summary["supporting_learning_scopes"])
+        self.assertIn("BU:long:news_event_setup:event_window:open", event_summary["supporting_learning_scopes"])
         self.assertIn("no_trade_authority", event_summary["authority_boundary"])
         self.assertNotIn("lots", event_summary)
         self.assertNotIn("margin_ratio", event_summary)
@@ -3674,7 +3801,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
             return []
 
         def get_alpha_setup_action_values(self, **kwargs):
-            if str(kwargs.get("setup_type") or "") != "watch_for_trigger":
+            if str(kwargs.get("setup_type") or "") != "breakdown_setup":
                 return []
             return [
                 {
@@ -3683,7 +3810,7 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
                     "side": "short",
                     "horizon_class": kwargs.get("horizon_class") or "short",
                     "market_regime": kwargs.get("market_regime") or "trend",
-                    "setup_type": "watch_for_trigger",
+                    "setup_type": "breakdown_setup",
                     "action_name": "open",
                     "canonical_action_value": True,
                     "canonical_action_family": "open_add_new_risk",
@@ -3731,6 +3858,121 @@ class Phase1RecommendationSnapshotRegressionTest(unittest.TestCase):
 
         def get_similar_alpha_setup_action_values(self, **kwargs):
             return []
+
+    class _PMExactLearningFailureDB(_PMTestDB):
+        def get_alpha_setup_action_values(self, **kwargs):
+            if kwargs.get("setup_type"):
+                raise RuntimeError("simulated exact setup retrieval failure")
+            return []
+
+    def test_pm_exact_learning_failure_is_not_disguised_as_cold_start(self):
+        portfolio = Portfolio(
+            id="portfolio-prev",
+            cashflow=5_000_000.0,
+            account_equity=5_000_000.0,
+            cash_available=5_000_000.0,
+            margin_available=5_000_000.0,
+            positions={},
+        )
+        signals = []
+        for index, analyst in enumerate(
+            ("technical", "fundamental", "commodity_news"),
+            start=1,
+        ):
+            directional = analyst == "technical"
+            aec = build_test_aec(
+                analyst,
+                ticker="BU",
+                trading_date="2025-03-03",
+                signal="Bearish" if directional else "Neutral",
+                side="short" if directional else "flat",
+                confidence=0.72 if directional else 0.35,
+                opportunity_state="watch_for_trigger" if directional else "no_opportunity",
+                setup_type="breakdown_setup" if directional else "no_trade",
+                setup_quality_ok=directional,
+                trigger_valid=False,
+                current_trigger_confirmed=False,
+                invalidation_present=directional,
+                entry_trigger=None if directional else "",
+                invalidation_condition="15m close above 3520" if directional else None,
+                extra=(
+                    {
+                        "invalidation_level": 3520.0,
+                        "position_invalidation_level": 3540.0,
+                    }
+                    if directional
+                    else None
+                ),
+            )
+            signals.append(
+                AnalystSignal(
+                    agent_name=analyst,
+                    signal=Signal.BEARISH if directional else Signal.NEUTRAL,
+                    confidence=0.72 if directional else 0.35,
+                    opportunity_state="watch_for_trigger" if directional else "no_opportunity",
+                    setup_type="breakdown_setup" if directional else "no_trade",
+                    entry_trigger=aec["entry_trigger"],
+                    trigger_valid=False,
+                    invalidation_present=directional,
+                    metadata={
+                        "signal_record_id": f"signal-failure-{index}",
+                        "action_evidence_contract": aec,
+                    },
+                )
+            )
+        full_config = {
+            "cashflow": 5_000_000.0,
+            "max_total_margin_ratio": 0.20,
+            "max_single_margin_ratio": 0.12,
+            "learning": {"enabled": False},
+            "pm_risk_gate": {"enabled": False},
+        }
+        state = {
+            "portfolio": portfolio,
+            "ticker": "BU",
+            "trading_date": datetime(2025, 3, 3),
+            "analyst_signals": signals,
+            "num_tickers": 1,
+            "enabled_analysts": ["technical", "fundamental", "commodity_news"],
+            "config_id": "cfg",
+            "phase": TradingPhase.PHASE1,
+            "morning_price_context": SimpleNamespace(
+                base_price=3500.0,
+                base_price_source="t_minus_1_close_fallback",
+                base_price_date="2025-02-28",
+                open_price=None,
+                prev_close_price=3500.0,
+                warning_message=None,
+                contract_code="BU2506",
+                contract_facts={
+                    "contract_code": "BU2506",
+                    "underlying_code": "BU",
+                    "as_of_date": "2025-02-28",
+                    "source": "test_visible_contract",
+                },
+            ),
+            "config": full_config,
+            "full_config": full_config,
+            "router": None,
+        }
+        state.update(signal_collector_agent(state))
+
+        with patch(
+            "agents.decision_team.portfolio_manager.get_db",
+            return_value=self._PMExactLearningFailureDB(),
+        ), patch(
+            "agents.decision_team.portfolio_manager.FuturesContractInfoCache.get_contract_info",
+            return_value={
+                "contract_multiplier": 10.0,
+                "margin_rate_long": 0.10,
+                "margin_rate_short": 0.10,
+            },
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "BU: pm_exact_setup_learning_retrieval_failed",
+            ):
+                portfolio_agent_futures(state)
 
     def test_canonical_watch_survives_pm_prose_and_reaches_nonzero_conditional_fac(self):
         portfolio = Portfolio(

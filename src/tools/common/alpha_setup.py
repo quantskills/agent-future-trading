@@ -331,45 +331,48 @@ def infer_setup_type(
     opportunity_state: Optional[str] = None,
 ) -> str:
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-    raw_parts: List[str] = [
-        str(setup_type or ""),
-        str(opportunity_type or ""),
-        str(opportunity_state or ""),
-    ]
     final_contract = (
         snapshot.get("final_action_contract")
         if isinstance(snapshot.get("final_action_contract"), Mapping)
         else {}
     )
-    raw_parts.extend([
-        str(final_contract.get("setup_type") or ""),
+    explicit_setup = _first_text(
+        final_contract.get("setup_type"),
+        setup_type,
+        default="",
+    )
+    if explicit_setup:
+        normalized = _clean_token(explicit_setup, "")
+        if normalized not in {"", "*", "unknown", "generic_trade_setup"}:
+            return normalized
+    # Setup identity for executed episodes is owned by the opening FAC.  SCC
+    # sources are deliberately not rescanned here: news and fundamental
+    # evidence support the decision but cannot rename the traded setup.
+    raw_parts: List[str] = [
         str(final_contract.get("entry_trigger") or ""),
         str(final_contract.get("market_regime") or ""),
-    ])
-    scc = (
-        snapshot.get("signal_collection_contract")
-        if isinstance(snapshot.get("signal_collection_contract"), Mapping)
-        else {}
-    )
-    for source in scc.get("source_contracts") or []:
-        if not isinstance(source, Mapping):
-            continue
-        contract = source.get("action_evidence_contract")
-        if not isinstance(contract, Mapping):
-            continue
-        raw_parts.extend([
-            str(contract.get("setup_type") or ""),
-            str(contract.get("action_name") or ""),
-            str(contract.get("opportunity_type") or ""),
-            str(contract.get("opportunity_state") or ""),
-            str(contract.get("entry_trigger") or ""),
-            str(contract.get("event_type") or ""),
-            " ".join(str(item) for item in (contract.get("factor_focus") or []) if item),
-            str(contract.get("primary_business_driver") or ""),
-            str(contract.get("supply_demand_state") or ""),
-            str(contract.get("basis_state") or ""),
-            str(contract.get("inventory_state") or ""),
-        ])
+        str(opportunity_type or ""),
+        str(opportunity_state or ""),
+    ]
+    if not final_contract:
+        scc = (
+            snapshot.get("signal_collection_contract")
+            if isinstance(snapshot.get("signal_collection_contract"), Mapping)
+            else {}
+        )
+        for source in scc.get("source_contracts") or []:
+            if not isinstance(source, Mapping):
+                continue
+            contract = source.get("action_evidence_contract")
+            if not isinstance(contract, Mapping):
+                continue
+            raw_parts.extend(
+                [
+                    str(contract.get("setup_type") or ""),
+                    str(contract.get("entry_trigger") or ""),
+                    str(contract.get("opportunity_type") or ""),
+                ]
+            )
     text = " ".join(raw_parts).lower()
     if any(token in text for token in ("news", "event", "catalyst")):
         return "news_event_setup"

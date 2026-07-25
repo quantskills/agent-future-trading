@@ -6,11 +6,22 @@ adjustments. It must not create trade authority, sizing authority, or PM bypasse
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Dict, Iterable, List, Mapping
 
 from graph.constants import Signal
 from graph.schema import AnalystSignal
 from tools.common.adaptive_policy_safety import filter_adaptive_policy_state_for_pm
+from tools.common.execution_trigger_semantics import (
+    CANONICAL_ENTRY_TRIGGERS,
+    canonical_entry_trigger,
+    normalize_execution_profile,
+)
+from tools.common.final_action_semantics import (
+    ACTION_FAMILY_OPEN_ADD_NEW_RISK,
+    canonical_action_family,
+    canonical_action_value_lane,
+)
 
 
 _DIRECTION_BY_SIDE = {
@@ -20,6 +31,14 @@ _DIRECTION_BY_SIDE = {
 
 _CROSS_REGIME_RETRIEVAL_MATCH = "cross_regime_same_ticker_side_horizon"
 _CROSS_REGIME_CALIBRATION_WEIGHT = 0.25
+_CANONICAL_TRIGGER_IDENTITIES = frozenset(
+    "".join(
+        character
+        for character in str(trigger or "").strip().lower().replace(" ", "_").replace("/", "_")
+        if character.isalnum() or character in {"_", "-", "*"}
+    )
+    for trigger in CANONICAL_ENTRY_TRIGGERS
+)
 
 
 def retrieve_analyst_policy_calibration(
@@ -86,6 +105,17 @@ def _clip(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
 def _signal_direction(signal: AnalystSignal) -> str:
     value = signal.signal.value if hasattr(signal.signal, "value") else str(signal.signal)
     return str(value or "").lower()
+
+
+def _signal_side(signal: AnalystSignal) -> str:
+    direction = _signal_direction(signal)
+    for side, signal_value in _DIRECTION_BY_SIDE.items():
+        if direction == signal_value:
+            return side
+    counterfactual_side = str(
+        getattr(signal, "counterfactual_side", "") or ""
+    ).strip().lower()
+    return counterfactual_side if counterfactual_side in _DIRECTION_BY_SIDE else ""
 
 
 def _row_side_matches_signal(row: Mapping[str, Any], direction: str) -> bool:
@@ -167,6 +197,12 @@ def _analyst_safe_action_value_row(row: Mapping[str, Any]) -> Dict[str, Any] | N
         "setup_type": row.get("setup_type"),
         "data_combo": row.get("data_combo"),
         "action_name": row.get("action_name"),
+        "action_value_lane": (
+            row.get("action_value_lane")
+            or calibration.get("source_action_value_lane")
+        ),
+        "learning_lane": row.get("learning_lane"),
+        "canonical_action_family": row.get("canonical_action_family"),
         "sample_count": row.get("sample_count"),
         "confidence_score": row.get("confidence_score"),
         "signal_calibration": dict(calibration),
@@ -218,14 +254,168 @@ def _broad_prior_rows(rows: Iterable[Mapping[str, Any]], ticker: str) -> List[Ma
 
 
 def _matching_rows(rows: Iterable[Mapping[str, Any]], signal: AnalystSignal, ticker: str) -> List[Mapping[str, Any]]:
-    direction = _signal_direction(signal)
+    side = _signal_side(signal)
     same_ticker = _same_ticker_rows(rows, ticker)
-    return [row for row in same_ticker if _row_side_matches_signal(row, direction)]
+    direction = _DIRECTION_BY_SIDE.get(side, "")
+    return [row for row in same_ticker if direction and _row_side_matches_signal(row, direction)]
 
 
 def _broad_matching_rows(rows: Iterable[Mapping[str, Any]], signal: AnalystSignal, ticker: str) -> List[Mapping[str, Any]]:
-    direction = _signal_direction(signal)
-    return [row for row in _broad_prior_rows(rows, ticker) if _row_side_matches_signal(row, direction)]
+    side = _signal_side(signal)
+    direction = _DIRECTION_BY_SIDE.get(side, "")
+    return [
+        row
+        for row in _broad_prior_rows(rows, ticker)
+        if direction and _row_side_matches_signal(row, direction)
+    ]
+
+
+def _normalized_identity(value: Any) -> str:
+    text = str(value or "").strip().lower().replace(" ", "_").replace("/", "_")
+    return "".join(
+        character
+        for character in text
+        if character.isalnum() or character in {"_", "-", "*"}
+    )
+
+
+def _product_learning_view(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    product_view = row.get("product_learning_calibration_view")
+    if isinstance(product_view, Mapping):
+        return product_view
+    payload = row.get("payload") if isinstance(row.get("payload"), Mapping) else {}
+    product_view = payload.get("product_learning_calibration_view")
+    return product_view if isinstance(product_view, Mapping) else {}
+
+
+def _row_entry_lane(row: Mapping[str, Any]) -> tuple[str, bool]:
+    calibration = _signal_calibration(row)
+    product_view = _product_learning_view(row)
+    lanes = {
+        canonical_action_value_lane(value)
+        for value in (
+            calibration.get("source_action_value_lane"),
+            row.get("action_value_lane"),
+            row.get("learning_lane"),
+            row.get("action_name"),
+            product_view.get("action_name"),
+        )
+        if _normalized_identity(value)
+    }
+    if len(lanes) != 1:
+        return "", False
+    lane = next(iter(lanes))
+    action_names = [
+        value
+        for value in (row.get("action_name"), product_view.get("action_name"))
+        if _normalized_identity(value)
+    ]
+    families = {
+        _normalized_identity(value)
+        for value in (
+            row.get("canonical_action_family"),
+            calibration.get("source_canonical_action_family"),
+        )
+        if _normalized_identity(value)
+    } | {
+        canonical_action_family(value)
+        for value in action_names
+    }
+    family_valid = (
+        len(families) == 1
+        and next(iter(families)) == ACTION_FAMILY_OPEN_ADD_NEW_RISK
+    )
+    return lane, family_valid and canonical_action_family(lane) == ACTION_FAMILY_OPEN_ADD_NEW_RISK
+
+
+def _row_setup_identity(row: Mapping[str, Any]) -> tuple[str, bool]:
+    product_view = _product_learning_view(row)
+    values = {
+        _normalized_identity(value)
+        for value in (row.get("setup_type"), product_view.get("setup_type"))
+        if _normalized_identity(value) not in {"", "*", "unknown"}
+    }
+    if len(values) != 1:
+        return "", False
+    return next(iter(values)), True
+
+
+def _row_trigger_identity(row: Mapping[str, Any]) -> tuple[str, bool]:
+    product_view = _product_learning_view(row)
+    entry_view = product_view.get("entry_quality_calibration")
+    if not isinstance(entry_view, Mapping):
+        entry_view = {}
+    values = {
+        _normalized_identity(value)
+        for value in (
+            entry_view.get("trigger_key"),
+            product_view.get("trigger_key"),
+        )
+        if _normalized_identity(value) not in {"", "unknown_trigger"}
+    }
+    if len(values) != 1:
+        return "", False
+    trigger = next(iter(values))
+    return trigger, trigger in _CANONICAL_TRIGGER_IDENTITIES
+
+
+def _current_entry_identity(signal: AnalystSignal) -> tuple[str, str]:
+    setup_type = _normalized_identity(getattr(signal, "setup_type", ""))
+    if setup_type in {"", "*", "unknown"}:
+        setup_type = ""
+    side = _signal_side(signal)
+    profile = normalize_execution_profile(
+        getattr(signal, "entry_timing_signal", "")
+    )
+    trigger = _normalized_identity(canonical_entry_trigger(profile, side))
+    if trigger not in _CANONICAL_TRIGGER_IDENTITIES:
+        trigger = ""
+    return setup_type, trigger
+
+
+def _entry_calibration_rejection_reason(
+    row: Mapping[str, Any],
+    *,
+    current_setup: str,
+    current_trigger: str,
+) -> str:
+    lane, valid_lane = _row_entry_lane(row)
+    if not lane:
+        return "learning_lane_missing_or_conflicting"
+    if not valid_lane:
+        return "learning_lane_not_open_add"
+    row_setup, valid_setup = _row_setup_identity(row)
+    if not valid_setup or not current_setup:
+        return "setup_identity_missing_or_conflicting"
+    if row_setup != current_setup:
+        return "setup_mismatch"
+    row_trigger, valid_trigger = _row_trigger_identity(row)
+    if not valid_trigger or not current_trigger:
+        return "canonical_trigger_missing_or_conflicting"
+    if row_trigger != current_trigger:
+        return "canonical_trigger_mismatch"
+    return ""
+
+
+def _eligible_entry_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    current_setup: str,
+    current_trigger: str,
+) -> tuple[List[Mapping[str, Any]], Counter[str]]:
+    eligible: List[Mapping[str, Any]] = []
+    rejected: Counter[str] = Counter()
+    for row in rows:
+        reason = _entry_calibration_rejection_reason(
+            row,
+            current_setup=current_setup,
+            current_trigger=current_trigger,
+        )
+        if reason:
+            rejected[reason] += 1
+        else:
+            eligible.append(row)
+    return eligible, rejected
 
 
 def _append_unique(values: List[str], item: str) -> None:
@@ -434,18 +624,43 @@ def calibrate_signal_with_learning_context(
     and metadata; it never creates trade authority, lots, margin, or PM bypasses.
     """
     context = dict(learning_context or {})
-    alpha_profiles = list(context.get("alpha_setup_items") or [])
-    analyst_calibration_items = [
-        safe_row
+    alpha_profiles = [
+        row
+        for row in list(context.get("alpha_setup_items") or [])
+        if isinstance(row, Mapping)
+    ]
+    raw_analyst_calibration_items = [
+        row
         for row in list(context.get("analyst_calibration_items") or [])
         if isinstance(row, Mapping)
+    ]
+    analyst_calibration_items = [
+        safe_row
+        for row in raw_analyst_calibration_items
         for safe_row in [_analyst_safe_action_value_row(row)]
         if safe_row is not None
     ]
     rows: List[Mapping[str, Any]] = [row for row in alpha_profiles + analyst_calibration_items if isinstance(row, Mapping)]
 
-    matched = _matching_rows(rows, signal, ticker)
-    broad = _broad_matching_rows(rows, signal, ticker)
+    current_setup, current_trigger = _current_entry_identity(signal)
+    matched_candidates = _matching_rows(rows, signal, ticker)
+    broad_candidates = _broad_matching_rows(rows, signal, ticker)
+    matched, matched_rejections = _eligible_entry_rows(
+        matched_candidates,
+        current_setup=current_setup,
+        current_trigger=current_trigger,
+    )
+    broad, broad_rejections = _eligible_entry_rows(
+        broad_candidates,
+        current_setup=current_setup,
+        current_trigger=current_trigger,
+    )
+    rejected_reasons = matched_rejections + broad_rejections
+    unsafe_contract_count = len(raw_analyst_calibration_items) - len(
+        analyst_calibration_items
+    )
+    if unsafe_contract_count > 0:
+        rejected_reasons["analyst_calibration_contract_invalid"] += unsafe_contract_count
     positive_rows = [row for row in matched if _row_is_positive(row)]
     negative_rows = [row for row in matched if _row_is_negative(row)]
     broad_positive_rows = [row for row in broad if _row_is_positive(row)]
@@ -479,7 +694,7 @@ def calibrate_signal_with_learning_context(
         _append_unique(conflicting_factors, f"{analyst}_same_scope_negative_learning")
     if broad_positive_strength or broad_negative_strength:
         _append_unique(setup_notes, f"{analyst}_broad_prior_weak_only")
-    if rows:
+    if matched or broad:
         _append_unique(factor_focus, f"{analyst}_learning_calibration")
 
     signal.setup_quality_notes = setup_notes
@@ -492,11 +707,16 @@ def calibrate_signal_with_learning_context(
 
     metadata = dict(getattr(signal, "metadata", {}) or {})
     metadata["analyst_learning_calibration"] = {
-        "enabled": bool(rows),
+        "enabled": bool(matched or broad),
         "analyst": str(analyst or ""),
         "ticker": str(ticker or "").upper(),
         "same_ticker_matched_count": len(matched),
         "broad_prior_matched_count": len(broad),
+        "eligible_entry_learning_count": len(matched) + len(broad),
+        "rejected_entry_learning_count": sum(rejected_reasons.values()),
+        "rejected_entry_learning_reason_counts": dict(rejected_reasons),
+        "current_setup_type": current_setup,
+        "current_canonical_trigger": current_trigger,
         "positive_strength": round(positive_strength, 4),
         "negative_strength": round(negative_strength, 4),
         "broad_positive_strength": round(broad_positive_strength, 4),
