@@ -518,6 +518,11 @@ def _action_value_learning_summary(
         scope = _clean_key(
             _row_value(row, payload, "amplification_scope_quality", "source_quality", "evidence_scope", default="unknown")
         )
+        if (
+            retrieval_match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+            and scope == "exact_real_state"
+        ):
+            scope = "partial_real_state"
         reward_source = _clean_key(
             _row_value(row, payload, "reward_source", "sample_source", default="unknown")
         )

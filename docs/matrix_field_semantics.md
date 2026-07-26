@@ -994,7 +994,7 @@ Researcher 单次运行的研究 SQL 写入、`researcher_learning_completed`、
 | `memory_requirement_reason` | PM action-value 摘要 | action-value 被当前生命周期和方向角色要求的原因。 |
 | `execution_action_value_preference.base_execution_profile` / `does_not_create_trade_authority` / `keeps_pm_authority_boundary` | PM execution profile 偏好 | 调整前 profile 及不得创建权限、不得突破 PM 权限的固定边界。 |
 | `selected_action_value.exact_ticker_support` | PM action-value 摘要 | 历史 action-value 是否具备当前品种的精确支持。 |
-| `learning_to_position_summary.holding_lifecycle.lifecycle_classification` / `current_side` / `loss_revalidation_due` / `loss_revalidation_failed` | PM 学习落地摘要 | 持仓生命周期分类、当前方向及亏损持仓是否到期/未通过重新验证。 |
+| `learning_to_position_summary.holding_lifecycle.lifecycle_classification` / `current_side` / `holding_days` / `target_side` / `market_confirmation_score` / `loss_revalidation_due` / `loss_revalidation_failed` | PM 学习落地摘要 | 持仓生命周期分类、当前方向、持有交易日、原始目标方向、当日确认分及亏损持仓是否到期/未通过重新验证；只从内部 `held_days/raw_target_side/confirmation_score` 映射，不暴露完整 PM 内部对象。 |
 | `pm_landing_consistency_audit.version` | PM 学习落地检查 | PM 学习落地检查的结构版本。 |
 
 ### 16.4 Auditor 审计字段

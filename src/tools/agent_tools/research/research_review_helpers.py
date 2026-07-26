@@ -1127,6 +1127,36 @@ def _recommendation_side(recommendation: Dict[str, Any], snapshot: Dict[str, Any
     return "unknown"
 
 
+def _fac_no_trade_learning_identity(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the complete FAC identity required by no-trade learning."""
+    contract = final_action_contract_from_snapshot(snapshot)
+    semantic_side = _final_action_semantic_view(contract).get("contract_side")
+    evidence = contract.get("evidence_used") if isinstance(contract.get("evidence_used"), dict) else {}
+    side = str(semantic_side or "").strip().lower()
+    if side not in {"long", "short"}:
+        side = str(evidence.get("scorecard_preferred_side") or "").strip().lower()
+    identity = {
+        "side": side,
+        "setup_type": str(contract.get("setup_type") or "").strip(),
+        "entry_trigger": str(contract.get("entry_trigger") or "").strip(),
+        "horizon_class": str(contract.get("horizon_class") or "").strip(),
+        "market_regime": str(contract.get("market_regime") or "").strip(),
+    }
+    missing_fields = [
+        field_name
+        for field_name, value in identity.items()
+        if value.lower() in {"", "unknown", "*"}
+    ]
+    if identity["side"] not in {"long", "short"} and "side" not in missing_fields:
+        missing_fields.append("side")
+    return {
+        **identity,
+        "complete": not missing_fields,
+        "missing_fields": sorted(missing_fields),
+        "source": "final_action_contract",
+    }
+
+
 def _setup_type(side: str, combo: Iterable[str], snapshot: Dict[str, Any]) -> str:
     for analyst, payload in _analyst_payloads(snapshot).items():
         if _signal_side(payload.get("signal")) == side:

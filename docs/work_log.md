@@ -52,3 +52,15 @@
 （3）[PM精确setup检索键] `portfolio_manager.py`从已验证SCC重建的当前technical/event执行证据取得canonical setup作为精确学习检索键，禁止历史best profile、Step4 final_state及通配setup冒充精确命中；当前setup缺失时只走既有降级检索。原因：修复正式学习消费全部落入fallback、无法按当前真实setup影响候选质量、升层和rank的问题。
 
 （4）[分析师双路径学习与PM检索失败边界] `analyst_learning_context.py`恢复把经T+1、canonical、作用域和family/lane校验的正式open/add安全摘要按预算写入分析师Prompt，并保留同一批记录供LLM输出后按最终setup/canonical trigger确定性校准；hold、reduce/exit、execution/profile及similar/weak/incomplete仍不得进入新增风险入场校准。`portfolio_manager.py`不再吞掉当前canonical setup正式学习检索异常，只有检索成功且结果为空才按合法冷启动处理。对应测试恢复Prompt安全投影、跨regime低权重投影，并覆盖精确检索异常终止。原因：修复生命周期隔离时误将合格open/add学习从Prompt全部清空，以及真实检索故障被伪装成无学习而阻断分析迭代、候选升层和交易放大。
+
+（5）[signal setup字段初始化保真] `sqlite_setup.py`删除`signal.setup_type`到自身的迁移删除调用，`test_unified_field_migration.py`增加SQLite schema重复初始化保真回归，验证已写入的canonical setup在连续初始化后保持不变。原因：字段统一后无需迁移同名列，防止每次本地数据库初始化删除`setup_type`并由运行期补列为`unknown`。
+
+（6）[PM fallback学习作用域降级] `pm_decision_memory_retrieval.py`在`same_ticker_side_horizon`和`same_ticker_side`命中时将原`exact_real_state`降为`partial_real_state`并保留命中层级，`pm_signal_fusion.py`按partial权重继续形成学习分和rank影响，`portfolio_manager.py`在资金升层校验中再次按命中层级阻止fallback取得exact资格；反事实及相似先验保持原低级作用域。对应回归覆盖fallback低权重影响rank、不得支持real/scale放大、exact严格命中仍可放大、反事实不被升级及混合lane检索。原因：防止跨setup或跨regime历史被当成当前精确状态取得满权重和真实资金晋升资格，同时保留既有合法fallback学习路径。
+
+（7）[未交易学习身份继承FAC] `research_review_helpers.py`新增未交易学习的FAC完整身份提取，`research_memory_writers.py`将未交易记录的方向、setup、入场触发、周期和市场状态全部改为直接继承对应FAC，FAC身份不完整时拒绝写入，不再按分析师顺序、信号组合及推荐动作重建复合键；`test_reviewer_learning.py`覆盖FAC身份保真及缺字段拒写。原因：防止可关联未交易记录使用错误复合setup进入后续聚合、检索和校准。
+
+（8）[未交易fast-candidate晋升证据] `research_memory_writers.py`将fast-candidate政策晋升改为固定5日观察窗口，纳入同作用域全部到期正负样本，并要求未发生`fac_invalidated_before_entry/fac_expired_before_entry`且FAC具备一致身份、canonical执行profile、触发来源和入场失效边界；多周期影子结果继续保留为诊断，不再满足新晋升证据的既有active政策同步停用。`learning_policy_catalog.yaml`登记固定5日窗口，`test_reviewer_learning.py`覆盖禁止挑最佳周期、负样本计入、失效及缺执行依据拒绝晋升、旧污染政策停用。原因：防止影子结果事后选优和不可执行信号生成虚假fast-candidate政策。
+
+（9）[config overlay无证据不刷新] `research_memory_writers.py`在当前不存在验证参数优化生产者时停止复制资本利用配置，不再写`config_overlay_refresh`事件及`config_learning_overlay`行，并按原写入来源与原因精确停用既有原值复制行；overlay读取白名单保持不变。`test_reviewer_learning.py`覆盖原值复制不产生学习刷新、旧复制行不再active。原因：原值重复写入不是参数学习，不能以短期结算样本冒充已学习参数。
+
+（10）[PM生命周期审计摘要字段映射] `portfolio_manager.py`在安全`learning_to_position_summary.holding_lifecycle`中仅将内部`held_days/raw_target_side/confirmation_score`映射为`holding_days/target_side/market_confirmation_score`，继续剔除完整PM内部对象；`test_phase_flow_regression.py`覆盖三个字段落地及内部字段不外泄。原因：PM内部生命周期决策正常，但审计摘要此前读取了不存在的外部字段名。

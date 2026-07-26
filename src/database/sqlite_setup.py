@@ -1441,12 +1441,6 @@ def init_database():
                 **_json_artifact_columns("artifact_json"),
             },
         )
-        _migrate_and_drop_columns(
-            cursor,
-            "signal",
-            {"setup_type": "setup_type"},
-        )
-
         # Create portfolio_forced_settlement table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio_forced_settlement (

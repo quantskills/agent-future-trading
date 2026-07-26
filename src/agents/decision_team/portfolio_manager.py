@@ -5191,6 +5191,16 @@ def _action_value_scope_quality(row: dict, ticker: str | None = None, side: str 
         or payload.get("amplification_scope_quality")
         or ""
     ).strip().lower()
+    retrieval_match_level = str(
+        row.get("retrieval_match_level")
+        or payload.get("retrieval_match_level")
+        or ""
+    ).strip().lower()
+    if (
+        retrieval_match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+        and explicit_quality == "exact_real_state"
+    ):
+        return "partial_real_state"
     if explicit_quality in _ACTION_VALUE_SCOPE_QUALITIES:
         if explicit_quality == "exact_real_state":
             if not _action_value_has_complete_state(row, ticker=ticker, side=side):
@@ -5861,12 +5871,12 @@ def _contract_safe_learning_to_position_summary(trace: dict | None) -> dict:
         "holding_lifecycle": {
             "decision": holding.get("decision"),
             "lifecycle_classification": holding.get("lifecycle_classification"),
-            "holding_days": holding.get("holding_days"),
+            "holding_days": holding.get("held_days"),
             "current_side": holding.get("current_side"),
-            "target_side": holding.get("target_side"),
+            "target_side": holding.get("raw_target_side"),
             "loss_revalidation_due": holding.get("loss_revalidation_due"),
             "loss_revalidation_failed": holding.get("loss_revalidation_failed"),
-            "market_confirmation_score": holding.get("market_confirmation_score"),
+            "market_confirmation_score": holding.get("confirmation_score"),
         },
         "artifact_boundary": {
             "summary_only": True,

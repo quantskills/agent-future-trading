@@ -12,6 +12,7 @@ PROJECT_ROOT = SRC_ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from database import sqlite_setup
 from database.sqlite_setup import _ensure_reviewer_learning_schema
 from tools.agent_tools.control.pg_unified_field_audit import (
     scan_legacy_field_token_locations,
@@ -20,6 +21,57 @@ from tools.agent_tools.control.pg_unified_field_audit import (
 
 
 class UnifiedFieldMigrationTests(unittest.TestCase):
+    def test_signal_schema_initialization_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            db_path = Path(raw_tmp) / "agentquant.db"
+            original_db_path = sqlite_setup.DB_PATH
+            sqlite_setup.DB_PATH = str(db_path)
+            try:
+                sqlite_setup.init_database()
+                conn = sqlite3.connect(db_path)
+                try:
+                    columns = {
+                        str(row[1])
+                        for row in conn.execute("PRAGMA table_info(signal)").fetchall()
+                    }
+                    self.assertIn("setup_type", columns)
+                    conn.execute(
+                        """
+                        INSERT INTO signal (
+                            id, portfolio_id, ticker, llm_prompt, analyst,
+                            signal, justification, setup_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "signal-1",
+                            "portfolio-1",
+                            "HC",
+                            "",
+                            "technical",
+                            "Bullish",
+                            "test",
+                            "volatility_breakout_setup",
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                for _initialization_number in (2, 3):
+                    sqlite_setup.init_database()
+                    conn = sqlite3.connect(db_path)
+                    try:
+                        row = conn.execute(
+                            "SELECT setup_type FROM signal WHERE id = ?",
+                            ("signal-1",),
+                        ).fetchone()
+                        self.assertIsNotNone(row)
+                        self.assertEqual("volatility_breakout_setup", row[0])
+                    finally:
+                        conn.close()
+            finally:
+                sqlite_setup.DB_PATH = original_db_path
+
     def test_forbidden_runtime_field_tokens_are_absent(self):
         offenders, _checked_files = scan_runtime_field_usage(SRC_ROOT)
         self.assertEqual([], offenders)

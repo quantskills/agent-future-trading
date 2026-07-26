@@ -43,6 +43,8 @@ from agents.decision_team.portfolio_manager import (
     _opening_fac_position_invalidation_breached,
     _apply_position_budget_policy_for_new_entry,
     _alpha_setup_action_value_trace,
+    _action_value_can_support_real_amplification,
+    _action_value_scope_quality,
     _conditional_monitor_probe_seed_plan,
     _final_contract_authority,
     _finalize_hold_exit_learning_explanation,
@@ -62,6 +64,7 @@ from agents.decision_team.portfolio_manager import (
     _build_pm_decision_context,
     _build_final_action_contract,
     _build_pm_landing_consistency_audit,
+    _contract_safe_learning_to_position_summary,
     _build_release_block_diagnostics,
     _canonical_action_evidence_contract,
     _audit_frozen_step4_pm_memory,
@@ -471,6 +474,34 @@ def _persist_pm_state_fixtures(workflow, generated) -> dict:
         for ticker, recommendation in generated
     ]
     return dict(workflow._persist_pm_full_market_contracts(states))
+
+
+class PMLearningSummaryFieldMappingRegressionTest(unittest.TestCase):
+    def test_lifecycle_summary_maps_internal_field_names(self):
+        summary = _contract_safe_learning_to_position_summary(
+            {
+                "holding_lifecycle": {
+                    "decision": "keep_profitable_supported_exit_deferred",
+                    "lifecycle_classification": "normal",
+                    "held_days": 4,
+                    "current_side": "long",
+                    "raw_target_side": "short",
+                    "loss_revalidation_due": True,
+                    "loss_revalidation_failed": False,
+                    "confirmation_score": 0.72,
+                    "private_pm_internal_trace": {"must_not_leak": True},
+                }
+            }
+        )
+
+        lifecycle = summary["holding_lifecycle"]
+        self.assertEqual(lifecycle["holding_days"], 4)
+        self.assertEqual(lifecycle["target_side"], "short")
+        self.assertEqual(lifecycle["market_confirmation_score"], 0.72)
+        self.assertNotIn("held_days", lifecycle)
+        self.assertNotIn("raw_target_side", lifecycle)
+        self.assertNotIn("confirmation_score", lifecycle)
+        self.assertNotIn("private_pm_internal_trace", lifecycle)
 
 
 class TradingCalendarRegressionTest(unittest.TestCase):
@@ -2748,6 +2779,82 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
             min(1.0, row["opportunity_score"] + 0.08),
         )
 
+    def test_fallback_action_value_keeps_partial_rank_weight_without_exact_promotion(self):
+        signal = self._tradeable_signal()
+        exact_value = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=1600.0,
+            reward_sum=6400.0,
+        )
+        exact_value["retrieval_match_level"] = "exact_state"
+        fallback_value = json.loads(json.dumps(exact_value))
+        fallback_value["retrieval_match_level"] = "same_ticker_side_horizon"
+
+        exact = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[exact_value],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]["action_value_learning_summary"]
+        fallback = build_opportunity_scorecard(
+            ticker="TA",
+            analyst_signals=[signal],
+            market_confirmation={"confirmation_score": 0.70},
+            data_quality_summary={},
+            alpha_setup_action_values=[fallback_value],
+            decision_date="2025-03-15",
+            config=self._scorecard_config(),
+        )["short"]["action_value_learning_summary"]
+
+        self.assertGreater(fallback["positive_learning_signal"], 0.0)
+        self.assertLess(fallback["positive_learning_signal"], exact["positive_learning_signal"])
+        self.assertEqual(fallback["exact_real_count"], 0)
+        self.assertEqual(fallback["strongest_positive"]["scope"], "partial_real_state")
+        self.assertEqual(exact["exact_real_count"], 1)
+
+    def test_fallback_action_value_cannot_support_real_amplification(self):
+        row = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=1600.0,
+            reward_sum=6400.0,
+        )
+        row["retrieval_match_level"] = "same_ticker_side_horizon"
+
+        self.assertEqual(
+            _action_value_scope_quality(row, ticker="TA", side="short"),
+            "partial_real_state",
+        )
+        self.assertFalse(_action_value_can_support_real_amplification(row, ticker="TA", side="short"))
+
+        row["retrieval_match_level"] = "exact_state"
+        self.assertEqual(
+            _action_value_scope_quality(row, ticker="TA", side="short"),
+            "exact_real_state",
+        )
+        self.assertTrue(_action_value_can_support_real_amplification(row, ticker="TA", side="short"))
+
+    def test_fallback_does_not_upgrade_counterfactual_scope(self):
+        row = self._action_value(
+            action_preference="positive_candidate_open",
+            lane="open",
+            reward_mean=1600.0,
+            reward_sum=6400.0,
+            scope="counterfactual_prior",
+            reward_source="counterfactual_prior",
+        )
+        row["retrieval_match_level"] = "same_ticker_side_horizon"
+
+        self.assertEqual(
+            _action_value_scope_quality(row, ticker="TA", side="short"),
+            "counterfactual_prior",
+        )
+        self.assertFalse(_action_value_can_support_real_amplification(row, ticker="TA", side="short"))
+
     def test_episode_action_values_move_scorecard_rank_without_product_blacklist(self):
         signal = self._tradeable_signal()
         positive = build_opportunity_scorecard(
@@ -3250,6 +3357,7 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["consumer_scope"], "pm_learning")
         self.assertEqual(rows[0]["retrieval_match_level"], "same_ticker_side_horizon")
+        self.assertEqual(rows[0]["evidence_scope"], "partial_real_state")
         self.assertEqual(detail["effective_row_count"], 1)
         self.assertEqual(attempts[0]["match_level"], "exact_state")
         self.assertEqual(attempts[0]["row_count"], 0)
@@ -3334,6 +3442,9 @@ class OpportunityScorecardLearningRegressionTest(unittest.TestCase):
         ids = {row["id"] for row in rows}
         self.assertIn("m-open-exact", ids)
         self.assertIn("m-execution-fallback", ids)
+        scope_by_id = {row["id"]: row["evidence_scope"] for row in rows}
+        self.assertEqual(scope_by_id["m-open-exact"], "exact_real_state")
+        self.assertEqual(scope_by_id["m-execution-fallback"], "partial_real_state")
         self.assertEqual(attempts[0]["row_count"], 1)
         self.assertIn("exact_state", detail["matched_levels"])
         self.assertIn("same_ticker_side_horizon", detail["matched_levels"])

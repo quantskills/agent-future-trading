@@ -104,15 +104,33 @@ def _quality_rank(row: Mapping[str, Any]) -> tuple:
 
 def _normalize(row: Mapping[str, Any], *, match_level: str, match_reason: str) -> dict:
     normalized = dict(row)
+    payload = _payload(normalized)
     consumer_scope = _consumer_scope(normalized)
     if consumer_scope:
         normalized["consumer_scope"] = consumer_scope
     normalized["retrieval_match_level"] = match_level
     normalized["retrieval_match_reason"] = match_reason
-    payload = _payload(normalized)
+    stored_scope = _text(
+        normalized.get("evidence_scope")
+        or normalized.get("amplification_scope_quality")
+        or payload.get("evidence_scope")
+        or payload.get("amplification_scope_quality")
+    ).lower()
+    if (
+        match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+        and stored_scope == "exact_real_state"
+    ):
+        normalized["evidence_scope"] = "partial_real_state"
+        normalized["amplification_scope_quality"] = "partial_real_state"
     if payload:
         payload["retrieval_match_level"] = match_level
         payload["retrieval_match_reason"] = match_reason
+        if (
+            match_level in {"same_ticker_side_horizon", "same_ticker_side"}
+            and stored_scope == "exact_real_state"
+        ):
+            payload["evidence_scope"] = "partial_real_state"
+            payload["amplification_scope_quality"] = "partial_real_state"
         normalized["payload"] = payload
     return normalized
 

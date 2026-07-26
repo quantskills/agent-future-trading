@@ -97,6 +97,7 @@ from tools.agent_tools.research.research_memory_writers import (
     _write_learning_mechanism_policy_state,
     _write_learned_vs_unlearned_policy_state,
     _write_loss_template_observation_research,
+    _write_missed_alpha_accountability_state,
     _write_no_trade_opportunity_memory,
     _write_opportunity_ranking_learning_events,
     _write_research_position_feedback,
@@ -6144,9 +6145,13 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                     "current_lots": 0,
                     "target_lots": 0,
                     "lots_delta": 0,
-                    "reason_codes": "intraday_trigger_not_met",
+                    "setup_type": "volatility_breakout_setup",
+                    "horizon_class": "medium",
+                    "market_regime": "range_breakout",
+                    "entry_trigger": "opening_range_breakout_with_volume",
                     "reason_codes": ["intraday_trigger_not_met"],
                     "learning_used": {},
+                    "evidence_used": {"scorecard_preferred_side": "long"},
                 },
                 "execution_result": {"no_trade_reason": "intraday_trigger_not_met"},
             }
@@ -6203,6 +6208,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             item = cursor.execute("SELECT * FROM no_trade_opportunity_memory").fetchone()
             results = json.loads(item["counterfactual_results_json"])
             payload = load_externalized_json(item["payload_json"])
+            self.assertEqual(item["side"], "long")
+            self.assertEqual(item["setup_type"], "volatility_breakout_setup")
+            self.assertEqual(item["horizon_class"], "medium")
+            self.assertEqual(item["market_regime"], "range_breakout")
+            self.assertEqual(payload["entry_trigger"], "opening_range_breakout_with_volume")
+            self.assertEqual(
+                payload[CONTRACT_KEY]["scope"]["entry_trigger"],
+                "opening_range_breakout_with_volume",
+            )
             self.assertEqual(results[0]["horizon_days"], 3)
             self.assertEqual(item["classification"], "missed_opportunity")
             self.assertEqual(payload["neutral_opportunity_observations"][0]["bucket"], "watchlist_trigger")
@@ -6253,6 +6267,20 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                         }
                     }
                 },
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "RB",
+                    "final_action": "open_long",
+                    "current_lots": 0,
+                    "target_lots": 2,
+                    "lots_delta": 2,
+                    "setup_type": "breakout_continuation",
+                    "horizon_class": "short",
+                    "market_regime": "trend",
+                    "entry_trigger": "breakout_above_resistance",
+                    "reason_codes": ["entry_confirmed"],
+                    "learning_used": {},
+                },
                 "execution_result": {
                     "outcome": "skipped",
                     "status": "skipped",
@@ -6298,6 +6326,252 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
             self.assertIn("entry/exit timing research question", " ".join(contract["analysis_strategy_updates"]))
             self.assertIn("Do not chase at the limit price", " ".join(contract["trading_strategy_updates"]))
             self.assertIn("not increase size", " ".join(contract["position_impact_conditions"]))
+        finally:
+            conn.close()
+
+    def test_no_trade_opportunity_memory_rejects_incomplete_fac_identity(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            snapshot = {
+                "signal_collection_contract": _scc_from_analyst_payloads(
+                    technical={
+                        "signal": "Bullish",
+                        "setup_type": "analyst_reconstructed_setup",
+                        "horizon_class": "short",
+                        "market_regime": "trend",
+                        "entry_trigger": "analyst_reconstructed_trigger",
+                    },
+                    fundamental={"signal": "Bullish"},
+                    commodity_news={"signal": "Neutral"},
+                ),
+                "final_action_contract": {
+                    "contract_version": "agentquant.final_action.v1",
+                    "ticker": "BU",
+                    "final_action": "wait",
+                    "current_lots": 0,
+                    "target_lots": 0,
+                    "lots_delta": 0,
+                    "reason_codes": ["current_evidence_not_tradeable"],
+                    "learning_used": {},
+                    "evidence_used": {"scorecard_preferred_side": "long"},
+                },
+            }
+
+            rows = _write_no_trade_opportunity_memory(
+                cursor,
+                cfg={"learning": {"no_trade_opportunity_memory": {"enabled": True}}},
+                config_id="cfg",
+                trading_date="2025-03-11",
+                strategy_recommendations=[
+                    {
+                        "id": "rec-incomplete-fac",
+                        "config_id": "cfg",
+                        "underlying_code": "BU",
+                        "action": "hold",
+                        "lots": 0,
+                        "base_price": 3200.0,
+                        "signal_snapshot": json.dumps(snapshot),
+                    }
+                ],
+            )
+
+            self.assertEqual(rows, 0)
+            count = cursor.execute("SELECT COUNT(*) FROM no_trade_opportunity_memory").fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
+
+    def _insert_fast_candidate_counterfactual_memory(
+        self,
+        cursor,
+        *,
+        memory_id,
+        trading_date,
+        fixed_pnl,
+        execution_reason="intraday_trigger_not_met",
+        complete_execution_basis=True,
+        classification="missed_opportunity",
+    ):
+        fac = {
+            "contract_version": "agentquant.final_action.v1",
+            "ticker": "RB",
+            "final_action": "wait",
+            "current_lots": 0,
+            "target_lots": 0,
+            "lots_delta": 0,
+            "setup_type": "volatility_breakout_setup",
+            "horizon_class": "short",
+            "market_regime": "trend",
+            "entry_trigger": "breakout_above_opening_range",
+            "execution_profile": "breakout",
+            "trigger_source": "technical",
+            "invalidation": "long breakout invalid below opening range",
+            "invalidation_level": 3400.0,
+            "evidence_used": {"scorecard_preferred_side": "long"},
+        }
+        if not complete_execution_basis:
+            fac["invalidation"] = ""
+            fac["invalidation_level"] = None
+        payload = {
+            "final_action_contract": fac,
+            "entry_trigger": fac["entry_trigger"],
+        }
+        results = [
+            {"horizon_days": 3, "counterfactual_pnl": 5000.0},
+            {"horizon_days": 5, "counterfactual_pnl": fixed_pnl},
+            {"horizon_days": 10, "counterfactual_pnl": 7000.0},
+        ]
+        cursor.execute(
+            """
+            INSERT INTO no_trade_opportunity_memory (
+                id, config_id, trading_date, ticker, side, sector, setup_type,
+                signal_combo, horizon_class, market_regime, opportunity_type,
+                opportunity_state, candidate_lots, counterfactual_lots,
+                counterfactual_entry_price, pm_reason, auditor_reason,
+                execution_reason, evidence_summary, status, classification,
+                counterfactual_results_json, payload_json, created_at,
+                last_reviewed_at
+            ) VALUES (?, 'cfg', ?, 'RB', 'long', 'ferrous',
+                      'volatility_breakout_setup', '["Bullish"]', 'short',
+                      'trend', 'trend_continuation', 'tradeable_candidate',
+                      1, 1, 3500.0, 'intraday_trigger_not_met', '', ?, '',
+                      'closed', ?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                trading_date,
+                execution_reason,
+                classification,
+                json.dumps(results),
+                json.dumps(payload),
+                f"{trading_date}T16:00:00Z",
+                f"{trading_date}T16:00:00Z",
+            ),
+        )
+
+    def test_fast_candidate_uses_fixed_horizon_and_complete_signed_sample(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-positive-1",
+                trading_date="2025-03-20",
+                fixed_pnl=2200.0,
+            )
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-negative",
+                trading_date="2025-03-21",
+                fixed_pnl=-900.0,
+                classification="correct_avoidance",
+            )
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-positive-2",
+                trading_date="2025-03-24",
+                fixed_pnl=1200.0,
+            )
+
+            summary = _write_missed_alpha_accountability_state(
+                cursor,
+                cfg={
+                    "learning": {
+                        "missed_alpha_accountability": {
+                            "enabled": True,
+                            "fixed_horizon_days": 5,
+                            "min_counterfactual_samples": 3,
+                            "min_net_counterfactual_pnl": 2000.0,
+                            "min_positive_rate": 0.55,
+                        }
+                    }
+                },
+                config_id="cfg",
+                trading_date="2025-04-10",
+            )
+
+            self.assertEqual(summary["rows"], 1)
+            row = cursor.execute(
+                "SELECT sample_count, payload_json FROM adaptive_policy_state WHERE policy_type='fast_candidate_alpha'"
+            ).fetchone()
+            payload = json.loads(row["payload_json"])
+            evidence = payload["evidence"]
+            self.assertEqual(row["sample_count"], 3)
+            self.assertEqual(evidence["fixed_horizon_days"], 5)
+            self.assertEqual(evidence["net_counterfactual_pnl"], 2500.0)
+            self.assertAlmostEqual(evidence["positive_rate"], 2 / 3)
+            self.assertEqual(
+                evidence["memory_ids"],
+                ["nt-positive-2", "nt-negative", "nt-positive-1"],
+            )
+        finally:
+            conn.close()
+
+    def test_fast_candidate_rejects_invalidated_and_incomplete_execution_basis(self):
+        conn = self._connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO adaptive_policy_state (
+                    id, config_id, ticker, side, setup_type, horizon_class,
+                    market_regime, policy_type, policy_action, multiplier,
+                    confidence_score, sample_count, reason, created_at, active
+                ) VALUES (
+                    'old-fast-candidate', 'cfg', 'RB', 'long',
+                    'volatility_breakout_setup', 'short', 'trend',
+                    'fast_candidate_alpha', 'probe', 0.75, 0.70, 2,
+                    'old contaminated policy', '2025-03-25T16:00:00Z', 1
+                )
+                """
+            )
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-valid",
+                trading_date="2025-03-20",
+                fixed_pnl=2200.0,
+            )
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-invalidated",
+                trading_date="2025-03-21",
+                fixed_pnl=2600.0,
+                execution_reason="fac_invalidated_before_entry",
+            )
+            self._insert_fast_candidate_counterfactual_memory(
+                cursor,
+                memory_id="nt-no-basis",
+                trading_date="2025-03-24",
+                fixed_pnl=2800.0,
+                complete_execution_basis=False,
+            )
+
+            summary = _write_missed_alpha_accountability_state(
+                cursor,
+                cfg={
+                    "learning": {
+                        "missed_alpha_accountability": {
+                            "enabled": True,
+                            "fixed_horizon_days": 5,
+                            "min_counterfactual_samples": 2,
+                            "min_net_counterfactual_pnl": 1000.0,
+                            "min_positive_rate": 0.55,
+                        }
+                    }
+                },
+                config_id="cfg",
+                trading_date="2025-04-10",
+            )
+
+            self.assertEqual(summary["rows"], 0)
+            self.assertEqual(summary["deactivated_rows"], 1)
+            self.assertEqual(summary["excluded_invalidated"], 1)
+            self.assertEqual(summary["excluded_incomplete_execution_basis"], 1)
+            count = cursor.execute(
+                "SELECT COUNT(*) FROM adaptive_policy_state WHERE policy_type='fast_candidate_alpha' AND active=1"
+            ).fetchone()[0]
+            self.assertEqual(count, 0)
         finally:
             conn.close()
 
@@ -9011,10 +9285,26 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_config_overlay_persists_previous_and_rollback_values(self):
+    def test_config_overlay_does_not_write_refresh_without_changed_learned_values(self):
         conn = self._connection()
         try:
             cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO config_learning_overlay (
+                    id, config_id, trading_date, param_key, learned_value_json,
+                    previous_value_json, scope_type, scope_key, source,
+                    confidence_score, sample_count, reason, rollback_value_json,
+                    created_at, valid_until, active
+                ) VALUES (
+                    'old-copy-overlay', 'cfg', '2025-02-09',
+                    'capital_utilization_control.target_margin_ratio_min',
+                    '0.16', '0.16', 'global', '*', 'reviewer', 0.90, 1,
+                    'capital utilization hard target is managed as reviewer overlay', '0.16',
+                    '2025-02-09T16:00:00Z', '2025-02-20', 1
+                )
+                """
+            )
             inserted = _write_config_overlay(
                 cursor,
                 config_id="cfg",
@@ -9030,20 +9320,15 @@ class ReviewerLearningPersistenceRegressionTest(unittest.TestCase):
                 settlement_row={"margin_ratio": 0.08, "current_margin": 400000.0},
             )
 
-            cursor.execute(
-                """
-                SELECT *
-                FROM config_learning_overlay
-                WHERE param_key = ?
-                """,
-                ("capital_utilization_control.target_margin_ratio_min",),
-            )
-            row = dict(cursor.fetchone())
-            self.assertEqual(inserted, 3)
-            self.assertEqual(json.loads(row["learned_value_json"]), 0.16)
-            self.assertEqual(json.loads(row["previous_value_json"]), 0.16)
-            self.assertEqual(json.loads(row["rollback_value_json"]), 0.16)
-            self.assertTrue(row["source_event_id"])
+            self.assertEqual(inserted, 0)
+            active_overlay_count = cursor.execute(
+                "SELECT COUNT(*) FROM config_learning_overlay WHERE active=1"
+            ).fetchone()[0]
+            refresh_count = cursor.execute(
+                "SELECT COUNT(*) FROM learning_event_log WHERE event_type='config_overlay_refresh'"
+            ).fetchone()[0]
+            self.assertEqual(active_overlay_count, 0)
+            self.assertEqual(refresh_count, 0)
         finally:
             conn.close()
 

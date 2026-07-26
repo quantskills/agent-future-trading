@@ -220,9 +220,10 @@ learning:
     counterfactual_forward_days: [3, 5, 10]
     max_rows_per_day: 30
   missed_alpha_accountability:
-    # 高质量机会未落仓或未成交后，若未来 counterfactual 证明为正，只生成同作用域 fast_candidate_alpha。
+    # 高质量机会未落仓或未成交后，只按固定5日窗口、完整正负样本和FAC可执行依据评估同作用域fast_candidate_alpha。
     # 它只能支持下一轮 probe/小仓复核，不是成熟 alpha，也不写品种白名单。
     enabled: true
+    fixed_horizon_days: 5
     min_counterfactual_samples: 2
     min_net_counterfactual_pnl: 1500
     min_positive_rate: 0.55

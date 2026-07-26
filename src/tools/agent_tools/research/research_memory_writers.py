@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from apis.contract_info_cache import FuturesContractInfoCache
-from database.artifact_store import externalize_json_for_db, write_artifact_text
+from database.artifact_store import externalize_json_for_db, load_externalized_json, write_artifact_text
 from graph.schema import RecommendationSourceType
 from tools.agent_tools.research import research_review_helpers as _review_helpers
 from tools.agent_tools.research import research_snapshot_reports as _research_snapshots
@@ -3625,16 +3625,21 @@ def _write_no_trade_opportunity_memory(
         no_trade_category = categorize_no_trade_reason(normalized_reason)
         if lots > 0 and action not in {"hold", "none"} and not limit_locked_execution and not execution_no_trade_reason:
             continue
-        side = _candidate_side_from_snapshot(snapshot)
-        if side not in {"long", "short"} and limit_locked_execution:
-            side = _candidate_side_from_action(action)
-        if side not in {"long", "short"}:
+        fac_identity = _fac_no_trade_learning_identity(snapshot)
+        if not fac_identity.get("complete"):
+            logger.warning(
+                "Skip no-trade opportunity memory with incomplete FAC identity: "
+                f"ticker={ticker}, recommendation_id={recommendation.get('id')}, "
+                f"missing_fields={fac_identity.get('missing_fields') or []}"
+            )
             continue
+        side = str(fac_identity["side"])
         neutral_observations = _neutral_opportunity_observations(snapshot)
         combo = _signal_combo_from_snapshot(snapshot)
-        template = _setup_type(side, combo, snapshot)
-        horizon = _horizon_class(_expected_horizon_days(snapshot, side), snapshot)
-        regime = _market_regime(snapshot)
+        template = str(fac_identity["setup_type"])
+        entry_trigger = str(fac_identity["entry_trigger"])
+        horizon = str(fac_identity["horizon_class"])
+        regime = str(fac_identity["market_regime"])
         sector = _sector_for_ticker(cfg, ticker)
         counterfactual_entry_price = _safe_float(
             recommendation.get("base_price")
@@ -3710,6 +3715,7 @@ def _write_no_trade_opportunity_memory(
             "action": recommendation.get("action"),
             "lots": lots,
             "candidate_side": side,
+            "entry_trigger": entry_trigger,
             "neutral_opportunity_observations": neutral_observations,
             "counterfactual_entry_price": counterfactual_entry_price,
             "no_trade_reason": normalized_reason,
@@ -3746,6 +3752,7 @@ def _write_no_trade_opportunity_memory(
                 "sector": sector,
                 "side": side,
                 "setup_type": template,
+                "entry_trigger": entry_trigger,
                 "horizon_class": horizon,
                 "market_regime": regime,
             },
@@ -4017,6 +4024,7 @@ def _write_missed_alpha_accountability_state(
         return {"rows": 0, "status": "disabled"}
     _ensure_research_learning_schema(cursor)
 
+    fixed_horizon_days = int(control.get("fixed_horizon_days", 5) or 5)
     min_samples = int(control.get("min_counterfactual_samples", 2) or 2)
     min_counterfactual_pnl = _safe_float(control.get("min_net_counterfactual_pnl"), 1500.0)
     min_positive_rate = _safe_float(control.get("min_positive_rate"), 0.55)
@@ -4033,27 +4041,76 @@ def _write_missed_alpha_accountability_state(
         SELECT *
         FROM no_trade_opportunity_memory
         WHERE config_id = ?
-          AND classification = 'missed_opportunity'
+          AND trading_date < ?
           AND counterfactual_results_json IS NOT NULL
         ORDER BY trading_date DESC
         LIMIT 500
         ''',
-        (config_id,),
+        (config_id, trading_date),
     )
     groups: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    excluded_invalidated = 0
+    excluded_incomplete_execution_basis = 0
     for row in cursor.fetchall():
         item = dict(row)
         state = str(item.get("opportunity_state") or "watch_for_trigger")
         if allowed_states and state not in allowed_states:
             continue
         results = _json_loads(item.get("counterfactual_results_json")) or []
-        best_pnl = max(
-            [_safe_float(result.get("counterfactual_pnl")) for result in results if isinstance(result, dict)]
-            or [0.0]
+        fixed_result = next(
+            (
+                result
+                for result in results
+                if isinstance(result, dict)
+                and _safe_int(result.get("horizon_days"), 0) == fixed_horizon_days
+            ),
+            None,
         )
-        if best_pnl <= 0:
+        if not isinstance(fixed_result, dict):
             continue
-        item["best_counterfactual_pnl"] = best_pnl
+        execution_reason = normalize_no_trade_reason(item.get("execution_reason")) or ""
+        if execution_reason in {"fac_invalidated_before_entry", "fac_expired_before_entry"}:
+            excluded_invalidated += 1
+            continue
+        payload = load_externalized_json(
+            item.get("payload_json"),
+            item.get("payload_artifact_path"),
+            item.get("payload_sha256"),
+        ) or {}
+        final_contract = (
+            payload.get("final_action_contract")
+            if isinstance(payload, dict) and isinstance(payload.get("final_action_contract"), dict)
+            else {}
+        )
+        fac_identity = _fac_no_trade_learning_identity({"final_action_contract": final_contract})
+        execution_profile = str(final_contract.get("execution_profile") or "").strip()
+        trigger_source = str(final_contract.get("trigger_source") or "").strip().lower()
+        execution_basis_complete = all(
+            final_contract.get(field_name) not in (None, "", "unknown")
+            for field_name in (
+                "setup_type",
+                "horizon_class",
+                "market_regime",
+                "entry_trigger",
+                "execution_profile",
+                "trigger_source",
+                "invalidation",
+                "invalidation_level",
+            )
+        ) and execution_profile in {"breakout", "pullback", "vwap_confirmed", "event_immediate"}
+        execution_basis_complete = execution_basis_complete and trigger_source not in {"", "none", "unknown"}
+        execution_basis_complete = execution_basis_complete and _safe_float(
+            final_contract.get("invalidation_level"), 0.0
+        ) > 0.0
+        execution_basis_complete = execution_basis_complete and bool(fac_identity.get("complete"))
+        execution_basis_complete = execution_basis_complete and all(
+            str(fac_identity.get(field_name) or "") == str(item.get(field_name) or "")
+            for field_name in ("side", "setup_type", "horizon_class", "market_regime")
+        )
+        if not execution_basis_complete:
+            excluded_incomplete_execution_basis += 1
+            continue
+        item["fixed_horizon_counterfactual_pnl"] = _safe_float(fixed_result.get("counterfactual_pnl"))
         key = (
             str(item.get("ticker") or "*"),
             str(item.get("side") or "*"),
@@ -4069,11 +4126,52 @@ def _write_missed_alpha_accountability_state(
     guarded = 0
     candidates: List[Tuple[float, Tuple[str, str, str, str, str], List[Dict[str, Any]]]] = []
     for key, items in groups.items():
-        net_counterfactual = sum(_safe_float(item.get("best_counterfactual_pnl")) for item in items)
-        positive_rate = sum(1 for item in items if _safe_float(item.get("best_counterfactual_pnl")) > 0) / max(1, len(items))
+        net_counterfactual = sum(_safe_float(item.get("fixed_horizon_counterfactual_pnl")) for item in items)
+        positive_rate = sum(
+            1
+            for item in items
+            if _safe_float(item.get("fixed_horizon_counterfactual_pnl")) > 0
+        ) / max(1, len(items))
         if len(items) >= min_samples and net_counterfactual >= min_counterfactual_pnl and positive_rate >= min_positive_rate:
             candidates.append((net_counterfactual, key, items))
     candidates.sort(reverse=True, key=lambda item: (item[0], len(item[2])))
+
+    qualified_scope_keys = {key for _, key, _ in candidates}
+    cursor.execute(
+        """
+        SELECT id, ticker, side, setup_type, horizon_class, market_regime
+        FROM adaptive_policy_state
+        WHERE config_id = ?
+          AND policy_type = 'fast_candidate_alpha'
+          AND active = 1
+        """,
+        (config_id,),
+    )
+    deactivated_rows = 0
+    for policy_row in cursor.fetchall():
+        policy = dict(policy_row)
+        policy_scope_key = (
+            str(policy.get("ticker") or "*"),
+            str(policy.get("side") or "*"),
+            str(policy.get("setup_type") or "*"),
+            str(policy.get("horizon_class") or "*"),
+            str(policy.get("market_regime") or "*"),
+        )
+        if policy_scope_key in qualified_scope_keys:
+            continue
+        deactivated_rows += _deactivate_adaptive_policy_state(
+            cursor,
+            config_id=config_id,
+            scope={
+                "ticker": policy_scope_key[0],
+                "side": policy_scope_key[1],
+                "setup_type": policy_scope_key[2],
+                "horizon_class": policy_scope_key[3],
+                "market_regime": policy_scope_key[4],
+            },
+            policy_type="fast_candidate_alpha",
+            reason="fixed-horizon signed evidence no longer qualifies this fast candidate",
+        )
 
     for net_counterfactual, key, items in candidates[:max_rows]:
         ticker, side, template, horizon, regime = key
@@ -4087,9 +4185,14 @@ def _write_missed_alpha_accountability_state(
         confidence = min(0.85, 0.35 + 0.08 * len(items) + min(0.25, net_counterfactual / 50000.0))
         evidence = {
             "source": "missed_opportunity_counterfactual",
+            "fixed_horizon_days": fixed_horizon_days,
             "sample_count": len(items),
             "net_counterfactual_pnl": net_counterfactual,
-            "positive_rate": sum(1 for item in items if _safe_float(item.get("best_counterfactual_pnl")) > 0) / max(1, len(items)),
+            "positive_rate": sum(
+                1
+                for item in items
+                if _safe_float(item.get("fixed_horizon_counterfactual_pnl")) > 0
+            ) / max(1, len(items)),
             "memory_ids": [item.get("id") for item in items[:20]],
             "opportunity_states": sorted({str(item.get("opportunity_state") or "unknown") for item in items}),
             "counterfactual_results_are_future_settled": True,
@@ -4196,7 +4299,15 @@ def _write_missed_alpha_accountability_state(
 
     if not inserted and candidates:
         guarded = len(candidates)
-    return {"rows": inserted, "guarded": guarded, "status": "applied" if inserted else "no_ready_candidates"}
+    return {
+        "rows": inserted,
+        "guarded": guarded,
+        "deactivated_rows": deactivated_rows,
+        "excluded_invalidated": excluded_invalidated,
+        "excluded_incomplete_execution_basis": excluded_incomplete_execution_basis,
+        "fixed_horizon_days": fixed_horizon_days,
+        "status": "applied" if inserted else "no_ready_candidates",
+    }
 
 def _write_validated_causal_policy_rules(
     cursor: sqlite3.Cursor,
@@ -5792,83 +5903,22 @@ def _write_config_overlay(
     overlay_cfg = learning_cfg.get("config_overlay", {}) or {}
     if not bool(overlay_cfg.get("enabled", True)):
         return 0
-    capital_cfg = cfg.get("capital_utilization_control", {}) or {}
-    target_min = float(capital_cfg.get("target_margin_ratio_min", 0.16))
-    target_max = float(capital_cfg.get("target_margin_ratio_max", 0.20))
-    values = {
-        "capital_utilization_control.target_margin_ratio_min": target_min,
-        "capital_utilization_control.target_margin_ratio_max": target_max,
-        "capital_utilization_control.target_margin_ratio_confirmed": max(target_min, min(target_max, float(capital_cfg.get("target_margin_ratio_confirmed", target_min)))),
-    }
-    rollback_values = {
-        key: _dotted_config_value(cfg, key, default=value)
-        for key, value in values.items()
-    }
-    now = _utc_now()
-    valid_until = _valid_until(trading_date, int(learning_cfg.get("overlay_expires_after_days", 10)))
-    if settlement_row:
-        evidence = {
-            "current_margin_ratio": _safe_float(settlement_row.get("margin_ratio")),
-            "current_margin": _safe_float(settlement_row.get("current_margin")),
-        }
-    else:
-        evidence = {}
-    event_id = _insert_learning_event(
-        cursor,
-        config_id=config_id,
-        trading_date=trading_date,
-        event_type="config_overlay_refresh",
-        scope_type="global",
-        scope_key="capital_utilization_control",
-        evidence=evidence,
-        action={"learned_values": values, "rollback_values": rollback_values},
+    # No validated parameter-optimization producer exists yet. Copying the
+    # current configuration is not learning and must not create refresh events
+    # or active overlays that PM will consume on the next trading day.
+    _ensure_research_learning_schema(cursor)
+    cursor.execute(
+        """
+        UPDATE config_learning_overlay
+        SET active = 0
+        WHERE config_id = ?
+          AND active = 1
+          AND source = 'reviewer'
+          AND reason = 'capital utilization hard target is managed as reviewer overlay'
+        """,
+        (config_id,),
     )
-    inserted = 0
-    for key, value in values.items():
-        rollback_value = rollback_values.get(key, value)
-        cursor.execute(
-            '''
-            INSERT INTO config_learning_overlay (
-                id, config_id, trading_date, param_key, learned_value_json,
-                previous_value_json, scope_type, scope_key, source, confidence_score,
-                sample_count, reason, source_event_id, rollback_value_json,
-                created_at, valid_until, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(config_id, param_key, scope_type, scope_key, source)
-            DO UPDATE SET
-                trading_date=excluded.trading_date,
-                learned_value_json=excluded.learned_value_json,
-                previous_value_json=excluded.previous_value_json,
-                confidence_score=excluded.confidence_score,
-                sample_count=excluded.sample_count,
-                reason=excluded.reason,
-                source_event_id=excluded.source_event_id,
-                rollback_value_json=excluded.rollback_value_json,
-                created_at=excluded.created_at,
-                valid_until=excluded.valid_until,
-                active=1
-            ''',
-            (
-                str(uuid.uuid4()),
-                config_id,
-                trading_date,
-                key,
-                _json_dumps(value),
-                _json_dumps(rollback_value),
-                "global",
-                "*",
-                "reviewer",
-                0.90,
-                1,
-                "capital utilization hard target is managed as reviewer overlay",
-                event_id,
-                _json_dumps(rollback_value),
-                now,
-                valid_until,
-            ),
-        )
-        inserted += 1
-    return inserted
+    return 0
 
 def _write_neutral_accountability_state(
     cursor: sqlite3.Cursor,
